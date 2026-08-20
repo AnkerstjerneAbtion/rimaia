@@ -1,5 +1,16 @@
 /* Baseline only. Both colour schemes have to be legible; there is no design
-   system yet and adding one is not task 001's job. */
+   system yet and adding one is not task 001's job.
+
+   This file holds the :root custom properties, the dark-scheme override, the
+   base element rules (*, body, code, button) and the app shell layout (.app,
+   .sidebar*, .content) - things every view shares - plus the handful of
+   components used by more than one view (.panel, .detail-list, .empty-state,
+   .error-banner). A view's own rules belong in its leaf under
+   `src/styles/*.css`, imported below; do not move them back in here. */
+
+@import "./styles/board.css";
+@import "./styles/runs.css";
+@import "./styles/settings.css";
 
 :root {
   --bg: #f7f7f8;
@@ -116,22 +127,6 @@ body {
   overflow-y: auto;
 }
 
-.view {
-  display: flex;
-  flex-direction: column;
-  gap: 1.25rem;
-  max-width: 46rem;
-}
-
-.view-header h2 {
-  margin: 0 0 0.25rem;
-}
-
-.view-header p {
-  margin: 0;
-  color: var(--text-muted);
-}
-
 .panel {
   background: var(--surface);
   border: 1px solid var(--border);
@@ -142,10 +137,6 @@ body {
 .panel h3 {
   margin: 0 0 0.75rem;
   font-size: 0.95rem;
-}
-
-.panel-dev {
-  border-style: dashed;
 }
 
 .detail-list {
@@ -181,11 +172,6 @@ button {
 
 button:hover {
   border-color: var(--accent);
-}
-
-.muted {
-  color: var(--text-muted);
-  margin: 0 0 0.75rem;
 }
 
 /* Empty states */
