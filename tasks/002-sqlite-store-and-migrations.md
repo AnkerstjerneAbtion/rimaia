@@ -30,7 +30,8 @@ Everything from task 003 onward reads or writes this.
 
   - `repositories` — id, name, path, default_branch, worktree_root,
     allow_unattended_runs, created_at
-  - `settings` — key, value (holds `base_instructions`, scheduler config)
+  - `settings` — key, value (holds `base_instructions`, `run_environment`
+    (`inherit` | `strict_local`, ADR-0004), scheduler config)
   - `tasks` — id, repository_id, title, plan, extra_instructions, column, position (REAL),
     run_state, branch, worktree_path, model, effort, created_at, updated_at
   - `task_links` — id, task_id, label, url, position

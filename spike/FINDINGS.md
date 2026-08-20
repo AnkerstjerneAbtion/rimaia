@@ -42,11 +42,18 @@ run's system context, and two personal MCP servers were connected and callable. 
 unattended overnight queue would inherit whatever the operator happened to have configured
 that day — including hooks that change how the agent writes commits.
 
-Rimaia must isolate the run environment. `--setting-sources project,local` keeps the
-repository's own `CLAUDE.md` and project settings — which we *want* — while dropping user
--level hooks, plugins, and output styles.
+**Decision after review: inherit by default.** The measurements above are real, but the
+inherited MCP servers are the point rather than the problem — a run that can reach the
+issue tracker or the org's knowledge base mid-implementation is more useful than a clean
+one, and that capability is much of why this is a local desktop app. A single Settings
+toggle (`run_environment`: `inherit` | `strict_local`) covers the case where someone wants
+the cheap, hermetic version.
 
-→ **Amend ADR-0004** with the required isolation flags.
+What must not be hidden: the ~3.6× per-run cost (show it — `result` reports it for free),
+and the fact that a personal `SessionStart` hook silently alters agent behaviour in every
+run.
+
+→ **Amend ADR-0004** with the setting and both modes' flags.
 
 ### 2b. Nested-session env vars
 
@@ -173,9 +180,9 @@ Still needed: `usage_limit`, a transient API error, an auth failure. Capture opp
 
 ## 9. What to change before task 001
 
-1. **ADR-0004** — add required isolation flags: `--strict-mcp-config`,
-   `--setting-sources project,local`, and stripping inherited `CLAUDE_*` env vars. Note
-   `permissionMode` verification via the `init` event.
+1. **ADR-0004** — add the `run_environment` setting (`inherit` default, `strict_local`
+   applying `--strict-mcp-config --setting-sources project,local`), always strip inherited
+   `CLAUDE_*` env vars, and verify `permissionMode` via the `init` event.
 2. **ADR-0011** — replace message-grepping with the `rate_limit_event`; classify on
    `terminal_reason` + `subtype`; note that killed runs do emit a `result`.
 3. **ADR-0013** — `result` already carries cost, turns, duration and usage; no derivation

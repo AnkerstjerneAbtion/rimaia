@@ -45,9 +45,10 @@ process per run, with the worktree as its working directory.
 - Invocation shape:
   `claude -p --output-format stream-json --verbose --session-id <uuid> [--resume <uuid>]`,
   cwd set to the task's worktree, prompt delivered on stdin.
-- **The run environment is isolated from the operator's own Claude Code configuration**
-  with `--strict-mcp-config --setting-sources project,local`, and by stripping inherited
-  `CLAUDE_*` environment variables. See the amendment below — this is not optional.
+- **Runs inherit the operator's own Claude Code configuration by default** — their MCP
+  servers, hooks and plugins are capability, not noise. A single Settings toggle switches
+  the whole app between `inherit` and `strict_local`. Inherited `CLAUDE_*`
+  process-identity env vars are always stripped. See the amendment below.
 - The backend parses the stdout event stream line by line and maps events to run state,
   live UI updates, and the persisted transcript (ADR-0013).
 - Rimaia generates the session id up front (`--session-id`) so resume works even if the
@@ -93,30 +94,54 @@ passing tests came out, unattended, with `bypassPermissions` and no stalls. Full
 [`spike/FINDINGS.md`](../../spike/FINDINGS.md). Three things the spike found that this ADR
 did not anticipate:
 
-### Run isolation is mandatory, not hygiene
+### Environment inheritance is a setting, defaulting to inherit
 
-Spawned without isolation flags, a run inherits the operator's entire personal Claude Code
-environment. Measured, same one-word prompt:
+A run inherits the operator's entire personal Claude Code environment unless told
+otherwise. Measured, same one-word prompt:
 
-| | Default | Isolated |
+| | Inherited (default) | Isolated |
 | --- | --- | --- |
 | Tools exposed | 255 | 26 |
 | MCP servers connected | 2 | 0 |
 | `SessionStart` hooks fired | 4 | 0 |
 | Cost | $0.1061 | $0.0291 |
 
-A personal `SessionStart` hook injected an unrelated instruction into the run's context,
-and two personal MCP servers were connected and callable. An overnight queue would inherit
-whatever the operator happened to have configured that day.
+**Decision: inherit by default, with one toggle in Settings.** The operator's MCP servers
+are capability, not noise — a run that can reach the issue tracker, the design tool, or the
+org's own knowledge base while implementing is more useful than an isolated one, and that
+is a large part of why this is a local desktop app on the user's own machine at all.
 
-**Required on every run:** `--strict-mcp-config` and `--setting-sources project,local`.
-This keeps the repository's own `CLAUDE.md` and project settings — which we want — while
-dropping user-level hooks, plugins, and output styles. Do not use `--bare`; it also
-disables `CLAUDE.md` discovery.
+A single app-level setting, `run_environment`, with two modes:
 
-**Also required:** strip the 13 `CLAUDE_*` / `CLAUDECODE` variables Claude Code exports
-into its children. Rimaia will routinely be developed and tested from inside a Claude Code
-session, and without stripping, the child does not behave like a fresh run.
+| Mode | Behaviour |
+| --- | --- |
+| `inherit` (default) | The operator's full Claude Code environment: MCP servers, hooks, plugins, output styles |
+| `strict_local` | `--strict-mcp-config --setting-sources project,local` — the repository's own `CLAUDE.md` and project settings only |
+
+Two modes, one control, no per-repository matrix to reason about. (Do not implement
+`strict_local` with `--bare`; it also disables `CLAUDE.md` discovery, which we want in both
+modes.) A per-repository override is a plausible later refinement, deliberately not built
+until something asks for it.
+
+Two consequences the UI must own rather than hide:
+
+- **Cost.** Inheriting a large tool set costs roughly 3.6× per run before any work happens.
+  Since `result` reports `total_cost_usd`, show per-run cost and put the mode toggle within
+  reach of it.
+- **Hooks change agent behaviour.** A personal `SessionStart` hook injects instructions
+  into every run — during the spike one altered the agent's output style. That is fine when
+  intended and confusing when forgotten. The `init` event lists what loaded; task 018's
+  doctor should report the hooks and MCP servers a run will inherit, so it is a visible
+  choice rather than a surprise at 2am.
+
+### Inherited `CLAUDE_*` env vars are stripped regardless
+
+Separate from the setting above, and not configurable. Claude Code exports 13 `CLAUDE_*` /
+`CLAUDECODE` variables into its children, including `CLAUDE_CODE_SESSION_ID` and
+`CLAUDE_CODE_CHILD_SESSION`, which tell the child it is a nested session of the parent.
+That is a leak of process identity, not user configuration — inheriting it makes the child
+misreport which session it is. Rimaia will routinely be developed and tested from inside a
+Claude Code session, so this is a live hazard rather than a theoretical one.
 
 ### The event stream is wider than assumed
 

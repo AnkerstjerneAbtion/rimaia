@@ -91,10 +91,12 @@ Rules:
 
 - `claude` CLI is a **prerequisite**, not a dependency. Verify it at startup; never bundle
   it (ADR-0004).
-- **Every run must be isolated** from the operator's own Claude Code config:
-  `--strict-mcp-config --setting-sources project,local`, plus stripping inherited
-  `CLAUDE_*` env vars. Measured without it: 255 tools instead of 26, personal MCP servers
-  connected, personal `SessionStart` hooks firing, 3.6× the cost.
+- **Runs inherit the operator's Claude Code config by default** — their MCP servers are
+  capability. One Settings toggle, `run_environment`: `inherit` (default) or
+  `strict_local` (`--strict-mcp-config --setting-sources project,local`). Inheriting costs
+  ~3.6× per run, so surface per-run cost near the toggle.
+- **Always strip inherited `CLAUDE_*` env vars**, regardless of that setting.
+  `CLAUDE_CODE_SESSION_ID` and friends are process identity, not user config.
 - **Classify runs on `result.terminal_reason` + `subtype`**, not on exit code alone. A
   SIGTERM-killed run still emits a `result` and exits 143.
 - Usage limits arrive as a typed `rate_limit_event` with an epoch `resetsAt`, on every
