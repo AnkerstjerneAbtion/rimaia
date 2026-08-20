@@ -4,7 +4,7 @@ title: Kanban board UI
 milestone: mvp
 status: ready
 depends_on: ["004"]
-adrs: ["0007"]
+adrs: ["0007", "0018"]
 size: L
 ---
 
