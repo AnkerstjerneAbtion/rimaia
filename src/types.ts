@@ -270,3 +270,53 @@ export interface TaskLinkPatchInput {
   label?: string;
   url?: string;
 }
+
+// ---------------------------------------------------------------------------
+// Settings (task 006) — mirrors `rimaia_core::db::settings` and
+// `rimaia_core::runner::prompt` (ADR-0009, ADR-0012, seam-contract D3).
+// ---------------------------------------------------------------------------
+
+/**
+ * Mirrors `rimaia_core::db::RunEnvironment` (ADR-0004's amendment). How much
+ * of the operator's own Claude Code configuration a run inherits. An absent
+ * setting reads as `"inherit"` — there is no third "unset" spelling.
+ */
+export type RunEnvironment = "inherit" | "strict_local";
+
+// ---------------------------------------------------------------------------
+// Worktrees (task 007) — mirrors `rimaia_core::worktree` (ADR-0005).
+// ---------------------------------------------------------------------------
+
+/** Mirrors `rimaia_core::worktree::DiffStat`. */
+export interface DiffStat {
+  filesChanged: number;
+  insertions: number;
+  deletions: number;
+}
+
+/**
+ * Mirrors `rimaia_core::worktree::WorktreeStatus` — what the task detail
+ * panel's worktree section shows, recomputed fresh from git on every read.
+ * Every numeric field is zero and `dirty` is `false` whenever `exists` is
+ * `false`: a task that has never run, or one whose branch was deleted, reads
+ * as "no worktree yet" rather than as five fields to unwrap.
+ */
+export interface WorktreeStatus {
+  taskId: string;
+  /** The directory is on disk **and** git still lists it as a worktree of
+   *  this repository on this branch. */
+  exists: boolean;
+  /** What the row records, whether or not it still resolves — shown so the
+   *  user can go and look, including when it is gone. */
+  path: string | null;
+  branch: string | null;
+  baseRef: string;
+  ahead: number;
+  behind: number;
+  /** Uncommitted work in the worktree: modified, staged or untracked alike. */
+  dirty: boolean;
+  /** Commits on the branch that are not on the base — the same number as
+   *  `ahead`, computed from one `rev-list` on the Rust side. */
+  commitCount: number;
+  diff: DiffStat;
+}

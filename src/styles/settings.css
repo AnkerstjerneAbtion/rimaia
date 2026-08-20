@@ -165,3 +165,107 @@
 .btn-danger:hover {
   border-color: var(--danger-text);
 }
+
+/* Instructions (task 006) — base instructions, the run-environment toggle
+   and the composed-prompt preview. `.instructions-subsection` only spaces
+   the three apart; it borrows `.task-detail-section`'s divider look rather
+   than duplicating it, since both are "one section of a panel, several
+   labelled parts". */
+
+.instructions-subsection {
+  margin-top: 1.1rem;
+  padding-top: 1.1rem;
+  border-top: 1px solid var(--border);
+}
+
+.instructions-subsection:first-of-type {
+  margin-top: 0;
+  padding-top: 0;
+  border-top: none;
+}
+
+.instructions-subsection h4 {
+  margin: 0 0 0.4rem;
+  font-size: 0.8rem;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+
+.instructions-editor-textarea {
+  width: 100%;
+  min-height: 14rem;
+  resize: vertical;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.85rem;
+  line-height: 1.5;
+  padding: 0.5rem 0.6rem;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg);
+  color: var(--text);
+}
+
+.run-environment-options {
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+}
+
+.run-environment-option {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.6rem;
+  padding: 0.6rem 0.75rem;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+
+.run-environment-option input {
+  margin-top: 0.2rem;
+}
+
+.run-environment-option-body {
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+  font-size: 0.9rem;
+}
+
+.run-environment-option-body .muted {
+  margin: 0;
+  font-size: 0.85rem;
+}
+
+/* The cost note is a caption under the toggle, not a paragraph in the flow
+   above it — `.muted` alone carries the bottom margin meant for stacked
+   paragraphs, which reads wrong directly under a control. */
+.run-environment-cost-note {
+  margin: 0.6rem 0 0;
+}
+
+.instructions-preview-picker {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 0.25rem;
+  font-size: 0.85rem;
+  color: var(--text-muted);
+  margin-bottom: 0.6rem;
+}
+
+.instructions-preview-output {
+  max-height: 28rem;
+  overflow: auto;
+  margin: 0;
+  padding: 0.75rem 0.9rem;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg);
+  color: var(--text);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.8rem;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}

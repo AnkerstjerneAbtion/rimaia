@@ -41,3 +41,14 @@ export function subscribeToRepositoriesChanged(
 ): Promise<UnlistenFn> {
   return listen<string[]>("repositories:changed", (event) => onChanged(event.payload));
 }
+
+/**
+ * `settings:changed` carries no ids — the whole `settings` table is a
+ * handful of rows, so every write (base instructions, run environment)
+ * announces the same signal and every consumer just re-reads all of it,
+ * mirroring `rimaia_core::db::settings`'s own doc comment on why the event
+ * it publishes is untyped.
+ */
+export function subscribeToSettingsChanged(onChanged: () => void): Promise<UnlistenFn> {
+  return listen<null>("settings:changed", () => onChanged());
+}

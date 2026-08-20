@@ -18,6 +18,7 @@ use sqlx::SqlitePool;
 use crate::error::Result;
 
 pub mod models;
+pub mod settings;
 
 /// Re-exported so callers write `db::Task` rather than `db::models::Task`: the
 /// module is an organizing detail, and the rows are the store's vocabulary.
@@ -25,6 +26,12 @@ pub use models::{
     new_id, BoardColumn, ExitClass, Repository, Run, RunState, RunStatus, Schedule, ScheduleMode,
     Setting, StrategyMode, StrategySource, Task, TaskDependency, TaskLink,
 };
+
+/// The one enum a settings *value* carries, re-exported alongside the row enums
+/// for the same reason: it is part of the store's vocabulary, and task 008 reads
+/// it beside them. The functions stay behind `settings::` — they are an accessor
+/// with rules, not a row.
+pub use settings::RunEnvironment;
 
 /// How long a writer waits for the lock before giving up. Long enough to cover a
 /// board reorder racing the scheduler claiming the next task.

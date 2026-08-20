@@ -12,6 +12,7 @@ import { PlanEditor } from "../panel/PlanEditor";
 import { RepositorySelector } from "../panel/RepositorySelector";
 import { RunInfoSection } from "../panel/RunInfoSection";
 import { TitleField } from "../panel/TitleField";
+import { WorktreeSection } from "../panel/WorktreeSection";
 import { COLUMN_TITLES } from "./Column";
 import { RunStateBadge } from "./RunStateBadge";
 
@@ -37,6 +38,7 @@ interface TaskDetailPanelProps {
  * brief names as all editing this file next, for branch/worktree/status,
  * last-run outcome and queue position respectively) add a section and one
  * line of composition here, rather than touching another section's code.
+ * Task 007's `WorktreeSection` is the first of the three to land.
  *
  * Wrapped so switching the selected task (or `Esc` closing and reopening a
  * different one) remounts the body by `key`. That is what resets every
@@ -206,6 +208,8 @@ function TaskDetailPanelBody({
         lastRun={detail?.lastRun ?? null}
         loading={detailLoading}
       />
+
+      <WorktreeSection taskId={task.id} />
 
       <DeleteTaskSection taskId={task.id} title={task.title} onDeleted={onClose} />
     </aside>

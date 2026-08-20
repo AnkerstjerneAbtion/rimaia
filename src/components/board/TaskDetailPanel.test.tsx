@@ -5,7 +5,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 
 import { TaskDetailPanel } from "./TaskDetailPanel";
-import type { Task, TaskDetail } from "../../types";
+import type { Task, TaskDetail, WorktreeStatus } from "../../types";
 
 // Mocked at the Tauri seam (`commands.ts` and `events.ts`'s own boundary),
 // not the wrapper modules — see `StorageSection.test.tsx`'s comment.
@@ -47,6 +47,28 @@ function detail(overrides: Partial<TaskDetail> = {}): TaskDetail {
   return { ...task(), links: [], dependsOn: [], lastRun: null, ...overrides };
 }
 
+/** `WorktreeSection` (task 007) fetches this independently of `get_task` —
+ *  every test below has to answer `get_worktree_status` too, or the
+ *  section's own request rejects with "unexpected command" and renders an
+ *  error banner none of these tests are about. Defaults to the deliberate
+ *  "never run" empty case, which is what every fixture `task()`/`detail()`
+ *  above already implies (`worktreePath: null`). */
+function worktreeStatus(overrides: Partial<WorktreeStatus> = {}): WorktreeStatus {
+  return {
+    taskId: "task-1",
+    exists: false,
+    path: null,
+    branch: null,
+    baseRef: "main",
+    ahead: 0,
+    behind: 0,
+    dirty: false,
+    commitCount: 0,
+    diff: { filesChanged: 0, insertions: 0, deletions: 0 },
+    ...overrides,
+  };
+}
+
 beforeEach(() => {
   mockInvoke.mockReset();
   mockListen.mockReset();
@@ -57,6 +79,7 @@ describe("TaskDetailPanel", () => {
   it("fetches and renders the task's detail, including its sections", async () => {
     mockInvoke.mockImplementation(async (command) => {
       if (command === "get_task") return detail();
+      if (command === "get_worktree_status") return worktreeStatus();
       throw new Error(`unexpected command: ${command}`);
     });
 
@@ -79,6 +102,7 @@ describe("TaskDetailPanel", () => {
           ? detail({ id: "task-1" })
           : detail({ id: "task-2", plan: "a different plan" });
       }
+      if (command === "get_worktree_status") return worktreeStatus();
       throw new Error(`unexpected command: ${command}`);
     });
 
@@ -123,6 +147,7 @@ describe("TaskDetailPanel", () => {
           },
         });
       }
+      if (command === "get_worktree_status") return worktreeStatus();
       throw new Error(`unexpected command: ${command}`);
     });
 
@@ -149,6 +174,7 @@ describe("TaskDetailPanel", () => {
         resolveCount += 1;
         return detail({ plan: resolveCount === 1 ? "first" : "second" });
       }
+      if (command === "get_worktree_status") return worktreeStatus();
       throw new Error(`unexpected command: ${command}`);
     });
 
@@ -163,7 +189,13 @@ describe("TaskDetailPanel", () => {
 
     changedHandler?.(["task-1"]);
 
-    await waitFor(() => expect(mockInvoke).toHaveBeenCalledTimes(2));
+    // Counts only `get_task` calls, not every `invoke` call: `WorktreeSection`
+    // (task 007) also subscribes to `tasks:changed` and fetches its own
+    // `get_worktree_status` on the same trigger, which a bare total call
+    // count would conflate with the detail refetch this test is about.
+    await waitFor(() =>
+      expect(mockInvoke.mock.calls.filter(([command]) => command === "get_task")).toHaveLength(2),
+    );
   });
 
   it("refetches on an empty tasks:changed payload — ADR-0018's lag-recovery case means re-read everything", async () => {
@@ -173,6 +205,7 @@ describe("TaskDetailPanel", () => {
         resolveCount += 1;
         return detail({ plan: resolveCount === 1 ? "first" : "second" });
       }
+      if (command === "get_worktree_status") return worktreeStatus();
       throw new Error(`unexpected command: ${command}`);
     });
 
@@ -187,7 +220,13 @@ describe("TaskDetailPanel", () => {
 
     changedHandler?.([]);
 
-    await waitFor(() => expect(mockInvoke).toHaveBeenCalledTimes(2));
+    // Counts only `get_task` calls, not every `invoke` call: `WorktreeSection`
+    // (task 007) also subscribes to `tasks:changed` and fetches its own
+    // `get_worktree_status` on the same trigger, which a bare total call
+    // count would conflate with the detail refetch this test is about.
+    await waitFor(() =>
+      expect(mockInvoke.mock.calls.filter(([command]) => command === "get_task")).toHaveLength(2),
+    );
   });
 
   it("does not refetch when tasks:changed names a different task's id", async () => {
@@ -197,6 +236,7 @@ describe("TaskDetailPanel", () => {
         getTaskCalls += 1;
         return detail();
       }
+      if (command === "get_worktree_status") return worktreeStatus();
       throw new Error(`unexpected command: ${command}`);
     });
 
@@ -222,6 +262,7 @@ describe("TaskDetailPanel", () => {
   it("restores the previous title rather than saving a blank one", async () => {
     mockInvoke.mockImplementation(async (command) => {
       if (command === "get_task") return detail();
+      if (command === "get_worktree_status") return worktreeStatus();
       throw new Error(`unexpected command: ${command}`);
     });
 
@@ -248,6 +289,7 @@ describe("TaskDetailPanel", () => {
   it("deletes the task after confirmation and closes the panel", async () => {
     mockInvoke.mockImplementation(async (command) => {
       if (command === "get_task") return detail();
+      if (command === "get_worktree_status") return worktreeStatus();
       if (command === "delete_task") return undefined;
       throw new Error(`unexpected command: ${command}`);
     });

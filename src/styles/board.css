@@ -684,3 +684,21 @@
   justify-content: flex-end;
   gap: 0.5rem;
 }
+
+/* Worktree (task 007) — extends `.task-detail-section`'s shell above rather
+   than replacing it. */
+
+.worktree-actions {
+  display: flex;
+  gap: 0.5rem;
+  margin-top: 0.5rem;
+}
+
+/* Why "Open" is disabled — same shape as `.repository-locked` (seam-contract
+   D13): a courtesy explanation sitting directly under the control it
+   describes, not a paragraph in the flow above it. */
+.worktree-locked {
+  margin: 0.35rem 0 0;
+  font-size: 0.8rem;
+  overflow-wrap: anywhere;
+}

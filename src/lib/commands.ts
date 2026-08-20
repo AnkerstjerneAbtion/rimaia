@@ -9,6 +9,7 @@ import type {
   RemoteInfo,
   Repository,
   RimaiaError,
+  RunEnvironment,
   RunState,
   Task,
   TaskDetail,
@@ -18,6 +19,7 @@ import type {
   TaskPatchInput,
   TaskSummary,
   UpdateRepositoryInput,
+  WorktreeStatus,
 } from "../types";
 
 /**
@@ -181,4 +183,51 @@ export function reorderTaskLink(
   afterId: string | null,
 ): Promise<TaskLink> {
   return call<TaskLink>("reorder_task_link", { linkId, beforeId, afterId });
+}
+
+// ---------------------------------------------------------------------------
+// Settings (task 006) — see `src-tauri/src/commands/settings.rs`.
+// ---------------------------------------------------------------------------
+
+export function getBaseInstructions(): Promise<string> {
+  return call<string>("get_base_instructions");
+}
+
+export function setBaseInstructions(value: string): Promise<void> {
+  return call<void>("set_base_instructions", { value });
+}
+
+export function getRunEnvironment(): Promise<RunEnvironment> {
+  return call<RunEnvironment>("get_run_environment");
+}
+
+export function setRunEnvironment(value: RunEnvironment): Promise<void> {
+  return call<void>("set_run_environment", { value });
+}
+
+/**
+ * The prompt `taskId` would receive right now, byte for byte — calls the
+ * same `compose_prompt` a run does (ADR-0009), never a frontend-side
+ * approximation. Read fresh on every call; nothing here caches.
+ */
+export function previewComposedPrompt(taskId: string): Promise<string> {
+  return call<string>("preview_composed_prompt", { taskId });
+}
+
+// ---------------------------------------------------------------------------
+// Worktrees (task 007) — see `src-tauri/src/commands/worktree.rs`.
+// ---------------------------------------------------------------------------
+
+export function getWorktreeStatus(taskId: string): Promise<WorktreeStatus> {
+  return call<WorktreeStatus>("get_worktree_status", { taskId });
+}
+
+/**
+ * Opens the task's worktree directory in the OS file manager. "Copy path"
+ * needs no command — a component already has the path from
+ * {@link getWorktreeStatus} or from `TaskDetail.worktreePath`, and the
+ * system clipboard is a browser API away.
+ */
+export function revealTaskWorktree(taskId: string): Promise<void> {
+  return call<void>("reveal_task_worktree", { taskId });
 }

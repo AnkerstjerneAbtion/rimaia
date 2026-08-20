@@ -201,21 +201,24 @@ async fn a_repository_inserted_without_allow_unattended_runs_defaults_to_false()
 async fn a_setting_round_trips_its_key_and_value() {
     let pool = test_pool().await;
 
+    // `base_instructions` is now seeded by 20260820120100_seed_settings.sql, so a
+    // fresh key exercises the same insert-and-round-trip path without colliding
+    // with that seed row.
     sqlx::query!(
         "INSERT INTO settings (key, value) VALUES (?1, ?2)",
-        "base_instructions",
+        "some_unseeded_setting",
         "Work from the plan. Keep commits small.",
     )
     .execute(&pool)
     .await
     .expect("insert a setting");
 
-    let setting = fetch_setting(&pool, "base_instructions").await;
+    let setting = fetch_setting(&pool, "some_unseeded_setting").await;
 
     assert_eq!(
         setting,
         Setting {
-            key: "base_instructions".to_string(),
+            key: "some_unseeded_setting".to_string(),
             value: "Work from the plan. Keep commits small.".to_string(),
         }
     );

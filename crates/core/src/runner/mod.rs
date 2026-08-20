@@ -8,3 +8,7 @@
 //! SIGTERM-killed run still emits a `result` and exits 143.
 //!
 //! Filled in by task 008, against the recorded fixtures task 019 promotes.
+//! [`prompt`] landed first (task 006): task 008 needs a prompt to send, and
+//! composing it is unit-testable without spawning anything.
+
+pub mod prompt;

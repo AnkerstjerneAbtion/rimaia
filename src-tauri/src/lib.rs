@@ -8,7 +8,9 @@ use std::fmt::Display;
 use std::path::Path;
 use std::sync::Arc;
 
-use rimaia_core::{db, startup, AppPaths, ChangeEvent, Error, ServiceContext, SystemClock};
+use rimaia_core::{
+    db, startup, worktree, AppPaths, ChangeEvent, Error, ServiceContext, SystemClock,
+};
 use tauri::{Emitter, Manager};
 use tokio::sync::broadcast;
 use tokio::sync::broadcast::error::RecvError;
@@ -61,10 +63,13 @@ pub fn run() {
             // otherwise only reads (see its module docs); repairing a stuck
             // `running` task, a vanished worktree or a missing run log belongs to
             // tasks 004, 007 and 008 respectively, not to startup.
-            if let Err(err) = tauri::async_runtime::block_on(startup::survey(&pool)) {
-                log_startup_failure("startup survey", &paths.db_file(), &err);
-                return Err(err.into());
-            }
+            let report = match tauri::async_runtime::block_on(startup::survey(&pool)) {
+                Ok(report) => report,
+                Err(err) => {
+                    log_startup_failure("startup survey", &paths.db_file(), &err);
+                    return Err(err.into());
+                }
+            };
 
             // One `ServiceContext` for the whole process (ADR-0018): the pool
             // above, a system clock, and a fresh change-event sender. Every
@@ -84,6 +89,19 @@ pub fn run() {
             // writers start.
             let change_events = context.subscribe();
             tauri::async_runtime::spawn(forward_change_events(app.handle().clone(), change_events));
+
+            // Task 007's repair step for `survey`'s `missing_worktrees` finding
+            // (ADR-0005: "repository state on disk is authoritative"). Placed
+            // after the subscriber above, matching that step's own "subscribe
+            // first, then let writers start" — `reconcile` is itself a writer,
+            // just one that runs once at startup instead of once per command.
+            // Unlike a failed migration this is recoverable: `reconcile` takes
+            // no `Result`, logs and skips whatever it cannot clear, and so
+            // cannot itself stop the window from opening.
+            tauri::async_runtime::block_on(worktree::reconcile(
+                &context,
+                &report.missing_worktrees,
+            ));
 
             app.manage(AppState { context, paths });
 
@@ -132,6 +150,13 @@ pub fn run() {
         commands::tasks::update_task_link,
         commands::tasks::remove_task_link,
         commands::tasks::reorder_task_link,
+        commands::settings::get_base_instructions,
+        commands::settings::set_base_instructions,
+        commands::settings::get_run_environment,
+        commands::settings::set_run_environment,
+        commands::settings::preview_composed_prompt,
+        commands::worktree::get_worktree_status,
+        commands::worktree::reveal_task_worktree,
     ]);
     #[cfg(not(debug_assertions))]
     let builder = builder.invoke_handler(tauri::generate_handler![
@@ -154,6 +179,13 @@ pub fn run() {
         commands::tasks::update_task_link,
         commands::tasks::remove_task_link,
         commands::tasks::reorder_task_link,
+        commands::settings::get_base_instructions,
+        commands::settings::set_base_instructions,
+        commands::settings::get_run_environment,
+        commands::settings::set_run_environment,
+        commands::settings::preview_composed_prompt,
+        commands::worktree::get_worktree_status,
+        commands::worktree::reveal_task_worktree,
     ]);
 
     builder
