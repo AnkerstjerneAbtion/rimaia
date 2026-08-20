@@ -1,8 +1,28 @@
 # Rimaia
 
-Cross-platform desktop app (macOS, Windows, Linux) built with [Tauri 2](https://tauri.app), React 19, TypeScript and Vite.
+*Review in the morning, agent in the afternoon.*
 
-Current UI is a placeholder counter — increase, decrease, reset.
+A local-first desktop app for queueing implementation plans and letting Claude Code work
+through them unattended — in git worktrees, on your own subscription — so the results are
+waiting to be reviewed the next morning.
+
+- **Kanban board** — Not ready · Ready · In review · Done. Board order is execution order.
+- **Plans in, branches out** — each task carries a plan, extra instructions, and links.
+- **Git worktree per task** — your checkout is never touched.
+- **Local MCP server** — hand plans to Rimaia from the Claude Code session you planned in.
+- **Unattended runs** — sequential or parallel, scheduled, resuming through usage limits.
+
+Status: **design complete, implementation not started.** The scaffold below is a Tauri 2 +
+React 19 + TypeScript starter with a placeholder counter UI.
+
+## Design
+
+- [Architecture decision records](docs/adr/README.md) — 17 ADRs covering the stack, how
+  Claude Code is invoked, worktree strategy, dependency semantics, permission posture,
+  testing, and MVP scope.
+- [Task backlog](tasks/README.md) — 21 tasks; the table defines the order. The first ten
+  are the MVP walking skeleton.
+- [CLAUDE.md](CLAUDE.md) — working agreement for agents implementing this.
 
 ## Prerequisites
 
