@@ -31,7 +31,9 @@ Do not renumber ADRs or tasks. Numbers are stable ids; the README tables define 
 | Path | Contents |
 | --- | --- |
 | `crates/core/` | `rimaia-core` — all logic. **Must not depend on `tauri`** (ADR-0015) |
+| `crates/core/tests/fixtures/` | Recorded `stream-json` CLI streams and the test-repo builder |
 | `src-tauri/` | Tauri shell: commands, window, state wiring. Thin |
+| `src-tauri/migrations/` | SQLite migrations (ADR-0003). The test harness applies these too |
 | `src/` | React 19 + TypeScript frontend |
 | `docs/adr/` | Architecture decision records |
 | `tasks/` | Task backlog |
@@ -44,9 +46,19 @@ npm run typecheck                     # tsc --noEmit
 npm run test                          # vitest run
 cargo test -p rimaia-core             # logic tests, no system deps needed
 cargo fmt --all --check
-cargo clippy -p rimaia-core -- -D warnings
-cargo check --workspace               # includes the Tauri shell
+cargo clippy -p rimaia-core --all-targets -- -D warnings
+cargo check --workspace --all-targets # includes the Tauri shell
 ```
+
+**These are exactly the commands `.github/workflows/ci.yml` runs.** Keep them identical.
+`--all-targets` is load-bearing, not decoration: without it the `testing` feature is off
+and clippy never compiles `crates/core/src/testing/` or any `#[cfg(test)]` module, so a
+warning that reddens CI passes locally.
+
+`cargo test -p rimaia-core` needs **no** `--features testing`. `crates/core/Cargo.toml`
+dev-depends on itself with that feature on, which is what makes the harness visible to
+tests without shipping it to consumers. Do not add a feature flag to the CI invocation —
+it would diverge from the command above for no gain.
 
 `SQLX_OFFLINE=true` is set in CI. Re-run `cargo sqlx prepare` after changing any query and
 commit the `.sqlx` cache.

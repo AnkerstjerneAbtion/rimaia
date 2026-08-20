@@ -1,0 +1,25 @@
+[workspace]
+resolver = "2"
+members = ["crates/core", "src-tauri"]
+
+# Versions live here so the core crate and the Tauri shell can never drift onto
+# two different serde or sqlx. ADR-0015 splits the crates; it does not split the
+# dependency graph.
+[workspace.dependencies]
+anyhow = "1"
+chrono = { version = "0.4", features = ["serde"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sqlx = { version = "0.8", default-features = false, features = [
+  "runtime-tokio",
+  "sqlite",
+  "chrono",
+  "uuid",
+  "macros",
+  "migrate",
+] }
+tempfile = "3"
+thiserror = "2"
+tokio = { version = "1", features = ["full"] }
+tracing = "0.1"
+uuid = { version = "1", features = ["v4", "serde"] }

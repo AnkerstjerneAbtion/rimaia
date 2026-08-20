@@ -25,8 +25,10 @@ export default defineConfig(async () => ({
         }
       : undefined,
     watch: {
-      // 3. tell Vite to ignore watching `src-tauri`
-      ignored: ["**/src-tauri/**"],
+      // 3. tell Vite to ignore watching the Rust side. `target/` moved to the
+      // workspace root with the crate split, so a `cargo check` in another
+      // terminal would otherwise restart the dev server.
+      ignored: ["**/src-tauri/**", "**/crates/**", "**/target/**"],
     },
   },
 }));
