@@ -24,6 +24,10 @@ fixture harness at task 014 means task 008 was written untested.
 `.github/workflows/ci.yml` already exists in the repository and is **red until this task
 lands**. Making it green is the acceptance criterion.
 
+The pre-implementation spike already produced six fixtures and the test repository — see
+[`spike/FINDINGS.md`](../../spike/FINDINGS.md). This task promotes them into
+`crates/core/tests/`, it does not re-record them.
+
 ## Scope
 
 **Rust**
@@ -40,13 +44,16 @@ lands**. Making it green is the acceptance criterion.
 
 **CLI fixture harness** — the important part:
 
-- Recorded `stream-json` output stored under `crates/core/tests/fixtures/cli/`, one file
-  per scenario: success, usage limit with reset timestamp, usage limit without one,
-  transient API error, malformed line, unknown event type, truncated stream, max turns,
-  auth failure.
+- Recorded `stream-json` output under `crates/core/tests/fixtures/cli/`, one file per
+  scenario.
+- **Six fixtures already exist** in `spike/fixtures/cli/` — `success`,
+  `interrupted-sigterm`, `resume-success`, `max-turns`, and the two `env-leak-*` settings
+  comparisons. Move them across; do not re-record them.
+- Still to capture, opportunistically from real runs: `usage_limit` (a non-`allowed`
+  `rate_limit_event`), a transient API error, an auth failure. Synthesize malformed-line,
+  unknown-event-type and truncated-stream cases by editing copies of `success.jsonl`.
 - A fake CLI runner that replays a fixture through the same parsing and classification
   path a real process uses, so tasks 008 and 014 can be tested without spawning anything.
-- Capture the first fixtures during the pre-implementation runner spike, and check them in.
 
 **Frontend**
 
@@ -58,9 +65,10 @@ lands**. Making it green is the acceptance criterion.
 
 **Test repository**
 
-- A small, real repository (checked in as a fixture archive or created by script) with a
-  test suite that passes, a lint config, and two or three obvious tasks to implement.
-  This is the ground truth for tasks 007, 008, and 009.
+- A small, real repository with a passing test suite and two or three obvious tasks to
+  implement — ground truth for tasks 007, 008 and 009.
+- `spike/fixtures/make-test-repo.sh` already builds one (a Rust crate with a `slugify`
+  helper and a test). Promote it; the spike ran all four scenarios against it.
 
 ## Out of scope
 

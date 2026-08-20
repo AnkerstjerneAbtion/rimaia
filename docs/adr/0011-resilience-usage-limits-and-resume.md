@@ -78,3 +78,57 @@ Details:
   tokens that produced it.
 - **Give up on first failure and report in the morning.** Predictable, and wastes the
   entire night on the first transient blip.
+
+---
+
+## Amendment, 2026-08-20 — verified by spike against CLI 2.1.234
+
+The retry-and-resume decision stands and the resume mechanism was confirmed end to end: a
+four-step task was killed after step 2, resumed with `--resume` and a one-line continuation
+prompt, and completed steps 3 and 4 with prior commits intact. Full write-up in
+[`spike/FINDINGS.md`](../../spike/FINDINGS.md). Three corrections to the mechanics above:
+
+### Usage limits are a structured event, not a message to grep
+
+This ADR assumed we would parse a reset timestamp out of an error message, with a fixed
+15-minute poll as fallback. Reality is better. **Every run** emits, unprompted and early:
+
+```json
+{"type": "rate_limit_event",
+ "rate_limit_info": {"status": "allowed", "resetsAt": 1787224800,
+                     "rateLimitType": "five_hour", "overageStatus": "rejected",
+                     "isUsingOverage": false}}
+```
+
+A typed event with an epoch `resetsAt`, a `status`, and the window type — **on every run,
+not only on failure**. Prefer it; keep message parsing only as a fallback.
+
+This enables something not considered above: the scheduler can read limit state *before*
+committing to a long task, and can schedule its next wake-up precisely rather than polling.
+Worth exploring in task 014.
+
+Not yet observed: the payload when `status` is not `"allowed"`. **The `usage_limit` fixture
+is still missing** — capture it opportunistically the first time a real queue hits the wall.
+Until then, that branch of the classifier is written against an assumed shape.
+
+### Classify on `terminal_reason`, and expect a `result` even when killed
+
+Captured signatures:
+
+| Scenario | exit | `subtype` | `terminal_reason` | `is_error` |
+| --- | --- | --- | --- | --- |
+| Success | 0 | `success` | `completed` | false |
+| Killed (SIGTERM) | 143 | `error_during_execution` | `aborted_streaming` | true |
+| Turn limit | 1 | `error_max_turns` | `max_turns` | true |
+
+`terminal_reason` is the cleanest discriminator and was not in the original design.
+
+**A killed run still emits a `result` event before exiting** — the stream does not simply
+stop, which is what this ADR assumed. And a killed process exits **143**, so
+`status.code().is_none()` is the wrong "was it signalled" check; classify on exit code plus
+the `result` event.
+
+### `result` already carries the run metrics
+
+`num_turns`, `total_cost_usd`, `duration_ms`, `usage`, `modelUsage` and `permission_denials`
+all arrive on the terminal event — nothing to derive for the `runs` row in ADR-0013.

@@ -1,0 +1,11 @@
+[package]
+name = "rimaia-spike"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+# Throwaway. Verifies the ADR-0004 / ADR-0011 assumptions and captures CLI
+# fixtures for task 019. Delete once task 001 starts. No dependencies on
+# purpose — this is a probe, not a foundation.
+
+[dependencies]

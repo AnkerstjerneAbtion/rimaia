@@ -13,6 +13,11 @@ worktrees, on the user's own subscription. Kanban board in, reviewable branches 
    task file names its ADRs in front matter.
 2. **[`tasks/`](tasks/README.md)** — the backlog, in order. **A task's acceptance criteria
    are the contract.** Done means all of them hold.
+3. **[`spike/FINDINGS.md`](spike/FINDINGS.md)** — what a throwaway probe actually measured
+   against Claude Code 2.1.234, before any of this was built. Read it before touching the
+   runner (task 008) or the classifier (task 014). ADR-0004 and ADR-0011 carry amendments
+   from it. `spike/` itself is throwaway — delete it once task 019 has promoted its
+   fixtures.
 
 **If you disagree with an ADR, or a task needs a decision no ADR covers: stop and say so.**
 Write a new ADR, or ask. Do not invent architecture in an implementation task and do not
@@ -86,6 +91,14 @@ Rules:
 
 - `claude` CLI is a **prerequisite**, not a dependency. Verify it at startup; never bundle
   it (ADR-0004).
+- **Every run must be isolated** from the operator's own Claude Code config:
+  `--strict-mcp-config --setting-sources project,local`, plus stripping inherited
+  `CLAUDE_*` env vars. Measured without it: 255 tools instead of 26, personal MCP servers
+  connected, personal `SessionStart` hooks firing, 3.6× the cost.
+- **Classify runs on `result.terminal_reason` + `subtype`**, not on exit code alone. A
+  SIGTERM-killed run still emits a `result` and exits 143.
+- Usage limits arrive as a typed `rate_limit_event` with an epoch `resetsAt`, on every
+  run. Do not grep error messages for it.
 - Unattended runs use `--permission-mode bypassPermissions` behind a per-repository
   opt-in. Do not weaken or widen this without amending ADR-0012.
 - Worktrees live under the app data directory, never inside a repository.
