@@ -265,6 +265,77 @@ here so task 002 does not reach for a plugin and task 018 knows it inherits the 
 
 **Binds.** 002, 018.
 
+## D12 — What the board's bulk read returns
+
+**Question.** Task 005's card must show a link count, a dependency indicator, and — per [D9](#d9)
+— the word "interrupted" read off the task's last run. Task 004 shipped `list_tasks` returning
+bare `tasks` rows and `get_task` returning the full detail with links, dependencies and the last
+run. Neither serves a board of fifty cards: the row has none of it, and the detail is one query
+per visible card.
+
+**Decision.** `list_tasks` returns a **summary projection**, not a `Task` row. One query per
+board read, with the counts and the last-run fields computed by aggregate and correlated
+subquery in SQL:
+
+```
+TaskSummary = every column of `tasks`
+            + link_count: i64
+            + dependency_count: i64
+            + blocked_by_incomplete: bool   -- reserved for task 011; false until it lands
+            + last_run: Option<{ status, exit_class, ended_at }>
+```
+
+`get_task` is unchanged and keeps returning the full detail with the link rows themselves. The
+frontend card renders only from the summary; the panel renders from the detail.
+
+**Why.** The alternative shapes are each worse in a specific way. Fetching `get_task` per card is
+N+1 against the single SQLite writer on every `tasks:changed`, which arrives once per mutation —
+a fifty-card board doing fifty reads per keystroke-driven autosave is the one performance
+mistake this codebase can actually make. Denormalising a counter column onto `tasks` would need a
+third migration, which [D4](#d4) forbids, and a counter maintained by triggers or by hand is a
+second source of truth for something SQL computes correctly for free. Dropping the fields from
+the card would silently contradict task 005's Scope and D9 — the card is the only place the word
+"interrupted" is ever supposed to appear, since [D9](#d9) deliberately kept it out of
+`run_state`, and a board that cannot show it makes D9's whole argument hollow.
+
+`blocked_by_incomplete` ships as a constant `false` now rather than being added later, for the
+same reason task 002 shipped `task_dependencies` and `schedules`: task 011 turns it into a real
+predicate by changing one query, and the DTO and its TypeScript mirror are already in place. The
+card does not render it yet — there is nothing true to render until task 011 computes it — so
+that task adds the query and the badge together.
+
+**Binds.** 004, 005, 011.
+
+## D13 — Whether a task can change repository
+
+**Question.** Task 005's Scope lists "Title, repository selector" in the task detail panel, but
+task 004 shipped `TaskPatchInput` without a `repositoryId` field. So the panel rendered the
+repository as read-only text behind a comment admitting no ADR said it should be. Which is right?
+
+**Decision.** A task's repository is reassignable **only while the task has no worktree and no
+runs**. The guard lives in `tasks::update_task` in `rimaia-core` and refuses with a message
+naming what blocks it; the panel shows a real selector, disabled with that same reason once it
+is fixed. `TaskPatchInput` gains `repository_id`.
+
+**Why.** Both halves of the original conflict were right about something. Reassignment genuinely
+becomes unsafe the moment task 007 creates a worktree: ADR-0005 ties `branch` and
+`worktree_path` to one repository, `runs` rows reference transcripts produced inside it, and
+ADR-0008's branch chaining resolves a base ref within a repository — a task dragged to a
+different repo after any of that is a task whose recorded state describes a place it no longer
+lives. But *before* any of it, a task is a title and a plan, and mis-filing one is an obvious
+mistake to want to undo without retyping the plan.
+
+The guard belongs in the service, not the panel, because ADR-0006 makes a rule enforced in only
+one of the UI path and the MCP path a bug — task 010 will expose `update_task` too. Disabling the
+control in the UI is a courtesy on top of the refusal, never a substitute for it.
+
+Recorded here rather than left as a code comment because the comment was reasoning from the
+command surface — "`TaskPatchInput` has no `repositoryId`, therefore it is fixed" — which
+inverts cause and effect. Task 004 simply had no reason to add the field; that is not a decision
+anyone made.
+
+**Binds.** 004, 005, 007.
+
 ---
 
 ## How to use this
@@ -275,12 +346,13 @@ An implementation task reads the entries its number appears in, before writing c
 | --- | --- |
 | [002](../tasks/002-sqlite-store-and-migrations.md) | D1 · D3 · D4 · D5 · D9 · D10 · D11 |
 | [003](../tasks/003-repository-registration.md) | D5 · D6 · D8 · D10 |
-| [004](../tasks/004-task-crud-and-service-layer.md) | D1 · D2 · D5 · D8 · D9 · D10 |
-| [005](../tasks/005-kanban-board-ui.md) | D1 · D2 · D6 · D7 · D9 |
+| [004](../tasks/004-task-crud-and-service-layer.md) | D1 · D2 · D5 · D8 · D9 · D10 · D12 · D13 |
+| [005](../tasks/005-kanban-board-ui.md) | D1 · D2 · D6 · D7 · D9 · D12 · D13 |
 | [006](../tasks/006-base-instructions-and-prompt-composition.md) | D3 · D4 · D5 · D8 |
-| [007](../tasks/007-git-worktree-service.md) | D5 · D8 · D10 |
+| [007](../tasks/007-git-worktree-service.md) | D5 · D8 · D10 · D13 |
 | [008](../tasks/008-claude-code-runner.md) | D2 · D5 · D7 · D8 · D9 · D10 |
 | [009](../tasks/009-sequential-run-queue.md) | D2 · D5 · D7 · D8 · D9 · D10 |
+| [011](../tasks/011-task-dependencies-and-blocking.md) | D12 |
 | [018](../tasks/018-preflight-doctor-and-packaging.md) | D11 |
 | every task | D4 and D6 as prohibitions |
 
