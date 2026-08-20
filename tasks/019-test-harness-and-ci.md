@@ -1,0 +1,84 @@
+---
+id: "019"
+title: Test harness and CI
+milestone: mvp
+status: ready
+depends_on: ["001"]
+adrs: ["0015"]
+size: M
+---
+
+# Test harness and CI
+
+## Goal
+
+Make the testing strategy real: test tooling on both sides, the fixture harness that
+everything downstream depends on, a throwaway repository to run against, and a green CI.
+
+## Why now
+
+Second task, immediately after the skeleton. Every task from 002 onward is supposed to
+ship with tests; the harness has to exist before that is a reasonable ask. Retrofitting a
+fixture harness at task 014 means task 008 was written untested.
+
+`.github/workflows/ci.yml` already exists in the repository and is **red until this task
+lands**. Making it green is the acceptance criterion.
+
+## Scope
+
+**Rust**
+
+- Workspace split per ADR-0015 is done in task 001; this task adds the test scaffolding.
+- `dev-dependencies`: `tempfile`, `pretty_assertions`, `insta` (optional, for large
+  composed-prompt assertions), `tokio-test`.
+- In-memory SQLite test helper: fresh migrated database per test, returned as a pool.
+- **`Clock` trait** with a real implementation and a controllable test implementation.
+  Anything that schedules, waits, or timestamps takes a `Clock`. This is what keeps retry
+  tests instant (ADR-0015).
+- **Temp git repository builder** — a helper that creates a real repo with commits,
+  branches, and optionally a remote, for worktree and diff tests.
+
+**CLI fixture harness** — the important part:
+
+- Recorded `stream-json` output stored under `crates/core/tests/fixtures/cli/`, one file
+  per scenario: success, usage limit with reset timestamp, usage limit without one,
+  transient API error, malformed line, unknown event type, truncated stream, max turns,
+  auth failure.
+- A fake CLI runner that replays a fixture through the same parsing and classification
+  path a real process uses, so tasks 008 and 014 can be tested without spawning anything.
+- Capture the first fixtures during the pre-implementation runner spike, and check them in.
+
+**Frontend**
+
+- `vitest`, `@testing-library/react`, `@testing-library/user-event`, `jsdom`.
+- Vitest config sharing the Vite pipeline; setup file with RTL cleanup.
+- `npm run typecheck` and `npm run test` scripts (CI already calls both).
+- One meaningful test per layer as a pattern to copy — a pure helper and a component with
+  real logic.
+
+**Test repository**
+
+- A small, real repository (checked in as a fixture archive or created by script) with a
+  test suite that passes, a lint config, and two or three obvious tasks to implement.
+  This is the ground truth for tasks 007, 008, and 009.
+
+## Out of scope
+
+- E2E tooling (ADR-0015 non-goal).
+- Release/bundle workflow (task 018).
+
+## Acceptance criteria
+
+- All three CI jobs pass on a pull request.
+- `cargo test -p rimaia-core` runs on a machine with **no** WebKit or GTK installed.
+- A retry-policy test exercising a 15-minute backoff completes in milliseconds.
+- The fixture harness classifies every checked-in scenario correctly, and adding a new
+  fixture requires no changes outside the fixtures directory.
+- The temp-repo builder produces a repository that `git worktree add` succeeds against.
+- `npm run test` passes with the example tests.
+
+## Notes
+
+The fixture harness is worth more than the retry code it will test. Build it properly:
+tasks 008, 014, and 017 all depend on being able to replay a Claude Code run without
+spending tokens or waiting for a real usage limit.
