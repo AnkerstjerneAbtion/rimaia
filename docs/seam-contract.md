@@ -131,7 +131,8 @@ described, and the cache is incomplete in exactly the way that passes locally an
 **Question.** Which runtime npm dependencies may the MVP add?
 
 **Decision.** `@dnd-kit/core`, `@dnd-kit/sortable`, `@dnd-kit/utilities` and `react-markdown`
-are approved, for task 005. No other task adds a runtime npm dependency without asking.
+are approved, for task 005. `@tauri-apps/plugin-dialog` is approved, for task 003. No other
+task adds a runtime npm dependency without asking.
 
 **Why.** Task 005's own Notes name dnd-kit and say why: cross-column drop and keyboard
 accessibility are more work than they look. The repo has no UI library by choice and that
@@ -141,7 +142,15 @@ list is closed rather than a default because two tasks running near each other b
 `package-lock.json` produce a generated-file conflict, and the natural way an agent resolves a
 generated file — regenerate it — silently reverts the other.
 
-**Binds.** 005, and every other task as a prohibition.
+`@tauri-apps/plugin-dialog` is a different kind of entry: task 003's scope names a "native
+folder picker", which is not something the frontend can hand-roll, so the dependency is the
+requirement rather than a convenience. It is listed here anyway because the prohibition above
+is worth being literally true — an entry that says "the list is closed" while the tree carries
+an unlisted dependency teaches the next agent that the list is advisory. Note it is four
+coordinated edits, not one: `package.json`, `src-tauri/Cargo.toml`, the plugin init in
+`src-tauri/src/lib.rs`, and a capability in `src-tauri/capabilities/default.json`.
+
+**Binds.** 003, 005, and every other task as a prohibition.
 
 ## D7 — The event-subscription seam in the frontend
 
@@ -265,7 +274,7 @@ An implementation task reads the entries its number appears in, before writing c
 | Task | Entries |
 | --- | --- |
 | [002](../tasks/002-sqlite-store-and-migrations.md) | D1 · D3 · D4 · D5 · D9 · D10 · D11 |
-| [003](../tasks/003-repository-registration.md) | D5 · D8 · D10 |
+| [003](../tasks/003-repository-registration.md) | D5 · D6 · D8 · D10 |
 | [004](../tasks/004-task-crud-and-service-layer.md) | D1 · D2 · D5 · D8 · D9 · D10 |
 | [005](../tasks/005-kanban-board-ui.md) | D1 · D2 · D6 · D7 · D9 |
 | [006](../tasks/006-base-instructions-and-prompt-composition.md) | D3 · D4 · D5 · D8 |
