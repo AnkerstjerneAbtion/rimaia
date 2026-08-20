@@ -1,27 +1,26 @@
 import { useState } from "react";
-import "./App.css";
+
+import { Sidebar } from "./components/Sidebar";
+import { BoardView } from "./views/BoardView";
+import { RunsView } from "./views/RunsView";
+import { SettingsView } from "./views/SettingsView";
+import type { View } from "./types";
+import "./styles.css";
 
 function App() {
-  const [count, setCount] = useState(0);
+  // Route state, not a router. Three views with no URLs, no nesting and no deep
+  // links to preserve — a router library would be all cost (task 001).
+  const [view, setView] = useState<View>("board");
 
   return (
-    <main className="container">
-      <h1>Rimaia</h1>
-
-      <div className="counter">
-        <button aria-label="Decrease" onClick={() => setCount(count - 1)}>
-          −
-        </button>
-        <span className="counter-value">{count}</span>
-        <button aria-label="Increase" onClick={() => setCount(count + 1)}>
-          +
-        </button>
-      </div>
-
-      <button className="reset" onClick={() => setCount(0)}>
-        Reset
-      </button>
-    </main>
+    <div className="app">
+      <Sidebar current={view} onNavigate={setView} />
+      <main className="content">
+        {view === "board" && <BoardView />}
+        {view === "runs" && <RunsView />}
+        {view === "settings" && <SettingsView />}
+      </main>
+    </div>
   );
 }
 

@@ -12,6 +12,9 @@ dist
 dist-ssr
 *.local
 
+# Cargo build output — one workspace target dir at the root since task 001
+/target
+
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json

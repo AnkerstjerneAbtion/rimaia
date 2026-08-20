@@ -1,0 +1,21 @@
+[package]
+name = "rimaia-core"
+version = "0.1.0"
+edition = "2021"
+description = "Rimaia orchestration logic. Free of any desktop-shell dependency (ADR-0015)."
+
+# Nothing here may require a display server, WebKit or GTK. `cargo test -p
+# rimaia-core` has to run on a bare machine — that is the whole point of the
+# split, and task 001 asserts it by grepping this file for the framework's name.
+# If a task wants the desktop framework in this list, the design is being
+# violated, not a dependency missing.
+[dependencies]
+anyhow = { workspace = true }
+chrono = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sqlx = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+uuid = { workspace = true }
