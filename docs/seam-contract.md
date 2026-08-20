@@ -336,6 +336,45 @@ anyone made.
 
 **Binds.** 004, 005, 007.
 
+## D14 — The mechanism for the live run tail
+
+**Question.** [ADR-0018](adr/0018-core-to-shell-change-events.md) routes state changes from a
+core service to the shell, and then explicitly declines to carry the live run tail: *"Task 008
+picks the mechanism for the tail; it must not turn `ChangeEvent` into a data channel by adding a
+payload-carrying variant."* So task 008 has to pick, and no ADR says what.
+
+**Decision.** The same shape as ADR-0018, on a **separate channel**. `rimaia-core` owns a second
+`tokio::sync::broadcast::Sender<RunTail>` alongside `changes` on `ServiceContext`. The runner
+publishes to it as events arrive; the shell subscribes once in `setup()` and forwards to a
+`runs:tail` Tauri event. Unlike `ChangeEvent`, `RunTail` **does** carry a payload — the run id,
+elapsed time, turn count, the current tool call, and the most recent assistant text — because it
+is a view, not a fact about stored state.
+
+Two rules follow from that difference:
+
+1. **A dropped tail message is nothing.** `RecvError::Lagged` on this channel is discarded and
+   counted, never recovered. A `ChangeEvent` drop means "re-read"; a tail drop means the user
+   missed a line of scrollback that is already on disk in the JSONL transcript. Do not build
+   replay for it.
+2. **The tail is never the source of truth for anything persisted.** The transcript file is
+   (ADR-0013), and the `runs` row is. If the tail and the row disagree, the row wins.
+
+**Why not reuse ADR-0018's channel.** Frequency. `ChangeEvent` fires once per committed mutation;
+the tail fires many times per turn. Sharing one bounded broadcast means a chatty run can lag a
+subscriber into dropping change events — and a dropped change event *does* have a consequence: a
+card that stops refreshing until the next mutation. Separating them makes the two lag behaviours
+independent and correct for their own kinds of loss, which is precisely the distinction ADR-0018
+was protecting when it pushed the tail out.
+
+**Why not polling a ring buffer through a command.** It would work, and it avoids a channel — but
+it puts the refresh interval in the frontend, where it is either too slow to feel live or a
+constant query loop against the single SQLite writer while a run is in flight. The bounded
+in-memory ring buffer task 008's scope names still exists; it is what a client reads to catch up
+when it starts watching mid-run. The channel is for what happens after that.
+
+**Binds.** 008, 009, 015.
+
+
 ---
 
 ## How to use this
@@ -350,9 +389,10 @@ An implementation task reads the entries its number appears in, before writing c
 | [005](../tasks/005-kanban-board-ui.md) | D1 · D2 · D6 · D7 · D9 · D12 · D13 |
 | [006](../tasks/006-base-instructions-and-prompt-composition.md) | D3 · D4 · D5 · D8 |
 | [007](../tasks/007-git-worktree-service.md) | D5 · D8 · D10 · D13 |
-| [008](../tasks/008-claude-code-runner.md) | D2 · D5 · D7 · D8 · D9 · D10 |
-| [009](../tasks/009-sequential-run-queue.md) | D2 · D5 · D7 · D8 · D9 · D10 |
+| [008](../tasks/008-claude-code-runner.md) | D2 · D3 · D5 · D7 · D8 · D9 · D10 · D14 |
+| [009](../tasks/009-sequential-run-queue.md) | D2 · D5 · D7 · D8 · D9 · D10 · D14 |
 | [011](../tasks/011-task-dependencies-and-blocking.md) | D12 |
+| [015](../tasks/015-run-history-and-log-viewer.md) | D14 |
 | [018](../tasks/018-preflight-doctor-and-packaging.md) | D11 |
 | every task | D4 and D6 as prohibitions |
 
