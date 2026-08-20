@@ -232,13 +232,27 @@ Startup fails loudly on migration error." Loudly how?
 **Decision.** The window never opens, the process exits non-zero, and the reason is written to
 stderr and to the rolling log file under `<app-data>/logs/`. No modal dialog.
 
+"Never opens" has to be *arranged*, because it is the opposite of what Tauri does unaided:
+`setup()` builds every window declared in `tauri.conf.json` before it calls the user setup hook
+(tauri 2.11.5, `src/app.rs:2524`), and both `create` and `visible` default to true. Left alone,
+a migration failure therefore draws the full 1280x832 window, loads the frontend into it, and
+only then panics — the user watches a window appear and vanish. So the mechanism is two halves,
+and neither is meaningful alone: the main window is declared `"visible": false`, and
+`src-tauri/src/lib.rs` shows it as the **last** statement of the setup hook, after every
+fallible step has succeeded. Drop the config flag and the window is on screen while the
+migration runs; drop the `show()` call and a *successful* startup leaves an app with no window
+at all. This is what makes the first paragraph true rather than aspirational.
+
 **Why.** A modal needs `tauri-plugin-dialog`, which is not a dependency, added for a path that
 by definition already failed. `logging::init` runs before the database is opened in the setup
 hook, so the file appender is open and synchronous by the time a migration can fail — the log
-line that matters most is written. What this does not solve is a double-clicked `.app`, where
-nobody reads stderr; that visible-failure story belongs with task 018's preflight doctor rather
-than being invented inside task 002. Recorded here so task 002 does not reach for a plugin and
-task 018 knows it inherits the problem.
+line that matters most is written. Every fallible step in that hook logs at `error` level
+itself, before propagating: Tauri turns the returned `Err` into a panic at
+`RuntimeRunEvent::Ready`, and `panic!` does not go through `tracing`, so a step that only
+propagates leaves the log file holding nothing but the "rimaia starting" line. What this does
+not solve is a double-clicked `.app`, where nobody reads stderr; that visible-failure story
+belongs with task 018's preflight doctor rather than being invented inside task 002. Recorded
+here so task 002 does not reach for a plugin and task 018 knows it inherits the problem.
 
 **Binds.** 002, 018.
 

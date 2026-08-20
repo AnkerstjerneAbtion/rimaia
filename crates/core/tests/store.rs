@@ -27,7 +27,13 @@ use sqlx::SqlitePool;
 /// A fixed instant used everywhere a test needs *a* timestamp but the value itself is
 /// not under test. Round-trip precision has its own tests, below, with timestamps chosen
 /// to make that the point.
-const NOW: &str = "2026-08-20T12:00:00Z";
+///
+/// Spelled with a numeric offset rather than `Z` because that is what sqlx writes for a
+/// bound `DateTime<Utc>`, and the two spellings do not sort together — see the migration's
+/// header and
+/// [`a_bound_timestamp_is_stored_with_a_numeric_offset_rather_than_z`]. A fixture in the
+/// spelling production never produces is a fixture that proves less than it looks like.
+const NOW: &str = "2026-08-20T12:00:00+00:00";
 
 // ---------------------------------------------------------------------------------
 // Launch behaviour
@@ -1101,6 +1107,54 @@ async fn the_text_sqlx_stores_agrees_with_the_word_serde_puts_on_the_wire() {
             stored_text(&pool, "schedules", "mode", &id).await,
             wire,
             "what sqlx stores"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------------
+// Timestamp text
+// ---------------------------------------------------------------------------------
+
+#[tokio::test]
+async fn a_bound_timestamp_is_stored_with_a_numeric_offset_rather_than_z() {
+    // The bytes, not the instant. Decoding round-trips both spellings, so no round-trip
+    // test above can see this: sqlx passes `use_z: false` to chrono's `to_rfc3339_opts`
+    // (sqlx-sqlite 0.8.6, `src/types/chrono.rs:69`) and therefore never writes `Z`,
+    // while chrono's serde impl — what `src/types.ts` sees — always does. The two
+    // spellings sort differently, `tasks.created_at` is the tie-break a rebalance orders
+    // by, and board order is execution order (ADR-0007), so this is the format's pin:
+    // change it and a second writer following the migration's header is now wrong.
+    let pool = test_pool().await;
+    let repository_id = insert_repository(&pool).await;
+
+    for (instant, stored) in [
+        // Whole seconds, then the two sub-second widths `SecondsFormat::AutoSi` picks
+        // between — a trailing `.5` is written `.500`, not `.5`.
+        ("2026-08-20T12:00:00Z", "2026-08-20T12:00:00+00:00"),
+        ("2026-08-20T12:00:00.5Z", "2026-08-20T12:00:00.500+00:00"),
+        (
+            "2026-08-20T12:00:00.123456Z",
+            "2026-08-20T12:00:00.123456+00:00",
+        ),
+    ] {
+        let created_at: DateTime<Utc> = instant.parse().expect("rfc3339");
+        let id = new_id();
+
+        sqlx::query!(
+            "INSERT INTO tasks (id, repository_id, title, board_column, position, run_state, created_at, updated_at)
+             VALUES (?1, ?2, 'a task', 'ready', 1.0, 'idle', ?3, ?3)",
+            id,
+            repository_id,
+            created_at,
+        )
+        .execute(&pool)
+        .await
+        .expect("insert a task with a bound timestamp");
+
+        assert_eq!(
+            stored_text(&pool, "tasks", "created_at", &id).await,
+            stored,
+            "what sqlx stores for {instant}"
         );
     }
 }

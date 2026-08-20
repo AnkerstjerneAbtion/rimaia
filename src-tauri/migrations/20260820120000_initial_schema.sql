@@ -6,10 +6,26 @@
 --
 -- Two conventions run through every table below.
 --
--- Timestamps are TEXT holding RFC 3339 UTC. That is exactly what sqlx writes for
--- `chrono::DateTime<Utc>` on SQLite, it sorts lexicographically, and it stays
--- legible to somebody poking at the file with the sqlite3 CLI — which ADR-0003
--- does not merely tolerate but counts as a feature.
+-- Timestamps are TEXT holding RFC 3339 UTC, in the one spelling sqlx writes for
+-- `chrono::DateTime<Utc>` on SQLite: '2026-08-20T12:00:00+00:00', with
+-- sub-second digits only when the instant has any ('...T12:00:00.500+00:00').
+-- The offset is numeric and never the 'Z' form — sqlx passes `use_z: false` to
+-- chrono's `to_rfc3339_opts` (sqlx-sqlite 0.8.6, src/types/chrono.rs:69). Note
+-- that chrono's *serde* impl does the opposite and writes 'Z', so the JSON DTO
+-- and the stored column do not agree letter for letter, only instant for
+-- instant.
+--
+-- Those values sort lexicographically into chronological order, because '+'
+-- (0x2B) precedes '.' (0x2E) and so a whole second sorts before the same second
+-- with a fraction. Mixing in the 'Z' spelling breaks that: 'Z' is 0x5A, so
+-- '2026-08-20T12:00:00Z' sorts *after* '2026-08-20T12:00:00.500+00:00' and the
+-- half second is inverted. `tasks` is renumbered with
+-- `ORDER BY position, created_at, id` and board order is execution order
+-- (ADR-0007), so an inverted timestamp is a wrong run order, not a cosmetic
+-- defect. ADR-0003 counts the sqlite3 CLI as a supported second writer and the
+-- MCP server is a third: whatever writes a timestamp into this file by hand
+-- writes '+00:00'. That legibility to any SQLite tool is a feature ADR-0003
+-- does not merely tolerate, which is precisely why the hazard is named here.
 --
 -- Enums are TEXT with a CHECK naming the whole domain. The CHECK is not the
 -- enforcement; the service is (ADR-0006), because three writers share this file

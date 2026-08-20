@@ -159,6 +159,21 @@ pub fn rebalanced_positions(count: usize) -> Vec<f64> {
 /// interleave and put back the very collision this just removed. Callers pass
 /// `&mut *tx`.
 ///
+/// **That transaction is an obligation, and nothing here enforces it** —
+/// `&mut SqliteConnection` is what a `Transaction` derefs to, so a pooled
+/// connection in autocommit satisfies the signature just as well. Break it and
+/// the loop below is N independent commits. A failure part-way through — a
+/// `SQLITE_BUSY` that outlasts the pool's busy timeout, an I/O error — keeps
+/// the rows already renumbered and abandons the rest. Negative positions are
+/// ordinary, since `position_between(None, Some(x))` prepends at `x - 1.0`, so
+/// three drags to the top of a column give `[-3.0, -2.0, -1.0]`; renumber that
+/// and fail on the third `UPDATE` and the column reads `[0.0, 1.0, -1.0]` —
+/// the card that was last is now first. **The column was correctly ordered
+/// before the call.** Partial renumbering does not leave a precision problem
+/// half-fixed, it turns one into a wrong execution order (ADR-0007), and that,
+/// rather than an interleaving writer, is the reason not to "simplify" this
+/// signature to take a `&SqlitePool`.
+///
 /// Ties are broken on `created_at` then `id`, so a column whose cards share a
 /// position — the degenerate case this function exists to repair — comes out
 /// deterministically ordered rather than in whatever order SQLite happened to

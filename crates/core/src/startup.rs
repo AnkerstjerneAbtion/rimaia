@@ -297,13 +297,21 @@ mod tests {
         );
     }
 
+    /// The one instant every fixture below is stamped with, in the spelling sqlx
+    /// writes for a bound `DateTime<Utc>` — a numeric offset, never `Z` (see the
+    /// migration's header). Nothing here reads a timestamp back, but a fixture
+    /// in a spelling production never produces is a habit, and the habit is what
+    /// eventually mixes the two in a column that sorts by them.
+    const NOW: &str = "2026-08-20T12:00:00+00:00";
+
     async fn insert_repository(pool: &SqlitePool) -> String {
         let id = crate::db::new_id();
         sqlx::query!(
             "INSERT INTO repositories
                 (id, name, path, default_branch, worktree_root, allow_unattended_runs, created_at)
-             VALUES (?, 'rimaia', '/tmp/rimaia', 'main', '/tmp/rimaia/worktrees', 0, '2026-08-20T12:00:00Z')",
+             VALUES (?, 'rimaia', '/tmp/rimaia', 'main', '/tmp/rimaia/worktrees', 0, ?)",
             id,
+            NOW,
         )
         .execute(pool)
         .await
@@ -322,11 +330,13 @@ mod tests {
             "INSERT INTO tasks
                 (id, repository_id, title, board_column, position, run_state, worktree_path,
                  created_at, updated_at)
-             VALUES (?, ?, 'a task', 'ready', 1.0, ?, ?, '2026-08-20T12:00:00Z', '2026-08-20T12:00:00Z')",
+             VALUES (?, ?, 'a task', 'ready', 1.0, ?, ?, ?, ?)",
             id,
             repository_id,
             run_state,
             worktree_path,
+            NOW,
+            NOW,
         )
         .execute(pool)
         .await
@@ -339,10 +349,11 @@ mod tests {
         sqlx::query!(
             "INSERT INTO runs
                 (id, task_id, attempt, status, session_id, prompt, started_at, log_path)
-             VALUES (?, ?, 1, 'running', ?, 'do the thing', '2026-08-20T12:00:00Z', ?)",
+             VALUES (?, ?, 1, 'running', ?, 'do the thing', ?, ?)",
             id,
             task_id,
             id,
+            NOW,
             log_path,
         )
         .execute(pool)

@@ -25,6 +25,8 @@ async fn rebalancing_preserves_the_columns_existing_order() {
     seed_task(&pool, "task-a", &repository_id, BoardColumn::Ready, 1.0, T1).await;
     seed_task(&pool, "task-b", &repository_id, BoardColumn::Ready, 3.0, T1).await;
 
+    let updated_at_before = updated_at_by_id(&pool, &repository_id).await;
+
     let touched = rebalance(&pool, &repository_id, BoardColumn::Ready).await;
 
     assert_eq!(touched, 3);
@@ -34,6 +36,62 @@ async fn rebalancing_preserves_the_columns_existing_order() {
             ("task-a".to_string(), 0.0),
             ("task-b".to_string(), 1.0),
             ("task-c".to_string(), 2.0),
+        ]
+    );
+    // The promise `rebalance_column`'s doc makes, asserted rather than trusted.
+    // Task 004 owns `updated_at` and edits this function's caller; adding
+    // `updated_at = ?` to the renumber's UPDATE would look like a consistency
+    // fix and would break nothing else. Renumbering is not a change to any
+    // card, and stamping a whole column modified makes every client refresh for
+    // nothing.
+    assert_eq!(
+        updated_at_by_id(&pool, &repository_id).await,
+        updated_at_before,
+        "a renumber must not stamp updated_at"
+    );
+}
+
+#[tokio::test]
+async fn a_whole_second_sorts_before_the_same_second_with_a_fraction() {
+    // The `created_at` tie-break is a *string* comparison — the column is TEXT
+    // and `ORDER BY position, created_at, id` sorts it lexicographically. In
+    // sqlx's spelling that agrees with chronological order, because '+' (0x2B)
+    // precedes '.' (0x2E). It would not in the 'Z' spelling: 'Z' is 0x5A, so
+    // '...T00:00:00Z' sorts *after* '...T00:00:00.500+00:00' and this pair
+    // would come out reversed. Board order is execution order (ADR-0007), so
+    // the property is pinned here rather than assumed from the format.
+    let pool = test_pool().await;
+    let repository_id = seed_repository(&pool).await;
+
+    // Both at the same position, and seeded later-first so a renumber that
+    // ignored `created_at` and fell through to insertion order — or to `id`,
+    // which sorts 'h' before 'o' — would fail this rather than pass it.
+    seed_task(
+        &pool,
+        "half-a-second-later",
+        &repository_id,
+        BoardColumn::Ready,
+        1.0,
+        T1_AND_A_HALF,
+    )
+    .await;
+    seed_task(
+        &pool,
+        "on-the-second",
+        &repository_id,
+        BoardColumn::Ready,
+        1.0,
+        T1,
+    )
+    .await;
+
+    rebalance(&pool, &repository_id, BoardColumn::Ready).await;
+
+    assert_eq!(
+        ordered_positions(&pool, &repository_id, BoardColumn::Ready).await,
+        vec![
+            ("on-the-second".to_string(), 0.0),
+            ("half-a-second-later".to_string(), 1.0),
         ]
     );
 }
@@ -167,22 +225,40 @@ async fn forcing_a_rebalance_leaves_position_between_able_to_find_room_again() {
     );
 }
 
-const T1: &str = "2026-08-20T00:00:00Z";
-const T2: &str = "2026-08-20T00:01:00Z";
-const T3: &str = "2026-08-20T00:02:00Z";
+// Every fixture timestamp below is written the way sqlx writes a bound
+// `DateTime<Utc>`: a numeric `+00:00` offset, never `Z` (sqlx-sqlite 0.8.6,
+// `src/types/chrono.rs:69`, and the migration's header). That is not cosmetic
+// here — `created_at` is TEXT and the tie-break sorts it as a string, so a
+// fixture in the other spelling would exercise an ordering production never
+// produces. `T1_AND_A_HALF` is deliberately sub-second: the two widths have to
+// interleave correctly, and that is what
+// `a_whole_second_sorts_before_the_same_second_with_a_fraction` pins.
+const T1: &str = "2026-08-20T00:00:00+00:00";
+const T1_AND_A_HALF: &str = "2026-08-20T00:00:00.500+00:00";
+const T2: &str = "2026-08-20T00:01:00+00:00";
+const T3: &str = "2026-08-20T00:02:00+00:00";
 
-/// Acquires its own connection and releases it before returning, so the
-/// caller's subsequent pool queries never contend with it — [`test_pool`]
-/// caps the pool at one connection, and holding this one open would deadlock
-/// the next query rather than fail it.
+/// Runs the renumber inside a transaction and commits it, because that is the
+/// obligation [`rebalance_column`]'s own doc comment places on every caller —
+/// and this is the only worked example of that call in the repository, so it
+/// is what the next caller copies. In autocommit a mid-loop failure leaves the
+/// column strictly worse ordered than it started; the doc comment spells that
+/// out.
+///
+/// The transaction is committed and dropped before returning, so the caller's
+/// subsequent pool queries never contend with it — [`test_pool`] caps the pool
+/// at one connection, and holding this one open would deadlock the next query
+/// rather than fail it.
 async fn rebalance(pool: &SqlitePool, repository_id: &str, column: BoardColumn) -> usize {
-    let mut conn = pool
-        .acquire()
+    let mut tx = pool
+        .begin()
         .await
         .expect("the sole test connection must still be available");
-    rebalance_column(&mut conn, repository_id, column)
+    let touched = rebalance_column(&mut tx, repository_id, column)
         .await
-        .expect("rebalance_column must succeed against a migrated schema")
+        .expect("rebalance_column must succeed against a migrated schema");
+    tx.commit().await.expect("commit the renumber");
+    touched
 }
 
 /// Every task in one `(repository, column)`, in board order, as `(id,
@@ -207,6 +283,23 @@ async fn ordered_positions(
     .expect("read back the column")
     .into_iter()
     .map(|row| (row.id, row.position))
+    .collect()
+}
+
+/// Every task of one repository as `(id, updated_at)`, keyed by id rather than
+/// by board order so the comparison survives the very renumber it is checking.
+/// The raw stored text, not a decoded `DateTime`, so a rewrite that happened to
+/// land on the same instant in a different spelling would still show up.
+async fn updated_at_by_id(pool: &SqlitePool, repository_id: &str) -> Vec<(String, String)> {
+    sqlx::query!(
+        "SELECT id, updated_at FROM tasks WHERE repository_id = ?1 ORDER BY id ASC",
+        repository_id,
+    )
+    .fetch_all(pool)
+    .await
+    .expect("read back the column's updated_at")
+    .into_iter()
+    .map(|row| (row.id, row.updated_at))
     .collect()
 }
 
