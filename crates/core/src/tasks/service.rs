@@ -15,7 +15,8 @@
 
 use chrono::{DateTime, Utc};
 use serde::Serialize;
-use sqlx::{SqliteConnection, SqlitePool};
+use sqlx::sqlite::SqliteRow;
+use sqlx::{FromRow, Row, SqliteConnection, SqlitePool};
 
 use crate::context::ServiceContext;
 use crate::db::{
@@ -45,6 +46,106 @@ pub struct TaskDetail {
     pub depends_on: Vec<String>,
     pub last_run: Option<Run>,
 }
+
+/// One card's worth of a task: every column of the row, plus the two counts
+/// and the last-run fields the board draws on it (seam-contract D12).
+///
+/// Deliberately not [`TaskDetail`]. The panel needs the link rows themselves,
+/// the dependency ids and the whole [`Run`]; a card needs two numbers and
+/// three fields, and the difference is that a fifty-card board read is one
+/// query rather than fifty — on every `tasks:changed`, which arrives once per
+/// mutation.
+///
+/// `#[serde(flatten)]` on `task` for the reason [`TaskDetail`] gives: the wire
+/// shape is the task's own fields plus these four, not a nested object.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TaskSummary {
+    #[serde(flatten)]
+    pub task: Task,
+    pub link_count: i64,
+    pub dependency_count: i64,
+    /// Reserved for task 011, and a constant `false` until it lands
+    /// (seam-contract D12). It ships now, with the card that renders it and
+    /// the TypeScript mirror, so that turning it into a real predicate is a
+    /// change to [`list_tasks`]'s query and nothing else — the `0` literal in
+    /// [`TASK_SUMMARY_SELECT`] is the single place task 011 edits. Deliberate,
+    /// not an unfinished thought.
+    pub blocked_by_incomplete: bool,
+    pub last_run: Option<LastRunSummary>,
+}
+
+/// What a card shows about a task's most recent attempt.
+///
+/// Three fields of a [`Run`] rather than the row: the word "interrupted" is
+/// read off `exit_class` (seam-contract D9), `ended_at` is the card's relative
+/// time, and the prompt, the session id and the transcript path are the
+/// panel's business.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LastRunSummary {
+    pub status: RunStatus,
+    pub exit_class: Option<ExitClass>,
+    /// `None` while the attempt is still in flight — which is also why the
+    /// "last" run is chosen by attempt number and never by this column.
+    pub ended_at: Option<DateTime<Utc>>,
+}
+
+/// Hand-written rather than derived: `last_run` is an `Option<struct>` over
+/// three nullable columns, and `#[sqlx(flatten)]` has no way to say "all three
+/// NULL means `None`". A task with no runs is the common case on a board, not
+/// an edge one.
+impl<'r> FromRow<'r, SqliteRow> for TaskSummary {
+    fn from_row(row: &'r SqliteRow) -> sqlx::Result<Self> {
+        let last_run = match row.try_get::<Option<RunStatus>, _>("last_run_status")? {
+            // `status` is `NOT NULL` on the row, so it is the one column that
+            // distinguishes "no run" from a run whose other fields are still
+            // unset.
+            Some(status) => Some(LastRunSummary {
+                status,
+                exit_class: row.try_get("last_run_exit_class")?,
+                ended_at: row.try_get("last_run_ended_at")?,
+            }),
+            None => None,
+        };
+
+        Ok(TaskSummary {
+            task: Task::from_row(row)?,
+            link_count: row.try_get("link_count")?,
+            dependency_count: row.try_get("dependency_count")?,
+            blocked_by_incomplete: row.try_get("blocked_by_incomplete")?,
+            last_run,
+        })
+    }
+}
+
+/// The board's bulk read (seam-contract D12) up to its `WHERE`, which
+/// [`list_tasks`] appends its optional filters to.
+///
+/// The counts are correlated subqueries rather than two `LEFT JOIN`s under one
+/// `GROUP BY`: joining both child tables at once multiplies their rows
+/// together, so a task with three links and two dependencies would report six
+/// of each unless every count were a `count(DISTINCT …)`. They also keep the
+/// no-rows case honest for free — a task with no links, no edges and no runs
+/// comes back with zeros and NULLs rather than dropping out of the result, and
+/// an inner join here would silently empty a board of brand-new tasks.
+///
+/// The last run is joined on the highest `attempt`, never on `ended_at`, which
+/// is NULL while a run is in flight. `idx_runs_task_attempt` is UNIQUE on
+/// `(task_id, attempt)`, so that join matches at most one row and needs no
+/// `GROUP BY` of its own.
+const TASK_SUMMARY_SELECT: &str = r#"
+SELECT t.*,
+       (SELECT count(*) FROM task_links WHERE task_id = t.id) AS link_count,
+       (SELECT count(*) FROM task_dependencies WHERE task_id = t.id) AS dependency_count,
+       0 AS blocked_by_incomplete,
+       r.status AS last_run_status,
+       r.exit_class AS last_run_exit_class,
+       r.ended_at AS last_run_ended_at
+  FROM tasks t
+  LEFT JOIN runs r ON r.task_id = t.id
+       AND r.attempt = (SELECT max(attempt) FROM runs WHERE task_id = t.id)
+ WHERE 1 = 1"#;
 
 /// Creates a task at the bottom of its target column, inside one repository.
 ///
@@ -148,31 +249,39 @@ pub async fn get_task(ctx: &ServiceContext, id: &str) -> Result<TaskDetail> {
     })
 }
 
-/// Every task matching `filter`, ordered the way the board reads a column:
-/// by repository, then column, then position — the same leading columns as
-/// the migration's own `idx_tasks_board`, so a broad call (few or no
-/// filters) is still a board-shaped read rather than an arbitrary one.
+/// Every task matching `filter` as a [`TaskSummary`], ordered the way the
+/// board reads a column: by repository, then column, then position — the same
+/// leading columns as the migration's own `idx_tasks_board`, so a broad call
+/// (few or no filters) is still a board-shaped read rather than an arbitrary
+/// one.
+///
+/// A summary and not a bare row because the card has to show a link count, a
+/// dependency indicator and the outcome of the last run (seam-contract D12);
+/// [`get_task`] is unchanged and still the detail read.
 ///
 /// Optional filters are why this is hand-built SQL through the `FromRow`
 /// path rather than `query_as!`: the macro needs a query whose shape is
 /// fixed at compile time, and which `WHERE` clauses apply here depends on
 /// which fields of `filter` are `Some` (seam-contract D5).
-pub async fn list_tasks(ctx: &ServiceContext, filter: TaskFilter) -> Result<Vec<Task>> {
-    let mut sql = String::from("SELECT * FROM tasks WHERE 1 = 1");
+pub async fn list_tasks(ctx: &ServiceContext, filter: TaskFilter) -> Result<Vec<TaskSummary>> {
+    let mut sql = String::from(TASK_SUMMARY_SELECT);
     if filter.repository_id.is_some() {
-        sql.push_str(" AND repository_id = ?");
+        sql.push_str(" AND t.repository_id = ?");
     }
     if filter.column.is_some() {
-        sql.push_str(" AND board_column = ?");
+        sql.push_str(" AND t.board_column = ?");
     }
     if filter.run_state.is_some() {
-        sql.push_str(" AND run_state = ?");
+        sql.push_str(" AND t.run_state = ?");
     }
+    // Qualified with `t.`: `runs` carries an `id` and a `task_id` of its own,
+    // so an unqualified ordering column would be ambiguous the moment the join
+    // above matched.
     sql.push_str(
-        " ORDER BY repository_id ASC, board_column ASC, position ASC, created_at ASC, id ASC",
+        " ORDER BY t.repository_id ASC, t.board_column ASC, t.position ASC, t.created_at ASC, t.id ASC",
     );
 
-    let mut query = sqlx::query_as::<_, Task>(&sql);
+    let mut query = sqlx::query_as::<_, TaskSummary>(&sql);
     if let Some(repository_id) = filter.repository_id {
         query = query.bind(repository_id);
     }
@@ -193,9 +302,20 @@ pub async fn list_tasks(ctx: &ServiceContext, filter: TaskFilter) -> Result<Vec<
 /// refused — the empty-plan guard is about the *state* "ready with no plan",
 /// not only about the `move_task` call that would create it, so editing the
 /// plan out from under a ready card is held to the same rule.
+///
+/// `patch.repository_id` re-files the task, and is refused once anything has
+/// tied it to the repository it is in — see
+/// [`resolve_repository_placement`] and seam-contract D13.
 pub async fn update_task(ctx: &ServiceContext, id: &str, patch: TaskPatch) -> Result<Task> {
     let mut tx = ctx.pool.begin().await?;
     let current = fetch_task_row(&mut *tx, id).await?;
+
+    // Resolved before the patch's own columns are folded in, because it is
+    // the one field whose new value depends on rows other than this task's:
+    // the destination repository has to exist, nothing may have tied the task
+    // to its current one, and the position it lands on is read out of the
+    // destination column.
+    let placement = resolve_repository_placement(&mut tx, &current, patch.repository_id).await?;
 
     let title = match patch.title {
         Some(title) => {
@@ -213,13 +333,15 @@ pub async fn update_task(ctx: &ServiceContext, id: &str, patch: TaskPatch) -> Re
 
     let now = ctx.clock.now();
     sqlx::query!(
-        r#"UPDATE tasks SET title = ?1, plan = ?2, extra_instructions = ?3, model = ?4,
-            effort = ?5, updated_at = ?6 WHERE id = ?7"#,
+        r#"UPDATE tasks SET repository_id = ?1, title = ?2, plan = ?3, extra_instructions = ?4,
+            model = ?5, effort = ?6, position = ?7, updated_at = ?8 WHERE id = ?9"#,
+        placement.repository_id,
         title,
         plan,
         extra_instructions,
         model,
         effort,
+        placement.position,
         now,
         id,
     )
@@ -230,7 +352,12 @@ pub async fn update_task(ctx: &ServiceContext, id: &str, patch: TaskPatch) -> Re
 
     // See `create_task`'s identical comment: publish before the read-back so
     // a failed re-read never costs the notification for a committed write.
-    ctx.publish(ChangeEvent::tasks([id.to_string()]));
+    // A reassignment that forced a rebalance in the destination column
+    // renumbered other cards too, so their ids ride along the way
+    // `create_task` and `move_task` send theirs.
+    ctx.publish(ChangeEvent::tasks(std::iter::once(id.to_string()).chain(
+        placement.rebalanced_ids.into_iter().filter(|rid| rid != id),
+    )));
     let updated = fetch_task_row(&ctx.pool, id).await?;
     Ok(updated)
 }
@@ -391,6 +518,146 @@ fn ensure_ready_has_a_plan(column: BoardColumn, plan: &Option<String>, title: &s
             "cannot put \"{title}\" in ready without a plan"
         )));
     }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Repository reassignment (seam-contract D13)
+// ---------------------------------------------------------------------------
+
+/// Where a task's row lands once [`update_task`] has resolved
+/// `patch.repository_id`: which repository it belongs to, and its position in
+/// that repository's copy of its column — plus every id a forced rebalance
+/// renumbered on the way, which is empty on every path except a reassignment
+/// into a column with no room left.
+struct RepositoryPlacement {
+    repository_id: String,
+    position: f64,
+    rebalanced_ids: Vec<String>,
+}
+
+/// What `patch.repository_id` means for the row, per seam-contract D13.
+///
+/// Three cases. A patch that omits the field changes nothing — patch
+/// semantics, the same as every other field. A patch naming the repository
+/// the task is already in also changes nothing, and in particular does not
+/// reorder the column: re-filing a task where it already lives is a no-op,
+/// not a request to send it to the bottom. A patch naming a different
+/// repository is the reassignment, and is held to
+/// [`ensure_repository_is_reassignable`] first.
+///
+/// The position is recomputed rather than carried, because `position` is
+/// scoped to `(repository, column)` (ADR-0007) and a number that ordered the
+/// old repository's column means nothing in the destination's — at best it
+/// lands somewhere arbitrary, at worst it duplicates a card already there,
+/// which is precisely the damage [`rebalance_column`] exists to repair. The
+/// bottom of the same column is the destination: the card keeps its place in
+/// the user's process and loses only a priority that was never expressed
+/// against these neighbours. All of it inside [`update_task`]'s transaction,
+/// so no reader ever sees the row filed under a repository it has no position
+/// in.
+async fn resolve_repository_placement(
+    tx: &mut SqliteConnection,
+    current: &Task,
+    requested: Option<String>,
+) -> Result<RepositoryPlacement> {
+    let unchanged = || RepositoryPlacement {
+        repository_id: current.repository_id.clone(),
+        position: current.position,
+        rebalanced_ids: Vec::new(),
+    };
+
+    let Some(repository_id) = requested else {
+        return Ok(unchanged());
+    };
+    if repository_id == current.repository_id {
+        return Ok(unchanged());
+    }
+
+    ensure_repository_exists(&mut *tx, &repository_id).await?;
+    ensure_repository_is_reassignable(&mut *tx, current).await?;
+
+    let (position, rebalanced_ids) =
+        append_task_position(&mut *tx, &repository_id, current.column).await?;
+
+    Ok(RepositoryPlacement {
+        repository_id,
+        position,
+        rebalanced_ids,
+    })
+}
+
+/// The schema's foreign key already refuses a `repository_id` naming nothing,
+/// but as a constraint violation the user cannot read. This is the message
+/// they get instead — deliberately the same sentence, and the same
+/// [`Error::not_found`], that `repo::get` answers the identical question
+/// with, so "that repository id does not exist" does not depend on which door
+/// asked (ADR-0006).
+async fn ensure_repository_exists(tx: &mut SqliteConnection, repository_id: &str) -> Result<()> {
+    let count: i64 = sqlx::query_scalar!(
+        "SELECT count(*) FROM repositories WHERE id = ?1",
+        repository_id,
+    )
+    .fetch_one(&mut *tx)
+    .await?;
+
+    if count == 0 {
+        return Err(Error::not_found(format!(
+            "no repository with id {repository_id}"
+        )));
+    }
+    Ok(())
+}
+
+/// Seam-contract D13's guard: a task's repository may be changed only while
+/// it has no worktree and no runs.
+///
+/// Before either exists a task is a title and a plan, and mis-filing one is
+/// an obvious mistake to want to undo. After: ADR-0005 has tied `branch` and
+/// `worktree_path` to that repository — the same act creates both, so the
+/// recorded worktree is the fact this reads — `runs` rows reference
+/// transcripts produced inside it, and ADR-0008's branch chaining resolves a
+/// base ref within it. A task moved out from under any of that is a task
+/// whose recorded state describes a place it no longer lives.
+///
+/// Each refusal names what blocks it, because the panel renders this message
+/// verbatim beside the selector it has disabled — and disabling that control
+/// is a courtesy on top of this refusal, never a substitute for it: task 010
+/// exposes `update_task` too, and a rule enforced in only one of the two
+/// paths is a bug (ADR-0006). `Error::invalid` and no new `ErrorCode`
+/// (seam-contract D8): the specificity that matters is in the sentence.
+///
+/// The worktree is checked first: it is already on the row where the run count
+/// is a query, and when both hold it is the more useful of the two messages —
+/// it names a place on disk the user can go and look at.
+async fn ensure_repository_is_reassignable(tx: &mut SqliteConnection, task: &Task) -> Result<()> {
+    if let Some(worktree_path) = &task.worktree_path {
+        return Err(Error::invalid(format!(
+            "cannot move \"{title}\" to another repository: it already has a worktree at {worktree_path}",
+            title = task.title,
+        )));
+    }
+
+    let run_count: i64 =
+        sqlx::query_scalar!("SELECT count(*) FROM runs WHERE task_id = ?1", task.id)
+            .fetch_one(&mut *tx)
+            .await?;
+
+    if run_count > 0 {
+        // Two whole clauses rather than one format string with a pluralized
+        // noun, for the reason `repo::remove` gives at its own count: English
+        // inflects the verb as well as the noun.
+        let reason = if run_count == 1 {
+            "1 run has already been recorded against it".to_string()
+        } else {
+            format!("{run_count} runs have already been recorded against it")
+        };
+        return Err(Error::invalid(format!(
+            "cannot move \"{title}\" to another repository: {reason}",
+            title = task.title,
+        )));
+    }
+
     Ok(())
 }
 
@@ -601,4 +868,110 @@ async fn task_column_has_other_rows(
     .fetch_one(&mut *tx)
     .await?;
     Ok(count > 0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use pretty_assertions::assert_eq;
+    use serde_json::json;
+
+    /// The board's DTO is mirrored by hand in `src/types.ts`, and a key spelled
+    /// `link_count` there instead of `linkCount` would typecheck on both sides
+    /// and render `undefined` on every card. `db::models` pins [`Task`]'s own
+    /// keys the same way and for the same reason; this pins what
+    /// [`TaskSummary`] adds, including that the task is flattened alongside
+    /// them rather than nested under a `task` key.
+    #[test]
+    fn a_task_summary_serializes_the_task_flat_alongside_its_board_fields() {
+        let summary = TaskSummary {
+            task: Task {
+                id: "3f2b1c00-0000-4000-8000-000000000001".to_string(),
+                repository_id: "3f2b1c00-0000-4000-8000-000000000002".to_string(),
+                title: "Wire the board to the store".to_string(),
+                plan: Some("## Steps\n1. ...".to_string()),
+                extra_instructions: None,
+                column: BoardColumn::Ready,
+                position: 1.5,
+                run_state: RunState::Failed,
+                branch: None,
+                worktree_path: None,
+                strategy_mode: StrategyMode::Default,
+                model: None,
+                effort: None,
+                strategy_plan: None,
+                strategy_source: None,
+                strategy_updated_at: None,
+                created_at: "2026-08-20T12:00:00Z".parse().expect("a literal timestamp"),
+                updated_at: "2026-08-20T12:30:00Z".parse().expect("a literal timestamp"),
+            },
+            link_count: 2,
+            dependency_count: 1,
+            blocked_by_incomplete: false,
+            // seam-contract D9's case: the task is `failed`, and the only place
+            // the word "interrupted" reaches the board is this exit class.
+            last_run: Some(LastRunSummary {
+                status: RunStatus::Interrupted,
+                exit_class: Some(ExitClass::Interrupted),
+                ended_at: Some("2026-08-20T12:29:00Z".parse().expect("a literal timestamp")),
+            }),
+        };
+
+        let wire = serde_json::to_value(&summary).expect("a DTO must always serialize");
+
+        assert_eq!(wire["id"], json!("3f2b1c00-0000-4000-8000-000000000001"));
+        assert_eq!(wire["column"], json!("ready"));
+        assert_eq!(wire["runState"], json!("failed"));
+        assert_eq!(wire["linkCount"], json!(2));
+        assert_eq!(wire["dependencyCount"], json!(1));
+        assert_eq!(wire["blockedByIncomplete"], json!(false));
+        assert_eq!(
+            wire["lastRun"],
+            json!({
+                "status": "interrupted",
+                "exitClass": "interrupted",
+                "endedAt": "2026-08-20T12:29:00Z",
+            })
+        );
+        assert!(
+            wire.get("task").is_none(),
+            "the task is flattened, not nested — `TaskSummary extends Task` in src/types.ts"
+        );
+    }
+
+    #[test]
+    fn a_task_summary_with_no_runs_serializes_last_run_as_null() {
+        let summary = TaskSummary {
+            task: Task {
+                id: "3f2b1c00-0000-4000-8000-000000000003".to_string(),
+                repository_id: "3f2b1c00-0000-4000-8000-000000000002".to_string(),
+                title: "Brand new".to_string(),
+                plan: None,
+                extra_instructions: None,
+                column: BoardColumn::NotReady,
+                position: 0.0,
+                run_state: RunState::Idle,
+                branch: None,
+                worktree_path: None,
+                strategy_mode: StrategyMode::Default,
+                model: None,
+                effort: None,
+                strategy_plan: None,
+                strategy_source: None,
+                strategy_updated_at: None,
+                created_at: "2026-08-20T12:00:00Z".parse().expect("a literal timestamp"),
+                updated_at: "2026-08-20T12:00:00Z".parse().expect("a literal timestamp"),
+            },
+            link_count: 0,
+            dependency_count: 0,
+            blocked_by_incomplete: false,
+            last_run: None,
+        };
+
+        let wire = serde_json::to_value(&summary).expect("a DTO must always serialize");
+
+        // `null`, never an absent key: `lastRun: LastRunSummary | null` in
+        // `src/types.ts` is a field the card reads, not one it probes for.
+        assert_eq!(wire["lastRun"], json!(null));
+    }
 }

@@ -69,6 +69,18 @@ impl<T> Patch<T> {
 /// transition), and links (their own add/update/remove/reorder surface).
 #[derive(Debug, Clone, Default)]
 pub struct TaskPatch {
+    /// `None` leaves the task in the repository it is already filed under.
+    /// A plain `Option` rather than a [`Patch`] for the same reason `title`
+    /// is one: `repository_id` is `NOT NULL`, so there is nothing for "clear
+    /// it" to mean.
+    ///
+    /// Naming a *different* repository is only legal while the task has no
+    /// worktree and no runs (seam-contract D13) —
+    /// [`crate::tasks::update_task`] refuses otherwise, naming what blocks
+    /// it, and also moves the card to the bottom of its column in the
+    /// destination, because `position` is scoped to `(repository, column)`
+    /// (ADR-0007).
+    pub repository_id: Option<String>,
     /// `None` leaves the title alone. Never [`Patch::Clear`]: `title` is
     /// `NOT NULL`, and non-blank is a rule this crate enforces rather than
     /// the schema, so there is nothing here to represent "clear it" with.

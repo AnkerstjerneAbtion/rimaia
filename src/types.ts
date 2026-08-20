@@ -180,6 +180,36 @@ export interface TaskDetail extends Task {
   lastRun: Run | null;
 }
 
+/**
+ * Mirrors `rimaia_core::tasks::LastRunSummary` — the three fields of a `Run`
+ * a card draws, not the row. `interrupted` reaches the board through
+ * `exitClass` and nowhere else (seam-contract D9).
+ */
+export interface LastRunSummary {
+  status: RunStatus;
+  exitClass: ExitClass | null;
+  /** `null` while the attempt is still in flight. */
+  endedAt: string | null;
+}
+
+/**
+ * Mirrors `rimaia_core::tasks::TaskSummary`, what [`listTasks`](./commands)
+ * returns (seam-contract D12). Flattened on the Rust side for the reason
+ * `TaskDetail` is, so this `extends Task` rather than nesting one.
+ *
+ * The card renders from this; the panel renders from `TaskDetail`. That split
+ * is what keeps a fifty-card board one query instead of fifty.
+ */
+export interface TaskSummary extends Task {
+  linkCount: number;
+  dependencyCount: number;
+  /** Reserved for task 011 and a constant `false` until it lands — the card
+   *  renders it now so that task 011 changes one backend query and nothing
+   *  else (seam-contract D12). */
+  blockedByIncomplete: boolean;
+  lastRun: LastRunSummary | null;
+}
+
 /** What [`createTask`](./commands) sends. Mirrors `NewTaskLink`, and also
  *  what [`addTaskLink`](./commands) sends for one link added afterwards. */
 export interface NewTaskLinkInput {
@@ -215,9 +245,18 @@ export interface TaskFilterInput {
  */
 export type PatchField<T> = T | null;
 
-/** What [`updateTask`](./commands) sends. Mirrors `TaskPatch` — `title` is a
- *  plain optional string (never "clear", `title` is `NOT NULL`). */
+/** What [`updateTask`](./commands) sends. Mirrors `TaskPatch` — `repositoryId`
+ *  and `title` are plain optional strings (never "clear", both columns are
+ *  `NOT NULL`). */
 export interface TaskPatchInput {
+  /**
+   * Re-files the task under another repository. Legal only while the task has
+   * no worktree and no runs (seam-contract D13): `update_task` refuses
+   * otherwise, with a message naming the worktree or the run count, and the
+   * panel renders that text beside the selector it has disabled. The refusal
+   * is the rule; the disabled control is a courtesy on top of it.
+   */
+  repositoryId?: string;
   title?: string;
   plan?: PatchField<string>;
   extraInstructions?: PatchField<string>;

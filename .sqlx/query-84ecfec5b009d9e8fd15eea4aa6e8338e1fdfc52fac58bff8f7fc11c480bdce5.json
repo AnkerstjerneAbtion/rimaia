@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE tasks SET worktree_path = ?1 WHERE id = ?2",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "84ecfec5b009d9e8fd15eea4aa6e8338e1fdfc52fac58bff8f7fc11c480bdce5"
+}

@@ -11,9 +11,13 @@
 //! consequence, is a `cargo test -p rimaia-core` assertion rather than
 //! something needing a window.
 
+use chrono::{DateTime, Utc};
 use pretty_assertions::assert_eq;
-use rimaia_core::db::{BoardColumn, RunState};
-use rimaia_core::tasks::{self, NewTask, NewTaskLink, Patch, TaskFilter, TaskLinkPatch, TaskPatch};
+use rimaia_core::db::{BoardColumn, ExitClass, RunState, RunStatus};
+use rimaia_core::tasks::{
+    self, LastRunSummary, NewTask, NewTaskLink, Patch, TaskFilter, TaskLinkPatch, TaskPatch,
+    TaskSummary,
+};
 use rimaia_core::testing::TestContext;
 use rimaia_core::{ChangeEvent, Clock, ErrorCode};
 use sqlx::SqlitePool;
@@ -264,7 +268,10 @@ async fn list_tasks_filters_by_repository_column_and_run_state() {
     .expect("list filtered tasks");
 
     assert_eq!(
-        filtered.iter().map(|t| t.id.clone()).collect::<Vec<_>>(),
+        filtered
+            .iter()
+            .map(|t| t.task.id.clone())
+            .collect::<Vec<_>>(),
         vec![a_ready.id]
     );
 
@@ -279,9 +286,12 @@ async fn list_tasks_filters_by_repository_column_and_run_state() {
     .await
     .expect("list every task in one repository");
 
-    let mut ids: Vec<_> = all_in_repository_a.iter().map(|t| t.id.clone()).collect();
+    let mut ids: Vec<_> = all_in_repository_a
+        .iter()
+        .map(|t| t.task.id.clone())
+        .collect();
     ids.sort();
-    let mut expected = vec![a_not_ready.id, filtered[0].id.clone()];
+    let mut expected = vec![a_not_ready.id, filtered[0].task.id.clone()];
     expected.sort();
     assert_eq!(ids, expected);
 }
@@ -306,9 +316,136 @@ async fn list_tasks_orders_a_column_by_position() {
     .expect("list the column");
 
     assert_eq!(
-        listed.iter().map(|t| t.id.clone()).collect::<Vec<_>>(),
+        listed.iter().map(|t| t.task.id.clone()).collect::<Vec<_>>(),
         vec![first.id, second.id, third.id]
     );
+}
+
+// ---------------------------------------------------------------------------
+// list_tasks — the board's summary projection (seam-contract D12)
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn a_listed_task_carries_its_link_and_dependency_counts_and_its_last_run() {
+    let h = TestContext::new().await;
+    let repository_id = seed_repository(&h.context.pool).await;
+    let blocker = create_ready(&h, &repository_id, "blocker", "plan").await;
+    let task = tasks::create_task(
+        &h.context,
+        NewTask {
+            repository_id: repository_id.clone(),
+            title: "with everything".to_string(),
+            plan: Some("plan".to_string()),
+            extra_instructions: None,
+            column: Some(BoardColumn::Ready),
+            links: vec![
+                NewTaskLink {
+                    label: "Design doc".to_string(),
+                    url: "https://example.com/design".to_string(),
+                },
+                NewTaskLink {
+                    label: "Issue".to_string(),
+                    url: "https://example.com/issue".to_string(),
+                },
+            ],
+        },
+    )
+    .await
+    .expect("create a task with two links");
+    seed_dependency(&h.context.pool, &task.id, &blocker.id).await;
+    seed_run(&h.context.pool, &task.id, 1, "session-1").await;
+
+    let summary = list_one(&h, &repository_id, &task.id).await;
+
+    assert_eq!(summary.link_count, 2);
+    assert_eq!(summary.dependency_count, 1);
+    assert_eq!(
+        summary.last_run,
+        Some(LastRunSummary {
+            status: RunStatus::Running,
+            exit_class: None,
+            ended_at: None,
+        }),
+        "a run still in flight has no exit class and no end"
+    );
+}
+
+#[tokio::test]
+async fn a_task_with_no_links_dependencies_or_runs_lists_with_zeros_and_no_last_run() {
+    // The join has to be a LEFT join: an inner one would hide every
+    // brand-new task and the board would simply look empty.
+    let h = TestContext::new().await;
+    let repository_id = seed_repository(&h.context.pool).await;
+    let task = create_ready(&h, &repository_id, "brand new", "plan").await;
+
+    let summary = list_one(&h, &repository_id, &task.id).await;
+
+    assert_eq!(summary.link_count, 0);
+    assert_eq!(summary.dependency_count, 0);
+    assert_eq!(summary.last_run, None);
+    assert_eq!(
+        summary.task, task,
+        "the projection carries every column of the row it wraps"
+    );
+}
+
+#[tokio::test]
+async fn the_listed_last_run_is_the_highest_attempt_not_the_most_recently_ended() {
+    let h = TestContext::new().await;
+    let repository_id = seed_repository(&h.context.pool).await;
+    let task = create_ready(&h, &repository_id, "retried twice", "plan").await;
+
+    // Attempt 1 ends *after* attempt 2 — the ordering `ended_at` would give is
+    // the wrong one, and a run still in flight has no `ended_at` at all.
+    seed_finished_run(
+        &h.context.pool,
+        &task.id,
+        1,
+        RunStatus::Succeeded,
+        ExitClass::Success,
+        "2026-08-20T12:00:00+00:00",
+    )
+    .await;
+    seed_finished_run(
+        &h.context.pool,
+        &task.id,
+        2,
+        RunStatus::Interrupted,
+        ExitClass::Interrupted,
+        "2026-08-20T09:00:00+00:00",
+    )
+    .await;
+
+    let summary = list_one(&h, &repository_id, &task.id).await;
+
+    assert_eq!(
+        summary.last_run,
+        Some(LastRunSummary {
+            // seam-contract D9: this is the only place the word "interrupted"
+            // ever reaches the board, since `run_state` deliberately has no
+            // such value.
+            status: RunStatus::Interrupted,
+            exit_class: Some(ExitClass::Interrupted),
+            ended_at: Some(timestamp("2026-08-20T09:00:00+00:00")),
+        })
+    );
+}
+
+#[tokio::test]
+async fn blocked_by_incomplete_is_false_for_every_task_until_task_011() {
+    // A dependency edge exists and is counted, and the flag is still false —
+    // pinning seam-contract D12's "ships as a constant now" so that task 011
+    // has a test to change rather than a behaviour to discover.
+    let h = TestContext::new().await;
+    let repository_id = seed_repository(&h.context.pool).await;
+    let blocker = create_ready(&h, &repository_id, "blocker", "plan").await;
+    let dependent = create_ready(&h, &repository_id, "dependent", "plan").await;
+    seed_dependency(&h.context.pool, &dependent.id, &blocker.id).await;
+
+    let summary = list_one(&h, &repository_id, &dependent.id).await;
+
+    assert_eq!(summary.dependency_count, 1);
+    assert!(!summary.blocked_by_incomplete);
 }
 
 // ---------------------------------------------------------------------------
@@ -493,6 +630,276 @@ async fn clearing_the_plan_of_a_ready_task_is_refused() {
 }
 
 // ---------------------------------------------------------------------------
+// update_task — changing repository (seam-contract D13)
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn a_task_with_no_worktree_and_no_runs_can_be_refiled_under_another_repository() {
+    let mut h = TestContext::new().await;
+    let origin = seed_repository(&h.context.pool).await;
+    let destination = seed_repository(&h.context.pool).await;
+    let task = create_ready(&h, &origin, "misfiled", "a plan").await;
+    h.changes.try_recv().expect("drain the create event");
+
+    h.clock.advance(chrono::Duration::minutes(5));
+    let moved = tasks::update_task(
+        &h.context,
+        &task.id,
+        TaskPatch {
+            repository_id: Some(destination.clone()),
+            ..Default::default()
+        },
+    )
+    .await
+    .expect("a task with no worktree and no runs is reassignable");
+
+    assert_eq!(moved.repository_id, destination);
+    assert_eq!(
+        moved.column,
+        BoardColumn::Ready,
+        "re-filing a task moves it between boards, never between columns"
+    );
+    assert_eq!(
+        moved.title, "misfiled",
+        "unpatched fields stay as they were"
+    );
+    assert_eq!(moved.updated_at, h.clock.now());
+
+    assert_eq!(
+        h.changes.try_recv().expect("a publication"),
+        ChangeEvent::tasks([task.id])
+    );
+}
+
+#[tokio::test]
+async fn a_refiled_task_lands_at_the_bottom_of_its_column_in_the_destination() {
+    let h = TestContext::new().await;
+    let origin = seed_repository(&h.context.pool).await;
+    let destination = seed_repository(&h.context.pool).await;
+    create_ready(&h, &destination, "already here", "plan").await;
+    let bottom = create_ready(&h, &destination, "and here", "plan").await;
+    let task = create_ready(&h, &origin, "misfiled", "a plan").await;
+
+    let moved = tasks::update_task(
+        &h.context,
+        &task.id,
+        TaskPatch {
+            repository_id: Some(destination.clone()),
+            ..Default::default()
+        },
+    )
+    .await
+    .expect("reassign the task");
+
+    // The position it arrived with ordered a column it is no longer in
+    // (ADR-0007 scopes `position` to `(repository, column)`), so what matters
+    // is that the destination column reads in a defined order with the new
+    // card last — not what the number is.
+    assert!(
+        moved.position > bottom.position,
+        "a re-filed card ({}) must land below the destination column's last card ({})",
+        moved.position,
+        bottom.position
+    );
+    assert_eq!(
+        column_titles(&h, &destination, BoardColumn::Ready).await,
+        vec!["already here", "and here", "misfiled"]
+    );
+    assert!(
+        column_titles(&h, &origin, BoardColumn::Ready)
+            .await
+            .is_empty(),
+        "the card must leave the board it was mis-filed on"
+    );
+}
+
+#[tokio::test]
+async fn refiling_a_task_into_the_repository_it_is_already_in_leaves_its_position_alone() {
+    let h = TestContext::new().await;
+    let repository_id = seed_repository(&h.context.pool).await;
+    let task = create_ready(&h, &repository_id, "first", "a plan").await;
+    create_ready(&h, &repository_id, "second", "plan").await;
+
+    let updated = tasks::update_task(
+        &h.context,
+        &task.id,
+        TaskPatch {
+            repository_id: Some(repository_id.clone()),
+            ..Default::default()
+        },
+    )
+    .await
+    .expect("naming the repository a task is already in is not a reassignment");
+
+    assert_eq!(updated.position, task.position);
+    assert_eq!(
+        column_titles(&h, &repository_id, BoardColumn::Ready).await,
+        vec!["first", "second"],
+        "a no-op re-file must not send the card to the bottom of its own column"
+    );
+}
+
+#[tokio::test]
+async fn a_patch_that_omits_the_repository_leaves_the_task_where_it_is_filed() {
+    let h = TestContext::new().await;
+    let repository_id = seed_repository(&h.context.pool).await;
+    let task = create_ready(&h, &repository_id, "first", "a plan").await;
+    create_ready(&h, &repository_id, "second", "plan").await;
+
+    let updated = tasks::update_task(
+        &h.context,
+        &task.id,
+        TaskPatch {
+            title: Some("renamed".to_string()),
+            ..Default::default()
+        },
+    )
+    .await
+    .expect("patch the title alone");
+
+    assert_eq!(updated.repository_id, repository_id);
+    assert_eq!(
+        updated.position, task.position,
+        "an unset repository must not recompute the position either"
+    );
+    assert_eq!(
+        column_titles(&h, &repository_id, BoardColumn::Ready).await,
+        vec!["renamed", "second"]
+    );
+}
+
+#[tokio::test]
+async fn refiling_a_task_that_has_a_worktree_is_refused_and_names_the_worktree() {
+    let mut h = TestContext::new().await;
+    let origin = seed_repository(&h.context.pool).await;
+    let destination = seed_repository(&h.context.pool).await;
+    let task = create_ready(&h, &origin, "already started", "a plan").await;
+    seed_worktree_path(
+        &h.context.pool,
+        &task.id,
+        "/tmp/rimaia-worktrees/rimaia/already-started",
+    )
+    .await;
+    h.changes.try_recv().expect("drain the create event");
+
+    let error = tasks::update_task(
+        &h.context,
+        &task.id,
+        TaskPatch {
+            repository_id: Some(destination),
+            ..Default::default()
+        },
+    )
+    .await
+    .expect_err("a task with a worktree must not change repository");
+
+    assert_eq!(error.code(), ErrorCode::Invalid);
+    assert_eq!(
+        error.to_string(),
+        "cannot move \"already started\" to another repository: it already has a worktree at /tmp/rimaia-worktrees/rimaia/already-started"
+    );
+    assert_eq!(
+        tasks::get_task(&h.context, &task.id)
+            .await
+            .expect("read it back")
+            .task
+            .repository_id,
+        origin,
+        "a refused reassignment must leave the row where it was"
+    );
+    assert!(
+        h.changes.try_recv().is_err(),
+        "a refused reassignment must publish nothing"
+    );
+}
+
+#[tokio::test]
+async fn refiling_a_task_that_has_runs_is_refused_and_names_the_count() {
+    let h = TestContext::new().await;
+    let origin = seed_repository(&h.context.pool).await;
+    let destination = seed_repository(&h.context.pool).await;
+    let task = create_ready(&h, &origin, "attempted twice", "a plan").await;
+    seed_run(&h.context.pool, &task.id, 1, "session-1").await;
+    seed_run(&h.context.pool, &task.id, 2, "session-1").await;
+
+    let error = tasks::update_task(
+        &h.context,
+        &task.id,
+        TaskPatch {
+            repository_id: Some(destination),
+            ..Default::default()
+        },
+    )
+    .await
+    .expect_err("a task with runs must not change repository");
+
+    assert_eq!(error.code(), ErrorCode::Invalid);
+    assert_eq!(
+        error.to_string(),
+        "cannot move \"attempted twice\" to another repository: 2 runs have already been recorded against it"
+    );
+}
+
+#[tokio::test]
+async fn refiling_a_task_with_exactly_one_run_uses_the_singular_noun() {
+    let h = TestContext::new().await;
+    let origin = seed_repository(&h.context.pool).await;
+    let destination = seed_repository(&h.context.pool).await;
+    let task = create_ready(&h, &origin, "attempted once", "a plan").await;
+    seed_run(&h.context.pool, &task.id, 1, "session-1").await;
+
+    let error = tasks::update_task(
+        &h.context,
+        &task.id,
+        TaskPatch {
+            repository_id: Some(destination),
+            ..Default::default()
+        },
+    )
+    .await
+    .expect_err("a task with a run must not change repository");
+
+    assert_eq!(
+        error.to_string(),
+        "cannot move \"attempted once\" to another repository: 1 run has already been recorded against it"
+    );
+}
+
+#[tokio::test]
+async fn refiling_a_task_under_an_unknown_repository_is_refused() {
+    let h = TestContext::new().await;
+    let repository_id = seed_repository(&h.context.pool).await;
+    let task = create_ready(&h, &repository_id, "misfiled", "a plan").await;
+
+    let error = tasks::update_task(
+        &h.context,
+        &task.id,
+        TaskPatch {
+            repository_id: Some("no-such-repository".to_string()),
+            ..Default::default()
+        },
+    )
+    .await
+    .expect_err("the destination must exist");
+
+    // The same sentence `repo::get` answers the identical question with: the
+    // foreign key is the backstop, this is what the user reads.
+    assert_eq!(error.code(), ErrorCode::NotFound);
+    assert_eq!(
+        error.to_string(),
+        "no repository with id no-such-repository"
+    );
+    assert_eq!(
+        tasks::get_task(&h.context, &task.id)
+            .await
+            .expect("read it back")
+            .task
+            .repository_id,
+        repository_id
+    );
+}
+
+// ---------------------------------------------------------------------------
 // delete_task
 // ---------------------------------------------------------------------------
 
@@ -615,7 +1022,10 @@ async fn moving_a_task_to_the_top_of_its_own_column_reorders_it() {
     .await
     .expect("list the column");
     assert_eq!(
-        ordered.iter().map(|t| t.id.clone()).collect::<Vec<_>>(),
+        ordered
+            .iter()
+            .map(|t| t.task.id.clone())
+            .collect::<Vec<_>>(),
         vec![second.id.clone(), first.id]
     );
 
@@ -801,7 +1211,7 @@ async fn a_forced_rebalance_still_lands_the_task_between_its_neighbours() {
     )
     .await
     .expect("list the column");
-    let positions: Vec<f64> = ordered.iter().map(|t| t.position).collect();
+    let positions: Vec<f64> = ordered.iter().map(|t| t.task.position).collect();
     let mut sorted = positions.clone();
     sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
     assert_eq!(
@@ -809,7 +1219,10 @@ async fn a_forced_rebalance_still_lands_the_task_between_its_neighbours() {
         "the column must come out strictly ordered"
     );
     assert_eq!(
-        ordered.iter().map(|t| t.id.clone()).collect::<Vec<_>>(),
+        ordered
+            .iter()
+            .map(|t| t.task.id.clone())
+            .collect::<Vec<_>>(),
         vec![lower.id.clone(), moved.id.clone(), upper_id.clone()],
         "moving must land the task between the two it was asked to"
     );
@@ -1064,6 +1477,58 @@ async fn create_ready(
     .expect("create a ready task fixture")
 }
 
+/// One task's summary, read through the board's own bulk call rather than a
+/// narrower one — the projection is only worth asserting on the query the
+/// board actually issues.
+async fn list_one(h: &TestContext, repository_id: &str, task_id: &str) -> TaskSummary {
+    tasks::list_tasks(
+        &h.context,
+        TaskFilter {
+            repository_id: Some(repository_id.to_string()),
+            column: None,
+            run_state: None,
+        },
+    )
+    .await
+    .expect("list the repository's tasks")
+    .into_iter()
+    .find(|summary| summary.task.id == task_id)
+    .expect("the task must be in the board's own read")
+}
+
+/// The titles of one repository's column, in board order — read through
+/// [`list_one`]'s own call, so a test about where a card landed asserts the
+/// order the board would draw rather than a raw position.
+async fn column_titles(h: &TestContext, repository_id: &str, column: BoardColumn) -> Vec<String> {
+    tasks::list_tasks(
+        &h.context,
+        TaskFilter {
+            repository_id: Some(repository_id.to_string()),
+            column: Some(column),
+            run_state: None,
+        },
+    )
+    .await
+    .expect("list a column")
+    .into_iter()
+    .map(|summary| summary.task.title)
+    .collect()
+}
+
+/// Task 007 is what will write `worktree_path`, so seam-contract D13's guard
+/// has nothing in this crate to put one on a row with — the same reason
+/// [`seed_run`] exists for task 008's table.
+async fn seed_worktree_path(pool: &SqlitePool, task_id: &str, worktree_path: &str) {
+    sqlx::query!(
+        "UPDATE tasks SET worktree_path = ?1 WHERE id = ?2",
+        worktree_path,
+        task_id,
+    )
+    .execute(pool)
+    .await
+    .expect("seed a worktree path");
+}
+
 async fn seed_repository(pool: &SqlitePool) -> String {
     let id = rimaia_core::db::new_id();
     sqlx::query!(
@@ -1137,7 +1602,41 @@ async fn seed_run(pool: &SqlitePool, task_id: &str, attempt: i64, session_id: &s
     id
 }
 
+/// A terminal `runs` row: the same seed as [`seed_run`], with the columns a
+/// run only has once it is over. `ended_at` is a parameter rather than a
+/// constant because proving "the last run is the highest attempt" needs an
+/// earlier attempt that ended later.
+async fn seed_finished_run(
+    pool: &SqlitePool,
+    task_id: &str,
+    attempt: i64,
+    status: RunStatus,
+    exit_class: ExitClass,
+    ended_at: &str,
+) -> String {
+    let id = rimaia_core::db::new_id();
+    sqlx::query!(
+        r#"INSERT INTO runs (id, task_id, attempt, status, session_id, prompt, started_at, ended_at, exit_class, log_path)
+           VALUES (?1, ?2, ?3, ?4, 'session-1', 'do the thing', ?5, ?6, ?7, ?1)"#,
+        id,
+        task_id,
+        attempt,
+        status,
+        NOW,
+        ended_at,
+        exit_class,
+    )
+    .execute(pool)
+    .await
+    .expect("seed a finished run");
+    id
+}
+
 /// Written the way sqlx writes a bound `DateTime<Utc>` — a numeric `+00:00`
 /// offset, never `Z` (the migration's own header, and every other fixture
 /// file in this suite).
 const NOW: &str = "2026-08-20T00:00:00+00:00";
+
+fn timestamp(rfc3339: &str) -> DateTime<Utc> {
+    rfc3339.parse().expect("a literal timestamp must parse")
+}

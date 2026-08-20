@@ -10,6 +10,7 @@
 use rimaia_core::db::{BoardColumn, RunState, Task, TaskLink};
 use rimaia_core::tasks::{
     self, NewTask, NewTaskLink, Patch, TaskDetail, TaskFilter, TaskLinkPatch, TaskPatch,
+    TaskSummary,
 };
 use rimaia_core::Result;
 use serde::{Deserialize, Deserializer};
@@ -90,13 +91,19 @@ fn to_patch<T>(field: Option<Option<T>>) -> Patch<T> {
     }
 }
 
-/// What the frontend sends [`update_task`]. Mirrors [`TaskPatch`] — `title`
-/// is a plain `Option` (never "clear", `title` is `NOT NULL`); the nullable
-/// fields go through [`opt_patch`] so the frontend can distinguish leaving a
-/// field alone from clearing it.
+/// What the frontend sends [`update_task`]. Mirrors [`TaskPatch`] —
+/// `repository_id` and `title` are plain `Option`s (never "clear", both
+/// columns are `NOT NULL`); the nullable fields go through [`opt_patch`] so
+/// the frontend can distinguish leaving a field alone from clearing it.
 #[derive(Debug, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TaskPatchInput {
+    /// Seam-contract D13. Whether a reassignment is allowed is
+    /// `rimaia_core::tasks::update_task`'s to decide, not this adapter's —
+    /// the panel disables the selector as a courtesy, and task 010 sends the
+    /// same field over MCP.
+    #[serde(default)]
+    pub repository_id: Option<String>,
     #[serde(default)]
     pub title: Option<String>,
     #[serde(default, deserialize_with = "opt_patch")]
@@ -145,9 +152,15 @@ pub async fn get_task(state: State<'_, AppState>, id: String) -> Result<TaskDeta
     tasks::get_task(&state.context, &id).await
 }
 
-/// Every task matching `filter`, ordered the way the board reads a column.
+/// The board's bulk read: every task matching `filter`, ordered the way the
+/// board reads a column, as the [`TaskSummary`] projection seam-contract D12
+/// fixes — the row plus the counts and last-run fields a card draws, so a
+/// fifty-card board is one query and not fifty [`get_task`] calls.
 #[tauri::command]
-pub async fn list_tasks(state: State<'_, AppState>, filter: TaskFilterInput) -> Result<Vec<Task>> {
+pub async fn list_tasks(
+    state: State<'_, AppState>,
+    filter: TaskFilterInput,
+) -> Result<Vec<TaskSummary>> {
     tasks::list_tasks(
         &state.context,
         TaskFilter {
@@ -170,6 +183,7 @@ pub async fn update_task(
         &state.context,
         &id,
         TaskPatch {
+            repository_id: patch.repository_id,
             title: patch.title,
             plan: to_patch(patch.plan),
             extra_instructions: to_patch(patch.extra_instructions),

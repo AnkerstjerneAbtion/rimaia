@@ -16,6 +16,7 @@ import type {
   TaskLink,
   TaskLinkPatchInput,
   TaskPatchInput,
+  TaskSummary,
   UpdateRepositoryInput,
 } from "../types";
 
@@ -120,9 +121,16 @@ export function getTask(id: string): Promise<TaskDetail> {
   return call<TaskDetail>("get_task", { id });
 }
 
-/** `filter` narrows the result; an empty object matches every task. */
-export function listTasks(filter: TaskFilterInput = {}): Promise<Task[]> {
-  return call<Task[]>("list_tasks", { filter });
+/**
+ * The board's bulk read: one query for every card, each carrying its link and
+ * dependency counts and a summary of its last run (seam-contract D12). Reach
+ * for `getTask` only for the panel — a `get_task` per card is N+1 against the
+ * single SQLite writer on every `tasks:changed`.
+ *
+ * `filter` narrows the result; an empty object matches every task.
+ */
+export function listTasks(filter: TaskFilterInput = {}): Promise<TaskSummary[]> {
+  return call<TaskSummary[]>("list_tasks", { filter });
 }
 
 export function updateTask(id: string, patch: TaskPatchInput): Promise<Task> {
