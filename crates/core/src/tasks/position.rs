@@ -183,11 +183,18 @@ pub fn rebalanced_positions(count: usize) -> Vec<f64> {
 /// and marking a whole column modified would make every client refresh for
 /// nothing. Task 004 owns `updated_at`'s rule; revisit this with a clock in
 /// hand if it decides renumbering should count.
+///
+/// Returns every id it rewrote, in the order it rewrote them. A rebalance
+/// touches every row in the column, not just the one the caller was placing —
+/// callers publish these ids alongside the placed task's own, or a
+/// subscriber that reads a [`crate::events::ChangeEvent`] literally (ADR-0018:
+/// "an id means re-read this") keeps every other card's pre-rebalance
+/// position.
 pub async fn rebalance_column(
     conn: &mut SqliteConnection,
     repository_id: &str,
     column: BoardColumn,
-) -> Result<usize> {
+) -> Result<Vec<String>> {
     // Binding `column: BoardColumn` directly works because sqlx's SQLite
     // driver is `ParamChecking::Weak`: the macro checks argument arity only,
     // and the derive on `BoardColumn` supplies `Encode` and `Type`.
@@ -210,7 +217,7 @@ pub async fn rebalance_column(
             .await?;
     }
 
-    Ok(ids.len())
+    Ok(ids)
 }
 
 #[cfg(test)]

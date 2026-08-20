@@ -29,7 +29,7 @@ async fn rebalancing_preserves_the_columns_existing_order() {
 
     let touched = rebalance(&pool, &repository_id, BoardColumn::Ready).await;
 
-    assert_eq!(touched, 3);
+    assert_eq!(touched.len(), 3);
     assert_eq!(
         ordered_positions(&pool, &repository_id, BoardColumn::Ready).await,
         vec![
@@ -249,7 +249,7 @@ const T3: &str = "2026-08-20T00:02:00+00:00";
 /// subsequent pool queries never contend with it — [`test_pool`] caps the pool
 /// at one connection, and holding this one open would deadlock the next query
 /// rather than fail it.
-async fn rebalance(pool: &SqlitePool, repository_id: &str, column: BoardColumn) -> usize {
+async fn rebalance(pool: &SqlitePool, repository_id: &str, column: BoardColumn) -> Vec<String> {
     let mut tx = pool
         .begin()
         .await

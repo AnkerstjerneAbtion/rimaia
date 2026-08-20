@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT position FROM task_links\n           WHERE task_id = ?1 AND id IS NOT ?2\n           ORDER BY position DESC, id DESC LIMIT 1",
+  "describe": {
+    "columns": [
+      {
+        "name": "position",
+        "ordinal": 0,
+        "type_info": "Float"
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "8b8d973490bd4642491912690d6748d804e00aceeb9e603929a92782cd00e41c"
+}

@@ -6,3 +6,5 @@
 //! the two paths is a bug.
 
 pub mod app;
+pub mod repositories;
+pub mod tasks;

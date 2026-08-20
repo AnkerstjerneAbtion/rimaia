@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT depends_on_task_id FROM task_dependencies\n         WHERE task_id = ?1 ORDER BY depends_on_task_id ASC",
+  "describe": {
+    "columns": [
+      {
+        "name": "depends_on_task_id",
+        "ordinal": 0,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "612b69031d1e2c841bca223489492447a02c4c1339f14f46d57294ef2241b7e2"
+}

@@ -1,0 +1,104 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT id, task_id, attempt, status AS \"status: RunStatus\", session_id, prompt,\n            started_at AS \"started_at: DateTime<Utc>\", ended_at AS \"ended_at: DateTime<Utc>\",\n            exit_class AS \"exit_class: ExitClass\", error_message, num_turns, cost_usd, log_path,\n            pr_url, resume_after AS \"resume_after: DateTime<Utc>\"\n           FROM runs WHERE task_id = ?1 ORDER BY attempt DESC LIMIT 1",
+  "describe": {
+    "columns": [
+      {
+        "name": "id",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "task_id",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "attempt",
+        "ordinal": 2,
+        "type_info": "Integer"
+      },
+      {
+        "name": "status: RunStatus",
+        "ordinal": 3,
+        "type_info": "Text"
+      },
+      {
+        "name": "session_id",
+        "ordinal": 4,
+        "type_info": "Text"
+      },
+      {
+        "name": "prompt",
+        "ordinal": 5,
+        "type_info": "Text"
+      },
+      {
+        "name": "started_at: DateTime<Utc>",
+        "ordinal": 6,
+        "type_info": "Text"
+      },
+      {
+        "name": "ended_at: DateTime<Utc>",
+        "ordinal": 7,
+        "type_info": "Text"
+      },
+      {
+        "name": "exit_class: ExitClass",
+        "ordinal": 8,
+        "type_info": "Text"
+      },
+      {
+        "name": "error_message",
+        "ordinal": 9,
+        "type_info": "Text"
+      },
+      {
+        "name": "num_turns",
+        "ordinal": 10,
+        "type_info": "Integer"
+      },
+      {
+        "name": "cost_usd",
+        "ordinal": 11,
+        "type_info": "Float"
+      },
+      {
+        "name": "log_path",
+        "ordinal": 12,
+        "type_info": "Text"
+      },
+      {
+        "name": "pr_url",
+        "ordinal": 13,
+        "type_info": "Text"
+      },
+      {
+        "name": "resume_after: DateTime<Utc>",
+        "ordinal": 14,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      true,
+      true,
+      true,
+      true,
+      true,
+      false,
+      true,
+      true
+    ]
+  },
+  "hash": "8c9411d1e3b6cce9a79b0c9ae67cfca9bce1ca6fd52b6b70279e67e2643b7166"
+}

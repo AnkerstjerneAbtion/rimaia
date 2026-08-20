@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT id FROM task_links WHERE task_id = ?1 ORDER BY position ASC, id ASC",
+  "describe": {
+    "columns": [
+      {
+        "name": "id",
+        "ordinal": 0,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "67a619d7a7e31fe9eba44acada835f5d66464bb0f2c97feaf4b9a89f2830141e"
+}

@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT position FROM task_links WHERE id = ?1 AND task_id = ?2",
+  "describe": {
+    "columns": [
+      {
+        "name": "position",
+        "ordinal": 0,
+        "type_info": "Float"
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "dc3edd5ae13196b599c2fbd36490bf928ca99ad02b36766c5c6f3e792d8b6424"
+}

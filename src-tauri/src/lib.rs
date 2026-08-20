@@ -1,15 +1,17 @@
 mod commands;
 mod logging;
-// Public because `AppState`'s pool and clock are the shell's whole contract with
-// the tasks that follow — 002 onward read them from commands in this crate.
+// Public because `AppState`'s context is the shell's whole contract with the
+// tasks that follow — 002 onward read it from commands in this crate.
 pub mod state;
 
 use std::fmt::Display;
 use std::path::Path;
 use std::sync::Arc;
 
-use rimaia_core::{db, startup, AppPaths, Error, SystemClock};
-use tauri::Manager;
+use rimaia_core::{db, startup, AppPaths, ChangeEvent, Error, ServiceContext, SystemClock};
+use tauri::{Emitter, Manager};
+use tokio::sync::broadcast;
+use tokio::sync::broadcast::error::RecvError;
 
 use crate::state::AppState;
 
@@ -22,6 +24,7 @@ const MAIN_WINDOW_LABEL: &str = "main";
 pub fn run() {
     let builder = tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
             // Order matters: the directories have to exist before the log
             // appender opens a file in one of them, and before SQLite is asked
@@ -41,12 +44,12 @@ pub fn run() {
             // aborts startup outright (seam-contract D11): there is no useful UI
             // to draw over a half-migrated database. "Fails loudly" is
             // deliberately just process exit + stderr + the rolling log file
-            // `logging::init` already opened above, not a modal — that needs
-            // `tauri-plugin-dialog`, which is not a dependency, and adding it
-            // here for a path that has already failed would be the wrong place to
-            // first reach for it. The
-            // double-clicked-`.app`-with-nobody-watching-stderr case is task 018's
-            // preflight doctor, not this hook.
+            // `logging::init` already opened above, not a modal — D11 settles
+            // that independently of whether `tauri-plugin-dialog` happens to be
+            // a dependency (it now is, for task 003's folder picker below): a
+            // path that has already failed is not the place to first reach for
+            // it. The double-clicked-`.app`-with-nobody-watching-stderr case is
+            // task 018's preflight doctor, not this hook.
             if let Err(err) = tauri::async_runtime::block_on(db::migrate(&pool)) {
                 log_startup_failure("migrate", &paths.db_file(), &err);
                 return Err(err.into());
@@ -63,11 +66,26 @@ pub fn run() {
                 return Err(err.into());
             }
 
-            app.manage(AppState {
-                pool,
-                paths,
-                clock: Arc::new(SystemClock),
-            });
+            // One `ServiceContext` for the whole process (ADR-0018): the pool
+            // above, a system clock, and a fresh change-event sender. Every
+            // `rimaia-core` service task 003 onward calls goes through this,
+            // never a bare pool — that is what makes the MCP server (task 010)
+            // a second caller of the same rules instead of a second
+            // implementation of them (ADR-0006).
+            let context = ServiceContext::new(pool, Arc::new(SystemClock));
+
+            // Subscribed once, here, for the life of the app (ADR-0018): the
+            // shell is the only thing that turns a `ChangeEvent` into a Tauri
+            // event, and it does so from one forwarding task rather than a
+            // listener per window or per command. Subscribing before
+            // `app.manage` hands `context` to any command matters less here
+            // than it does in a test — nothing has published yet — but keeping
+            // the order matches the rule anyway: subscribe first, then let
+            // writers start.
+            let change_events = context.subscribe();
+            tauri::async_runtime::spawn(forward_change_events(app.handle().clone(), change_events));
+
+            app.manage(AppState { context, paths });
 
             // The window is declared `"visible": false` in `tauri.conf.json` and
             // shown here, once every fallible step above has succeeded. The two
@@ -97,11 +115,45 @@ pub fn run() {
         commands::app::get_app_info,
         commands::app::reveal_app_data_dir,
         commands::app::debug_provoke_error,
+        commands::repositories::list_repositories,
+        commands::repositories::register_repository,
+        commands::repositories::update_repository,
+        commands::repositories::set_repository_unattended_runs,
+        commands::repositories::remove_repository,
+        commands::repositories::get_repository_remote_info,
+        commands::tasks::create_task,
+        commands::tasks::get_task,
+        commands::tasks::list_tasks,
+        commands::tasks::update_task,
+        commands::tasks::delete_task,
+        commands::tasks::move_task,
+        commands::tasks::set_task_run_state,
+        commands::tasks::add_task_link,
+        commands::tasks::update_task_link,
+        commands::tasks::remove_task_link,
+        commands::tasks::reorder_task_link,
     ]);
     #[cfg(not(debug_assertions))]
     let builder = builder.invoke_handler(tauri::generate_handler![
         commands::app::get_app_info,
         commands::app::reveal_app_data_dir,
+        commands::repositories::list_repositories,
+        commands::repositories::register_repository,
+        commands::repositories::update_repository,
+        commands::repositories::set_repository_unattended_runs,
+        commands::repositories::remove_repository,
+        commands::repositories::get_repository_remote_info,
+        commands::tasks::create_task,
+        commands::tasks::get_task,
+        commands::tasks::list_tasks,
+        commands::tasks::update_task,
+        commands::tasks::delete_task,
+        commands::tasks::move_task,
+        commands::tasks::set_task_run_state,
+        commands::tasks::add_task_link,
+        commands::tasks::update_task_link,
+        commands::tasks::remove_task_link,
+        commands::tasks::reorder_task_link,
     ]);
 
     builder
@@ -125,4 +177,51 @@ fn log_startup_failure(step: &str, db_file: &Path, error: &impl Display) {
         error = %error,
         "startup failed; the window will not open"
     );
+}
+
+/// The ADR-0018 forwarder: the one place a `rimaia-core` `ChangeEvent` becomes
+/// a Tauri event. Runs for the life of the app on one subscription taken once
+/// in `setup()` — not per window, not per command.
+///
+/// `RecvError::Lagged` does not end this loop. It means a subscriber fell
+/// behind the broadcast channel's buffer and missed some publications, not
+/// that anything is wrong with the app; the recovery is to tell every view to
+/// re-read wholesale (an empty id array, ADR-0018's wire signal for that) and
+/// carry on. `RecvError::Closed` is the only exit — every `ServiceContext`
+/// clone holding the sender has been dropped, i.e. the app is shutting down.
+async fn forward_change_events(
+    app: tauri::AppHandle,
+    mut events: broadcast::Receiver<ChangeEvent>,
+) {
+    loop {
+        match events.recv().await {
+            Ok(event) => emit_change_event(&app, event),
+            Err(RecvError::Lagged(dropped)) => {
+                tracing::warn!(
+                    dropped,
+                    "change-event receiver fell behind; telling every view to re-read"
+                );
+                emit_change_event(&app, ChangeEvent::tasks(Vec::<String>::new()));
+                emit_change_event(&app, ChangeEvent::repositories(Vec::<String>::new()));
+                emit_change_event(&app, ChangeEvent::runs(Vec::<String>::new()));
+                emit_change_event(&app, ChangeEvent::Settings);
+            }
+            Err(RecvError::Closed) => break,
+        }
+    }
+}
+
+/// The variant-to-event-name mapping ADR-0018's table fixes. Kept as the only
+/// place those strings appear in the shell, so a renamed event is a one-line
+/// change here rather than a search across every window and command.
+fn emit_change_event(app: &tauri::AppHandle, event: ChangeEvent) {
+    let result = match &event {
+        ChangeEvent::Tasks(ids) => app.emit("tasks:changed", ids.as_ref()),
+        ChangeEvent::Repositories(ids) => app.emit("repositories:changed", ids.as_ref()),
+        ChangeEvent::Runs(ids) => app.emit("runs:changed", ids.as_ref()),
+        ChangeEvent::Settings => app.emit("settings:changed", ()),
+    };
+    if let Err(error) = result {
+        tracing::error!(%error, "failed to forward a change event to the frontend");
+    }
 }
