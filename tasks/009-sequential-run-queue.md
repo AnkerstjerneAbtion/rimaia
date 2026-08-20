@@ -4,7 +4,7 @@ title: Sequential run queue
 milestone: mvp
 status: ready
 depends_on: ["008"]
-adrs: ["0010", "0007"]
+adrs: ["0010", "0007", "0018"]
 size: M
 ---
 
@@ -68,3 +68,10 @@ in the morning".
 **MVP boundary.** When this passes, use it for a real evening's work before continuing.
 The next tasks should be ordered by what that evening actually reveals — the current
 order (MCP first, then dependencies, then resilience) is the best guess, not a commitment.
+
+**On "shows accurate state: one `interrupted` task."** This is about what the card reads,
+not about a `run_state` value. ADR-0007 fixes seven `run_state`s and `interrupted` is not
+among them; a run killed by a crash carries `interrupted` as its own status and exit class,
+the task it belongs to lands `run_state = failed`, and the reconciliation-time card reads
+the word off that last run rather than off the task row. See
+[`docs/seam-contract.md`](../docs/seam-contract.md), entry D9, for the reasoning.

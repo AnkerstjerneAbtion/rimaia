@@ -25,6 +25,7 @@ alternatives.
 | [0015](0015-testing-strategy-and-crate-split.md) | Testing strategy and core/shell crate split | Accepted |
 | [0016](0016-per-task-execution-strategy.md) | Per-task execution strategy: model, effort, planned workflows | Accepted |
 | [0017](0017-review-and-fix-loop.md) | Post-implementation review-and-fix loop | Accepted |
+| [0018](0018-core-to-shell-change-events.md) | Change events from core to the shell | Accepted |
 
 ## Conventions
 

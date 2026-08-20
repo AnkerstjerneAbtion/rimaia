@@ -3,17 +3,22 @@
 Rimaia queues implementation plans and runs them unattended with Claude Code, in git
 worktrees, on the user's own subscription. Kanban board in, reviewable branches out.
 
-**Status: design complete, implementation not started.** The current `src/` and
-`src-tauri/` contents are an unmodified Tauri starter with a counter UI.
+**Status: app shell and test harness landed (tasks 001, 019); the MVP (002–009) is next.**
+`src/` is a Sidebar/Board/Runs/Settings shell of empty states, not yet wired to a store; no
+counter UI remains. `src-tauri/` is the thin command surface task 001 defined.
 
 ## Read these before writing code
 
-1. **[`docs/adr/`](docs/adr/README.md) — 17 ADRs. Read the ones your task lists.**
+1. **[`docs/adr/`](docs/adr/README.md) — 18 ADRs. Read the ones your task lists.**
    They are not background reading; they are the decisions you are implementing. Every
    task file names its ADRs in front matter.
 2. **[`tasks/`](tasks/README.md)** — the backlog, in order. **A task's acceptance criteria
    are the contract.** Done means all of them hold.
-3. **[`spike/FINDINGS.md`](spike/FINDINGS.md)** — what a throwaway probe actually measured
+3. **[`docs/seam-contract.md`](docs/seam-contract.md)** — decisions too small or too local
+   to be an ADR, but shared by two or more tasks that would otherwise each have to guess.
+   Same "may not deviate silently" rule as an ADR. Read the entries your task's row in its
+   "How to use this" table lists.
+4. **[`spike/FINDINGS.md`](spike/FINDINGS.md)** — what a throwaway probe actually measured
    against Claude Code 2.1.234, before any of this was built. Read it before touching the
    runner (task 008) or the classifier (task 014). ADR-0004 and ADR-0011 carry amendments
    from it. `spike/` itself is throwaway — delete it once task 019 has promoted its
@@ -48,6 +53,7 @@ cargo test -p rimaia-core             # logic tests, no system deps needed
 cargo fmt --all --check
 cargo clippy -p rimaia-core --all-targets -- -D warnings
 cargo check --workspace --all-targets # includes the Tauri shell
+./scripts/check-command-wiring.sh     # both generate_handler! lists agree, and every commands.ts name is registered
 ```
 
 **These are exactly the commands `.github/workflows/ci.yml` runs.** Keep them identical.
@@ -60,8 +66,25 @@ dev-depends on itself with that feature on, which is what makes the harness visi
 tests without shipping it to consumers. Do not add a feature flag to the CI invocation —
 it would diverge from the command above for no gain.
 
-`SQLX_OFFLINE=true` is set in CI. Re-run `cargo sqlx prepare` after changing any query and
-commit the `.sqlx` cache.
+`SQLX_OFFLINE=true` is set in CI, so clippy, `cargo test` and `cargo check` all compile the
+query macros against the checked-in `.sqlx/` cache at the workspace root instead of a live
+database. After changing any query — or any migration a query reads — regenerate and
+commit it:
+
+```bash
+export DATABASE_URL="sqlite:target/sqlx-prepare.db?mode=rwc"
+cargo sqlx migrate run --source src-tauri/migrations
+cargo sqlx prepare --workspace -- --all-targets
+```
+
+`--all-targets` matters here for the same reason it does for clippy: the integration tests
+hold queries too, and a cache generated without them compiles locally and fails CI, not
+your machine. Install the matching CLI once — the version must track the `sqlx` version in
+`Cargo.toml`:
+
+```bash
+cargo install sqlx-cli --version 0.8.6 --no-default-features --features rustls,sqlite
+```
 
 ## Testing (ADR-0015)
 
