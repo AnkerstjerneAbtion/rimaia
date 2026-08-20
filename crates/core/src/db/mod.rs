@@ -18,7 +18,7 @@ use crate::error::Result;
 
 /// How long a writer waits for the lock before giving up. Long enough to cover a
 /// board reorder racing the scheduler claiming the next task.
-const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
+pub(crate) const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Opens (creating if absent) the database at `path`.
 ///
@@ -43,10 +43,8 @@ mod tests {
 
     #[tokio::test]
     async fn connect_creates_the_file_and_applies_the_pragmas() {
-        let dir = std::env::temp_dir().join("rimaia-db-connect-test");
-        std::fs::create_dir_all(&dir).expect("temp dir");
-        let file = dir.join("rimaia.db");
-        let _ = std::fs::remove_file(&file);
+        let dir = tempfile::tempdir().expect("temp dir");
+        let file = dir.path().join("rimaia.db");
 
         let pool = connect(&file).await.expect("connect");
 
@@ -64,6 +62,5 @@ mod tests {
         assert!(file.exists());
 
         pool.close().await;
-        let _ = std::fs::remove_dir_all(&dir);
     }
 }

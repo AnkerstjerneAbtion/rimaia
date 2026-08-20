@@ -1,5 +1,11 @@
 # Spike findings
 
+> Task 019 promoted this spike's recorded CLI streams and synthesized three more into
+> `crates/core/tests/fixtures/cli/`, and moved `make-test-repo.sh` to
+> `crates/core/tests/fixtures/make-test-repo.sh`. The rest of `spike/` — its crate, its
+> prompts, and the emptied `fixtures/` directory — was deleted; this file stays at its
+> current path because ADR-0004 and ADR-0011 link to it relatively.
+
 Run 2026-08-20 against Claude Code **2.1.234**, git 2.50.0, rustc 1.91.1, macOS.
 
 Purpose: verify the assumptions in ADR-0004 and ADR-0011 before task 001 builds on them,
@@ -176,7 +182,8 @@ In `fixtures/cli/`, for task 019:
 
 Still needed: `usage_limit`, a transient API error, an auth failure. Capture opportunistically.
 
-`fixtures/make-test-repo.sh` rebuilds the throwaway repository the runs went against.
+`crates/core/tests/fixtures/make-test-repo.sh` rebuilds the throwaway repository the runs
+went against.
 
 ## 9. What to change before task 001
 

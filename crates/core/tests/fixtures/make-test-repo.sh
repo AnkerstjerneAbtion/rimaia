@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Recreates the throwaway repository the spike runs against.
-# Task 019 should replace this with a checked-in fixture repo.
+# Recreates the throwaway repository the fixtures in cli/ were recorded against —
+# ground truth for tasks 007, 008 and 009. See README.md next to this file.
 set -euo pipefail
 R="${1:-/tmp/rimaia-spike/testrepo}"
 rm -rf "$R" && mkdir -p "$R/src" && cd "$R"

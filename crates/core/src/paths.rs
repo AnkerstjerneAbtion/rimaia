@@ -94,11 +94,10 @@ mod tests {
 
     #[test]
     fn create_all_is_idempotent() {
-        let root = std::env::temp_dir().join("rimaia-create-all-test");
-        let paths = AppPaths::new(&root);
+        let temp = tempfile::tempdir().expect("temp dir");
+        let paths = AppPaths::new(temp.path().join("com.rimaia.app"));
         paths.create_all().expect("first create");
         paths.create_all().expect("second create must not fail");
         assert!(paths.logs_dir().is_dir());
-        let _ = std::fs::remove_dir_all(&root);
     }
 }

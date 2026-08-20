@@ -9,13 +9,30 @@ description = "Rimaia orchestration logic. Free of any desktop-shell dependency 
 # split, and task 001 asserts it by grepping this file for the framework's name.
 # If a task wants the desktop framework in this list, the design is being
 # violated, not a dependency missing.
+[features]
+# Compiles the `testing` module — the clock, temp-repo, in-memory-database and
+# fixture helpers (ADR-0015, task 019). Off by default so a release build never
+# links `tempfile`; the self-referencing dev-dependency below turns it on for
+# `cargo test`.
+testing = ["dep:tempfile"]
+
 [dependencies]
 anyhow = { workspace = true }
 chrono = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 sqlx = { workspace = true }
+tempfile = { workspace = true, optional = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
 uuid = { workspace = true }
+
+# Depending on ourselves with `testing` on is the supported way to make a
+# feature-gated helper module visible to `tests/` without making it visible to
+# consumers of the published library. Cargo unifies the feature into the
+# unit-test build too, so plain `cargo test -p rimaia-core` is enough.
+[dev-dependencies]
+rimaia-core = { path = ".", features = ["testing"] }
+pretty_assertions = "1"
+tokio-test = "0.4"

@@ -21,6 +21,11 @@ pub mod scheduler;
 pub mod tasks;
 pub mod worktree;
 
+/// Test scaffolding shared by this crate's unit tests, its `tests/` integration
+/// tests, and the shell's. Behind a feature so a release build never links it.
+#[cfg(feature = "testing")]
+pub mod testing;
+
 pub use clock::{Clock, SystemClock};
 pub use error::{Error, ErrorCode, Result};
 pub use paths::AppPaths;

@@ -74,6 +74,7 @@ wall. With it, the queue picks up when the window resets.
 - A fatal error (bad auth, missing binary) is not retried.
 - Transient retries stop at the cap and the task lands in `failed` with the reason.
 - Simulated failures for each class are covered by tests without needing a real limit.
+- A retry-policy test exercising a 15-minute backoff completes in milliseconds.
 
 ## Notes
 

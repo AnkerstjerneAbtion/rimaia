@@ -108,6 +108,7 @@ that either works or doesn't.
 - Prompts several thousand tokens long are delivered correctly via stdin.
 - The stored prompt matches what task 006 composes.
 - An injected unknown event type does not fail the run.
+- The fixture harness classifies every checked-in scenario correctly.
 
 ## Notes
 

@@ -1,0 +1,4 @@
+# Recorded CLI fixture streams (crates/core/tests/fixtures/cli/*.jsonl) are byte-for-byte
+# captures of real `claude` CLI output. Line-ending normalization would silently corrupt
+# them, so treat *.jsonl as opaque binary data for git's purposes.
+*.jsonl -text

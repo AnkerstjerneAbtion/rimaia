@@ -85,11 +85,23 @@ The pre-implementation spike already produced six fixtures and the test reposito
 - All three CI jobs pass on a pull request **with every step actually running** — no
   `::notice::` skip lines in the log for missing `Cargo.toml` or Vitest config.
 - `cargo test -p rimaia-core` runs on a machine with **no** WebKit or GTK installed.
-- A retry-policy test exercising a 15-minute backoff completes in milliseconds.
-- The fixture harness classifies every checked-in scenario correctly, and adding a new
-  fixture requires no changes outside the fixtures directory.
+- Adding a new fixture requires no changes outside the fixtures directory.
 - The temp-repo builder produces a repository that `git worktree add` succeeds against.
 - `npm run test` passes with the example tests.
+
+## Moved out of this task
+
+Two acceptance criteria originally in task 019 were moved to the tasks that own them:
+
+- **Fixture classification** (to tasks/008-claude-code-runner.md): "The fixture harness
+  classifies every checked-in scenario correctly" was split from the fixture criterion
+  above. The outcome classifier is owned by task 008, which now tests against the fixture
+  corpus. Task 019 still delivers the replay plumbing and TestClock that task 008 will
+  use.
+- **Retry backoff test** (to tasks/014-usage-limit-resilience.md): "A retry-policy test
+  exercising a 15-minute backoff completes in milliseconds" moved verbatim, since retry
+  policy is task 014's responsibility and the TestClock injection it needs is part of the
+  harness task 019 provides.
 
 ## Notes
 
