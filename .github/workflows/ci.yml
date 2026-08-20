@@ -13,6 +13,11 @@ env:
   CARGO_TERM_COLOR: always
   SQLX_OFFLINE: "true"
 
+# The Rust jobs and the frontend test step are gated on the files they need
+# existing. The repository is still design-only: the Cargo workspace arrives with
+# task 001 and Vitest with task 019. The gates are `hashFiles` checks rather than
+# commented-out steps, so each check starts enforcing the moment its task lands —
+# nobody has to remember to re-enable it.
 jobs:
   frontend:
     name: Frontend
@@ -30,7 +35,18 @@ jobs:
       - name: Typecheck
         run: npm run typecheck
 
+      - name: Check for Vitest
+        id: vitest
+        run: |
+          if [ -f vitest.config.ts ] || [ -f vitest.config.js ]; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "present=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::Vitest not configured yet — task 019 adds it."
+          fi
+
       - name: Test
+        if: steps.vitest.outputs.present == 'true'
         run: npm run test
 
   core:
@@ -39,19 +55,34 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Check for Cargo workspace
+        id: ws
+        run: |
+          if [ -f Cargo.toml ]; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "present=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::No Cargo workspace yet — task 001 creates it."
+          fi
+
       - uses: dtolnay/rust-toolchain@stable
+        if: steps.ws.outputs.present == 'true'
         with:
           components: rustfmt, clippy
 
       - uses: Swatinem/rust-cache@v2
+        if: steps.ws.outputs.present == 'true'
 
       - name: Format
+        if: steps.ws.outputs.present == 'true'
         run: cargo fmt --all --check
 
       - name: Clippy
+        if: steps.ws.outputs.present == 'true'
         run: cargo clippy -p rimaia-core --all-targets -- -D warnings
 
       - name: Test
+        if: steps.ws.outputs.present == 'true'
         run: cargo test -p rimaia-core
 
   shell:
@@ -60,14 +91,27 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Check for Cargo workspace
+        id: ws
+        run: |
+          if [ -f Cargo.toml ]; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "present=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::No Cargo workspace yet — task 001 creates it."
+          fi
+
       # Tauri 2 needs these to compile on Linux. Not needed for the `core` job,
       # which is exactly why the crate split in ADR-0015 exists.
+      #
+      # libayatana-appindicator3-dev only: it Conflicts with the older
+      # libappindicator3-dev, and requesting both makes apt fail outright.
       - name: Install system dependencies
+        if: steps.ws.outputs.present == 'true'
         run: |
           sudo apt-get update
           sudo apt-get install -y \
             libwebkit2gtk-4.1-dev \
-            libappindicator3-dev \
             libayatana-appindicator3-dev \
             librsvg2-dev \
             libxdo-dev \
@@ -77,8 +121,11 @@ jobs:
             file
 
       - uses: dtolnay/rust-toolchain@stable
+        if: steps.ws.outputs.present == 'true'
 
       - uses: Swatinem/rust-cache@v2
+        if: steps.ws.outputs.present == 'true'
 
       - name: Check workspace
+        if: steps.ws.outputs.present == 'true'
         run: cargo check --workspace --all-targets

@@ -21,8 +21,13 @@ Second task, immediately after the skeleton. Every task from 002 onward is suppo
 ship with tests; the harness has to exist before that is a reasonable ask. Retrofitting a
 fixture harness at task 014 means task 008 was written untested.
 
-`.github/workflows/ci.yml` already exists in the repository and is **red until this task
-lands**. Making it green is the acceptance criterion.
+`.github/workflows/ci.yml` already exists and is green, but most of it is **inert**: the
+Rust jobs and the frontend test step are gated on `Cargo.toml` and `vitest.config.ts`
+existing, and emit a skip notice instead of running. Task 001 activates the Rust gates;
+this task activates the test gate and makes every step do real work.
+
+**A job that skips is not a job that passes.** The acceptance criterion below is that no
+step reports a skip notice.
 
 The pre-implementation spike already produced six fixtures and the test repository — see
 [`spike/FINDINGS.md`](../../spike/FINDINGS.md). This task promotes them into
@@ -77,7 +82,8 @@ The pre-implementation spike already produced six fixtures and the test reposito
 
 ## Acceptance criteria
 
-- All three CI jobs pass on a pull request.
+- All three CI jobs pass on a pull request **with every step actually running** — no
+  `::notice::` skip lines in the log for missing `Cargo.toml` or Vitest config.
 - `cargo test -p rimaia-core` runs on a machine with **no** WebKit or GTK installed.
 - A retry-policy test exercising a 15-minute backoff completes in milliseconds.
 - The fixture harness classifies every checked-in scenario correctly, and adding a new
