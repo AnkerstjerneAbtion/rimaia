@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT run_state AS \"run_state: RunState\" FROM tasks WHERE id = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "run_state: RunState",
+        "ordinal": 0,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "6ef1d3be7875f775f99f060dc22a05b31b6c4a1933b607a15798d9055f22485f"
+}

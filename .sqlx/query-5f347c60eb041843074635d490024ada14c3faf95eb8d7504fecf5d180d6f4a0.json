@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO repositories\n            (id, name, path, default_branch, worktree_root, allow_unattended_runs, created_at)\n         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 7
+    },
+    "nullable": []
+  },
+  "hash": "5f347c60eb041843074635d490024ada14c3faf95eb8d7504fecf5d180d6f4a0"
+}

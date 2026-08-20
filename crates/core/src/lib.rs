@@ -18,6 +18,7 @@ pub mod paths;
 pub mod repo;
 pub mod runner;
 pub mod scheduler;
+pub mod startup;
 pub mod tasks;
 pub mod worktree;
 

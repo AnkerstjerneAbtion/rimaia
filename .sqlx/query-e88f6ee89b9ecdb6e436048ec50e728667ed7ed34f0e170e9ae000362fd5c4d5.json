@@ -1,0 +1,38 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT type AS \"kind!\", name AS \"name!\", tbl_name AS \"tbl_name!\", sql\n           FROM sqlite_master ORDER BY type, name",
+  "describe": {
+    "columns": [
+      {
+        "name": "kind!",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "name!",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "tbl_name!",
+        "ordinal": 2,
+        "type_info": "Text"
+      },
+      {
+        "name": "sql",
+        "ordinal": 3,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      true,
+      true,
+      true,
+      true
+    ]
+  },
+  "hash": "e88f6ee89b9ecdb6e436048ec50e728667ed7ed34f0e170e9ae000362fd5c4d5"
+}

@@ -9,20 +9,10 @@
 //! journal and no file to create. The pragmas that *are* behaviour, foreign keys
 //! and the busy timeout, are shared with production rather than restated.
 
-use sqlx::migrate::Migrator;
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use sqlx::SqlitePool;
 
-use crate::db::BUSY_TIMEOUT;
-
-/// Compiled in, so migrations need no filesystem at test time and
-/// `SQLX_OFFLINE=true` in CI changes nothing here.
-///
-/// The path reaches out of the crate because ADR-0003 puts the migration files
-/// under `src-tauri/migrations/`, and tests must apply the same ones the shipped
-/// app does or they are testing a schema nobody runs. Relative to
-/// `CARGO_MANIFEST_DIR`, so it does not depend on the working directory.
-static MIGRATOR: Migrator = sqlx::migrate!("../../src-tauri/migrations");
+use crate::db::{migrate, BUSY_TIMEOUT};
 
 /// A fresh database with every migration applied.
 ///
@@ -44,8 +34,9 @@ pub async fn test_pool() -> SqlitePool {
         .await
         .expect("an in-memory SQLite database must always open");
 
-    MIGRATOR
-        .run(&pool)
+    // Through `db::migrate`, not a second `sqlx::migrate!`, so a test can never
+    // pass against a schema the running app does not have (ADR-0003).
+    migrate(&pool)
         .await
         .expect("migrations must apply cleanly to an empty database");
 
@@ -58,9 +49,6 @@ mod tests {
 
     #[tokio::test]
     async fn the_pool_comes_back_migrated() {
-        // Task 002 writes the first migration; until then this asserts only that
-        // the migrator ran, over an empty set. Read it as plumbing coverage, not
-        // as schema coverage — it gains teeth the moment a migration lands.
         let pool = test_pool().await;
 
         let applied: i64 = sqlx::query_scalar(

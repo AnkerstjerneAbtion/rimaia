@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT key, value FROM settings WHERE key = ?1",
+  "describe": {
+    "columns": [
+      {
+        "name": "key",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "value",
+        "ordinal": 1,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false
+    ]
+  },
+  "hash": "88fc34269e888f0ef60260224c692c7d69a590da6e28e2e3d8d2607b243ddede"
+}

@@ -10,3 +10,7 @@
 //! (ADR-0006) enforces the same invariants as the UI by calling the same code.
 //!
 //! Filled in by task 004.
+
+pub mod position;
+
+pub use position::{position_between, rebalance_column, rebalanced_positions, Placement};

@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO runs (\n            id, task_id, attempt, status, session_id, prompt, started_at, ended_at,\n            exit_class, error_message, num_turns, cost_usd, log_path, pr_url, resume_after\n         ) VALUES (?1, ?2, 2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 14
+    },
+    "nullable": []
+  },
+  "hash": "8f7b9a2898be6c5f2e6c88be4c9b33603f9529aab9cae113dc5d164657149a9b"
+}

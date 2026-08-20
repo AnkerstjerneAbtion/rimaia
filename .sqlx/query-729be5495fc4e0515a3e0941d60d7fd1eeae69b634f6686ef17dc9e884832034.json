@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO schedules (id, name, mode) VALUES (?1, 'run now', ?2)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "729be5495fc4e0515a3e0941d60d7fd1eeae69b634f6686ef17dc9e884832034"
+}

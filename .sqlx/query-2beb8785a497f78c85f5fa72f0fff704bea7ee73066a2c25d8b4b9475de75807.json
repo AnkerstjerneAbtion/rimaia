@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "\n        SELECT id, position\n        FROM tasks\n        WHERE repository_id = ?1 AND board_column = ?2\n        ORDER BY position ASC, created_at ASC, id ASC\n        ",
+  "describe": {
+    "columns": [
+      {
+        "name": "id",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "position",
+        "ordinal": 1,
+        "type_info": "Float"
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      false,
+      false
+    ]
+  },
+  "hash": "2beb8785a497f78c85f5fa72f0fff704bea7ee73066a2c25d8b4b9475de75807"
+}
