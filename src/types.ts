@@ -319,6 +319,78 @@ export interface RunTail {
 }
 
 // ---------------------------------------------------------------------------
+// The run queue (task 009) — mirrors `rimaia_core::scheduler` (ADR-0010,
+// ADR-0007, ADR-0012).
+// ---------------------------------------------------------------------------
+
+/**
+ * Mirrors `rimaia_core::scheduler::QueueState`. The queue's whole on/off
+ * switch — not a {@link RunState}, which is one *task's* place in the
+ * machine's process, and not a fifth thing to track per repository. Exactly
+ * two values, because Start/Resume both mean {@link "running"} and
+ * Pause/Stop both mean {@link "paused"}. Persisted in `settings` under
+ * `queue_state`; an absent key reads `"paused"`, the direction that costs a
+ * queue that does not start rather than one that starts unasked.
+ */
+export type QueueState = "running" | "paused";
+
+/**
+ * Mirrors `rimaia_core::scheduler::SkipReason`. Why the queue passes over a
+ * `ready` task it can otherwise see — a badge's worth of explanation, never
+ * a severity. Every value but `"unattended_runs_not_allowed"` clears on its
+ * own; that one is the only reason the user has to act on before the queue
+ * can ever start the task (ADR-0012).
+ */
+export type SkipReason =
+  | "unattended_runs_not_allowed"
+  | "dependency_not_satisfied"
+  | "already_in_flight"
+  | "needs_attention";
+
+/**
+ * Mirrors `rimaia_core::scheduler::QueueEntry`. One `ready` task as the queue
+ * sees it — ids and a title, never a row, since whoever renders this already
+ * re-reads the board on `tasks:changed` (ADR-0018's argument for ids-only
+ * events, applied to a projection).
+ */
+export interface QueueEntry {
+  taskId: string;
+  title: string;
+  repositoryId: string;
+  /** Where in the queue this task sits, counting only what the queue will
+   *  actually start: `1` is next up. `null` for a task the queue is passing
+   *  over — see {@link skip}. This is what a board card's "queued position"
+   *  badge reads. */
+  queuePosition: number | null;
+  /** `null` when the queue would start this task right now. */
+  skip: SkipReason | null;
+}
+
+/**
+ * Mirrors `rimaia_core::scheduler::QueueStatus` — everything the Runs view
+ * asks the queue about, in one read: {@link getQueueStatus} in `./lib/commands`.
+ */
+export interface QueueStatus {
+  state: QueueState;
+  /** The task whose process the queue is supervising right now. `null`
+   *  between runs, while paused, or with nothing to do. */
+  runningTaskId: string | null;
+  /** Every `ready` task in board order, with the reason the queue will pass
+   *  over each one it cannot start. Re-read fresh on every call — never a
+   *  snapshot from when the queue was started — so a card dragged to the top
+   *  mid-queue shows up here as what runs next before the queue itself gets
+   *  there. */
+  plan: QueueEntry[];
+  /** Why the loop's last pass could not be completed, if it couldn't. `null`
+   *  once a later pass gets all the way through. The one failure no
+   *  {@link SkipReason} can name — a missing `claude` fails before any task
+   *  is even chosen, so nothing on the board explains it, and without this
+   *  {@link state} still read `"running"` over a full {@link plan} while
+   *  nothing was happening. */
+  lastStepError: string | null;
+}
+
+// ---------------------------------------------------------------------------
 // Worktrees (task 007) — mirrors `rimaia_core::worktree` (ADR-0005).
 // ---------------------------------------------------------------------------
 

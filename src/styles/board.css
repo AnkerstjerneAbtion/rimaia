@@ -712,6 +712,28 @@
   color: var(--danger-text);
 }
 
+/* Queued position (task 009) — sits between the card face and "Run now",
+   same shape as `.task-card-run-locked`/`.task-card-run-error` above: a
+   short line of text, not a second badge system. `.task-card-indicator`
+   (already defined above, in the footer's flex row) is reused standalone
+   here rather than duplicated - it is already just padding-free text with
+   no wrapping, which reads fine outside that row too. */
+
+.task-card-queue {
+  margin-top: 0.35rem;
+}
+
+.task-card-queue-position {
+  color: var(--text-muted);
+  font-size: 0.75rem;
+}
+
+.task-card-queue-skip {
+  margin: 0;
+  font-size: 0.75rem;
+  overflow-wrap: anywhere;
+}
+
 /* Run outcome (task 008) — extends `.task-detail-section`'s shell above.
    New tokens for the six ADR-0011 exit classes: `success` gets its own
    (nothing in the app has needed a positive/green token before this); the

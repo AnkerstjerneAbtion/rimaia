@@ -61,9 +61,15 @@ use crate::error::Result;
 #[derive(Debug, Clone, Default, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ReconciliationReport {
-    /// Ids of tasks whose `run_state` was still `running` when this process
-    /// started — the state a task is left in only by a crash, since nothing in
-    /// the MVP transitions a task *out* of `running` except a run finishing.
+    /// Ids of tasks whose `run_state` was still `running` or `queued` when
+    /// this process started — the two states a crash, and nothing else, can
+    /// leave a task in. `queued` belongs here too: `scheduler::claim` walks
+    /// `idle -> queued -> running` as two separately committed transitions,
+    /// so a crash between them leaves a task at `queued` with no process
+    /// and no legal edge back to `idle` — invisible to the queue's own
+    /// selection (which only ever claims `idle`) and to a "Run now" button
+    /// disabled by the same badge. Nothing in the MVP transitions a task out
+    /// of either state on its own.
     pub tasks_left_running: Vec<String>,
     /// Ids of tasks whose `worktree_path` is set but no longer resolves to
     /// anything on disk.
@@ -107,8 +113,9 @@ pub async fn survey(pool: &SqlitePool) -> Result<ReconciliationReport> {
 
 async fn tasks_left_running(pool: &SqlitePool) -> Result<Vec<String>> {
     let ids = sqlx::query_scalar!(
-        "SELECT id FROM tasks WHERE run_state = ?",
-        RunState::Running
+        "SELECT id FROM tasks WHERE run_state = ?1 OR run_state = ?2",
+        RunState::Running,
+        RunState::Queued,
     )
     .fetch_all(pool)
     .await?;
@@ -183,6 +190,24 @@ mod tests {
         let pool = test_pool().await;
         let repository_id = insert_repository(&pool).await;
         let task_id = insert_task(&pool, &repository_id, RunState::Running, None).await;
+
+        let report = survey(&pool).await.expect("survey succeeds");
+
+        assert_eq!(report.tasks_left_running, vec![task_id]);
+        assert!(report.missing_worktrees.is_empty());
+        assert!(report.missing_run_logs.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_task_left_queued_is_reported_too() {
+        // The narrower crash: caught between `scheduler::claim`'s two
+        // separately committed transitions, `idle -> queued` then
+        // `queued -> running`, before the second ever ran. `running` alone
+        // would miss exactly this task — see this module's own doc on why
+        // `queued` belongs in the same finding.
+        let pool = test_pool().await;
+        let repository_id = insert_repository(&pool).await;
+        let task_id = insert_task(&pool, &repository_id, RunState::Queued, None).await;
 
         let report = survey(&pool).await.expect("survey succeeds");
 

@@ -11,6 +11,8 @@ use std::time::Duration;
 
 use rimaia_core::runner::events::RunTail;
 use rimaia_core::runner::process::DEFAULT_GRACE_PERIOD;
+use rimaia_core::runner::RunnerConfig;
+use rimaia_core::scheduler;
 use rimaia_core::{
     db, startup, worktree, AppPaths, ChangeEvent, Error, ServiceContext, SystemClock,
 };
@@ -107,6 +109,37 @@ pub fn run() {
                 runs.clone(),
             ));
 
+            // Task 009's repair for `survey`'s `tasks_left_running` finding
+            // (ADR-0010, ADR-0011, seam-contract D9): a task still `running`
+            // is not a live condition (nothing was running when this process
+            // started), it is what a crash left behind, and it has to be
+            // settled *before* the queue below ever reads the board. A queue
+            // that started selecting while a stale `running` row was still
+            // sitting there could read it as legitimately in flight forever
+            // (nothing in the MVP transitions a task out of `running` except
+            // a run finishing) — this is what finishes it instead, through
+            // the same services every other caller uses
+            // (`runner::outcome::finish_run`, `tasks::set_run_state`), never a
+            // raw `UPDATE`. It shares this startup with `worktree::reconcile`
+            // below in either order — each only acts on a state the other has
+            // not already produced — but it must land before the queue is
+            // built, which is why it is sequenced here rather than after.
+            let reconciled = match tauri::async_runtime::block_on(scheduler::reconcile_interrupted(
+                &context, &report,
+            )) {
+                Ok(reconciled) => reconciled,
+                Err(err) => {
+                    log_startup_failure("reconcile interrupted runs", &paths.db_file(), &err);
+                    return Err(err.into());
+                }
+            };
+            if !reconciled.is_empty() {
+                tracing::info!(
+                    tasks = reconciled.len(),
+                    "marked tasks a previous launch left running as interrupted",
+                );
+            }
+
             // Task 007's repair step for `survey`'s `missing_worktrees` finding
             // (ADR-0005: "repository state on disk is authoritative"). Placed
             // after the subscriber above, matching that step's own "subscribe
@@ -120,10 +153,26 @@ pub fn run() {
                 &report.missing_worktrees,
             ));
 
+            // Task 009's one long-lived queue, built and spawned once here —
+            // after both reconciliations above have committed, never before.
+            // `tauri::async_runtime::spawn` rather than a bare `tokio::spawn`
+            // for the reason every other background task in this hook uses
+            // it: Tauri's async runtime *is* Tokio, so this rides the runtime
+            // already here instead of starting a second. `runs.attach_queue`
+            // is what lets a manual "Run now" and the queue's own claim
+            // refuse to double-spawn a process for the same task — see
+            // `RunRegistry::attach_queue`'s doc — and it has to happen before
+            // `app.manage` hands `runs` to any command.
+            let (queue, queue_task) =
+                scheduler::build(context.clone(), paths.clone(), RunnerConfig::default());
+            runs.attach_queue(queue.clone());
+            tauri::async_runtime::spawn(queue_task.run());
+
             app.manage(AppState {
                 context,
                 paths,
                 runs,
+                queue,
             });
 
             // The window is declared `"visible": false` in `tauri.conf.json` and
@@ -181,6 +230,11 @@ pub fn run() {
         commands::runs::start_task_run,
         commands::runs::cancel_task_run,
         commands::runs::get_run_tail,
+        commands::queue::start_queue,
+        commands::queue::pause_queue,
+        commands::queue::resume_queue,
+        commands::queue::stop_queue,
+        commands::queue::get_queue_status,
     ]);
     #[cfg(not(debug_assertions))]
     let builder = builder.invoke_handler(tauri::generate_handler![
@@ -213,6 +267,11 @@ pub fn run() {
         commands::runs::start_task_run,
         commands::runs::cancel_task_run,
         commands::runs::get_run_tail,
+        commands::queue::start_queue,
+        commands::queue::pause_queue,
+        commands::queue::resume_queue,
+        commands::queue::stop_queue,
+        commands::queue::get_queue_status,
     ]);
 
     // `Builder::run(context)` is exactly `build(context)?.run(|_, _| {})`
@@ -251,8 +310,9 @@ pub fn run() {
     });
 }
 
-/// Cancels every run still in flight and waits, bounded, for it to actually
-/// end before the app is allowed to finish quitting.
+/// Cancels every run still in flight — manual, and task 009's queue — and
+/// waits, bounded, for it to actually end before the app is allowed to finish
+/// quitting.
 ///
 /// A user who quits mid-run sees the same SIGTERM-then-grace-period-then-
 /// SIGKILL sequence a manual Cancel would produce (ADR-0004) — quitting just
@@ -260,13 +320,27 @@ pub fn run() {
 /// that refuses to die cannot hold the app open indefinitely: past the
 /// deadline, Rimaia exits anyway and `kill_on_drop` plus the process-group
 /// signal already sent are left to finish the job.
+///
+/// `queue.shutdown()` runs **first** and, by itself, cancels nothing — it
+/// only stops the queue's loop from claiming *another* task once the current
+/// one ends (`scheduler::queue`'s own module doc explains why racing that
+/// loop's next claim against this exit path, instead of ordering against it,
+/// would leave a task claimed with nobody left supervising it). Cancelling
+/// the run actually in flight is `runs.cancel_all()` right after, which
+/// reaches the queue's own run through `RunRegistry::attach_queue` exactly as
+/// it reaches a manual one. Net effect: quitting mid-run cancels that one run
+/// the same way pressing the queue's own Stop button would — including that
+/// button's side effect of leaving `queue_state = paused` for the next
+/// launch — and the wait loop below is only the backstop for a child that
+/// refuses to die, not what performs the cancellation itself.
 async fn shut_down(app: &tauri::AppHandle) {
     let Some(state) = app.try_state::<AppState>() else {
         // Nothing was ever `manage`d — setup failed before reaching that
         // point, and nothing here could have started a run either.
         return;
     };
-    if !state.runs.cancel_all() {
+    state.queue.shutdown();
+    if !state.runs.cancel_all().await {
         return;
     }
 

@@ -1,6 +1,6 @@
 {
   "db_name": "SQLite",
-  "query": "SELECT id FROM tasks WHERE run_state = ?",
+  "query": "SELECT id FROM runs WHERE task_id = ?1 AND ended_at IS NULL ORDER BY attempt ASC",
   "describe": {
     "columns": [
       {
@@ -16,5 +16,5 @@
       false
     ]
   },
-  "hash": "6e84958859e8fb95344befcf80fc4e8e411cf60e5b560f168bb06a4911a1c51f"
+  "hash": "91f55630b4449b57e32c5f2e8e5d6f5560f04165d3406f682038510a2bb21a8a"
 }

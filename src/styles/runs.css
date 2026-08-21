@@ -67,3 +67,146 @@
   justify-content: flex-end;
   margin-top: 0.75rem;
 }
+
+/* The run queue (task 009) — Start/Pause/Resume/Stop, what is next, and what
+   has finished this session. Its own section above the live-run list stage
+   008 built, rather than folded into it: the queue can be running or paused
+   with nothing currently active, which `.active-runs-list` alone cannot
+   express. */
+
+.queue-section {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 1rem 1.25rem;
+  background: var(--surface);
+}
+
+.queue-section-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  margin-bottom: 0.5rem;
+}
+
+.queue-section-header h2 {
+  margin: 0;
+  font-size: 1rem;
+}
+
+.queue-section h3 {
+  margin: 1rem 0 0.5rem;
+  font-size: 0.8rem;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+
+/* Reuses the run-state badge tokens declared in board.css's `:root` —
+   "running"/"paused" are two of the same visual language as `.run-badge-*`,
+   not a third badge system. */
+.queue-state-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 0.1rem 0.5rem;
+  border-radius: 999px;
+  font-size: 0.7rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.02em;
+  white-space: nowrap;
+}
+
+.queue-state-running {
+  background: var(--badge-running-bg);
+  color: var(--badge-running-text);
+}
+
+.queue-state-paused {
+  background: var(--badge-queued-bg);
+  color: var(--badge-queued-text);
+}
+
+/* The last pass's own failure (task 009's own verification report, finding
+   5) — a missing `claude` or similar fails before any task is even chosen,
+   so no `SkipReason` badge below can say why nothing is happening. */
+.queue-step-error {
+  margin: 0.5rem 0 0;
+  color: var(--danger-text);
+}
+
+.queue-controls-buttons {
+  display: flex;
+  gap: 0.5rem;
+}
+
+/* The distinction task 009 asks to make legible: Pause finishes the current
+   run and starts nothing new, Stop also cancels it. Always shown, not just
+   when Stop is visible, so it is read before either button is ever pressed. */
+.queue-controls-caption {
+  margin: 0.5rem 0 0;
+}
+
+.queue-stop-button {
+  color: var(--danger-text);
+  border-color: var(--danger-border);
+}
+
+.queue-plan-list {
+  margin: 0;
+  padding-left: 1.25rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+}
+
+.queue-plan-entry {
+  display: flex;
+  align-items: baseline;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+
+.queue-plan-entry-skipped {
+  color: var(--text-muted);
+}
+
+.queue-plan-title {
+  font-weight: 500;
+}
+
+.queue-plan-position {
+  font-size: 0.75rem;
+  color: var(--text-muted);
+}
+
+.queue-plan-skip {
+  font-size: 0.8rem;
+  color: var(--text-muted);
+  overflow-wrap: anywhere;
+}
+
+.session-outcomes-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+}
+
+.session-outcome-entry {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  flex-wrap: wrap;
+}
+
+.session-outcome-title {
+  font-weight: 500;
+}
+
+.session-outcome-repo {
+  font-size: 0.8rem;
+  color: var(--text-muted);
+}

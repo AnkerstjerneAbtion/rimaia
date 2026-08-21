@@ -21,6 +21,13 @@ export type { UnlistenFn };
  * left for the tasks that first have something to publish on them, the same
  * incremental-extension pattern D7 already describes for 008 and 009.
  *
+ * Task 009 adds no new event of its own: `queue_state` lives in `settings`
+ * (`rimaia_core::scheduler::state`), so a queue Start/Pause/Resume/Stop
+ * already announces itself on `settings:changed` below, and a task the queue
+ * claims or finishes already announces itself on `tasks:changed` /
+ * `runs:changed`. The Runs view re-fetches `getQueueStatus` from `./commands`
+ * on any of the three rather than waiting on a fourth, dedicated channel.
+ *
  * **An empty id array means "re-read this entity wholesale," never "nothing
  * changed."** ADR-0018's shell forwarder is the only thing entitled to send
  * one: when its subscription falls behind the change-event broadcast
@@ -46,10 +53,10 @@ export function subscribeToRepositoriesChanged(
 
 /**
  * `settings:changed` carries no ids — the whole `settings` table is a
- * handful of rows, so every write (base instructions, run environment)
- * announces the same signal and every consumer just re-reads all of it,
- * mirroring `rimaia_core::db::settings`'s own doc comment on why the event
- * it publishes is untyped.
+ * handful of rows, so every write (base instructions, run environment,
+ * task 009's `queue_state`) announces the same signal and every consumer
+ * just re-reads all of it, mirroring `rimaia_core::db::settings`'s own doc
+ * comment on why the event it publishes is untyped.
  */
 export function subscribeToSettingsChanged(onChanged: () => void): Promise<UnlistenFn> {
   return listen<null>("settings:changed", () => onChanged());

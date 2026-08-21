@@ -9,9 +9,15 @@ import { useSortable } from "@dnd-kit/sortable";
 import { CSS } from "@dnd-kit/utilities";
 
 import { relativeTime } from "../../lib/board";
-import { listRepositories, startRun, toRimaiaError } from "../../lib/commands";
-import { subscribeToRepositoriesChanged } from "../../lib/events";
-import type { Repository, RimaiaError, Task, TaskSummary } from "../../types";
+import { getQueueStatus, listRepositories, startRun, toRimaiaError } from "../../lib/commands";
+import {
+  subscribeToRepositoriesChanged,
+  subscribeToRunsChanged,
+  subscribeToSettingsChanged,
+  subscribeToTasksChanged,
+} from "../../lib/events";
+import type { QueueEntry, Repository, RimaiaError, Task, TaskSummary } from "../../types";
+import { QUEUE_SKIP_LABELS } from "../runs/QueuePlanList";
 import { RunStateBadge } from "./RunStateBadge";
 
 type KeyDownHandler = (event: ReactKeyboardEvent<HTMLElement>) => void;
@@ -92,6 +98,134 @@ function useRepositoryLookup(): ReadonlyMap<string, Repository> | null {
         repositoryFetch = null;
         repositoryUnlisten?.();
         repositoryUnlisten = null;
+      }
+    };
+  }, []);
+
+  return lookup;
+}
+
+// ---------------------------------------------------------------------------
+// Queued position (task 009) — the same shared, single-flight lookup shape as
+// the repository cache above, and for the same reason: `getQueueStatus` is
+// not something `Column`/`Board` already fetch and could hand down, and both
+// sit outside this stage's file ownership (this task's own final report names
+// the flag). Keyed by task id, from `QueueStatus.plan` — every mounted card
+// shares one `get_queue_status` call rather than one each.
+// ---------------------------------------------------------------------------
+
+let queueCache: ReadonlyMap<string, QueueEntry> | null = null;
+let queueFetch: Promise<void> | null = null;
+// Set by `invalidate` when a change event lands while `queueFetch` is
+// already outstanding — `loadQueueStatus`'s own early-return guard below
+// would otherwise treat that call as a no-op, and the fetch already in
+// flight (started before whatever just changed) would then overwrite the
+// cache with a snapshot nothing left in place to correct. See `loadQueueStatus`'s
+// `.finally` for the retry this flag actually triggers.
+let queueDirty = false;
+let queueUnlistenTasks: (() => void) | null = null;
+let queueUnlistenRuns: (() => void) | null = null;
+let queueUnlistenSettings: (() => void) | null = null;
+const queueSubscribers = new Set<(cache: ReadonlyMap<string, QueueEntry> | null) => void>();
+
+function notifyQueueSubscribers() {
+  for (const subscriber of queueSubscribers) subscriber(queueCache);
+}
+
+function loadQueueStatus() {
+  if (queueCache || queueFetch) return;
+  queueFetch = getQueueStatus()
+    .then((status) => {
+      queueCache = new Map(status.plan.map((entry) => [entry.taskId, entry]));
+    })
+    .catch(() => {
+      // No event bridge, or the call itself failed: every card falls back to
+      // "nothing to show" below rather than retrying in a loop.
+      queueCache = new Map();
+    })
+    .finally(() => {
+      queueFetch = null;
+      if (queueDirty) {
+        // An invalidation landed while this fetch was already in flight and
+        // found nothing to act on but `queueDirty` — the fetch's own `.then`
+        // above just wrote the stale result into `queueCache`, so clear it
+        // again before retrying or `loadQueueStatus`'s own guard would read
+        // that stale (but non-null) cache and skip the fetch entirely.
+        // Notifying subscribers with the stale value first, then immediately
+        // re-fetching, would only flash the wrong value before the retry
+        // lands — so this goes straight to the retry instead.
+        queueDirty = false;
+        queueCache = null;
+        loadQueueStatus();
+        return;
+      }
+      notifyQueueSubscribers();
+    });
+}
+
+/**
+ * Every `ready` task's place in the queue's own plan, invalidated on the same
+ * three publishes the Runs view refreshes on: a task moving or ending, or the
+ * switch itself (`settings:changed` — `queue_state` lives there).
+ */
+function useQueueLookup(): ReadonlyMap<string, QueueEntry> | null {
+  const [lookup, setLookup] = useState(queueCache);
+
+  useEffect(() => {
+    queueSubscribers.add(setLookup);
+    loadQueueStatus();
+
+    function invalidate() {
+      queueCache = null;
+      if (queueFetch) {
+        // A fetch already in flight was started with data from before
+        // whatever just changed — `loadQueueStatus`'s own early-return guard
+        // would otherwise discard this call as a no-op. Mark it dirty
+        // instead: that fetch's own `.finally` is what re-fetches once it
+        // settles, so this invalidation is never silently dropped.
+        queueDirty = true;
+        return;
+      }
+      loadQueueStatus();
+    }
+
+    if (!queueUnlistenTasks) {
+      subscribeToTasksChanged(invalidate).then(
+        (unlisten) => {
+          queueUnlistenTasks = unlisten;
+        },
+        () => {},
+      );
+    }
+    if (!queueUnlistenRuns) {
+      subscribeToRunsChanged(invalidate).then(
+        (unlisten) => {
+          queueUnlistenRuns = unlisten;
+        },
+        () => {},
+      );
+    }
+    if (!queueUnlistenSettings) {
+      subscribeToSettingsChanged(invalidate).then(
+        (unlisten) => {
+          queueUnlistenSettings = unlisten;
+        },
+        () => {},
+      );
+    }
+
+    return () => {
+      queueSubscribers.delete(setLookup);
+      if (queueSubscribers.size === 0) {
+        queueCache = null;
+        queueFetch = null;
+        queueDirty = false;
+        queueUnlistenTasks?.();
+        queueUnlistenTasks = null;
+        queueUnlistenRuns?.();
+        queueUnlistenRuns = null;
+        queueUnlistenSettings?.();
+        queueUnlistenSettings = null;
       }
     };
   }, []);
@@ -257,6 +391,18 @@ export function TaskCard({
   const [starting, setStarting] = useState(false);
   const [runError, setRunError] = useState<RimaiaError | null>(null);
 
+  // Queued position (task 009): looked up unconditionally, same as
+  // `repositories` above — a hook cannot be called only for some renders —
+  // and only ever rendered for a `ready`, `idle` card. Every other run state
+  // already has its own badge (`RunStateBadge`) for "why this is not running
+  // right now", and `selection::skip_reason` can only ever return
+  // `AlreadyInFlight`/`DependencyNotSatisfied`/`NeedsAttention` for a task in
+  // one of those states — never for `idle` — so gating on `idle` costs
+  // nothing this task's own scheduler code could otherwise show here.
+  const queuePlan = useQueueLookup();
+  const queueEntry =
+    task.column === "ready" && task.runState === "idle" ? (queuePlan?.get(task.id) ?? null) : null;
+
   /** Never reaches `onSelect`/dnd-kit's own drag activation — both listen on
    *  the `<article>` this button sits inside, and a click or a keypress here
    *  is stopped before it bubbles that far (see the wrapping `<div>` below). */
@@ -324,6 +470,25 @@ export function TaskCard({
       onClick={() => onSelect(task.id)}
     >
       <CardFace task={task} repositoryName={repositoryName} now={now} />
+
+      {/* Queued position (task 009's Scope: "Board cards show `queued`
+          position"). ADR-0012's whole security posture depends on a skipped
+          reason being visible rather than silent, so a task the queue is
+          passing over reads why here, not just on the disabled "Run now"
+          button below. */}
+      {queueEntry && (
+        <div className="task-card-queue">
+          {queueEntry.skip === null ? (
+            <span className="task-card-indicator task-card-queue-position">
+              Queued #{queueEntry.queuePosition}
+            </span>
+          ) : (
+            <span className="task-card-queue-skip muted">
+              Not queued — {QUEUE_SKIP_LABELS[queueEntry.skip]}
+            </span>
+          )}
+        </div>
+      )}
 
       {/* Task 008's "Run now": a plain nested `<button>`, isolated from the
           drag/select machinery `{...attributes}`/`{...listeners}` and

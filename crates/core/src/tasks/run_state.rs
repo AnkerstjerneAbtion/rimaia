@@ -128,8 +128,21 @@ pub fn is_legal_run_state_transition(from: RunState, to: RunState) -> bool {
 /// write of the new one cannot interleave with a concurrent caller: two
 /// writers racing to transition the same task must not both succeed from a
 /// state that was only true for one of them.
+///
+/// `BEGIN IMMEDIATE` rather than a plain (deferred) `BEGIN`: on the
+/// production pool — more than one connection, unlike the single-connection
+/// test pool, where this never showed up — two callers racing this function
+/// would otherwise both open a deferred read here, unlocked, and the loser's
+/// later `UPDATE` would fail to upgrade with `SQLITE_BUSY_SNAPSHOT`, a
+/// conflict SQLite's busy handler does not retry. That left `busy_timeout`
+/// never applying and the loser reading a raw "database is locked" instead of
+/// the transition refusal `scheduler::claim`'s own `lost_the_race` exists to
+/// recognise — measured at 598 of 600 losers on a ten-connection pool.
+/// Taking the write lock up front makes a second caller wait for it, which
+/// *is* covered by `busy_timeout`, so it always reaches its own read seeing
+/// whatever the first writer already committed rather than racing it.
 pub async fn set_run_state(ctx: &ServiceContext, id: &str, to: RunState) -> Result<Task> {
-    let mut tx = ctx.pool.begin().await?;
+    let mut tx = ctx.pool.begin_with("BEGIN IMMEDIATE").await?;
     let current = fetch_task_row(&mut *tx, id).await?;
 
     if !is_legal_run_state_transition(current.run_state, to) {

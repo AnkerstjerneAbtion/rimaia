@@ -5,6 +5,7 @@ import type {
   BoardColumn,
   NewTaskInput,
   NewTaskLinkInput,
+  QueueStatus,
   RegisterRepositoryInput,
   RemoteInfo,
   Repository,
@@ -271,4 +272,44 @@ export function cancelRun(taskId: string): Promise<void> {
  */
 export function getRunTail(runId: string): Promise<RunTail | null> {
   return call<RunTail | null>("get_run_tail", { runId });
+}
+
+// ---------------------------------------------------------------------------
+// The run queue (task 009) — see `src-tauri/src/commands/queue.rs`.
+// ---------------------------------------------------------------------------
+
+/** Starts working the `ready` column top-down, one task at a time. Idempotent
+ *  — starting an already-running queue is not an error. */
+export function startQueue(): Promise<void> {
+  return call<void>("start_queue");
+}
+
+/** The same action as {@link startQueue}, under the name the user presses
+ *  after a pause. */
+export function resumeQueue(): Promise<void> {
+  return call<void>("resume_queue");
+}
+
+/** Starts nothing new; lets the current run finish. */
+export function pauseQueue(): Promise<void> {
+  return call<void>("pause_queue");
+}
+
+/** Pause, plus cancel whatever the queue is currently running. */
+export function stopQueue(): Promise<void> {
+  return call<void>("stop_queue");
+}
+
+/**
+ * The whole picture for the Runs view: whether the queue is running, which
+ * task it holds a process for right now, and every `ready` task in board
+ * order with the reason the queue will pass over each one it cannot start.
+ * Re-read fresh on every call — subscribe to {@link subscribeToTasksChanged},
+ * {@link subscribeToRunsChanged} and {@link subscribeToSettingsChanged} in
+ * `./events` and re-fetch on any of them, since a task moving, a run ending,
+ * or the queue's own switch (`queue_state` lives in `settings`) can each
+ * change what this returns.
+ */
+export function getQueueStatus(): Promise<QueueStatus> {
+  return call<QueueStatus>("get_queue_status");
 }

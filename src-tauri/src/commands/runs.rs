@@ -18,7 +18,8 @@
 
 use rimaia_core::runner::events::RunTail;
 use rimaia_core::runner::{probe_cli, run_task, RunRequest, RunTrigger, RunnerConfig};
-use rimaia_core::{repo, tasks, Result};
+use rimaia_core::scheduler::{self, ClaimOutcome};
+use rimaia_core::{repo, tasks, Error, Result};
 use tauri::State;
 
 use crate::state::{AppState, RunRegistry};
@@ -68,6 +69,25 @@ impl Drop for ReleaseOnDrop {
 /// `RunTrigger::Manual` is ADR-0012's conservative `acceptEdits` posture: this
 /// command is the foreground "Run now" button. The unattended,
 /// `bypassPermissions` path is task 009's queue, not this one.
+///
+/// # Why this also takes `scheduler::claim` before spawning anything
+///
+/// `state.runs.start`'s `queue_owns` check is an in-memory read of the
+/// queue's own `in_flight_task_id` — set only once the queue's own claim has
+/// already committed — so a click that lands in the gap between that commit
+/// and the in-memory flag being set sails straight through it. Four awaits
+/// separate that check from the spawn below (this function's own body,
+/// unchanged since task 008), which is window enough: by the time
+/// `run_task` re-reads the task, the queue may already have moved it to
+/// `running`, and `run_task`'s own internal claim treats an already-`running`
+/// task as "already mine" and spawns anyway (the arm task 008 wrote for
+/// exactly one starter, before there was a second). The transactional claim
+/// here closes that race for real, at the row: whichever caller's
+/// `set_run_state` commits first owns the task, and `run_task`'s own claim
+/// then no-ops on top of a state this call already produced. Refusing on
+/// `Lost` rather than propagating a raw transition error also gives the
+/// button the same sentence `queue_owns` already shows for the case it does
+/// catch.
 #[tauri::command]
 pub async fn start_task_run(state: State<'_, AppState>, task_id: String) -> Result<()> {
     let cancel = state.runs.start(&task_id)?;
@@ -86,6 +106,13 @@ pub async fn start_task_run(state: State<'_, AppState>, task_id: String) -> Resu
     let repository = repo::get(&context, &detail.task.repository_id).await?;
     repo::ensure_unattended_runs_allowed(&repository)?;
     probe_cli(&config.program).await?;
+
+    if scheduler::claim(&context, &task_id).await? == ClaimOutcome::Lost {
+        return Err(Error::invalid(
+            "the run queue is already working on this task; pause or stop the queue, \
+             or wait for it to finish, before starting it by hand",
+        ));
+    }
 
     let paths = state.paths.clone();
     let request = RunRequest {

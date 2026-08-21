@@ -16,7 +16,7 @@ import {
 import { SortableContext, sortableKeyboardCoordinates } from "@dnd-kit/sortable";
 
 import { TaskCard } from "./TaskCard";
-import type { Repository, Task } from "../../types";
+import type { QueueEntry, Repository, Task } from "../../types";
 
 // Mocked at the Tauri seam, not `lib/commands.ts`/`lib/events.ts` — see
 // `StorageSection.test.tsx`'s own comment for why. `TaskCard`'s "Run now"
@@ -91,16 +91,22 @@ function repository(overrides: Partial<Repository> = {}): Repository {
   };
 }
 
-/** Every test's default backend: one opted-in repository, and every `listen`
+/** Every test's default backend: one opted-in repository, an empty queue
+ *  plan (task 009's `useQueueLookup` is called unconditionally, same as
+ *  `useRepositoryLookup` — see both hooks' own comments), and every `listen`
  *  subscription resolves and never fires on its own — the same shape
  *  `Board.test.tsx`'s own `mockBackend` uses, scoped to what `TaskCard`
  *  itself calls. */
 function mockBackend({
   repositories = [repository()],
-}: { repositories?: Repository[] } = {}) {
+  queuePlan = [] as QueueEntry[],
+}: { repositories?: Repository[]; queuePlan?: QueueEntry[] } = {}) {
   mockListen.mockResolvedValue(vi.fn());
   mockInvoke.mockImplementation(async (command) => {
     if (command === "list_repositories") return repositories;
+    if (command === "get_queue_status") {
+      return { state: "paused", runningTaskId: null, plan: queuePlan };
+    }
     throw new Error(`unexpected command: ${command}`);
   });
 }
@@ -345,6 +351,7 @@ describe("TaskCard", () => {
     it("calls start_task_run with the task id when clicked", async () => {
       mockInvoke.mockImplementation(async (command) => {
         if (command === "list_repositories") return [repository({ allowUnattendedRuns: true })];
+        if (command === "get_queue_status") return { state: "paused", runningTaskId: null, plan: [] };
         if (command === "start_task_run") return undefined;
         throw new Error(`unexpected command: ${command}`);
       });
@@ -361,6 +368,7 @@ describe("TaskCard", () => {
     it("does not open the task panel when Run now is clicked", async () => {
       mockInvoke.mockImplementation(async (command) => {
         if (command === "list_repositories") return [repository({ allowUnattendedRuns: true })];
+        if (command === "get_queue_status") return { state: "paused", runningTaskId: null, plan: [] };
         if (command === "start_task_run") return undefined;
         throw new Error(`unexpected command: ${command}`);
       });
@@ -375,6 +383,7 @@ describe("TaskCard", () => {
     it("shows the backend's own rejection message when start_task_run fails", async () => {
       mockInvoke.mockImplementation(async (command) => {
         if (command === "list_repositories") return [repository({ allowUnattendedRuns: true })];
+        if (command === "get_queue_status") return { state: "paused", runningTaskId: null, plan: [] };
         if (command === "start_task_run") {
           throw { code: "invalid", message: "a run is already in progress for this task" };
         }
@@ -420,6 +429,185 @@ describe("TaskCard", () => {
         expect(screen.getAllByRole("button", { name: "Run now" })).toHaveLength(2),
       );
       expect(mockInvoke.mock.calls.filter(([command]) => command === "list_repositories")).toHaveLength(1);
+    });
+  });
+
+  // ---------------------------------------------------------------------------
+  // Queued position (task 009; ADR-0010, ADR-0012).
+  // ---------------------------------------------------------------------------
+
+  describe("Queued position", () => {
+    it("shows the queue position for a ready, idle task the queue would start", async () => {
+      mockBackend({
+        queuePlan: [
+          {
+            taskId: "task-1",
+            title: "Wire up the board",
+            repositoryId: "repo-1",
+            queuePosition: 2,
+            skip: null,
+          },
+        ],
+      });
+      renderCard({ task: task({ column: "ready", runState: "idle" }) });
+
+      expect(await screen.findByText("Queued #2")).toBeInTheDocument();
+    });
+
+    it("surfaces the reason on the card when the repository has not opted in (ADR-0012)", async () => {
+      mockBackend({
+        queuePlan: [
+          {
+            taskId: "task-1",
+            title: "Wire up the board",
+            repositoryId: "repo-1",
+            queuePosition: null,
+            skip: "unattended_runs_not_allowed",
+          },
+        ],
+      });
+      renderCard({ task: task({ column: "ready", runState: "idle" }) });
+
+      expect(
+        await screen.findByText(
+          "Not queued — this repository has not enabled unattended agent runs",
+        ),
+      ).toBeInTheDocument();
+    });
+
+    it("shows nothing when the task is not in the queue's plan", async () => {
+      mockBackend({ queuePlan: [] });
+      renderCard({ task: task({ column: "ready", runState: "idle" }) });
+      await screen.findByRole("button", { name: "Run now" });
+
+      expect(screen.queryByText(/^Queued #/)).toBeNull();
+      expect(screen.queryByText(/^Not queued/)).toBeNull();
+    });
+
+    it("shows nothing for a task outside the ready column, even if the plan names it", async () => {
+      mockBackend({
+        queuePlan: [
+          {
+            taskId: "task-1",
+            title: "Wire up the board",
+            repositoryId: "repo-1",
+            queuePosition: 1,
+            skip: null,
+          },
+        ],
+      });
+      renderCard({ task: task({ column: "not_ready", runState: "idle" }) });
+      await screen.findByRole("button", { name: "Run now" });
+
+      expect(screen.queryByText(/^Queued #/)).toBeNull();
+    });
+
+    it("shows nothing for a non-idle task — its own run-state badge already says why", async () => {
+      mockBackend({
+        queuePlan: [
+          {
+            taskId: "task-1",
+            title: "Wire up the board",
+            repositoryId: "repo-1",
+            queuePosition: null,
+            skip: "already_in_flight",
+          },
+        ],
+      });
+      renderCard({ task: task({ column: "ready", runState: "running" }) });
+      await screen.findByRole("button", { name: "Running…" });
+
+      expect(screen.queryByText(/^Not queued/)).toBeNull();
+    });
+
+    it("shares one get_queue_status call across every mounted card", async () => {
+      mockBackend({ queuePlan: [] });
+      render(
+        <DndHarness>
+          <SortableContext items={["task-1", "task-2"]}>
+            <TaskCard
+              task={task()}
+              repositoryName="rimaia"
+              now={NOW}
+              selected={false}
+              onSelect={vi.fn()}
+              registerCardRef={vi.fn()}
+              onArrowNavigate={vi.fn()}
+            />
+            <TaskCard
+              task={task({ id: "task-2" })}
+              repositoryName="rimaia"
+              now={NOW}
+              selected={false}
+              onSelect={vi.fn()}
+              registerCardRef={vi.fn()}
+              onArrowNavigate={vi.fn()}
+            />
+          </SortableContext>
+        </DndHarness>,
+      );
+
+      await waitFor(() =>
+        expect(screen.getAllByRole("button", { name: "Run now" })).toHaveLength(2),
+      );
+      expect(
+        mockInvoke.mock.calls.filter(([command]) => command === "get_queue_status"),
+      ).toHaveLength(1);
+    });
+
+    it("does not strand a card on a stale queue position when a change event lands mid fetch", async () => {
+      // Task 009's own verification report, finding 7: `loadQueueStatus`'s
+      // early-return guard treated an invalidation that landed while a fetch
+      // was already outstanding as a no-op, so the outstanding (now stale)
+      // response overwrote the cache with nothing left to correct it.
+      const taskChangedListeners: Array<(event: { payload: unknown }) => void> = [];
+      mockListen.mockImplementation(async (eventName, callback) => {
+        if (eventName === "tasks:changed") {
+          taskChangedListeners.push(callback as (event: { payload: unknown }) => void);
+        }
+        return vi.fn();
+      });
+
+      let resolveFirstFetch: ((value: unknown) => void) | undefined;
+      let queueStatusCalls = 0;
+      mockInvoke.mockImplementation(async (command) => {
+        if (command === "list_repositories") return [repository({ allowUnattendedRuns: true })];
+        if (command === "get_queue_status") {
+          queueStatusCalls += 1;
+          if (queueStatusCalls === 1) {
+            return new Promise((resolve) => {
+              resolveFirstFetch = resolve;
+            });
+          }
+          return {
+            state: "paused",
+            runningTaskId: null,
+            plan: [
+              {
+                taskId: "task-1",
+                title: "Wire up the board",
+                repositoryId: "repo-1",
+                queuePosition: 3,
+                skip: null,
+              },
+            ],
+          };
+        }
+        throw new Error(`unexpected command: ${command}`);
+      });
+
+      renderCard({ task: task({ column: "ready", runState: "idle" }) });
+      await waitFor(() => expect(taskChangedListeners.length).toBeGreaterThan(0));
+
+      // A task moving elsewhere fires while the very first fetch is still
+      // outstanding — the exact window the shared queue cache used to drop.
+      taskChangedListeners[0]?.({ payload: [] });
+
+      // The first (now stale) fetch finally settles.
+      resolveFirstFetch?.({ state: "paused", runningTaskId: null, plan: [] });
+
+      expect(await screen.findByText("Queued #3")).toBeInTheDocument();
+      expect(queueStatusCalls).toBe(2);
     });
   });
 });
