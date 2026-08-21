@@ -7,6 +7,7 @@
 
 pub mod app;
 pub mod repositories;
+pub mod runs;
 pub mod settings;
 pub mod tasks;
 pub mod worktree;

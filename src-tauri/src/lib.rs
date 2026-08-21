@@ -7,15 +7,18 @@ pub mod state;
 use std::fmt::Display;
 use std::path::Path;
 use std::sync::Arc;
+use std::time::Duration;
 
+use rimaia_core::runner::events::RunTail;
+use rimaia_core::runner::process::DEFAULT_GRACE_PERIOD;
 use rimaia_core::{
     db, startup, worktree, AppPaths, ChangeEvent, Error, ServiceContext, SystemClock,
 };
-use tauri::{Emitter, Manager};
+use tauri::{Emitter, Manager, RunEvent};
 use tokio::sync::broadcast;
 use tokio::sync::broadcast::error::RecvError;
 
-use crate::state::AppState;
+use crate::state::{AppState, RunRegistry};
 
 /// The label of the one window `tauri.conf.json` declares. Spelled out because
 /// that file leaves it implicit and Tauri fills it in — an unlabelled window
@@ -90,6 +93,20 @@ pub fn run() {
             let change_events = context.subscribe();
             tauri::async_runtime::spawn(forward_change_events(app.handle().clone(), change_events));
 
+            // Task 008's D14 channel, subscribed the same way and for the same
+            // reason: once, here, before anything can publish to it. `runs`
+            // is the shell's own bookkeeping — which task has a process in
+            // flight, and the latest tail snapshot for it (see
+            // `state::RunRegistry`'s doc) — and the forwarder is what keeps
+            // the second half current.
+            let runs = RunRegistry::new();
+            let tail_events = context.subscribe_tail();
+            tauri::async_runtime::spawn(forward_run_tail(
+                app.handle().clone(),
+                tail_events,
+                runs.clone(),
+            ));
+
             // Task 007's repair step for `survey`'s `missing_worktrees` finding
             // (ADR-0005: "repository state on disk is authoritative"). Placed
             // after the subscriber above, matching that step's own "subscribe
@@ -103,7 +120,11 @@ pub fn run() {
                 &report.missing_worktrees,
             ));
 
-            app.manage(AppState { context, paths });
+            app.manage(AppState {
+                context,
+                paths,
+                runs,
+            });
 
             // The window is declared `"visible": false` in `tauri.conf.json` and
             // shown here, once every fallible step above has succeeded. The two
@@ -157,6 +178,9 @@ pub fn run() {
         commands::settings::preview_composed_prompt,
         commands::worktree::get_worktree_status,
         commands::worktree::reveal_task_worktree,
+        commands::runs::start_task_run,
+        commands::runs::cancel_task_run,
+        commands::runs::get_run_tail,
     ]);
     #[cfg(not(debug_assertions))]
     let builder = builder.invoke_handler(tauri::generate_handler![
@@ -186,11 +210,78 @@ pub fn run() {
         commands::settings::preview_composed_prompt,
         commands::worktree::get_worktree_status,
         commands::worktree::reveal_task_worktree,
+        commands::runs::start_task_run,
+        commands::runs::cancel_task_run,
+        commands::runs::get_run_tail,
     ]);
 
-    builder
-        .run(tauri::generate_context!())
+    // `Builder::run(context)` is exactly `build(context)?.run(|_, _| {})`
+    // (tauri 2.11.5 `src/app.rs:2449`) — spelling it out rather than using the
+    // shorthand is what lets the closure below see `RunEvent::ExitRequested`.
+    // Everything about setup and its failure mode (D11) is unchanged: the
+    // setup hook still runs, and still panics on `Err`, inside `App::run`
+    // itself, not during `build`.
+    let app = builder
+        .build(tauri::generate_context!())
         .expect("error while running tauri application");
+
+    app.run(|app_handle, event| {
+        if let RunEvent::ExitRequested { api, code, .. } = event {
+            // Task 008's "all child processes reaped on app exit". Tauri
+            // turns a completed exit into `std::process::exit`, which runs no
+            // destructors at all — so the `ChildProcess::Drop` backstop
+            // `rimaia_core::runner::process` documents for a panic or an
+            // aborted future never fires on a plain quit, and cancelling has
+            // to actually *finish* here rather than merely being requested.
+            // `prevent_exit` delays this specific exit; `shut_down` cancels
+            // every in-flight run, waits (bounded) for their process groups
+            // to die, and then calls `AppHandle::exit`, which re-enters this
+            // same closure with `code: Some(_)` set. Only the first request —
+            // the user's own, always `code: None` — is prevented; the second
+            // is let through, or this spins forever asking itself to quit.
+            if code.is_none() {
+                api.prevent_exit();
+                let app_handle = app_handle.clone();
+                tauri::async_runtime::spawn(async move {
+                    shut_down(&app_handle).await;
+                    app_handle.exit(0);
+                });
+            }
+        }
+    });
+}
+
+/// Cancels every run still in flight and waits, bounded, for it to actually
+/// end before the app is allowed to finish quitting.
+///
+/// A user who quits mid-run sees the same SIGTERM-then-grace-period-then-
+/// SIGKILL sequence a manual Cancel would produce (ADR-0004) — quitting just
+/// asks every in-flight run for it at once. The wait is capped so a child
+/// that refuses to die cannot hold the app open indefinitely: past the
+/// deadline, Rimaia exits anyway and `kill_on_drop` plus the process-group
+/// signal already sent are left to finish the job.
+async fn shut_down(app: &tauri::AppHandle) {
+    let Some(state) = app.try_state::<AppState>() else {
+        // Nothing was ever `manage`d — setup failed before reaching that
+        // point, and nothing here could have started a run either.
+        return;
+    };
+    if !state.runs.cancel_all() {
+        return;
+    }
+
+    tracing::info!("cancelling in-flight runs before exiting");
+    let deadline = tokio::time::Instant::now() + DEFAULT_GRACE_PERIOD + Duration::from_secs(5);
+    while state.runs.has_in_flight_runs() {
+        if tokio::time::Instant::now() >= deadline {
+            tracing::warn!(
+                "some runs were still terminating when Rimaia exited; \
+                 their process groups were already signalled and should exit on their own"
+            );
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
 }
 
 /// Records why a startup step failed, immediately before the error propagates
@@ -255,5 +346,46 @@ fn emit_change_event(app: &tauri::AppHandle, event: ChangeEvent) {
     };
     if let Err(error) = result {
         tracing::error!(%error, "failed to forward a change event to the frontend");
+    }
+}
+
+/// The seam-contract D14 forwarder: the one place a `rimaia-core` `RunTail`
+/// becomes a `runs:tail` Tauri event. Subscribed once in `setup()`, mirroring
+/// [`forward_change_events`] in shape — but **not** in its recovery, which is
+/// the one thing D14 says to do differently on purpose.
+///
+/// `RecvError::Lagged` here is **discarded and counted, never recovered.**
+/// There is no empty-payload "re-read everything" signal on this channel,
+/// because there is nothing to re-read: a dropped tail line is already on
+/// disk in the run's JSONL transcript (ADR-0013), and the `runs` row is the
+/// other source of truth if the two ever disagree. Building a recovery path
+/// for a lossy, high-frequency view channel is exactly the mistake D14
+/// separated this channel from `ChangeEvent` to avoid.
+///
+/// Every snapshot is also recorded into `runs` — the shell's own catch-up
+/// cache (`state::RunRegistry`) — before it is forwarded, so a client that
+/// starts watching mid-run and calls `get_run_tail` sees at least this one.
+async fn forward_run_tail(
+    app: tauri::AppHandle,
+    mut tails: broadcast::Receiver<RunTail>,
+    runs: RunRegistry,
+) {
+    loop {
+        match tails.recv().await {
+            Ok(tail) => {
+                runs.record_tail(tail.clone());
+                if let Err(error) = app.emit("runs:tail", &tail) {
+                    tracing::error!(%error, "failed to forward a run-tail snapshot to the frontend");
+                }
+            }
+            Err(RecvError::Lagged(dropped)) => {
+                tracing::debug!(
+                    dropped,
+                    "run-tail receiver fell behind; the dropped snapshots are already on disk \
+                     in the run's transcript",
+                );
+            }
+            Err(RecvError::Closed) => break,
+        }
     }
 }

@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT max(attempt) AS \"attempt: i64\" FROM runs WHERE task_id = ?1",
+  "describe": {
+    "columns": [
+      {
+        "name": "attempt: i64",
+        "ordinal": 0,
+        "type_info": "Null"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      true
+    ]
+  },
+  "hash": "5766a0f233a7a3f9e1490e52994236fda39b6e7af994ab3a8382ba2392c9c713"
+}

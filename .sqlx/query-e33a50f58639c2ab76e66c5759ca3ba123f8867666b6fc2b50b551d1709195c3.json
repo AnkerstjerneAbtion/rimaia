@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO repositories (id, name, path, default_branch, worktree_root, allow_unattended_runs, created_at)\n           VALUES (?1, 'rimaia', '/tmp/rimaia', 'main', '/tmp/rimaia-worktrees', 1, ?2)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "e33a50f58639c2ab76e66c5759ca3ba123f8867666b6fc2b50b551d1709195c3"
+}

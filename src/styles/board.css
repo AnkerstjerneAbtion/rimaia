@@ -685,6 +685,93 @@
   gap: 0.5rem;
 }
 
+/* "Run now" (task 008) — a nested control inside `.task-card`, isolated from
+   the card's own drag/select handling (see `TaskCard.tsx`'s own comment on
+   why every listener here calls `stopPropagation`). */
+
+.task-card-run {
+  margin-top: 0.5rem;
+}
+
+.task-card-run-button {
+  font-size: 0.8rem;
+  padding: 0.3rem 0.6rem;
+}
+
+/* Why it is disabled, or the error a click came back with — same shape as
+   `.repository-locked`/`.worktree-locked` above: a courtesy explanation
+   directly under the control it describes, not a paragraph in the flow. */
+.task-card-run-locked,
+.task-card-run-error {
+  margin: 0.35rem 0 0;
+  font-size: 0.75rem;
+  overflow-wrap: anywhere;
+}
+
+.task-card-run-error {
+  color: var(--danger-text);
+}
+
+/* Run outcome (task 008) — extends `.task-detail-section`'s shell above.
+   New tokens for the six ADR-0011 exit classes: `success` gets its own
+   (nothing in the app has needed a positive/green token before this); the
+   rest reuse the severities `.run-badge-*` above already assigned — a
+   "still recoverable" state reuses the waiting-retry amber, and the two
+   dead-end states reuse the shared danger tokens from styles.css, same as
+   `.run-badge-failed`/`.run-badge-interrupted` do for the same reason (D9:
+   the word carries the distinction, not the colour). */
+:root {
+  --exit-success-bg: #dcf5e3;
+  --exit-success-text: #157a3d;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --exit-success-bg: #163b25;
+    --exit-success-text: #7fd99b;
+  }
+}
+
+.exit-class-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 0.1rem 0.5rem;
+  border-radius: 999px;
+  font-size: 0.75rem;
+  font-weight: 600;
+}
+
+.exit-class-success {
+  background: var(--exit-success-bg);
+  color: var(--exit-success-text);
+}
+
+.exit-class-usage_limit,
+.exit-class-transient {
+  background: var(--badge-waiting-retry-bg);
+  color: var(--badge-waiting-retry-text);
+}
+
+.exit-class-interrupted,
+.exit-class-fatal {
+  background: var(--danger-bg);
+  color: var(--danger-text);
+}
+
+.exit-class-cancelled {
+  background: var(--badge-cancelled-bg);
+  color: var(--badge-cancelled-text);
+}
+
+.run-outcome-error {
+  color: var(--danger-text);
+}
+
+.run-outcome-actions {
+  display: flex;
+  margin-top: 0.5rem;
+}
+
 /* Worktree (task 007) — extends `.task-detail-section`'s shell above rather
    than replacing it. */
 

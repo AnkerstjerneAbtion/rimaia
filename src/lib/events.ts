@@ -1,6 +1,8 @@
 import { listen } from "@tauri-apps/api/event";
 import type { UnlistenFn } from "@tauri-apps/api/event";
 
+import type { RunTail } from "../types";
+
 export type { UnlistenFn };
 
 /**
@@ -51,4 +53,27 @@ export function subscribeToRepositoriesChanged(
  */
 export function subscribeToSettingsChanged(onChanged: () => void): Promise<UnlistenFn> {
   return listen<null>("settings:changed", () => onChanged());
+}
+
+/** See {@link subscribeToTasksChanged} for the empty-array contract; the
+ *  same rule applies here, scoped to `runs:changed` (task 008). */
+export function subscribeToRunsChanged(
+  onChanged: (runIds: string[]) => void,
+): Promise<UnlistenFn> {
+  return listen<string[]>("runs:changed", (event) => onChanged(event.payload));
+}
+
+/**
+ * `runs:tail` (task 008, seam-contract D14) — a live snapshot of whatever
+ * run is in flight: elapsed time, turn count, the current tool call, the
+ * last assistant text. **Not** the empty-array recovery signal every other
+ * event here uses: D14 rule 1 is that a dropped snapshot is discarded and
+ * counted on the backend, never recovered, because it is already on disk in
+ * the run's transcript — there is nothing for a listener to special-case. A
+ * component that starts watching mid-run should seed itself from
+ * `getRunTail` in `./commands` before subscribing here, and filter on the
+ * snapshot's own `runId` if more than one run might be in flight.
+ */
+export function subscribeToRunsTail(onTail: (tail: RunTail) => void): Promise<UnlistenFn> {
+  return listen<RunTail>("runs:tail", (event) => onTail(event.payload));
 }

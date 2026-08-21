@@ -11,6 +11,7 @@ import { ModelEffortOverrides } from "../panel/ModelEffortOverrides";
 import { PlanEditor } from "../panel/PlanEditor";
 import { RepositorySelector } from "../panel/RepositorySelector";
 import { RunInfoSection } from "../panel/RunInfoSection";
+import { RunOutcomeSection } from "../panel/RunOutcomeSection";
 import { TitleField } from "../panel/TitleField";
 import { WorktreeSection } from "../panel/WorktreeSection";
 import { COLUMN_TITLES } from "./Column";
@@ -208,6 +209,12 @@ function TaskDetailPanelBody({
         lastRun={detail?.lastRun ?? null}
         loading={detailLoading}
       />
+
+      {/* Task 008's own section: the last run's outcome (exit class, cost,
+          error text, PR link) and its log path — additive to `RunInfoSection`
+          above, not a replacement for it (see this stage's file-ownership
+          note in `RunOutcomeSection.tsx`'s own doc comment). */}
+      <RunOutcomeSection lastRun={detail?.lastRun ?? null} loading={detailLoading} />
 
       <WorktreeSection taskId={task.id} />
 

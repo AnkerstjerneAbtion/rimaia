@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { invoke } from "@tauri-apps/api/core";
@@ -93,6 +93,45 @@ describe("TaskDetailPanel", () => {
     expect(screen.getByText("rimaia")).toBeInTheDocument();
     expect(screen.getByLabelText("Plan")).toHaveValue("a plan");
     expect(screen.getByText("Delete task")).toBeInTheDocument();
+  });
+
+  it("shows the last run's outcome, cost included, once detail resolves (task 008)", async () => {
+    mockInvoke.mockImplementation(async (command) => {
+      if (command === "get_task") {
+        return detail({
+          lastRun: {
+            id: "run-1",
+            taskId: "task-1",
+            attempt: 1,
+            status: "succeeded",
+            sessionId: "s1",
+            prompt: "p",
+            startedAt: "2026-08-20T09:00:00Z",
+            endedAt: "2026-08-20T09:10:00Z",
+            exitClass: "success",
+            errorMessage: null,
+            numTurns: 5,
+            costUsd: 0.1061,
+            logPath: "/data/runs/task-1/run-1.jsonl",
+            prUrl: null,
+            resumeAfter: null,
+          },
+        });
+      }
+      if (command === "get_worktree_status") return worktreeStatus();
+      throw new Error(`unexpected command: ${command}`);
+    });
+
+    render(<TaskDetailPanel task={task()} repositoryName="rimaia" onClose={vi.fn()} />);
+
+    expect(await screen.findByText("$0.1061")).toBeInTheDocument();
+    // "Succeeded" legitimately appears twice once detail resolves —
+    // `RunInfoSection`'s own status label (task 007) and this section's exit
+    // class both read it off the same fetched run — so this scopes to the
+    // section task 008 owns rather than picking one arbitrarily.
+    const outcomeSection = document.querySelector<HTMLElement>(".run-outcome-section")!;
+    expect(within(outcomeSection).getByText("Succeeded")).toBeInTheDocument();
+    expect(screen.getByText("/data/runs/task-1/run-1.jsonl")).toBeInTheDocument();
   });
 
   it("remounts every field fresh when the selected task changes", async () => {

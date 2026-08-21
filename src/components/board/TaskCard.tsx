@@ -1,15 +1,137 @@
-import type { CSSProperties, KeyboardEvent as ReactKeyboardEvent } from "react";
+import type {
+  CSSProperties,
+  KeyboardEvent as ReactKeyboardEvent,
+  MouseEvent as ReactMouseEvent,
+} from "react";
+import { useEffect, useState } from "react";
 
 import { useSortable } from "@dnd-kit/sortable";
 import { CSS } from "@dnd-kit/utilities";
 
 import { relativeTime } from "../../lib/board";
-import type { Task, TaskSummary } from "../../types";
+import { listRepositories, startRun, toRimaiaError } from "../../lib/commands";
+import { subscribeToRepositoriesChanged } from "../../lib/events";
+import type { Repository, RimaiaError, Task, TaskSummary } from "../../types";
 import { RunStateBadge } from "./RunStateBadge";
 
 type KeyDownHandler = (event: ReactKeyboardEvent<HTMLElement>) => void;
 
 const ARROW_KEYS = new Set(["ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight"]);
+
+// ---------------------------------------------------------------------------
+// "Run now" (task 008) — a shared, single-flight repository lookup.
+//
+// `Column` hands this component only a resolved repository *name*
+// (`repositoryName`, below), never the `Repository` row itself — so
+// `allowUnattendedRuns` (ADR-0012's per-repository opt-in, which "Run now"
+// must be disabled against) is not on hand here. The correct fix is threading
+// the row `Board`'s own `useRepositories()` already holds down through
+// `Column`, but both files sit outside this stage's file ownership (see this
+// task's own final report for the flag). This module-level, reference-counted
+// cache is the seam this file *can* own: every mounted card shares one
+// `list_repositories` call and one `repositories:changed` subscription rather
+// than firing its own, and both are torn down the moment the last card
+// watching them unmounts — so a board that re-mounts (a real navigation, or a
+// test's own render/cleanup cycle) always starts the next one from a real
+// fetch, never a stale snapshot left over from before.
+let repositoryCache: ReadonlyMap<string, Repository> | null = null;
+let repositoryFetch: Promise<void> | null = null;
+let repositoryUnlisten: (() => void) | null = null;
+const repositorySubscribers = new Set<
+  (cache: ReadonlyMap<string, Repository> | null) => void
+>();
+
+function notifyRepositorySubscribers() {
+  for (const subscriber of repositorySubscribers) subscriber(repositoryCache);
+}
+
+function loadRepositories() {
+  if (repositoryCache || repositoryFetch) return;
+  repositoryFetch = listRepositories()
+    .then((repositories) => {
+      repositoryCache = new Map(repositories.map((repository) => [repository.id, repository]));
+    })
+    .catch(() => {
+      // No event bridge (a non-Tauri preview, or a test that never mocks
+      // `list_repositories`), or the call itself failed: every card falls
+      // back to its own "unknown" disabled state below rather than retrying
+      // in a loop.
+      repositoryCache = new Map();
+    })
+    .finally(() => {
+      repositoryFetch = null;
+      notifyRepositorySubscribers();
+    });
+}
+
+function useRepositoryLookup(): ReadonlyMap<string, Repository> | null {
+  const [lookup, setLookup] = useState(repositoryCache);
+
+  useEffect(() => {
+    repositorySubscribers.add(setLookup);
+    loadRepositories();
+    if (!repositoryUnlisten) {
+      subscribeToRepositoriesChanged(() => {
+        repositoryCache = null;
+        loadRepositories();
+      }).then(
+        (unlisten) => {
+          repositoryUnlisten = unlisten;
+        },
+        () => {
+          // No event bridge — the fetch above still resolved (or failed) on
+          // its own; there is simply nothing to keep it fresh with.
+        },
+      );
+    }
+
+    return () => {
+      repositorySubscribers.delete(setLookup);
+      if (repositorySubscribers.size === 0) {
+        repositoryCache = null;
+        repositoryFetch = null;
+        repositoryUnlisten?.();
+        repositoryUnlisten = null;
+      }
+    };
+  }, []);
+
+  return lookup;
+}
+
+/** Whether "Run now" is clickable right now, and — when it is not — why. */
+type RunNowState =
+  | { readonly kind: "ready" }
+  | { readonly kind: "unknown" }
+  | { readonly kind: "running" }
+  | { readonly kind: "blocked"; readonly reason: string };
+
+/**
+ * ADR-0012's opt-in, applied to one card. The wording mirrors
+ * `repo::ensure_unattended_runs_allowed`'s own refusal (`crates/core/src/
+ * repo/mod.rs`) — the same sentence a rejected `start_task_run` call would
+ * carry, so a card that guessed wrong about a repository's state still shows
+ * the service's own reason rather than a paraphrase of it (seam-contract D8's
+ * "specificity lives in the message", applied to a disabled button instead of
+ * a rejection).
+ */
+function runNowState(task: CardTask, repositories: ReadonlyMap<string, Repository> | null): RunNowState {
+  if (task.runState === "running" || task.runState === "queued") {
+    return { kind: "running" };
+  }
+  if (repositories === null) {
+    return { kind: "unknown" };
+  }
+  const repository = repositories.get(task.repositoryId);
+  if (!repository || !repository.allowUnattendedRuns) {
+    const name = repository?.name ?? "this task's repository";
+    return {
+      kind: "blocked",
+      reason: `"${name}" has not enabled unattended agent runs. Enable it in Settings → Repositories before starting tasks here.`,
+    };
+  }
+  return { kind: "ready" };
+}
 
 /**
  * The D12 summary fields a card renders, layered onto `Task` as *optional*
@@ -130,6 +252,28 @@ export function TaskCard({
     registerCardRef(task.id, element);
   }
 
+  const repositories = useRepositoryLookup();
+  const runNow = runNowState(task, repositories);
+  const [starting, setStarting] = useState(false);
+  const [runError, setRunError] = useState<RimaiaError | null>(null);
+
+  /** Never reaches `onSelect`/dnd-kit's own drag activation — both listen on
+   *  the `<article>` this button sits inside, and a click or a keypress here
+   *  is stopped before it bubbles that far (see the wrapping `<div>` below). */
+  function handleRunNow(event: ReactMouseEvent<HTMLButtonElement>) {
+    event.stopPropagation();
+    if (runNow.kind !== "ready") return;
+    setRunError(null);
+    setStarting(true);
+    startRun(task.id).then(
+      () => setStarting(false),
+      (thrown) => {
+        setRunError(toRimaiaError(thrown));
+        setStarting(false);
+      },
+    );
+  }
+
   function handleKeyDown(event: ReactKeyboardEvent<HTMLElement>) {
     // dnd-kit's own keyboard handling first (Space to lift, arrows and
     // Escape while a keyboard drag is active) — it calls `preventDefault()`
@@ -180,6 +324,29 @@ export function TaskCard({
       onClick={() => onSelect(task.id)}
     >
       <CardFace task={task} repositoryName={repositoryName} now={now} />
+
+      {/* Task 008's "Run now": a plain nested `<button>`, isolated from the
+          drag/select machinery `{...attributes}`/`{...listeners}` and
+          `onClick`/`onKeyDown` above bind to the whole article — a click or a
+          keypress here must start a run, never lift the card or open the
+          panel underneath it. */}
+      <div
+        className="task-card-run"
+        onPointerDown={(event) => event.stopPropagation()}
+        onKeyDown={(event) => event.stopPropagation()}
+      >
+        <button
+          type="button"
+          className="task-card-run-button"
+          disabled={runNow.kind !== "ready" || starting}
+          title={runNow.kind === "blocked" ? runNow.reason : undefined}
+          onClick={handleRunNow}
+        >
+          {starting ? "Starting…" : runNow.kind === "running" ? "Running…" : "Run now"}
+        </button>
+        {runNow.kind === "blocked" && <p className="task-card-run-locked muted">{runNow.reason}</p>}
+        {runError && <p className="task-card-run-error">{runError.message}</p>}
+      </div>
     </article>
   );
 }

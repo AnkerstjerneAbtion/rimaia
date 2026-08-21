@@ -284,6 +284,41 @@ export interface TaskLinkPatchInput {
 export type RunEnvironment = "inherit" | "strict_local";
 
 // ---------------------------------------------------------------------------
+// Runs (task 008) — mirrors `rimaia_core::runner::events` (ADR-0004,
+// ADR-0011, ADR-0013, seam-contract D14). `Run` itself is defined above,
+// alongside `Task`, because it was already needed by `TaskDetail.lastRun`.
+// ---------------------------------------------------------------------------
+
+/** Mirrors `rimaia_core::runner::events::ToolCall`. A bounded, one-line
+ *  rendering of a tool call's most identifying argument — never the raw
+ *  input, which for a `Write` call is an entire file. */
+export interface ToolCall {
+  /** The `tool_use_id`, so a matching result can be correlated with it. */
+  id: string;
+  name: string;
+  /** `null` when the tool's input carried none of the recognised keys —
+   *  the name alone is still shown. */
+  detail: string | null;
+}
+
+/**
+ * Mirrors `rimaia_core::runner::events::RunTail` (seam-contract D14). The
+ * payload of the `runs:tail` event and of
+ * [`getRunTail`](./lib/commands) — a live view of a run in progress, never
+ * the source of truth for anything persisted. If this and a {@link Run} row
+ * ever disagree, the row wins.
+ */
+export interface RunTail {
+  runId: string;
+  elapsedMs: number;
+  /** Approximate while the run is in flight — replaced by the `Run` row's
+   *  own `numTurns` once it ends. */
+  turns: number;
+  currentTool: ToolCall | null;
+  lastAssistantText: string | null;
+}
+
+// ---------------------------------------------------------------------------
 // Worktrees (task 007) — mirrors `rimaia_core::worktree` (ADR-0005).
 // ---------------------------------------------------------------------------
 

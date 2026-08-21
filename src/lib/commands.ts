@@ -11,6 +11,7 @@ import type {
   RimaiaError,
   RunEnvironment,
   RunState,
+  RunTail,
   Task,
   TaskDetail,
   TaskFilterInput,
@@ -230,4 +231,44 @@ export function getWorktreeStatus(taskId: string): Promise<WorktreeStatus> {
  */
 export function revealTaskWorktree(taskId: string): Promise<void> {
   return call<void>("reveal_task_worktree", { taskId });
+}
+
+// ---------------------------------------------------------------------------
+// Runs (task 008) — see `src-tauri/src/commands/runs.rs`.
+// ---------------------------------------------------------------------------
+
+/**
+ * Starts a manual "Run now" for `taskId` and resolves as soon as it is under
+ * way — **not once it finishes.** A long-running run is supervised entirely
+ * on the backend; watch `tasks:changed` / `runs:changed` for the row and
+ * {@link subscribeToRunsTail} in `./events` for the live view, the same way
+ * every other view learns about a change it did not make itself.
+ *
+ * A repository that has not opted in to unattended runs (ADR-0012), a
+ * missing `claude` CLI, or a task already running rejects with a
+ * {@link RimaiaError} describing which.
+ */
+export function startRun(taskId: string): Promise<void> {
+  return call<void>("start_task_run", { taskId });
+}
+
+/**
+ * Asks `taskId`'s in-flight run to stop. A no-op, not an error, when nothing
+ * is running for it — the same button can be pressed after the run has
+ * already finished.
+ */
+export function cancelRun(taskId: string): Promise<void> {
+  return call<void>("cancel_task_run", { taskId });
+}
+
+/**
+ * The most recent live-tail snapshot the backend has seen for `runId`, or
+ * `null` when it has not seen one yet. This is what a client that opens the
+ * Runs view after a run has already started reads once to catch up, before
+ * subscribing to {@link subscribeToRunsTail} in `./events` for the rest
+ * (seam-contract D14) — a run's own outcome and log path are read through
+ * {@link getTask}'s `lastRun`, not through this.
+ */
+export function getRunTail(runId: string): Promise<RunTail | null> {
+  return call<RunTail | null>("get_run_tail", { runId });
 }
