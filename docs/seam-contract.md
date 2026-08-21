@@ -395,6 +395,39 @@ task 015 too, and both should inherit the corrected version and the reason for i
 
 **Binds.** 008, 009, 015.
 
+## D15 — What quitting does to the queue
+
+**Question.** Task 009 makes the queue's state durable — "derived from the database, so it
+survives app restart". Task 008's exit path SIGTERMs a run in flight. Together those leave a
+question neither task answers: after the user quits, is the queue running when the app comes
+back?
+
+**Decision.** **Quitting always stops the queue.** Whether or not a run happened to be in flight
+at that instant, the exit path sets the queue to stopped, so the next launch starts idle and
+waits to be told to go.
+
+**Why.** The alternative that shipped first was accidental rather than chosen: quitting mid-run
+stopped the queue (because the cancel path stopped it) while quitting between runs left it
+running (because nothing stopped it). Same user action, two outcomes, decided by whether a child
+process existed at that millisecond.
+
+Of the two consistent answers, stopping is the conservative one and it is what this codebase's
+own reasoning already argued for in the mid-run case: a run the app just killed by quitting
+should not silently restart itself on the next launch without the user asking again. Extending
+that to the between-runs case costs one deliberate click in the morning. The opposite default —
+resume on launch — means opening the app to check something starts spending money before the
+window is drawn, and ADR-0012 makes those runs `bypassPermissions` in an opted-in repository.
+
+The durability task 009 built is not wasted: what survives a restart is the board, the run
+history and every task's state. It is only the *go* signal that does not, and that is the one
+piece of queue state a human should own.
+
+Revisit when task 013 lands run windows and scheduling — "start at 22:00" is a standing
+instruction of exactly the kind this entry declines to infer, and once it exists the right
+default may change.
+
+**Binds.** 008, 009, 013.
+
 
 ---
 
@@ -410,9 +443,10 @@ An implementation task reads the entries its number appears in, before writing c
 | [005](../tasks/005-kanban-board-ui.md) | D1 · D2 · D6 · D7 · D9 · D12 · D13 |
 | [006](../tasks/006-base-instructions-and-prompt-composition.md) | D3 · D4 · D5 · D8 |
 | [007](../tasks/007-git-worktree-service.md) | D5 · D8 · D10 · D13 |
-| [008](../tasks/008-claude-code-runner.md) | D2 · D3 · D5 · D7 · D8 · D9 · D10 · D14 |
-| [009](../tasks/009-sequential-run-queue.md) | D2 · D5 · D7 · D8 · D9 · D10 · D14 |
+| [008](../tasks/008-claude-code-runner.md) | D2 · D3 · D5 · D7 · D8 · D9 · D10 · D14 · D15 |
+| [009](../tasks/009-sequential-run-queue.md) | D2 · D5 · D7 · D8 · D9 · D10 · D14 · D15 |
 | [011](../tasks/011-task-dependencies-and-blocking.md) | D12 |
+| [013](../tasks/013-run-scheduling.md) | D15 |
 | [015](../tasks/015-run-history-and-log-viewer.md) | D14 |
 | [018](../tasks/018-preflight-doctor-and-packaging.md) | D11 |
 | every task | D4 and D6 as prohibitions |
