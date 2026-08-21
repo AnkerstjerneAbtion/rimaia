@@ -368,9 +368,30 @@ was protecting when it pushed the tail out.
 
 **Why not polling a ring buffer through a command.** It would work, and it avoids a channel — but
 it puts the refresh interval in the frontend, where it is either too slow to feel live or a
-constant query loop against the single SQLite writer while a run is in flight. The bounded
-in-memory ring buffer task 008's scope names still exists; it is what a client reads to catch up
-when it starts watching mid-run. The channel is for what happens after that.
+constant query loop against the single SQLite writer while a run is in flight.
+
+### Amendment, 2026-08-21 — what "catch up" actually means
+
+As first written this entry said the bounded ring buffer task 008's scope names is "what a client
+reads to catch up when it starts watching mid-run". Task 008 implemented something different and
+better, and the entry was wrong rather than the code.
+
+**The catch-up is the latest snapshot, held by the shell.** The forwarder subscribes in `setup()`
+and therefore has seen every `RunTail` since the run began, so it caches the most recent one per
+run and a client that opens the Runs view mid-run asks for that. The in-core ring buffer
+(`RunProgress`, `RECENT_ACTIVITY_CAPACITY`) still exists and still earns its place: it bounds what
+a snapshot is built from and caps a verbose turn's contribution, in a process that runs all night.
+It is not, and does not need to be, readable across the process boundary.
+
+Scrollback during a run comes from the transcript file, not from memory. ADR-0013 already said so
+— *"completed runs are read from the JSONL file on demand, paginated"* — and the same file is
+being flushed line by line while the run is live, so there is nothing a second in-memory copy
+would add except a second thing to keep consistent. The one-snapshot field list is also exactly
+what ADR-0013 specifies the live view shows: current tool call, last assistant message, elapsed
+time, turn count.
+
+Recorded as an amendment rather than an edit because the original sentence bound task 009 and
+task 015 too, and both should inherit the corrected version and the reason for it.
 
 **Binds.** 008, 009, 015.
 
