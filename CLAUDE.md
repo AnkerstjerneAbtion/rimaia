@@ -3,9 +3,10 @@
 Rimaia queues implementation plans and runs them unattended with Claude Code, in git
 worktrees, on the user's own subscription. Kanban board in, reviewable branches out.
 
-**Status: app shell and test harness landed (tasks 001, 019); the MVP (002–009) is next.**
-`src/` is a Sidebar/Board/Runs/Settings shell of empty states, not yet wired to a store; no
-counter UI remains. `src-tauri/` is the thin command surface task 001 defined.
+**Status: the MVP walking skeleton is implemented (tasks 001–009, 019 landed); it is awaiting**
+**its first real unattended run.** `src/` is the Board/Runs/Settings app wired to the store and
+the run queue. `src-tauri/` is the scheduler, process runner and queue commands task 009 added,
+on top of task 001's command surface.
 
 ## Read these before writing code
 
