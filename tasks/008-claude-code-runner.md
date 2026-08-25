@@ -4,7 +4,7 @@ title: Claude Code runner
 milestone: mvp
 status: ready
 depends_on: ["006", "007", "019"]
-adrs: ["0004", "0011", "0012", "0013", "0015"]
+adrs: ["0004", "0011", "0012", "0013", "0015", "0018"]
 size: L
 ---
 

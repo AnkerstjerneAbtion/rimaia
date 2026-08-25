@@ -1,0 +1,271 @@
+/* Settings view. `.panel`, `.detail-list` and `.error-banner` are shared
+   components and live in styles.css instead (see the comment there) - what's
+   left here is the view's own header layout plus the bits still unique to
+   it: the dashed dev panel and the generic muted-caption style. */
+
+.view {
+  display: flex;
+  flex-direction: column;
+  gap: 1.25rem;
+  max-width: 46rem;
+}
+
+.view-header h2 {
+  margin: 0 0 0.25rem;
+}
+
+.view-header p {
+  margin: 0;
+  color: var(--text-muted);
+}
+
+/* `.panel-dev` alone would tie `.panel` on specificity, and lose to it on
+   source order now that this rule lives in a leaf imported before styles.css's
+   own `.panel` — pair the classes so this rule always wins regardless of
+   import order. */
+.panel.panel-dev {
+  border: 1px dashed var(--border);
+}
+
+.muted {
+  color: var(--text-muted);
+  margin: 0 0 0.75rem;
+}
+
+/* Repositories (task 003). No root-level warning colour exists yet (only
+   --danger-* and --accent*) - defined locally rather than added to
+   styles.css's :root, since "gh missing" is deliberately not the same
+   severity as a real error (task 003's scope: "a warning on the repository,
+   not an error"). */
+:root {
+  --warning-bg: #fdf3e2;
+  --warning-border: #e4bb6a;
+  --warning-text: #7a5410;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --warning-bg: #3a2f16;
+    --warning-border: #8a6a2c;
+    --warning-text: #f0c876;
+  }
+}
+
+.repo-add {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 0.5rem;
+  margin-bottom: 1rem;
+}
+
+.repo-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.85rem;
+}
+
+.repo-item {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 0.85rem 1rem;
+}
+
+.repo-item h4 {
+  margin: 0 0 0.5rem;
+}
+
+.repo-item .detail-list {
+  margin-bottom: 0.5rem;
+}
+
+.repo-actions {
+  display: flex;
+  gap: 0.5rem;
+  margin-top: 0.5rem;
+}
+
+.repo-edit-form {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  margin: 0.25rem 0 0.5rem;
+}
+
+.repo-edit-form label {
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+  font-size: 0.85rem;
+  color: var(--text-muted);
+}
+
+.repo-edit-form input {
+  font: inherit;
+  padding: 0.35rem 0.5rem;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface);
+  color: var(--text);
+}
+
+.repo-warning {
+  display: inline-block;
+  margin: 0.4rem 0 0;
+  padding: 0.3rem 0.55rem;
+  border-radius: 6px;
+  font-size: 0.8rem;
+  background: var(--warning-bg);
+  border: 1px solid var(--warning-border);
+  color: var(--warning-text);
+}
+
+.unattended-toggle {
+  margin-top: 0.6rem;
+  font-size: 0.9rem;
+}
+
+.unattended-toggle label {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.45rem;
+}
+
+.unattended-confirm {
+  margin-top: 0.6rem;
+  padding: 0.75rem 0.9rem;
+  border: 1px solid var(--danger-border);
+  border-radius: 8px;
+  background: var(--danger-bg);
+}
+
+.unattended-confirm p {
+  margin: 0 0 0.6rem;
+  color: var(--danger-text);
+  font-weight: 500;
+}
+
+.unattended-confirm-actions {
+  display: flex;
+  gap: 0.5rem;
+}
+
+/* The confirm action is deliberately the harder-to-reach visual choice -
+   danger-coloured, and second rather than first - never the friendly
+   default. ADR-0012: the dialog does not soften what enabling this grants. */
+.btn-danger {
+  background: var(--danger-bg);
+  border-color: var(--danger-border);
+  color: var(--danger-text);
+}
+
+.btn-danger:hover {
+  border-color: var(--danger-text);
+}
+
+/* Instructions (task 006) — base instructions, the run-environment toggle
+   and the composed-prompt preview. `.instructions-subsection` only spaces
+   the three apart; it borrows `.task-detail-section`'s divider look rather
+   than duplicating it, since both are "one section of a panel, several
+   labelled parts". */
+
+.instructions-subsection {
+  margin-top: 1.1rem;
+  padding-top: 1.1rem;
+  border-top: 1px solid var(--border);
+}
+
+.instructions-subsection:first-of-type {
+  margin-top: 0;
+  padding-top: 0;
+  border-top: none;
+}
+
+.instructions-subsection h4 {
+  margin: 0 0 0.4rem;
+  font-size: 0.8rem;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+
+.instructions-editor-textarea {
+  width: 100%;
+  min-height: 14rem;
+  resize: vertical;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.85rem;
+  line-height: 1.5;
+  padding: 0.5rem 0.6rem;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg);
+  color: var(--text);
+}
+
+.run-environment-options {
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+}
+
+.run-environment-option {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.6rem;
+  padding: 0.6rem 0.75rem;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+
+.run-environment-option input {
+  margin-top: 0.2rem;
+}
+
+.run-environment-option-body {
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+  font-size: 0.9rem;
+}
+
+.run-environment-option-body .muted {
+  margin: 0;
+  font-size: 0.85rem;
+}
+
+/* The cost note is a caption under the toggle, not a paragraph in the flow
+   above it — `.muted` alone carries the bottom margin meant for stacked
+   paragraphs, which reads wrong directly under a control. */
+.run-environment-cost-note {
+  margin: 0.6rem 0 0;
+}
+
+.instructions-preview-picker {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 0.25rem;
+  font-size: 0.85rem;
+  color: var(--text-muted);
+  margin-bottom: 0.6rem;
+}
+
+.instructions-preview-output {
+  max-height: 28rem;
+  overflow: auto;
+  margin: 0;
+  padding: 0.75rem 0.9rem;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg);
+  color: var(--text);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.8rem;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}

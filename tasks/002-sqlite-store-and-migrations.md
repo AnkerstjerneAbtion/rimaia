@@ -4,7 +4,7 @@ title: SQLite store and migrations
 milestone: mvp
 status: ready
 depends_on: ["001"]
-adrs: ["0003", "0007"]
+adrs: ["0003", "0007", "0011", "0013", "0016"]
 size: M
 ---
 

@@ -1,0 +1,813 @@
+/* Board view (task 005): four-column Kanban layout, cards, drag state and
+   the task detail panel.
+
+   Badge colours are new tokens, declared in this file's own `:root` block
+   rather than in `src/styles.css` (this leaf does not touch that file - see
+   the board agent's file-ownership note). A second `:root { ... }` rule in
+   an imported stylesheet is not a second root: it adds properties to the
+   same element, same as `styles.css`'s own block does, as long as no name
+   collides - none of the ones below exist there. */
+
+:root {
+  --badge-running-bg: #dbe7ff;
+  --badge-running-text: #1d4ed8;
+  --badge-queued-bg: #ececf0;
+  --badge-queued-text: #45454f;
+  --badge-blocked-bg: #ece4fb;
+  --badge-blocked-text: #5b21b6;
+  --badge-waiting-retry-bg: #fdf1da;
+  --badge-waiting-retry-text: #92600a;
+  --badge-cancelled-bg: #ececf0;
+  --badge-cancelled-text: #62626b;
+
+  /* The detail drawer is painted over the columns, so its edge has to read
+     as depth rather than as a border between two panels. A token because the
+     shadow that does that on white is invisible on the dark surface. */
+  --drawer-shadow: -0.5rem 0 1.5rem rgb(0 0 0 / 0.16);
+
+  /* The board's width arithmetic. Nothing in the test suite can ever check
+     it - jsdom has no layout engine - so this comment is the record.
+
+     `1rem` is **15px**, not 16: `styles.css`'s `:root` sets
+     `font-size: 15px`. Every rem below is converted at that rate; an earlier
+     version of this comment used 16 and was wrong by ~6% throughout.
+
+     The two widths that matter are the two `src-tauri/tauri.conf.json`
+     declares: `width: 1280` (task 005's acceptance criterion, "usable at
+     1280px wide") and `minWidth: 1024` (the floor the window can be resized
+     to - not named by the criterion, but the layout still has to hold
+     there).
+
+     Available to `.board-view`: `.app` is `232px 1fr` and `.content` adds
+     2rem = 30px of padding each side, so `window - 232 - 60`:
+       1280px window -> 988px
+       1024px window -> 732px
+
+     `.board-columns` is `repeat(4, minmax(--board-column-min, 1fr))` with a
+     0.75rem = 11.25px gap, so its hard minimum is `4 * 160 + 3 * 11.25` =
+     673.75px:
+       1280px: 674 <= 988  (314px spare; the tracks grow past their floor
+         to fill it)
+       1024px: 674 <= 732  (58px spare, kept as a buffer for a non-overlay
+         scrollbar `.content`'s `overflow-y: auto` can draw)
+
+     **The panel open changes none of that.** `.task-detail-panel` is an
+     overlay drawer - `position: absolute` inside `.board-layout`, out of
+     flow - so it subtracts nothing from the columns at any width. That is
+     the whole reason for the overlay. As a flex sibling at `0 0 20rem` it
+     took 300px plus `.board-layout`'s 1rem = 15px gap off the top, leaving
+     the columns:
+       1280px, panel open: 988 - 315 = 673px  (673.75 needed - short)
+       1024px, panel open: 732 - 315 = 417px  (673.75 needed - 257px short,
+         roughly 1.5 of the 4 columns clipped into a horizontal scroll)
+     Out of flow, the four numbers above are the only four, and they hold
+     with the panel open or closed - no breakpoint, no second case.
+     `.board-columns` keeps its own `overflow-x: auto` as a safety valve, but
+     at both declared widths it is now slack, not scroll.
+
+     What the drawer covers, rather than displaces:
+       width = min(46rem, calc(100% - 12rem)) = min(690px, board - 180px)
+       1280px: min(690, 808) = 690px drawer, 298px of columns uncovered
+       1024px: min(690, 552) = 552px drawer, 180px of columns uncovered
+     180px is one whole column (160px) plus its gap (11.25px), so a column
+     stays visible and droppable at the narrowest supported window, and the
+     writing surface is 690px - not the 300px box a 400-line plan used to
+     get - whenever the window is 1280px or wider.
+
+     `100%` rather than `100vw` in that `min()`: the drawer's containing
+     block is `.board-layout`, which is already the content area, so a
+     viewport unit would have to re-subtract the sidebar and the padding
+     that percentage has accounted for. A human should still confirm both
+     states in a real 1280x832 window and a resized-to-1024 one. */
+  --board-column-min: 160px;
+  /* Approximates the toolbar, banners and page padding above the columns so
+     each column scrolls its own cards instead of the whole page scrolling -
+     a human should check this against the real window chrome at 1280x832
+     (see the board agent's return value). */
+  --board-column-max-height: calc(100vh - 220px);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --badge-running-bg: #1e2c4d;
+    --badge-running-text: #9db8f7;
+    --badge-queued-bg: #2c2c33;
+    --badge-queued-text: #b4b4bd;
+    --badge-blocked-bg: #2e2340;
+    --badge-blocked-text: #c4a4f5;
+    --badge-waiting-retry-bg: #3a2f16;
+    --badge-waiting-retry-text: #f0c473;
+    --badge-cancelled-bg: #2c2c33;
+    --badge-cancelled-text: #9a9aa4;
+    --drawer-shadow: -0.5rem 0 1.5rem rgb(0 0 0 / 0.55);
+  }
+}
+
+.board-view {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+  height: 100%;
+}
+
+/* Toolbar */
+
+.board-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+}
+
+.board-repo-filter {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  font-size: 0.85rem;
+  color: var(--text-muted);
+}
+
+.board-toolbar select,
+.board-toolbar input[type="search"] {
+  padding: 0.4rem 0.6rem;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface);
+  color: var(--text);
+  font: inherit;
+}
+
+.board-search {
+  flex: 1 1 16rem;
+  min-width: 12rem;
+}
+
+/* Layout: the four columns, with the detail panel drawn over them. */
+
+.board-layout {
+  display: flex;
+  align-items: flex-start;
+  gap: 1rem;
+  flex: 1;
+  min-height: 0;
+  /* The containing block for `.task-detail-panel`'s `position: absolute` —
+     which is what keeps the drawer inside the board area (below the toolbar,
+     above the bottom) without pinning it to the viewport and having to
+     hard-code the height of the chrome above it. */
+  position: relative;
+}
+
+.board-columns {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(var(--board-column-min), 1fr));
+  gap: 0.75rem;
+  flex: 1;
+  min-width: 0;
+  /* A safety valve, not a working part: the arithmetic above leaves the grid
+     58px of slack at the narrowest supported window with the drawer open or
+     closed. It stays because a scrollbar is a better answer than a clipped
+     fourth column if a future row of chrome eats that slack. */
+  overflow-x: auto;
+}
+
+/* Columns */
+
+.board-column {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  max-height: var(--board-column-max-height);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+.board-column-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  padding: 0.65rem 0.85rem;
+  border-bottom: 1px solid var(--border);
+}
+
+.board-column-header h3 {
+  margin: 0;
+  font-size: 0.85rem;
+}
+
+.board-column-count {
+  font-size: 0.75rem;
+  color: var(--text-muted);
+  background: var(--bg);
+  border-radius: 999px;
+  padding: 0.05rem 0.5rem;
+}
+
+.board-column-body {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  padding: 0.65rem;
+  overflow-y: auto;
+  flex: 1;
+  min-height: 4rem;
+  transition: background-color 120ms ease;
+}
+
+.board-column-body-over {
+  background: color-mix(in srgb, var(--accent) 8%, transparent);
+}
+
+.board-column-empty {
+  margin: 0.5rem 0;
+  padding: 0.75rem;
+  color: var(--text-muted);
+  font-size: 0.85rem;
+  text-align: center;
+  border: 1px dashed var(--border);
+  border-radius: 6px;
+}
+
+/* Cards */
+
+.task-card {
+  display: block;
+  width: 100%;
+  padding: 0.6rem 0.75rem;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  cursor: grab;
+  text-align: left;
+  touch-action: none; /* dnd-kit's pointer sensor owns touch gestures here */
+}
+
+.task-card:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+.task-card-dragging {
+  opacity: 0.5;
+}
+
+.task-card-selected {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 1px var(--accent);
+}
+
+.task-card-overlay {
+  cursor: grabbing;
+  box-shadow: 0 8px 20px rgb(0 0 0 / 0.18);
+}
+
+.task-card-title {
+  margin: 0 0 0.35rem;
+  font-size: 0.9rem;
+  font-weight: 600;
+}
+
+.task-card-meta {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+}
+
+.task-card-repo {
+  font-size: 0.75rem;
+  color: var(--text-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.task-card-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  margin-top: 0.4rem;
+  font-size: 0.75rem;
+  color: var(--text-muted);
+}
+
+.task-card-time {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Link count and dependency indicator (task 005 Scope) — plain text rather
+   than an icon: D6's dependency list is closed and does not include an icon
+   set, and a hand-drawn glyph would need to carry the same information in
+   its `title`/`aria` text anyway, so the text itself is simplest. Hidden at
+   zero rather than reading "0 links" - see `TaskCard.tsx`'s own comment. */
+.task-card-indicators {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex-shrink: 0;
+}
+
+.task-card-indicator {
+  white-space: nowrap;
+}
+
+/* Run-state badges — each state its own colour so the set stays
+   distinguishable at a glance; `running` additionally pulses (task 005:
+   "running (animated)"). Failed and interrupted deliberately reuse the
+   shared danger tokens from styles.css rather than a badge-specific one:
+   both are the same severity, and the word (not the colour) is what tells
+   them apart per D9. */
+
+.run-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 0.1rem 0.5rem;
+  border-radius: 999px;
+  font-size: 0.7rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.02em;
+  white-space: nowrap;
+}
+
+.run-badge-running {
+  background: var(--badge-running-bg);
+  color: var(--badge-running-text);
+}
+
+.run-badge-queued {
+  background: var(--badge-queued-bg);
+  color: var(--badge-queued-text);
+}
+
+.run-badge-blocked {
+  background: var(--badge-blocked-bg);
+  color: var(--badge-blocked-text);
+}
+
+.run-badge-waiting_retry {
+  background: var(--badge-waiting-retry-bg);
+  color: var(--badge-waiting-retry-text);
+}
+
+.run-badge-cancelled {
+  background: var(--badge-cancelled-bg);
+  color: var(--badge-cancelled-text);
+}
+
+.run-badge-failed,
+.run-badge-interrupted {
+  background: var(--danger-bg);
+  color: var(--danger-text);
+}
+
+.run-badge-running::before {
+  content: "";
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  margin-right: 0.35em;
+  border-radius: 50%;
+  background: currentColor;
+  animation: run-badge-pulse 1.4s ease-in-out infinite;
+}
+
+@keyframes run-badge-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.25;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .run-badge-running::before {
+    animation: none;
+  }
+}
+
+/* Task detail panel — an overlay drawer over the board's top-right corner,
+   not a column of its own. See the width arithmetic in `:root` above for
+   why, and `TaskDetailPanel.tsx` for why it is deliberately not a modal. */
+
+.task-detail-panel {
+  position: absolute;
+  inset: 0 0 auto auto;
+  z-index: 2;
+  width: min(46rem, calc(100% - 12rem));
+  max-height: var(--board-column-max-height);
+  overflow-y: auto;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 1rem 1.25rem;
+  /* Opaque surface plus a shadow: the columns are still painted underneath,
+     and the drawer has to read as being in front of them rather than as a
+     panel that has swallowed them. */
+  box-shadow: var(--drawer-shadow);
+}
+
+.task-detail-panel:focus {
+  /* Focused programmatically when the drawer opens, so a ring here would be
+     a box drawn around the whole panel every time it is opened by a mouse —
+     the drawer's own appearance is the visible feedback. Children keep their
+     own `:focus-visible` rings; this suppresses one on the container. */
+  outline: none;
+}
+
+.task-detail-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 0.75rem;
+  margin-bottom: 0.75rem;
+}
+
+.task-detail-header h3 {
+  margin: 0;
+}
+
+.task-detail-note {
+  font-size: 0.85rem;
+}
+
+/* Task detail panel, stage 3's build-out. Everything below extends stage
+   2's panel shell above rather than replacing it — `.task-detail-panel`,
+   `.task-detail-header` and `.task-detail-note` stay exactly as written
+   there. */
+
+.task-detail-title {
+  flex: 1;
+  min-width: 0;
+}
+
+.task-detail-title-input {
+  width: 100%;
+  font: inherit;
+  font-size: 1.05rem;
+  font-weight: 600;
+  padding: 0.2rem 0.3rem;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text);
+}
+
+.task-detail-title-input:hover,
+.task-detail-title-input:focus {
+  border-color: var(--border);
+  background: var(--bg);
+}
+
+/* Repository selector (seam-contract D13) — its own class rather than
+   `.task-detail-panel select`, which would collide at equal specificity with
+   `.model-effort-row select` further down and be decided by source order. */
+
+.repository-select {
+  max-width: 100%;
+  font: inherit;
+  padding: 0.3rem 0.45rem;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface);
+  color: var(--text);
+}
+
+.repository-select:disabled {
+  color: var(--text-muted);
+  cursor: not-allowed;
+}
+
+.repository-saving {
+  margin-left: 0.5rem;
+  font-size: 0.8rem;
+}
+
+/* Why it is disabled. `.muted` (settings.css) carries a bottom margin meant
+   for paragraphs stacked in a panel; this one sits directly under its own
+   control. */
+.repository-locked {
+  margin: 0.35rem 0 0;
+  font-size: 0.8rem;
+  overflow-wrap: anywhere;
+}
+
+.task-detail-section {
+  margin-top: 1.1rem;
+  padding-top: 1.1rem;
+  border-top: 1px solid var(--border);
+}
+
+.task-detail-section h4 {
+  margin: 0 0 0.5rem;
+  font-size: 0.8rem;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+
+.task-detail-panel textarea,
+.task-detail-panel input[type="text"] {
+  width: 100%;
+  font: inherit;
+  padding: 0.5rem 0.6rem;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg);
+  color: var(--text);
+}
+
+/* The plan editor: the tallest control on the board by design — task 005
+   requires a 400-line plan to be "comfortable to write and read" here, not
+   a one-line input. Monospace so Markdown syntax (headings, lists, fences)
+   stays visually aligned while writing it; a human should judge the actual
+   comfort of this against a real 400-line plan (see the panel agent's
+   return value) — jsdom cannot. */
+
+.plan-editor-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  margin-bottom: 0.5rem;
+}
+
+.plan-editor-header h4 {
+  margin: 0;
+}
+
+.plan-editor-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+}
+
+.plan-editor-textarea {
+  min-height: 22rem;
+  resize: vertical;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.85rem;
+  line-height: 1.5;
+}
+
+.plan-preview {
+  min-height: 22rem;
+  max-height: 34rem;
+  overflow-y: auto;
+  padding: 0.75rem 0.9rem;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg);
+}
+
+.plan-preview :first-child {
+  margin-top: 0;
+}
+
+.plan-preview :last-child {
+  margin-bottom: 0;
+}
+
+.extra-instructions-textarea {
+  min-height: 4.5rem;
+  resize: vertical;
+}
+
+/* Links */
+
+.links-list {
+  list-style: none;
+  margin: 0 0 0.75rem;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.link-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  padding: 0.4rem 0.55rem;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  flex-wrap: wrap;
+}
+
+.link-item a {
+  color: var(--accent);
+  overflow-wrap: anywhere;
+}
+
+.link-item-actions {
+  display: flex;
+  gap: 0.3rem;
+  flex-shrink: 0;
+}
+
+.link-item-actions button {
+  padding: 0.2rem 0.5rem;
+  font-size: 0.8rem;
+}
+
+.link-add-form {
+  display: flex;
+  gap: 0.4rem;
+  flex-wrap: wrap;
+}
+
+.link-add-form input {
+  flex: 1 1 10rem;
+}
+
+/* Model & effort — plain dropdowns until task 020 (ADR-0016); see
+   `ModelEffortOverrides`'s own doc comment. */
+
+.model-effort-row {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  flex-wrap: wrap;
+}
+
+.model-effort-row label {
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+  font-size: 0.8rem;
+  color: var(--text-muted);
+}
+
+.model-effort-row select {
+  font: inherit;
+  padding: 0.35rem 0.5rem;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface);
+  color: var(--text);
+}
+
+/* Delete — the confirm step reuses `.btn-danger` from settings.css (global,
+   not view-scoped) rather than redefining it. */
+
+.task-detail-delete {
+  display: flex;
+  justify-content: flex-end;
+}
+
+.task-detail-delete-confirm {
+  width: 100%;
+  padding: 0.75rem 0.9rem;
+  border: 1px solid var(--danger-border);
+  border-radius: 8px;
+  background: var(--danger-bg);
+}
+
+.task-detail-delete-confirm p {
+  margin: 0 0 0.6rem;
+  color: var(--danger-text);
+  font-weight: 500;
+}
+
+.task-detail-delete-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 0.5rem;
+}
+
+/* "Run now" (task 008) — a nested control inside `.task-card`, isolated from
+   the card's own drag/select handling (see `TaskCard.tsx`'s own comment on
+   why every listener here calls `stopPropagation`). */
+
+.task-card-run {
+  margin-top: 0.5rem;
+}
+
+.task-card-run-button {
+  font-size: 0.8rem;
+  padding: 0.3rem 0.6rem;
+}
+
+/* Why it is disabled, or the error a click came back with — same shape as
+   `.repository-locked`/`.worktree-locked` above: a courtesy explanation
+   directly under the control it describes, not a paragraph in the flow. */
+.task-card-run-locked,
+.task-card-run-error {
+  margin: 0.35rem 0 0;
+  font-size: 0.75rem;
+  overflow-wrap: anywhere;
+}
+
+.task-card-run-error {
+  color: var(--danger-text);
+}
+
+/* Queued position (task 009) — sits between the card face and "Run now",
+   same shape as `.task-card-run-locked`/`.task-card-run-error` above: a
+   short line of text, not a second badge system. `.task-card-indicator`
+   (already defined above, in the footer's flex row) is reused standalone
+   here rather than duplicated - it is already just padding-free text with
+   no wrapping, which reads fine outside that row too. */
+
+.task-card-queue {
+  margin-top: 0.35rem;
+}
+
+.task-card-queue-position {
+  color: var(--text-muted);
+  font-size: 0.75rem;
+}
+
+.task-card-queue-skip {
+  margin: 0;
+  font-size: 0.75rem;
+  overflow-wrap: anywhere;
+}
+
+/* Run outcome (task 008) — extends `.task-detail-section`'s shell above.
+   New tokens for the six ADR-0011 exit classes: `success` gets its own
+   (nothing in the app has needed a positive/green token before this); the
+   rest reuse the severities `.run-badge-*` above already assigned — a
+   "still recoverable" state reuses the waiting-retry amber, and the two
+   dead-end states reuse the shared danger tokens from styles.css, same as
+   `.run-badge-failed`/`.run-badge-interrupted` do for the same reason (D9:
+   the word carries the distinction, not the colour). */
+:root {
+  --exit-success-bg: #dcf5e3;
+  --exit-success-text: #157a3d;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --exit-success-bg: #163b25;
+    --exit-success-text: #7fd99b;
+  }
+}
+
+.exit-class-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 0.1rem 0.5rem;
+  border-radius: 999px;
+  font-size: 0.75rem;
+  font-weight: 600;
+}
+
+.exit-class-success {
+  background: var(--exit-success-bg);
+  color: var(--exit-success-text);
+}
+
+.exit-class-usage_limit,
+.exit-class-transient {
+  background: var(--badge-waiting-retry-bg);
+  color: var(--badge-waiting-retry-text);
+}
+
+.exit-class-interrupted,
+.exit-class-fatal {
+  background: var(--danger-bg);
+  color: var(--danger-text);
+}
+
+.exit-class-cancelled {
+  background: var(--badge-cancelled-bg);
+  color: var(--badge-cancelled-text);
+}
+
+.run-outcome-error {
+  color: var(--danger-text);
+}
+
+.run-outcome-actions {
+  display: flex;
+  margin-top: 0.5rem;
+}
+
+/* Worktree (task 007) — extends `.task-detail-section`'s shell above rather
+   than replacing it. */
+
+.worktree-actions {
+  display: flex;
+  gap: 0.5rem;
+  margin-top: 0.5rem;
+}
+
+/* Why "Open" is disabled — same shape as `.repository-locked` (seam-contract
+   D13): a courtesy explanation sitting directly under the control it
+   describes, not a paragraph in the flow above it. */
+.worktree-locked {
+  margin: 0.35rem 0 0;
+  font-size: 0.8rem;
+  overflow-wrap: anywhere;
+}

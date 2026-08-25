@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO tasks (id, repository_id, title, board_column, position, run_state, created_at, updated_at)\n         VALUES (?1, ?2, 'a task', 'ready', 1.0, 'interrupted', ?3, ?3)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": []
+  },
+  "hash": "c9e38921ba823ef77e48d1b1fdd1024cb2297b2e3136e0729c402f5f053e5122"
+}

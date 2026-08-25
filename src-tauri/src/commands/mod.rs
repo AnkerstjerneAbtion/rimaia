@@ -6,3 +6,9 @@
 //! the two paths is a bug.
 
 pub mod app;
+pub mod queue;
+pub mod repositories;
+pub mod runs;
+pub mod settings;
+pub mod tasks;
+pub mod worktree;

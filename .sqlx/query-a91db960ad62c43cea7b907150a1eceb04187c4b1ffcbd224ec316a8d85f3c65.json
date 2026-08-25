@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO schedules (id, name, mode, max_concurrency, enabled) VALUES (?1, 'nightly', ?2, 2, 1)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "a91db960ad62c43cea7b907150a1eceb04187c4b1ffcbd224ec316a8d85f3c65"
+}

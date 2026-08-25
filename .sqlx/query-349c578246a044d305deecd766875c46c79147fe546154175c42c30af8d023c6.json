@@ -1,0 +1,56 @@
+{
+  "db_name": "SQLite",
+  "query": "\n        SELECT id, name, path, default_branch, worktree_root, allow_unattended_runs,\n               created_at AS \"created_at: chrono::DateTime<chrono::Utc>\"\n        FROM repositories\n        ORDER BY name ASC, created_at ASC\n        ",
+  "describe": {
+    "columns": [
+      {
+        "name": "id",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "name",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "path",
+        "ordinal": 2,
+        "type_info": "Text"
+      },
+      {
+        "name": "default_branch",
+        "ordinal": 3,
+        "type_info": "Text"
+      },
+      {
+        "name": "worktree_root",
+        "ordinal": 4,
+        "type_info": "Text"
+      },
+      {
+        "name": "allow_unattended_runs",
+        "ordinal": 5,
+        "type_info": "Bool"
+      },
+      {
+        "name": "created_at: chrono::DateTime<chrono::Utc>",
+        "ordinal": 6,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "349c578246a044d305deecd766875c46c79147fe546154175c42c30af8d023c6"
+}

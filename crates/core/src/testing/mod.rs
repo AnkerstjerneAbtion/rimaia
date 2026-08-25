@@ -3,7 +3,9 @@
 //! Four helpers, one per thing that is otherwise slow, flaky or unavailable in a
 //! test: a controllable [`clock`], a real git repository in a temporary
 //! directory ([`repo`]), a migrated in-memory database ([`db`]), and access to
-//! the recorded Claude Code streams under [`fixtures`].
+//! the recorded Claude Code streams under [`fixtures`]. [`context`] assembles
+//! the first three into the [`ServiceContext`](crate::ServiceContext) a service
+//! actually takes, with a change-event receiver already listening (ADR-0018).
 //!
 //! Note what is *not* faked. Git and the filesystem are real, because a mocked
 //! git only ever proves the mock works. The Claude CLI is replayed from recorded
@@ -19,10 +21,12 @@
 //! turns on through the crate's self-referencing dev-dependency.
 
 pub mod clock;
+pub mod context;
 pub mod db;
 pub mod fixtures;
 pub mod repo;
 
 pub use clock::TestClock;
+pub use context::{test_epoch, TestContext};
 pub use db::test_pool;
 pub use repo::TempRepo;

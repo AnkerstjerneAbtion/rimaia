@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT name AS \"name!\" FROM sqlite_master\n           WHERE type = 'table' AND name NOT LIKE 'sqlite_%' AND name != '_sqlx_migrations'\n           ORDER BY name",
+  "describe": {
+    "columns": [
+      {
+        "name": "name!",
+        "ordinal": 0,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      true
+    ]
+  },
+  "hash": "c0dbdc3bb8d13da194935f12649d42439f18de5eb450e65bf100b5681deff9d5"
+}

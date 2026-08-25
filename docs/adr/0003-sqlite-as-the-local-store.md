@@ -72,3 +72,61 @@ async SQLite driver.
   writers make corruption a question of when.
 - **An embedded key-value store (sled, redb).** Loses relational queries the UI needs and
   gains nothing for this data size.
+
+---
+
+## Amendment, 2026-08-20 — corrected against the crate split and the shipped identifier
+
+The decision stands unchanged: SQLite, `sqlx`, one pool, schema owned by Rust. This ADR
+predates ADR-0015's crate split and a bundle-identifier fix, and two things it states as
+fact are wrong, a third it never says at all.
+
+### The macOS path was an illustration, not a spec, and read as the latter
+
+`~/Library/Application Support/dev.rimaia.app/rimaia.db` is wrong on two counts, one
+cosmetic and one structural. The shipped identifier (`src-tauri/tauri.conf.json`) is
+`com.rimaia.app`, not `dev.rimaia.app` — a stale value from before it was fixed. More to
+the point, that path was never a string Rimaia formats. `crates/core/src/paths.rs` says why
+in its own module doc: core *derives* paths, it does not discover them, because the
+OS-specific lookup would need a `tauri` dependency in a crate that must not have one
+(ADR-0015). The shell resolves the platform directory exactly once, in
+`src-tauri/src/lib.rs`'s `setup()`, via Tauri's `app_data_dir()`, and hands it to
+`AppPaths::new()`; every other path — the database file included — is `data_dir.join(...)`
+from there. `AppPaths::db_file()` is the definition now; the path in the Decision section
+was always meant to illustrate what that resolves to on one platform, not to specify it.
+
+### Migrations: the crate split moved the code, not the files, and that is deliberate
+
+ADR-0015 moved persistence into `crates/core/`. Both halves of the original claim are true
+at once, and this ADR left the seam unstated. The pool, the migrator, the models and every
+query are `rimaia-core`, under `crates/core/src/db/`. The migration **files** stay at
+`src-tauri/migrations/` — not an oversight this ADR failed to update, but where they belong:
+they are what the application ships and what `sqlx-cli` is pointed at, so shell tooling and
+packaging find them without a crate-relative detour. `crates/core` embeds them at compile
+time with `sqlx::migrate!("../../src-tauri/migrations")`, a path relative to
+`CARGO_MANIFEST_DIR` and therefore independent of the working directory the build runs
+from, plus a three-line `crates/core/build.rs` that `cargo:rerun-if-changed`s the
+directory — `sqlx::migrate!` embeds files with `include_str!`, so rustc only watches the
+files it found on the *previous* build, and adding the very first migration would not
+otherwise force a rebuild. Task 002 ships both; as of this amendment `src-tauri/migrations/`
+still holds only `.gitkeep`.
+
+Core must own the migrator, not the shell: task 002 lands one
+`rimaia_core::db::migrate(&pool)`, called by the app at startup and by the in-memory harness
+in `crates/core/src/testing/db.rs`, so a test can never pass against a schema the running
+app does not have.
+
+Moving the files next to the code that reads them was considered and rejected. They belong
+to the application, not the library — `sqlx-cli` and packaging point at
+`src-tauri/migrations/` regardless of which crate embeds them at compile time — and a
+rename would cost a path in three places (the `sqlx::migrate!` argument, `sqlx-cli`'s
+`--source`, CI) and buy nothing.
+
+### The offline cache lives at the workspace root
+
+This ADR commits to checking in the `.sqlx` cache but predates the workspace and never says
+where. One `.sqlx/` at the workspace root, generated with
+`cargo sqlx prepare --workspace -- --all-targets`: `sqlx` looks in the crate directory and
+then the workspace root when resolving the cache, and `rimaia-core` is the only crate that
+holds queries, so the workspace root is where every consumer — `cargo check` on the
+workspace, clippy, CI — finds it without a per-crate override.

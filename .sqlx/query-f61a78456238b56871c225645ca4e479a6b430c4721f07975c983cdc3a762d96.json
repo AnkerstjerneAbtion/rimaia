@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT t.title AS \"title!\"\n           FROM task_dependencies d JOIN tasks t ON t.id = d.task_id\n           WHERE d.depends_on_task_id = ?1\n           ORDER BY t.title ASC",
+  "describe": {
+    "columns": [
+      {
+        "name": "title!",
+        "ordinal": 0,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "f61a78456238b56871c225645ca4e479a6b430c4721f07975c983cdc3a762d96"
+}

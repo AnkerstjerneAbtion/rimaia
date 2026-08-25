@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT id FROM runs WHERE task_id = ?1 AND ended_at IS NULL ORDER BY attempt ASC",
+  "describe": {
+    "columns": [
+      {
+        "name": "id",
+        "ordinal": 0,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "91f55630b4449b57e32c5f2e8e5d6f5560f04165d3406f682038510a2bb21a8a"
+}

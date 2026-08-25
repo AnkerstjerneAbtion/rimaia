@@ -3,7 +3,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { invoke } from "@tauri-apps/api/core";
 
-import { SettingsView } from "./SettingsView";
+import { StorageSection } from "./StorageSection";
 
 // `commands.ts` is the only module that imports `invoke`; mocking it here
 // exercises the real call path (including `toRimaiaError`) instead of
@@ -18,7 +18,7 @@ beforeEach(() => {
   mockInvoke.mockReset();
 });
 
-describe("SettingsView", () => {
+describe("StorageSection", () => {
   it("renders the data, database and logs paths once get_app_info resolves", async () => {
     mockInvoke.mockImplementation(async (command) => {
       if (command === "get_app_info") {
@@ -32,7 +32,7 @@ describe("SettingsView", () => {
       throw new Error(`unexpected command: ${command}`);
     });
 
-    render(<SettingsView />);
+    render(<StorageSection />);
 
     expect(await screen.findByText("/home/user/.local/share/rimaia")).toBeInTheDocument();
     expect(
@@ -44,7 +44,7 @@ describe("SettingsView", () => {
   it("renders the error message inside the ErrorBanner when get_app_info rejects", async () => {
     mockInvoke.mockRejectedValue({ code: "io", message: "app data directory unreadable" });
 
-    render(<SettingsView />);
+    render(<StorageSection />);
 
     const banner = await screen.findByRole("alert");
     expect(banner).toHaveTextContent("app data directory unreadable");

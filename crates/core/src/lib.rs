@@ -11,13 +11,16 @@
 //! stops business rules from drifting into a layer the MCP server cannot reach.
 
 pub mod clock;
+pub mod context;
 pub mod db;
 pub mod error;
+pub mod events;
 pub mod mcp;
 pub mod paths;
 pub mod repo;
 pub mod runner;
 pub mod scheduler;
+pub mod startup;
 pub mod tasks;
 pub mod worktree;
 
@@ -27,5 +30,7 @@ pub mod worktree;
 pub mod testing;
 
 pub use clock::{Clock, SystemClock};
+pub use context::ServiceContext;
 pub use error::{Error, ErrorCode, Result};
+pub use events::ChangeEvent;
 pub use paths::AppPaths;

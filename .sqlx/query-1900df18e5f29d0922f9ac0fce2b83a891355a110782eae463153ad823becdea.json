@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO task_links (id, task_id, label, url, position)\n         VALUES (?1, 'no-such-task', 'label', 'https://example.com', 1.0)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": []
+  },
+  "hash": "1900df18e5f29d0922f9ac0fce2b83a891355a110782eae463153ad823becdea"
+}

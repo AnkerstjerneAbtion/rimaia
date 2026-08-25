@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT position FROM tasks\n           WHERE repository_id = ?1 AND board_column = ?2 AND id IS NOT ?3\n           ORDER BY position DESC, created_at DESC, id DESC LIMIT 1",
+  "describe": {
+    "columns": [
+      {
+        "name": "position",
+        "ordinal": 0,
+        "type_info": "Float"
+      }
+    ],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "50dfb21c0281c2bb025cc52213a8b317d7217cd2feae8f408a7b1d9ca7e850f5"
+}

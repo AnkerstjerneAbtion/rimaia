@@ -20,6 +20,17 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # Belongs to the `shell` job by subject (it's about the Tauri
+      # command wiring), but it's placed here, first, on purpose: it reads
+      # src-tauri/src/lib.rs and src/lib/commands.ts as plain text, so it
+      # needs no Rust toolchain, no apt packages, and no `npm ci` — nothing
+      # this job installs below. Running it before any of that gives the
+      # fastest possible signal for the one gap ADR-0015 admits no E2E test
+      # covers: a command registered in only one of lib.rs's two
+      # `generate_handler!` lists.
+      - name: Check Tauri command wiring
+        run: ./scripts/check-command-wiring.sh
+
       - uses: actions/setup-node@v4
         with:
           node-version: 20

@@ -22,10 +22,13 @@ tauri-build = { version = "2", features = [] }
 rimaia-core = { path = "../crates/core" }
 tauri = { version = "2", features = [] }
 tauri-plugin-opener = "2"
+# Native folder picker for task 003's "Settings → Repositories → add" (ADR-0002).
+tauri-plugin-dialog = "2"
 
 serde = { workspace = true }
 serde_json = { workspace = true }
 sqlx = { workspace = true }
+tokio = { workspace = true }
 tracing = { workspace = true }
 tracing-appender = "0.2"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
