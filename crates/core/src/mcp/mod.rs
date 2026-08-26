@@ -13,9 +13,11 @@
 pub mod error;
 pub mod requests;
 pub mod responses;
+pub mod server;
 pub mod settings;
 
 pub use error::ToolError;
+pub use server::RimaiaServer;
 pub use settings::{configured_port, set_configured_port, MCP_PORT};
 
 /// The port ADR-0006 fixes as the default, and the one every `claude mcp add`

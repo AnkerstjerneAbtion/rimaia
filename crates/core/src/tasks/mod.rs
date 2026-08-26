@@ -29,7 +29,9 @@ pub mod service;
 pub mod types;
 
 pub use dependencies::set_task_dependencies;
-pub use links::{add_task_link, remove_task_link, reorder_task_link, update_task_link};
+pub use links::{
+    add_task_link, get_task_link, remove_task_link, reorder_task_link, update_task_link,
+};
 pub use position::{position_between, rebalance_column, rebalanced_positions, Placement};
 pub use run_state::{is_legal_run_state_transition, set_run_state};
 pub use service::{

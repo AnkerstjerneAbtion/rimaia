@@ -93,6 +93,16 @@ pub async fn update_task_link(
     Ok(updated)
 }
 
+/// One link by its own id.
+///
+/// A read, so it takes the context only for the pool and publishes nothing.
+/// Task 010 needs it: every MCP tool answers with the whole task it touched,
+/// and `remove_task_link` is handed a link id — the owning task has to be
+/// known *before* the row is deleted.
+pub async fn get_task_link(ctx: &ServiceContext, link_id: &str) -> Result<TaskLink> {
+    fetch_link_row(&ctx.pool, link_id).await
+}
+
 #[tracing::instrument(skip_all, fields(source = ctx.source.as_str(), link_id = %link_id))]
 pub async fn remove_task_link(ctx: &ServiceContext, link_id: &str) -> Result<()> {
     let mut tx = ctx.pool.begin().await?;

@@ -211,15 +211,6 @@ pub struct BaseInstructionsView {
     pub template_variables: Vec<String>,
 }
 
-/// What `set_task_dependencies` reports back.
-#[derive(Debug, Clone, PartialEq, Serialize, JsonSchema)]
-#[serde(rename_all = "snake_case")]
-pub struct DependenciesView {
-    pub task_id: String,
-    /// The stored set, sorted — the order `get_task` reads it back in.
-    pub depends_on: Vec<String>,
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
