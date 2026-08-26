@@ -597,6 +597,7 @@ async fn file_backed_context(db_file: &Path) -> ServiceContext {
     ServiceContext::new(
         pool,
         Arc::new(TestClock::new(rimaia_core::testing::test_epoch())),
+        rimaia_core::db::MutationSource::Ui,
     )
 }
 

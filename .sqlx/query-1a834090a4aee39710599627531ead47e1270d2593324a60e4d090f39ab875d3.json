@@ -1,6 +1,6 @@
 {
   "db_name": "SQLite",
-  "query": "SELECT id, repository_id, title, plan, extra_instructions,\n            board_column AS \"column: BoardColumn\", position, run_state AS \"run_state: RunState\",\n            branch, worktree_path, strategy_mode AS \"strategy_mode: StrategyMode\", model, effort,\n            strategy_plan, strategy_source AS \"strategy_source: StrategySource\",\n            strategy_updated_at AS \"strategy_updated_at: DateTime<Utc>\",\n            created_at AS \"created_at: DateTime<Utc>\", updated_at AS \"updated_at: DateTime<Utc>\"\n           FROM tasks WHERE id = ?1",
+  "query": "SELECT id, repository_id, title, plan, extra_instructions,\n            board_column AS \"column: BoardColumn\", position, run_state AS \"run_state: RunState\",\n            branch, worktree_path, strategy_mode AS \"strategy_mode: StrategyMode\", model, effort,\n            strategy_plan, strategy_source AS \"strategy_source: StrategySource\",\n            strategy_updated_at AS \"strategy_updated_at: DateTime<Utc>\",\n            created_at AS \"created_at: DateTime<Utc>\", updated_at AS \"updated_at: DateTime<Utc>\",\n            source AS \"source: MutationSource\"\n           FROM tasks WHERE id = ?1",
   "describe": {
     "columns": [
       {
@@ -92,6 +92,11 @@
         "name": "updated_at: DateTime<Utc>",
         "ordinal": 17,
         "type_info": "Text"
+      },
+      {
+        "name": "source: MutationSource",
+        "ordinal": 18,
+        "type_info": "Text"
       }
     ],
     "parameters": {
@@ -115,8 +120,9 @@
       true,
       true,
       false,
+      false,
       false
     ]
   },
-  "hash": "08e774a353ffb47d79cf2bc516b26e4f791862608a113c61756156924c703591"
+  "hash": "1a834090a4aee39710599627531ead47e1270d2593324a60e4d090f39ab875d3"
 }

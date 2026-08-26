@@ -9,6 +9,7 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
+use rimaia_core::db::MutationSource;
 use rimaia_core::runner::events::RunTail;
 use rimaia_core::runner::process::DEFAULT_GRACE_PERIOD;
 use rimaia_core::runner::RunnerConfig;
@@ -82,7 +83,11 @@ pub fn run() {
             // never a bare pool — that is what makes the MCP server (task 010)
             // a second caller of the same rules instead of a second
             // implementation of them (ADR-0006).
-            let context = ServiceContext::new(pool, Arc::new(SystemClock));
+            // `Ui`, because this is the context the user's own commands write
+            // through (ADR-0019). The scheduler and the MCP server are handed
+            // this same context and each re-sources its own clone at
+            // construction, so nothing below has to remember to pass a source.
+            let context = ServiceContext::new(pool, Arc::new(SystemClock), MutationSource::Ui);
 
             // Subscribed once, here, for the life of the app (ADR-0018): the
             // shell is the only thing that turns a `ChangeEvent` into a Tauri

@@ -110,6 +110,11 @@ export type RunStatus = "running" | "succeeded" | "failed" | "cancelled" | "inte
 /** Mirrors `rimaia_core::db::ExitClass` (ADR-0011). Why a run stopped. */
 export type ExitClass = "success" | "usage_limit" | "transient" | "interrupted" | "fatal" | "cancelled";
 
+/** Mirrors `rimaia_core::db::MutationSource` (ADR-0019). Which door a mutation
+ *  came through: the board, an MCP tool call from another Claude Code session,
+ *  or the run scheduler. */
+export type MutationSource = "ui" | "mcp" | "system";
+
 /** Mirrors `rimaia_core::db::Task`. */
 export interface Task {
   id: string;
@@ -135,6 +140,9 @@ export interface Task {
   strategyUpdatedAt: string | null;
   createdAt: string;
   updatedAt: string;
+  /** Creation provenance, never rewritten (ADR-0019): a task created on the
+   *  board and later patched over MCP still reads `ui`. */
+  source: MutationSource;
 }
 
 /** Mirrors `rimaia_core::db::TaskLink`. One `{label, url}` external reference. */

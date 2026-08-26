@@ -176,6 +176,41 @@ pub enum ScheduleMode {
     Parallel,
 }
 
+/// Which door a mutation came through (ADR-0019).
+///
+/// Three values because there are three writers of these tables, and each is a
+/// subsystem rather than a caller: the UI through the Tauri commands, an MCP
+/// tool call from a Claude Code session elsewhere on this machine (ADR-0006),
+/// and the run scheduler working the board (ADR-0010). It travels on
+/// [`ServiceContext`](crate::ServiceContext) rather than as a parameter for the
+/// reason ADR-0018 gives about publishing: being the scheduler is what a
+/// subsystem *is*, not something each of its call sites decides.
+///
+/// On a `tasks` row this is **creation provenance and is never rewritten** — see
+/// [`Task::source`]. ADR-0006's "every mutation is attributed" is carried by the
+/// tracing span on each mutating service function, not by the column.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, sqlx::Type)]
+#[sqlx(rename_all = "snake_case")]
+#[serde(rename_all = "snake_case")]
+pub enum MutationSource {
+    Ui,
+    Mcp,
+    System,
+}
+
+impl MutationSource {
+    /// The stored spelling, which is also what the tracing span records — one
+    /// string, so a `source` in the log file and a `source` in the sqlite3 CLI
+    /// are the same word.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            MutationSource::Ui => "ui",
+            MutationSource::Mcp => "mcp",
+            MutationSource::System => "system",
+        }
+    }
+}
+
 /// A registered local git repository (ADR-0005).
 ///
 /// The repository on disk is authoritative: this row records what Rimaia was told,
@@ -257,6 +292,11 @@ pub struct Task {
     pub strategy_updated_at: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+    /// Which door created this task (ADR-0019). Written once, by
+    /// [`crate::tasks::create_task`], and never updated — a patch over MCP
+    /// leaves a `ui` task saying `ui`. Last, after `updated_at`, matching the
+    /// column order the migration produced.
+    pub source: MutationSource,
 }
 
 /// One external reference on a task — an Asana task, a GitHub issue, a doc
@@ -502,6 +542,7 @@ mod tests {
             strategy_updated_at: None,
             created_at: timestamp("2026-08-20T12:00:00Z"),
             updated_at: timestamp("2026-08-20T12:30:00Z"),
+            source: MutationSource::Mcp,
         };
 
         assert_eq!(
@@ -528,6 +569,9 @@ mod tests {
                 "strategyUpdatedAt": null,
                 "createdAt": "2026-08-20T12:00:00Z",
                 "updatedAt": "2026-08-20T12:30:00Z",
+                // ADR-0019's provenance, `snake_case` on the wire like every
+                // other enum value, because it answers to SQLite's CHECK too.
+                "source": "mcp",
             })
         );
     }

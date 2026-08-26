@@ -13,6 +13,7 @@ use chrono::{DateTime, Utc};
 use tokio::sync::broadcast::Receiver;
 
 use crate::context::ServiceContext;
+use crate::db::MutationSource;
 use crate::events::ChangeEvent;
 use crate::testing::{test_pool, TestClock};
 
@@ -49,7 +50,14 @@ impl TestContext {
     /// is an absolute time, such as a usage limit's epoch `resetsAt`.
     pub async fn starting_at(start: DateTime<Utc>) -> Self {
         let clock = TestClock::new(start);
-        let context = ServiceContext::new(test_pool().await, Arc::new(clock.clone()));
+        // `Ui` because a service test stands in for the board unless it says
+        // otherwise; a test about the MCP path re-sources with `with_source`,
+        // exactly as `mcp::build` does (ADR-0019).
+        let context = ServiceContext::new(
+            test_pool().await,
+            Arc::new(clock.clone()),
+            MutationSource::Ui,
+        );
         let changes = context.subscribe();
 
         Self {

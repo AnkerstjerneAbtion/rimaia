@@ -20,8 +20,8 @@ use sqlx::{FromRow, Row, SqliteConnection, SqlitePool};
 
 use crate::context::ServiceContext;
 use crate::db::{
-    new_id, BoardColumn, ExitClass, Run, RunState, RunStatus, StrategyMode, StrategySource, Task,
-    TaskLink,
+    new_id, BoardColumn, ExitClass, MutationSource, Run, RunState, RunStatus, StrategyMode,
+    StrategySource, Task, TaskLink,
 };
 use crate::error::{Error, Result};
 use crate::events::ChangeEvent;
@@ -154,6 +154,10 @@ SELECT t.*,
 /// [`BoardColumn::Ready`] is held to the same empty-plan guard
 /// [`move_task`] enforces, so the invariant holds regardless of which door a
 /// task enters `ready` through.
+#[tracing::instrument(
+    skip_all,
+    fields(source = ctx.source.as_str(), repository_id = %input.repository_id)
+)]
 pub async fn create_task(ctx: &ServiceContext, input: NewTask) -> Result<Task> {
     validate_title(&input.title)?;
     let column = input.column.unwrap_or(BoardColumn::NotReady);
@@ -170,8 +174,8 @@ pub async fn create_task(ctx: &ServiceContext, input: NewTask) -> Result<Task> {
     sqlx::query!(
         r#"INSERT INTO tasks
             (id, repository_id, title, plan, extra_instructions, board_column, position,
-             run_state, created_at, updated_at)
-           VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?9)"#,
+             run_state, created_at, updated_at, source)
+           VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?9, ?10)"#,
         id,
         input.repository_id,
         input.title,
@@ -181,6 +185,7 @@ pub async fn create_task(ctx: &ServiceContext, input: NewTask) -> Result<Task> {
         position,
         RunState::Idle,
         now,
+        ctx.source,
     )
     .execute(&mut *tx)
     .await?;
@@ -306,6 +311,7 @@ pub async fn list_tasks(ctx: &ServiceContext, filter: TaskFilter) -> Result<Vec<
 /// `patch.repository_id` re-files the task, and is refused once anything has
 /// tied it to the repository it is in — see
 /// [`resolve_repository_placement`] and seam-contract D13.
+#[tracing::instrument(skip_all, fields(source = ctx.source.as_str(), task_id = %id))]
 pub async fn update_task(ctx: &ServiceContext, id: &str, patch: TaskPatch) -> Result<Task> {
     let mut tx = ctx.pool.begin().await?;
     let current = fetch_task_row(&mut *tx, id).await?;
@@ -372,6 +378,7 @@ pub async fn update_task(ctx: &ServiceContext, id: &str, patch: TaskPatch) -> Re
 /// outgoing dependency edges and its runs — all by the schema's `CASCADE`,
 /// exercised here through the service rather than assumed from the schema
 /// test suite in `tests/store.rs`.
+#[tracing::instrument(skip_all, fields(source = ctx.source.as_str(), task_id = %id))]
 pub async fn delete_task(ctx: &ServiceContext, id: &str) -> Result<()> {
     let mut tx = ctx.pool.begin().await?;
     fetch_task_row(&mut *tx, id).await?;
@@ -424,6 +431,7 @@ pub async fn delete_task(ctx: &ServiceContext, id: &str) -> Result<()> {
 /// Refuses to land in [`BoardColumn::Ready`] with no plan. Landing in
 /// [`BoardColumn::Done`] is always allowed from anywhere — the user is in
 /// charge of their own board.
+#[tracing::instrument(skip_all, fields(source = ctx.source.as_str(), task_id = %id, column = ?column))]
 pub async fn move_task(
     ctx: &ServiceContext,
     id: &str,
@@ -683,7 +691,8 @@ where
             branch, worktree_path, strategy_mode AS "strategy_mode: StrategyMode", model, effort,
             strategy_plan, strategy_source AS "strategy_source: StrategySource",
             strategy_updated_at AS "strategy_updated_at: DateTime<Utc>",
-            created_at AS "created_at: DateTime<Utc>", updated_at AS "updated_at: DateTime<Utc>"
+            created_at AS "created_at: DateTime<Utc>", updated_at AS "updated_at: DateTime<Utc>",
+            source AS "source: MutationSource"
            FROM tasks WHERE id = ?1"#,
         id,
     )
@@ -904,6 +913,7 @@ mod tests {
                 strategy_updated_at: None,
                 created_at: "2026-08-20T12:00:00Z".parse().expect("a literal timestamp"),
                 updated_at: "2026-08-20T12:30:00Z".parse().expect("a literal timestamp"),
+                source: MutationSource::Ui,
             },
             link_count: 2,
             dependency_count: 1,
@@ -925,6 +935,10 @@ mod tests {
         assert_eq!(wire["linkCount"], json!(2));
         assert_eq!(wire["dependencyCount"], json!(1));
         assert_eq!(wire["blockedByIncomplete"], json!(false));
+        // ADR-0019's provenance, flattened out of the task row like every other
+        // column: `ui`, never `Ui`, because the value answers to SQLite's CHECK
+        // as well as to TypeScript.
+        assert_eq!(wire["source"], json!("ui"));
         assert_eq!(
             wire["lastRun"],
             json!({
@@ -961,6 +975,7 @@ mod tests {
                 strategy_updated_at: None,
                 created_at: "2026-08-20T12:00:00Z".parse().expect("a literal timestamp"),
                 updated_at: "2026-08-20T12:00:00Z".parse().expect("a literal timestamp"),
+                source: MutationSource::Mcp,
             },
             link_count: 0,
             dependency_count: 0,

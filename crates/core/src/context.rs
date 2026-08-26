@@ -26,6 +26,7 @@ use sqlx::SqlitePool;
 use tokio::sync::broadcast;
 
 use crate::clock::Clock;
+use crate::db::MutationSource;
 use crate::events::{ChangeEvent, CHANGE_BUFFER_CAPACITY};
 use crate::runner::events::{RunTail, TAIL_CHANNEL_CAPACITY};
 
@@ -48,6 +49,15 @@ pub struct ServiceContext {
     ///
     /// Prefer [`publish_tail`](Self::publish_tail).
     pub tail: broadcast::Sender<RunTail>,
+    /// Which door every mutation made through this context came from
+    /// (ADR-0019).
+    ///
+    /// Ambient for the same reason `changes` is: it is a property of the
+    /// subsystem holding the context, not of the call. The shell builds one
+    /// [`MutationSource::Ui`] context and hands it to both the scheduler and
+    /// the MCP server, each of which re-sources its own clone with
+    /// [`with_source`](Self::with_source) at construction.
+    pub source: MutationSource,
 }
 
 impl ServiceContext {
@@ -57,7 +67,13 @@ impl ServiceContext {
     /// context must publish to the *same* senders — a second channel is a second
     /// set of subscribers that never hear each other, which shows up as a board
     /// that refreshes for its own writes and not for anyone else's.
-    pub fn new(pool: SqlitePool, clock: Arc<dyn Clock>) -> Self {
+    ///
+    /// `source` is a parameter rather than a default because every plausible
+    /// default is wrong somewhere — [`MutationSource::Ui`] is wrong for the
+    /// scheduler, [`MutationSource::System`] is wrong for the shell — and a
+    /// field that is wrong by omission is worse than one the compiler makes
+    /// the caller name. There is deliberately no `Default` impl.
+    pub fn new(pool: SqlitePool, clock: Arc<dyn Clock>, source: MutationSource) -> Self {
         // The receivers are dropped immediately; the senders stay alive on their
         // own and `subscribe` mints receivers on demand. Nothing sent before the
         // first `subscribe` is buffered, which is why a test subscribes first.
@@ -68,6 +84,25 @@ impl ServiceContext {
             clock,
             changes,
             tail,
+            source,
+        }
+    }
+
+    /// The same context, attributing its mutations to `source` (ADR-0019).
+    ///
+    /// Called once per subsystem at construction — `scheduler::build` and
+    /// `mcp::build` each do it — so the shell hands one context to both and
+    /// never thinks about the field again.
+    ///
+    /// It clones rather than rebuilding, which is the whole point: the clone
+    /// keeps the *same* senders, so an MCP write reaches the board's
+    /// subscriber. A `with_source` that minted fresh channels would be a card
+    /// that never refreshes for anyone else's writes, which is the failure
+    /// ADR-0018 exists to prevent — hence the test below.
+    pub fn with_source(&self, source: MutationSource) -> Self {
+        Self {
+            source,
+            ..self.clone()
         }
     }
 
@@ -131,6 +166,7 @@ impl fmt::Debug for ServiceContext {
     /// publication went nowhere.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("ServiceContext")
+            .field("source", &self.source)
             .field("subscribers", &self.changes.receiver_count())
             .field("tail_subscribers", &self.tail.receiver_count())
             .finish_non_exhaustive()
@@ -149,7 +185,11 @@ mod tests {
         let start: DateTime<Utc> = DateTime::parse_from_rfc3339("2026-08-20T02:00:00Z")
             .expect("test timestamp must be valid RFC 3339")
             .with_timezone(&Utc);
-        ServiceContext::new(test_pool().await, Arc::new(TestClock::new(start)))
+        ServiceContext::new(
+            test_pool().await,
+            Arc::new(TestClock::new(start)),
+            MutationSource::Ui,
+        )
     }
 
     fn task_ids(event: &ChangeEvent) -> Vec<String> {
@@ -312,6 +352,40 @@ mod tests {
             current_tool: None,
             last_assistant_text: None,
         }
+    }
+
+    #[tokio::test]
+    async fn with_source_publishes_to_the_original_subscribers() {
+        // The ADR-0018 guarantee `with_source` must not break. Every subsystem
+        // re-sources its own clone at construction, so if this cloned the
+        // struct but minted new channels, a task created over MCP would never
+        // reach the board — the exact requirement ADR-0006 states.
+        let ctx = context().await;
+        let mut changes = ctx.subscribe();
+
+        ctx.with_source(MutationSource::Mcp)
+            .publish(ChangeEvent::tasks(["written-over-mcp".to_string()]));
+
+        assert_eq!(
+            changes.recv().await.expect("the sender is still alive"),
+            ChangeEvent::tasks(["written-over-mcp".to_string()])
+        );
+    }
+
+    #[tokio::test]
+    async fn with_source_changes_only_the_source() {
+        let ctx = context().await;
+
+        let scheduler = ctx.with_source(MutationSource::System);
+
+        assert_eq!(scheduler.source, MutationSource::System);
+        assert_eq!(ctx.source, MutationSource::Ui, "the original is untouched");
+        assert_eq!(scheduler.clock.now(), ctx.clock.now());
+        assert!(
+            scheduler.changes.same_channel(&ctx.changes),
+            "the clone must publish on the original's channel"
+        );
+        assert!(scheduler.tail.same_channel(&ctx.tail));
     }
 
     #[tokio::test]

@@ -65,6 +65,7 @@ use tokio::sync::broadcast::error::{RecvError, TryRecvError};
 use tokio::sync::{broadcast, watch};
 
 use crate::context::ServiceContext;
+use crate::db::MutationSource;
 use crate::error::Result;
 use crate::events::ChangeEvent;
 use crate::paths::AppPaths;
@@ -119,6 +120,14 @@ pub fn build(
     paths: AppPaths,
     runner: RunnerConfig,
 ) -> (QueueHandle, QueueTask) {
+    // Every write this queue makes is the machine's, not the user's
+    // (ADR-0019). Re-sourced here, once, rather than at each service call
+    // inside the loop: the shell hands one `Ui` context to the scheduler and
+    // to the MCP server alike, and each subsystem is what decides what its own
+    // writes are attributed to. The clone keeps the original's channels — see
+    // `ServiceContext::with_source`.
+    let ctx = ctx.with_source(MutationSource::System);
+
     // The receiver is dropped immediately; the loop mints its own with
     // `subscribe`, which is what lets `build` be called before anything is
     // spawned.

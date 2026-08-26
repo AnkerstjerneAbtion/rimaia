@@ -17,8 +17,8 @@
 use chrono::{DateTime, Utc};
 use pretty_assertions::assert_eq;
 use rimaia_core::db::{
-    self, new_id, BoardColumn, ExitClass, Repository, Run, RunState, RunStatus, Schedule,
-    ScheduleMode, Setting, StrategyMode, StrategySource, Task, TaskDependency, TaskLink,
+    self, new_id, BoardColumn, ExitClass, MutationSource, Repository, Run, RunState, RunStatus,
+    Schedule, ScheduleMode, Setting, StrategyMode, StrategySource, Task, TaskDependency, TaskLink,
 };
 use rimaia_core::testing::test_pool;
 use serde::Serialize;
@@ -237,8 +237,8 @@ async fn a_task_round_trips_every_field_exactly() {
         "INSERT INTO tasks (
             id, repository_id, title, plan, extra_instructions, board_column, position,
             run_state, branch, worktree_path, strategy_mode, model, effort, strategy_plan,
-            strategy_source, strategy_updated_at, created_at, updated_at
-         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)",
+            strategy_source, strategy_updated_at, created_at, updated_at, source
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)",
         id,
         repository_id,
         "Wire the board to the store",
@@ -257,6 +257,7 @@ async fn a_task_round_trips_every_field_exactly() {
         strategy_updated_at,
         created_at,
         updated_at,
+        MutationSource::Mcp,
     )
     .execute(&pool)
     .await
@@ -285,6 +286,7 @@ async fn a_task_round_trips_every_field_exactly() {
             strategy_updated_at: Some(strategy_updated_at),
             created_at,
             updated_at,
+            source: MutationSource::Mcp,
         }
     );
 }
@@ -791,6 +793,71 @@ async fn an_unrecognised_run_state_is_refused() {
 }
 
 #[tokio::test]
+async fn the_source_column_rejects_a_spelling_outside_its_check() {
+    // ADR-0019's three doors, and only these three. A fourth would be a
+    // rename-copy-drop rebuild, so the CHECK is what makes the domain
+    // permanent — the same argument the initial schema's header makes for
+    // every other enum column.
+    let pool = test_pool().await;
+    let repository_id = insert_repository(&pool).await;
+    let id = new_id();
+
+    let result = sqlx::query!(
+        "INSERT INTO tasks (id, repository_id, title, board_column, position, run_state, created_at, updated_at, source)
+         VALUES (?1, ?2, 'a task', 'ready', 1.0, 'idle', ?3, ?3, 'cli')",
+        id,
+        repository_id,
+        NOW,
+    )
+    .execute(&pool)
+    .await;
+
+    assert_check_violation(result);
+}
+
+#[tokio::test]
+async fn an_existing_row_backfills_to_ui() {
+    // The migration's `DEFAULT 'ui'` is what backfills every row written before
+    // task 010 — and every row written by a statement that predates the column,
+    // which is what this insert stands in for. `ui` is the fact rather than a
+    // guess: the board was the only writer that existed.
+    let pool = test_pool().await;
+    let repository_id = insert_repository(&pool).await;
+    let id = insert_task(&pool, &repository_id, BoardColumn::Ready, RunState::Idle).await;
+
+    let task = fetch_task(&pool, &id).await;
+
+    assert_eq!(task.source, MutationSource::Ui);
+}
+
+#[tokio::test]
+async fn source_variants_round_trip_through_a_real_check_constraint() {
+    let pool = test_pool().await;
+    let repository_id = insert_repository(&pool).await;
+
+    for source in [
+        MutationSource::Ui,
+        MutationSource::Mcp,
+        MutationSource::System,
+    ] {
+        let id = new_id();
+        sqlx::query!(
+            "INSERT INTO tasks (id, repository_id, title, board_column, position, run_state, created_at, updated_at, source)
+             VALUES (?1, ?2, 'a task', 'ready', 1.0, 'idle', ?3, ?3, ?4)",
+            id,
+            repository_id,
+            NOW,
+            source,
+        )
+        .execute(&pool)
+        .await
+        .unwrap_or_else(|error| panic!("{source:?} must satisfy the CHECK: {error}"));
+
+        assert_eq!(fetch_task(&pool, &id).await.source, source);
+    }
+}
+
+#[tokio::test]
 async fn an_unrecognised_exit_class_is_refused() {
     let pool = test_pool().await;
     let repository_id = insert_repository(&pool).await;
@@ -1242,7 +1309,8 @@ async fn fetch_task(pool: &SqlitePool, id: &str) -> Task {
             branch, worktree_path, strategy_mode AS "strategy_mode: StrategyMode", model, effort,
             strategy_plan, strategy_source AS "strategy_source: StrategySource",
             strategy_updated_at AS "strategy_updated_at: DateTime<Utc>",
-            created_at AS "created_at: DateTime<Utc>", updated_at AS "updated_at: DateTime<Utc>"
+            created_at AS "created_at: DateTime<Utc>", updated_at AS "updated_at: DateTime<Utc>",
+            source AS "source: MutationSource"
            FROM tasks WHERE id = ?1"#,
         id,
     )
