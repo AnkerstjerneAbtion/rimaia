@@ -435,3 +435,32 @@ export interface WorktreeStatus {
   commitCount: number;
   diff: DiffStat;
 }
+
+// ---------------------------------------------------------------------------
+// The local MCP server (task 010) — see `crates/core/src/mcp/mod.rs`.
+// ---------------------------------------------------------------------------
+
+/** Mirrors `rimaia_core::mcp::McpState`. */
+export type McpServerState = "listening" | "port_in_use" | "stopped";
+
+/** Mirrors `rimaia_core::mcp::McpStatus`. */
+export interface McpStatus {
+  state: McpServerState;
+  /** What the port *should* be. It disagrees with {@link boundAddress} in
+   *  exactly the case the panel exists to explain, which is why every URL on
+   *  screen is built from the address and never from this. */
+  configuredPort: number;
+  /** `"127.0.0.1:4517"`, and `null` unless the server is listening. */
+  boundAddress: string | null;
+  /** The operating system's own words about a failed bind, plus the remedy. */
+  message: string | null;
+}
+
+/** Mirrors `rimaia_core::mcp::McpProbe`: what one real round trip measured. */
+export interface McpProbe {
+  endpoint: string;
+  latencyMs: number;
+  serverName: string;
+  protocolVersion: string;
+  toolCount: number;
+}

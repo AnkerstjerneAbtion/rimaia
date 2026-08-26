@@ -1,6 +1,7 @@
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex, OnceLock};
 
+use rimaia_core::mcp::McpHandle;
 use rimaia_core::runner::events::RunTail;
 use rimaia_core::runner::CancelSignal;
 use rimaia_core::scheduler::QueueHandle;
@@ -26,6 +27,12 @@ use rimaia_core::{AppPaths, Error, Result, ServiceContext};
 /// client that opens the Runs view mid-run has something to read is the
 /// shell's to build.
 ///
+/// `mcp` is the handle onto that server: `lib.rs` binds it as the last step of
+/// `setup()` — nothing outside Rimaia should reach the board until every repair
+/// startup was going to make has been made — and the exit path shuts it down
+/// before the queue, above `cancel_all`'s early return, so quitting with
+/// nothing in flight still closes the listener.
+///
 /// `queue` is task 009's one long-lived queue for the process's lifetime
 /// (ADR-0010). `commands::queue` is a thin wrapper over it — Start, Pause,
 /// Resume, Stop and Status are all this handle's own methods — and
@@ -40,6 +47,13 @@ pub struct AppState {
     pub paths: AppPaths,
     pub runs: RunRegistry,
     pub queue: QueueHandle,
+    /// Task 010's MCP server (ADR-0006).
+    ///
+    /// A `Mutex` because this is the one field that is not write-once:
+    /// `commands::mcp::set_mcp_port` replaces the whole handle in-process when
+    /// the user moves the port, since a listener cannot be rebound. Held only
+    /// for the swap and never across an `await`.
+    pub mcp: Mutex<McpHandle>,
 }
 
 /// How many concurrently-tracked runs' tail snapshots [`RunRegistry`] keeps.

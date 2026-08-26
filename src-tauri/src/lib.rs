@@ -10,6 +10,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use rimaia_core::db::MutationSource;
+use rimaia_core::mcp::{self, McpState};
 use rimaia_core::runner::events::RunTail;
 use rimaia_core::runner::process::DEFAULT_GRACE_PERIOD;
 use rimaia_core::runner::RunnerConfig;
@@ -173,11 +174,51 @@ pub fn run() {
             runs.attach_queue(queue.clone());
             tauri::async_runtime::spawn(queue_task.run());
 
+            // Task 010's MCP server (ADR-0006). Last of the startup steps on
+            // purpose: this is the first thing in this hook that a process
+            // *outside* Rimaia can write through, and nothing outside should
+            // reach the board until every repair this startup was going to
+            // make has been made — `reconcile_interrupted`, `worktree::reconcile`
+            // and the queue's own construction all sit above it.
+            let mcp_port = tauri::async_runtime::block_on(mcp::configured_port(&context.pool))
+                .unwrap_or_else(|error| {
+                    tracing::warn!(
+                        %error,
+                        port = mcp::DEFAULT_PORT,
+                        "could not read mcp_port; using the default",
+                    );
+                    mcp::DEFAULT_PORT
+                });
+            let (mcp_handle, mcp_task) =
+                tauri::async_runtime::block_on(mcp::build(context.clone(), mcp_port));
+            let mcp_status = mcp_handle.status();
+            match mcp_status.state {
+                McpState::Listening => {
+                    tracing::info!(address = ?mcp_status.bound_address, "MCP server listening")
+                }
+                // Task 010's "surfaces a port-in-use error instead of failing
+                // silently" — half of it. The other half is Settings → MCP,
+                // reading the same status. Not fatal: seam-contract D16.
+                McpState::PortInUse => tracing::warn!(
+                    port = mcp_port,
+                    error = ?mcp_status.message,
+                    "the MCP port is taken; Rimaia is running without its MCP server — \
+                     change the port in Settings → MCP",
+                ),
+                McpState::Stopped => tracing::warn!(
+                    port = mcp_port,
+                    error = ?mcp_status.message,
+                    "the MCP server did not start",
+                ),
+            }
+            tauri::async_runtime::spawn(mcp_task.run());
+
             app.manage(AppState {
                 context,
                 paths,
                 runs,
                 queue,
+                mcp: std::sync::Mutex::new(mcp_handle),
             });
 
             // The window is declared `"visible": false` in `tauri.conf.json` and
@@ -240,6 +281,9 @@ pub fn run() {
         commands::queue::resume_queue,
         commands::queue::stop_queue,
         commands::queue::get_queue_status,
+        commands::mcp::get_mcp_status,
+        commands::mcp::set_mcp_port,
+        commands::mcp::test_mcp_connection,
     ]);
     #[cfg(not(debug_assertions))]
     let builder = builder.invoke_handler(tauri::generate_handler![
@@ -277,6 +321,9 @@ pub fn run() {
         commands::queue::resume_queue,
         commands::queue::stop_queue,
         commands::queue::get_queue_status,
+        commands::mcp::get_mcp_status,
+        commands::mcp::set_mcp_port,
+        commands::mcp::test_mcp_connection,
     ]);
 
     // `Builder::run(context)` is exactly `build(context)?.run(|_, _| {})`
@@ -344,6 +391,15 @@ async fn shut_down(app: &tauri::AppHandle) {
         // point, and nothing here could have started a run either.
         return;
     };
+    // Above `cancel_all`'s early return on purpose: quitting with nothing in
+    // flight must still close the listener, or task 010's "stopping the app
+    // makes the server unreachable" holds only on the nights a run happened to
+    // be going.
+    state
+        .mcp
+        .lock()
+        .expect("the mcp handle mutex is poisoned")
+        .shutdown();
     state.queue.shutdown();
     if !state.runs.cancel_all().await {
         return;
