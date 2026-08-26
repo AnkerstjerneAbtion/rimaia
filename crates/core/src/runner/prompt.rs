@@ -185,6 +185,23 @@ fn link_list(links: &[TaskLink]) -> String {
 const OPEN: &str = "{{";
 const CLOSE: &str = "}}";
 
+/// ADR-0009's five variable names, as a list something outside this module can
+/// read.
+///
+/// Task 010's `get_base_instructions` returns the stored template unexpanded
+/// and hands this alongside it, so a planning agent writing a plan can use a
+/// placeholder that exists rather than invent one. The colocated test asserts
+/// every name here resolves through [`Variables::lookup`] *and* that `lookup`
+/// recognises nothing else — which is what stops this constant and the
+/// expander drifting apart.
+pub const TEMPLATE_VARIABLES: [&str; 5] = [
+    "task.title",
+    "task.branch",
+    "task.links",
+    "repo.name",
+    "repo.default_branch",
+];
+
 /// The five variables ADR-0009 fixes, resolved once before any expansion.
 ///
 /// Resolved up front rather than looked up lazily so that [`expand`] is a pure
@@ -280,6 +297,34 @@ mod tests {
             task_links: "- [Asana](https://app.asana.com/0/1/2)".to_string(),
             repo_name: "rimaia".to_string(),
             repo_default_branch: "main".to_string(),
+        }
+    }
+
+    #[test]
+    fn the_published_variable_list_is_exactly_what_lookup_recognises() {
+        // Both directions, because either half alone lets the two drift: a
+        // name published but unresolvable expands to nothing, and a name
+        // resolvable but unpublished is one no agent will ever use.
+        let variables = variables();
+
+        for name in TEMPLATE_VARIABLES {
+            assert!(
+                variables.lookup(name).is_some(),
+                "{name} is published but does not resolve"
+            );
+        }
+
+        for unknown in [
+            "task.plan",
+            "task.id",
+            "repo.path",
+            "Task.Title",
+            "task.title ",
+        ] {
+            assert!(
+                variables.lookup(unknown).is_none(),
+                "{unknown} resolves but is not published"
+            );
         }
     }
 

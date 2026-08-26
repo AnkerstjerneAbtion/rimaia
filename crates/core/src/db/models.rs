@@ -44,7 +44,22 @@ pub fn new_id() -> String {
 ///
 /// Only `ready` feeds the run queue; `in_review` is where the morning review
 /// starts.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, sqlx::Type)]
+/// `JsonSchema` because an MCP tool takes this off the wire (ADR-0006), and a
+/// tool that advertises `column: string` is a tool that gets `"todo"` sent to
+/// it. Deriving it here rather than mirroring the domain in `mcp::requests`
+/// keeps one list of columns; the derive is inert everywhere else.
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Hash,
+    Serialize,
+    Deserialize,
+    sqlx::Type,
+    schemars::JsonSchema,
+)]
 #[sqlx(rename_all = "snake_case")]
 #[serde(rename_all = "snake_case")]
 pub enum BoardColumn {
@@ -65,7 +80,20 @@ pub enum BoardColumn {
 /// own state (seam-contract D9). ADR-0007's list and task 005's badge list omit it
 /// independently, which is a decision and not an oversight — and the schema's
 /// `CHECK` now makes it permanent.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, sqlx::Type)]
+/// `JsonSchema` for the reason [`BoardColumn`] carries one: `list_tasks`
+/// filters on it over MCP.
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Hash,
+    Serialize,
+    Deserialize,
+    sqlx::Type,
+    schemars::JsonSchema,
+)]
 #[sqlx(rename_all = "snake_case")]
 #[serde(rename_all = "snake_case")]
 pub enum RunState {
@@ -91,7 +119,18 @@ pub enum RunState {
 /// What each class *does* — wait for the reset, back off, resume once, stop — is
 /// retry policy, and lives with the classifier (task 014) rather than with the
 /// value.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, sqlx::Type)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Hash,
+    Serialize,
+    Deserialize,
+    sqlx::Type,
+    schemars::JsonSchema,
+)]
 #[sqlx(rename_all = "snake_case")]
 #[serde(rename_all = "snake_case")]
 pub enum ExitClass {
@@ -117,7 +156,18 @@ pub enum ExitClass {
 ///
 /// There is no `queued`: a `runs` row exists only once a process was spawned for
 /// it, and what is waiting to start is a [`RunState`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, sqlx::Type)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Hash,
+    Serialize,
+    Deserialize,
+    sqlx::Type,
+    schemars::JsonSchema,
+)]
 #[sqlx(rename_all = "snake_case")]
 #[serde(rename_all = "snake_case")]
 pub enum RunStatus {
@@ -189,7 +239,18 @@ pub enum ScheduleMode {
 /// On a `tasks` row this is **creation provenance and is never rewritten** — see
 /// [`Task::source`]. ADR-0006's "every mutation is attributed" is carried by the
 /// tracing span on each mutating service function, not by the column.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, sqlx::Type)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Hash,
+    Serialize,
+    Deserialize,
+    sqlx::Type,
+    schemars::JsonSchema,
+)]
 #[sqlx(rename_all = "snake_case")]
 #[serde(rename_all = "snake_case")]
 pub enum MutationSource {
