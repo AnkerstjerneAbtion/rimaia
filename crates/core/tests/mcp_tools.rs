@@ -16,7 +16,7 @@ use rimaia_core::mcp::requests::{
     GetTaskRequest, ListTasksRequest, MoveTaskRequest, RemoveTaskLinkRequest,
     SetTaskDependenciesRequest, UpdateTaskRequest,
 };
-use rimaia_core::mcp::responses::{TaskListItem, TaskView};
+use rimaia_core::mcp::responses::{TaskListView, TaskView};
 use rimaia_core::mcp::RimaiaServer;
 use rimaia_core::tasks::{self, NewTask, TaskPatch};
 use rimaia_core::testing::TestContext;
@@ -483,12 +483,12 @@ async fn list_tasks_over_mcp_omits_plan_text_and_filters_by_column() {
             .await,
     );
 
-    assert_eq!(listed.len(), 1);
-    assert_eq!(listed[0].title, "Queued");
-    assert!(listed[0].has_plan);
+    assert_eq!(listed.tasks.len(), 1);
+    assert_eq!(listed.tasks[0].title, "Queued");
+    assert!(listed.tasks[0].has_plan);
     let wire = serde_json::to_value(&listed).expect("a DTO must always serialize");
     assert!(
-        wire[0].get("plan").is_none(),
+        wire["tasks"][0].get("plan").is_none(),
         "fifty plans in one response is a context bomb (D16)"
     );
 }
@@ -567,11 +567,9 @@ fn ok(result: Result<Json<TaskView>, rimaia_core::mcp::ToolError>) -> TaskView {
     }
 }
 
-fn ok_list(
-    result: Result<Json<Vec<TaskListItem>>, rimaia_core::mcp::ToolError>,
-) -> Vec<TaskListItem> {
+fn ok_list(result: Result<Json<TaskListView>, rimaia_core::mcp::ToolError>) -> TaskListView {
     match result {
-        Ok(Json(items)) => items,
+        Ok(Json(listed)) => listed,
         Err(error) => panic!("the tool must succeed: {:?}", error.0),
     }
 }

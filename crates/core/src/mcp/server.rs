@@ -28,7 +28,9 @@ use crate::mcp::requests::{
     AddTaskLinkRequest, ClearableField, CreateTaskRequest, GetTaskRequest, ListTasksRequest,
     MoveTaskRequest, RemoveTaskLinkRequest, SetTaskDependenciesRequest, UpdateTaskRequest,
 };
-use crate::mcp::responses::{BaseInstructionsView, RepositoryView, TaskListItem, TaskView};
+use crate::mcp::responses::{
+    BaseInstructionsView, RepositoryListView, RepositoryView, TaskListItem, TaskListView, TaskView,
+};
 use crate::runner::prompt::TEMPLATE_VARIABLES;
 use crate::tasks::{NewTask, NewTaskLink, Patch, TaskFilter, TaskPatch};
 use crate::{db, repo, tasks, Result};
@@ -69,11 +71,11 @@ known by. Call this before creating a task: every task belongs to exactly one re
 name or path. Also call it when the user names a project you have not seen an id for in this \
 session."
     )]
-    pub async fn list_repositories(&self) -> Result<Json<Vec<RepositoryView>>, ToolError> {
+    pub async fn list_repositories(&self) -> Result<Json<RepositoryListView>, ToolError> {
         let repositories = repo::list(&self.ctx).await?;
-        Ok(Json(
-            repositories.into_iter().map(RepositoryView::from).collect(),
-        ))
+        Ok(Json(RepositoryListView {
+            repositories: repositories.into_iter().map(RepositoryView::from).collect(),
+        }))
     }
 
     #[tool(
@@ -137,7 +139,7 @@ work, to check what is waiting in `ready`, or to find the tasks a new one should
     pub async fn list_tasks(
         &self,
         Parameters(request): Parameters<ListTasksRequest>,
-    ) -> Result<Json<Vec<TaskListItem>>, ToolError> {
+    ) -> Result<Json<TaskListView>, ToolError> {
         let summaries = tasks::list_tasks(
             &self.ctx,
             TaskFilter {
@@ -148,9 +150,9 @@ work, to check what is waiting in `ready`, or to find the tasks a new one should
         )
         .await?;
 
-        Ok(Json(
-            summaries.into_iter().map(TaskListItem::from).collect(),
-        ))
+        Ok(Json(TaskListView {
+            tasks: summaries.into_iter().map(TaskListItem::from).collect(),
+        }))
     }
 
     #[tool(
@@ -442,6 +444,29 @@ mod tests {
     #[test]
     fn update_task_requires_nothing_but_the_task_id() {
         assert_eq!(required_properties("update_task"), vec!["task_id"]);
+    }
+
+    #[test]
+    fn every_tool_output_schema_is_an_object() {
+        // MCP requires it, and Claude Code refuses the *entire* `tools/list`
+        // response when one tool disagrees — dropping every other tool with
+        // it, which is a far worse failure than the one tool being wrong. A
+        // list-returning tool therefore wraps its array in an object; see
+        // `responses::RepositoryListView`. Found by the CLI, not by a test,
+        // which is why there is now a test.
+        for tool in RimaiaServer::tool_router().list_all() {
+            let schema = tool
+                .output_schema
+                .as_ref()
+                .unwrap_or_else(|| panic!("{} advertises no output schema", tool.name));
+            let schema = serde_json::to_value(schema).expect("a schema serializes");
+            assert_eq!(
+                schema.get("type").and_then(|value| value.as_str()),
+                Some("object"),
+                "{}'s output schema is not an object: {schema}",
+                tool.name,
+            );
+        }
     }
 
     #[test]

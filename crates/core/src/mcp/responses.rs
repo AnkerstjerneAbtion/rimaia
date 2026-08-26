@@ -107,6 +107,29 @@ impl From<TaskDetail> for TaskView {
     }
 }
 
+/// What `list_repositories` answers with.
+///
+/// An object wrapping the array rather than a bare array, and not for taste:
+/// MCP requires a tool's `outputSchema` to be an object schema, and Claude
+/// Code refuses the whole `tools/list` response when one is not — *silently
+/// dropping every other tool with it*. A bare `Vec` produces
+/// `{"type": "array"}` and earns `expected "object" (at
+/// tools.N.outputSchema.type)`, which is how this was found: the CLI, not a
+/// test. Any future list-returning tool wraps its array the same way.
+#[derive(Debug, Clone, PartialEq, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub struct RepositoryListView {
+    pub repositories: Vec<RepositoryView>,
+}
+
+/// What `list_tasks` answers with. Wrapped for the reason
+/// [`RepositoryListView`] gives.
+#[derive(Debug, Clone, PartialEq, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub struct TaskListView {
+    pub tasks: Vec<TaskListItem>,
+}
+
 /// One card's worth of a task, as `list_tasks` reports it.
 ///
 /// **No plan** (seam-contract D16): fifty tasks times a multi-thousand-word
