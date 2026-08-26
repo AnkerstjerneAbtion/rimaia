@@ -14,7 +14,8 @@ on top of task 001's command surface.
    They are not background reading; they are the decisions you are implementing. Every
    task file names its ADRs in front matter.
 2. **[`tasks/`](tasks/README.md)** — the backlog, in order. **A task's acceptance criteria
-   are the contract.** Done means all of them hold.
+   are the contract.** Done means all of them hold. A task with a `landed:` line in its front
+   matter is already built — read it for context, do not implement it again.
 3. **[`docs/seam-contract.md`](docs/seam-contract.md)** — decisions too small or too local
    to be an ADR, but shared by two or more tasks that would otherwise each have to guess.
    Same "may not deviate silently" rule as an ADR. Read the entries your task's row in its
@@ -31,6 +32,18 @@ silently deviate — the whole point of the ADRs is that the next agent inherits
 decisions.
 
 Do not renumber ADRs or tasks. Numbers are stable ids; the README tables define order.
+
+**When you finish a task, mark it landed.** Open the PR first — the number does not exist until
+you do — then push one more commit to the same branch adding `landed: "#N"` to the task's front
+matter and filling its `Landed` cell in [`tasks/README.md`](tasks/README.md). Do this even when
+the PR carries several tasks; each gets its own line.
+
+Do not reach for `status:` instead. It says whether a task is ready to be *started*, and a
+finished task is still `ready` — nothing about it became unready. Two dimensions, two fields,
+for the same reason ADR-0007 keeps `run_state` off the board's columns. Without the marker the
+backlog cannot tell a task nobody has begun from one that shipped a month ago, and task 010
+imports this file into Rimaia itself: unmarked, ten finished tasks arrive in the `ready` column,
+which is the run queue.
 
 ## Layout
 

@@ -3,6 +3,7 @@ id: "001"
 title: App shell and backend skeleton
 milestone: mvp
 status: ready
+landed: "#2"
 depends_on: []
 adrs: ["0002", "0015"]
 size: M

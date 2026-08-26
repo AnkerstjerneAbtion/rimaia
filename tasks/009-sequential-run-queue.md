@@ -3,6 +3,7 @@ id: "009"
 title: Sequential run queue
 milestone: mvp
 status: ready
+landed: "#3"
 depends_on: ["008"]
 adrs: ["0010", "0007", "0018"]
 size: M

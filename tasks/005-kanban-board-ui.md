@@ -3,6 +3,7 @@ id: "005"
 title: Kanban board UI
 milestone: mvp
 status: ready
+landed: "#3"
 depends_on: ["004"]
 adrs: ["0007", "0018"]
 size: L
