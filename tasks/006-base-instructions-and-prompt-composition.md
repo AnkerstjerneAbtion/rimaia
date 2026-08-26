@@ -3,6 +3,7 @@ id: "006"
 title: Base instructions and prompt composition
 milestone: mvp
 status: ready
+landed: "#3"
 depends_on: ["004"]
 adrs: ["0009", "0012"]
 size: S

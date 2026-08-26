@@ -3,6 +3,7 @@ id: "004"
 title: Task CRUD and service layer
 milestone: mvp
 status: ready
+landed: "#3"
 depends_on: ["002"]
 adrs: ["0003", "0007", "0018"]
 size: M

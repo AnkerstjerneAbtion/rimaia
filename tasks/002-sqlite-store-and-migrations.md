@@ -3,6 +3,7 @@ id: "002"
 title: SQLite store and migrations
 milestone: mvp
 status: ready
+landed: "#3"
 depends_on: ["001"]
 adrs: ["0003", "0007", "0011", "0013", "0016"]
 size: M

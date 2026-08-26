@@ -3,6 +3,7 @@ id: "003"
 title: Repository registration
 milestone: mvp
 status: ready
+landed: "#3"
 depends_on: ["002"]
 adrs: ["0002", "0005", "0012"]
 size: S

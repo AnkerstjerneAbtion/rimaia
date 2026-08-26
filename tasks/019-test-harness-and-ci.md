@@ -3,6 +3,7 @@ id: "019"
 title: Test harness and CI
 milestone: mvp
 status: ready
+landed: "#2"
 depends_on: ["001"]
 adrs: ["0015"]
 size: M

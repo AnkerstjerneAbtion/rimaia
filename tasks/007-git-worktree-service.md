@@ -3,6 +3,7 @@ id: "007"
 title: Git worktree service
 milestone: mvp
 status: ready
+landed: "#3"
 depends_on: ["003"]
 adrs: ["0005"]
 size: M
