@@ -26,6 +26,7 @@ alternatives.
 | [0016](0016-per-task-execution-strategy.md) | Per-task execution strategy: model, effort, planned workflows | Accepted |
 | [0017](0017-review-and-fix-loop.md) | Post-implementation review-and-fix loop | Accepted |
 | [0018](0018-core-to-shell-change-events.md) | Change events from core to the shell | Accepted |
+| [0019](0019-mutation-source-and-service-context.md) | Mutation source, and where it lives on the service context | Accepted |
 
 ## Conventions
 

@@ -95,6 +95,22 @@ until v0.2.
 
 **Binds.** 002, 006, and every later task as a prohibition.
 
+### Amendment, 2026-08-26 — a third migration, named
+
+Task 010 needs `tasks.source` (ADR-0006: "every mutation is attributed"), which is a column,
+which is a migration this entry forbids. [ADR-0019](adr/0019-mutation-source-and-service-context.md)
+takes that decision and is the **named exception**:
+
+```
+src-tauri/migrations/20260826120000_task_source.sql   (task 010)
+```
+
+**The count is now three, and three is the whole list.** The prohibition above is otherwise
+unchanged and still binds every other task: a task that believes it needs a fourth stops and
+asks, for exactly the collision reason the body gives. Appended rather than edited, the way
+D14's amendment was, because the original sentence bound every task written against it and
+each should inherit both the rule and the one exception to it.
+
 ## D5 — Compile-time checked queries and the `.sqlx` cache
 
 **Question.** `sqlx::query!` or the runtime `sqlx::query()`, and what enforces that the
@@ -429,6 +445,58 @@ default may change.
 **Binds.** 008, 009, 013.
 
 
+## D16 — Task 010's cross-cutting choices
+
+**Question.** Task 010 exposes the task service over MCP. ADR-0006 fixes the transport, the
+loopback boundary, the port and the tool list, and stops there. Half a dozen smaller answers
+are still needed, and tasks 011, 018 and 020 each inherit one or more of them.
+
+**Decision.** Seven, taken together by task 010:
+
+1. **All MCP tool JSON is `snake_case`**, in both directions — request fields and response
+   fields. Not the `camelCase` the Tauri boundary uses.
+2. **The port lives in `settings` under the key `mcp_port`, owned by
+   `crates/core/src/mcp/settings.rs`.** Storage still goes through `db::settings::get`/`set`;
+   what the key means, what an absent one means and what range is legal live with the module
+   that owns it — the shape D3 fixed, and the same shape `scheduler/state.rs` uses for
+   `queue_state`.
+3. **The transport is `rmcp` 3.1.4 over `axum` 0.8**, not a hand-rolled JSON-RPC surface.
+   `rmcp`'s reqwest client transport is also what `mcp::probe` uses for Test connection, so
+   the probe cannot disagree with the server about the wire format. (`reqwest` is already in
+   the workspace lockfile via `tauri`, with no TLS features; the probe adds none.)
+4. **`set_task_dependencies` ships in 010, not 011**, with cycle detection and cross-repository
+   rejection in `crates/core/src/tasks/dependencies.rs`. It is on ADR-0006's tool table, and a
+   tool that stores an edge without checking for a cycle is not the tool that table names.
+   Task 011 keeps blocking, branch chaining, the `blocked_by_incomplete` predicate and the UI.
+5. **`update_task` over MCP erases a field through a `clear: [field]` list**, not by sending
+   `null`. An LLM filling in every property of a schema sends `plan: null` and destroys four
+   thousand words; an omitted field is a no-op. The two mistakes are not symmetric, so the
+   destructive one is made to be deliberate. `plan` is not clearable over MCP at all.
+6. **`list_tasks` omits plan text.** Fifty tasks times a multi-thousand-word plan is a context
+   bomb in the caller's session. `get_task` is how an agent reads one plan.
+7. **A busy MCP port is surfaced, not fatal to startup.** D11's fatality argument does not
+   transfer: the remedy — Settings → MCP — lives behind the window a fatal bind would refuse to
+   open, and task 018's "MCP port free" doctor row would be unreachable code.
+
+**Why.** Each is a place where two tasks would otherwise choose independently and differently.
+(1) is the convention MCP tool schemas are written in everywhere else, and mixing it with the
+frontend's `camelCase` inside one process is a bug generator — so the DTOs in `mcp::responses`
+are deliberately projections rather than the row types re-serialized. (2) keeps one settings
+reader instead of two, which is the whole of D3. (3) is a dependency choice, and D6's argument
+about a closed list applies to Cargo as much as to npm. (4) is scope, and the alternative —
+011 adding cycle detection under a tool 010 already shipped — means 010 ships a tool that
+corrupts the graph. (5) and (6) are the two places the MCP surface deliberately *differs* from
+the command surface, which is exactly the kind of divergence that must be written down rather
+than discovered in a diff; note that neither is a business rule enforced in one path only —
+they are capabilities the adapter declines to expose, which ADR-0006 already does for
+`delete_task` and every run tool. (7) is argued at length in ADR-0019's neighbourhood and
+restated here because task 018 inherits it.
+
+See also ADR-0019, which takes the `tasks.source` decision and the named exception to
+[D4](#d4--migration-file-numbering) that its migration needs.
+
+**Binds.** 010, 011, 018, 020.
+
 ---
 
 ## How to use this
@@ -445,10 +513,11 @@ An implementation task reads the entries its number appears in, before writing c
 | [007](../tasks/007-git-worktree-service.md) | D5 · D8 · D10 · D13 |
 | [008](../tasks/008-claude-code-runner.md) | D2 · D3 · D5 · D7 · D8 · D9 · D10 · D14 · D15 |
 | [009](../tasks/009-sequential-run-queue.md) | D2 · D5 · D7 · D8 · D9 · D10 · D14 · D15 |
-| [011](../tasks/011-task-dependencies-and-blocking.md) | D12 |
+| [010](../tasks/010-local-mcp-server.md) | D2 · D3 · D4 · D5 · D6 · D8 · D10 · D12 · D13 · D16 |
+| [011](../tasks/011-task-dependencies-and-blocking.md) | D12 · D16 |
 | [013](../tasks/013-run-scheduling.md) | D15 |
 | [015](../tasks/015-run-history-and-log-viewer.md) | D14 |
-| [018](../tasks/018-preflight-doctor-and-packaging.md) | D11 |
+| [018](../tasks/018-preflight-doctor-and-packaging.md) | D11 · D16 |
 | every task | D4 and D6 as prohibitions |
 
 A reviewer treats any decision visible in a diff that is neither in an ADR nor here as a
