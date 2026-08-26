@@ -1,5 +1,6 @@
 import { DeveloperSection } from "./settings/DeveloperSection";
 import { InstructionsSection } from "./settings/InstructionsSection";
+import { McpSection } from "./settings/McpSection";
 import { RepositoriesSection } from "./settings/RepositoriesSection";
 import { StorageSection } from "./settings/StorageSection";
 
@@ -8,7 +9,7 @@ export function SettingsView() {
     <div className="view">
       <header className="view-header">
         <h2>Settings</h2>
-        <p>Repositories, storage and the instructions every run receives.</p>
+        <p>Repositories, storage, the MCP server, and the instructions every run receives.</p>
       </header>
 
       {/* Each section owns its own error state and <ErrorBanner> instead of
@@ -16,6 +17,7 @@ export function SettingsView() {
           sections without touching this composer. */}
       <RepositoriesSection />
       <InstructionsSection />
+      <McpSection />
       <StorageSection />
       {import.meta.env.DEV && <DeveloperSection />}
     </div>

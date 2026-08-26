@@ -269,3 +269,48 @@
   white-space: pre-wrap;
   overflow-wrap: anywhere;
 }
+
+/* The MCP server (task 010, ADR-0006). */
+
+.mcp-warning {
+  margin: 0 0 0.75rem;
+  padding: 0.5rem 0.7rem;
+  border-radius: 6px;
+  font-size: 0.85rem;
+  background: var(--warning-bg);
+  border: 1px solid var(--warning-border);
+  color: var(--warning-text);
+}
+
+/* Selectable and wrapping, so a clipboard refusal is never a dead end: the
+   user can always drag over the line and copy it by hand. */
+.mcp-command {
+  display: block;
+  margin: 0 0 0.75rem;
+  padding: 0.5rem 0.7rem;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  overflow-wrap: anywhere;
+  user-select: all;
+}
+
+.mcp-actions {
+  display: flex;
+  gap: 0.5rem;
+  margin-bottom: 0.5rem;
+}
+
+.mcp-locked {
+  font-size: 0.85rem;
+}
+
+.mcp-port-form {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin-top: 0.75rem;
+}
+
+.mcp-port-form input {
+  width: 7rem;
+}
