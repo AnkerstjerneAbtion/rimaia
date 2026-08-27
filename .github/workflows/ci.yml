@@ -50,9 +50,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # Installs rustup, not the compiler this job actually runs: rust-toolchain.toml
+      # names an exact channel, and rustup's shim honours a toolchain file over the
+      # `rustup default` this action sets. The first `cargo` below fetches that
+      # version and the rustfmt and clippy the file asks for. Bump the version there,
+      # never here — one source of truth is the entire point, and a version named in
+      # two places is a version that disagrees with itself.
       - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt, clippy
 
       - uses: Swatinem/rust-cache@v2
 
@@ -89,6 +93,8 @@ jobs:
             build-essential \
             file
 
+      # Same as the `core` job: rust-toolchain.toml decides the version, this only
+      # guarantees a rustup that can fetch it.
       - uses: dtolnay/rust-toolchain@stable
 
       - uses: Swatinem/rust-cache@v2
