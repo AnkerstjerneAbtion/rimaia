@@ -43,6 +43,12 @@ database, its prompts, or its transcripts.**
    the per-repository security posture column. Deleting a repository deletes its keychain
    item.
 
+   **All three platforms, from the start.** ADR-0002 targets macOS first while keeping
+   Windows and Linux viable, and secret storage is exactly where that promise is easiest to
+   break: macOS Keychain, Windows Credential Manager and the Linux Secret Service are three
+   native mechanisms behind one trait, and the injection below is chosen for behaving
+   identically on all of them rather than for being shortest on any one.
+
 2. **Provisioning verifies before it saves, and never reads back.** The user pastes a token
    in the repository's settings; Rimaia calls the forge with it, confirms it can reach that
    repository, and stores it with the login it resolved to. After that the value is
@@ -98,8 +104,12 @@ implies the other, and `strict_local` has never had anything to say about `gh`.
   every run. ADR-0012's warning stands, minus one clause.
 - **A keychain is a new dependency and a new failure mode**: first access can prompt, a
   locked keychain blocks a queue rather than corrupting it, and the Linux path needs a
-  running secret service. Fail-closed makes those visible as a refused run naming the
-  repository, which is the recoverable version of the failure.
+  running secret service — which a server, a container or a fresh login session may not
+  have. Fail-closed makes those visible as a refused run naming the repository, which is
+  the recoverable version of the failure.
+- **The cross-platform claim has to be enforced by CI, not by intent.** Three native secret
+  stores and three credential-prompt behaviours cannot be kept working by a developer on
+  one of them, so the implementing task extends CI to build and test on all three.
 - **Expiry is invisible until it bites.** A PAT that lapsed silently looks exactly like a
   permissions problem at 3am. Task 018's preflight doctor is where a "this repository's
   credential expires in 6 days" check belongs, and the verification call from provisioning

@@ -31,7 +31,8 @@ reviewable in the app afterwards.
 | 18 | [016](016-worktree-lifecycle-and-cleanup.md) | Worktree lifecycle and cleanup | v0.3 | 007, 009 | — |
 | 19 | [017](017-morning-review-flow.md) | Morning review flow | v0.3 | 015 | — |
 | 20 | [018](018-preflight-doctor-and-packaging.md) | Preflight doctor and packaging | v0.3 | 008 | — |
-| 21 | [021](021-review-and-fix-loop.md) | Review-and-fix loop | v0.4 | 015, 017, 020 | — |
+| 21 | [022](022-per-repository-git-credentials.md) | Per-repository git credentials | v0.3 | 003, 008 | — |
+| 22 | [021](021-review-and-fix-loop.md) | Review-and-fix loop | v0.4 | 015, 017, 020 | — |
 
 ## Before task 001
 
