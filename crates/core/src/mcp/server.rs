@@ -348,8 +348,7 @@ impl RimaiaServer {
         Ok(column_tasks
             .into_iter()
             .map(|summary| summary.task.id)
-            .filter(|id| id != task_id)
-            .next_back())
+            .rfind(|id| id != task_id))
     }
 }
 
