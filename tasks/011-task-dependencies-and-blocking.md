@@ -30,12 +30,17 @@ task writes code against an API that isn't there.
   scheduler, not failed.
 - A failed dependency leaves dependents blocked, and is surfaced on every dependent card
   so a single glance shows the stalled chain.
-- Cross-repository dependencies are rejected at write time.
+- Cross-repository dependencies are rejected at write time. **Shipped by task 010**
+  (seam-contract D16) in `tasks::dependencies::set_task_dependencies`.
 
 **Graph**
 
-- Cycle detection on every edge write, in the service layer so both UI and MCP get it.
-  The error names the offending path.
+- Cycle detection on every edge write, in the service layer so both UI and MCP get it,
+  with an error naming the offending path. **Shipped by task 010** (seam-contract D16):
+  `set_task_dependencies` is on ADR-0006's tool table, and a tool that stores an edge
+  without checking for a cycle is not the tool that table names. Read
+  `crates/core/src/tasks/dependencies.rs` before adding anything here — this task extends
+  it, it does not re-implement it.
 - `blocking_reason(task) -> Option<Vec<Task>>` for display.
 - Deleting a task with dependents is refused (already in 004; extend the message with the
   dependency context).
@@ -64,7 +69,9 @@ task writes code against an API that isn't there.
 
 - A → B → C in `ready` run in dependency order in a single unattended queue run, with no
   human interaction, and C's branch contains A's and B's commits.
-- Creating a cycle is rejected in both UI and MCP, naming the path.
+- Creating a cycle is rejected in both UI and MCP, naming the path. Task 010 landed this
+  for the MCP path and for the service beneath it (seam-contract D16); what remains here is
+  the UI path reaching the same function and the panel rendering the refusal.
 - A failing A leaves B and C blocked, each showing A as the reason.
 - A dependent task's worktree is created from its dependency's branch, verified by
   `git merge-base`.

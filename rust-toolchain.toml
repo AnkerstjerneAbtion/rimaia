@@ -1,0 +1,20 @@
+# The one place the Rust version is decided, for CI and for a working copy alike.
+#
+# Pinned exactly, not `channel = "stable"`, because "stable" is not a shared
+# fact: it means whatever each rustup last downloaded. A machine that had not
+# run `rustup update` in months read "stable" as 1.91.1 while CI read it as
+# 1.98.0, and `cargo clippy -- -D warnings` passed locally and failed on the
+# branch — clippy had widened `filter_next` to catch `.filter(..).next_back()`
+# somewhere in between. An exact channel makes rustup fetch this compiler on
+# both sides, so a green clippy locally means a green clippy in CI.
+#
+# The cost is that a Rust upgrade is now a deliberate edit to this line rather
+# than something that happens to you mid-review. That is the trade being made.
+# Bump it on purpose, and let CI run the new lint set before merging.
+#
+# `components` is load-bearing: when rustup auto-installs this toolchain it
+# installs these with it, which is what lets ci.yml ask for a toolchain without
+# also naming the version.
+[toolchain]
+channel = "1.98.0"
+components = ["rustfmt", "clippy"]

@@ -13,7 +13,7 @@
 
 use chrono::{DateTime, Utc};
 use pretty_assertions::assert_eq;
-use rimaia_core::db::{BoardColumn, ExitClass, RunState, RunStatus};
+use rimaia_core::db::{BoardColumn, ExitClass, MutationSource, RunState, RunStatus};
 use rimaia_core::tasks::{
     self, LastRunSummary, NewTask, NewTaskLink, Patch, TaskFilter, TaskLinkPatch, TaskPatch,
     TaskSummary,
@@ -57,6 +57,63 @@ async fn a_created_task_defaults_to_not_ready_and_idle_and_publishes_its_id() {
         h.changes.try_recv().expect("a publication"),
         ChangeEvent::tasks([created.id])
     );
+}
+
+#[tokio::test]
+async fn a_created_task_records_the_source_of_the_context_that_created_it() {
+    // ADR-0019: the source is ambient, so a task created through an
+    // MCP-sourced context records `mcp` without `create_task` taking a
+    // parameter for it.
+    let h = TestContext::new().await;
+    let repository_id = seed_repository(&h.context.pool).await;
+    let over_mcp = h.context.with_source(MutationSource::Mcp);
+
+    let from_board = create_ready(&h, &repository_id, "board", "a plan").await;
+    let from_mcp = tasks::create_task(
+        &over_mcp,
+        NewTask {
+            repository_id: repository_id.clone(),
+            title: "mcp".to_string(),
+            plan: Some("a plan".to_string()),
+            extra_instructions: None,
+            column: Some(BoardColumn::Ready),
+            links: vec![],
+        },
+    )
+    .await
+    .expect("create a task over an mcp-sourced context");
+
+    assert_eq!(from_board.source, MutationSource::Ui);
+    assert_eq!(from_mcp.source, MutationSource::Mcp);
+}
+
+#[tokio::test]
+async fn a_patched_task_keeps_the_source_it_was_created_with() {
+    // The decision ADR-0019 argues at length: `source` is creation provenance,
+    // never last-writer. A task the user captured on the board and an agent
+    // later amended is still the user's task.
+    let h = TestContext::new().await;
+    let repository_id = seed_repository(&h.context.pool).await;
+    let created = create_ready(&h, &repository_id, "board", "a plan").await;
+    let over_mcp = h.context.with_source(MutationSource::Mcp);
+
+    let patched = tasks::update_task(
+        &over_mcp,
+        &created.id,
+        TaskPatch {
+            title: Some("amended by an agent".to_string()),
+            ..TaskPatch::default()
+        },
+    )
+    .await
+    .expect("patch the task over mcp");
+
+    assert_eq!(patched.title, "amended by an agent");
+    assert_eq!(patched.source, MutationSource::Ui);
+
+    // And the same through the board's own read, not only the returned row.
+    let summary = list_one(&h, &repository_id, &created.id).await;
+    assert_eq!(summary.task.source, MutationSource::Ui);
 }
 
 #[tokio::test]

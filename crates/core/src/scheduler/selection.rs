@@ -205,7 +205,7 @@ pub fn skip_reason(task: &TaskSummary, unattended_runs_allowed: bool) -> Option<
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::db::{StrategyMode, Task};
+    use crate::db::{MutationSource, StrategyMode, Task};
     use chrono::{DateTime, Utc};
     use pretty_assertions::assert_eq;
 
@@ -231,6 +231,7 @@ mod tests {
                 strategy_updated_at: None,
                 created_at: at("2026-08-20T12:00:00Z"),
                 updated_at: at("2026-08-20T12:00:00Z"),
+                source: MutationSource::Ui,
             },
             link_count: 0,
             dependency_count: 0,

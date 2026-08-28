@@ -3,6 +3,7 @@ id: "010"
 title: Local MCP server
 milestone: v0.2
 status: ready
+landed: "#5"
 depends_on: ["004", "006"]
 adrs: ["0006"]
 size: L

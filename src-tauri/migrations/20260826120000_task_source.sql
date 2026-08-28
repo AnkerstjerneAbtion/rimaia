@@ -1,0 +1,41 @@
+-- Where a task came from (ADR-0019, task 010).
+--
+-- # The third migration, and the last
+--
+-- Seam-contract D4 fixes the MVP at two migrations and forbids a third outright.
+-- ADR-0019 takes this one as the *named* exception and D4 now carries an
+-- amendment saying so; the prohibition is otherwise unchanged and still binds
+-- every other task, for the reason D4 gives — two agents in two worktrees each
+-- reaching for "the next timestamp" collide silently, and append-only (ADR-0003)
+-- means a renumber is not available afterwards as a repair.
+--
+-- # Creation provenance, never last-writer
+--
+-- `create_task` binds this column and nothing else ever writes it again. It
+-- answers "where did this task come from", which is a fact about the task. It
+-- deliberately does not answer "who touched it last", which is a fact about an
+-- event: the moment a task runs, the scheduler would stamp it 'system' and the
+-- answer to "did an agent put this on my board while I slept" would be gone.
+--
+-- ADR-0006's "every mutation is attributed" is satisfied by the **tracing span**
+-- on every mutating service function — `source = ctx.source.as_str()` — not by
+-- this column. That is stated here as well as in ADR-0019 because a reader who
+-- finds only the column reads the schema as a deviation from that ADR.
+--
+-- # DEFAULT 'ui' is the fact, not a guess
+--
+-- Every row that exists when this runs was written by the board, because the
+-- board was the only writer that existed before the MCP server. SQLite's ADD
+-- COLUMN accepts NOT NULL together with a non-NULL DEFAULT and a CHECK, and the
+-- backfill is O(1) — the default is recorded in the schema, not written into
+-- every row.
+--
+-- The CHECK spells the whole domain for the reason the initial schema's header
+-- gives: SQLite cannot widen one afterwards, so a fourth source would be a
+-- rename-copy-drop table rebuild. The three values are the three doors the
+-- design has (ADR-0006 the MCP server, ADR-0010 the scheduler, ADR-0018 the UI);
+-- a fourth writer would be an architectural change anyway.
+
+ALTER TABLE tasks
+    ADD COLUMN source TEXT NOT NULL DEFAULT 'ui'
+    CHECK (source IN ('ui', 'mcp', 'system'));

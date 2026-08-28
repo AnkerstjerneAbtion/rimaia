@@ -6,6 +6,7 @@
 //! the two paths is a bug.
 
 pub mod app;
+pub mod mcp;
 pub mod queue;
 pub mod repositories;
 pub mod runs;

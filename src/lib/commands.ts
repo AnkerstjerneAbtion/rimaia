@@ -3,6 +3,8 @@ import { invoke } from "@tauri-apps/api/core";
 import type {
   AppInfo,
   BoardColumn,
+  McpProbe,
+  McpStatus,
   NewTaskInput,
   NewTaskLinkInput,
   QueueStatus,
@@ -312,4 +314,38 @@ export function stopQueue(): Promise<void> {
  */
 export function getQueueStatus(): Promise<QueueStatus> {
   return call<QueueStatus>("get_queue_status");
+}
+
+// ---------------------------------------------------------------------------
+// The local MCP server (task 010) — see `src-tauri/src/commands/mcp.rs`.
+// ---------------------------------------------------------------------------
+
+/**
+ * Whether the MCP server is listening, on which address, and the operating
+ * system's own words if its port was taken.
+ *
+ * A cached snapshot of the bind, which is the thing that fails; it is not a
+ * live check that the server is still answering. That is
+ * {@link testMcpConnection}. Re-read on mount and on
+ * {@link subscribeToSettingsChanged}, since `mcp_port` is a settings key.
+ */
+export function getMcpStatus(): Promise<McpStatus> {
+  return call<McpStatus>("get_mcp_status");
+}
+
+/**
+ * Stores the port and restarts the server on it, answering with the new
+ * status — so a caller never has to re-read to find out what happened.
+ *
+ * A no-op when the port has not changed: rebinding a socket that is currently
+ * listening races itself.
+ */
+export function setMcpPort(port: number): Promise<McpStatus> {
+  return call<McpStatus>("set_mcp_port", { port });
+}
+
+/** One real `initialize` + `tools/list` round trip against the running server,
+ *  the way a client would — not a "something is listening" check. */
+export function testMcpConnection(): Promise<McpProbe> {
+  return call<McpProbe>("test_mcp_connection");
 }

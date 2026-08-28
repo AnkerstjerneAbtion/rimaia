@@ -1,7 +1,13 @@
 //! The task service layer: CRUD, board columns, ordering, run-state
-//! transitions, and links (ADR-0007, task 004). Dependency edges are stored
-//! and read here — the delete guard needs them — but their semantics
-//! (cycle rejection, blocking) are task 011's (ADR-0008).
+//! transitions, links, and dependency edges (ADR-0007, ADR-0008; tasks 004 and
+//! 010).
+//!
+//! Task 004's original note assigned every dependency semantic to task 011.
+//! Seam-contract D16 moved half of it here: [`dependencies`] ships the write —
+//! replace-the-whole-set, cycle detection, cross-repository rejection —
+//! because `set_task_dependencies` is on ADR-0006's tool table and task 010
+//! ships that tool. What is still task 011's: the `blocked` run state, the
+//! scheduler predicate, `blocked_by_incomplete`, branch chaining and the UI.
 //!
 //! `position` is a fractional float and ordering *is* the priority mechanism —
 //! there is no separate priority field. A dependency is satisfied when its run
@@ -15,13 +21,17 @@
 //! nothing here is a shell type, so the MCP server (ADR-0006) enforces the
 //! same invariants as the UI by calling the same code.
 
+pub mod dependencies;
 pub mod links;
 pub mod position;
 pub mod run_state;
 pub mod service;
 pub mod types;
 
-pub use links::{add_task_link, remove_task_link, reorder_task_link, update_task_link};
+pub use dependencies::set_task_dependencies;
+pub use links::{
+    add_task_link, get_task_link, remove_task_link, reorder_task_link, update_task_link,
+};
 pub use position::{position_between, rebalance_column, rebalanced_positions, Placement};
 pub use run_state::{is_legal_run_state_transition, set_run_state};
 pub use service::{

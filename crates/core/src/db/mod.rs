@@ -23,8 +23,8 @@ pub mod settings;
 /// Re-exported so callers write `db::Task` rather than `db::models::Task`: the
 /// module is an organizing detail, and the rows are the store's vocabulary.
 pub use models::{
-    new_id, BoardColumn, ExitClass, Repository, Run, RunState, RunStatus, Schedule, ScheduleMode,
-    Setting, StrategyMode, StrategySource, Task, TaskDependency, TaskLink,
+    new_id, BoardColumn, ExitClass, MutationSource, Repository, Run, RunState, RunStatus, Schedule,
+    ScheduleMode, Setting, StrategyMode, StrategySource, Task, TaskDependency, TaskLink,
 };
 
 /// The one enum a settings *value* carries, re-exported alongside the row enums

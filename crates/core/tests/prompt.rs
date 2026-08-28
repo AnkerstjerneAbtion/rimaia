@@ -14,7 +14,9 @@
 
 use chrono::{DateTime, Utc};
 use pretty_assertions::assert_eq;
-use rimaia_core::db::{BoardColumn, Repository, RunState, StrategyMode, Task, TaskLink};
+use rimaia_core::db::{
+    BoardColumn, MutationSource, Repository, RunState, StrategyMode, Task, TaskLink,
+};
 use rimaia_core::runner::prompt::{compose_prompt, compose_resume_prompt, compose_system_append};
 use rimaia_core::tasks::TaskDetail;
 
@@ -424,6 +426,7 @@ fn task() -> TaskDetail {
             strategy_updated_at: None,
             created_at: timestamp(),
             updated_at: timestamp(),
+            source: MutationSource::Ui,
         },
         links: vec![
             link("Asana", "https://app.asana.com/0/1/2", 0.0),

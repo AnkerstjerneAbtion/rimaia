@@ -28,6 +28,7 @@ function task(id: string): Task {
     strategyUpdatedAt: null,
     createdAt: "2026-08-20T11:00:00Z",
     updatedAt: "2026-08-20T11:00:00Z",
+    source: "ui",
   };
 }
 

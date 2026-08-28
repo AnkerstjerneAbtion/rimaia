@@ -75,6 +75,15 @@ cargo check --workspace --all-targets # includes the Tauri shell
 and clippy never compiles `crates/core/src/testing/` or any `#[cfg(test)]` module, so a
 warning that reddens CI passes locally.
 
+Running the same command is only half of it — you have to run it with the same compiler.
+`rust-toolchain.toml` pins one exactly, and rustup fetches it on both sides, so `cargo`
+inside this repo is the pinned version whatever your default toolchain is. Two things
+follow. **Invoke `cargo` through rustup**, not through a Homebrew or distro `cargo`: those
+ignore the toolchain file, and a shadowed `PATH` is how clippy passes locally and fails CI.
+And **bump the version only in `rust-toolchain.toml`** — `ci.yml` deliberately does not name
+one. A new stable's widened lints are a real change; let them land as a deliberate bump with
+its own CI run, not as a surprise on someone's branch.
+
 `cargo test -p rimaia-core` needs **no** `--features testing`. `crates/core/Cargo.toml`
 dev-depends on itself with that feature on, which is what makes the harness visible to
 tests without shipping it to consumers. Do not add a feature flag to the CI invocation —

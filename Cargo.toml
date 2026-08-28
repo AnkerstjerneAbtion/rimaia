@@ -7,7 +7,27 @@ members = ["crates/core", "src-tauri"]
 # dependency graph.
 [workspace.dependencies]
 anyhow = "1"
+axum = "0.8"
 chrono = { version = "0.4", features = ["serde"] }
+# Task 010's MCP server (ADR-0006, seam-contract D16). `reqwest` is here for
+# `mcp::probe` — rmcp's own client transport, so the Test connection round trip
+# cannot disagree with the server about the wire format — with no TLS features:
+# the probe only ever talks to 127.0.0.1 over http.
+reqwest = { version = "0.13", default-features = false }
+rmcp = { version = "3.1.4", default-features = false, features = [
+  "server",
+  "macros",
+  "transport-streamable-http-server",
+  "client",
+  "transport-streamable-http-client",
+  "transport-streamable-http-client-reqwest",
+] }
+# A direct dependency rather than `rmcp::schemars`: the 1.x derive emits
+# fully-qualified `::schemars::` paths, so going through the re-export would
+# need `#[schemars(crate = "rmcp::schemars")]` on every request and response
+# struct.
+# `chrono04` so a `DateTime<Utc>` in a response DTO has a schema.
+schemars = { version = "1", features = ["chrono04"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sqlx = { version = "0.8", default-features = false, features = [
