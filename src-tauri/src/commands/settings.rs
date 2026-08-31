@@ -46,7 +46,11 @@ pub async fn set_run_environment(state: State<'_, AppState>, value: RunEnvironme
 ///
 /// Reads the current base instructions and the task fresh on every call
 /// rather than caching either, so an edit not yet saved anywhere else is
-/// never shown as if it had already taken effect.
+/// never shown as if it had already taken effect. The recorded proposal is read
+/// the same way, through [`prompt::StrategyGuidance::for_task`] rather than
+/// interpreted here: task 006's criterion is that this preview and a real run
+/// agree byte for byte, and a second reading of the `strategy_plan` envelope in
+/// this file is exactly how they would stop agreeing.
 #[tauri::command]
 pub async fn preview_composed_prompt(
     state: State<'_, AppState>,
@@ -55,6 +59,12 @@ pub async fn preview_composed_prompt(
     let base = settings::base_instructions(&state.context.pool).await?;
     let detail = tasks::get_task(&state.context, &task_id).await?;
     let repository = repo::get(&state.context, &detail.task.repository_id).await?;
+    let guidance = prompt::StrategyGuidance::for_task(&detail);
 
-    Ok(prompt::compose_prompt(&base, &detail, &repository))
+    Ok(prompt::compose_prompt(
+        &base,
+        &detail,
+        &repository,
+        guidance.as_ref(),
+    ))
 }
