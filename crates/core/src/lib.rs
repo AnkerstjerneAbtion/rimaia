@@ -21,6 +21,7 @@ pub mod repo;
 pub mod runner;
 pub mod scheduler;
 pub mod startup;
+pub mod strategy;
 pub mod tasks;
 pub mod worktree;
 
