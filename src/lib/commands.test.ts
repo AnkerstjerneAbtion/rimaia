@@ -1,6 +1,31 @@
-import { describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 
-import { toRimaiaError } from "./commands";
+import { invoke } from "@tauri-apps/api/core";
+
+import {
+  acceptTaskStrategy,
+  clearTaskStrategy,
+  getStrategyApproval,
+  getStrategyCatalogue,
+  getStrategyDefaults,
+  planTaskStrategy,
+  setStrategyApproval,
+  setStrategyCatalogue,
+  setStrategyDefaults,
+  toRimaiaError,
+} from "./commands";
+import type { StrategyCatalogueView, StrategyDefaults } from "../types";
+
+// Mocked at the Tauri seam, not at the wrapper module — the wrappers are what
+// is under test here, and mocking them would leave the command names and
+// argument keys they send untested. Those names are exactly what
+// `scripts/check-command-wiring.sh` cross-checks against `lib.rs`, and the
+// argument keys are the half of the contract no script can see.
+vi.mock("@tauri-apps/api/core", () => ({
+  invoke: vi.fn(),
+}));
+
+const mockInvoke = vi.mocked(invoke);
 
 describe("toRimaiaError", () => {
   it("passes a backend {code, message} payload through unchanged", () => {
@@ -32,5 +57,136 @@ describe("toRimaiaError", () => {
     expect(result.code).toBe("internal");
     expect(result.message).not.toBe("[object Object]");
     expect(result.message).toBe('{"unexpected":"shape"}');
+  });
+});
+
+describe("the execution-strategy wrappers (task 020)", () => {
+  const catalogue: StrategyCatalogueView = {
+    catalogue: {
+      models: [{ id: "opus", label: "Opus" }],
+      efforts: [{ id: "low", label: "Low" }],
+      planner: { model: "haiku", effort: "low", max_turns: 6 },
+    },
+    json: '{ "models": [{ "id": "opus", "label": "Opus" }] }',
+    defaultJson: '{ "models": [] }',
+  };
+
+  const defaults: StrategyDefaults = {
+    mode: "manual",
+    model: "sonnet",
+    effort: "high",
+  };
+
+  beforeEach(() => {
+    mockInvoke.mockReset();
+  });
+
+  it("reads the catalogue with no arguments at all", async () => {
+    mockInvoke.mockResolvedValue(catalogue);
+
+    await expect(getStrategyCatalogue()).resolves.toEqual(catalogue);
+    expect(mockInvoke).toHaveBeenCalledWith("get_strategy_catalogue", undefined);
+  });
+
+  it("sends an edited catalogue as text and answers with the stored view", async () => {
+    // The text is what crosses, not a re-serialized object: the backend stores
+    // the user's own key order and indentation, and the view it answers with is
+    // what the editor reopens on.
+    mockInvoke.mockResolvedValue(catalogue);
+
+    await expect(setStrategyCatalogue(catalogue.json)).resolves.toEqual(catalogue);
+    expect(mockInvoke).toHaveBeenCalledWith("set_strategy_catalogue", {
+      value: catalogue.json,
+    });
+  });
+
+  it("asks for the global defaults when no repository is named", async () => {
+    mockInvoke.mockResolvedValue(defaults);
+
+    await expect(getStrategyDefaults()).resolves.toEqual(defaults);
+    expect(mockInvoke).toHaveBeenCalledWith("get_strategy_defaults", {
+      repositoryId: null,
+    });
+  });
+
+  it("asks for one repository's defaults when it is named", async () => {
+    mockInvoke.mockResolvedValue(defaults);
+
+    await getStrategyDefaults("repo-1");
+
+    expect(mockInvoke).toHaveBeenCalledWith("get_strategy_defaults", {
+      repositoryId: "repo-1",
+    });
+  });
+
+  it("writes the global defaults and one repository's through the same command", async () => {
+    // One command for both levels, because one struct and one precedence chain
+    // read both — the repository id is the only thing that differs.
+    mockInvoke.mockResolvedValue(undefined);
+
+    await setStrategyDefaults(null, defaults);
+    await setStrategyDefaults("repo-1", defaults);
+
+    expect(mockInvoke).toHaveBeenNthCalledWith(1, "set_strategy_defaults", {
+      repositoryId: null,
+      value: defaults,
+    });
+    expect(mockInvoke).toHaveBeenNthCalledWith(2, "set_strategy_defaults", {
+      repositoryId: "repo-1",
+      value: defaults,
+    });
+  });
+
+  it("reads and writes the approval setting", async () => {
+    mockInvoke.mockResolvedValue("manual");
+
+    await expect(getStrategyApproval()).resolves.toBe("manual");
+    expect(mockInvoke).toHaveBeenCalledWith("get_strategy_approval", undefined);
+
+    mockInvoke.mockResolvedValue(undefined);
+    await setStrategyApproval("manual");
+
+    expect(mockInvoke).toHaveBeenLastCalledWith("set_strategy_approval", {
+      value: "manual",
+    });
+  });
+
+  it("accepts and clears a proposal by task id", async () => {
+    mockInvoke.mockResolvedValue(undefined);
+
+    await acceptTaskStrategy("task-1");
+    await clearTaskStrategy("task-1");
+
+    expect(mockInvoke).toHaveBeenNthCalledWith(1, "accept_task_strategy", {
+      taskId: "task-1",
+    });
+    expect(mockInvoke).toHaveBeenNthCalledWith(2, "clear_task_strategy", {
+      taskId: "task-1",
+    });
+  });
+
+  it("starts a planner run by task id", async () => {
+    mockInvoke.mockResolvedValue(undefined);
+
+    await planTaskStrategy("task-1");
+
+    expect(mockInvoke).toHaveBeenCalledWith("plan_task_strategy", {
+      taskId: "task-1",
+    });
+  });
+
+  it("rejects with a renderable RimaiaError when a strategy command is refused", async () => {
+    // Every wrapper goes through the same `call`, so one of them is enough to
+    // pin that a refusal arrives as `{code, message}` and not as whatever
+    // `invoke` happened to throw.
+    mockInvoke.mockRejectedValue({
+      code: "invalid",
+      message: "the catalogue is not valid JSON: key must be a string at line 1 column 3",
+    });
+
+    await expect(setStrategyCatalogue("{ models: [] }")).rejects.toEqual({
+      code: "invalid",
+      message: "the catalogue is not valid JSON: key must be a string at line 1 column 3",
+    });
   });
 });

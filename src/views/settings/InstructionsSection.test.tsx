@@ -40,6 +40,12 @@ function taskSummary(overrides: Partial<TaskSummary> = {}): TaskSummary {
     dependencyCount: 0,
     blockedByIncomplete: false,
     lastRun: null,
+    // What a run would spawn with, resolved in Rust and carried on the read
+    // (task 020, seam-contract D12's amendment). Nothing configured anywhere
+    // is the `claude_code` origin, which is what this fixture's task has.
+    effectiveModel: null,
+    effectiveEffort: null,
+    effectiveOrigin: "claude_code",
     ...overrides,
   };
 }

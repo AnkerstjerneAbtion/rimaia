@@ -100,8 +100,21 @@ export type RunState =
 /** Mirrors `rimaia_core::db::StrategyMode` (ADR-0016). */
 export type StrategyMode = "default" | "manual" | "planned";
 
-/** Mirrors `rimaia_core::db::StrategySource` (ADR-0016). */
+/** Mirrors `rimaia_core::db::StrategySource` (ADR-0016). Whose decision a run
+ *  will execute. "Accepted" is this flipping `"planner"` → `"user"`
+ *  (seam-contract D17.7) — there is no `accepted` column to read instead. */
 export type StrategySource = "user" | "planner";
+
+/**
+ * Mirrors `rimaia_core::strategy::StrategyOrigin` (ADR-0016, seam-contract
+ * D17.6). Which link of the precedence chain — task, then repository, then
+ * global — answered for a value.
+ *
+ * `"claude_code"` is the fourth on purpose: nothing configured anywhere means
+ * no `--model` reaches the command line and the CLI picks for itself, which is
+ * an answer with consequences and not the same as a global default.
+ */
+export type StrategyOrigin = "task" | "repository" | "global" | "claude_code";
 
 /** Mirrors `rimaia_core::db::RunStatus` (ADR-0013). The coarse lifecycle of
  *  one attempt, as the Runs view queries it. */
@@ -132,9 +145,13 @@ export interface Task {
   branch: string | null;
   worktreePath: string | null;
   strategyMode: StrategyMode;
+  /** What the *card* asks for. Read {@link TaskSummary.effectiveModel} to
+   *  render what a run would actually spawn with: a task in resolved
+   *  `"default"` mode ignores this column entirely (seam-contract D17.6). */
   model: string | null;
   effort: string | null;
-  /** Opaque JSON text (ADR-0016); task 020 is the first thing that parses it. */
+  /** The {@link StrategyPlan} envelope as stored text — `JSON.parse` it; the
+   *  column is `TEXT` and the backend hands it over verbatim (D17.3). */
   strategyPlan: string | null;
   strategySource: StrategySource | null;
   strategyUpdatedAt: string | null;
@@ -176,12 +193,37 @@ export interface Run {
 }
 
 /**
+ * The three fields seam-contract D12's 2026-08-28 amendment adds to *both*
+ * projections: what a run would actually spawn with, and who decided it.
+ *
+ * Computed in Rust by `strategy::effective_strategy` after the query, never
+ * here. The precedence chain is a business rule, and a TypeScript copy of it
+ * would be a second implementation free to disagree with the first — the whole
+ * reason these ride along on a read instead of being derived from
+ * {@link Task.model} and a settings fetch.
+ *
+ * Declared once and mixed into {@link TaskSummary} and {@link TaskDetail}
+ * rather than into {@link Task}: they are not columns, and a card is not
+ * allowed to think they are.
+ */
+export interface EffectiveStrategyFields {
+  /** `null` when nothing anywhere names a model — see
+   *  {@link StrategyOrigin}'s `"claude_code"`. */
+  effectiveModel: string | null;
+  effectiveEffort: string | null;
+  /** Which link of the chain answered. The card renders an inherited value
+   *  differently from a chosen one, and the winning link cannot be
+   *  reconstructed from the value alone. */
+  effectiveOrigin: StrategyOrigin;
+}
+
+/**
  * Mirrors `rimaia_core::tasks::TaskDetail`. Rust `#[serde(flatten)]`s the
  * task onto this shape, so the wire object is `Task`'s own fields plus these
  * three siblings — not a nested `{ task: {...} }` — which is why this
  * `extends Task` rather than nesting one.
  */
-export interface TaskDetail extends Task {
+export interface TaskDetail extends Task, EffectiveStrategyFields {
   links: TaskLink[];
   /** Outgoing edges only — what this task depends on, not what depends on it. */
   dependsOn: string[];
@@ -208,7 +250,7 @@ export interface LastRunSummary {
  * The card renders from this; the panel renders from `TaskDetail`. That split
  * is what keeps a fifty-card board one query instead of fifty.
  */
-export interface TaskSummary extends Task {
+export interface TaskSummary extends Task, EffectiveStrategyFields {
   linkCount: number;
   dependencyCount: number;
   /** Reserved for task 011 and a constant `false` until it lands — the card
@@ -266,6 +308,17 @@ export interface TaskPatchInput {
    */
   repositoryId?: string;
   title?: string;
+  /**
+   * Task 020's mode, which has no command of its own on purpose: sending it
+   * here is what makes the panel and the `update_task` MCP tool reach the same
+   * rule (ADR-0006). A plain optional, never a {@link PatchField} — the column
+   * is `NOT NULL` and `"default"` is how it spells "no opinion".
+   *
+   * Setting {@link model} or {@link effort} to a value flips the mode to
+   * `"manual"` on the backend, and clearing both flips it back to `"default"`
+   * (seam-contract D17.6); the panel does not have to send both.
+   */
+  strategyMode?: StrategyMode;
   plan?: PatchField<string>;
   extraInstructions?: PatchField<string>;
   model?: PatchField<string>;
@@ -290,6 +343,164 @@ export interface TaskLinkPatchInput {
  * setting reads as `"inherit"` — there is no third "unset" spelling.
  */
 export type RunEnvironment = "inherit" | "strict_local";
+
+// ---------------------------------------------------------------------------
+// Execution strategy (task 020) — mirrors `rimaia_core::strategy` and the
+// `strategy_plan` envelope seam-contract D17.3 fixes (ADR-0016).
+//
+// Two spellings meet in this section, and the difference is deliberate. The
+// command payloads below are camelCase like everything else on this boundary;
+// {@link Catalogue} and {@link StrategyPlan} are **stored JSON documents** —
+// one hand-edited in a textarea, one written by a planner and read by task 021
+// — so their keys are the stored spelling, `max_turns` and `num_turns` and
+// all, and renaming them on the way through would make Settings show a
+// document that does not match the row.
+// ---------------------------------------------------------------------------
+
+/**
+ * Mirrors `rimaia_core::strategy::CatalogueEntry`. One choice in a dropdown:
+ * `id` reaches `--model` or `--effort` verbatim, `label` draws the option.
+ */
+export interface CatalogueEntry {
+  id: string;
+  label: string;
+}
+
+/**
+ * Mirrors `rimaia_core::strategy::PlannerBudget` — the strategy run's own
+ * budget, configuration for the same reason the model list is.
+ *
+ * `model` and `effort` absent means *no flag at all*: the CLI chooses. That is
+ * not the same as the built-in haiku/low pair, which is what an unedited
+ * catalogue reads as.
+ */
+export interface PlannerBudget {
+  model: string | null;
+  effort: string | null;
+  /** Stored spelling — see this section's note. */
+  max_turns: number;
+}
+
+/**
+ * Mirrors `rimaia_core::strategy::Catalogue`, as
+ * {@link getStrategyCatalogue} in `./lib/commands` returns it parsed.
+ *
+ * An explicitly empty list means no choices, **not** the built-in list — an
+ * operator turning a dropdown off is a thing they are allowed to do. A model a
+ * task already names but the catalogue no longer lists is still spawned
+ * verbatim; the panel shows it with a hint rather than dropping it.
+ */
+export interface Catalogue {
+  models: CatalogueEntry[];
+  efforts: CatalogueEntry[];
+  planner: PlannerBudget;
+}
+
+/**
+ * What {@link getStrategyCatalogue} returns: the same key read three ways,
+ * because Settings' textarea and the panel's dropdowns want different things
+ * out of it and a second round trip would let them disagree. Mirrors
+ * `StrategyCatalogueView` in `src-tauri/src/commands/strategy.rs`.
+ */
+export interface StrategyCatalogueView {
+  /** The parsed value the dropdowns render — already the built-in list if the
+   *  stored text will not parse, since that tolerance rule is the backend's. */
+  catalogue: Catalogue;
+  /** The stored text verbatim, so the editor reopens on the user's own key
+   *  order and indentation. The built-in JSON while the key is unset, which is
+   *  every fresh install. */
+  json: string;
+  /** What "Restore defaults" writes. Crosses the boundary rather than being
+   *  retyped here: a second copy of the default list is a second thing to
+   *  update when a model is added. */
+  defaultJson: string;
+}
+
+/**
+ * Mirrors `rimaia_core::strategy::StrategyDefaults` — one repository's
+ * default, or the global one under it. The same shape at both levels, because
+ * one precedence chain reads both.
+ *
+ * A `"default"` mode with no model and no effort *is* "no opinion", and reads
+ * identically to a key that was never written. There is nothing to clear.
+ */
+export interface StrategyDefaults {
+  mode: StrategyMode;
+  /**
+   * Optional in both directions, and that is the Rust shape rather than a
+   * convenience: the backend omits an absent model from the JSON entirely
+   * (`skip_serializing_if`), so a level that has no opinion arrives as
+   * `{ "mode": "default" }` and nothing else. Sending `null` and leaving the
+   * key out both mean "no opinion" on the way back in.
+   */
+  model?: string | null;
+  effort?: string | null;
+}
+
+/**
+ * Mirrors `rimaia_core::strategy::StrategyApproval`. Whether a proposal runs
+ * on its own or waits for a human.
+ *
+ * **Stored and rendered by task 020, read by nothing yet** — the gate lands
+ * after tasks 011 and 012. It is settable now because a radio group that
+ * forgets its answer on relaunch is worse than no radio group.
+ */
+export type StrategyApproval = "automatic" | "manual";
+
+/** Whether the planner produced a proposal or failed trying. A `"failed"`
+ *  envelope is written on every planner failure — non-zero exit, `max_turns`,
+ *  a usage limit, or a run that never called the tool — and is what suppresses
+ *  a re-plan on every later queue pass (seam-contract D17.8). */
+export type StrategyPlanStatus = "proposed" | "failed";
+
+/** Whether the planner thinks the work fans out. Rimaia never orchestrates
+ *  the phases; the guidance is injected into the implementation prompt and the
+ *  agent runs them itself with its own subagents (ADR-0016). */
+export type StrategyWorkflow = "single_agent" | "multi_agent";
+
+/** One phase of a {@link StrategyPlan}. Stored spelling throughout. */
+export interface StrategyPlanPhase {
+  name: string;
+  model: string | null;
+  effort: string | null;
+  agents: number;
+  summary: string;
+}
+
+/**
+ * The planner's own accounting, carried inside the envelope because a strategy
+ * run deliberately gets **no `runs` row** (seam-contract D17.5) — the panel
+ * still has to render "Planner: 4 turns, $0.03", and there is no row to read
+ * it off.
+ */
+export interface StrategyPlanRun {
+  session_id: string | null;
+  num_turns: number | null;
+  cost_usd: number | null;
+  /** Why the planner failed, on a `"failed"` envelope. `null` otherwise. */
+  error: string | null;
+}
+
+/**
+ * The `strategy_plan` envelope, version 1, as seam-contract D17.3 fixes it —
+ * `JSON.parse`d from {@link Task.strategyPlan}, which the backend hands over as
+ * text.
+ *
+ * Every field a failed envelope has no answer for is optional here rather than
+ * nullable-and-required: this is a document being parsed, not a command's
+ * response, and a panel that renders a failure must not depend on the writer
+ * having emitted a key it had nothing to put in.
+ */
+export interface StrategyPlan {
+  version: number;
+  status: StrategyPlanStatus;
+  model?: string | null;
+  effort?: string | null;
+  workflow?: StrategyWorkflow;
+  phases?: StrategyPlanPhase[];
+  rationale?: string | null;
+  run?: StrategyPlanRun;
+}
 
 // ---------------------------------------------------------------------------
 // Runs (task 008) — mirrors `rimaia_core::runner::events` (ADR-0004,

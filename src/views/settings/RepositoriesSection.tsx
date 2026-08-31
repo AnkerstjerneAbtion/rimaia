@@ -5,15 +5,25 @@ import { open } from "@tauri-apps/plugin-dialog";
 import { ErrorBanner } from "../../components/ErrorBanner";
 import {
   getRepositoryRemoteInfo,
+  getStrategyCatalogue,
+  getStrategyDefaults,
   listRepositories,
   registerRepository,
   removeRepository,
   setRepositoryUnattendedRuns,
+  setStrategyDefaults,
   toRimaiaError,
   updateRepository,
 } from "../../lib/commands";
 import { subscribeToRepositoriesChanged } from "../../lib/events";
-import type { RemoteInfo, Repository, RimaiaError } from "../../types";
+import type {
+  Catalogue,
+  RemoteInfo,
+  Repository,
+  RimaiaError,
+  StrategyDefaults,
+} from "../../types";
+import { StrategyDefaultsFields } from "./StrategyDefaultsFields";
 
 /**
  * ADR-0012's own wording for what the opt-in grants, used verbatim rather
@@ -52,6 +62,11 @@ export function RepositoriesSection() {
   const [editingId, setEditingId] = useState<string | null>(null);
   const [draft, setDraft] = useState<EditDraft | null>(null);
   const [confirmingUnattendedId, setConfirmingUnattendedId] = useState<string | null>(null);
+  const [catalogue, setCatalogue] = useState<Catalogue | null>(null);
+  const [catalogueError, setCatalogueError] = useState<RimaiaError | null>(null);
+  const [defaultsByRepository, setDefaultsByRepository] = useState<
+    Record<string, StrategyDefaults>
+  >({});
 
   const refresh = useCallback(() => {
     listRepositories().then(
@@ -110,6 +125,34 @@ export function RepositoriesSection() {
         (info) =>
           setRemoteInfos((prev) => ({ ...prev, [repository.id]: { status: "ready", info } })),
         () => setRemoteInfos((prev) => ({ ...prev, [repository.id]: { status: "error" } })),
+      );
+    }
+  }, [repositories]);
+
+  // The lists the per-repository strategy dropdowns draw from (task 020). One
+  // read for the whole section rather than one per row: it is a single
+  // settings key, and a row is not entitled to its own copy of it.
+  useEffect(() => {
+    getStrategyCatalogue().then(
+      (view) => setCatalogue(view.catalogue),
+      (thrown) => setCatalogueError(toRimaiaError(thrown)),
+    );
+  }, []);
+
+  // Fetched once per repository id, the same way the remote info above is —
+  // for a different reason. A settings read is cheap; re-reading on every
+  // refresh is what would hurt, because a refresh follows every write and
+  // would race the optimistic value in the row the user just changed.
+  const fetchedDefaultIds = useRef<Set<string>>(new Set());
+  useEffect(() => {
+    if (!repositories) return;
+    for (const repository of repositories) {
+      if (fetchedDefaultIds.current.has(repository.id)) continue;
+      fetchedDefaultIds.current.add(repository.id);
+      getStrategyDefaults(repository.id).then(
+        (defaults) =>
+          setDefaultsByRepository((prev) => ({ ...prev, [repository.id]: defaults })),
+        (thrown) => setRowErrors((prev) => ({ ...prev, [repository.id]: toRimaiaError(thrown) })),
       );
     }
   }, [repositories]);
@@ -191,6 +234,26 @@ export function RepositoriesSection() {
     setConfirmingUnattendedId(repository.id);
   }
 
+  // Optimistic, reverted on rejection — `set_strategy_defaults` answers with
+  // nothing, so there is no stored value to repaint the row from, and a
+  // dropdown that waited for a round trip would sit on the old choice.
+  function handleStrategyChange(repository: Repository, next: StrategyDefaults) {
+    const previous = defaultsByRepository[repository.id];
+    setDefaultsByRepository((prev) => ({ ...prev, [repository.id]: next }));
+    setRowErrors((prev) => ({ ...prev, [repository.id]: null }));
+    setStrategyDefaults(repository.id, next).catch((thrown) => {
+      setDefaultsByRepository((prev) =>
+        previous === undefined
+          ? prev
+          : {
+              ...prev,
+              [repository.id]: previous,
+            },
+      );
+      setRowErrors((prev) => ({ ...prev, [repository.id]: toRimaiaError(thrown) }));
+    });
+  }
+
   async function confirmEnableUnattended(repository: Repository) {
     setRowErrors((prev) => ({ ...prev, [repository.id]: null }));
     try {
@@ -207,6 +270,9 @@ export function RepositoriesSection() {
     <section className="panel">
       <h3>Repositories</h3>
       {listError && <ErrorBanner error={listError} onDismiss={() => setListError(null)} />}
+      {catalogueError && (
+        <ErrorBanner error={catalogueError} onDismiss={() => setCatalogueError(null)} />
+      )}
 
       <div className="repo-add">
         {addError && <ErrorBanner error={addError} onDismiss={() => setAddError(null)} />}
@@ -227,6 +293,7 @@ export function RepositoriesSection() {
             const remote = remoteInfos[repository.id];
             const rowError = rowErrors[repository.id];
             const confirming = confirmingUnattendedId === repository.id;
+            const strategyDefault = defaultsByRepository[repository.id];
 
             return (
               <li key={repository.id} className="repo-item">
@@ -346,6 +413,25 @@ export function RepositoriesSection() {
                     Allow unattended agent runs
                   </label>
                 </div>
+
+                {/* Beside the opt-in, because the two answer the same
+                    question about this repository: what a run here is allowed
+                    to do, and what it is spawned with. ADR-0016's "a repo of
+                    small tasks can default low without touching each card" is
+                    this control — every task in it inherits, and none of them
+                    has to be edited. */}
+                {catalogue && strategyDefault && (
+                  <div className="repo-strategy">
+                    <h5>Default strategy</h5>
+                    <StrategyDefaultsFields
+                      catalogue={catalogue}
+                      value={strategyDefault}
+                      idPrefix={`repo-strategy-${repository.id}`}
+                      unsetLabel="Inherit the global default"
+                      onChange={(next) => handleStrategyChange(repository, next)}
+                    />
+                  </div>
+                )}
 
                 {confirming && (
                   <div

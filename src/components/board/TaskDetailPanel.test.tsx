@@ -44,8 +44,21 @@ function task(overrides: Partial<Task> = {}): Task {
   };
 }
 
+/** The three `effective*` fields are `get_task`'s own, not columns (D12's
+ *  task 020 amendment): a `TaskDetail` without them is not something the
+ *  backend can return, so the fixture carries the "nothing configured
+ *  anywhere" answer rather than leaving them out. */
 function detail(overrides: Partial<TaskDetail> = {}): TaskDetail {
-  return { ...task(), links: [], dependsOn: [], lastRun: null, ...overrides };
+  return {
+    ...task(),
+    links: [],
+    dependsOn: [],
+    lastRun: null,
+    effectiveModel: null,
+    effectiveEffort: null,
+    effectiveOrigin: "claude_code",
+    ...overrides,
+  };
 }
 
 /** `WorktreeSection` (task 007) fetches this independently of `get_task` —
@@ -94,6 +107,35 @@ describe("TaskDetailPanel", () => {
     expect(screen.getByText("rimaia")).toBeInTheDocument();
     expect(screen.getByLabelText("Plan")).toHaveValue("a plan");
     expect(screen.getByText("Delete task")).toBeInTheDocument();
+  });
+
+  it("shows what a run would spawn with, resolved by the backend (task 020)", async () => {
+    mockInvoke.mockImplementation(async (command) => {
+      if (command === "get_task") {
+        return detail({
+          effectiveModel: "sonnet",
+          effectiveEffort: "high",
+          effectiveOrigin: "repository",
+        });
+      }
+      if (command === "get_worktree_status") return worktreeStatus();
+      if (command === "get_strategy_catalogue") {
+        return {
+          catalogue: { models: [], efforts: [], planner: { model: null, effort: null, max_turns: 0 } },
+          json: "{}",
+          defaultJson: "{}",
+        };
+      }
+      throw new Error(`unexpected command: ${command}`);
+    });
+
+    render(<TaskDetailPanel task={task()} repositoryName="rimaia" onClose={vi.fn()} />);
+
+    // The effective triple rides along on `get_task` — the section never
+    // resolves the precedence chain itself (seam-contract D12's amendment).
+    expect(
+      await screen.findByText("Runs as Sonnet · high — from the repository default."),
+    ).toBeInTheDocument();
   });
 
   it("shows the last run's outcome, cost included, once detail resolves (task 008)", async () => {

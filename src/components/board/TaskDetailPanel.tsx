@@ -7,11 +7,11 @@ import { ErrorBanner } from "../ErrorBanner";
 import { DeleteTaskSection } from "../panel/DeleteTaskSection";
 import { ExtraInstructionsEditor } from "../panel/ExtraInstructionsEditor";
 import { LinksEditor } from "../panel/LinksEditor";
-import { ModelEffortOverrides } from "../panel/ModelEffortOverrides";
 import { PlanEditor } from "../panel/PlanEditor";
 import { RepositorySelector } from "../panel/RepositorySelector";
 import { RunInfoSection } from "../panel/RunInfoSection";
 import { RunOutcomeSection } from "../panel/RunOutcomeSection";
+import { StrategySection } from "../panel/StrategySection";
 import { TitleField } from "../panel/TitleField";
 import { WorktreeSection } from "../panel/WorktreeSection";
 import { COLUMN_TITLES } from "./Column";
@@ -201,7 +201,23 @@ function TaskDetailPanelBody({
         onChanged={refreshDetail}
       />
 
-      <ModelEffortOverrides taskId={task.id} model={task.model} effort={task.effort} />
+      {/* Task 020's execution-strategy control, where task 005's plain
+          model/effort dropdowns used to sit. The mode, the two choices and
+          the plan envelope come off the board's own `Task` (they are columns,
+          and the board re-reads them on `tasks:changed`); the effective
+          triple comes off `detail`, because it is resolved per read and is
+          not on a `Task` at all (seam-contract D12's amendment). */}
+      <StrategySection
+        taskId={task.id}
+        strategyMode={task.strategyMode}
+        model={task.model}
+        effort={task.effort}
+        strategyPlan={task.strategyPlan}
+        strategySource={task.strategySource}
+        effective={detail}
+        loading={detailLoading}
+        onChanged={refreshDetail}
+      />
 
       <RunInfoSection
         branch={task.branch}

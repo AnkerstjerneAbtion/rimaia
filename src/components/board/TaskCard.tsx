@@ -16,7 +16,19 @@ import {
   subscribeToSettingsChanged,
   subscribeToTasksChanged,
 } from "../../lib/events";
-import type { QueueEntry, Repository, RimaiaError, Task, TaskSummary } from "../../types";
+import type {
+  EffectiveStrategyFields,
+  QueueEntry,
+  Repository,
+  RimaiaError,
+  Task,
+  TaskSummary,
+} from "../../types";
+import {
+  STRATEGY_ORIGIN_LABELS,
+  parseStrategyPlan,
+  strategyBadgeText,
+} from "../panel/StrategySection";
 import { QUEUE_SKIP_LABELS } from "../runs/QueuePlanList";
 import { RunStateBadge } from "./RunStateBadge";
 
@@ -277,7 +289,9 @@ function runNowState(task: CardTask, repositories: ReadonlyMap<string, Repositor
  * fabricating a link count. Missing renders as "no links / no dependencies",
  * which is also the correct reading for a task genuinely built with none.
  */
-type CardTask = Task & Partial<Pick<TaskSummary, "linkCount" | "dependencyCount" | "lastRun">>;
+type CardTask = Task &
+  Partial<Pick<TaskSummary, "linkCount" | "dependencyCount" | "lastRun">> &
+  Partial<EffectiveStrategyFields>;
 
 interface CardFace {
   readonly task: CardTask;
@@ -297,10 +311,33 @@ interface CardFace {
  * relative time of last activity. Link/dependency counts of 0 render nothing
  * rather than "0 links" — task 005's own Notes ask for polish on ordering,
  * not card decoration, and a task with neither has nothing to indicate.
+ *
+ * Task 020's amendment to D12 adds a seventh: what a run would actually spawn
+ * with. It is read off `effectiveModel`/`effectiveEffort`/`effectiveOrigin`,
+ * which `list_tasks` resolves in Rust, and **never** recomputed from
+ * `task.model` and a settings fetch — the precedence chain is a business rule,
+ * and a TypeScript copy of it would be a second implementation free to
+ * disagree with the one the runner actually obeys.
  */
 function CardFace({ task, repositoryName, now }: CardFace) {
   const linkCount = task.linkCount ?? 0;
   const dependencyCount = task.dependencyCount ?? 0;
+
+  // The three effective fields are one projection on the Rust side and arrive
+  // together or not at all, so an absent origin means this card was built from
+  // a bare `Task` (see `CardTask`) — nothing true to render, which is the same
+  // answer as a task with nothing configured anywhere.
+  const origin = task.effectiveOrigin;
+  const strategy = origin
+    ? strategyBadgeText(task.effectiveModel ?? null, task.effectiveEffort ?? null)
+    : null;
+  // An inherited value is still what runs, but it is not a decision anybody
+  // made about *this* card, so it recedes.
+  const inherited = origin === "global" || origin === "claude_code";
+  const proposalWaiting =
+    task.strategyMode === "planned" &&
+    task.strategySource === "planner" &&
+    parseStrategyPlan(task.strategyPlan)?.status === "proposed";
 
   return (
     <>
@@ -309,6 +346,28 @@ function CardFace({ task, repositoryName, now }: CardFace) {
         <span className="task-card-repo">{repositoryName}</span>
         <RunStateBadge runState={task.runState} lastRun={task.lastRun ?? null} />
       </div>
+      {(strategy || proposalWaiting) && (
+        <div className="task-card-strategy">
+          {origin && strategy && (
+            <span
+              className={
+                inherited ? "task-card-strategy-badge muted" : "task-card-strategy-badge"
+              }
+              title={`Model and effort from ${STRATEGY_ORIGIN_LABELS[origin]}`}
+            >
+              {strategy}
+            </span>
+          )}
+          {proposalWaiting && (
+            <span
+              className="task-card-strategy-proposal"
+              title="The planner has proposed a strategy — open the task to accept, edit or override it."
+            >
+              Proposal
+            </span>
+          )}
+        </div>
+      )}
       <div className="task-card-footer">
         <span className="task-card-time">{relativeTime(task.updatedAt, now)}</span>
         <span className="task-card-indicators">

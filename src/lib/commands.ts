@@ -15,6 +15,9 @@ import type {
   RunEnvironment,
   RunState,
   RunTail,
+  StrategyApproval,
+  StrategyCatalogueView,
+  StrategyDefaults,
   Task,
   TaskDetail,
   TaskFilterInput,
@@ -216,6 +219,112 @@ export function setRunEnvironment(value: RunEnvironment): Promise<void> {
  */
 export function previewComposedPrompt(taskId: string): Promise<string> {
   return call<string>("preview_composed_prompt", { taskId });
+}
+
+// ---------------------------------------------------------------------------
+// Execution strategy (task 020) — see `src-tauri/src/commands/strategy.rs`.
+//
+// The *mode* is deliberately absent from this list: it travels as
+// `strategyMode` on {@link updateTask}'s patch, so the panel and the
+// `update_task` MCP tool reach the same rule (ADR-0006).
+// ---------------------------------------------------------------------------
+
+/**
+ * The model and effort lists every strategy dropdown draws from, the stored
+ * text Settings' editor opens on, and the bytes "Restore defaults" writes — one
+ * read, because they are one settings key.
+ *
+ * Re-read on {@link subscribeToSettingsChanged} in `./events`: adding a model
+ * is a settings write, and a second window has to learn about it.
+ */
+export function getStrategyCatalogue(): Promise<StrategyCatalogueView> {
+  return call<StrategyCatalogueView>("get_strategy_catalogue");
+}
+
+/**
+ * Stores an edited catalogue, answering with the new view so the caller never
+ * re-reads to find out what it stored.
+ *
+ * Rejects unparseable JSON with the parser's own message, which is what the
+ * editor renders inline — an edit that was accepted and then quietly ignored
+ * is not something to make a user discover from a log file.
+ */
+export function setStrategyCatalogue(value: string): Promise<StrategyCatalogueView> {
+  return call<StrategyCatalogueView>("set_strategy_catalogue", { value });
+}
+
+/**
+ * One repository's default strategy, or the global one under it when
+ * `repositoryId` is `null`.
+ *
+ * Never "the effective strategy for a task" — that chain is resolved on the
+ * backend and arrives as {@link TaskSummary.effectiveModel} and its siblings.
+ */
+export function getStrategyDefaults(
+  repositoryId: string | null = null,
+): Promise<StrategyDefaults> {
+  return call<StrategyDefaults>("get_strategy_defaults", { repositoryId });
+}
+
+/** Writes one repository's default strategy, or the global one. There is no
+ *  "clear": a `"default"` mode with no model and no effort already means "no
+ *  opinion". */
+export function setStrategyDefaults(
+  repositoryId: string | null,
+  value: StrategyDefaults,
+): Promise<void> {
+  return call<void>("set_strategy_defaults", { repositoryId, value });
+}
+
+/** Whether a proposal runs on its own or waits for a human. An absent setting
+ *  reads `"automatic"`. */
+export function getStrategyApproval(): Promise<StrategyApproval> {
+  return call<StrategyApproval>("get_strategy_approval");
+}
+
+/** Stores the approval setting. **Nothing reads it yet** — the gate lands after
+ *  tasks 011 and 012 — but a control that forgot its answer on relaunch would
+ *  be worse than none. */
+export function setStrategyApproval(value: StrategyApproval): Promise<void> {
+  return call<void>("set_strategy_approval", { value });
+}
+
+/**
+ * Takes authorship of the proposal on `taskId`: `strategySource` flips from
+ * `"planner"` to `"user"` (seam-contract D17.7).
+ *
+ * Accepting a proposal unchanged is this; accepting an *edited* one is
+ * {@link updateTask} with the edited model and effort, which flips the same
+ * field. There is no `accepted` column behind either.
+ */
+export function acceptTaskStrategy(taskId: string): Promise<Task> {
+  return call<Task>("accept_task_strategy", { taskId });
+}
+
+/**
+ * Clears the recorded proposal — the panel's "Re-plan", and the only thing that
+ * lifts the guard (seam-contract D17.8).
+ *
+ * A `planned` task with a recorded proposal, successful *or* failed, is not
+ * planned again; without it, its next run plans first. Editing the plan text
+ * does not re-trigger anything.
+ */
+export function clearTaskStrategy(taskId: string): Promise<Task> {
+  return call<Task>("clear_task_strategy", { taskId });
+}
+
+/**
+ * Runs the planner for `taskId` now and resolves as soon as it is under way —
+ * **not once it finishes**, exactly like {@link startRun}. The proposal arrives
+ * on `tasks:changed` when the planner writes it back through Rimaia's own MCP
+ * server.
+ *
+ * Rejects before spawning anything when the repository has not opted in to
+ * unattended runs (ADR-0012), when `claude` is missing, or when a run — of
+ * either kind — is already in flight for the task.
+ */
+export function planTaskStrategy(taskId: string): Promise<void> {
+  return call<void>("plan_task_strategy", { taskId });
 }
 
 // ---------------------------------------------------------------------------

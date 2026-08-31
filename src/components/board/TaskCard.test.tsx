@@ -611,4 +611,125 @@ describe("TaskCard", () => {
       expect(queueStatusCalls).toBe(2);
     });
   });
+
+  // ---------------------------------------------------------------------------
+  // The effective strategy (task 020; ADR-0016, seam-contract D12's amendment).
+  //
+  // Every fixture below sets the three `effective*` fields directly rather
+  // than `model`/`effort`: they are what `list_tasks` resolves in Rust, and a
+  // card that derived a badge from `task.model` would be a second copy of the
+  // precedence chain — the thing the amendment exists to prevent.
+  // ---------------------------------------------------------------------------
+
+  describe("Execution strategy", () => {
+    it("shows the model and effort a run would actually spawn with", async () => {
+      renderCard({
+        task: {
+          ...task({ model: "sonnet", effort: "high", strategyMode: "manual" }),
+          effectiveModel: "sonnet",
+          effectiveEffort: "high",
+          effectiveOrigin: "task",
+        },
+      });
+      await screen.findByRole("button", { name: "Run now" });
+
+      expect(screen.getByText("Sonnet · high")).toBeInTheDocument();
+      expect(screen.getByTitle("Model and effort from this task")).toBeInTheDocument();
+    });
+
+    it("shows an inherited value muted, and names the link of the chain it came from", async () => {
+      renderCard({
+        task: {
+          ...task(),
+          effectiveModel: "haiku",
+          effectiveEffort: "low",
+          effectiveOrigin: "global",
+        },
+      });
+      await screen.findByRole("button", { name: "Run now" });
+
+      expect(screen.getByText("Haiku · low")).toHaveClass("muted");
+      expect(screen.getByTitle("Model and effort from the global default")).toBeInTheDocument();
+    });
+
+    it("does not mute a value the repository chose — somebody decided that one", async () => {
+      renderCard({
+        task: { ...task(), effectiveModel: "opus", effectiveEffort: null, effectiveOrigin: "repository" },
+      });
+      await screen.findByRole("button", { name: "Run now" });
+
+      expect(screen.getByText("Opus")).not.toHaveClass("muted");
+    });
+
+    it("renders no badge at all when nothing is configured anywhere", async () => {
+      // D12: a card renders nothing rather than a badge with nothing true in
+      // it. `claude_code` is precisely "no flag reaches the command line".
+      renderCard({
+        task: {
+          ...task(),
+          effectiveModel: null,
+          effectiveEffort: null,
+          effectiveOrigin: "claude_code",
+        },
+      });
+      await screen.findByRole("button", { name: "Run now" });
+
+      expect(document.querySelector(".task-card-strategy")).toBeNull();
+    });
+
+    it("marks a planned task whose proposal is still waiting for a decision", async () => {
+      renderCard({
+        task: {
+          ...task({
+            strategyMode: "planned",
+            strategySource: "planner",
+            strategyPlan: JSON.stringify({ version: 1, status: "proposed", model: "sonnet" }),
+          }),
+          effectiveModel: "sonnet",
+          effectiveEffort: "high",
+          effectiveOrigin: "task",
+        },
+      });
+      await screen.findByRole("button", { name: "Run now" });
+
+      expect(screen.getByText("Proposal")).toBeInTheDocument();
+    });
+
+    it("drops the marker once the proposal has been accepted (D17.7)", async () => {
+      renderCard({
+        task: {
+          ...task({
+            strategyMode: "planned",
+            strategySource: "user",
+            strategyPlan: JSON.stringify({ version: 1, status: "proposed", model: "sonnet" }),
+          }),
+          effectiveModel: "sonnet",
+          effectiveEffort: "high",
+          effectiveOrigin: "task",
+        },
+      });
+      await screen.findByRole("button", { name: "Run now" });
+
+      expect(screen.queryByText("Proposal")).toBeNull();
+    });
+
+    it("shows no marker for a planner failure — the badge already says what runs", async () => {
+      renderCard({
+        task: {
+          ...task({
+            strategyMode: "planned",
+            strategySource: "planner",
+            strategyPlan: JSON.stringify({ version: 1, status: "failed" }),
+          }),
+          effectiveModel: "haiku",
+          effectiveEffort: null,
+          effectiveOrigin: "global",
+        },
+      });
+      await screen.findByRole("button", { name: "Run now" });
+
+      expect(screen.queryByText("Proposal")).toBeNull();
+      expect(screen.getByText("Haiku")).toBeInTheDocument();
+    });
+  });
 });
