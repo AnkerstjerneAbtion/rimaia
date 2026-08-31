@@ -7,7 +7,7 @@
 //! input types and calls it, per this crate's own module doc: a rule enforced
 //! here and not also on the MCP path (task 010) is a bug (ADR-0006).
 
-use rimaia_core::db::{BoardColumn, RunState, Task, TaskLink};
+use rimaia_core::db::{BoardColumn, RunState, StrategyMode, Task, TaskLink};
 use rimaia_core::tasks::{
     self, NewTask, NewTaskLink, Patch, TaskDetail, TaskFilter, TaskLinkPatch, TaskPatch,
     TaskSummary,
@@ -106,6 +106,13 @@ pub struct TaskPatchInput {
     pub repository_id: Option<String>,
     #[serde(default)]
     pub title: Option<String>,
+    /// Task 020's mode, which gets no command of its own: the column is
+    /// `NOT NULL` and has no "clear", so a plain `Option` says everything, and
+    /// sending it here means the panel and the `update_task` MCP tool reach
+    /// D17.6's rule — a model or effort set flips the mode to `manual` — through
+    /// the same service (ADR-0006).
+    #[serde(default)]
+    pub strategy_mode: Option<StrategyMode>,
     #[serde(default, deserialize_with = "opt_patch")]
     pub plan: Option<Option<String>>,
     #[serde(default, deserialize_with = "opt_patch")]
@@ -185,6 +192,7 @@ pub async fn update_task(
         TaskPatch {
             repository_id: patch.repository_id,
             title: patch.title,
+            strategy_mode: patch.strategy_mode,
             plan: to_patch(patch.plan),
             extra_instructions: to_patch(patch.extra_instructions),
             model: to_patch(patch.model),

@@ -1,9 +1,9 @@
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex, OnceLock};
 
-use rimaia_core::mcp::McpHandle;
+use rimaia_core::mcp::{McpHandle, RunHandles};
 use rimaia_core::runner::events::RunTail;
-use rimaia_core::runner::CancelSignal;
+use rimaia_core::runner::{CancelSignal, RunnerConfig};
 use rimaia_core::scheduler::QueueHandle;
 use rimaia_core::{AppPaths, Error, Result, ServiceContext};
 
@@ -42,11 +42,41 @@ use rimaia_core::{AppPaths, Error, Result, ServiceContext};
 /// in `setup()`, which is what lets a manual "Run now" and the queue's own
 /// claim refuse to double-spawn a process for the same task — see that
 /// method's doc.
+///
+/// `runner` and `run_handles` are task 020's two shared values, and they are
+/// shared for the same kind of reason: a second copy would be a second answer.
+/// See each field's own doc.
 pub struct AppState {
     pub context: ServiceContext,
     pub paths: AppPaths,
     pub runs: RunRegistry,
     pub queue: QueueHandle,
+    /// The one [`RunnerConfig`] every starter spawns from — task 009's queue,
+    /// a manual "Run now", and task 020's "Plan now".
+    ///
+    /// Built once in `setup()` and cloned from there, replacing the two
+    /// independent `RunnerConfig::default()` calls task 020 found in `lib.rs`
+    /// and `commands::runs`. What it holds — which `claude` binary, the grace
+    /// period a cancelled child gets, the turn budget — is a property of *this
+    /// installation*, not of whoever pressed which button, so two starters that
+    /// disagreed about any of it would spawn measurably different processes for
+    /// the same card with nothing on screen to explain the difference.
+    pub runner: RunnerConfig,
+    /// Task 020's live run-scoped MCP endpoints (seam-contract D17.4).
+    ///
+    /// Built in `setup()` before either subsystem and handed to both:
+    /// [`mcp::build`](rimaia_core::mcp::build) records the address it actually
+    /// bound on **every** bind — including the rebind
+    /// `commands::mcp::set_mcp_port` performs at runtime — and the runner mints
+    /// a per-run token against this same value. That is the whole reason it is
+    /// shared mutable state rather than a URL captured once: a captured URL goes
+    /// stale the moment the operator moves the port, and the next planner would
+    /// be handed an endpoint nothing answers.
+    ///
+    /// It is also what removes an ordering constraint from `setup()` — neither
+    /// the scheduler nor the MCP server has to exist before the other for a run
+    /// to have somewhere to mint a token.
+    pub run_handles: RunHandles,
     /// Task 010's MCP server (ADR-0006).
     ///
     /// A `Mutex` because this is the one field that is not write-once:

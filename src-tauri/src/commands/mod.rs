@@ -11,5 +11,6 @@ pub mod queue;
 pub mod repositories;
 pub mod runs;
 pub mod settings;
+pub mod strategy;
 pub mod tasks;
 pub mod worktree;

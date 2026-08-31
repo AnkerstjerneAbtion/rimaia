@@ -10,7 +10,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use rimaia_core::db::MutationSource;
-use rimaia_core::mcp::{self, McpState};
+use rimaia_core::mcp::{self, McpState, RunHandles};
 use rimaia_core::runner::events::RunTail;
 use rimaia_core::runner::process::DEFAULT_GRACE_PERIOD;
 use rimaia_core::runner::RunnerConfig;
@@ -169,8 +169,28 @@ pub fn run() {
             // refuse to double-spawn a process for the same task — see
             // `RunRegistry::attach_queue`'s doc — and it has to happen before
             // `app.manage` hands `runs` to any command.
+            //
+            // Task 020's two shared values are built here, ahead of the queue,
+            // rather than inside `scheduler::build`, because each is shared
+            // with something the queue knows nothing about (see `AppState`'s
+            // own docs): the `RunnerConfig` with every other starter, so a
+            // manual "Run now" and the queue cannot spawn differently
+            // configured processes for the same card; the `RunHandles` with the
+            // MCP server below, which records the address it actually bound
+            // into them on every bind, and with the runner, which mints one
+            // scoped token per run against that same table.
+            let run_handles = RunHandles::default();
+            // The same table the MCP server below records its bound address
+            // into. Cloning it here rather than leaving `RunnerConfig::default`'s
+            // empty one is what lets a strategy run mint a token against an
+            // endpoint that exists — with the default, `mcp_config_json` would
+            // answer `None` forever and no task would ever plan.
+            let runner = RunnerConfig {
+                run_handles: run_handles.clone(),
+                ..RunnerConfig::default()
+            };
             let (queue, queue_task) =
-                scheduler::build(context.clone(), paths.clone(), RunnerConfig::default());
+                scheduler::build(context.clone(), paths.clone(), runner.clone());
             runs.attach_queue(queue.clone());
             tauri::async_runtime::spawn(queue_task.run());
 
@@ -189,8 +209,11 @@ pub fn run() {
                     );
                     mcp::DEFAULT_PORT
                 });
-            let (mcp_handle, mcp_task) =
-                tauri::async_runtime::block_on(mcp::build(context.clone(), mcp_port));
+            let (mcp_handle, mcp_task) = tauri::async_runtime::block_on(mcp::build(
+                context.clone(),
+                mcp_port,
+                run_handles.clone(),
+            ));
             let mcp_status = mcp_handle.status();
             match mcp_status.state {
                 McpState::Listening => {
@@ -218,6 +241,8 @@ pub fn run() {
                 paths,
                 runs,
                 queue,
+                runner,
+                run_handles,
                 mcp: std::sync::Mutex::new(mcp_handle),
             });
 
@@ -271,6 +296,15 @@ pub fn run() {
         commands::settings::get_run_environment,
         commands::settings::set_run_environment,
         commands::settings::preview_composed_prompt,
+        commands::strategy::get_strategy_catalogue,
+        commands::strategy::set_strategy_catalogue,
+        commands::strategy::get_strategy_defaults,
+        commands::strategy::set_strategy_defaults,
+        commands::strategy::get_strategy_approval,
+        commands::strategy::set_strategy_approval,
+        commands::strategy::accept_task_strategy,
+        commands::strategy::clear_task_strategy,
+        commands::strategy::plan_task_strategy,
         commands::worktree::get_worktree_status,
         commands::worktree::reveal_task_worktree,
         commands::runs::start_task_run,
@@ -311,6 +345,15 @@ pub fn run() {
         commands::settings::get_run_environment,
         commands::settings::set_run_environment,
         commands::settings::preview_composed_prompt,
+        commands::strategy::get_strategy_catalogue,
+        commands::strategy::set_strategy_catalogue,
+        commands::strategy::get_strategy_defaults,
+        commands::strategy::set_strategy_defaults,
+        commands::strategy::get_strategy_approval,
+        commands::strategy::set_strategy_approval,
+        commands::strategy::accept_task_strategy,
+        commands::strategy::clear_task_strategy,
+        commands::strategy::plan_task_strategy,
         commands::worktree::get_worktree_status,
         commands::worktree::reveal_task_worktree,
         commands::runs::start_task_run,
