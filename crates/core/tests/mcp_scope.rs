@@ -14,12 +14,17 @@
 
 use rimaia_core::db::{BoardColumn, MutationSource};
 use rimaia_core::mcp::requests::{
-    CreateTaskRequest, GetTaskRequest, ListTasksRequest, MoveTaskRequest,
-    SetTaskDependenciesRequest, SetTaskStrategyRequest, UpdateTaskRequest,
+    CreateTaskRequest, GetStrategyDefaultsRequest, GetTaskRequest, ListTasksRequest,
+    MoveTaskRequest, SetStrategyApprovalRequest, SetStrategyCatalogueRequest,
+    SetStrategyDefaultsRequest, SetTaskDependenciesRequest, SetTaskStrategyRequest,
+    TaskStrategyRequest, UpdateTaskRequest,
 };
-use rimaia_core::mcp::responses::{TaskListView, TaskView};
+use rimaia_core::mcp::responses::{StrategyApprovalView, TaskListView, TaskView};
 use rimaia_core::mcp::{
     self, McpHandle, RimaiaServer, RunAccess, RunGrant, RunHandles, RunScope, Tool,
+};
+use rimaia_core::strategy::{
+    self, Catalogue, CatalogueEntry, StrategyApproval, StrategyDefaults, DEFAULT_CATALOGUE_JSON,
 };
 use rimaia_core::tasks::{self, NewTask};
 use rimaia_core::testing::TestContext;
@@ -393,6 +398,290 @@ async fn a_scope_refusal_carries_the_same_payload_as_every_other_refusal() {
 }
 
 // ---------------------------------------------------------------------------
+// ADR-0021's eight, through their real handlers
+//
+// `the_operator_endpoint_keeps_every_tool_it_had_before_task_020` pins the
+// *table*; these pin the handlers. The difference is the whole failure mode: a
+// tool that forgot its `authorize` line would satisfy the table and still be
+// callable by a run, because nothing else on the path checks. So every one of
+// them is called on a scoped server here, and the refusal is asserted by
+// sentence rather than by "it errored".
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn nothing_adr_0021_added_is_reachable_from_a_run() {
+    // Seven of these reconfigure the installation — the model catalogue, the
+    // defaults every card inherits, whether a proposal waits for a human — and
+    // a run rewriting any of them changes what every *other* task in the queue
+    // runs as. `accept_task_strategy` is refused for a different reason: it
+    // speaks for a human, and a planner accepting its own proposal is marking
+    // its own homework.
+    let h = TestContext::new().await;
+    let repository_id = seed_repository(&h.context.pool, "rimaia", "/tmp/rimaia").await;
+    let mine = create_task(&h, &repository_id, "Mine").await;
+    let run = scoped(&h, &mine.id);
+
+    assert_refusal(
+        &as_result(run.get_strategy_catalogue().await),
+        &not_available("get_strategy_catalogue", &mine.id),
+    );
+    assert_refusal(
+        &as_result(
+            run.set_strategy_catalogue(Parameters(request::<SetStrategyCatalogueRequest>(
+                json!({ "catalogue": DEFAULT_CATALOGUE_JSON }),
+            )))
+            .await,
+        ),
+        &not_available("set_strategy_catalogue", &mine.id),
+    );
+    assert_refusal(
+        &as_result(
+            run.get_strategy_defaults(Parameters(request::<GetStrategyDefaultsRequest>(json!({}))))
+                .await,
+        ),
+        &not_available("get_strategy_defaults", &mine.id),
+    );
+    assert_refusal(
+        &as_result(
+            run.set_strategy_defaults(Parameters(request::<SetStrategyDefaultsRequest>(json!({
+                "mode": "manual",
+                "model": "opus",
+            }))))
+            .await,
+        ),
+        &not_available("set_strategy_defaults", &mine.id),
+    );
+    assert_refusal(
+        &as_result(run.get_strategy_approval().await),
+        &not_available("get_strategy_approval", &mine.id),
+    );
+    assert_refusal(
+        &as_result(
+            run.set_strategy_approval(Parameters(request::<SetStrategyApprovalRequest>(
+                json!({ "approval": "manual" }),
+            )))
+            .await,
+        ),
+        &not_available("set_strategy_approval", &mine.id),
+    );
+
+    // Both of these name a task, and both are refused for the run's *own* card:
+    // they are off its table entirely, not merely narrowed to its own task.
+    assert_refusal(
+        &as_result(
+            run.accept_task_strategy(Parameters(request::<TaskStrategyRequest>(
+                json!({ "task_id": mine.id }),
+            )))
+            .await,
+        ),
+        &not_available("accept_task_strategy", &mine.id),
+    );
+    assert_refusal(
+        &as_result(
+            run.clear_task_strategy(Parameters(request::<TaskStrategyRequest>(
+                json!({ "task_id": mine.id }),
+            )))
+            .await,
+        ),
+        &not_available("clear_task_strategy", &mine.id),
+    );
+
+    // And none of them wrote anything on the way to being refused.
+    assert_eq!(
+        strategy::settings::approval(&h.context.pool)
+            .await
+            .expect("read the approval setting"),
+        StrategyApproval::Automatic,
+    );
+    assert_eq!(
+        strategy::settings::global_default(&h.context.pool)
+            .await
+            .expect("read the global defaults"),
+        StrategyDefaults::default(),
+    );
+}
+
+#[tokio::test]
+async fn the_operator_reads_and_writes_the_strategy_configuration_over_mcp() {
+    // ADR-0021's premise: every one of these had a Tauri command and no tool,
+    // and an agent could not do what the window could. So each is round-tripped
+    // — set, then read back through the *other* tool — rather than merely
+    // called, because a setter that stored nothing would pass a smoke test.
+    let h = TestContext::new().await;
+    let operator = RimaiaServer::new(h.context.clone());
+
+    let stored: StrategyApprovalView = json_of(
+        operator
+            .set_strategy_approval(Parameters(request::<SetStrategyApprovalRequest>(
+                json!({ "approval": "manual" }),
+            )))
+            .await,
+    );
+    assert_eq!(stored.approval, StrategyApproval::Manual);
+    assert_eq!(
+        json_of::<StrategyApprovalView>(operator.get_strategy_approval().await).approval,
+        StrategyApproval::Manual,
+    );
+
+    let catalogue: Catalogue = json_of(
+        operator
+            .set_strategy_catalogue(Parameters(request::<SetStrategyCatalogueRequest>(json!({
+                // ADR-0016's "a new model does not require a release", as the
+                // only thing that could prove it: a model this build has never
+                // heard of, stored and read back verbatim.
+                "catalogue": r#"{"models":[{"id":"sonnet-9","label":"Sonnet 9"}],
+                    "efforts":[{"id":"low","label":"Low"}],
+                    "planner":{"model":"sonnet-9","effort":"low","max_turns":4}}"#,
+            }))))
+            .await,
+    );
+    assert_eq!(
+        catalogue.models,
+        vec![CatalogueEntry {
+            id: "sonnet-9".to_string(),
+            label: "Sonnet 9".to_string(),
+        }],
+    );
+    assert_eq!(
+        json_of::<Catalogue>(operator.get_strategy_catalogue().await),
+        catalogue,
+    );
+}
+
+#[tokio::test]
+async fn strategy_defaults_are_read_and_written_per_repository_or_globally_by_one_pair_of_tools() {
+    // The optional `repository_id` is the whole reason there is one tool per
+    // direction rather than four (ADR-0021's warning about a surface that is
+    // large and badly described), so both spellings are exercised — and the
+    // repository's own row must not answer for the global one or the reverse.
+    let h = TestContext::new().await;
+    let operator = RimaiaServer::new(h.context.clone());
+    let repository_id = seed_repository(&h.context.pool, "rimaia", "/tmp/rimaia").await;
+
+    json_of::<StrategyDefaults>(
+        operator
+            .set_strategy_defaults(Parameters(request::<SetStrategyDefaultsRequest>(json!({
+                "mode": "planned",
+                "effort": "low",
+            }))))
+            .await,
+    );
+    json_of::<StrategyDefaults>(
+        operator
+            .set_strategy_defaults(Parameters(request::<SetStrategyDefaultsRequest>(json!({
+                "repository_id": repository_id,
+                "mode": "manual",
+                "model": "opus",
+                "effort": "high",
+            }))))
+            .await,
+    );
+
+    // Omitted means global — the level beneath the repositories, not a default
+    // spelling of "the only repository there is".
+    assert_eq!(
+        json_of::<StrategyDefaults>(
+            operator
+                .get_strategy_defaults(Parameters(request::<GetStrategyDefaultsRequest>(json!({}))))
+                .await
+        ),
+        StrategyDefaults {
+            mode: rimaia_core::db::StrategyMode::Planned,
+            model: None,
+            effort: Some("low".to_string()),
+        },
+    );
+    assert_eq!(
+        json_of::<StrategyDefaults>(
+            operator
+                .get_strategy_defaults(Parameters(request::<GetStrategyDefaultsRequest>(
+                    json!({ "repository_id": repository_id }),
+                )))
+                .await
+        ),
+        StrategyDefaults {
+            mode: rimaia_core::db::StrategyMode::Manual,
+            model: Some("opus".to_string()),
+            effort: Some("high".to_string()),
+        },
+    );
+
+    // A repository nobody has configured reads as nothing configured, rather
+    // than inheriting the global row through this tool — the precedence chain
+    // is `strategy::resolve`'s job, and a getter that pre-resolved it would
+    // make "clear this repository's override" impossible to express.
+    let other = seed_repository(&h.context.pool, "other", "/tmp/other").await;
+    assert_eq!(
+        json_of::<StrategyDefaults>(
+            operator
+                .get_strategy_defaults(Parameters(request::<GetStrategyDefaultsRequest>(
+                    json!({ "repository_id": other }),
+                )))
+                .await
+        ),
+        StrategyDefaults::default(),
+    );
+}
+
+#[tokio::test]
+async fn a_proposal_is_accepted_and_cleared_over_mcp_exactly_as_the_panel_does_it() {
+    // The two task-shaped tools ADR-0021 added, round-tripped against the same
+    // service the panel calls: accepting takes authorship of a planner's
+    // proposal, and clearing is the only thing that lifts D17.8's re-plan guard.
+    let h = TestContext::new().await;
+    let repository_id = seed_repository(&h.context.pool, "rimaia", "/tmp/rimaia").await;
+    let task = create_task(&h, &repository_id, "Mine").await;
+    tasks::update_task(
+        &h.context,
+        &task.id,
+        rimaia_core::tasks::TaskPatch {
+            strategy_mode: Some(rimaia_core::db::StrategyMode::Planned),
+            ..Default::default()
+        },
+    )
+    .await
+    .expect("a planned task");
+    tasks::strategy::set_task_strategy(
+        &h.context,
+        &task.id,
+        rimaia_core::tasks::StrategyPlan::proposed(Some("sonnet".to_string()), None),
+        rimaia_core::db::StrategySource::Planner,
+    )
+    .await
+    .expect("a planner's proposal");
+
+    let operator = RimaiaServer::new(h.context.clone());
+
+    let accepted = ok(operator
+        .accept_task_strategy(Parameters(request::<TaskStrategyRequest>(
+            json!({ "task_id": task.id }),
+        )))
+        .await);
+    assert_eq!(
+        accepted.strategy_source,
+        Some(rimaia_core::db::StrategySource::User),
+        "accepting is a claim of authorship, and there is no separate `accepted` column",
+    );
+    assert!(
+        accepted.strategy_plan.is_some(),
+        "the proposal itself is untouched, so the card keeps rendering the rationale",
+    );
+
+    let cleared = ok(operator
+        .clear_task_strategy(Parameters(request::<TaskStrategyRequest>(
+            json!({ "task_id": task.id }),
+        )))
+        .await);
+    assert_eq!(cleared.strategy_plan, None);
+    assert_eq!(cleared.strategy_source, None);
+    assert_eq!(
+        cleared.model.as_deref(),
+        Some("sonnet"),
+        "model and effort stay: they are still what this task runs on until the next planner",
+    );
+}
+
+// ---------------------------------------------------------------------------
 // Routing, against a real bound server
 // ---------------------------------------------------------------------------
 
@@ -608,6 +897,18 @@ fn assert_refusal(result: &CallToolResult, expected: &str) {
 /// The request an agent would send, deserialized through the real schema.
 fn request<T: serde::de::DeserializeOwned>(value: Value) -> T {
     serde_json::from_value(value).expect("a well-formed request deserializes")
+}
+
+/// The value a tool served, for a call that had no business being refused.
+///
+/// Generic where [`ok`] is not, because ADR-0021's tools answer with four
+/// different shapes and a helper per shape would be four ways of writing
+/// `panic!`.
+fn json_of<T>(result: Result<Json<T>, rimaia_core::mcp::ToolError>) -> T {
+    match result {
+        Ok(Json(value)) => value,
+        Err(error) => panic!("the operator's own door must serve this: {:?}", error.0),
+    }
 }
 
 fn ok(result: Result<Json<TaskView>, rimaia_core::mcp::ToolError>) -> TaskView {
