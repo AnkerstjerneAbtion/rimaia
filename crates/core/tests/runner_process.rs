@@ -83,7 +83,12 @@ fn invocation() -> Invocation {
         system_append: "You are running unattended, started by Rimaia.".to_string(),
         model: Some("claude-sonnet-5".to_string()),
         effort: None,
+        allowed_tools: Vec::new(),
         disallowed_tools: Vec::new(),
+        // An implementation run reaches Rimaia through nothing. The scoped
+        // handle is the strategy run's, and `runner_strategy.rs` pins the
+        // vector that carries it.
+        mcp_config: None,
         max_turns: None,
     }
 }
@@ -1501,7 +1506,7 @@ impl RunnerFixture {
             .await
             .expect("read the base instructions");
 
-        compose_prompt(&base, &detail, &repository)
+        compose_prompt(&base, &detail, &repository, None)
     }
 
     /// The JSONL transcript, line by line.
@@ -1513,4 +1518,103 @@ impl RunnerFixture {
             .map(str::to_string)
             .collect()
     }
+}
+
+// ---------------------------------------------------------------------------
+// The strategy run's invocation (ADR-0012's 2026-08-31 correction)
+//
+// These pin the flags that were wrong on the first real planner run. The bug
+// was invisible to every other kind of test: the process spawned, the stream
+// parsed, the run classified as successful, and only the *absence* of a
+// write-back said anything had gone wrong. An exact-argv assertion is what
+// makes "the planner is permitted to answer" a checked property rather than an
+// assumption.
+
+/// The planner's shape: narrow mode, its one tool allowed by name, every
+/// writing tool denied, isolated, and bounded.
+fn planner_invocation() -> Invocation {
+    Invocation {
+        session_id: SESSION_ID.to_string(),
+        resume: false,
+        permission_mode: PermissionMode::AcceptEdits,
+        run_environment: RunEnvironment::StrictLocal,
+        system_append: "You are running unattended, started by Rimaia.".to_string(),
+        model: Some("haiku".to_string()),
+        effort: Some("low".to_string()),
+        allowed_tools: vec!["mcp__rimaia__set_task_strategy".to_string()],
+        disallowed_tools: vec!["Write".to_string(), "Bash".to_string()],
+        mcp_config: Some(
+            r#"{"mcpServers":{"rimaia":{"type":"http","url":"http://127.0.0.1:4517/mcp/run/tok"}}}"#
+                .to_string(),
+        ),
+        max_turns: Some(6),
+    }
+}
+
+#[test]
+fn a_strategy_run_is_permitted_to_call_the_one_tool_it_exists_to_call() {
+    // The regression this file exists for. `acceptEdits` auto-approves file
+    // edits and *not* MCP tool calls, so without `--allowedTools` the planner's
+    // only action raises a permission request that nobody unattended can grant.
+    // The run then ends looking successful and every planned task silently
+    // falls back to the default.
+    let argv = argv(&planner_invocation());
+
+    let at = argv
+        .iter()
+        .position(|arg| arg == "--allowedTools")
+        .expect("a planner that cannot call its own write-back cannot plan");
+    assert_eq!(argv[at + 1], "mcp__rimaia__set_task_strategy");
+}
+
+#[test]
+fn a_strategy_run_is_denied_every_way_of_touching_the_worktree_it_reads() {
+    let argv = argv(&planner_invocation());
+    let at = argv
+        .iter()
+        .position(|arg| arg == "--disallowedTools")
+        .expect("the planner's blocklist is what makes reading safe");
+
+    // Everything between this flag and the next one is the list.
+    let denied: Vec<&String> = argv[at + 1..]
+        .iter()
+        .take_while(|arg| !arg.starts_with("--"))
+        .collect();
+    assert!(denied.iter().any(|tool| *tool == "Write"));
+    assert!(denied.iter().any(|tool| *tool == "Bash"));
+}
+
+#[test]
+fn a_strategy_run_is_isolated_and_bounded_whatever_the_operator_configured() {
+    // `strict_local` is forced for the planner regardless of the
+    // `run_environment` setting (ADR-0004's amendment): it is what guarantees
+    // the only MCP server in reach is the scoped Rimaia handle, and it is why
+    // `--mcp-config` below can be trusted to be the whole list.
+    let argv = argv(&planner_invocation());
+    assert!(argv.iter().any(|arg| arg == "--strict-mcp-config"));
+
+    let at = argv
+        .iter()
+        .position(|arg| arg == "--max-turns")
+        .expect("an unbounded planner is a planner in a loop, spending money");
+    assert_eq!(argv[at + 1], "6");
+}
+
+#[test]
+fn the_scoped_mcp_config_is_one_inline_json_argument_and_not_a_file_path() {
+    // Seam-contract D17.4. One argv element, parseable as JSON, naming the
+    // run-scoped route — a temp file would change every run and could not be
+    // pinned here at all.
+    let argv = argv(&planner_invocation());
+    let at = argv
+        .iter()
+        .position(|arg| arg == "--mcp-config")
+        .expect("a planner with no handle has no way to answer");
+
+    let config: serde_json::Value =
+        serde_json::from_str(&argv[at + 1]).expect("the config is an inline JSON string");
+    let url = config["mcpServers"]["rimaia"]["url"]
+        .as_str()
+        .expect("the scoped endpoint");
+    assert!(url.contains("/mcp/run/"), "the run-scoped route, not /mcp");
 }

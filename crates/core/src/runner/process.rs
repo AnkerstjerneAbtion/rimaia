@@ -57,6 +57,7 @@ use crate::context::ServiceContext;
 use crate::db::settings::{self, RunEnvironment};
 use crate::db::{new_id, ExitClass, Run, RunState, RunStatus, Task};
 use crate::error::{Error, Result};
+use crate::mcp::RunHandles;
 use crate::paths::AppPaths;
 use crate::repo;
 use crate::runner::events::{EventStream, InitEvent, RunEvent};
@@ -64,6 +65,7 @@ use crate::runner::outcome::{
     finish_run, start_run, NewRun, PullRequestWatch, RunOutcome, Termination,
 };
 use crate::runner::prompt::{compose_prompt, compose_system_append};
+use crate::runner::strategy;
 use crate::tasks::{self, set_run_state};
 use crate::worktree;
 
@@ -239,11 +241,43 @@ pub struct Invocation {
     /// expressible). An empty `--model` would be a worse answer than no flag.
     pub model: Option<String>,
     pub effort: Option<String>,
+    /// `--allowedTools`: tools pre-approved for this session, so the run never
+    /// stops to ask.
+    ///
+    /// Empty for an implementation run, which gets its blanket approval from
+    /// `bypassPermissions` (ADR-0012) and needs no list. Non-empty for a
+    /// strategy run, and that is not a nicety — it is the only reason the
+    /// planner can answer at all.
+    ///
+    /// **`acceptEdits` does not cover MCP tools.** It auto-approves file edits;
+    /// an `mcp__*` call still raises a permission request, and an unattended run
+    /// has nobody to grant it, so the call is refused and the planner produces
+    /// nothing. Naming the one tool here is what keeps ADR-0012's argument for
+    /// the *narrow* posture intact instead of reaching for
+    /// `bypassPermissions`: the planner is permitted exactly its own write-back
+    /// and nothing else, while `disallowed_tools` still denies it every way of
+    /// touching the worktree.
+    pub allowed_tools: Vec<String>,
     pub disallowed_tools: Vec<String>,
+    /// `--mcp-config`, as an inline JSON string from
+    /// [`RunHandles::mcp_config_json`](crate::mcp::RunHandles::mcp_config_json)
+    /// (seam-contract D17.4).
+    ///
+    /// `None` for an implementation run, which reaches Rimaia through nothing
+    /// and has no reason to. `Some` for a strategy run, whose entire output is
+    /// one call back through the scoped handle this names — and also `None` for
+    /// a strategy run when no endpoint is bound, the busy-port case D16.7 makes
+    /// non-fatal, which [`strategy::resolve`](super::strategy::resolve) refuses
+    /// to plan into rather than spawning a planner that cannot answer.
+    pub mcp_config: Option<String>,
     /// ADR-0011 bounds a runaway loop with this. Left `None` by task 008: there
     /// is no column and no setting holding a turn budget, and *what* the budget
     /// should be is retry policy, which is task 014's. The field is here so that
     /// task adds a value rather than a flag.
+    ///
+    /// Task 020 is the first caller to set it: a planner's budget comes from
+    /// the catalogue, so a strategy run is bounded even though the retry loop
+    /// that will eventually bound implementation runs is still task 014's.
     pub max_turns: Option<u32>,
 }
 
@@ -292,9 +326,28 @@ impl Invocation {
             args.push(effort.clone());
         }
 
+        // Before `--disallowedTools` so the two variadic lists read in the order
+        // a human reasons about them — what this run may do, then what it may
+        // not. Each `--` token ends the previous list, so the pairing is safe in
+        // either order; this one is just the legible one.
+        if !self.allowed_tools.is_empty() {
+            args.push("--allowedTools".to_string());
+            args.extend(self.allowed_tools.iter().cloned());
+        }
+
         if !self.disallowed_tools.is_empty() {
             args.push("--disallowedTools".to_string());
             args.extend(self.disallowed_tools.iter().cloned());
+        }
+
+        // Immediately after the other variadic flag and before `--max-turns`,
+        // which is the ordering contract `--disallowedTools` above already
+        // documents: `--mcp-config` also takes "JSON files or strings
+        // (space-separated)", so what ends its list is the next `--` token.
+        // Anything non-flag appended after it would be read as a second config.
+        if let Some(mcp_config) = &self.mcp_config {
+            args.push("--mcp-config".to_string());
+            args.push(mcp_config.clone());
         }
 
         if let Some(max_turns) = self.max_turns {
@@ -529,6 +582,19 @@ pub struct RunnerConfig {
     pub grace_period: Duration,
     /// See [`Invocation::max_turns`].
     pub max_turns: Option<u32>,
+    /// Where a strategy run mints its scoped MCP token (seam-contract D17.4).
+    ///
+    /// On the *runner's* config rather than passed per call because it is a
+    /// property of this installation in exactly the way `program` is: the
+    /// shell builds one table in `setup()` and hands the same one to
+    /// [`mcp::build`](crate::mcp::build), so the endpoint a run is handed is
+    /// always the address the server most recently bound — including after a
+    /// runtime rebind.
+    ///
+    /// [`Default`] gives an empty table with no endpoint, which is the right
+    /// answer for every test that never plans anything: no endpoint means no
+    /// `--mcp-config` and no planner, not a failure.
+    pub run_handles: RunHandles,
 }
 
 impl Default for RunnerConfig {
@@ -537,6 +603,7 @@ impl Default for RunnerConfig {
             program: PathBuf::from(CLAUDE_CLI),
             grace_period: DEFAULT_GRACE_PERIOD,
             max_turns: None,
+            run_handles: RunHandles::default(),
         }
     }
 }
@@ -615,8 +682,58 @@ pub async fn run_task(
     let worktree = worktree::prepare(ctx, &task_id).await?;
 
     let detail = tasks::get_task(ctx, &task_id).await?;
+
+    // The claim moved ahead of the strategy run in task 020, and the order is
+    // load-bearing: it is what makes this task exclusively ours *before* a
+    // second process is spawned on its behalf. Without it the queue and a manual
+    // "Run now" could each start a planner for the same card and each pay for
+    // it. `claim` is already a no-op for a task this process just moved to
+    // `running`, and `release` below already covers a claim that never became a
+    // run — the only new thing is that it now also covers the planner.
+    claim(ctx, &detail.task).await?;
+
+    let resolved = match strategy::resolve(
+        ctx,
+        paths,
+        config,
+        &detail,
+        &repository,
+        Path::new(&worktree.path),
+        &request.cancel,
+    )
+    .await
+    {
+        Ok(resolved) => resolved,
+        Err(error) => {
+            release(ctx, &task_id).await;
+            return Err(error);
+        }
+    };
+
+    let (model, effort, guidance) = match resolved {
+        strategy::Resolution::Ready {
+            model,
+            effort,
+            guidance,
+        } => (model, effort, guidance),
+        // Stopped while planning. Spawning the implementation run now would run
+        // the very thing the user just cancelled, so the claim goes back and
+        // nothing else happens.
+        strategy::Resolution::Cancelled => {
+            release(ctx, &task_id).await;
+            return Err(Error::invalid(format!(
+                "\"{}\" was cancelled while its strategy was being planned",
+                detail.task.title,
+            )));
+        }
+    };
+
+    // Re-read once more: a planner that wrote a proposal changed this row, and
+    // the prompt has to carry what the card now says rather than what it said
+    // before the planner ran.
+    let detail = tasks::get_task(ctx, &task_id).await?;
     let base = settings::base_instructions(&ctx.pool).await?;
-    let prompt = compose_prompt(&base, &detail, &repository);
+    let prompt = compose_prompt(&base, &detail, &repository, guidance.as_ref());
 
     let invocation = Invocation {
         session_id: new_id(),
@@ -624,13 +741,20 @@ pub async fn run_task(
         permission_mode: request.trigger.permission_mode(),
         run_environment: settings::run_environment(&ctx.pool).await?,
         system_append: compose_system_append(&detail, &repository),
-        model: detail.task.model.clone(),
-        effort: detail.task.effort.clone(),
+        model,
+        effort,
+        // Empty: ADR-0012 gives an unattended implementation run
+        // `bypassPermissions`, which approves everything the blocklist has not
+        // already taken away. A list here would narrow that, which is task
+        // 012's or 014's decision to make, not this line's.
+        allowed_tools: Vec::new(),
         disallowed_tools: disallowed_tools(&ctx.pool).await?,
+        // An implementation run reaches Rimaia through nothing: the scoped
+        // handle exists so a *planner* can answer, and ADR-0016 gives the
+        // implementation run no reason to write to its own card.
+        mcp_config: None,
         max_turns: config.max_turns,
     };
-
-    claim(ctx, &detail.task).await?;
 
     let run = match start_run(
         ctx,
