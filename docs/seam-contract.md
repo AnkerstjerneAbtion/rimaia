@@ -111,6 +111,31 @@ asks, for exactly the collision reason the body gives. Appended rather than edit
 D14's amendment was, because the original sentence bound every task written against it and
 each should inherit both the rule and the one exception to it.
 
+
+### Amendment, 2026-09-01 — a fourth, and a fifth reserved
+
+Two more, and the reasons are different in kind.
+
+```
+src-tauri/migrations/20260828120000_dependencies_and_parallel.sql   (tasks 011 + 012, reserved)
+src-tauri/migrations/20260901000000_backfill_strategy_mode.sql      (task 020)
+```
+
+The first is reserved rather than written: tasks 011 and 012 need `runs.base_ref`
+and `repositories.max_concurrency`, and the name is claimed here so a later branch
+cannot pick the same timestamp.
+
+The second is not a schema change at all — it adds no column, index or constraint.
+Task 020 gave `tasks.strategy_mode` a meaning it did not have, and in doing so
+changed what an existing row means: `(model = 'opus', strategy_mode = 'default')`
+used to say "spawn with opus" and now says "ignore opus and use the configured
+default". The migration repairs rows written under the old reading. It is a
+one-time data repair, and the alternative to writing it was shipping a branch that
+silently changes which model six existing cards run with.
+
+**The count is now five.** D4's prohibition is otherwise unchanged and still binds
+every other task, for exactly the collision reason the body gives.
+
 ## D5 — Compile-time checked queries and the `.sqlx` cache
 
 **Question.** `sqlx::query!` or the runtime `sqlx::query()`, and what enforces that the
