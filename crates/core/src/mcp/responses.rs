@@ -1,4 +1,5 @@
-//! What the eleven tools hand back (ADR-0006 and its 2026-08-28 amendment,
+//! What the registered tools hand back (ADR-0006, its 2026-08-28 amendment,
+//! and ADR-0021,
 //! seam-contract D16).
 //!
 //! Projections, not mirrors. A conversion layer is unavoidable — the row types

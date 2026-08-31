@@ -1,4 +1,4 @@
-//! What the eleven tools take off the wire (ADR-0006 and its 2026-08-28
+//! What the registered tools take off the wire (ADR-0006, its 2026-08-28
 //! amendment, seam-contract D16).
 //!
 //! `snake_case` in both directions, which is the convention MCP tool schemas

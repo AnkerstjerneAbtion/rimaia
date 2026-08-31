@@ -190,10 +190,21 @@ async fn effective_for(
 }
 
 fn ready(detail: &TaskDetail, effective: &EffectiveStrategy) -> Resolution {
+    // Guidance only when the resolved mode is `planned`. `resolve::rule 3`
+    // already drops a stale proposal's *model and effort* for a task in
+    // `default` or `manual` mode; leaving its workflow section in the prompt
+    // would keep half of a proposal the user overrode — the run would be told
+    // "this work fans out, use subagents" while spawning with the model the
+    // user chose instead. Two halves of one decision must not disagree.
+    let guidance = match effective.mode {
+        StrategyMode::Planned => StrategyGuidance::for_task(detail),
+        StrategyMode::Default | StrategyMode::Manual => None,
+    };
+
     Resolution::Ready {
         model: effective.model.clone(),
         effort: effective.effort.clone(),
-        guidance: StrategyGuidance::for_task(detail),
+        guidance,
     }
 }
 
@@ -432,6 +443,22 @@ pub async fn plan_task(
     let detail = tasks::get_task(ctx, task_id).await?;
     let repository = crate::repo::get(ctx, &detail.task.repository_id).await?;
     crate::repo::ensure_unattended_runs_allowed(&repository)?;
+
+    // Refused before anything is spawned. `set_task_strategy` will not accept a
+    // planner's write for a task that is not in planned mode, so without this
+    // check the run happens, costs money, is refused its one write, and then
+    // has its failure note refused by the same guard — leaving no trace on the
+    // card and nothing on screen. The panel offers "Plan now" whenever a
+    // proposal failed, and the user may well have switched the card to manual
+    // in between.
+    let mode = effective_mode(ctx, &detail, &repository).await?;
+    if mode != StrategyMode::Planned {
+        return Err(crate::error::Error::invalid(format!(
+            "\"{}\" is not set to be planned, so there is no strategy to plan. \
+Set its mode to planned first.",
+            detail.task.title,
+        )));
+    }
 
     // The planner reads the repository, so it needs a checkout that is not the
     // operator's (ADR-0005). `prepare` is idempotent, so a task that already has

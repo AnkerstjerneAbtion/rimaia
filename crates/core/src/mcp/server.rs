@@ -1,4 +1,5 @@
-//! The eleven tools (ADR-0006 and its 2026-08-28 amendment), and nothing else.
+//! The registered tools (ADR-0006, its 2026-08-28 amendment, and ADR-0021),
+//! and nothing else.
 //!
 //! Every handler here marshals a request, calls a `rimaia-core` service, and
 //! projects the result. **No business rule lives in this file.** A rule
@@ -621,7 +622,10 @@ impl ServerHandler for RimaiaServer {
     /// `CARGO_PKG_VERSION` and cannot drift from the crate's.
     fn get_info(&self) -> ServerInfo {
         ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
-            .with_server_info(Implementation::new("rimaia", env!("CARGO_PKG_VERSION")))
+            .with_server_info(Implementation::new(
+                crate::mcp::MCP_SERVER_NAME,
+                env!("CARGO_PKG_VERSION"),
+            ))
             .with_instructions(SERVER_INSTRUCTIONS)
     }
 }

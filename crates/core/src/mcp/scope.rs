@@ -45,7 +45,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 
 use crate::db::new_id;
 use crate::error::{Error, Result};
-use crate::mcp::MCP_PATH;
+use crate::mcp::{MCP_PATH, MCP_SERVER_NAME};
 
 /// Where the scoped route hangs, relative to [`MCP_PATH`].
 ///
@@ -71,7 +71,8 @@ pub enum RunScope {
     Run { task_id: String },
 }
 
-/// Every tool this server registers, plus the one task 020's next commit wires.
+/// Every tool this server registers (ADR-0021: the set is open, the scope
+/// decision is not optional).
 ///
 /// An enum rather than a string, for the reason every other closed set in this
 /// crate is one: a typo in `"remove_task_link"` inside an allow table is a hole
@@ -365,7 +366,7 @@ impl RunHandles {
         // `Display` is the compact form, which is what has to survive argv.
         Some(
             serde_json::json!({
-                "mcpServers": { "rimaia": { "type": "http", "url": url } }
+                "mcpServers": { MCP_SERVER_NAME: { "type": "http", "url": url } }
             })
             .to_string(),
         )

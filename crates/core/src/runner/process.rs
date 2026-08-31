@@ -57,7 +57,7 @@ use crate::context::ServiceContext;
 use crate::db::settings::{self, RunEnvironment};
 use crate::db::{new_id, ExitClass, Run, RunState, RunStatus, Task};
 use crate::error::{Error, Result};
-use crate::mcp::RunHandles;
+use crate::mcp::{RunHandles, MCP_SERVER_NAME};
 use crate::paths::AppPaths;
 use crate::repo;
 use crate::runner::events::{EventStream, InitEvent, RunEvent};
@@ -424,6 +424,44 @@ where
 // Settings this module reads
 // ---------------------------------------------------------------------------
 
+/// Rimaia's own MCP tools, denied to an implementation run whatever the
+/// operator's configuration says.
+///
+/// # Why this is not in [`DEFAULT_DISALLOWED_TOOLS`]
+///
+/// That list is configuration, and an explicitly empty setting means an empty
+/// list — the operator is allowed to turn it off. This is not configuration. It
+/// closes a hole that would otherwise make [`RunScope`](crate::mcp::RunScope)
+/// decorative.
+///
+/// # The hole
+///
+/// `run_environment` defaults to `inherit` (ADR-0004's amendment), and ADR-0006
+/// tells the operator to register Rimaia with `claude mcp add`. So an
+/// implementation run's session loads the **operator's unscoped `/mcp`**, and
+/// ADR-0012 gives that run `bypassPermissions`, which — unlike `acceptEdits` —
+/// auto-approves MCP calls. The run would hold `move_task`, `create_task`,
+/// `set_task_dependencies`, and every ADR-0021 configuration tool: exactly the
+/// rows `Tool::run_access` marks `Refused`. A prompt-injected run could mark its
+/// own card `done`, or change the model every future run uses, with no bash
+/// involved at all.
+///
+/// # Derived, not listed
+///
+/// Built from [`Tool::ALL`](crate::mcp::Tool::ALL) rather than spelled out, so a
+/// tool added later is denied by existing.
+fn rimaia_tools_denied_to_a_run() -> Vec<String> {
+    // The bare server name denies the whole server where Claude Code supports
+    // it; the per-tool entries are what make the denial exact if it does not.
+    std::iter::once(format!("mcp__{MCP_SERVER_NAME}"))
+        .chain(
+            crate::mcp::Tool::ALL
+                .iter()
+                .map(|tool| format!("mcp__{MCP_SERVER_NAME}__{}", tool.as_str())),
+        )
+        .collect()
+}
+
 /// The tool blocklist, or [`DEFAULT_DISALLOWED_TOOLS`] when nobody has set one.
 ///
 /// One pattern per line rather than comma-separated: a pattern contains spaces
@@ -728,18 +766,39 @@ pub async fn run_task(
         }
     };
 
-    // Re-read once more: a planner that wrote a proposal changed this row, and
-    // the prompt has to carry what the card now says rather than what it said
-    // before the planner ran.
-    let detail = tasks::get_task(ctx, &task_id).await?;
-    let base = settings::base_instructions(&ctx.pool).await?;
+    // Everything between the claim and `start_run` runs inside this block so a
+    // failure gives the claim back. Before task 020 these reads all happened
+    // *before* the claim and could not strand anything; moving the claim up to
+    // cover the strategy run put four fallible calls behind it, and a bare `?`
+    // on any of them would leave a card reading "running" with no `runs` row to
+    // close it out — repaired only by the next launch's reconciliation.
+    let prepared = async {
+        // Re-read once more: a planner that wrote a proposal changed this row,
+        // and the prompt has to carry what the card now says rather than what
+        // it said before the planner ran.
+        let detail = tasks::get_task(ctx, &task_id).await?;
+        let base = settings::base_instructions(&ctx.pool).await?;
+        let run_environment = settings::run_environment(&ctx.pool).await?;
+        let disallowed = disallowed_tools(&ctx.pool).await?;
+        Ok::<_, Error>((detail, base, run_environment, disallowed))
+    }
+    .await;
+
+    let (detail, base, run_environment, disallowed) = match prepared {
+        Ok(prepared) => prepared,
+        Err(error) => {
+            release(ctx, &task_id).await;
+            return Err(error);
+        }
+    };
+
     let prompt = compose_prompt(&base, &detail, &repository, guidance.as_ref());
 
     let invocation = Invocation {
         session_id: new_id(),
         resume: false,
         permission_mode: request.trigger.permission_mode(),
-        run_environment: settings::run_environment(&ctx.pool).await?,
+        run_environment,
         system_append: compose_system_append(&detail, &repository),
         model,
         effort,
@@ -748,7 +807,12 @@ pub async fn run_task(
         // already taken away. A list here would narrow that, which is task
         // 012's or 014's decision to make, not this line's.
         allowed_tools: Vec::new(),
-        disallowed_tools: disallowed_tools(&ctx.pool).await?,
+        // The operator's blocklist, plus the denial that is not theirs to turn
+        // off — see `rimaia_tools_denied_to_a_run`.
+        disallowed_tools: disallowed
+            .into_iter()
+            .chain(rimaia_tools_denied_to_a_run())
+            .collect(),
         // An implementation run reaches Rimaia through nothing: the scoped
         // handle exists so a *planner* can answer, and ADR-0016 gives the
         // implementation run no reason to write to its own card.

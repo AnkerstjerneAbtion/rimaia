@@ -7,7 +7,7 @@
 //! rejection whichever door it comes through.
 //!
 //! [`settings`] owns the port key, [`requests`] and [`responses`] are the wire
-//! DTOs, [`server`] holds the eleven tool handlers, [`scope`] says which of them
+//! DTOs, [`server`] holds the tool handlers, [`scope`] says which of them
 //! each door may reach, and [`build`] binds the listener.
 //!
 //! # Two doors, one service layer
@@ -87,6 +87,15 @@ pub const DEFAULT_PORT: u16 = 4517;
 
 /// The path the streamable-HTTP endpoint is mounted at, so
 /// `http://127.0.0.1:4517/mcp` is what a user registers.
+/// The name Rimaia registers itself under in an `--mcp-config`, and the name a
+/// tool therefore wears as `mcp__rimaia__<tool>`.
+///
+/// One constant because three places have to agree: the config the runner
+/// writes, the server info the handshake returns, and the denial an
+/// implementation run carries (`runner::process`). A disagreement between the
+/// last two would be a blocklist that silently matches nothing.
+pub const MCP_SERVER_NAME: &str = "rimaia";
+
 pub const MCP_PATH: &str = "/mcp";
 
 /// Whether the server is reachable, and if not, why.
@@ -578,10 +587,11 @@ mod tests {
     /// asserted where the count actually crosses the wire rather than only
     /// against the router.
     ///
-    /// **Ten until task 020**, eleven since: `set_task_strategy` is ADR-0006's
+    /// **Ten until task 020**, then eleven, and nineteen since ADR-0021 made
+    /// capability parity a rule: `set_task_strategy` is ADR-0006's
     /// 2026-08-28 amendment, which widens the table by exactly one and restates
     /// that it is otherwise closed. The count is pinned in two places on
-    /// purpose — here and `server::tests::ADR_0006_TOOLS` — because a tool that
+    /// purpose — here and `server::tests::REGISTERED_TOOLS` — because a tool that
     /// registers but never reaches the wire, or the reverse, is a bug neither
     /// assertion catches alone.
     #[tokio::test]
