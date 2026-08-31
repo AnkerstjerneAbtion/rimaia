@@ -19,6 +19,7 @@ use serde::Deserialize;
 
 use crate::db::{BoardColumn, RunState, StrategyMode};
 use crate::error::{Error, Result};
+use crate::strategy::StrategyApproval;
 use crate::tasks::{StrategyPhase, StrategyPlan, StrategyWorkflow};
 
 /// `create_task`: a whole plan, handed over in one call.
@@ -304,6 +305,66 @@ impl SetTaskStrategyRequest {
             ..StrategyPlan::proposed(self.model, self.effort)
         }
     }
+}
+
+/// A task id and nothing else — the shape every task-scoped tool that takes no
+/// other argument shares.
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct TaskStrategyRequest {
+    pub task_id: String,
+}
+
+/// Which defaults to read: one repository's, or the global ones beneath them.
+///
+/// `None` means global. A separate tool per scope was the alternative and it
+/// would double the surface to express one optional field (ADR-0021's own
+/// warning about a list that is large and badly described).
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct GetStrategyDefaultsRequest {
+    #[serde(default)]
+    pub repository_id: Option<String>,
+}
+
+/// The defaults to store, and where.
+///
+/// `mode`, `model` and `effort` are the whole record, so this replaces rather
+/// than patches: there is no `clear` list because sending the record without a
+/// `model` already says "no model", and D16.5's argument for an explicit clear
+/// applies to a field whose accidental erasure is expensive. A default model is
+/// not that.
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct SetStrategyDefaultsRequest {
+    /// Omitted sets the global defaults.
+    #[serde(default)]
+    pub repository_id: Option<String>,
+    pub mode: StrategyMode,
+    #[serde(default)]
+    pub model: Option<String>,
+    #[serde(default)]
+    pub effort: Option<String>,
+}
+
+/// The catalogue as a JSON document.
+///
+/// A string rather than a typed structure, deliberately: the catalogue is
+/// configuration whose whole point is that a new model does not require a
+/// release (ADR-0016), and a typed request would put this crate's idea of the
+/// shape between the operator and their own settings row. The service parses it
+/// and refuses what it cannot read, which is the one place that check belongs.
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct SetStrategyCatalogueRequest {
+    pub catalogue: String,
+}
+
+/// Whether a planned strategy waits for a human before the implementation run.
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct SetStrategyApprovalRequest {
+    pub approval: StrategyApproval,
 }
 
 #[cfg(test)]

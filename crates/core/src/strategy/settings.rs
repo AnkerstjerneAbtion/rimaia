@@ -65,7 +65,13 @@ pub fn repository_default_key(repository_id: &str) -> String {
 /// no `inherit` variant — the column it mirrors is `NOT NULL DEFAULT 'default'`
 /// — so `Default` means *fall through* here for exactly the reason D17.6 gives
 /// it that meaning on a task.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// `JsonSchema` because ADR-0021 puts this on the tool surface, and because
+/// unlike a row type it *is* the wire shape: seam-contract D16.1 keeps row types
+/// out of `mcp::responses` by projecting them, but a catalogue is a
+/// configuration document whose serde shape is already what gets stored and what
+/// the operator edits. A projection here would be a second spelling of one
+/// document, free to drift from the thing it describes.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default, deny_unknown_fields)]
 pub struct StrategyDefaults {
     pub mode: StrategyMode,
@@ -94,7 +100,9 @@ impl Default for StrategyDefaults {
 /// absent key stands for — an overnight queue that stops to ask is the thing
 /// ADR-0016's "can let the queue proceed without waiting for approval" exists
 /// to avoid, and the queue is the reason this product exists.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize, schemars::JsonSchema,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum StrategyApproval {
     /// The proposal is applied and the implementation run follows it.

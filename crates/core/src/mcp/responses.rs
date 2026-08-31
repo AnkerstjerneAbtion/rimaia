@@ -19,6 +19,7 @@ use crate::db::{
     BoardColumn, ExitClass, MutationSource, Repository, Run, RunState, RunStatus, StrategyMode,
     StrategySource, TaskLink,
 };
+use crate::strategy::StrategyApproval;
 use crate::tasks::{TaskDetail, TaskSummary};
 
 /// One registered repository, as `list_repositories` reports it.
@@ -274,6 +275,17 @@ pub struct BaseInstructionsView {
     /// The placeholder names that exist, so an agent writing a plan can use
     /// one rather than inventing it.
     pub template_variables: Vec<String>,
+}
+
+/// The approval setting, wrapped.
+///
+/// An object rather than a bare string because every other tool on this surface
+/// answers with one, and a caller that has to special-case one tool's shape is
+/// a caller that will get it wrong.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub struct StrategyApprovalView {
+    pub approval: StrategyApproval,
 }
 
 #[cfg(test)]

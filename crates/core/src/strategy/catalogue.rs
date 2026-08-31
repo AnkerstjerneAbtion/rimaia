@@ -67,7 +67,13 @@ pub const DEFAULT_CATALOGUE_JSON: &str = r#"{
 /// fields rather than one because the flag value and the word a human reads are
 /// not the same string and never have been — `xhigh` against "Extra high" — and
 /// deriving one from the other would be a presentation rule hidden in a parser.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// `JsonSchema` because ADR-0021 puts this on the tool surface, and because
+/// unlike a row type it *is* the wire shape: seam-contract D16.1 keeps row types
+/// out of `mcp::responses` by projecting them, but a catalogue is a
+/// configuration document whose serde shape is already what gets stored and what
+/// the operator edits. A projection here would be a second spelling of one
+/// document, free to drift from the thing it describes.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct CatalogueEntry {
     pub id: String,
@@ -83,7 +89,13 @@ pub struct CatalogueEntry {
 /// haiku/low pair lives in [`Catalogue::default`], where an *unedited* key
 /// reaches it. Explicit beats default, the same rule
 /// [`crate::runner::process::disallowed_tools`] states for an empty blocklist.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// `JsonSchema` because ADR-0021 puts this on the tool surface, and because
+/// unlike a row type it *is* the wire shape: seam-contract D16.1 keeps row types
+/// out of `mcp::responses` by projecting them, but a catalogue is a
+/// configuration document whose serde shape is already what gets stored and what
+/// the operator edits. A projection here would be a second spelling of one
+/// document, free to drift from the thing it describes.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct PlannerBudget {
     #[serde(default)]
@@ -122,7 +134,13 @@ impl Default for PlannerBudget {
 /// is otherwise invisible: the whole value falls back to the default anyway
 /// (see [`parse`]), so the choice is only between a warning that names the
 /// typo and a silence that does not.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// `JsonSchema` because ADR-0021 puts this on the tool surface, and because
+/// unlike a row type it *is* the wire shape: seam-contract D16.1 keeps row types
+/// out of `mcp::responses` by projecting them, but a catalogue is a
+/// configuration document whose serde shape is already what gets stored and what
+/// the operator edits. A projection here would be a second spelling of one
+/// document, free to drift from the thing it describes.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default, deny_unknown_fields)]
 pub struct Catalogue {
     pub models: Vec<CatalogueEntry>,

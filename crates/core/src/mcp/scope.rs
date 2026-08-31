@@ -91,6 +91,17 @@ pub enum Tool {
     /// handler because the decision is ADR-0006's to make, not the handler's.
     SetTaskStrategy,
     UpdateTask,
+
+    // ADR-0021's capability parity. Each of these had a Tauri command and no
+    // tool, which is the asymmetry that ADR exists to end.
+    AcceptTaskStrategy,
+    ClearTaskStrategy,
+    GetStrategyApproval,
+    GetStrategyCatalogue,
+    GetStrategyDefaults,
+    SetStrategyApproval,
+    SetStrategyCatalogue,
+    SetStrategyDefaults,
 }
 
 /// What a [`RunScope::Run`] may do with one tool — ADR-0006's amendment table,
@@ -107,7 +118,7 @@ pub enum RunAccess {
 
 impl Tool {
     /// Every tool with a recorded decision, so a test can walk the table.
-    pub const ALL: [Tool; 11] = [
+    pub const ALL: [Tool; 19] = [
         Tool::AddTaskLink,
         Tool::CreateTask,
         Tool::GetBaseInstructions,
@@ -119,6 +130,14 @@ impl Tool {
         Tool::SetTaskDependencies,
         Tool::SetTaskStrategy,
         Tool::UpdateTask,
+        Tool::AcceptTaskStrategy,
+        Tool::ClearTaskStrategy,
+        Tool::GetStrategyApproval,
+        Tool::GetStrategyCatalogue,
+        Tool::GetStrategyDefaults,
+        Tool::SetStrategyApproval,
+        Tool::SetStrategyCatalogue,
+        Tool::SetStrategyDefaults,
     ];
 
     /// The wired name — what `tools/list` advertises and what the ADR table
@@ -136,6 +155,14 @@ impl Tool {
             Tool::SetTaskDependencies => "set_task_dependencies",
             Tool::SetTaskStrategy => "set_task_strategy",
             Tool::UpdateTask => "update_task",
+            Tool::AcceptTaskStrategy => "accept_task_strategy",
+            Tool::ClearTaskStrategy => "clear_task_strategy",
+            Tool::GetStrategyApproval => "get_strategy_approval",
+            Tool::GetStrategyCatalogue => "get_strategy_catalogue",
+            Tool::GetStrategyDefaults => "get_strategy_defaults",
+            Tool::SetStrategyApproval => "set_strategy_approval",
+            Tool::SetStrategyCatalogue => "set_strategy_catalogue",
+            Tool::SetStrategyDefaults => "set_strategy_defaults",
         }
     }
 
@@ -173,6 +200,27 @@ impl Tool {
             Tool::CreateTask | Tool::ListTasks | Tool::MoveTask | Tool::SetTaskDependencies => {
                 RunAccess::Refused
             }
+
+            // ADR-0021 point 4's second permanent refusal: these reconfigure
+            // the installation. A run editing the settings
+            // that govern runs — which model the planner uses, what a
+            // repository defaults to, whether a proposal needs approval — is a
+            // loop nobody asked for, and it would let one task's agent change
+            // what every later task costs.
+            //
+            // `accept_task_strategy` is here rather than under `OwnTaskOnly`
+            // for a subtler reason: accepting flips `strategy_source` from
+            // `planner` to `user`, and a planner accepting its own proposal is
+            // the card claiming a human signed off on it. That is the one thing
+            // the field exists to distinguish.
+            Tool::AcceptTaskStrategy
+            | Tool::ClearTaskStrategy
+            | Tool::GetStrategyApproval
+            | Tool::GetStrategyCatalogue
+            | Tool::GetStrategyDefaults
+            | Tool::SetStrategyApproval
+            | Tool::SetStrategyCatalogue
+            | Tool::SetStrategyDefaults => RunAccess::Refused,
         }
     }
 }

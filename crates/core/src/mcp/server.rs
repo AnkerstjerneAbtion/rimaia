@@ -30,15 +30,18 @@ use crate::context::ServiceContext;
 use crate::db::{BoardColumn, StrategySource};
 use crate::mcp::error::ToolError;
 use crate::mcp::requests::{
-    AddTaskLinkRequest, ClearableField, CreateTaskRequest, GetTaskRequest, ListTasksRequest,
-    MoveTaskRequest, RemoveTaskLinkRequest, SetTaskDependenciesRequest, SetTaskStrategyRequest,
-    UpdateTaskRequest,
+    AddTaskLinkRequest, ClearableField, CreateTaskRequest, GetStrategyDefaultsRequest,
+    GetTaskRequest, ListTasksRequest, MoveTaskRequest, RemoveTaskLinkRequest,
+    SetStrategyApprovalRequest, SetStrategyCatalogueRequest, SetStrategyDefaultsRequest,
+    SetTaskDependenciesRequest, SetTaskStrategyRequest, TaskStrategyRequest, UpdateTaskRequest,
 };
 use crate::mcp::responses::{
-    BaseInstructionsView, RepositoryListView, RepositoryView, TaskListItem, TaskListView, TaskView,
+    BaseInstructionsView, RepositoryListView, RepositoryView, StrategyApprovalView, TaskListItem,
+    TaskListView, TaskView,
 };
 use crate::mcp::scope::{RunScope, Tool};
 use crate::runner::prompt::TEMPLATE_VARIABLES;
+use crate::strategy::{self, Catalogue, StrategyDefaults};
 use crate::tasks::{NewTask, NewTaskLink, Patch, TaskFilter, TaskPatch};
 use crate::{db, repo, tasks, Result};
 
@@ -419,6 +422,139 @@ placeholders left unexpanded; those are substituted per task when a run actually
                 .collect(),
         }))
     }
+
+    // ADR-0021's capability parity. Each of the eight below had a Tauri command
+    // and no tool, so the window could configure execution and an agent could
+    // not. All are operator-only: they either reconfigure the installation or
+    // speak for a human, and `Tool::run_access` is where that is argued.
+
+    #[tool(
+        description = "Read the models and effort levels a task may be given, and the planner's \
+own budget. Call this before `set_task_strategy` or `update_task`: the ids here are the exact \
+strings that reach the CLI, and a model that is not listed is one this installation has not been \
+told about."
+    )]
+    pub async fn get_strategy_catalogue(&self) -> Result<Json<Catalogue>, ToolError> {
+        self.scope.authorize(Tool::GetStrategyCatalogue, None)?;
+        Ok(Json(strategy::catalogue::catalogue(&self.ctx.pool).await?))
+    }
+
+    #[tool(
+        description = "Replace the model and effort catalogue with a JSON document. This is how a \
+newly released model becomes selectable without a new version of Rimaia. Call this after reading \
+the current catalogue, and send the whole document: it replaces rather than merges. It is validated \
+before it is stored, so an unparseable one is refused and the previous catalogue is left alone."
+    )]
+    pub async fn set_strategy_catalogue(
+        &self,
+        Parameters(request): Parameters<SetStrategyCatalogueRequest>,
+    ) -> Result<Json<Catalogue>, ToolError> {
+        self.scope.authorize(Tool::SetStrategyCatalogue, None)?;
+        strategy::catalogue::set_catalogue(&self.ctx, &request.catalogue).await?;
+        Ok(Json(strategy::catalogue::catalogue(&self.ctx.pool).await?))
+    }
+
+    #[tool(
+        description = "Read the execution strategy a task falls back to when it names none of its \
+own. Call this before setting a task's strategy, to see what it would already inherit — one \
+repository's defaults, or the global ones beneath them when `repository_id` is omitted."
+    )]
+    pub async fn get_strategy_defaults(
+        &self,
+        Parameters(request): Parameters<GetStrategyDefaultsRequest>,
+    ) -> Result<Json<StrategyDefaults>, ToolError> {
+        self.scope.authorize(Tool::GetStrategyDefaults, None)?;
+        Ok(Json(match request.repository_id.as_deref() {
+            Some(repository_id) => {
+                strategy::settings::repository_default(&self.ctx.pool, repository_id).await?
+            }
+            None => strategy::settings::global_default(&self.ctx.pool).await?,
+        }))
+    }
+
+    #[tool(
+        description = "Set the default execution strategy for one repository, or globally when \
+`repository_id` is omitted. Call this instead of editing cards one by one: a repository of small \
+tasks can be defaulted low here without touching any of them. It replaces the whole record rather \
+than patching it, so sending no `model` means the default names no model."
+    )]
+    pub async fn set_strategy_defaults(
+        &self,
+        Parameters(request): Parameters<SetStrategyDefaultsRequest>,
+    ) -> Result<Json<StrategyDefaults>, ToolError> {
+        self.scope.authorize(Tool::SetStrategyDefaults, None)?;
+
+        let defaults = StrategyDefaults {
+            mode: request.mode,
+            model: request.model.clone(),
+            effort: request.effort.clone(),
+        };
+        match request.repository_id.as_deref() {
+            Some(repository_id) => {
+                strategy::settings::set_repository_default(&self.ctx, repository_id, &defaults)
+                    .await?
+            }
+            None => strategy::settings::set_global_default(&self.ctx, &defaults).await?,
+        }
+        Ok(Json(defaults))
+    }
+
+    #[tool(
+        description = "Read whether a planned strategy waits for a human to accept it before the \
+implementation run starts, or proceeds automatically. Call this before queueing planned work \
+overnight — `manual` will stop the queue at every planned task."
+    )]
+    pub async fn get_strategy_approval(&self) -> Result<Json<StrategyApprovalView>, ToolError> {
+        self.scope.authorize(Tool::GetStrategyApproval, None)?;
+        Ok(Json(StrategyApprovalView {
+            approval: strategy::settings::approval(&self.ctx.pool).await?,
+        }))
+    }
+
+    #[tool(
+        description = "Set whether a planned strategy waits for a human before the implementation \
+run. Call this with `automatic` for an overnight queue; `manual` stops the queue at every planned \
+task until somebody accepts it, which is only useful while someone is watching."
+    )]
+    pub async fn set_strategy_approval(
+        &self,
+        Parameters(request): Parameters<SetStrategyApprovalRequest>,
+    ) -> Result<Json<StrategyApprovalView>, ToolError> {
+        self.scope.authorize(Tool::SetStrategyApproval, None)?;
+        strategy::settings::set_approval(&self.ctx, request.approval).await?;
+        Ok(Json(StrategyApprovalView {
+            approval: request.approval,
+        }))
+    }
+
+    #[tool(
+        description = "Accept a planner's proposal on behalf of the user, marking the strategy as \
+theirs rather than the planner's. A later planner run will then leave it alone. Call this when a human has \
+reviewed a proposal and is happy with it; it speaks for that human, so a run cannot call it — \
+not even about its own task."
+    )]
+    pub async fn accept_task_strategy(
+        &self,
+        Parameters(request): Parameters<TaskStrategyRequest>,
+    ) -> Result<Json<TaskView>, ToolError> {
+        self.scope.authorize(Tool::AcceptTaskStrategy, None)?;
+        let task = tasks::strategy::accept_task_strategy(&self.ctx, &request.task_id).await?;
+        self.task_view(&task.id).await
+    }
+
+    #[tool(
+        description = "Discard a task's recorded strategy proposal so a planned task will be \
+planned again on its next run. Call this after a planner failed, or when the plan has changed \
+enough that the old proposal no longer describes the work."
+    )]
+    pub async fn clear_task_strategy(
+        &self,
+        Parameters(request): Parameters<TaskStrategyRequest>,
+    ) -> Result<Json<TaskView>, ToolError> {
+        self.scope.authorize(Tool::ClearTaskStrategy, None)?;
+        let task = tasks::strategy::clear_task_strategy(&self.ctx, &request.task_id).await?;
+        self.task_view(&task.id).await
+    }
 }
 
 impl RimaiaServer {
@@ -505,15 +641,31 @@ mod tests {
     /// red should be reading that amendment, not widening the array: the count
     /// moved once, on purpose, and this comment is how the next reader tells a
     /// deliberate eleventh from a drifted one.
-    const ADR_0006_TOOLS: [&str; 11] = [
+    /// Every tool the server registers, as ADR-0021 leaves it: not a fixed
+    /// count anyone asserts, but a set that must agree with the scope table.
+    ///
+    /// ADR-0006's original ten were the v1 planning surface and are still
+    /// correct as that; they stopped being the boundary when ADR-0021 made
+    /// capability parity a rule. What replaces a count is the property that
+    /// actually matters — a registered tool with no run-scope decision cannot
+    /// reach the wire.
+    const REGISTERED_TOOLS: [&str; 19] = [
+        "accept_task_strategy",
         "add_task_link",
+        "clear_task_strategy",
         "create_task",
         "get_base_instructions",
+        "get_strategy_approval",
+        "get_strategy_catalogue",
+        "get_strategy_defaults",
         "get_task",
         "list_repositories",
         "list_tasks",
         "move_task",
         "remove_task_link",
+        "set_strategy_approval",
+        "set_strategy_catalogue",
+        "set_strategy_defaults",
         "set_task_dependencies",
         "set_task_strategy",
         "update_task",
@@ -531,7 +683,7 @@ mod tests {
 
     #[test]
     fn every_tool_adr_0006_names_is_registered() {
-        assert_eq!(tool_names(), ADR_0006_TOOLS);
+        assert_eq!(tool_names(), REGISTERED_TOOLS);
     }
 
     #[test]

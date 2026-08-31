@@ -107,9 +107,20 @@ fn the_operator_endpoint_keeps_every_tool_it_had_before_task_020() {
             | Tool::SetTaskStrategy
             | Tool::UpdateTask => RunAccess::OwnTaskOnly,
             Tool::GetBaseInstructions | Tool::ListRepositories => RunAccess::Unscoped,
-            Tool::CreateTask | Tool::ListTasks | Tool::MoveTask | Tool::SetTaskDependencies => {
-                RunAccess::Refused
-            }
+            Tool::CreateTask
+            | Tool::ListTasks
+            | Tool::MoveTask
+            | Tool::SetTaskDependencies
+            // ADR-0021's permanent refusal: everything that reconfigures the
+            // installation, plus accepting a proposal, which speaks for a human.
+            | Tool::AcceptTaskStrategy
+            | Tool::ClearTaskStrategy
+            | Tool::GetStrategyApproval
+            | Tool::GetStrategyCatalogue
+            | Tool::GetStrategyDefaults
+            | Tool::SetStrategyApproval
+            | Tool::SetStrategyCatalogue
+            | Tool::SetStrategyDefaults => RunAccess::Refused,
         };
         assert_eq!(tool.run_access(), expected, "{}", tool.as_str());
     }
