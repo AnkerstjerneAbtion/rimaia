@@ -159,3 +159,46 @@ treat unknown subtypes as opaque. Parse the JSON properly — naive substring ma
 `apiKeySource`. The runner should **verify** that the permission mode and isolation it
 asked for were actually applied, rather than assuming — a cheap guard against a CLI
 change silently widening permissions. `apiKeySource: "none"` confirms subscription auth.
+
+---
+
+## Amendment, 2026-08-28 — the strategy run is always `strict_local`
+
+ADR-0016's planned mode (task 020) spawns a **second** child per task: a short, cheap
+strategy run that reads the plan and decides model, effort and workflow shape before the
+implementation run starts. It is a different kind of run, and it does not take the
+`run_environment` setting.
+
+**Whatever `run_environment` says, a strategy run spawns with
+`--strict-mcp-config --setting-sources project,local`.** This contradicts the sentence
+above — "A single Settings toggle switches the whole app between `inherit` and
+`strict_local`" — and the contradiction is stated here rather than left as a surprise in
+the runner. Two reasons, either sufficient on its own.
+
+**Cost.** The table above measures inheritance at roughly 3.6× per run before any work
+happens, and this is the one run whose entire premise is being cheap. The planner exists to
+decide whether the implementation run deserves Opus; a planner that spends $0.10 loading
+255 tools it will never call has already spent most of what the decision might save. Its
+complete output is one MCP call, on a fast model, at low effort, inside six turns. Here the
+inherited tool set is not capability. It is the bill.
+
+**Security.** `--strict-mcp-config` is what makes the `--mcp-config` the runner passes the
+*complete* list of MCP servers rather than an addition to the operator's. It is therefore
+what guarantees that the only server the planner can reach is the scoped Rimaia handle
+ADR-0006's 2026-08-28 amendment describes. Without it, a run holding a token that names a
+task would also be holding the operator's issue tracker, design tool and knowledge base —
+and scoping one door in a room with several doors is not scoping. The same property covers
+hooks: the amendment above notes a personal `SessionStart` hook once altered the agent's
+output style, which is tolerable for implementation and not for a run whose answer is a
+single tool call against a fixed schema.
+
+`--setting-sources project,local` still leaves `CLAUDE.md` discovery on, so the planner
+reads the repository's own conventions — which is context it wants. The prohibition on
+`--bare` stands for the same reason it does above.
+
+The "two modes, one control, no per-repository matrix" argument survives, because this is
+not a matrix creeping back in. `run_environment` remains one setting choosing one thing:
+what the *implementation* run inherits, which is a real trade the operator makes between
+capability and cost. The strategy run has no such trade to offer — nobody wants their
+planner reaching the issue tracker — so its environment is not configuration at all, and is
+not surfaced as any kind of override.

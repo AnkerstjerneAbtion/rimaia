@@ -322,6 +322,22 @@ that task adds the query and the badge together.
 
 **Binds.** 004, 005, 011.
 
+### Amendment, 2026-08-28 — the summary carries the effective strategy
+
+Task 020 adds three fields to the projection: `effective_model`, `effective_effort` and
+`effective_origin`, filled by applying the strategy precedence chain (task → repository →
+global) to each row after the query. `TaskDetail` grows the same three.
+
+They are computed in Rust rather than in the card, for the reason this document exists: the
+chain is a business rule, and a TypeScript copy of it is a second implementation that will
+disagree with the first. They are not a fourth counter subquery either — one board read
+still costs one query plus two settings reads, so the argument above against N+1 is
+unaffected. `effective_origin` rides along because the card renders an inherited value
+differently from a chosen one, and reconstructing which link of the chain won from the
+value alone is not possible.
+
+The entry now binds 020 as well.
+
 ## D13 — Whether a task can change repository
 
 **Question.** Task 005's Scope lists "Title, repository selector" in the task detail panel, but
@@ -497,6 +513,162 @@ See also ADR-0019, which takes the `tasks.source` decision and the named excepti
 
 **Binds.** 010, 011, 018, 020.
 
+## D17 — Task 020's cross-cutting choices
+
+**Question.** Task 020 gives every task an execution strategy, and runs a planner for the
+tasks that ask for one. ADR-0016 fixes the three modes, the injection-not-orchestration
+boundary and the columns; the 2026-08-28 amendments to ADR-0004, 0006, 0009 and 0012 take
+the four decisions large enough to be argued at product scale. What is left is a set of
+smaller answers that tasks 021 and 016 inherit, and that a reviewer would otherwise meet in
+a diff with nothing to check them against.
+
+**Decision.** Nine, taken together by task 020:
+
+1. **No fourth migration.** [D4](#d4--migration-file-numbering)'s count stays at three.
+   `tasks` has carried all six strategy columns since `20260820120000_initial_schema.sql` —
+   write-never, read-never until now — and everything else 020 stores is *configuration*:
+   the per-repository and global defaults, the model and effort catalogue, the approval
+   flag. `settings` is the configuration table
+   ([D3](#d3--who-owns-settings-storage-vs-the-typed-accessor)), so none of it is a column.
+   The named cost, so that nobody meets it as a bug: a settings key is not a foreign key and
+   nothing cascades, so `repo::remove` gains an explicit `settings::delete` of that
+   repository's default, plus a test that removing a repository leaves no orphan row behind.
+2. **Per-repository defaults are keyed `strategy_default.<repository_id>`.** Four keys,
+   owned by `crates/core/src/strategy/settings.rs`, in the shape
+   [D3](#d3--who-owns-settings-storage-vs-the-typed-accessor) fixed and
+   [D16](#d16--task-010s-cross-cutting-choices).2 repeated — storage through
+   `db::settings::get`/`set`, meaning owned by the module:
+
+   ```
+   strategy_catalogue                  model list, effort list, and the planner's own budget
+   strategy_default                    global StrategyDefaults JSON
+   strategy_default.<repository_id>    per-repository StrategyDefaults JSON
+   strategy_approval                   "automatic" | "manual" — stored and rendered by 020,
+                                       read by nothing until the approval gate lands
+   ```
+
+   Absent, unparseable and explicitly-empty values follow the tolerance rule
+   `RunEnvironment::from_stored` and `mcp::configured_port` already state: warn and fall
+   back to a Rust default, never fatal. An explicitly empty list means no choices, not the
+   default list.
+3. **`strategy_plan` holds this envelope, version 1.** The column stays `TEXT`, parsed with
+   `serde_json` — the workspace `sqlx` has no `json` feature, and `db::models`' own comment
+   defers that choice to this task. **Task 021 reads this document**, which is why it is
+   here verbatim rather than only in a Rust doc comment:
+
+   ```json
+   { "version": 1,
+     "status": "proposed" | "failed",
+     "model": "sonnet", "effort": "high",
+     "workflow": "single_agent" | "multi_agent",
+     "phases": [{ "name": "Schema", "model": "sonnet", "effort": "medium", "agents": 1, "summary": "…" }],
+     "rationale": "…",
+     "run": { "session_id": "…", "num_turns": 4, "cost_usd": 0.031, "error": null } }
+   ```
+
+   `run` carries the planner's own accounting because the planner has no `runs` row (5) and
+   the panel still has to render "Planner: 4 turns, $0.03". A `failed` envelope is written
+   on every planner failure, with `error` set — which is also what makes the re-plan guard
+   (8) work.
+4. **The scoped handle is a path-segment token in an inline `--mcp-config` JSON string.**
+   ADR-0006's amendment fixes the route and the per-tool allow table — every tool, with
+   `Operator` and `Run { task_id }` columns, "its own task only" for the five a run may
+   call and an outright refusal for the four it may not. The mechanism is here. The runner
+   mints a token per run against a shared `RunHandles` value, passes
+   `--mcp-config {"mcpServers":{"rimaia":{"type":"http","url":"http://127.0.0.1:<port>/mcp/run/<token>"}}}`
+   in argv, and revokes on `Drop`, so a cancelled or panicking run cannot leave a live token
+   behind. `RunHandles` holds the bound endpoint as shared mutable state rather than a URL
+   copied at startup, because `set_mcp_port` rebinds the server at runtime and a copy goes
+   stale; that also removes an ordering constraint between `scheduler::build` and
+   `mcp::build` in the shell. With no endpoint bound at all — the busy-port case
+   [D16](#d16--task-010s-cross-cutting-choices).7 makes non-fatal — no `--mcp-config` is
+   passed, no planner is started, and the message names Settings → MCP.
+
+   Inline JSON rather than a temp file because `process.rs` earns its tests by pinning argv
+   byte for byte and a temp path changes every run; secondarily because there is nothing to
+   create, clean up, or leave inside a worktree where the run could stage it. A
+   **header**-carried token was rejected: `StreamableHttpService`'s service factory is
+   `Fn() -> Result<S, io::Error>` with no access to the request, so the scope would have to
+   be pulled from request extensions inside each handler — a second parameter on all eleven,
+   every direct-call test rewritten, and the scope living on the *request*, where a newly
+   added tool can silently forget to read it. In the path it lives on the server value,
+   where the type system carries it and one test can require every registered tool to
+   declare a decision.
+5. **A strategy run gets no `runs` row, and its transcript is `strategy-<uuid>.jsonl`.**
+   Three independent reasons, any one sufficient: `finish_run` → `apply_to_task` moves a
+   successful run's card to `in_review`, so recording the planner would file the card for
+   review before the work happened; `idx_runs_task_attempt` is `UNIQUE(task_id, attempt)`,
+   so `attempt` would come to mean "attempts, and also plannings", and the card
+   [D12](#d12--what-the-boards-bulk-read-returns) specifies reads `last_run`, so the badge
+   would show the planner's outcome instead of the implementation's; and telling the two
+   apart needs a `runs.kind` column, which is the migration (1) declines to add. The
+   transcript still lands on disk — `Transcript::create` touches no database — at
+   `<data>/runs/<task-id>/strategy-<uuid>.jsonl`, beside the implementation run's.
+   **Task 016's cleanup must recognise that prefix**: these files have no `runs` row, so
+   anything that enumerates transcripts through the database misses them. It follows that
+   the task walks the run-state machine exactly once, under one claim;
+   `is_legal_run_state_transition` and its exhaustive table test are untouched, and the
+   strategy run is deliberately given no claim of its own, which would need a
+   `Running → Running` transition that is banned.
+6. **A task in resolved `Default` mode ignores its own `model` and `effort`, and
+   `update_task` flips the mode to `Manual` when either is set.** `tasks.strategy_mode` is
+   `NOT NULL DEFAULT 'default'` and cannot spell "inherit", so `Default` on a task means
+   *fall through* — repository, then global. That is what makes ADR-0016's "a repo of small
+   tasks can default low without touching each card" work at all, and what lets a repository
+   default to `planned`. The consequence is that a model left on a card would otherwise be
+   silently ignored, so the service sets `strategy_mode = Manual` whenever `model` or
+   `effort` arrives as a set, and back to `Default` when both become null. The rule is in
+   `tasks::update_task`, not in a command, so the board and MCP get it identically
+   (ADR-0006).
+7. **"Accepted" is `strategy_source` flipping `planner` → `user`.** Accepting, editing and
+   overriding a proposal are the same write with different payloads, and all three are a
+   claim of authorship. No `accepted` column and no `approved_at`: the proposal stays on
+   `strategy_plan` to be read, and the source says whose decision the run will execute. It
+   is also what `set_task_strategy` checks before letting a planner overwrite a strategy a
+   human has taken over.
+8. **A recorded proposal suppresses further planning, whether it succeeded or failed.**
+   `needs_planning(task)` is `mode == Planned && strategy_plan.is_none()`, and nothing else.
+   Safety-critical rather than tidy: without it, a `planned` task whose planner fails is
+   replanned on every queue pass, forever, paying for the same failure all night — which is
+   the precise shape of overnight loss this product exists to prevent. Editing the plan text
+   does not re-trigger. "Re-plan" in the panel clears the column, and is the only thing that
+   does.
+9. **The strategy prompt is these sections, in this order**: `# Your job` · `# Task context`
+   · `# Plan` · `# Extra instructions` · `# Available models` · `# Available effort levels`
+   · `# How to answer`. Composed by the rules ADR-0009 already fixes — level-1 headings, the
+   same separator, empty sections omitted with their heading — and, per that ADR's
+   2026-08-28 amendment, carrying no base instructions. `# How to answer` names the tool and
+   its arguments and says to print nothing else: **there is no printed-JSON fallback.** A
+   second way in would be a second writer with its own parser duplicating every invariant
+   `set_task_strategy` enforces, which is the bug ADR-0006 exists to prevent; extracting it
+   would mean a heuristic over free-form prose; and the scope check lives on the MCP path. A
+   planner that reasons well and then forgets to call the tool is *detected* — the runner
+   compares `strategy_updated_at` against a clock reading taken before the spawn, so nothing
+   parses printed output anywhere — recorded as a failure, and falls back to the `default`
+   chain.
+
+**Why.** The same test as every entry here: could two agents have answered differently, and
+would a reviewer be able to tell which was right? (1) and (2) decide whether 020 is a schema
+change or a configuration change, and [D4](#d4--migration-file-numbering) makes that a
+question no task gets to answer quietly. (3) is a wire format between two tasks written
+months apart — 021 parses what 020 writes, and "read the struct" is not a contract when the
+struct can be renamed. (4) is the security-relevant mechanism, and its rejected alternative
+is recorded because a token in a URL path reads as laziness until the reason it is not is
+written down. (5), (6) and (8) are each invisible in the happy path and expensive in the
+failure path: a card filed for review by its own planner, a chosen model silently ignored, a
+queue paying for one broken planner until morning. (7) and (9) are the two places 020's
+surface deliberately differs from what a reader would guess — no approval column, and no way
+to answer except the tool.
+
+See also the 2026-08-28 amendments to [ADR-0004](adr/0004-drive-claude-code-via-headless-cli.md)
+(the strategy run is always `strict_local`), [ADR-0006](adr/0006-embedded-local-mcp-server.md)
+(the eleventh tool, the scoped route and its threat model),
+[ADR-0009](adr/0009-prompt-composition.md) (the fifth prompt section) and
+[ADR-0012](adr/0012-permission-posture-for-unattended-runs.md) (the planner's narrower
+permission posture), which take the decisions this entry is too small for.
+
+**Binds.** 020, 021, 016.
+
 ---
 
 ## How to use this
@@ -517,7 +689,10 @@ An implementation task reads the entries its number appears in, before writing c
 | [011](../tasks/011-task-dependencies-and-blocking.md) | D12 · D16 |
 | [013](../tasks/013-run-scheduling.md) | D15 |
 | [015](../tasks/015-run-history-and-log-viewer.md) | D14 |
+| [016](../tasks/016-worktree-lifecycle-and-cleanup.md) | D17 |
 | [018](../tasks/018-preflight-doctor-and-packaging.md) | D11 · D16 |
+| [020](../tasks/020-per-task-execution-strategy.md) | D2 · D3 · D4 · D5 · D8 · D10 · D12 · D16 · D17 |
+| [021](../tasks/021-review-and-fix-loop.md) | D17 |
 | every task | D4 and D6 as prohibitions |
 
 A reviewer treats any decision visible in a diff that is neither in an ADR nor here as a

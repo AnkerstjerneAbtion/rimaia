@@ -71,3 +71,63 @@ repository's worktree, including network access and package installation, withou
 - **Container or VM per run.** The strongest isolation, and it breaks subscription auth,
   local toolchains, and `~/.claude` configuration — the things that make the run behave
   like the user's own Claude Code (see ADR-0005).
+
+---
+
+## Amendment, 2026-08-28 — the planner is a third posture, narrower than both
+
+This ADR names two invocation shapes: `bypassPermissions` for unattended runs, and
+`acceptEdits` for a run the user started with the app in front of them. ADR-0016's strategy
+run (task 020) is a third, and it is narrower than either.
+
+| Shape | Permission mode | What it may write |
+| --- | --- | --- |
+| Unattended implementation run | `bypassPermissions` | Edits and arbitrary bash, behind the per-repository opt-in |
+| Interactive implementation run | `acceptEdits` | Edits; bash still prompts, and someone is there to answer |
+| **Strategy run (planner)** | **`acceptEdits`** + `--allowedTools mcp__rimaia__set_task_strategy` | **Nothing. `Write`, `Edit`, `NotebookEdit` and `Bash` are denied** |
+
+`acceptEdits` for a run that is unattended looks like a direct contradiction of the
+Decision above, whose whole argument is that an unattended run stalls on prompts. Both hold
+at once — but **only because the planner's one tool is pre-approved by name.**
+
+> **Correction, 2026-08-31.** This paragraph first claimed that "a stall needs a tool that
+> asks, and the planner has none," and that with the four writing tools denied there was
+> "nothing left in its reach that Claude Code would prompt about." That is false, and it was
+> false in the way that matters most: **`acceptEdits` auto-approves file edits and does not
+> auto-approve MCP tool calls.** The planner's single `mcp__rimaia__set_task_strategy` call
+> raises a permission request like any other, an unattended session has nobody to grant it,
+> and the CLI refuses it. Observed on the first real run — the transcript records
+> `"Claude requested permissions to use mcp__rimaia__set_task_strategy, but you haven't
+> granted it yet."`, the run then ended looking successful, and every planned task fell back
+> to the default. Recorded rather than quietly edited because the wrong claim is a plausible
+> one, and the next person to reason about a narrow posture for an unattended run will reach
+> for it again.
+
+The fix keeps the narrow posture rather than abandoning it: the planner is granted **exactly
+its own write-back** through `--allowedTools`, and nothing else. That is strictly tighter
+than `bypassPermissions`, which would approve every tool the blocklist has not already taken
+away. The weaker mode still buys what it was chosen for: if a future CLI ships a writing tool
+this blocklist does not name, `acceptEdits` is what stops it from being used unattended, and
+`bypassPermissions` would not.
+
+**An unattended run must be able to answer every prompt it can raise, by construction.** For
+an implementation run that means `bypassPermissions`, because its needs are open-ended. For
+the planner it means one named tool, because its needs are exactly one. Either way the test
+is the same, and it is the test this amendment originally failed to apply.
+
+The denied list is the implementation blocklist **plus** those four, not instead of it —
+the planner has no more business force-pushing than an implementation run does. This ADR's
+caveat that a blocklist is incomplete by construction still applies, but it applies more
+weakly here than anywhere else in the product: "read the plan and answer" is close to
+expressible as a denial of four tools, whereas an implementation run's needs are
+open-ended by definition, which is exactly why mitigation 3 could not carry the whole
+argument for it.
+
+Nothing else is relaxed. The per-repository opt-in (mitigation 1) is checked once, before
+either child is spawned, so a repository that has not opted in runs no planner either.
+Worktree isolation (mitigation 2) is unchanged: the strategy run creates no worktree and no
+branch of its own, and executes with its cwd set to the worktree the implementation run is
+about to use. `--append-system-prompt` (mitigation 4) still carries the orchestrator facts,
+now including the task id the run may address and the tool it must answer with. The
+transcript (mitigation 5) is written for the planner too, under its own name — seam-contract
+D17.
