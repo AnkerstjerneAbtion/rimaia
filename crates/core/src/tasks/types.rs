@@ -4,7 +4,7 @@
 //! what a caller *supplies* is a subset with its own optionality, and that
 //! subset is these types.
 
-use crate::db::{BoardColumn, RunState};
+use crate::db::{BoardColumn, RunState, StrategyMode};
 
 /// What [`crate::tasks::create_task`] takes.
 #[derive(Debug, Clone)]
@@ -85,6 +85,23 @@ pub struct TaskPatch {
     /// `NOT NULL`, and non-blank is a rule this crate enforces rather than
     /// the schema, so there is nothing here to represent "clear it" with.
     pub title: Option<String>,
+    /// ADR-0016's per-task strategy mode, which gets no command and no MCP tool
+    /// of its own: it travels on the patch every other field does, so setting
+    /// it from the panel and setting it over MCP are one write through one
+    /// service (ADR-0006).
+    ///
+    /// A plain `Option` rather than a [`Patch`], for `title`'s reason: the
+    /// column is `NOT NULL DEFAULT 'default'`, and
+    /// [`StrategyMode::Default`](crate::db::StrategyMode::Default) is already
+    /// how it spells "no opinion" — there is nothing left for "clear it" to
+    /// mean.
+    ///
+    /// Seam-contract D17.6's rule is applied on top of whatever this says:
+    /// `model` or `effort` arriving as [`Patch::Set`] flips the mode to
+    /// `manual`, and clearing both flips a `manual` task back to `default`. See
+    /// [`crate::tasks::update_task`], which is where that lives so that both
+    /// doors get it.
+    pub strategy_mode: Option<StrategyMode>,
     pub plan: Patch<String>,
     pub extra_instructions: Patch<String>,
     pub model: Patch<String>,
