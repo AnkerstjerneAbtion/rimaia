@@ -186,7 +186,24 @@ pub enum RunStatus {
 /// [`Default`](StrategyMode::Default) is a decision, not an absence. The column is
 /// `NOT NULL DEFAULT 'default'` precisely so that a NULL `model` or `effort` means
 /// "not set" and does not also have to mean "explicitly set to the default".
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, sqlx::Type)]
+///
+/// `JsonSchema` for the reason [`BoardColumn`] carries one: `update_task` takes
+/// this off the wire (ADR-0006's 2026-08-28 amendment — the *mode* is a patch
+/// field, where the planner's proposal is a document with its own tool), and a
+/// tool advertising `strategy_mode: string` is a tool that gets `"auto"` sent to
+/// it.
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Hash,
+    Serialize,
+    Deserialize,
+    sqlx::Type,
+    schemars::JsonSchema,
+)]
 #[sqlx(rename_all = "snake_case")]
 #[serde(rename_all = "snake_case")]
 pub enum StrategyMode {
@@ -202,7 +219,22 @@ pub enum StrategyMode {
 /// nobody has decided anything about is `None`, which the type then forces every
 /// reader to handle rather than letting one sentinel value drift into meaning two
 /// things.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, sqlx::Type)]
+///
+/// `JsonSchema` because `get_task` hands it back: a planner that has written a
+/// proposal reads its own `strategy_source` on the answer, which is how it sees
+/// that the card is still the planner's rather than one a human took over.
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Hash,
+    Serialize,
+    Deserialize,
+    sqlx::Type,
+    schemars::JsonSchema,
+)]
 #[sqlx(rename_all = "snake_case")]
 #[serde(rename_all = "snake_case")]
 pub enum StrategySource {

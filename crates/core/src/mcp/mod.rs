@@ -7,8 +7,17 @@
 //! rejection whichever door it comes through.
 //!
 //! [`settings`] owns the port key, [`requests`] and [`responses`] are the wire
-//! DTOs, [`server`] holds the ten tool handlers, and [`build`] binds the
-//! listener.
+//! DTOs, [`server`] holds the eleven tool handlers, [`scope`] says which of them
+//! each door may reach, and [`build`] binds the listener.
+//!
+//! # Two doors, one service layer
+//!
+//! [`MCP_PATH`] is the operator's, registered once with `claude mcp add` and
+//! fixed by ADR-0006. Since task 020 there is a second, `/mcp/run/{token}`,
+//! minted per run and revoked when the run ends — see [`scope`] for what it is
+//! for and what it deliberately is not. Both build the same [`RimaiaServer`]
+//! over the same [`ServiceContext`]; the only difference is the value of its
+//! `scope` field.
 //!
 //! # Loopback is not configurable
 //!
@@ -39,6 +48,10 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Instant;
 
+use axum::extract::{Path, Request, State};
+use axum::http::StatusCode;
+use axum::response::{IntoResponse, Response};
+use axum::routing::any;
 use rmcp::model::ProtocolVersion;
 use rmcp::transport::streamable_http_client::StreamableHttpClientTransportConfig;
 use rmcp::transport::streamable_http_server::session::local::LocalSessionManager;
@@ -56,12 +69,16 @@ use crate::error::{Error, Result};
 pub mod error;
 pub mod requests;
 pub mod responses;
+pub mod scope;
 pub mod server;
 pub mod settings;
 
 pub use error::ToolError;
+pub use scope::{RunAccess, RunGrant, RunHandles, RunScope, Tool};
 pub use server::RimaiaServer;
 pub use settings::{configured_port, set_configured_port, MCP_PORT};
+
+use scope::RUN_ROUTE_PREFIX;
 
 /// The port ADR-0006 fixes as the default, and the one every `claude mcp add`
 /// line in the docs uses. Configurable for a collision; the *interface* is not
@@ -125,8 +142,24 @@ pub struct McpTask {
     /// immediately, so the shell spawns it unconditionally and does not have to
     /// branch on the status a second time.
     listener: Option<TcpListener>,
-    service: Option<StreamableHttpService<RimaiaServer, LocalSessionManager>>,
+    /// `None` alongside `listener`, and for the same reason.
+    routes: Option<Routes>,
     shutdown: watch::Receiver<bool>,
+}
+
+/// Both doors: the operator's service, built once, and everything the scoped
+/// route needs to build one per request.
+struct Routes {
+    operator: StreamableHttpService<RimaiaServer, LocalSessionManager>,
+    run: RunRoute,
+}
+
+/// What `/mcp/run/{token}` needs on every request — the context to build a
+/// scoped server from, and the table that says which task a token means.
+#[derive(Clone)]
+struct RunRoute {
+    ctx: ServiceContext,
+    handles: RunHandles,
 }
 
 struct Shared {
@@ -147,7 +180,13 @@ struct Shared {
 ///
 /// Infallible: see this module's header on why a busy port is surfaced rather
 /// than fatal.
-pub async fn build(ctx: ServiceContext, port: u16) -> (McpHandle, McpTask) {
+///
+/// `handles` is built by the shell before either subsystem and shared with the
+/// runner, so this function can tell it where the server actually landed on
+/// every bind — including the rebind `set_mcp_port` performs at runtime. That
+/// is what makes a scoped URL truthful and what removes the ordering constraint
+/// between `scheduler::build` and this one (seam-contract D17.4).
+pub async fn build(ctx: ServiceContext, port: u16, handles: RunHandles) -> (McpHandle, McpTask) {
     // Every write this server makes is an agent's, not the user's (ADR-0019).
     // Re-sourced here, once, so no handler has to remember.
     let ctx = ctx.with_source(MutationSource::Mcp);
@@ -155,7 +194,7 @@ pub async fn build(ctx: ServiceContext, port: u16) -> (McpHandle, McpTask) {
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
     let bind = TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], port))).await;
 
-    let (status, listener, service) = match bind {
+    let (status, listener, operator) = match bind {
         Ok(listener) => {
             let bound = listener
                 .local_addr()
@@ -170,7 +209,7 @@ pub async fn build(ctx: ServiceContext, port: u16) -> (McpHandle, McpTask) {
                     message: None,
                 },
                 Some(listener),
-                Some(streamable_service(ctx)),
+                Some(streamable_service(ctx.clone())),
             )
         }
         Err(error) if error.kind() == std::io::ErrorKind::AddrInUse => {
@@ -204,6 +243,22 @@ pub async fn build(ctx: ServiceContext, port: u16) -> (McpHandle, McpTask) {
         }
     };
 
+    // On every bind, and on every failure to bind. A runner holding these
+    // handles must never be left pointing at a port nothing answers, and
+    // `None` is what makes it refuse to start a planner rather than start one
+    // that cannot reply.
+    handles.set_endpoint(
+        status
+            .bound_address
+            .as_ref()
+            .map(|address| format!("http://{address}")),
+    );
+
+    let routes = operator.map(|operator| Routes {
+        operator,
+        run: RunRoute { ctx, handles },
+    });
+
     (
         McpHandle {
             shared: Arc::new(Shared {
@@ -213,7 +268,7 @@ pub async fn build(ctx: ServiceContext, port: u16) -> (McpHandle, McpTask) {
         },
         McpTask {
             listener,
-            service,
+            routes,
             shutdown: shutdown_rx,
         },
     )
@@ -256,11 +311,16 @@ impl McpTask {
     /// Serves until [`McpHandle::shutdown`]. Returns immediately if the bind
     /// failed.
     pub async fn run(self) {
-        let (Some(listener), Some(service)) = (self.listener, self.service) else {
+        let (Some(listener), Some(routes)) = (self.listener, self.routes) else {
             return;
         };
 
-        let router = axum::Router::new().nest_service(MCP_PATH, service);
+        let router = axum::Router::new()
+            // Untouched: this is the URL in every `claude mcp add` line ever
+            // pasted, and ADR-0006 fixes it.
+            .nest_service(MCP_PATH, routes.operator)
+            .route(&run_route_path(), any(dispatch))
+            .with_state(routes.run);
         let mut shutdown = self.shutdown;
 
         let served = axum::serve(listener, router)
@@ -278,7 +338,42 @@ impl McpTask {
     }
 }
 
-/// The tower service both [`build`] and the in-process tests mount.
+/// The axum path the scoped route is registered at — `/mcp/run/{token}`.
+///
+/// Built from [`MCP_PATH`] and the same prefix constant
+/// [`RunHandles::mcp_config_json`] builds its URL from, so the route the server
+/// listens on and the URL a run is handed cannot drift apart.
+fn run_route_path() -> String {
+    format!("{MCP_PATH}{RUN_ROUTE_PREFIX}{{token}}")
+}
+
+/// The scoped route: a token in the path, and a server value carrying the task
+/// it resolves to.
+///
+/// A fresh [`StreamableHttpService`] per request rather than one cached per
+/// token, because the transport is stateless (see this module's header) and a
+/// run makes a handful of calls in its life. A cache keyed by token would be a
+/// second place that has to remember revocation, and forgetting there would
+/// keep a dead run's handle alive.
+async fn dispatch(
+    State(route): State<RunRoute>,
+    Path(token): Path<String>,
+    request: Request,
+) -> Response {
+    let Some(RunScope::Run { task_id }) = route.handles.resolve(&token) else {
+        // A bare 404 with no body. An unknown token and a revoked one must be
+        // indistinguishable, and neither may hint that some *other* token would
+        // have worked — this route is not an oracle for which runs exist.
+        return StatusCode::NOT_FOUND.into_response();
+    };
+
+    scoped_service(route.ctx.clone(), task_id)
+        .handle(request)
+        .await
+        .into_response()
+}
+
+/// The tower service [`build`] and the in-process tests mount at [`MCP_PATH`].
 ///
 /// `pub(crate)` so a test can drive one JSON-RPC request through the real
 /// transport without a socket, and so neither can drift onto a different
@@ -286,13 +381,30 @@ impl McpTask {
 pub(crate) fn streamable_service(
     ctx: ServiceContext,
 ) -> StreamableHttpService<RimaiaServer, LocalSessionManager> {
+    service_over(move || RimaiaServer::new(ctx.clone()))
+}
+
+/// The same transport, serving one run's scoped view of the same services.
+fn scoped_service(
+    ctx: ServiceContext,
+    task_id: String,
+) -> StreamableHttpService<RimaiaServer, LocalSessionManager> {
+    service_over(move || RimaiaServer::scoped(ctx.clone(), task_id.clone()))
+}
+
+/// One transport configuration, so the operator's door and a run's cannot
+/// answer to different rules about sessions or response framing.
+fn service_over<F>(server: F) -> StreamableHttpService<RimaiaServer, LocalSessionManager>
+where
+    F: Fn() -> RimaiaServer + Send + Sync + 'static,
+{
     let mut config = StreamableHttpServerConfig::default();
     // Stateless: see this module's header.
     config.legacy_session_mode = false;
     config.json_response = true;
 
     StreamableHttpService::new(
-        move || Ok(RimaiaServer::new(ctx.clone())),
+        move || Ok(server()),
         Arc::new(LocalSessionManager::default()),
         config,
     )
@@ -385,7 +497,7 @@ mod tests {
 
     /// A bound server on an OS-chosen port, already spawned.
     async fn serving(harness: &TestContext) -> (McpHandle, tokio::task::JoinHandle<()>) {
-        let (handle, task) = build(harness.context.clone(), 0).await;
+        let (handle, task) = build(harness.context.clone(), 0, RunHandles::default()).await;
         assert_eq!(handle.status().state, McpState::Listening);
         (handle, tokio::spawn(task.run()))
     }
@@ -439,7 +551,8 @@ mod tests {
             .expect("take a port");
         let taken = squatter.local_addr().expect("its address").port();
 
-        let (handle, task) = build(harness.context.clone(), taken).await;
+        let handles = RunHandles::default();
+        let (handle, task) = build(harness.context.clone(), taken, handles.clone()).await;
 
         let status = handle.status();
         assert_eq!(status.state, McpState::PortInUse);
@@ -450,12 +563,27 @@ mod tests {
             status.message.as_deref(),
             Some(port_in_use_message(taken).as_str())
         );
+        assert_eq!(
+            handles.endpoint(),
+            None,
+            "and no run is handed a URL nothing answers (seam-contract D16.7)"
+        );
 
         // And the task is spawnable regardless, which is what lets the shell
         // spawn it without branching on the status a second time.
         task.run().await;
     }
 
+    /// The number Settings → MCP shows after "Test connection", so it is
+    /// asserted where the count actually crosses the wire rather than only
+    /// against the router.
+    ///
+    /// **Ten until task 020**, eleven since: `set_task_strategy` is ADR-0006's
+    /// 2026-08-28 amendment, which widens the table by exactly one and restates
+    /// that it is otherwise closed. The count is pinned in two places on
+    /// purpose — here and `server::tests::ADR_0006_TOOLS` — because a tool that
+    /// registers but never reaches the wire, or the reverse, is a bug neither
+    /// assertion catches alone.
     #[tokio::test]
     async fn the_probe_reports_the_server_it_is_pointed_at() {
         let harness = TestContext::new().await;
@@ -467,8 +595,8 @@ mod tests {
         assert_eq!(probed.endpoint, format!("http://{address}/mcp"));
         assert_eq!(probed.server_name, "rimaia");
         assert_eq!(
-            probed.tool_count, 10,
-            "ADR-0006's ten tools, over the wire this time"
+            probed.tool_count, 11,
+            "ADR-0006's eleven tools, over the wire this time"
         );
         assert!(!probed.protocol_version.is_empty());
 
