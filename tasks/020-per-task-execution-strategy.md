@@ -3,6 +3,7 @@ id: "020"
 title: Per-task execution strategy (model, effort, planned workflows)
 milestone: v0.2
 status: ready
+landed: "#7"
 depends_on: ["010"]
 adrs: ["0016", "0004"]
 size: L
