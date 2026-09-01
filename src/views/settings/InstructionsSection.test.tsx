@@ -302,7 +302,12 @@ describe("InstructionsSection", () => {
     fireEvent.change(textarea, { target: { value: "revised base instructions" } });
     fireEvent.blur(textarea);
 
-    expect(await screen.findByText("second composed prompt")).toBeInTheDocument();
+    // Save, refetch and recompose is a three-hop async chain; the default
+    // 1000ms ran out on a CI runner at 1036ms. The assertion is unchanged —
+    // it just gets time a slower machine actually needs.
+    expect(
+      await screen.findByText("second composed prompt", undefined, { timeout: 5000 }),
+    ).toBeInTheDocument();
     expect(previewCalls).toBe(2);
   });
 });

@@ -153,6 +153,22 @@ function renderCard(overrides: Partial<Parameters<typeof TaskCard>[0]> = {}) {
   return props;
 }
 
+/** Clicks "Run now" once it is actually *enabled*.
+ *
+ *  The button is `disabled={runNow.kind !== "ready" || starting}`, and
+ *  `runNowState` cannot return `ready` until the async repository lookup has
+ *  resolved — so `findByRole` happily hands back a **disabled** button and
+ *  React drops the click on the floor. Locally the lookup always wins that
+ *  race; on a slower CI runner it does not, and the failure reads as
+ *  "expected spy to be called", which points at the handler rather than at
+ *  the wait. */
+async function clickRunNow() {
+  const button = await screen.findByRole("button", { name: "Run now" });
+  await waitFor(() => expect(button).toBeEnabled());
+  fireEvent.click(button);
+  return button;
+}
+
 describe("TaskCard", () => {
   beforeEach(() => {
     mockBackend();
@@ -358,7 +374,7 @@ describe("TaskCard", () => {
       });
       renderCard();
 
-      fireEvent.click(await screen.findByRole("button", { name: "Run now" }));
+      await clickRunNow();
 
       expect(mockInvoke).toHaveBeenCalledWith("start_task_run", { taskId: "task-1" });
       // Lets the click's own `setStarting(false)` land inside `act()` rather
@@ -375,7 +391,7 @@ describe("TaskCard", () => {
       });
       const { onSelect } = renderCard();
 
-      fireEvent.click(await screen.findByRole("button", { name: "Run now" }));
+      await clickRunNow();
 
       expect(onSelect).not.toHaveBeenCalled();
       await waitFor(() => expect(screen.getByRole("button", { name: "Run now" })).toBeEnabled());
@@ -392,7 +408,7 @@ describe("TaskCard", () => {
       });
       renderCard();
 
-      fireEvent.click(await screen.findByRole("button", { name: "Run now" }));
+      await clickRunNow();
 
       expect(
         await screen.findByText("a run is already in progress for this task"),
