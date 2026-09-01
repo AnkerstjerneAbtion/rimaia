@@ -314,3 +314,11 @@
 .mcp-port-form input {
   width: 7rem;
 }
+
+/* Task 015's storage housekeeping — the prune-by-age presets beside the
+   total run-log size. */
+.storage-prune-actions {
+  display: flex;
+  gap: 0.5rem;
+  margin: 0.5rem 0;
+}

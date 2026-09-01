@@ -210,3 +210,216 @@
   font-size: 0.8rem;
   color: var(--text-muted);
 }
+
+/* Task 015: run history, filters, and the run detail overlay. */
+
+.runs-history-section {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 1rem 1.25rem;
+  background: var(--surface);
+}
+
+.runs-history-filters {
+  display: flex;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+  margin-bottom: 0.75rem;
+}
+
+.run-history-list,
+.runs-history-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+}
+
+.run-history-list button,
+.runs-history-list button {
+  width: 100%;
+  display: flex;
+  gap: 0.6rem;
+  align-items: baseline;
+  flex-wrap: wrap;
+  text-align: left;
+}
+
+.run-history-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  margin-top: 0.75rem;
+}
+
+/* `position: fixed` rather than the board's `.task-detail-panel` (`absolute`
+   inside `.board-layout`'s containing block) because this overlay is opened
+   from two unrelated layouts — a task's own panel and the global Runs view —
+   and neither should have to be this component's containing block. */
+.run-detail-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 50;
+  overflow-y: auto;
+  background: var(--surface);
+  padding: 1.5rem;
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+}
+
+.run-detail-overlay-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  position: sticky;
+  top: -1.5rem;
+  background: var(--surface);
+  padding-bottom: 0.5rem;
+  border-bottom: 1px solid var(--border);
+}
+
+.run-detail-overlay-header h3 {
+  margin: 0;
+}
+
+.run-detail-section {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 1rem 1.25rem;
+  background: var(--surface);
+}
+
+.run-detail-section h4 {
+  margin: 0 0 0.5rem;
+}
+
+.run-detail-file-list,
+.run-detail-commit-list {
+  margin: 0.5rem 0 0;
+  padding-left: 1.25rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+}
+
+.run-detail-prompt {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  max-height: 20rem;
+  overflow-y: auto;
+}
+
+.run-detail-actions {
+  display: flex;
+  gap: 0.5rem;
+  margin-bottom: 0.75rem;
+}
+
+/* The transcript viewer itself: search, one bounded page of entries, and
+   pagination — never the whole file at once (see
+   `rimaia_core::runs::transcript`'s own doc for why). */
+
+.transcript-viewer {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+
+.transcript-search {
+  display: flex;
+  gap: 0.5rem;
+}
+
+.transcript-search input {
+  flex: 1;
+}
+
+.transcript-search-results {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  max-height: 12rem;
+  overflow-y: auto;
+}
+
+.transcript-search-results button {
+  width: 100%;
+  text-align: left;
+}
+
+.transcript-snippet {
+  color: var(--text-muted);
+  overflow-wrap: anywhere;
+}
+
+.transcript-entries {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  max-height: 40rem;
+  overflow-y: auto;
+}
+
+.transcript-entry {
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 0.5rem 0.75rem;
+}
+
+.transcript-assistant {
+  background: var(--surface);
+}
+
+.transcript-user {
+  background: transparent;
+}
+
+.transcript-text {
+  margin: 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.transcript-tool-use {
+  margin-top: 0.35rem;
+}
+
+.transcript-tool-name {
+  font-weight: 600;
+}
+
+.transcript-tool-input,
+.transcript-tool-result pre {
+  margin: 0.25rem 0 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  max-height: 16rem;
+  overflow-y: auto;
+}
+
+.transcript-tool-result summary {
+  cursor: pointer;
+}
+
+.transcript-error,
+.transcript-error-text {
+  color: var(--danger-text);
+}
+
+.transcript-other {
+  margin: 0;
+}
+
+.transcript-pagination {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+}

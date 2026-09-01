@@ -94,6 +94,7 @@ describe("TaskDetailPanel", () => {
     mockInvoke.mockImplementation(async (command) => {
       if (command === "get_task") return detail();
       if (command === "get_worktree_status") return worktreeStatus();
+      if (command === "list_runs_for_task") return [];
       throw new Error(`unexpected command: ${command}`);
     });
 
@@ -119,6 +120,7 @@ describe("TaskDetailPanel", () => {
         });
       }
       if (command === "get_worktree_status") return worktreeStatus();
+      if (command === "list_runs_for_task") return [];
       if (command === "get_strategy_catalogue") {
         return {
           catalogue: { models: [], efforts: [], planner: { model: null, effort: null, max_turns: 0 } },
@@ -162,6 +164,7 @@ describe("TaskDetailPanel", () => {
         });
       }
       if (command === "get_worktree_status") return worktreeStatus();
+      if (command === "list_runs_for_task") return [];
       throw new Error(`unexpected command: ${command}`);
     });
 
@@ -185,6 +188,7 @@ describe("TaskDetailPanel", () => {
           : detail({ id: "task-2", plan: "a different plan" });
       }
       if (command === "get_worktree_status") return worktreeStatus();
+      if (command === "list_runs_for_task") return [];
       throw new Error(`unexpected command: ${command}`);
     });
 
@@ -230,6 +234,7 @@ describe("TaskDetailPanel", () => {
         });
       }
       if (command === "get_worktree_status") return worktreeStatus();
+      if (command === "list_runs_for_task") return [];
       throw new Error(`unexpected command: ${command}`);
     });
 
@@ -257,6 +262,7 @@ describe("TaskDetailPanel", () => {
         return detail({ plan: resolveCount === 1 ? "first" : "second" });
       }
       if (command === "get_worktree_status") return worktreeStatus();
+      if (command === "list_runs_for_task") return [];
       throw new Error(`unexpected command: ${command}`);
     });
 
@@ -288,6 +294,7 @@ describe("TaskDetailPanel", () => {
         return detail({ plan: resolveCount === 1 ? "first" : "second" });
       }
       if (command === "get_worktree_status") return worktreeStatus();
+      if (command === "list_runs_for_task") return [];
       throw new Error(`unexpected command: ${command}`);
     });
 
@@ -319,6 +326,7 @@ describe("TaskDetailPanel", () => {
         return detail();
       }
       if (command === "get_worktree_status") return worktreeStatus();
+      if (command === "list_runs_for_task") return [];
       throw new Error(`unexpected command: ${command}`);
     });
 
@@ -345,6 +353,7 @@ describe("TaskDetailPanel", () => {
     mockInvoke.mockImplementation(async (command) => {
       if (command === "get_task") return detail();
       if (command === "get_worktree_status") return worktreeStatus();
+      if (command === "list_runs_for_task") return [];
       throw new Error(`unexpected command: ${command}`);
     });
 
@@ -372,6 +381,7 @@ describe("TaskDetailPanel", () => {
     mockInvoke.mockImplementation(async (command) => {
       if (command === "get_task") return detail();
       if (command === "get_worktree_status") return worktreeStatus();
+      if (command === "list_runs_for_task") return [];
       if (command === "delete_task") return undefined;
       throw new Error(`unexpected command: ${command}`);
     });
