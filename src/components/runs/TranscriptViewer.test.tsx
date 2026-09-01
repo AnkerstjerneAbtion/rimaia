@@ -58,6 +58,56 @@ describe("TranscriptViewer", () => {
     expect(screen.getByText("Tool result").closest("details")).not.toHaveAttribute("open");
   });
 
+  // A `system` transcript is nine unrelated things — a token counter, a
+  // hook's exit code, the run's own permission mode — and they all used to
+  // render as the single word "system".
+  it("names an unrendered event by its subtype, not only its type", async () => {
+    mockInvoke.mockImplementation(async (command) => {
+      if (command === "read_run_transcript_page") {
+        return page({
+          entries: [
+            { line: 1, kind: { type: "other", eventType: "system", subtype: "thinking_tokens" } },
+            { line: 2, kind: { type: "other", eventType: "tool_progress", subtype: null } },
+          ],
+          totalLines: 2,
+        });
+      }
+      throw new Error(`unexpected command: ${command}`);
+    });
+
+    render(<TranscriptViewer runId="run-1" />);
+
+    expect(await screen.findByText("Unrendered event: system/thinking_tokens")).toBeInTheDocument();
+    expect(screen.getByText("Unrendered event: tool_progress")).toBeInTheDocument();
+  });
+
+  // The line a cut stream ends on is usually the agent's closing message —
+  // the one thing worth reading on a run that ended without saying why.
+  it("shows the text of a line that would not parse", async () => {
+    mockInvoke.mockImplementation(async (command) => {
+      if (command === "read_run_transcript_page") {
+        return page({
+          entries: [
+            {
+              line: 1822,
+              kind: {
+                type: "malformed",
+                raw: '{"type":"assistant","message":{"content":[{"text":"I am stopping here because',
+              },
+            },
+          ],
+          totalLines: 1822,
+        });
+      }
+      throw new Error(`unexpected command: ${command}`);
+    });
+
+    render(<TranscriptViewer runId="run-1" />);
+
+    expect(await screen.findByText(/I am stopping here because/)).toBeInTheDocument();
+    expect(screen.getByText(/Line 1822: not valid JSON/)).toBeInTheDocument();
+  });
+
   it("highlights an errored result entry", async () => {
     mockInvoke.mockImplementation(async (command) => {
       if (command === "read_run_transcript_page") {

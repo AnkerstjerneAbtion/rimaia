@@ -118,6 +118,79 @@ describe("RunDetailOverlay", () => {
     expect(screen.getByRole("button", { name: "Reveal raw log" })).toBeDisabled();
   });
 
+  // The run this was written for: an hour of refused commands, then a stream
+  // that stopped mid-message. The row's own message ("the stream ended")
+  // describes that ending without explaining it; these three lines are the
+  // explanation, and every one of them was already in the transcript.
+  it("says what the transcript knows about how the run ended", async () => {
+    mockInvoke.mockImplementation(async (command) => {
+      if (command === "get_run") {
+        return runDetail({
+          exitClass: "transient",
+          errorMessage: "the event stream ended without a result event",
+          logAvailable: false,
+        });
+      }
+      if (command === "summarize_run_transcript") {
+        return {
+          permissionMode: "acceptEdits",
+          model: "claude-sonnet-5",
+          deniedToolCalls: 24,
+          endedWithResult: false,
+          endsMidLine: true,
+          malformedLines: 1,
+        };
+      }
+      throw new Error(`unexpected command: ${command}`);
+    });
+
+    render(<RunDetailOverlay runId="run-1" onClose={() => {}} />);
+
+    expect(await screen.findByText("acceptEdits")).toBeInTheDocument();
+    expect(screen.getByText(/24 tool calls were refused for want of approval/)).toBeInTheDocument();
+    expect(screen.getByText(/transcript ends mid-line/)).toBeInTheDocument();
+  });
+
+  it("says nothing about refusals or the stream when the run ended cleanly", async () => {
+    mockInvoke.mockImplementation(async (command) => {
+      if (command === "get_run") return runDetail({ logAvailable: false });
+      if (command === "summarize_run_transcript") {
+        return {
+          permissionMode: "bypassPermissions",
+          model: "claude-sonnet-5",
+          deniedToolCalls: 0,
+          endedWithResult: true,
+          endsMidLine: false,
+          malformedLines: 0,
+        };
+      }
+      throw new Error(`unexpected command: ${command}`);
+    });
+
+    render(<RunDetailOverlay runId="run-1" onClose={() => {}} />);
+
+    expect(await screen.findByText("bypassPermissions")).toBeInTheDocument();
+    expect(screen.queryByText(/refused for want of approval/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/without a result event/)).not.toBeInTheDocument();
+  });
+
+  // The summary explains the run; it is not the run. A pruned transcript must
+  // not put an error over an outcome that reads perfectly well without it.
+  it("still renders the outcome when the transcript summary cannot be read", async () => {
+    mockInvoke.mockImplementation(async (command) => {
+      if (command === "get_run") return runDetail({ logAvailable: false });
+      if (command === "summarize_run_transcript") {
+        throw { code: "not_found", message: "could not open the transcript" };
+      }
+      throw new Error(`unexpected command: ${command}`);
+    });
+
+    render(<RunDetailOverlay runId="run-1" onClose={() => {}} />);
+
+    expect(await screen.findByText("Succeeded")).toBeInTheDocument();
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  });
+
   it("shows a no-pull-request placeholder when none was opened", async () => {
     mockInvoke.mockImplementation(async (command) => {
       if (command === "get_run") return runDetail({ prUrl: null });

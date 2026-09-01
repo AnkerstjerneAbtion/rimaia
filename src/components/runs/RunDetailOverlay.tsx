@@ -1,9 +1,14 @@
 import { useEffect, useState } from "react";
 import { createPortal } from "react-dom";
 
-import { getRun, revealRunLog, toRimaiaError } from "../../lib/commands";
+import {
+  getRun,
+  revealRunLog,
+  summarizeRunTranscript,
+  toRimaiaError,
+} from "../../lib/commands";
 import { EXIT_CLASS_LABELS, formatCostUsd } from "../panel/RunOutcomeSection";
-import type { RimaiaError, RunDetail } from "../../types";
+import type { RimaiaError, RunDetail, TranscriptSummary } from "../../types";
 import { ErrorBanner } from "../ErrorBanner";
 import { TranscriptViewer } from "./TranscriptViewer";
 
@@ -39,6 +44,7 @@ interface RunDetailOverlayProps {
  */
 export function RunDetailOverlay({ runId, onClose }: RunDetailOverlayProps) {
   const [detail, setDetail] = useState<RunDetail | null>(null);
+  const [summary, setSummary] = useState<TranscriptSummary | null>(null);
   const [error, setError] = useState<RimaiaError | null>(null);
   const [revealing, setRevealing] = useState(false);
   const [revealError, setRevealError] = useState<RimaiaError | null>(null);
@@ -56,6 +62,24 @@ export function RunDetailOverlay({ runId, onClose }: RunDetailOverlayProps) {
       (thrown) => {
         if (active) setError(toRimaiaError(thrown));
       },
+    );
+    return () => {
+      active = false;
+    };
+  }, [runId]);
+
+  // A second read rather than a field on `getRun`, because it costs a scan of
+  // the transcript. Its own failure is deliberately silent: the summary
+  // explains the run, it is not the run, and a pruned log must not put an
+  // error banner over an outcome that is perfectly readable without it.
+  useEffect(() => {
+    let active = true;
+    setSummary(null);
+    summarizeRunTranscript(runId).then(
+      (result) => {
+        if (active) setSummary(result);
+      },
+      () => {},
     );
     return () => {
       active = false;
@@ -127,6 +151,40 @@ export function RunDetailOverlay({ runId, onClose }: RunDetailOverlayProps) {
                 <>
                   <dt>Error</dt>
                   <dd className="run-outcome-error">{detail.errorMessage}</dd>
+                </>
+              )}
+              {/* What the transcript knows that the row does not. A run that
+                  was refused every command it tried still produces an
+                  unremarkable-looking row; these three lines are where that
+                  becomes visible without reading a thousand entries. */}
+              {summary?.permissionMode && (
+                <>
+                  <dt>Ran as</dt>
+                  <dd>
+                    {summary.permissionMode}
+                    {summary.model && <span className="muted"> · {summary.model}</span>}
+                  </dd>
+                </>
+              )}
+              {summary && summary.deniedToolCalls > 0 && (
+                <>
+                  <dt>Refused</dt>
+                  <dd className="run-outcome-error">
+                    {summary.deniedToolCalls} tool call
+                    {summary.deniedToolCalls === 1 ? " was" : "s were"} refused for want of
+                    approval — this run could do nothing its permission mode had not already
+                    allowed.
+                  </dd>
+                </>
+              )}
+              {summary && !summary.endedWithResult && (
+                <>
+                  <dt>Stream</dt>
+                  <dd>
+                    {summary.endsMidLine
+                      ? "The transcript ends mid-line: the CLI stopped writing before it reported a result."
+                      : "The stream ended without a result event, so this outcome was inferred rather than reported."}
+                  </dd>
                 </>
               )}
             </dl>

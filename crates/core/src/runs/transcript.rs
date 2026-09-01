@@ -62,6 +62,14 @@ pub const MAX_SEARCH_HITS: usize = 200;
 /// The longest [`SearchHit::snippet`] returned, in characters.
 const MAX_SNIPPET_CHARS: usize = 320;
 
+/// The longest preview kept of a line that would not parse.
+///
+/// Larger than a snippet because this one is meant to be *read*: the line it
+/// most often belongs to is the closing message of a run whose stream was cut,
+/// and a sentence-and-a-half of it explains nothing. Still bounded, because a
+/// single unparseable line can be a whole file's worth of tool output.
+const MAX_MALFORMED_PREVIEW_CHARS: usize = 4_000;
+
 // ---------------------------------------------------------------------------
 // The display model — one entry per non-blank JSONL line
 // ---------------------------------------------------------------------------
@@ -110,14 +118,28 @@ pub enum TranscriptEntryKind {
     /// way — ADR-0004's tolerant-parsing rule applies to display just as much
     /// as to the classifier: an event type this version does not know still
     /// occupies its place in the page rather than vanishing from it.
+    ///
+    /// The `subtype` rides along because without it this arm is a lie by
+    /// omission: a real transcript is mostly `system`, and nine different
+    /// events — the run's own `init`, a hook's exit code, a subagent
+    /// starting, a token counter — all rendered as the single word "system".
     #[serde(rename_all = "camelCase")]
     Other {
         event_type: String,
+        subtype: Option<String>,
     },
     /// A line that was not valid JSON at all — kept in its place rather than
     /// skipped silently, so a page's entry count still matches what a reader
     /// counts by eye in the raw file.
-    Malformed,
+    ///
+    /// `raw` is a bounded prefix of the line itself. A truncated final line is
+    /// the shape of a stream that was cut mid-write, and what it was cut in
+    /// the middle of is usually the agent's closing message — the one thing a
+    /// reviewer most wants when a run ended without saying why. Rendering the
+    /// bytes we have beats telling them a line exists that they may not read.
+    Malformed {
+        raw: String,
+    },
 }
 
 /// A block inside one entry's `content` array — the same nesting
@@ -208,7 +230,9 @@ fn parse_entry(line: usize, raw: &str) -> TranscriptEntry {
     let Ok(value) = serde_json::from_str::<Value>(raw) else {
         return TranscriptEntry {
             line,
-            kind: TranscriptEntryKind::Malformed,
+            kind: TranscriptEntryKind::Malformed {
+                raw: preview(raw, MAX_MALFORMED_PREVIEW_CHARS),
+            },
         };
     };
 
@@ -243,10 +267,27 @@ fn parse_entry(line: usize, raw: &str) -> TranscriptEntry {
         },
         other => TranscriptEntryKind::Other {
             event_type: other.to_string(),
+            subtype: value
+                .get("subtype")
+                .and_then(Value::as_str)
+                .map(str::to_string),
         },
     };
 
     TranscriptEntry { line, kind }
+}
+
+/// The first `limit` *characters* of `raw`, marked when it had to cut.
+///
+/// Characters, never bytes, for the reason [`matching_snippet`] gives: a cut
+/// mid-codepoint is a panic, and a truncated line is exactly where invalid
+/// UTF-8 boundaries turn up.
+fn preview(raw: &str, limit: usize) -> String {
+    let mut preview: String = raw.chars().take(limit).collect();
+    if raw.chars().nth(limit).is_some() {
+        preview.push('…');
+    }
+    preview
 }
 
 fn content_blocks(event: &Value) -> Vec<TranscriptBlock> {
@@ -318,6 +359,103 @@ fn tool_result_content(block: &Value) -> Option<String> {
         }
         _ => None,
     }
+}
+
+// ---------------------------------------------------------------------------
+// The summary — what a reader needs before reading 1800 lines
+// ---------------------------------------------------------------------------
+
+/// The handful of facts that explain a run's shape, read in one pass.
+///
+/// Every field here is already *in* the transcript, and every one of them was
+/// unreadable in practice: the permission mode is inside a `system` event
+/// among a thousand others, the refusals are spread across a hundred tool
+/// results, and "there is no `result` line" is a fact about the whole file
+/// that no page of it can show. A reviewer opening a failed run should not
+/// have to page through a 4MB file to learn that the agent was never allowed
+/// to run `git commit`.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TranscriptSummary {
+    /// What the CLI reported it was actually running under, from `init` —
+    /// not what Rimaia asked for. ADR-0012's distinction, and `process.rs`
+    /// verifies the two agree; this is the one the transcript can prove.
+    pub permission_mode: Option<String>,
+    pub model: Option<String>,
+    /// Tool results refused for want of approval. See
+    /// [`crate::runner::events::reports_a_permission_denial`] — display only.
+    pub denied_tool_calls: usize,
+    /// Whether the stream reached its terminal event. `false` means whatever
+    /// the run's outcome says, it was inferred from an ending the CLI never
+    /// described.
+    pub ended_with_result: bool,
+    /// Whether the last entry in the file is one that would not parse — the
+    /// signature of a stream cut mid-write, as opposed to a malformed line in
+    /// the middle of an otherwise complete run.
+    pub ends_mid_line: bool,
+    pub malformed_lines: usize,
+}
+
+/// Reads `log_path` once and answers [`TranscriptSummary`].
+///
+/// A whole-file scan, like [`read_page`]'s own total-count pass and for the
+/// same reasons (see this module's header): bounded memory, one sequential
+/// read, nothing retained. It parses each line only far enough to ask what it
+/// is — the summary never holds a line it has finished with.
+pub async fn summarize(log_path: &Path) -> Result<TranscriptSummary> {
+    let file = open_transcript(log_path).await?;
+    let mut lines = BufReader::new(file).lines();
+
+    let mut summary = TranscriptSummary::default();
+    while let Some(raw) = lines.next_line().await? {
+        if raw.trim().is_empty() {
+            continue;
+        }
+
+        let Ok(value) = serde_json::from_str::<Value>(&raw) else {
+            summary.malformed_lines += 1;
+            summary.ends_mid_line = true;
+            continue;
+        };
+        // Only a *trailing* unparseable line means the stream was cut; one in
+        // the middle is a line the CLI wrote badly and then carried on past.
+        summary.ends_mid_line = false;
+
+        match value.get("type").and_then(Value::as_str) {
+            Some("result") => summary.ended_with_result = true,
+            Some("system") if value.get("subtype").and_then(Value::as_str) == Some("init") => {
+                summary.permission_mode = string_field(&value, "permissionMode");
+                summary.model = string_field(&value, "model");
+            }
+            Some("user") if refused_tool_result(&value, &raw) => summary.denied_tool_calls += 1,
+            _ => {}
+        }
+    }
+
+    Ok(summary)
+}
+
+fn string_field(value: &Value, key: &str) -> Option<String> {
+    value.get(key).and_then(Value::as_str).map(str::to_string)
+}
+
+/// The display-side reading of the same condition
+/// [`crate::runner::events::reports_a_permission_denial`] counts live, against
+/// the raw line rather than the live event model — the two agree on the gate
+/// (an errored `tool_result`) and on the phrase, which is defined once, there.
+fn refused_tool_result(value: &Value, raw: &str) -> bool {
+    let errored = value
+        .get("message")
+        .and_then(|message| message.get("content"))
+        .and_then(Value::as_array)
+        .is_some_and(|blocks| {
+            blocks.iter().any(|block| {
+                block.get("type").and_then(Value::as_str) == Some("tool_result")
+                    && block.get("is_error").and_then(Value::as_bool) == Some(true)
+            })
+        });
+
+    errored && crate::runner::events::line_reports_a_denial(raw)
 }
 
 // ---------------------------------------------------------------------------
@@ -454,11 +592,12 @@ mod tests {
     fn an_other_entry_keeps_event_type_camel_cased_on_the_wire() {
         let kind = TranscriptEntryKind::Other {
             event_type: "system".to_string(),
+            subtype: Some("thinking_tokens".to_string()),
         };
 
         assert_eq!(
             serde_json::to_value(&kind).expect("a DTO must always serialize"),
-            json!({ "type": "other", "eventType": "system" })
+            json!({ "type": "other", "eventType": "system", "subtype": "thinking_tokens" })
         );
     }
 
@@ -595,28 +734,136 @@ mod tests {
         );
     }
 
+    /// The subtype rides along, because a real transcript is mostly `system`
+    /// and its subtypes are nine unrelated things — a token counter, a hook's
+    /// exit code, the run's own configuration. One label for all of them told
+    /// a reader nothing.
     #[tokio::test]
-    async fn an_event_type_this_viewer_does_not_render_stays_in_place() {
-        let (_dir, path) = write_lines(&[r#"{"type":"system","subtype":"init"}"#]);
+    async fn an_event_type_this_viewer_does_not_render_keeps_its_subtype() {
+        let (_dir, path) = write_lines(&[
+            r#"{"type":"system","subtype":"thinking_tokens","estimated_tokens":100}"#,
+            r#"{"type":"tool_progress"}"#,
+        ]);
 
         let page = read_page(&path, 0, 10).await.expect("read a page");
 
         assert_eq!(
             page.entries[0].kind,
             TranscriptEntryKind::Other {
-                event_type: "system".to_string()
+                event_type: "system".to_string(),
+                subtype: Some("thinking_tokens".to_string()),
             }
+        );
+        assert_eq!(
+            page.entries[1].kind,
+            TranscriptEntryKind::Other {
+                event_type: "tool_progress".to_string(),
+                subtype: None,
+            },
+            "an event with no subtype says so rather than inventing one",
         );
     }
 
     #[tokio::test]
-    async fn a_line_that_is_not_json_is_malformed_rather_than_skipped() {
-        let (_dir, path) = write_lines(&["not json at all"]);
+    async fn a_line_that_is_not_json_is_kept_verbatim_rather_than_reduced_to_a_complaint() {
+        let (_dir, path) = write_lines(&[
+            r#"{"type":"assistant","message":{"content":[{"text":"I am stopping here because"#,
+        ]);
 
         let page = read_page(&path, 0, 10).await.expect("read a page");
 
         assert_eq!(page.total_lines, 1);
-        assert_eq!(page.entries[0].kind, TranscriptEntryKind::Malformed);
+        let TranscriptEntryKind::Malformed { raw } = &page.entries[0].kind else {
+            panic!("expected a malformed entry");
+        };
+        assert!(
+            raw.contains("I am stopping here because"),
+            "the text a cut-off line was carrying is the whole reason to show it: {raw}",
+        );
+    }
+
+    #[test]
+    fn a_malformed_preview_is_bounded_and_marks_where_it_was_cut() {
+        let long = "x".repeat(MAX_MALFORMED_PREVIEW_CHARS + 100);
+
+        let preview = preview(&long, MAX_MALFORMED_PREVIEW_CHARS);
+
+        assert_eq!(preview.chars().count(), MAX_MALFORMED_PREVIEW_CHARS + 1);
+        assert!(preview.ends_with('…'));
+    }
+
+    #[test]
+    fn a_preview_that_fits_is_not_marked_as_cut() {
+        assert_eq!(preview("short", MAX_MALFORMED_PREVIEW_CHARS), "short");
+    }
+
+    const INIT: &str = r#"{"type":"system","subtype":"init","permissionMode":"acceptEdits","model":"claude-sonnet-5"}"#;
+    const DENIED_TOOL_RESULT: &str = r#"{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"toolu_2","is_error":true,"content":"This command requires approval"}]}}"#;
+    const FAILED_TOOL_RESULT: &str = r#"{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"toolu_3","is_error":true,"content":"error: could not compile `rimaia-core`"}]}}"#;
+
+    /// The run this was written for, in five lines: it was refused everything
+    /// it tried, then its stream stopped mid-message without a `result`. Every
+    /// one of those facts was already in the transcript and none of them was
+    /// findable by paging through it.
+    #[tokio::test]
+    async fn a_summary_names_the_permission_mode_the_refusals_and_the_missing_result() {
+        let (_dir, path) = write_lines(&[
+            INIT,
+            ASSISTANT_TOOL_USE,
+            DENIED_TOOL_RESULT,
+            FAILED_TOOL_RESULT,
+            DENIED_TOOL_RESULT,
+            r#"{"type":"assistant","message":{"content":[{"type":"text","text":"I am stopping"#,
+        ]);
+
+        let summary = summarize(&path).await.expect("summarize");
+
+        assert_eq!(summary.permission_mode.as_deref(), Some("acceptEdits"));
+        assert_eq!(summary.model.as_deref(), Some("claude-sonnet-5"));
+        assert_eq!(
+            summary.denied_tool_calls, 2,
+            "an ordinary tool failure is not a refusal",
+        );
+        assert!(!summary.ended_with_result);
+        assert!(summary.ends_mid_line);
+        assert_eq!(summary.malformed_lines, 1);
+    }
+
+    #[tokio::test]
+    async fn a_run_that_reached_its_result_says_so_and_counts_no_refusals() {
+        let (_dir, path) = write_lines(&[INIT, ASSISTANT_TEXT, RESULT_SUCCESS]);
+
+        let summary = summarize(&path).await.expect("summarize");
+
+        assert!(summary.ended_with_result);
+        assert!(!summary.ends_mid_line);
+        assert_eq!(summary.denied_tool_calls, 0);
+        assert_eq!(summary.malformed_lines, 0);
+    }
+
+    /// A bad line the CLI wrote and then carried on past is not a cut stream —
+    /// only a *trailing* one is, and conflating them would put "the CLI
+    /// stopped writing" on a run that finished perfectly well.
+    #[tokio::test]
+    async fn a_malformed_line_in_the_middle_does_not_read_as_a_cut_stream() {
+        let (_dir, path) = write_lines(&[INIT, "{ not json", ASSISTANT_TEXT, RESULT_SUCCESS]);
+
+        let summary = summarize(&path).await.expect("summarize");
+
+        assert_eq!(summary.malformed_lines, 1);
+        assert!(!summary.ends_mid_line);
+        assert!(summary.ended_with_result);
+    }
+
+    #[tokio::test]
+    async fn summarizing_a_transcript_that_does_not_exist_is_a_not_found_error() {
+        let dir = tempfile::tempdir().expect("temp dir");
+
+        let error = summarize(&dir.path().join("gone.jsonl"))
+            .await
+            .expect_err("the file is missing");
+
+        assert_eq!(error.code(), crate::ErrorCode::NotFound);
     }
 
     #[tokio::test]

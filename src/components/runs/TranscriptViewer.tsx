@@ -189,10 +189,27 @@ function TranscriptEntryView({ entry }: { readonly entry: TranscriptEntry }) {
         </div>
       );
     case "other":
-      return <p className="muted transcript-other">Unrecognized event: {kind.eventType}</p>;
-    case "malformed":
+      // With the subtype, because without it a real transcript is mostly this
+      // one label: `system` covers the run's own init, hook results, subagent
+      // lifecycle and a per-tick token counter, and they are not the same
+      // event in any sense a reader cares about.
       return (
-        <p className="transcript-error-text">Line {entry.line}: could not be parsed as JSON.</p>
+        <p className="muted transcript-other">
+          Unrendered event: {kind.subtype ? `${kind.eventType}/${kind.subtype}` : kind.eventType}
+        </p>
+      );
+    case "malformed":
+      // The text, not just the fact. A trailing unparseable line is a stream
+      // cut mid-write, and what it was cut in the middle of is usually the
+      // agent's last message — the one thing worth reading on a run that
+      // ended without saying why.
+      return (
+        <div className="transcript-entry transcript-malformed">
+          <p className="transcript-error-text">
+            Line {entry.line}: not valid JSON — shown as written.
+          </p>
+          <pre className="transcript-malformed-raw">{kind.raw}</pre>
+        </div>
       );
   }
 }

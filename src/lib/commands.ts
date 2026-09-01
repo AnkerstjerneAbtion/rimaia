@@ -34,6 +34,7 @@ import type {
   TaskPatchInput,
   TaskSummary,
   TranscriptPage,
+  TranscriptSummary,
   UpdateRepositoryInput,
   WorktreeStatus,
 } from "../types";
@@ -456,7 +457,17 @@ export function searchRunTranscript(runId: string, query: string): Promise<Searc
   return call<SearchHit[]>("search_run_transcript", { runId, query });
 }
 
-/** Opens `runId`'s raw JSONL transcript in the OS file manager. "Copy log
+/**
+ * How `runId`'s transcript begins and ends — permission mode, model, refused
+ * tool calls, and whether the stream reached a `result`. One scan of the file
+ * on the backend, so it is read once per run detail rather than carried on
+ * every {@link getRun}.
+ */
+export function summarizeRunTranscript(runId: string): Promise<TranscriptSummary> {
+  return call<TranscriptSummary>("summarize_run_transcript", { runId });
+}
+
+/** Reveals `runId`'s raw JSONL transcript in the OS file manager. "Copy log
  *  path" needs no command — every caller already has `Run.logPath` from
  *  {@link getRun} or {@link listRunsForTask}, and the system clipboard is a
  *  browser API away. */

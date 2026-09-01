@@ -754,8 +754,8 @@ export type TranscriptEntryKind =
   | { type: "assistant"; blocks: TranscriptBlock[] }
   | { type: "user"; blocks: TranscriptBlock[] }
   | { type: "result"; summary: string | null; errors: string[]; isError: boolean }
-  | { type: "other"; eventType: string }
-  | { type: "malformed" };
+  | { type: "other"; eventType: string; subtype: string | null }
+  | { type: "malformed"; raw: string };
 
 /**
  * Mirrors `rimaia_core::runs::transcript::TranscriptEntry` — one line of a
@@ -784,6 +784,25 @@ export interface TranscriptPage {
   /** How many non-blank lines the whole file holds — enough to render
    *  "page 3 of 40" and disable "next" on the last page. */
   totalLines: number;
+}
+
+/**
+ * Mirrors `rimaia_core::runs::transcript::TranscriptSummary` — the few facts
+ * that explain a run's shape before anyone reads its thousand lines: what the
+ * CLI said it was running under, how many tool calls it was refused, and
+ * whether the stream ever reached a `result`. Read once per run detail, via
+ * {@link summarizeRunTranscript}; every field is already in the transcript
+ * and none of them is findable by paging it.
+ */
+export interface TranscriptSummary {
+  permissionMode: string | null;
+  model: string | null;
+  deniedToolCalls: number;
+  endedWithResult: boolean;
+  /** The last entry would not parse — a stream cut mid-write, not a bad line
+   *  in the middle of a run that carried on past it. */
+  endsMidLine: boolean;
+  malformedLines: number;
 }
 
 /**

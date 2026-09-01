@@ -260,6 +260,22 @@ pub async fn read_run_transcript_page(
     .await
 }
 
+/// How `run_id`'s transcript begins and ends: the permission mode and model
+/// the CLI reported, how many tool calls were refused, and whether the stream
+/// reached a `result` at all.
+///
+/// A separate read from [`get_run`] rather than a field on it, because it
+/// costs a scan of the file: a caller listing runs pays nothing, and the run
+/// detail view — which is about to page that same file anyway — pays it once.
+#[tauri::command]
+pub async fn summarize_run_transcript(
+    state: State<'_, AppState>,
+    run_id: String,
+) -> Result<transcript::TranscriptSummary> {
+    let run = runs::get_run_row(&state.context, &run_id).await?;
+    transcript::summarize(Path::new(&run.log_path)).await
+}
+
 /// Text search across `run_id`'s whole transcript — inside tool inputs as
 /// well as assistant messages, since [`transcript::search`] matches the raw
 /// JSON line rather than a rendering of it.

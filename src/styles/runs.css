@@ -417,6 +417,16 @@
   margin: 0;
 }
 
+/* Same treatment as a tool payload: a line that would not parse is usually a
+   long one, and it is here to be read rather than glanced at. */
+.transcript-malformed-raw {
+  margin: 0.25rem 0 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  max-height: 16rem;
+  overflow-y: auto;
+}
+
 .transcript-pagination {
   display: flex;
   align-items: center;
