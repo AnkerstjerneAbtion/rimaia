@@ -34,6 +34,7 @@ reviewable in the app afterwards.
 | 21 | [018](018-preflight-doctor-and-packaging.md) | Preflight doctor and packaging | v0.3 | 008 | — |
 | 22 | [022](022-per-repository-git-credentials.md) | Per-repository git credentials | v0.3 | 003, 008 | — |
 | 23 | [021](021-review-and-fix-loop.md) | Review-and-fix loop | v0.4 | 015, 017, 020 | — |
+| 24 | [024](024-analytics.md) | Analytics — what the queue has actually done | v0.4 | 015 | — |
 
 ## Before task 001
 
