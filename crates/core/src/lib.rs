@@ -19,6 +19,7 @@ pub mod mcp;
 pub mod paths;
 pub mod repo;
 pub mod runner;
+pub mod runs;
 pub mod scheduler;
 pub mod startup;
 pub mod strategy;
