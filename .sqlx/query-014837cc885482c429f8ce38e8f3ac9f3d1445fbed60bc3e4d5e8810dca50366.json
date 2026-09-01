@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT cost_usd AS \"cost_usd!: f64\" FROM runs\n           WHERE cost_usd IS NOT NULL AND cost_usd > 0 ORDER BY cost_usd ASC",
+  "describe": {
+    "columns": [
+      {
+        "name": "cost_usd!: f64",
+        "ordinal": 0,
+        "type_info": "Float"
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      true
+    ]
+  },
+  "hash": "014837cc885482c429f8ce38e8f3ac9f3d1445fbed60bc3e4d5e8810dca50366"
+}

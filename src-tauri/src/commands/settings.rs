@@ -11,6 +11,7 @@
 //! frontend-side approximation.
 
 use rimaia_core::db::{settings, RunEnvironment};
+use rimaia_core::runner::outcome::{self, RunCostSummary};
 use rimaia_core::runner::prompt;
 use rimaia_core::{repo, tasks, Result};
 use tauri::State;
@@ -39,6 +40,18 @@ pub async fn get_run_environment(state: State<'_, AppState>) -> Result<RunEnviro
 #[tauri::command]
 pub async fn set_run_environment(state: State<'_, AppState>, value: RunEnvironment) -> Result<()> {
     settings::set_run_environment(&state.context, value).await
+}
+
+/// What runs on this machine have actually cost, so the environment toggle can
+/// state its overhead as a share of real work rather than as the spike's ratio.
+///
+/// A separate command rather than a field on `get_run_environment`: the answer
+/// changes every time a run finishes, where the setting changes when a human
+/// edits it, and folding them together would make the cheap read as volatile
+/// as the expensive one.
+#[tauri::command]
+pub async fn get_run_cost_summary(state: State<'_, AppState>) -> Result<RunCostSummary> {
+    outcome::observed_run_cost(&state.context.pool).await
 }
 
 /// The prompt `task_id` would receive right now, composed the same way task
