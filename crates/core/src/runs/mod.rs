@@ -98,7 +98,12 @@ pub struct RunFilter {
     pub status: Option<RunStatus>,
     /// Matches a run started at or after this instant.
     pub since: Option<DateTime<Utc>>,
-    /// Matches a run started at or before this instant.
+    /// Matches a run started strictly *before* this instant.
+    ///
+    /// Half-open on purpose, because every caller names a day rather than an
+    /// instant: the Runs view turns "until the 20th" into the start of the
+    /// 21st, and an inclusive bound there would hand back a run that started
+    /// at 00:00:00 on the 21st — a day the user did not ask for.
     pub until: Option<DateTime<Utc>>,
 }
 
@@ -133,7 +138,7 @@ pub async fn list_runs(ctx: &ServiceContext, filter: RunFilter) -> Result<Vec<Ru
         sql.push_str(" AND r.started_at >= ?");
     }
     if filter.until.is_some() {
-        sql.push_str(" AND r.started_at <= ?");
+        sql.push_str(" AND r.started_at < ?");
     }
     sql.push_str(" ORDER BY r.started_at DESC");
 
@@ -600,6 +605,65 @@ mod tests {
         assert!(
             !entries[0].log_available,
             "the seeded log path was never written to disk"
+        );
+    }
+
+    /// The date range's two ends are not symmetrical, and the Runs view
+    /// depends on that: it turns a picked day into `[day, next day)`, so a run
+    /// that started at midnight on the following day belongs to a filter for
+    /// that day, not to this one. `since` is inclusive for the same reason —
+    /// a run at 00:00:00 on the first day picked is in range.
+    #[tokio::test]
+    async fn the_date_range_includes_its_since_instant_and_excludes_its_until_instant() {
+        let h = TestContext::new().await;
+        let repository_id = seed_repository(&h.context, "repo").await;
+        let task_id = seed_task(&h.context, &repository_id, "a task").await;
+
+        let day_start: DateTime<Utc> = "2026-08-20T00:00:00Z".parse().expect("literal timestamp");
+        let next_day_start: DateTime<Utc> =
+            "2026-08-21T00:00:00Z".parse().expect("literal timestamp");
+
+        let on_the_boundary = seed_run(
+            &h.context,
+            &task_id,
+            1,
+            RunStatus::Succeeded,
+            Some(ExitClass::Success),
+            day_start,
+            true,
+            "/tmp/a.jsonl",
+        )
+        .await;
+        seed_run(
+            &h.context,
+            &task_id,
+            2,
+            RunStatus::Succeeded,
+            Some(ExitClass::Success),
+            next_day_start,
+            true,
+            "/tmp/b.jsonl",
+        )
+        .await;
+
+        let entries = list_runs(
+            &h.context,
+            RunFilter {
+                since: Some(day_start),
+                until: Some(next_day_start),
+                ..RunFilter::default()
+            },
+        )
+        .await
+        .expect("list runs");
+
+        assert_eq!(
+            entries
+                .iter()
+                .map(|entry| entry.run.id.as_str())
+                .collect::<Vec<_>>(),
+            vec![on_the_boundary.as_str()],
+            "the run that started as the range ended is the next day's, not this one's",
         );
     }
 
