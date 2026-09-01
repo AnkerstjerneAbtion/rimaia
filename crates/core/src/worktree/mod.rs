@@ -105,6 +105,22 @@ pub struct WorktreeStatus {
     pub diff: DiffStat,
 }
 
+/// One file's insertions and deletions out of a [`DiffSummary`] — task 015's
+/// per-file breakdown, alongside the aggregate [`DiffStat`] rather than
+/// replacing it: a review opens on the totals and drills into this list only
+/// when it wants to.
+///
+/// `insertions`/`deletions` are `None` for a binary file, which `git diff
+/// --numstat` reports as `-` in both columns — a fact distinct from "zero
+/// lines changed", which is why this is not simply `0`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FileDiffStat {
+    pub path: String,
+    pub insertions: Option<i64>,
+    pub deletions: Option<i64>,
+}
+
 /// One commit on a task's branch, as the review view lists it (ADR-0013).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -125,6 +141,10 @@ pub struct DiffSummary {
     pub branch: Option<String>,
     pub base_ref: String,
     pub diff: DiffStat,
+    /// The same diff, broken out per file (task 015) — `diff`'s totals are a
+    /// sum over this list, kept alongside it rather than instead of it because
+    /// a review opens on the totals.
+    pub files: Vec<FileDiffStat>,
     /// Newest first.
     pub commits: Vec<CommitSummary>,
 }
@@ -322,6 +342,7 @@ pub async fn diff_summary(ctx: &ServiceContext, task_id: &str) -> Result<DiffSum
         branch: task.branch.clone(),
         base_ref: base_ref.clone(),
         diff: DiffStat::default(),
+        files: Vec::new(),
         commits: Vec::new(),
     };
 
@@ -334,7 +355,7 @@ pub async fn diff_summary(ctx: &ServiceContext, task_id: &str) -> Result<DiffSum
         return Ok(summary);
     }
 
-    summary.diff = git::diff_stat(&repository_path, &base_ref, branch).await?;
+    (summary.diff, summary.files) = git::diff(&repository_path, &base_ref, branch).await?;
     summary.commits = git::commits(&repository_path, &base_ref, branch).await?;
     Ok(summary)
 }
@@ -754,6 +775,11 @@ mod tests {
             branch: Some("rimaia/3f2b1c00-wire-the-board".to_string()),
             base_ref: "main".to_string(),
             diff: DiffStat::default(),
+            files: vec![FileDiffStat {
+                path: "src/lib.rs".to_string(),
+                insertions: Some(12),
+                deletions: Some(3),
+            }],
             commits: vec![CommitSummary {
                 sha: "1111111111111111111111111111111111111111".to_string(),
                 short_sha: "1111111".to_string(),
@@ -766,6 +792,10 @@ mod tests {
         let wire = serde_json::to_value(&summary).expect("a DTO must always serialize");
 
         assert_eq!(wire["baseRef"], json!("main"));
+        assert_eq!(
+            wire["files"][0],
+            json!({ "path": "src/lib.rs", "insertions": 12, "deletions": 3 })
+        );
         assert_eq!(
             wire["commits"][0],
             json!({

@@ -897,6 +897,15 @@ async fn diff_summary_lists_the_commits_on_the_branch_newest_first() {
         .starts_with(&summary.commits[0].short_sha));
     assert_eq!(summary.diff.files_changed, 2);
     assert_eq!(summary.diff.insertions, 3);
+    assert_eq!(
+        summary
+            .files
+            .iter()
+            .map(|file| file.path.as_str())
+            .collect::<Vec<_>>(),
+        vec!["lexer.rs", "parser.rs"],
+        "the per-file breakdown sums to the same totals, one entry per changed file"
+    );
 }
 
 #[tokio::test]

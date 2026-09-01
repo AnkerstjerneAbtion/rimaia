@@ -23,7 +23,7 @@ use std::path::{Path, PathBuf};
 
 use chrono::{DateTime, Utc};
 
-use super::{CommitSummary, DiffStat};
+use super::{CommitSummary, DiffStat, FileDiffStat};
 use crate::error::{Error, Result};
 
 /// The field separator inside one `git log` record, and the reason records can
@@ -247,6 +247,18 @@ pub(super) async fn is_dirty(worktree: &Path) -> Result<bool> {
 /// review view shows (ADR-0013), so a base branch that moved on after the
 /// worktree was created must not appear as work the agent undid.
 pub(super) async fn diff_stat(dir: &Path, base: &str, branch: &str) -> Result<DiffStat> {
+    let (stat, _) = diff(dir, base, branch).await?;
+    Ok(stat)
+}
+
+/// The same diff as [`diff_stat`], plus the per-file breakdown task 015's run
+/// detail view shows — one invocation of `git diff --numstat` rather than two,
+/// since the aggregate is nothing but a sum over these same rows.
+pub(super) async fn diff(
+    dir: &Path,
+    base: &str,
+    branch: &str,
+) -> Result<(DiffStat, Vec<FileDiffStat>)> {
     let range = format!("{base}...{branch}");
     let stdout = checked(dir, &["diff", "--numstat", &range]).await?;
     Ok(parse_numstat(&stdout))
@@ -307,18 +319,34 @@ fn parse_worktree_list(stdout: &str) -> Vec<WorktreeEntry> {
 /// Parses `git diff --numstat`: `<added>\t<deleted>\t<path>` per file, with
 /// `-` in both counts for a binary file. A binary file still counts as one
 /// file changed — it is a change the reviewer has to look at — and contributes
-/// no lines, because it has none.
-fn parse_numstat(stdout: &str) -> DiffStat {
+/// no lines, because it has none; [`FileDiffStat`] carries that as `None`
+/// rather than `0`, so a per-file breakdown can tell "no lines" from "not a
+/// text file" apart.
+///
+/// `splitn(3, ...)` rather than `split('\t')`: the path is the third field and
+/// is taken whole, including any tab a pathological filename might itself
+/// contain, instead of being cut at the first one.
+fn parse_numstat(stdout: &str) -> (DiffStat, Vec<FileDiffStat>) {
     let mut stat = DiffStat::default();
+    let mut files = Vec::new();
+
     for line in stdout.lines().filter(|line| !line.is_empty()) {
-        let mut fields = line.split('\t');
+        let mut fields = line.splitn(3, '\t');
         let insertions = fields.next().and_then(|n| n.parse::<i64>().ok());
         let deletions = fields.next().and_then(|n| n.parse::<i64>().ok());
+        let path = fields.next().unwrap_or_default().to_string();
+
         stat.files_changed += 1;
         stat.insertions += insertions.unwrap_or(0);
         stat.deletions += deletions.unwrap_or(0);
+        files.push(FileDiffStat {
+            path,
+            insertions,
+            deletions,
+        });
     }
-    stat
+
+    (stat, files)
 }
 
 /// Parses [`LOG_FORMAT`]. A record whose timestamp does not parse is dropped
@@ -403,7 +431,7 @@ detached
 
     #[test]
     fn a_numstat_sums_insertions_and_deletions_across_files() {
-        let stat = parse_numstat("12\t3\tsrc/lib.rs\n0\t7\tsrc/old.rs\n");
+        let (stat, files) = parse_numstat("12\t3\tsrc/lib.rs\n0\t7\tsrc/old.rs\n");
 
         assert_eq!(
             stat,
@@ -413,11 +441,26 @@ detached
                 deletions: 10,
             }
         );
+        assert_eq!(
+            files,
+            vec![
+                FileDiffStat {
+                    path: "src/lib.rs".to_string(),
+                    insertions: Some(12),
+                    deletions: Some(3),
+                },
+                FileDiffStat {
+                    path: "src/old.rs".to_string(),
+                    insertions: Some(0),
+                    deletions: Some(7),
+                },
+            ]
+        );
     }
 
     #[test]
     fn a_binary_file_counts_as_changed_but_contributes_no_lines() {
-        let stat = parse_numstat("-\t-\tlogo.png\n4\t0\tREADME.md\n");
+        let (stat, files) = parse_numstat("-\t-\tlogo.png\n4\t0\tREADME.md\n");
 
         assert_eq!(
             stat,
@@ -427,11 +470,30 @@ detached
                 deletions: 0,
             }
         );
+        assert_eq!(
+            files[0],
+            FileDiffStat {
+                path: "logo.png".to_string(),
+                // `None`, not `0` — a binary file has no line counts at all,
+                // which is a different fact from "zero lines changed".
+                insertions: None,
+                deletions: None,
+            }
+        );
+    }
+
+    #[test]
+    fn a_path_containing_a_tab_is_still_taken_whole() {
+        let (_, files) = parse_numstat("1\t2\tsrc/weird\tname.rs\n");
+
+        assert_eq!(files[0].path, "src/weird\tname.rs");
     }
 
     #[test]
     fn an_empty_diff_is_all_zeroes() {
-        assert_eq!(parse_numstat(""), DiffStat::default());
+        let (stat, files) = parse_numstat("");
+        assert_eq!(stat, DiffStat::default());
+        assert!(files.is_empty());
     }
 
     #[test]
