@@ -312,10 +312,18 @@ pub async fn prune_logs(ctx: &ServiceContext, criterion: PruneCriterion) -> Resu
             .await?
         }
         PruneCriterion::Task(task_id) => {
-            sqlx::query_scalar("SELECT log_path FROM runs WHERE task_id = ?1")
-                .bind(task_id)
-                .fetch_all(&ctx.pool)
-                .await?
+            // The same `ended_at IS NOT NULL` guard the by-age branch carries,
+            // and for the identical reason: an unfinished run's transcript is
+            // the only record of work still in progress. Without it, "Prune
+            // this task's logs" clicked during a run deletes the file the
+            // runner is writing to — and this is the criterion the panel
+            // exposes as a button, so it is the reachable one.
+            sqlx::query_scalar(
+                "SELECT log_path FROM runs WHERE task_id = ?1 AND ended_at IS NOT NULL",
+            )
+            .bind(task_id)
+            .fetch_all(&ctx.pool)
+            .await?
         }
     };
 
@@ -775,7 +783,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn pruning_by_task_removes_every_one_of_its_logs_regardless_of_age() {
+    async fn pruning_by_task_removes_its_finished_logs_and_spares_a_run_in_flight() {
         let h = TestContext::new().await;
         let repository_id = seed_repository(&h.context, "repo").await;
         let task_id = seed_task(&h.context, &repository_id, "a task").await;
@@ -811,12 +819,34 @@ mod tests {
         )
         .await;
 
+        // A second attempt on the *same* task, still running — `ended_at` NULL.
+        // This is the case the panel's button can reach mid-run, so it is the
+        // one worth pinning: the transcript being written to right now is the
+        // only record of work that has not finished.
+        let in_flight_log = dir.path().join("in-flight.jsonl");
+        std::fs::write(&in_flight_log, "still going").expect("write log");
+        seed_run(
+            &h.context,
+            &task_id,
+            2,
+            RunStatus::Running,
+            None,
+            now,
+            false,
+            in_flight_log.to_str().expect("temp path is UTF-8"),
+        )
+        .await;
+
         let result = prune_logs(&h.context, PruneCriterion::Task(task_id))
             .await
             .expect("prune");
 
         assert_eq!(result.runs_pruned, 1);
         assert!(!this_task_log.exists());
+        assert!(
+            in_flight_log.exists(),
+            "a run still in flight keeps the transcript it is writing to",
+        );
         assert!(other_task_log.exists(), "another task's log is untouched");
     }
 }
