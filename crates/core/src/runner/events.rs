@@ -89,6 +89,48 @@ const MAX_TOOL_DETAIL_CHARS: usize = 200;
 /// Appended when [`clamp`] had to cut.
 const TRUNCATION_MARKER: char = '…';
 
+/// What the CLI writes into a tool result it refused for want of approval.
+///
+/// A phrase, reluctantly, and only ever behind a typed gate: see
+/// [`reports_a_permission_denial`] for why there is no field to read instead
+/// and what this is allowed to be used for.
+const PERMISSION_DENIAL_MARKER: &str = "requires approval";
+
+/// Whether `raw_line` is a tool result the CLI refused because nothing could
+/// approve it — the shape of a run that spent an hour being told no.
+///
+/// The typed gate comes first: only a `user` event carrying a `tool_result`
+/// block with `is_error` is considered at all. The phrase is what separates a
+/// refusal from an ordinary tool failure, and there is no typed field that
+/// does — [`ResultEvent::permission_denials`] carries them, but only on a run
+/// that reached a `result`, and a run refused into giving up may never reach
+/// one.
+///
+/// **Diagnostics and display only.** Nothing classifies on this: ADR-0004's
+/// rule is that the terminal vocabulary decides an outcome, and a CLI update
+/// rewording this sentence must cost a count in a summary, never a
+/// misclassified run.
+pub fn reports_a_permission_denial(event: &RunEvent, raw_line: &str) -> bool {
+    let RunEvent::User(user) = event else {
+        return false;
+    };
+    user.content
+        .iter()
+        .any(|block| matches!(block, ContentBlock::ToolResult { is_error: true, .. }))
+        && line_reports_a_denial(raw_line)
+}
+
+/// The phrase half of [`reports_a_permission_denial`], on its own, for a
+/// caller that has already applied its own typed gate.
+///
+/// `runs::transcript` is that caller: it reads finished transcripts with its
+/// own parser (deliberately separate — see that module's header), and this is
+/// what keeps the CLI's wording written down in exactly one place rather than
+/// copied into a second module that would then drift.
+pub fn line_reports_a_denial(raw_line: &str) -> bool {
+    raw_line.contains(PERMISSION_DENIAL_MARKER)
+}
+
 // ---------------------------------------------------------------------------
 // The event model
 // ---------------------------------------------------------------------------
@@ -839,6 +881,7 @@ pub struct EventStream {
     rate_limit: Option<RateLimitEvent>,
     result: Option<ResultEvent>,
     malformed_lines: u64,
+    denied_tool_calls: u64,
 }
 
 impl EventStream {
@@ -862,6 +905,7 @@ impl EventStream {
             rate_limit: None,
             result: None,
             malformed_lines: 0,
+            denied_tool_calls: 0,
         })
     }
 
@@ -893,6 +937,10 @@ impl EventStream {
                 return Ok(None);
             }
         };
+
+        if reports_a_permission_denial(&event, raw_line) {
+            self.denied_tool_calls += 1;
+        }
 
         match &event {
             RunEvent::Init(init) => self.init = Some(init.clone()),
@@ -944,6 +992,18 @@ impl EventStream {
     /// by itself a failed run.
     pub fn malformed_lines(&self) -> u64 {
         self.malformed_lines
+    }
+
+    /// How many tool results came back refused for want of approval.
+    ///
+    /// A run that spends its whole hour being told no still ends looking
+    /// unremarkable — the CLI exits, the classifier sees an ending, and
+    /// nothing anywhere says the agent was never allowed to do the work. This
+    /// is what gives the log line and the run detail something to say about
+    /// that. See [`reports_a_permission_denial`] for what it is and is not
+    /// allowed to decide.
+    pub fn denied_tool_calls(&self) -> u64 {
+        self.denied_tool_calls
     }
 
     pub fn transcript_path(&self) -> &Path {
@@ -1041,6 +1101,26 @@ mod tests {
 
     fn parse(line: &str) -> RunEvent {
         parse_line(line).expect("the line is JSON")
+    }
+
+    /// The typed gate first, the phrase only to tell a refusal from an
+    /// ordinary tool failure. Both halves are load-bearing: without the gate
+    /// an assistant *discussing* approval would count, and without the phrase
+    /// every failing test run would.
+    #[test]
+    fn a_refused_tool_call_is_told_apart_from_a_tool_that_merely_failed() {
+        let refused = r#"{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"toolu_1","is_error":true,"content":"This Bash command contains multiple operations. The following part requires approval: git remote get-url origin"}]}}"#;
+        let failed = r#"{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"toolu_1","is_error":true,"content":"error: could not compile `rimaia-core`"}]}}"#;
+        let succeeded = r#"{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"toolu_1","is_error":false,"content":"ok"}]}}"#;
+        let discussed = r#"{"type":"assistant","message":{"content":[{"type":"text","text":"That command requires approval, so I will not run it."}]}}"#;
+
+        assert!(reports_a_permission_denial(&parse(refused), refused));
+        assert!(!reports_a_permission_denial(&parse(failed), failed));
+        assert!(!reports_a_permission_denial(&parse(succeeded), succeeded));
+        assert!(
+            !reports_a_permission_denial(&parse(discussed), discussed),
+            "an assistant talking about approval is not a tool being refused",
+        );
     }
 
     #[test]
