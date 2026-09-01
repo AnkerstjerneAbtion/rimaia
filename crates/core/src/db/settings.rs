@@ -49,6 +49,29 @@ If you cannot complete the task, stop, commit what you have, and explain what is
 /// here instead of at every call site. [`Inherit`](RunEnvironment::Inherit) is
 /// the default and has no seeded row: an absent key *is* `inherit`, which is
 /// also why there is no third `unset` variant.
+/// What inheriting the operator's environment adds to a run, in dollars.
+///
+/// From `spike/FINDINGS.md` §2, which spawned the *same one-word prompt* twice:
+/// $0.1061 inherited against $0.0291 isolated, on 16,455 cache-creation tokens
+/// against 3,179. The difference is these ~13,300 tokens of tools, MCP servers
+/// and hooks loaded before the run reads its plan.
+///
+/// # It is a fixed cost, and the ratio is the misleading way to say it
+///
+/// The spike reported "3.6x", and that number is true only of the trivial
+/// prompt it was measured on, where setup *was* the whole run. This is charged
+/// once per session as cache creation, not per turn, so it does not scale with
+/// the work: the same ~$0.08 lands on a four-turn run and a forty-turn one. As
+/// a share of a real run it has been observed anywhere from 64% (a ten-cent
+/// metadata edit) to 0.2% (a $32 implementation).
+///
+/// Quoting the ratio in the UI therefore argues for `strict_local`, which is
+/// the opposite of what the spike concluded — it recommended inheriting by
+/// default, because reaching your own MCP servers mid-run is much of the point
+/// of a local desktop app. So the UI states the fixed cost and puts it in
+/// proportion against runs this installation has actually paid for.
+pub const ENVIRONMENT_SETUP_COST_USD: f64 = 0.077;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RunEnvironment {

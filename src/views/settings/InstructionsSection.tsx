@@ -23,8 +23,9 @@ const RUN_ENVIRONMENT_OPTIONS: ReadonlyArray<{
     label: "Inherit (default)",
     description:
       "The full Claude Code environment you use interactively — your MCP servers, hooks, " +
-      "plugins and output styles. Measured against the spike's own one-word prompt, this " +
-      "costs roughly 3.6× per run before any work happens.",
+      "plugins and output styles, which is much of the point of running this locally. It " +
+      "loads roughly 255 tools instead of 26, so tool selection is noisier, and a personal " +
+      "SessionStart hook will alter how the agent works.",
   },
   {
     value: "strict_local",
@@ -43,7 +44,7 @@ const RUN_ENVIRONMENT_OPTIONS: ReadonlyArray<{
  *
  * 1. `settings.base_instructions`, edited here.
  * 2. `settings.run_environment` — ADR-0004's amendment names this UI's own
- *    obligation: state the ~3.6× cost of `inherit` plainly, not soften it,
+ *    obligation: state the cost of `inherit` plainly, not soften it,
  *    and keep the toggle within reach of the per-run cost task 008 adds.
  * 3. A live preview of a chosen task's fully composed prompt, fetched from
  *    the backend's own `compose_prompt` (`preview_composed_prompt`) so it is

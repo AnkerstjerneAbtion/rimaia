@@ -169,7 +169,7 @@ describe("InstructionsSection", () => {
     expect(await screen.findByText("settings table is locked")).toBeInTheDocument();
   });
 
-  it("shows both run-environment options, checked on the stored value, with the cost stated plainly", async () => {
+  it("shows both run-environment options, checked on the stored value, with the trade stated plainly", async () => {
     mockCommands({ get_run_environment: () => "inherit" });
 
     render(<InstructionsSection />);
@@ -178,8 +178,19 @@ describe("InstructionsSection", () => {
     const strictLocal = screen.getByRole("radio", { name: "Strict / local" });
     expect(inherit).toBeChecked();
     expect(strictLocal).not.toBeChecked();
-    // ADR-0004's amendment: the UI must not soften this number.
-    expect(screen.getByText(/3\.6×/)).toBeInTheDocument();
+    // ADR-0004's amendment says the UI must not soften the cost of
+    // inheriting. It used to satisfy that by quoting the spike's "3.6x",
+    // which was measured on a one-word prompt where setup *was* the whole
+    // run — so it read as "your runs cost 3.6x more", which is false and
+    // argues for strict_local, the opposite of what the spike concluded.
+    //
+    // What must not be softened is the part that does not shrink as a run
+    // gets longer: a much larger tool surface, and a personal hook that
+    // silently changes how the agent works. The dollar figure is stated in
+    // the Runs view, where it can be put against real run costs.
+    expect(screen.getByText(/255 tools instead of 26/)).toBeInTheDocument();
+    expect(screen.getByText(/SessionStart hook/)).toBeInTheDocument();
+    expect(screen.queryByText(/3\.6/)).not.toBeInTheDocument();
   });
 
   it("switches run environment and calls set_run_environment", async () => {

@@ -342,6 +342,18 @@ export interface TaskLinkPatchInput {
  * of the operator's own Claude Code configuration a run inherits. An absent
  * setting reads as `"inherit"` — there is no third "unset" spelling.
  */
+/**
+ * What finished runs on this machine have cost.
+ *
+ * Median rather than mean: run costs are wildly skewed, and one expensive run
+ * should not decide what the settings panel tells the user about every run.
+ * `medianRunCostUsd` is null until something has finished and reported a cost.
+ */
+export interface RunCostSummary {
+  medianUsd: number | null;
+  sampleSize: number;
+}
+
 export type RunEnvironment = "inherit" | "strict_local";
 
 // ---------------------------------------------------------------------------

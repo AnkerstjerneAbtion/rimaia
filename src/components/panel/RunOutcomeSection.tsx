@@ -18,11 +18,11 @@ export const EXIT_CLASS_LABELS: Record<ExitClass, string> = {
 };
 
 /**
- * `$0.1503`, not `$0.15`. ADR-0004's amendment is specific that inheriting
- * the operator's environment costs roughly 3.6× per run — the spike's own
- * two measurements, $0.1061 versus $0.0291, differ starting at the third
- * decimal place, which two-decimal rounding would erase entirely. Exported so
- * a mismatch between this and a rendered value is a one-function diff to fix.
+ * `$0.1503`, not `$0.15`. The spike's two environment measurements — $0.1061
+ * inherited against $0.0291 isolated — differ starting at the third decimal
+ * place, which two-decimal rounding would erase entirely, and per-run cost is
+ * the one number a user checks against a bill. Exported so a mismatch between
+ * this and a rendered value is a one-function diff to fix.
  */
 export function formatCostUsd(costUsd: number): string {
   return `$${costUsd.toFixed(4)}`;

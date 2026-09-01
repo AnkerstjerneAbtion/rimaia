@@ -4,11 +4,14 @@ import { ActiveRunCard } from "../components/runs/ActiveRunCard";
 import { QueueControls } from "../components/runs/QueueControls";
 import { QueuePlanList } from "../components/runs/QueuePlanList";
 import { SessionOutcomesList } from "../components/runs/SessionOutcomesList";
+import type { RunCostSummary } from "../types";
 import type { SessionOutcome } from "../components/runs/SessionOutcomesList";
 import { EmptyState } from "../components/EmptyState";
+import { environmentOverheadNote } from "../lib/runEnvironment";
 import { ErrorBanner } from "../components/ErrorBanner";
 import {
   getQueueStatus,
+  getRunCostSummary,
   getRunEnvironment,
   getTask,
   listRepositories,
@@ -42,6 +45,7 @@ export function RunsView() {
   const [readError, setReadError] = useState<RimaiaError | null>(null);
   const [repositoryNames, setRepositoryNames] = useState<ReadonlyMap<string, string>>(new Map());
   const [runEnvironment, setRunEnvironment] = useState<RunEnvironment | null>(null);
+  const [runCosts, setRunCosts] = useState<RunCostSummary | null>(null);
 
   const [queueStatus, setQueueStatus] = useState<QueueStatus | null>(null);
   const [queueError, setQueueError] = useState<RimaiaError | null>(null);
@@ -70,6 +74,10 @@ export function RunsView() {
       () => {},
     );
     getRunEnvironment().then(setRunEnvironment, () => {});
+    // Cosmetic, like the two above: a failure here costs the proportion in the
+    // note below and nothing else, so it stays silent rather than raising a
+    // banner over the queue.
+    getRunCostSummary().then(setRunCosts, () => {});
   }, []);
 
   useEffect(() => {
@@ -215,6 +223,8 @@ export function RunsView() {
     };
   }, []);
 
+  const overheadNote = environmentOverheadNote(runCosts);
+
   return (
     <div className="runs-view">
       {readError && <ErrorBanner error={readError} onDismiss={() => setReadError(null)} />}
@@ -263,7 +273,8 @@ export function RunsView() {
         <p className="muted runs-environment-note">
           Environment: {runEnvironment === "inherit" ? "Inherit (default)" : "Strict / local"}.{" "}
           {runEnvironment === "inherit"
-            ? "Inheriting your Claude Code environment costs roughly 3.6× per run over strict/local."
+            ? overheadNote ??
+              "Inheriting your Claude Code environment adds a fixed setup cost to every run."
             : "Only each repository's own CLAUDE.md and project settings reach a run."}{" "}
           Change this in Settings → Instructions; a finished run's own cost shows on its task's
           detail panel.
