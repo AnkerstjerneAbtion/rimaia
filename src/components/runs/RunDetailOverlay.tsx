@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { createPortal } from "react-dom";
 
 import { getRun, revealRunLog, toRimaiaError } from "../../lib/commands";
 import { EXIT_CLASS_LABELS, formatCostUsd } from "../panel/RunOutcomeSection";
@@ -22,6 +23,19 @@ interface RunDetailOverlayProps {
  * detail is a drawer painted over whichever view opened it — `TaskDetailPanel`
  * from a task's own history list, `RunsView` from the global one — the same
  * non-modal-drawer shape `TaskDetailPanel` itself uses over the board.
+ *
+ * **Portalled to `document.body`, not rendered where it is written.** Opened
+ * from the Runs view it is already a child of the page; opened from the task
+ * panel it would be a child of `.task-detail-panel`, which is a scroll
+ * container (`overflow-y: auto`) and its own stacking context (`z-index: 2`).
+ * A viewport overlay nested inside one of those is at the mercy of how the
+ * engine treats a fixed descendant of a scrolled, clipping ancestor — in
+ * WKWebView, which is the only engine this app ever runs in, it is laid out
+ * against that ancestor rather than the viewport, so opening a run from the
+ * board painted the overlay at the top of a panel the reader had scrolled
+ * past: the panel appeared to blank and the detail was nowhere. The portal is
+ * what makes "over whichever view opened it" true of both mount points
+ * instead of only the one this component was first written under.
  */
 export function RunDetailOverlay({ runId, onClose }: RunDetailOverlayProps) {
   const [detail, setDetail] = useState<RunDetail | null>(null);
@@ -70,7 +84,7 @@ export function RunDetailOverlay({ runId, onClose }: RunDetailOverlayProps) {
     }
   }
 
-  return (
+  return createPortal(
     <div className="run-detail-overlay" role="dialog" aria-label="Run detail">
       <div className="run-detail-overlay-header">
         <h3>Run detail{detail ? ` — attempt ${detail.attempt}` : ""}</h3>
@@ -182,7 +196,11 @@ export function RunDetailOverlay({ runId, onClose }: RunDetailOverlayProps) {
                 onClick={handleReveal}
                 disabled={!detail.logAvailable || revealing}
               >
-                {revealing ? "Opening…" : "Open raw log"}
+                {/* "Reveal", not "open": the backend shows the file in the
+                    OS file manager rather than handing megabytes of JSONL to
+                    whatever is registered for the extension — see
+                    `commands::runs::reveal_run_log`. */}
+                {revealing ? "Revealing…" : "Reveal raw log"}
               </button>
               <button type="button" onClick={handleCopyPath}>
                 {copied ? "Copied" : "Copy log path"}
@@ -201,7 +219,8 @@ export function RunDetailOverlay({ runId, onClose }: RunDetailOverlayProps) {
           </section>
         </>
       )}
-    </div>
+    </div>,
+    document.body,
   );
 }
 

@@ -82,6 +82,28 @@ describe("RunDetailOverlay", () => {
       "https://github.com/abtion/rimaia/pull/42",
     );
     expect(screen.getByText("Implement the parser.")).toBeInTheDocument();
+    // The order itself, not only that each section is present: ADR-0013's
+    // whole point is that a reviewer meets the diff and the commits before
+    // the transcript. `getAllByRole` returns document order.
+    expect(
+      screen.getAllByRole("heading", { level: 4 }).map((heading) => heading.textContent),
+    ).toEqual(["Outcome", "Diff summary", "Commits", "Pull request", "Prompt", "Transcript"]);
+  });
+
+  // Both callers mount it inside their own layout — `RunHistorySection`
+  // inside the board panel's scroll container — and neither should have to be
+  // the containing block of a viewport overlay. See this component's own doc.
+  it("portals itself to the document body rather than rendering where it is written", async () => {
+    mockInvoke.mockImplementation(async (command) => {
+      if (command === "get_run") return runDetail({ logAvailable: false });
+      throw new Error(`unexpected command: ${command}`);
+    });
+
+    const { container } = render(<RunDetailOverlay runId="run-1" onClose={() => {}} />);
+
+    const overlay = await screen.findByRole("dialog", { name: "Run detail" });
+    expect(container).not.toContainElement(overlay);
+    expect(overlay.parentElement).toBe(document.body);
   });
 
   it("shows log unavailable instead of the transcript viewer when the file is gone", async () => {
@@ -93,7 +115,7 @@ describe("RunDetailOverlay", () => {
     render(<RunDetailOverlay runId="run-1" onClose={() => {}} />);
 
     expect(await screen.findByText(/Log unavailable/)).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Open raw log" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Reveal raw log" })).toBeDisabled();
   });
 
   it("shows a no-pull-request placeholder when none was opened", async () => {

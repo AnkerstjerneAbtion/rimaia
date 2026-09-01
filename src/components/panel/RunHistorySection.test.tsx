@@ -93,6 +93,36 @@ describe("RunHistorySection", () => {
     expect(await screen.findByRole("dialog", { name: "Run detail" })).toBeInTheDocument();
   });
 
+  // The bug this pins: the overlay used to render where it is written —
+  // inside `.task-detail-panel`, which is a scroll container and its own
+  // stacking context. WKWebView lays a `position: fixed` element out against
+  // an ancestor like that rather than against the viewport, so opening a run
+  // from the board painted the detail at the top of a panel the reader had
+  // already scrolled past: the panel blanked and nothing appeared. Portalled
+  // to `document.body`, where it is written no longer decides where it is
+  // painted, and this mount point behaves like the Runs view's.
+  it("renders the overlay outside the panel's own subtree, portalled to the body", async () => {
+    mockInvoke.mockImplementation(async (command) => {
+      if (command === "list_runs_for_task") return [run()];
+      if (command === "get_run") {
+        return {
+          ...run(),
+          diff: { taskId: "task-1", branch: null, baseRef: "main", diff: { filesChanged: 0, insertions: 0, deletions: 0 }, files: [], commits: [] },
+          logAvailable: false,
+        };
+      }
+      throw new Error(`unexpected command: ${command}`);
+    });
+
+    const { container } = render(<RunHistorySection taskId="task-1" />);
+
+    fireEvent.click(await screen.findByText("Attempt 1"));
+
+    const overlay = await screen.findByRole("dialog", { name: "Run detail" });
+    expect(container.querySelector(".run-history-section")).not.toContainElement(overlay);
+    expect(overlay.parentElement).toBe(document.body);
+  });
+
   it("prunes this task's logs and reports what was removed", async () => {
     mockInvoke.mockImplementation(async (command, args) => {
       if (command === "list_runs_for_task") return [run()];
