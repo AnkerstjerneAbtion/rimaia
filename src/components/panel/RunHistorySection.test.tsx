@@ -123,7 +123,7 @@ describe("RunHistorySection", () => {
     expect(overlay.parentElement).toBe(document.body);
   });
 
-  it("prunes this task's logs and reports what was removed", async () => {
+  it("prunes this task's logs once the deletion is confirmed, and reports what was removed", async () => {
     mockInvoke.mockImplementation(async (command, args) => {
       if (command === "list_runs_for_task") return [run()];
       if (command === "prune_run_logs") {
@@ -136,8 +136,31 @@ describe("RunHistorySection", () => {
     render(<RunHistorySection taskId="task-1" />);
 
     fireEvent.click(await screen.findByRole("button", { name: "Prune this task's logs" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Delete transcripts" }));
 
     expect(await screen.findByText("Removed 1 log, freed 2.0 KB.")).toBeInTheDocument();
+  });
+
+  // The house rule for anything that deletes files: the dangerous step is the
+  // one the user names (`worktree::ForceRemoval::ConfirmedByUser`). The first
+  // click must not have reached the backend.
+  it("deletes nothing until the prune is confirmed, and cancelling deletes nothing at all", async () => {
+    const commands: string[] = [];
+    mockInvoke.mockImplementation(async (command) => {
+      commands.push(command as string);
+      if (command === "list_runs_for_task") return [run()];
+      throw new Error(`unexpected command: ${command}`);
+    });
+
+    render(<RunHistorySection taskId="task-1" />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "Prune this task's logs" }));
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+
+    expect(commands).not.toContain("prune_run_logs");
+    expect(
+      await screen.findByRole("button", { name: "Prune this task's logs" }),
+    ).toBeInTheDocument();
   });
 
   it("re-reads the history on runs:changed", async () => {

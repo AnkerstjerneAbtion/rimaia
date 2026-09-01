@@ -80,6 +80,7 @@ describe("StorageSection", () => {
     await screen.findByText("4.8 MB");
 
     fireEvent.click(screen.getByRole("button", { name: "Older than 30 days" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Delete transcripts" }));
 
     expect(
       await screen.findByText("Removed 3 logs, freed 3.8 MB."),
@@ -87,5 +88,26 @@ describe("StorageSection", () => {
     // The reported size refreshes to what `get_run_log_size` now answers,
     // not merely to "previous minus bytesFreed" computed client-side.
     expect(await screen.findByText("976.6 KB")).toBeInTheDocument();
+  });
+
+  // Picking the preset only *proposes* the deletion — this one spans every
+  // task on the board, so the confirm gate matters more here than anywhere.
+  it("prunes nothing when the confirmation is cancelled", async () => {
+    const commands: string[] = [];
+    mockInvoke.mockImplementation(async (command) => {
+      commands.push(String(command));
+      if (command === "get_app_info") return APP_INFO;
+      if (command === "get_run_log_size") return 5_000_000;
+      throw new Error(`unexpected command: ${String(command)}`);
+    });
+
+    render(<StorageSection />);
+    await screen.findByText("4.8 MB");
+
+    fireEvent.click(screen.getByRole("button", { name: "Older than 30 days" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Cancel" }));
+
+    expect(commands).not.toContain("prune_run_logs");
+    expect(screen.getByRole("button", { name: "Older than 30 days" })).toBeInTheDocument();
   });
 });

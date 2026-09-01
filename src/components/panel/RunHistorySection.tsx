@@ -29,6 +29,7 @@ export function RunHistorySection({ taskId }: RunHistorySectionProps) {
   const [error, setError] = useState<RimaiaError | null>(null);
   const [selectedRunId, setSelectedRunId] = useState<string | null>(null);
   const [pruning, setPruning] = useState(false);
+  const [confirmingPrune, setConfirmingPrune] = useState(false);
   const [pruneResult, setPruneResult] = useState<PruneResult | null>(null);
 
   useEffect(() => {
@@ -75,6 +76,7 @@ export function RunHistorySection({ taskId }: RunHistorySectionProps) {
 
   async function handlePrune() {
     setPruning(true);
+    setConfirmingPrune(false);
     setPruneResult(null);
     try {
       const result = await pruneRunLogs({ kind: "task", taskId });
@@ -118,10 +120,31 @@ export function RunHistorySection({ taskId }: RunHistorySectionProps) {
             ))}
           </ul>
 
+          {/* Deleting files gets the house confirm gate, the same one
+              `worktree::ForceRemoval::ConfirmedByUser` exists for: the
+              dangerous step is the one the user has to name. Two states of
+              one control rather than a dialog — the panel is not a modal
+              surface (`TaskDetailPanel`'s own doc), and a `window.confirm`
+              would be the app's only native one. */}
           <div className="run-history-actions">
-            <button type="button" onClick={handlePrune} disabled={pruning}>
-              {pruning ? "Pruning…" : "Prune this task's logs"}
-            </button>
+            {confirmingPrune ? (
+              <>
+                <span>
+                  Delete every finished run's transcript for this task? The history above
+                  stays; a run still in flight keeps its log.
+                </span>
+                <button type="button" onClick={handlePrune} disabled={pruning}>
+                  {pruning ? "Pruning…" : "Delete transcripts"}
+                </button>
+                <button type="button" onClick={() => setConfirmingPrune(false)}>
+                  Cancel
+                </button>
+              </>
+            ) : (
+              <button type="button" onClick={() => setConfirmingPrune(true)} disabled={pruning}>
+                {pruning ? "Pruning…" : "Prune this task's logs"}
+              </button>
+            )}
             {pruneResult && (
               <span className="muted">
                 Removed {pruneResult.runsPruned} log

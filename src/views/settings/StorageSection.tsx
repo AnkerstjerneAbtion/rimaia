@@ -25,6 +25,8 @@ export function StorageSection() {
   const [error, setError] = useState<RimaiaError | null>(null);
   const [logSize, setLogSize] = useState<number | null>(null);
   const [pruning, setPruning] = useState(false);
+  /** The preset awaiting confirmation, or `null` when none is. */
+  const [confirmingDays, setConfirmingDays] = useState<number | null>(null);
   const [pruneResult, setPruneResult] = useState<PruneResult | null>(null);
 
   useEffect(() => {
@@ -48,6 +50,7 @@ export function StorageSection() {
 
   async function handlePrune(days: number) {
     setPruning(true);
+    setConfirmingDays(null);
     setPruneResult(null);
     try {
       const result = await pruneRunLogs({ kind: "older_than_days", days });
@@ -102,17 +105,35 @@ export function StorageSection() {
         <dt>Run logs</dt>
         <dd>{logSize === null ? <span className="muted">Reading…</span> : formatBytes(logSize)}</dd>
       </dl>
+      {/* Confirmed before it runs, like every other action in this app that
+          deletes files (`worktree::ForceRemoval::ConfirmedByUser`) — and this
+          one spans every task, not one. */}
       <div className="storage-prune-actions">
-        {PRUNE_AGE_PRESETS.map((preset) => (
-          <button
-            key={preset.days}
-            type="button"
-            onClick={() => handlePrune(preset.days)}
-            disabled={pruning}
-          >
-            {preset.label}
-          </button>
-        ))}
+        {confirmingDays === null ? (
+          PRUNE_AGE_PRESETS.map((preset) => (
+            <button
+              key={preset.days}
+              type="button"
+              onClick={() => setConfirmingDays(preset.days)}
+              disabled={pruning}
+            >
+              {preset.label}
+            </button>
+          ))
+        ) : (
+          <>
+            <span>
+              Delete the transcript of every finished run started more than {confirmingDays} days
+              ago, across every task? The run history itself stays.
+            </span>
+            <button type="button" onClick={() => handlePrune(confirmingDays)} disabled={pruning}>
+              {pruning ? "Pruning…" : "Delete transcripts"}
+            </button>
+            <button type="button" onClick={() => setConfirmingDays(null)}>
+              Cancel
+            </button>
+          </>
+        )}
       </div>
       {pruneResult && (
         <p className="muted">
