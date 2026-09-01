@@ -328,9 +328,19 @@ fn tool_result_content(block: &Value) -> Option<String> {
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SearchHit {
-    /// The same 1-based file line [`TranscriptEntry::line`] uses, so a hit
-    /// can be resolved to the page that contains it.
+    /// The same 1-based file line [`TranscriptEntry::line`] uses — what to
+    /// show a reader, and what an "open in editor" link would point at.
     pub line: usize,
+    /// Where this hit sits in the *entry* numbering [`TranscriptPage::offset`]
+    /// advances over: 0-based, blank lines not counted, so
+    /// `read_page(path, hit.entry, limit)` opens on the entry that matched.
+    ///
+    /// It is counted here, during the same scan that finds the hit, because
+    /// no caller can convert `line` into it without re-reading the file:
+    /// the two numbers only agree when the transcript holds no blank lines,
+    /// and a viewer that jumped by `line` landed a hit's worth of blank lines
+    /// short of the match.
+    pub entry: usize,
     /// A bounded excerpt of the raw line, centred on the match — bounded so
     /// a hit inside a multi-megabyte tool input still returns a screenful of
     /// text rather than the whole field.
@@ -357,14 +367,23 @@ pub async fn search(log_path: &Path, query: &str) -> Result<Vec<SearchHit>> {
 
     let mut hits = Vec::new();
     let mut line_number = 0usize;
+    // Advanced exactly as `read_page` advances its own window: only over
+    // non-blank lines, so the two agree on what "entry 41" means.
+    let mut entry_index = 0usize;
     while let Some(raw) = lines.next_line().await? {
         line_number += 1;
         if hits.len() >= MAX_SEARCH_HITS {
             break;
         }
+        if raw.trim().is_empty() {
+            continue;
+        }
+        let entry = entry_index;
+        entry_index += 1;
         if let Some(snippet) = matching_snippet(&raw, &needle) {
             hits.push(SearchHit {
                 line: line_number,
+                entry,
                 snippet,
             });
         }
@@ -620,7 +639,32 @@ mod tests {
 
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].line, 1);
+        assert_eq!(hits[0].entry, 0);
         assert!(hits[0].snippet.to_lowercase().contains("reading the file"));
+    }
+
+    /// The bug this pins: a viewer that treated `line` as a page offset
+    /// scrolled to the wrong entry on any transcript with a blank line in it,
+    /// and every real 4MB transcript has one. `entry` is the number
+    /// `read_page` counts, so the two coordinate systems never have to be
+    /// converted in the frontend.
+    #[tokio::test]
+    async fn a_hit_after_blank_lines_reports_the_entry_that_holds_it_not_the_file_line() {
+        let (_dir, path) = write_lines(&[ASSISTANT_TEXT, "", "", ASSISTANT_TOOL_USE]);
+
+        let hits = search(&path, "cargo test").await.expect("search");
+
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].line, 4, "the fourth line of the file");
+        assert_eq!(hits[0].entry, 1, "but only the second entry");
+
+        let page = read_page(&path, hits[0].entry, 1)
+            .await
+            .expect("open the page the hit reports");
+        assert_eq!(
+            page.entries[0].line, 4,
+            "opening on the hit's entry shows the line that matched",
+        );
     }
 
     #[tokio::test]
@@ -634,6 +678,7 @@ mod tests {
 
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].line, 1);
+        assert_eq!(hits[0].entry, 0);
     }
 
     #[tokio::test]

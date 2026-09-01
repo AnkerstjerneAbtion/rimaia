@@ -705,7 +705,7 @@ export interface RunListEntry extends Run {
   repositoryName: string;
   /** Computed fresh on every read, never trusted from a cache — ADR-0013's
    *  "a runs row pointing at a missing file is marked, not trusted". `false`
-   *  is what "Open raw log" and the transcript viewer disable themselves on,
+   *  is what "Reveal raw log" and the transcript viewer disable themselves on,
    *  rendering "log unavailable" instead of erroring. */
   logAvailable: boolean;
 }
@@ -794,8 +794,14 @@ export interface TranscriptPage {
  * inside assistant text.
  */
 export interface SearchHit {
-  /** The same 1-based file line {@link TranscriptEntry.line} uses. */
+  /** The same 1-based file line {@link TranscriptEntry.line} uses — what to
+   *  show a reader. */
   line: number;
+  /** Where the hit sits in the entry numbering {@link TranscriptPage.offset}
+   *  advances over: 0-based, blank lines not counted. Pass it straight to
+   *  {@link readRunTranscriptPage} as the offset — `line` cannot be
+   *  converted into it without re-reading the file. */
+  entry: number;
   /** A bounded excerpt centred on the match. */
   snippet: string;
 }

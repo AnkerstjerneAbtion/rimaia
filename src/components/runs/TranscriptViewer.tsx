@@ -73,15 +73,15 @@ export function TranscriptViewer({ runId }: TranscriptViewerProps) {
     }
   }
 
-  // The transcript has one JSON object per line, so a hit's file line number
-  // and the entry offset it would occupy on a fresh read agree in practice
-  // (task 015's own parser tolerates a blank line, but a real transcript
-  // never writes one). Landing the page here rather than trying to centre it
-  // is a deliberate simplification: it puts the match at or near the top of
-  // the next page, which is close enough to "jump to it" for a reviewer.
+  // `hit.entry` is already an offset in the same numbering pages use — the
+  // backend counts it during the scan that finds the hit, precisely so this
+  // never has to convert a file line into one (it cannot: the two differ by
+  // however many blank lines precede the match, which only re-reading the
+  // file would reveal). Landing the page on the hit rather than centring it
+  // is a deliberate simplification: the match sits at the top of the page.
   function jumpToHit(hit: SearchHit) {
     setHits(null);
-    setOffset(Math.max(0, hit.line - 1));
+    setOffset(hit.entry);
   }
 
   return (

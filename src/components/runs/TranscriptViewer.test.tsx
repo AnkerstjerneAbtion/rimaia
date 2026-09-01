@@ -109,10 +109,15 @@ describe("TranscriptViewer", () => {
     expect(requestedOffsets).toEqual([0, 100]);
   });
 
-  it("searches the transcript and jumps to the matching line on click", async () => {
+  // A hit two blank lines into the file: `line` and `entry` disagree, which
+  // is exactly the case that used to scroll to the wrong entry. The offset
+  // sent back must be the hit's `entry`, never its file line.
+  it("searches the transcript and jumps by entry, not by file line", async () => {
+    const requestedOffsets: number[] = [];
     mockInvoke.mockImplementation(async (command, args) => {
       if (command === "read_run_transcript_page") {
         const offset = (args as { offset: number }).offset;
+        requestedOffsets.push(offset);
         return offset === 0
           ? page()
           : {
@@ -131,7 +136,7 @@ describe("TranscriptViewer", () => {
       }
       if (command === "search_run_transcript") {
         expect((args as { query: string }).query).toBe("cargo test");
-        return [{ line: 6, snippet: "…cargo test…" }];
+        return [{ line: 6, entry: 4, snippet: "…cargo test…" }];
       }
       throw new Error(`unexpected command: ${command}`);
     });
@@ -148,5 +153,6 @@ describe("TranscriptViewer", () => {
     fireEvent.click(hit);
 
     expect(await screen.findByText("Landed on the hit")).toBeInTheDocument();
+    expect(requestedOffsets).toEqual([0, 4]);
   });
 });
