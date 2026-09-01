@@ -209,6 +209,25 @@ pub async fn get_run_row(ctx: &ServiceContext, run_id: &str) -> Result<Run> {
     fetch_run(ctx, run_id).await
 }
 
+/// The transcript path to hand the OS file manager for `run_id`, refusing
+/// when the file is not there any more.
+///
+/// The refusal is the point. A reveal of a path that no longer resolves is
+/// the one failure a desktop cannot report by itself — nothing opens, nothing
+/// is raised, and the user is left looking at a button that did nothing. The
+/// same `try_exists` [`get_run`] computes `log_available` with answers it
+/// here, one read earlier, as a sentence the caller can render.
+pub async fn log_path_to_reveal(ctx: &ServiceContext, run_id: &str) -> Result<PathBuf> {
+    let run = fetch_run(ctx, run_id).await?;
+    if !log_file_exists(&run.log_path).await {
+        return Err(Error::not_found(format!(
+            "this run's transcript is no longer at {} — it was pruned or moved",
+            run.log_path
+        )));
+    }
+    Ok(PathBuf::from(run.log_path))
+}
+
 async fn fetch_run(ctx: &ServiceContext, run_id: &str) -> Result<Run> {
     sqlx::query_as::<_, Run>("SELECT * FROM runs WHERE id = ?1")
         .bind(run_id)
@@ -670,6 +689,64 @@ mod tests {
         );
         assert_eq!(detail.diff.commits.len(), 1);
         assert_eq!(detail.diff.commits[0].subject, "Add the parser");
+    }
+
+    #[tokio::test]
+    async fn the_path_to_reveal_is_the_runs_own_transcript() {
+        let h = TestContext::new().await;
+        let repository_id = seed_repository(&h.context, "repo").await;
+        let task_id = seed_task(&h.context, &repository_id, "a task").await;
+        let dir = tempfile::tempdir().expect("temp dir for a transcript");
+        let log_path = dir.path().join("run-1.jsonl");
+        std::fs::write(&log_path, "{}\n").expect("write a transcript");
+        let run_id = seed_run(
+            &h.context,
+            &task_id,
+            1,
+            RunStatus::Succeeded,
+            Some(ExitClass::Success),
+            h.context.clock.now(),
+            true,
+            log_path.to_str().expect("temp path is UTF-8"),
+        )
+        .await;
+
+        let revealed = log_path_to_reveal(&h.context, &run_id)
+            .await
+            .expect("the transcript is on disk");
+
+        assert_eq!(revealed, log_path);
+    }
+
+    /// The silent half of "Open raw log does nothing": handing a path that
+    /// no longer resolves to the OS file manager fails where nobody is
+    /// watching. Refusing here is what gives the button something to say.
+    #[tokio::test]
+    async fn revealing_a_transcript_that_is_gone_is_refused_rather_than_attempted() {
+        let h = TestContext::new().await;
+        let repository_id = seed_repository(&h.context, "repo").await;
+        let task_id = seed_task(&h.context, &repository_id, "a task").await;
+        let run_id = seed_run(
+            &h.context,
+            &task_id,
+            1,
+            RunStatus::Succeeded,
+            Some(ExitClass::Success),
+            h.context.clock.now(),
+            true,
+            "/tmp/definitely-does-not-exist-rimaia.jsonl",
+        )
+        .await;
+
+        let error = log_path_to_reveal(&h.context, &run_id)
+            .await
+            .expect_err("the transcript was pruned");
+
+        assert_eq!(error.code(), crate::ErrorCode::NotFound);
+        assert!(
+            error.to_string().contains("pruned or moved"),
+            "the message has to name what happened: {error}"
+        );
     }
 
     #[tokio::test]

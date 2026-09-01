@@ -273,21 +273,36 @@ pub async fn search_run_transcript(
     transcript::search(Path::new(&run.log_path), &query).await
 }
 
-/// Opens `run_id`'s raw JSONL transcript in the OS file manager — task 015's
-/// "reveals the JSONL file", the same shape [`crate::commands::worktree::
-/// reveal_task_worktree`] gives a worktree directory. "Copy log path" needs
-/// no command: every caller already has `Run.logPath` from [`get_run`] or
+/// Reveals `run_id`'s raw JSONL transcript in the OS file manager — task
+/// 015's "reveals the JSONL file". "Copy log path" needs no command: every
+/// caller already has `Run.logPath` from [`get_run`] or
 /// [`list_runs_for_task`], and the system clipboard is a browser API away.
+///
+/// # `reveal_item_in_dir`, not `open_path`
+///
+/// `open_path` hands the file to whatever the OS has registered for
+/// `.jsonl`, through a **detached** child process: on a machine with no
+/// handler for that extension the launch fails after this call has already
+/// returned `Ok`, so the button did nothing and had nothing to say about it —
+/// which is exactly how this was found. Revealing the file has no such gap
+/// (the plugin canonicalizes the path and the failure comes back here), and
+/// it is the better action anyway: a run's transcript is megabytes of JSONL,
+/// and "show me where it is" is what a reviewer wants from it, not "open it
+/// in a text editor".
+///
+/// The existence check is `rimaia_core::runs::log_path_to_reveal`'s, not this
+/// adapter's — a missing transcript is the same fact `get_run` reports as
+/// `logAvailable`, and it is stated once, in core (ADR-0006).
 #[tauri::command]
 pub async fn reveal_run_log(
     app: tauri::AppHandle,
     state: State<'_, AppState>,
     run_id: String,
 ) -> Result<()> {
-    let run = runs::get_run_row(&state.context, &run_id).await?;
+    let log_path = runs::log_path_to_reveal(&state.context, &run_id).await?;
     app.opener()
-        .open_path(run.log_path, None::<&str>)
-        .map_err(|e| Error::internal(format!("could not open the log file: {e}")))
+        .reveal_item_in_dir(log_path)
+        .map_err(|e| Error::internal(format!("could not reveal the log file: {e}")))
 }
 
 // ---------------------------------------------------------------------------
