@@ -51,3 +51,7 @@ once the queue is used daily, and not before.
 
 Deletion is the one irreversible thing this app does. Every guard here earns its place —
 if in doubt, refuse and explain.
+
+Transcript cleanup must also recognise the `strategy-<uuid>.jsonl` files task 020 writes
+beside each run's own: a strategy run has no `runs` row, so anything enumerating
+transcripts through the database misses them (seam-contract D17).

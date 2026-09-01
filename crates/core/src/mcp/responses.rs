@@ -1,4 +1,6 @@
-//! What the ten tools hand back (ADR-0006, seam-contract D16).
+//! What the registered tools hand back (ADR-0006, its 2026-08-28 amendment,
+//! and ADR-0021,
+//! seam-contract D16).
 //!
 //! Projections, not mirrors. A conversion layer is unavoidable — the row types
 //! serialize `camelCase` for the frontend and MCP is `snake_case` — so these
@@ -15,8 +17,10 @@ use schemars::JsonSchema;
 use serde::Serialize;
 
 use crate::db::{
-    BoardColumn, ExitClass, MutationSource, Repository, Run, RunState, RunStatus, TaskLink,
+    BoardColumn, ExitClass, MutationSource, Repository, Run, RunState, RunStatus, StrategyMode,
+    StrategySource, TaskLink,
 };
+use crate::strategy::StrategyApproval;
 use crate::tasks::{TaskDetail, TaskSummary};
 
 /// One registered repository, as `list_repositories` reports it.
@@ -48,10 +52,16 @@ impl From<Repository> for RepositoryView {
 /// One task in full: the plan, the links, what it depends on, and how its last
 /// attempt ended.
 ///
-/// Omits `position` and every `strategy_*` field deliberately. Board
-/// arithmetic is not an external planner's business — it sends `before_task_id`
-/// and `after_task_id`, exactly as the frontend does — and ADR-0016's strategy
-/// is task 020's surface, not this one's.
+/// Omits `position` deliberately: board arithmetic is not an external planner's
+/// business — it sends `before_task_id` and `after_task_id`, exactly as the
+/// frontend does.
+///
+/// The four `strategy_*` fields were omitted for the same kind of reason until
+/// task 020, and are here now because that task gave them a caller. A planner
+/// answering with `set_task_strategy` gets the card back with its own proposal
+/// on it, and any agent calling `get_task` can see whether a strategy is
+/// recorded, who decided it, and when — which is the difference between amending
+/// a plan whose model was chosen by a human and one nobody has looked at.
 #[derive(Debug, Clone, PartialEq, Serialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub struct TaskView {
@@ -66,6 +76,25 @@ pub struct TaskView {
     pub worktree_path: Option<String>,
     pub model: Option<String>,
     pub effort: Option<String>,
+    /// How `model` and `effort` get chosen (ADR-0016). The **stored** mode, not
+    /// the resolved one: `default` here means "fall through to the repository
+    /// and then the settings" (seam-contract D17.6), and reporting the resolved
+    /// value would tell a caller its card names a model it does not.
+    pub strategy_mode: StrategyMode,
+    /// Whose decision the next run executes — `planner` until a human takes
+    /// authorship, which is what accepting a proposal means (D17.7).
+    pub strategy_source: Option<StrategySource>,
+    /// The recorded proposal, **verbatim as stored**: the version-1 envelope
+    /// seam-contract D17.3 documents, as JSON text.
+    ///
+    /// Text rather than a re-serialization of this build's own struct, so an
+    /// envelope written by a later Rimaia reaches the caller with everything it
+    /// carried, and one somebody hand-edited into nonsense reaches it as the
+    /// nonsense it is rather than as a parse failure on a `get_task` that had
+    /// nothing to do with the strategy. It is the same text the panel
+    /// `JSON.parse`s, so there is one document and not two spellings of it.
+    pub strategy_plan: Option<String>,
+    pub strategy_updated_at: Option<DateTime<Utc>>,
     /// Creation provenance (ADR-0019): a task an agent created reads `mcp`
     /// forever, even after the user edits it on the board.
     pub source: MutationSource,
@@ -78,11 +107,22 @@ pub struct TaskView {
 
 impl From<TaskDetail> for TaskView {
     fn from(detail: TaskDetail) -> Self {
+        // Destructured exhaustively rather than with `..`, so a field added to
+        // `TaskDetail` has to be either projected or declined here.
+        //
+        // The three `effective_*` are declined: they are the *resolved* answer
+        // the board renders on a card, and an agent reading a task wants to know
+        // what the card itself says — a `strategy_mode` of `default` with no
+        // model is a task nobody has decided anything about, which is precisely
+        // what an inherited "opus" would hide from it.
         let TaskDetail {
             task,
             links,
             depends_on,
             last_run,
+            effective_model: _,
+            effective_effort: _,
+            effective_origin: _,
         } = detail;
 
         Self {
@@ -97,6 +137,10 @@ impl From<TaskDetail> for TaskView {
             worktree_path: task.worktree_path,
             model: task.model,
             effort: task.effort,
+            strategy_mode: task.strategy_mode,
+            strategy_source: task.strategy_source,
+            strategy_plan: task.strategy_plan,
+            strategy_updated_at: task.strategy_updated_at,
             source: task.source,
             created_at: task.created_at,
             updated_at: task.updated_at,
@@ -234,10 +278,22 @@ pub struct BaseInstructionsView {
     pub template_variables: Vec<String>,
 }
 
+/// The approval setting, wrapped.
+///
+/// An object rather than a bare string because every other tool on this surface
+/// answers with one, and a caller that has to special-case one tool's shape is
+/// a caller that will get it wrong.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub struct StrategyApprovalView {
+    pub approval: StrategyApproval,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::db::{StrategyMode, Task};
+    use crate::db::Task;
+    use crate::strategy::StrategyOrigin;
     use crate::tasks::LastRunSummary;
     use pretty_assertions::assert_eq;
     use serde_json::json;
@@ -279,6 +335,13 @@ mod tests {
             }],
             depends_on: vec!["3f2b1c00-0000-4000-8000-000000000009".to_string()],
             last_run: None,
+            // What the board would render on the card. Set to something this
+            // view must *not* pick up: the row names no effort, so an
+            // `effective_effort` reaching the wire would be the repository's
+            // answer presented as the task's.
+            effective_model: Some("opus".to_string()),
+            effective_effort: Some("high".to_string()),
+            effective_origin: StrategyOrigin::Repository,
         });
 
         let wire = serde_json::to_value(&view).expect("a DTO must always serialize");
@@ -298,13 +361,23 @@ mod tests {
         );
         assert_eq!(wire["last_run"], json!(null));
 
+        // The strategy, since task 020 gave these fields a caller. The envelope
+        // crosses as the text that is in the column, not as this build's struct
+        // re-serialized (seam-contract D17.3).
+        assert_eq!(wire["strategy_mode"], json!("default"));
+        assert_eq!(wire["strategy_source"], json!(null));
+        assert_eq!(wire["strategy_plan"], json!(r#"{"phases":[]}"#));
+        assert_eq!(wire["strategy_updated_at"], json!(null));
+
         // Deliberately absent, not forgotten.
         assert!(wire.get("position").is_none(), "board arithmetic is ours");
-        assert!(
-            wire.get("strategy_plan").is_none(),
-            "ADR-0016 is task 020's"
+        assert_eq!(
+            wire["effort"],
+            json!(null),
+            "the row's own effort, never the repository default the card renders"
         );
-        assert!(wire.get("strategy_mode").is_none());
+        assert!(wire.get("effective_effort").is_none());
+        assert!(wire.get("effective_origin").is_none());
     }
 
     #[test]
@@ -319,6 +392,12 @@ mod tests {
                 exit_class: Some(ExitClass::Success),
                 ended_at: None,
             }),
+            // The card's badge, which `list_tasks` does not carry for the reason
+            // `TaskView` does not: a summary reports what the row says, and the
+            // resolved answer is the board's rendering of it.
+            effective_model: Some("opus".to_string()),
+            effective_effort: Some("high".to_string()),
+            effective_origin: StrategyOrigin::Repository,
         });
 
         let wire = serde_json::to_value(&item).expect("a DTO must always serialize");
@@ -343,6 +422,9 @@ mod tests {
             dependency_count: 0,
             blocked_by_incomplete: false,
             last_run: None,
+            effective_model: None,
+            effective_effort: None,
+            effective_origin: StrategyOrigin::ClaudeCode,
         });
 
         assert!(!item.has_plan);

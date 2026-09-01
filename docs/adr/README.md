@@ -28,6 +28,7 @@ alternatives.
 | [0018](0018-core-to-shell-change-events.md) | Change events from core to the shell | Accepted |
 | [0019](0019-mutation-source-and-service-context.md) | Mutation source, and where it lives on the service context | Accepted |
 | [0020](0020-per-repository-git-credentials.md) | Per-repository git credentials, held by Rimaia | Accepted |
+| [0021](0021-mcp-first-capability-parity.md) | MCP-first: the tool surface is the whole product | Accepted |
 
 ## Conventions
 

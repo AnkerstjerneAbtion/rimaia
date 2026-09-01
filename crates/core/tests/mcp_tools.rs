@@ -11,14 +11,15 @@
 //! rather than by constructing the structs, so the schema and the handler are
 //! exercised together.
 
-use rimaia_core::db::{settings, BoardColumn, MutationSource};
+use rimaia_core::db::{settings, BoardColumn, MutationSource, StrategyMode, StrategySource};
 use rimaia_core::mcp::requests::{
     GetTaskRequest, ListTasksRequest, MoveTaskRequest, RemoveTaskLinkRequest,
     SetTaskDependenciesRequest, UpdateTaskRequest,
 };
 use rimaia_core::mcp::responses::{TaskListView, TaskView};
 use rimaia_core::mcp::RimaiaServer;
-use rimaia_core::tasks::{self, NewTask, TaskPatch};
+use rimaia_core::strategy::{settings as strategy_settings, StrategyDefaults};
+use rimaia_core::tasks::{self, NewTask, StrategyPlan, TaskPatch};
 use rimaia_core::testing::TestContext;
 use rimaia_core::{ChangeEvent, Error};
 
@@ -149,6 +150,107 @@ async fn reassigning_a_task_that_has_a_worktree_is_refused_identically_by_the_ui
         .update_task(Parameters(request(json!({
             "task_id": task.id,
             "repository_id": elsewhere,
+        }))))
+        .await;
+
+    assert_same_refusal(&ui, mcp);
+}
+
+#[tokio::test]
+async fn a_planner_write_back_is_refused_when_the_task_is_not_in_planned_mode() {
+    // Task 020's acceptance criterion 6. Two repositories rather than two rows
+    // written by hand, because the guard reads the **resolved** mode
+    // (seam-contract D17.6): a repository that defaults to `planned` plans every
+    // untouched card in it, and one that says nothing leaves its cards in
+    // `default`, where the strategy is the user's and a planner has no business
+    // writing one.
+    let h = TestContext::new().await;
+    let planning = seed_repository(&h.context.pool, "planning", "/tmp/planning").await;
+    let hand_picked = seed_repository(&h.context.pool, "hand-picked", "/tmp/hand-picked").await;
+    strategy_settings::set_repository_default(
+        &h.context,
+        &planning,
+        &StrategyDefaults {
+            mode: StrategyMode::Planned,
+            ..StrategyDefaults::default()
+        },
+    )
+    .await
+    .expect("store the repository default");
+
+    let planned = create_task(&h, &planning, "Let the planner choose").await;
+    let ours = create_task(&h, &hand_picked, "The user chose this one").await;
+
+    // The control: the same call, on a task whose mode does ask for a planner.
+    let recorded = ok(server(&h)
+        .set_task_strategy(Parameters(request(json!({
+            "task_id": planned.id,
+            "model": "sonnet",
+            "effort": "high",
+            "rationale": "Three services and a migration.",
+        }))))
+        .await);
+    assert_eq!(recorded.model.as_deref(), Some("sonnet"));
+    assert_eq!(recorded.effort.as_deref(), Some("high"));
+    assert_eq!(recorded.strategy_source, Some(StrategySource::Planner));
+
+    let refused = as_result(
+        server(&h)
+            .set_task_strategy(Parameters(request(json!({
+                "task_id": ours.id,
+                "model": "opus",
+                "effort": "max",
+            }))))
+            .await,
+    );
+
+    assert_eq!(refused.is_error, Some(true));
+    assert_eq!(
+        message(&refused),
+        "cannot record a planner's strategy for \"The user chose this one\": it is in default \
+         mode, so its strategy is the user's"
+    );
+
+    // And nothing was written on the way to being refused — not the envelope,
+    // and not the two columns a proposal also sets, which is what would silently
+    // change what the next run spawns with.
+    let untouched = tasks::get_task(&h.context, &ours.id)
+        .await
+        .expect("the task is still there")
+        .task;
+    assert_eq!(untouched.strategy_plan, None);
+    assert_eq!(untouched.strategy_source, None);
+    assert_eq!(untouched.model, None);
+    assert_eq!(untouched.effort, None);
+}
+
+#[tokio::test]
+async fn set_task_strategy_is_refused_identically_by_the_ui_path_and_by_mcp() {
+    // The eleventh tool, held to this file's standard: the mode guard lives in
+    // `tasks::set_task_strategy` and nowhere else, so the runner recording a
+    // planner failure and a planner writing its proposal back over MCP are
+    // refused by the same sentence and the same payload. A copy of the guard in
+    // the handler would pass "both refuse" and fail this.
+    let h = TestContext::new().await;
+    let repository_id = seed_repository(&h.context.pool, "rimaia", "/tmp/rimaia").await;
+    let task = create_task(&h, &repository_id, "Nobody asked for a planner").await;
+
+    // The other caller of the service: `runner::strategy`, annotating a task
+    // whose planner failed.
+    let ui = tasks::set_task_strategy(
+        &h.context,
+        &task.id,
+        StrategyPlan::proposed(Some("sonnet".to_string()), Some("high".to_string())),
+        StrategySource::Planner,
+    )
+    .await
+    .expect_err("a task in default mode is not the planner's to write");
+
+    let mcp = server(&h)
+        .set_task_strategy(Parameters(request(json!({
+            "task_id": task.id,
+            "model": "sonnet",
+            "effort": "high",
         }))))
         .await;
 

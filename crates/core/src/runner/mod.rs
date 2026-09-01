@@ -26,8 +26,10 @@ pub mod events;
 pub mod outcome;
 pub mod process;
 pub mod prompt;
+pub mod strategy;
 
 pub use process::{
     execute, probe_cli, run_task, Attempt, CancelSignal, Invocation, PermissionMode, RunRequest,
     RunTrigger, RunnerConfig,
 };
+pub use strategy::{Resolution, STRATEGY_TRANSCRIPT_PREFIX};

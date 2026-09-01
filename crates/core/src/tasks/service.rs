@@ -13,6 +13,8 @@
 //! server (task 010) builds the same context and gets the same rules
 //! (ADR-0006).
 
+use std::collections::HashMap;
+
 use chrono::{DateTime, Utc};
 use serde::Serialize;
 use sqlx::sqlite::SqliteRow;
@@ -25,8 +27,10 @@ use crate::db::{
 };
 use crate::error::{Error, Result};
 use crate::events::ChangeEvent;
+use crate::strategy::{effective_strategy, EffectiveStrategy, StrategyOrigin};
 use crate::tasks::position::{position_between, rebalance_column, rebalanced_positions, Placement};
-use crate::tasks::types::{NewTask, TaskFilter, TaskPatch};
+use crate::tasks::strategy::{defaults_for_repository, ResolvedDefaults};
+use crate::tasks::types::{NewTask, Patch, TaskFilter, TaskPatch};
 
 /// A task with everything a detail view needs in one read: its links in
 /// board order, the ids of what it depends on, and a summary of its most
@@ -45,6 +49,12 @@ pub struct TaskDetail {
     /// business; this is storage plus the shape [`get_task`] promises.
     pub depends_on: Vec<String>,
     pub last_run: Option<Run>,
+    /// What a run would actually spawn with, and which link of the precedence
+    /// chain said so — filled by [`apply_effective_strategy`], whose doc
+    /// comment argues why these are computed here and not in the frontend.
+    pub effective_model: Option<String>,
+    pub effective_effort: Option<String>,
+    pub effective_origin: StrategyOrigin,
 }
 
 /// One card's worth of a task: every column of the row, plus the two counts
@@ -73,6 +83,12 @@ pub struct TaskSummary {
     /// not an unfinished thought.
     pub blocked_by_incomplete: bool,
     pub last_run: Option<LastRunSummary>,
+    /// The same three fields [`TaskDetail`] carries, for the same reason — see
+    /// [`apply_effective_strategy`]. The card renders a badge off them and
+    /// never off [`Task::model`].
+    pub effective_model: Option<String>,
+    pub effective_effort: Option<String>,
+    pub effective_origin: StrategyOrigin,
 }
 
 /// What a card shows about a task's most recent attempt.
@@ -95,6 +111,13 @@ pub struct LastRunSummary {
 /// three nullable columns, and `#[sqlx(flatten)]` has no way to say "all three
 /// NULL means `None`". A task with no runs is the common case on a board, not
 /// an edge one.
+///
+/// The three `effective_*` fields come out of this **unresolved** — no model,
+/// no effort, [`StrategyOrigin::ClaudeCode`] — because they are not columns and
+/// a row cannot answer for them. [`list_tasks`] fills them in immediately
+/// afterwards, and is the only caller; anything else that reaches for
+/// `query_as::<TaskSummary>` has to do the same or it is rendering a card that
+/// claims nothing is configured.
 impl<'r> FromRow<'r, SqliteRow> for TaskSummary {
     fn from_row(row: &'r SqliteRow) -> sqlx::Result<Self> {
         let last_run = match row.try_get::<Option<RunStatus>, _>("last_run_status")? {
@@ -115,6 +138,9 @@ impl<'r> FromRow<'r, SqliteRow> for TaskSummary {
             dependency_count: row.try_get("dependency_count")?,
             blocked_by_incomplete: row.try_get("blocked_by_incomplete")?,
             last_run,
+            effective_model: None,
+            effective_effort: None,
+            effective_origin: StrategyOrigin::ClaudeCode,
         })
     }
 }
@@ -223,7 +249,8 @@ pub async fn create_task(ctx: &ServiceContext, input: NewTask) -> Result<Task> {
 }
 
 /// The full detail read: the task itself, its links in order, the ids of
-/// what it depends on, and its most recent run (by attempt number).
+/// what it depends on, its most recent run (by attempt number), and the
+/// strategy a run would actually spawn with (see [`apply_effective_strategy`]).
 pub async fn get_task(ctx: &ServiceContext, id: &str) -> Result<TaskDetail> {
     let task = fetch_task_row(&ctx.pool, id).await?;
 
@@ -246,11 +273,18 @@ pub async fn get_task(ctx: &ServiceContext, id: &str) -> Result<TaskDetail> {
 
     let last_run = fetch_last_run(&ctx.pool, id).await?;
 
+    let defaults = defaults_for_repository(ctx, &task.repository_id).await?;
+    let effective = effective_strategy(&task, &defaults.repository, &defaults.global);
+    let effective_origin = strongest_origin(&effective);
+
     Ok(TaskDetail {
         task,
         links,
         depends_on,
         last_run,
+        effective_model: effective.model,
+        effective_effort: effective.effort,
+        effective_origin,
     })
 }
 
@@ -297,7 +331,130 @@ pub async fn list_tasks(ctx: &ServiceContext, filter: TaskFilter) -> Result<Vec<
         query = query.bind(run_state);
     }
 
-    Ok(query.fetch_all(&ctx.pool).await?)
+    let mut summaries = query.fetch_all(&ctx.pool).await?;
+    apply_effective_strategy(ctx, &mut summaries).await?;
+    Ok(summaries)
+}
+
+/// Fills every card's effective model and effort after the board read.
+///
+/// After the query rather than inside it because the precedence chain is a
+/// business rule (ADR-0016) and lives in [`effective_strategy`], not in SQL —
+/// and because the defaults it reads are `settings` rows, which the board query
+/// does not join to and should not learn how to.
+///
+/// One global read plus one per *distinct repository*, not one per card: a
+/// fifty-card board across three repositories costs four settings reads, which
+/// keeps seam-contract D12's "one query per board read, not fifty" true in
+/// spirit. `HashMap` rather than sorting because the board's own ordering
+/// already groups by repository and this must not depend on that continuing to
+/// be the case.
+async fn apply_effective_strategy(
+    ctx: &ServiceContext,
+    summaries: &mut [TaskSummary],
+) -> Result<()> {
+    let mut by_repository: HashMap<String, ResolvedDefaults> = HashMap::new();
+
+    for summary in summaries.iter_mut() {
+        let repository_id = summary.task.repository_id.clone();
+        if !by_repository.contains_key(&repository_id) {
+            by_repository.insert(
+                repository_id.clone(),
+                defaults_for_repository(ctx, &repository_id).await?,
+            );
+        }
+        let defaults = &by_repository[&repository_id];
+
+        let effective = effective_strategy(&summary.task, &defaults.repository, &defaults.global);
+        summary.effective_origin = strongest_origin(&effective);
+        summary.effective_model = effective.model;
+        summary.effective_effort = effective.effort;
+    }
+
+    Ok(())
+}
+
+/// Seam-contract D17.6: what a task's mode becomes after an edit.
+///
+/// The rule lives here, in the service, rather than in the panel or in the MCP
+/// handler, because both doors reach `update_task` and a rule enforced in one of
+/// them is the defect ADR-0006 names. Three cases, in order of who is being
+/// most explicit:
+///
+/// 1. **An explicit `strategy_mode` on the patch wins.** Somebody used the mode
+///    selector; that is not a thing to second-guess.
+/// 2. **Naming a model or an effort means `manual`.** Otherwise the pair would
+///    be stored and then ignored: a task in `default` mode resolves through the
+///    repository and global defaults and never reads its own columns, so a
+///    dropdown that appeared to take effect would not have.
+/// 3. **Clearing both flips `manual` back to `default`.** A manual task with
+///    nothing selected is a mode with no content, and leaving it there would
+///    pin the card to whatever `default` resolves to today while claiming the
+///    user chose it.
+///
+/// A `planned` task is deliberately *not* returned to `default` by case 3: its
+/// mode says a planner decides, and the planner has not run yet.
+fn resolve_strategy_mode(
+    requested: Option<StrategyMode>,
+    current: StrategyMode,
+    touched_a_field: bool,
+    both_now_empty: bool,
+) -> StrategyMode {
+    if let Some(mode) = requested {
+        return mode;
+    }
+
+    // `touched_a_field` gates both remaining cases, and it is the whole
+    // correctness of this function. Deriving the answer from the *resulting*
+    // row alone cannot tell "the user just cleared both" from "both were
+    // already empty and this patch never mentioned them" — and the second is
+    // every ordinary edit. A task set to `manual` with no model yet, whose
+    // title is then edited, would be handed back to `default`, which under a
+    // repository default of `planned` silently re-arms the planner the user
+    // opted out of.
+    if !touched_a_field {
+        return current;
+    }
+
+    if both_now_empty {
+        // Only a `manual` task. A `planned` one means "a planner decides",
+        // which is still true of a card with no model on it yet.
+        if current == StrategyMode::Manual {
+            return StrategyMode::Default;
+        }
+        return current;
+    }
+
+    StrategyMode::Manual
+}
+
+/// The more specific of a strategy's two origins.
+///
+/// The card draws one badge, not two, so it needs one answer for "where did
+/// this come from". Model and effort resolve independently — a task may name a
+/// model and inherit its effort — and when they disagree the more specific one
+/// is the honest label: a badge reading "from the repository default" on a card
+/// that names its own model would be wrong in the direction that matters,
+/// because it invites the reader to go change a default that this card is not
+/// listening to.
+///
+/// [`StrategyOrigin::ClaudeCode`] is the least specific because it means the
+/// flag was never passed at all.
+fn strongest_origin(effective: &EffectiveStrategy) -> StrategyOrigin {
+    fn specificity(origin: StrategyOrigin) -> u8 {
+        match origin {
+            StrategyOrigin::Task => 3,
+            StrategyOrigin::Repository => 2,
+            StrategyOrigin::Global => 1,
+            StrategyOrigin::ClaudeCode => 0,
+        }
+    }
+
+    if specificity(effective.model_origin) >= specificity(effective.effort_origin) {
+        effective.model_origin
+    } else {
+        effective.effort_origin
+    }
 }
 
 /// Applies `patch`'s changed fields to a task and stamps `updated_at`. Fields
@@ -332,21 +489,34 @@ pub async fn update_task(ctx: &ServiceContext, id: &str, patch: TaskPatch) -> Re
     };
     let plan = normalize_plan(patch.plan.apply(current.plan));
     let extra_instructions = patch.extra_instructions.apply(current.extra_instructions);
+    // Whether the patch *mentioned* either field — set or cleared — not whether
+    // the row ends up carrying one. An edit that never names them must leave
+    // the mode exactly as it was; see `resolve_strategy_mode`.
+    let touched_a_field =
+        !matches!(patch.model, Patch::Unset) || !matches!(patch.effort, Patch::Unset);
     let model = patch.model.apply(current.model);
     let effort = patch.effort.apply(current.effort);
+    let strategy_mode = resolve_strategy_mode(
+        patch.strategy_mode,
+        current.strategy_mode,
+        touched_a_field,
+        model.is_none() && effort.is_none(),
+    );
 
     ensure_ready_has_a_plan(current.column, &plan, &title)?;
 
     let now = ctx.clock.now();
     sqlx::query!(
         r#"UPDATE tasks SET repository_id = ?1, title = ?2, plan = ?3, extra_instructions = ?4,
-            model = ?5, effort = ?6, position = ?7, updated_at = ?8 WHERE id = ?9"#,
+            model = ?5, effort = ?6, strategy_mode = ?7, position = ?8, updated_at = ?9
+            WHERE id = ?10"#,
         placement.repository_id,
         title,
         plan,
         extra_instructions,
         model,
         effort,
+        strategy_mode,
         placement.position,
         now,
         id,
@@ -925,6 +1095,9 @@ mod tests {
                 exit_class: Some(ExitClass::Interrupted),
                 ended_at: Some("2026-08-20T12:29:00Z".parse().expect("a literal timestamp")),
             }),
+            effective_model: Some("sonnet".to_string()),
+            effective_effort: Some("high".to_string()),
+            effective_origin: StrategyOrigin::Repository,
         };
 
         let wire = serde_json::to_value(&summary).expect("a DTO must always serialize");
@@ -981,6 +1154,9 @@ mod tests {
             dependency_count: 0,
             blocked_by_incomplete: false,
             last_run: None,
+            effective_model: None,
+            effective_effort: None,
+            effective_origin: StrategyOrigin::ClaudeCode,
         };
 
         let wire = serde_json::to_value(&summary).expect("a DTO must always serialize");
@@ -988,5 +1164,292 @@ mod tests {
         // `null`, never an absent key: `lastRun: LastRunSummary | null` in
         // `src/types.ts` is a field the card reads, not one it probes for.
         assert_eq!(wire["lastRun"], json!(null));
+        // Same rule for the strategy badge: the card reads
+        // `effectiveModel: string | null` and draws nothing for `null`, so an
+        // absent key would make it render `undefined`.
+        assert_eq!(wire["effectiveModel"], json!(null));
+        assert_eq!(wire["effectiveOrigin"], json!("claude_code"));
+    }
+
+    // -----------------------------------------------------------------------
+    // Seam-contract D17.6 — what an edit does to a task's mode
+    //
+    // The rule lives in the service because both doors reach `update_task`, so
+    // it is tested where it lives rather than once per door. Every case below
+    // is a sentence of D17.6.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn choosing_a_model_takes_the_task_over_and_makes_it_manual() {
+        // Otherwise the pair is stored and then ignored: a task in `default`
+        // mode resolves through the repository and global defaults and never
+        // reads its own columns, so a dropdown that appeared to take effect
+        // would not have.
+        assert_eq!(
+            resolve_strategy_mode(None, StrategyMode::Default, true, false),
+            StrategyMode::Manual,
+        );
+    }
+
+    #[test]
+    fn clearing_both_of_them_hands_a_manual_task_back_to_the_default() {
+        // A manual task with nothing selected is a mode with no content, and
+        // leaving it there would pin the card to whatever `default` resolves to
+        // today while claiming the user chose it.
+        assert_eq!(
+            resolve_strategy_mode(None, StrategyMode::Manual, true, true),
+            StrategyMode::Default,
+        );
+    }
+
+    #[test]
+    fn an_explicit_mode_wins_over_what_the_fields_imply() {
+        // Somebody used the mode selector; that is not a thing to second-guess.
+        // Both directions, because the interesting one is the mode that
+        // disagrees with the payload beside it.
+        assert_eq!(
+            resolve_strategy_mode(
+                Some(StrategyMode::Planned),
+                StrategyMode::Default,
+                true,
+                false
+            ),
+            StrategyMode::Planned,
+        );
+        assert_eq!(
+            resolve_strategy_mode(Some(StrategyMode::Manual), StrategyMode::Manual, true, true),
+            StrategyMode::Manual,
+            "asking for manual while clearing both is still asking for manual",
+        );
+    }
+
+    #[test]
+    fn clearing_both_of_them_does_not_drag_a_planned_task_back_to_the_default() {
+        // The exception D17.6 spells out: `planned` says a planner decides, and
+        // the planner has not run yet. Returning it to `default` here would
+        // silently cancel the planning nobody asked to cancel.
+        assert_eq!(
+            resolve_strategy_mode(None, StrategyMode::Planned, true, true),
+            StrategyMode::Planned,
+        );
+        assert_eq!(
+            resolve_strategy_mode(None, StrategyMode::Planned, false, true),
+            StrategyMode::Planned,
+            "an edit that touched neither field is not an edit to the mode",
+        );
+    }
+
+    #[test]
+    fn an_edit_that_names_neither_field_leaves_the_mode_exactly_as_it_was() {
+        for mode in [
+            StrategyMode::Default,
+            StrategyMode::Manual,
+            StrategyMode::Planned,
+        ] {
+            assert_eq!(resolve_strategy_mode(None, mode, false, false), mode);
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // One badge for two origins
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn a_card_that_names_its_own_model_does_not_claim_to_be_showing_a_default() {
+        // The failure that matters is the direction: a badge reading "from the
+        // repository default" on a card that names its own model invites the
+        // reader to go and change a default this card is not listening to.
+        assert_eq!(
+            strongest_origin(&resolved(StrategyOrigin::Task, StrategyOrigin::Repository)),
+            StrategyOrigin::Task,
+        );
+        assert_eq!(
+            strongest_origin(&resolved(StrategyOrigin::Repository, StrategyOrigin::Task)),
+            StrategyOrigin::Task,
+            "the more specific one wins whichever half it is",
+        );
+    }
+
+    #[test]
+    fn the_origins_rank_task_then_repository_then_global_then_the_cli_itself() {
+        // `ClaudeCode` is least specific because it means the flag was never
+        // passed at all, so anything else beside it is the honest label.
+        let ranked = [
+            StrategyOrigin::Task,
+            StrategyOrigin::Repository,
+            StrategyOrigin::Global,
+            StrategyOrigin::ClaudeCode,
+        ];
+        for (at, stronger) in ranked.iter().enumerate() {
+            for weaker in &ranked[at + 1..] {
+                assert_eq!(
+                    strongest_origin(&resolved(*stronger, *weaker)),
+                    *stronger,
+                    "{stronger:?} beside {weaker:?}",
+                );
+                assert_eq!(strongest_origin(&resolved(*weaker, *stronger)), *stronger);
+            }
+        }
+    }
+
+    #[test]
+    fn two_halves_from_the_same_level_report_that_level() {
+        assert_eq!(
+            strongest_origin(&resolved(StrategyOrigin::Global, StrategyOrigin::Global)),
+            StrategyOrigin::Global,
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // The board read's defaults
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn every_card_resolves_against_its_own_repositorys_defaults_however_they_interleave() {
+        // The memoization is keyed by repository, and a cache that answered for
+        // the whole board with the first repository it saw would still pass a
+        // single-repository test. So the cards alternate: A, B, A, B. The board's
+        // own ordering happens to group by repository today, and this must not
+        // depend on that continuing to be true.
+        let h = crate::testing::TestContext::new().await;
+        let first = seed_repository(&h.context, "first").await;
+        let second = seed_repository(&h.context, "second").await;
+
+        crate::strategy::settings::set_repository_default(
+            &h.context,
+            &first,
+            &crate::strategy::StrategyDefaults {
+                mode: StrategyMode::Default,
+                model: Some("opus".to_string()),
+                effort: Some("high".to_string()),
+            },
+        )
+        .await
+        .expect("the first repository's defaults");
+        crate::strategy::settings::set_global_default(
+            &h.context,
+            &crate::strategy::StrategyDefaults {
+                mode: StrategyMode::Default,
+                model: Some("haiku".to_string()),
+                effort: None,
+            },
+        )
+        .await
+        .expect("the global defaults beneath them");
+
+        let mut board = vec![
+            card(&first, StrategyMode::Default, None),
+            card(&second, StrategyMode::Default, None),
+            // A manual card in the *first* repository, which is the one whose
+            // defaults are memoized: its own model has to win anyway.
+            card(&first, StrategyMode::Manual, Some("sonnet")),
+            card(&second, StrategyMode::Default, None),
+        ];
+
+        apply_effective_strategy(&h.context, &mut board)
+            .await
+            .expect("the board resolves");
+
+        assert_eq!(
+            board
+                .iter()
+                .map(|summary| (
+                    summary.effective_model.as_deref(),
+                    summary.effective_effort.as_deref(),
+                    summary.effective_origin,
+                ))
+                .collect::<Vec<_>>(),
+            vec![
+                (Some("opus"), Some("high"), StrategyOrigin::Repository),
+                // The second repository configures nothing, so it falls through
+                // to the global default — never to the first repository's.
+                (Some("haiku"), None, StrategyOrigin::Global),
+                (Some("sonnet"), Some("high"), StrategyOrigin::Task),
+                (Some("haiku"), None, StrategyOrigin::Global),
+            ],
+        );
+    }
+
+    #[tokio::test]
+    async fn an_empty_board_reads_no_defaults_at_all() {
+        // The loop reads per distinct repository, so no cards means no reads —
+        // and the function still has to succeed rather than assume a first row.
+        let h = crate::testing::TestContext::new().await;
+        let mut board: Vec<TaskSummary> = Vec::new();
+
+        apply_effective_strategy(&h.context, &mut board)
+            .await
+            .expect("an empty board is not an error");
+
+        assert!(board.is_empty());
+    }
+
+    /// An [`EffectiveStrategy`] whose only interesting fields are its two
+    /// origins — the pair [`strongest_origin`] chooses between.
+    fn resolved(model_origin: StrategyOrigin, effort_origin: StrategyOrigin) -> EffectiveStrategy {
+        EffectiveStrategy {
+            mode: StrategyMode::Default,
+            model: None,
+            effort: None,
+            model_origin,
+            effort_origin,
+        }
+    }
+
+    /// A registered repository, seeded directly: this module's subject is the
+    /// strategy chain, and `repo::register` would drag a real checkout into a
+    /// test that never looks at one.
+    async fn seed_repository(ctx: &ServiceContext, name: &str) -> String {
+        let id = crate::db::new_id();
+        sqlx::query(
+            "INSERT INTO repositories (id, name, path, default_branch, worktree_root,
+                allow_unattended_runs, created_at)
+             VALUES (?1, ?2, ?3, 'main', '/tmp/rimaia-worktrees', 0, ?4)",
+        )
+        .bind(&id)
+        .bind(name)
+        .bind(format!("/tmp/{name}"))
+        .bind(ctx.clock.now())
+        .execute(&ctx.pool)
+        .await
+        .expect("seed a repository");
+        id
+    }
+
+    /// One card on the board, with everything [`apply_effective_strategy`] does
+    /// not read left at its most boring value.
+    fn card(repository_id: &str, mode: StrategyMode, model: Option<&str>) -> TaskSummary {
+        TaskSummary {
+            task: Task {
+                id: crate::db::new_id(),
+                repository_id: repository_id.to_string(),
+                title: "A card".to_string(),
+                plan: None,
+                extra_instructions: None,
+                column: BoardColumn::Ready,
+                position: 1.0,
+                run_state: RunState::Idle,
+                branch: None,
+                worktree_path: None,
+                strategy_mode: mode,
+                model: model.map(str::to_string),
+                effort: None,
+                strategy_plan: None,
+                strategy_source: None,
+                strategy_updated_at: None,
+                created_at: crate::testing::test_epoch(),
+                updated_at: crate::testing::test_epoch(),
+                source: MutationSource::Ui,
+            },
+            link_count: 0,
+            dependency_count: 0,
+            blocked_by_incomplete: false,
+            last_run: None,
+            // Unresolved, exactly as `FromRow` leaves them — which is the state
+            // `apply_effective_strategy` is given.
+            effective_model: None,
+            effective_effort: None,
+            effective_origin: StrategyOrigin::ClaudeCode,
+        }
     }
 }

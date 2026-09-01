@@ -40,6 +40,12 @@ function taskSummary(overrides: Partial<TaskSummary> = {}): TaskSummary {
     dependencyCount: 0,
     blockedByIncomplete: false,
     lastRun: null,
+    // What a run would spawn with, resolved in Rust and carried on the read
+    // (task 020, seam-contract D12's amendment). Nothing configured anywhere
+    // is the `claude_code` origin, which is what this fixture's task has.
+    effectiveModel: null,
+    effectiveEffort: null,
+    effectiveOrigin: "claude_code",
     ...overrides,
   };
 }
@@ -73,6 +79,22 @@ beforeEach(() => {
  *  pattern `PlanEditor.test.tsx` uses for its own "Saving…" indicator. */
 async function waitForInstructionsSaved() {
   await waitFor(() => expect(screen.queryByText("Saving…")).not.toBeInTheDocument());
+}
+
+/** Chooses a task in the preview picker once its `<option>` actually exists.
+ *
+ *  The `<select>` renders immediately with only "Choose a task…" in it — the
+ *  real options come from `list_tasks`, which is async. Setting `value` to an
+ *  id that has no matching `<option>` is a **silent no-op**: the select keeps
+ *  its old value, `onChange` never fires, and no preview is ever requested.
+ *  The failure then surfaces as a timeout on the composed text, which points
+ *  at the preview rather than at the selection that never happened. Locally
+ *  the task list always wins that race; on a slower CI runner it does not. */
+async function selectPreviewTask(id: string, title: string) {
+  const picker = await screen.findByLabelText("Preview task");
+  await screen.findByRole("option", { name: title });
+  fireEvent.change(picker, { target: { value: id } });
+  return picker;
 }
 
 describe("InstructionsSection", () => {
@@ -201,8 +223,7 @@ describe("InstructionsSection", () => {
 
     render(<InstructionsSection />);
 
-    const picker = await screen.findByLabelText("Preview task");
-    fireEvent.change(picker, { target: { value: "task-1" } });
+    await selectPreviewTask("task-1", "Wire the board");
 
     expect(mockInvoke).toHaveBeenCalledWith("preview_composed_prompt", { taskId: "task-1" });
 
@@ -233,8 +254,7 @@ describe("InstructionsSection", () => {
     });
 
     render(<InstructionsSection />);
-    const picker = await screen.findByLabelText("Preview task");
-    fireEvent.change(picker, { target: { value: "task-1" } });
+    await selectPreviewTask("task-1", "Wire the board");
 
     expect(await screen.findByText("task not found")).toBeInTheDocument();
   });
@@ -259,9 +279,8 @@ describe("InstructionsSection", () => {
     });
 
     render(<InstructionsSection />);
-    const picker = await screen.findByLabelText("Preview task");
+    const picker = await selectPreviewTask("task-1", "Wire the board");
 
-    fireEvent.change(picker, { target: { value: "task-1" } });
     fireEvent.change(picker, { target: { value: "task-2" } });
     expect(resolvers["task-1"]).toBeDefined();
     expect(resolvers["task-2"]).toBeDefined();
@@ -288,8 +307,7 @@ describe("InstructionsSection", () => {
     });
 
     render(<InstructionsSection />);
-    const picker = await screen.findByLabelText("Preview task");
-    fireEvent.change(picker, { target: { value: "task-1" } });
+    await selectPreviewTask("task-1", "Wire the board");
     expect(await screen.findByText("first composed prompt")).toBeInTheDocument();
 
     const textarea = screen.getByLabelText("Base instructions");

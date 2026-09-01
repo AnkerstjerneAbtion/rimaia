@@ -302,6 +302,14 @@ pub fn ensure_unattended_runs_allowed(repository: &Repository) -> Result<()> {
 /// references it — the schema's `ON DELETE RESTRICT` is the backstop for a
 /// writer that is not this function (the MCP server, or the user with the
 /// `sqlite3` CLI); this is the message the user actually reads.
+///
+/// It also deletes the repository's strategy default, which lives in `settings`
+/// under a key rather than in a column (seam-contract D17.1). A settings key is
+/// not a foreign key and nothing cascades, so this is the only thing standing
+/// between removing a repository and leaving configuration behind that no
+/// screen will ever show again. Inside the transaction, so a removal refused
+/// two statements later has not thrown that configuration away on its way to
+/// the refusal.
 pub async fn remove(ctx: &ServiceContext, id: &str) -> Result<()> {
     let mut tx = ctx.pool.begin().await?;
 
@@ -335,6 +343,11 @@ pub async fn remove(ctx: &ServiceContext, id: &str) -> Result<()> {
     if deleted == 0 {
         return Err(Error::not_found(format!("no repository with id {id}")));
     }
+
+    // Spelled through the module that owns the key, not with a `format!` here:
+    // two spellings of `strategy_default.<id>` would leak a row per removed
+    // repository and nothing would ever notice (seam-contract D3, D17.1).
+    crate::strategy::settings::delete_repository_default(&mut *tx, id).await?;
 
     tx.commit().await?;
     ctx.publish(ChangeEvent::repositories([id.to_string()]));

@@ -6,7 +6,7 @@ import { listen } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
 
 import { RepositoriesSection } from "./RepositoriesSection";
-import type { Repository } from "../../types";
+import type { Repository, StrategyCatalogueView, StrategyDefaults } from "../../types";
 
 // `commands.ts` and `events.ts` both bottom out in `@tauri-apps/api/core`'s
 // `invoke` - mocking here, rather than the wrappers, exercises the real
@@ -50,6 +50,49 @@ function repository(overrides: Partial<Repository> = {}): Repository {
   };
 }
 
+const CATALOGUE_JSON = `{
+  "models": [{ "id": "opus", "label": "Opus" }, { "id": "sonnet", "label": "Sonnet" }],
+  "efforts": [{ "id": "low", "label": "Low" }, { "id": "high", "label": "High" }],
+  "planner": { "model": "haiku", "effort": "low", "max_turns": 6 }
+}`;
+
+function catalogueView(): StrategyCatalogueView {
+  return {
+    catalogue: {
+      models: [
+        { id: "opus", label: "Opus" },
+        { id: "sonnet", label: "Sonnet" },
+      ],
+      efforts: [
+        { id: "low", label: "Low" },
+        { id: "high", label: "High" },
+      ],
+      planner: { model: "haiku", effort: "low", max_turns: 6 },
+    },
+    json: CATALOGUE_JSON,
+    defaultJson: CATALOGUE_JSON,
+  };
+}
+
+/**
+ * Installs an `invoke` implementation that already answers the two reads every
+ * row makes for its default strategy (task 020), and delegates everything else
+ * to `handler`.
+ *
+ * Tests that are not about the strategy control would otherwise each have to
+ * re-list those two commands, and their own "unexpected command" fallbacks
+ * would fail on them.
+ */
+function mockBackend(handler: (command: string, args?: unknown) => unknown) {
+  mockInvoke.mockImplementation(async (command, args) => {
+    if (command === "get_strategy_catalogue") return catalogueView();
+    if (command === "get_strategy_defaults") {
+      return { mode: "default" } satisfies StrategyDefaults;
+    }
+    return handler(command, args);
+  });
+}
+
 beforeEach(() => {
   mockInvoke.mockReset();
   mockOpen.mockReset();
@@ -63,7 +106,7 @@ beforeEach(() => {
 describe("RepositoriesSection", () => {
   it("renders every registered repository with its default branch and remote", async () => {
     const repo = repository();
-    mockInvoke.mockImplementation(async (command, args) => {
+    mockBackend((command, args) => {
       if (command === "list_repositories") return [repo];
       if (command === "get_repository_remote_info") {
         return { remoteUrl: "git@github.com:example/rimaia.git", ghReady: true };
@@ -83,7 +126,7 @@ describe("RepositoriesSection", () => {
 
   it("shows the specific backend message for one invalid path, not a generic failure", async () => {
     mockOpen.mockResolvedValue("/tmp/not-a-repo");
-    mockInvoke.mockImplementation(async (command) => {
+    mockBackend((command) => {
       if (command === "list_repositories") return [];
       if (command === "register_repository") {
         throw { code: "invalid", message: "/tmp/not-a-repo is not a git repository" };
@@ -102,7 +145,7 @@ describe("RepositoriesSection", () => {
 
   it("shows a different specific backend message for a repository with no commits", async () => {
     mockOpen.mockResolvedValue("/tmp/empty-repo");
-    mockInvoke.mockImplementation(async (command) => {
+    mockBackend((command) => {
       if (command === "list_repositories") return [];
       if (command === "register_repository") {
         throw { code: "invalid", message: "/tmp/empty-repo has no commits yet" };
@@ -121,7 +164,7 @@ describe("RepositoriesSection", () => {
 
   it("defaults the unattended opt-in to off and requires confirming the honest warning before enabling it", async () => {
     const repo = repository({ allowUnattendedRuns: false });
-    mockInvoke.mockImplementation(async (command) => {
+    mockBackend((command) => {
       if (command === "list_repositories") return [repo];
       if (command === "get_repository_remote_info") return { remoteUrl: null, ghReady: null };
       if (command === "set_repository_unattended_runs") {
@@ -154,7 +197,7 @@ describe("RepositoriesSection", () => {
   it("enables unattended runs only once the confirmation is accepted", async () => {
     const repo = repository({ allowUnattendedRuns: false });
     let allow = false;
-    mockInvoke.mockImplementation(async (command, args) => {
+    mockBackend((command, args) => {
       if (command === "list_repositories") return [{ ...repo, allowUnattendedRuns: allow }];
       if (command === "get_repository_remote_info") return { remoteUrl: null, ghReady: null };
       if (command === "set_repository_unattended_runs") {
@@ -183,7 +226,7 @@ describe("RepositoriesSection", () => {
 
   it("shows the backend's refusal, including the task count, when removing a repository with tasks", async () => {
     const repo = repository();
-    mockInvoke.mockImplementation(async (command) => {
+    mockBackend((command) => {
       if (command === "list_repositories") return [repo];
       if (command === "get_repository_remote_info") return { remoteUrl: null, ghReady: null };
       if (command === "remove_repository") {
@@ -203,7 +246,7 @@ describe("RepositoriesSection", () => {
   it("live-refreshes the list when the backend publishes repositories:changed", async () => {
     const repo = repository();
     let listCalls = 0;
-    mockInvoke.mockImplementation(async (command) => {
+    mockBackend((command) => {
       if (command === "list_repositories") {
         listCalls += 1;
         return listCalls === 1 ? [] : [repo];
@@ -233,5 +276,80 @@ describe("RepositoriesSection", () => {
 
     expect(await screen.findByText("rimaia")).toBeInTheDocument();
     expect(listCalls).toBe(2);
+  });
+
+  it("stores a default strategy against that repository's own id and keeps it on the row", async () => {
+    // ADR-0016's "a repo of small tasks can default low without touching each
+    // card": the write has to name the repository, since the global key and a
+    // repository's differ only in that argument.
+    const repo = repository();
+    const stored: Record<string, StrategyDefaults> = {};
+    mockInvoke.mockImplementation(async (command, args) => {
+      if (command === "list_repositories") return [repo];
+      if (command === "get_repository_remote_info") return { remoteUrl: null, ghReady: null };
+      if (command === "get_strategy_catalogue") return catalogueView();
+      if (command === "get_strategy_defaults") {
+        const { repositoryId } = args as { repositoryId: string };
+        return stored[repositoryId] ?? { mode: "default" };
+      }
+      if (command === "set_strategy_defaults") {
+        const { repositoryId, value } = args as {
+          repositoryId: string;
+          value: StrategyDefaults;
+        };
+        stored[repositoryId] = value;
+        return null;
+      }
+      throw new Error(`unexpected command: ${command}`);
+    });
+
+    render(<RepositoriesSection />);
+
+    const model = await screen.findByLabelText("Model");
+    fireEvent.change(model, { target: { value: "sonnet" } });
+
+    await waitFor(() =>
+      expect(mockInvoke).toHaveBeenCalledWith("set_strategy_defaults", {
+        repositoryId: "repo-1",
+        value: { mode: "default", model: "sonnet" },
+      }),
+    );
+
+    // The mode travels on the same struct, and the model chosen a moment ago
+    // is still part of it — one value per level, not three independent writes.
+    fireEvent.change(screen.getByLabelText("Mode"), { target: { value: "planned" } });
+
+    await waitFor(() =>
+      expect(mockInvoke).toHaveBeenCalledWith("set_strategy_defaults", {
+        repositoryId: "repo-1",
+        value: { mode: "planned", model: "sonnet" },
+      }),
+    );
+    expect(model).toHaveValue("sonnet");
+    expect(stored["repo-1"]).toEqual({ mode: "planned", model: "sonnet" });
+  });
+
+  it("reverts the row's strategy dropdown and shows the backend's refusal when the write fails", async () => {
+    const repo = repository();
+    mockInvoke.mockImplementation(async (command) => {
+      if (command === "list_repositories") return [repo];
+      if (command === "get_repository_remote_info") return { remoteUrl: null, ghReady: null };
+      if (command === "get_strategy_catalogue") return catalogueView();
+      if (command === "get_strategy_defaults") return { mode: "default" };
+      if (command === "set_strategy_defaults") {
+        throw { code: "internal", message: "the settings row could not be written" };
+      }
+      throw new Error(`unexpected command: ${command}`);
+    });
+
+    render(<RepositoriesSection />);
+
+    const model = await screen.findByLabelText("Model");
+    fireEvent.change(model, { target: { value: "opus" } });
+
+    const banner = await screen.findByRole("alert");
+    expect(banner).toHaveTextContent("the settings row could not be written");
+    // Nothing was stored, so the row must not go on claiming Opus.
+    await waitFor(() => expect(model).toHaveValue(""));
   });
 });

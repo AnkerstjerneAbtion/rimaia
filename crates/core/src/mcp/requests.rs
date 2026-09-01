@@ -1,4 +1,5 @@
-//! What the ten tools take off the wire (ADR-0006, seam-contract D16).
+//! What the registered tools take off the wire (ADR-0006, its 2026-08-28
+//! amendment, seam-contract D16).
 //!
 //! `snake_case` in both directions, which is the convention MCP tool schemas
 //! are written in everywhere else — deliberately *not* the `camelCase` the
@@ -16,8 +17,10 @@
 use schemars::JsonSchema;
 use serde::Deserialize;
 
-use crate::db::{BoardColumn, RunState};
+use crate::db::{BoardColumn, RunState, StrategyMode};
 use crate::error::{Error, Result};
+use crate::strategy::StrategyApproval;
+use crate::tasks::{StrategyPhase, StrategyPlan, StrategyWorkflow};
 
 /// `create_task`: a whole plan, handed over in one call.
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
@@ -94,6 +97,22 @@ pub struct UpdateTaskRequest {
     pub model: Option<String>,
     #[serde(default)]
     pub effort: Option<String>,
+    /// ADR-0016's mode, and the one part of a strategy that *is* a patch field
+    /// (ADR-0006's amendment): it is a plain enum an operator sets from either
+    /// door, where the planner's proposal is a document with its own tool.
+    ///
+    /// Not in [`ClearableField`], and D16.5's asymmetry is not an argument that
+    /// it should be: that rule exists because sending `null` for a *plan*
+    /// destroys four thousand words nobody can get back. A mode has three legal
+    /// values, one of which — [`StrategyMode::Default`] — already means "no
+    /// opinion", so "erase it" has both a spelling and no cost.
+    ///
+    /// Setting `model` or `effort` in the same call overrides whatever this
+    /// says, per seam-contract D17.6, in
+    /// [`tasks::update_task`](crate::tasks::update_task) — where both doors get
+    /// it, rather than here where only one would.
+    #[serde(default)]
+    pub strategy_mode: Option<StrategyMode>,
     /// Re-files the task into another repository. Refused once anything has
     /// tied it to the one it is in (seam-contract D13) — by the service, not
     /// here.
@@ -193,9 +212,165 @@ pub struct SetTaskDependenciesRequest {
     pub depends_on: Vec<String>,
 }
 
+/// `set_task_strategy`: a planner's whole answer, in one call (ADR-0006's
+/// 2026-08-28 amendment).
+///
+/// Not a patch, and that is the amendment's first argument for it being its own
+/// tool: the envelope is only coherent whole, so there is no `clear` list and no
+/// field whose absence means "leave what was there". A proposal that names no
+/// model names no model.
+///
+/// Two things this deliberately does **not** take. `status`, because a proposal
+/// is what this tool records and a planner declaring its own write a failure
+/// would be recording an outcome the runner owns; and `run` — the session id,
+/// turn count and cost — because the planner is still mid-session when it calls
+/// this and the runner amends the envelope with its own accounting once the
+/// process has exited (seam-contract D17.3). `version` is stamped by
+/// [`tasks::set_task_strategy`](crate::tasks::set_task_strategy) for the reason
+/// that function gives.
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct SetTaskStrategyRequest {
+    pub task_id: String,
+    /// The model id the implementation run should spawn with — one of the ids
+    /// the prompt listed, verbatim, since it reaches `--model` unchanged.
+    /// Omitting it is legal and means "no opinion": the task then falls back
+    /// through the repository and global defaults.
+    #[serde(default)]
+    pub model: Option<String>,
+    #[serde(default)]
+    pub effort: Option<String>,
+    #[serde(default)]
+    pub workflow: Option<StrategyWorkflow>,
+    /// The phase breakdown, when the work is worth splitting. Rendered into the
+    /// implementation prompt as guidance for the *agent*, which runs the phases
+    /// itself; nothing here reaches a flag or a second process (ADR-0016).
+    #[serde(default)]
+    pub phases: Vec<StrategyPhaseRequest>,
+    /// Why this strategy, for the human reading the card in the morning.
+    #[serde(default)]
+    pub rationale: Option<String>,
+}
+
+/// One phase of a proposal.
+///
+/// Its own DTO rather than [`StrategyPhase`] itself, for this module's stated
+/// reason: a request is a message from a caller who can be told they got a field
+/// name wrong, so it is `deny_unknown_fields`, where the stored envelope is a
+/// document that must stay readable when a later version adds a key.
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct StrategyPhaseRequest {
+    pub name: String,
+    #[serde(default)]
+    pub model: Option<String>,
+    #[serde(default)]
+    pub effort: Option<String>,
+    /// How many agents the phase wants. Defaulted rather than required, and to
+    /// the same one the stored envelope defaults to, so a phase that arrived
+    /// here and a phase hand-written into the column describe the same thing.
+    #[serde(default = "one_agent")]
+    pub agents: u32,
+    #[serde(default)]
+    pub summary: String,
+}
+
+fn one_agent() -> u32 {
+    1
+}
+
+impl SetTaskStrategyRequest {
+    /// The proposal as the service's own document.
+    ///
+    /// A conversion and nothing else: no defaulting a missing model, no
+    /// rejecting a `multi_agent` with no phases, no deciding whether the task
+    /// may be written to. Every one of those is
+    /// [`tasks::set_task_strategy`](crate::tasks::set_task_strategy)'s, so that
+    /// the panel and this tool cannot come to disagree about them (ADR-0006).
+    pub fn into_plan(self) -> StrategyPlan {
+        StrategyPlan {
+            workflow: self.workflow,
+            phases: self
+                .phases
+                .into_iter()
+                .map(|phase| StrategyPhase {
+                    name: phase.name,
+                    model: phase.model,
+                    effort: phase.effort,
+                    agents: phase.agents,
+                    summary: phase.summary,
+                })
+                .collect(),
+            rationale: self.rationale,
+            ..StrategyPlan::proposed(self.model, self.effort)
+        }
+    }
+}
+
+/// A task id and nothing else — the shape every task-scoped tool that takes no
+/// other argument shares.
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct TaskStrategyRequest {
+    pub task_id: String,
+}
+
+/// Which defaults to read: one repository's, or the global ones beneath them.
+///
+/// `None` means global. A separate tool per scope was the alternative and it
+/// would double the surface to express one optional field (ADR-0021's own
+/// warning about a list that is large and badly described).
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct GetStrategyDefaultsRequest {
+    #[serde(default)]
+    pub repository_id: Option<String>,
+}
+
+/// The defaults to store, and where.
+///
+/// `mode`, `model` and `effort` are the whole record, so this replaces rather
+/// than patches: there is no `clear` list because sending the record without a
+/// `model` already says "no model", and D16.5's argument for an explicit clear
+/// applies to a field whose accidental erasure is expensive. A default model is
+/// not that.
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct SetStrategyDefaultsRequest {
+    /// Omitted sets the global defaults.
+    #[serde(default)]
+    pub repository_id: Option<String>,
+    pub mode: StrategyMode,
+    #[serde(default)]
+    pub model: Option<String>,
+    #[serde(default)]
+    pub effort: Option<String>,
+}
+
+/// The catalogue as a JSON document.
+///
+/// A string rather than a typed structure, deliberately: the catalogue is
+/// configuration whose whole point is that a new model does not require a
+/// release (ADR-0016), and a typed request would put this crate's idea of the
+/// shape between the operator and their own settings row. The service parses it
+/// and refuses what it cannot read, which is the one place that check belongs.
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct SetStrategyCatalogueRequest {
+    pub catalogue: String,
+}
+
+/// Whether a planned strategy waits for a human before the implementation run.
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct SetStrategyApprovalRequest {
+    pub approval: StrategyApproval,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tasks::StrategyPlanStatus;
     use pretty_assertions::assert_eq;
     use serde_json::json;
 
@@ -249,6 +424,75 @@ mod tests {
         assert!(
             error.to_string().contains("unknown variant `plan`"),
             "the caller is told what the legal values are: {error}"
+        );
+    }
+
+    #[test]
+    fn a_proposal_becomes_a_proposed_envelope_without_the_planner_saying_so() {
+        // `status` is not on the request at all: this tool records proposals,
+        // and a planner declaring its own write a failure would be recording an
+        // outcome the runner owns.
+        let request: SetTaskStrategyRequest = serde_json::from_value(json!({
+            "task_id": "abc",
+            "model": "sonnet",
+            "effort": "high",
+            "workflow": "multi_agent",
+            "phases": [{ "name": "Schema", "summary": "the migration" }],
+            "rationale": "The plan names a migration and a command surface.",
+        }))
+        .expect("a planner's answer deserializes");
+
+        let plan = request.into_plan();
+
+        assert_eq!(plan.status, StrategyPlanStatus::Proposed);
+        assert_eq!(plan.model.as_deref(), Some("sonnet"));
+        assert_eq!(plan.effort.as_deref(), Some("high"));
+        assert_eq!(plan.workflow, Some(StrategyWorkflow::MultiAgent));
+        assert_eq!(plan.phases.len(), 1);
+        assert_eq!(
+            plan.phases[0].agents, 1,
+            "a phase that omits its agent count describes one agent"
+        );
+        assert_eq!(
+            plan.rationale.as_deref(),
+            Some("The plan names a migration and a command surface.")
+        );
+        assert_eq!(
+            plan.run, None,
+            "the planner is still mid-session; the runner records the accounting"
+        );
+    }
+
+    #[test]
+    fn a_proposal_that_names_no_model_is_a_proposal_and_not_a_bad_request() {
+        // "No opinion" is a legal answer — the task falls back through the
+        // repository and global defaults — so it must not be spelled by
+        // omitting the *call*, which is the one failure this tool cannot tell
+        // from a planner that crashed.
+        let request: SetTaskStrategyRequest =
+            serde_json::from_value(json!({ "task_id": "abc" })).expect("a bare proposal is legal");
+
+        let plan = request.into_plan();
+
+        assert_eq!(plan.model, None);
+        assert_eq!(plan.effort, None);
+        assert!(plan.phases.is_empty());
+    }
+
+    #[test]
+    fn a_strategy_field_misspelled_inside_a_phase_is_refused_naming_it() {
+        // The nested object is `deny_unknown_fields` too — the reason phases
+        // have a request DTO of their own rather than reusing the stored
+        // envelope's tolerant one.
+        let error = serde_json::from_value::<SetTaskStrategyRequest>(json!({
+            "task_id": "abc",
+            "phases": [{ "name": "Schema", "sumary": "the migration" }],
+        }))
+        .expect_err("a misspelled field is refused");
+
+        assert!(
+            error.to_string().contains("unknown field `sumary`"),
+            "the message names the typo: {error}"
         );
     }
 

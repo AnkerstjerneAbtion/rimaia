@@ -52,7 +52,11 @@ pub async fn set_mcp_port(state: State<'_, AppState>, port: u16) -> Result<McpSt
         return Ok(current);
     }
 
-    let (handle, task) = mcp::build(state.context.clone(), port).await;
+    // The same `RunHandles` the first bind was given, so the rebind records
+    // the new address into the value the runner already holds (seam-contract
+    // D17.4). Handing this one a fresh set would leave every later run minting
+    // tokens against a table nothing routes.
+    let (handle, task) = mcp::build(state.context.clone(), port, state.run_handles.clone()).await;
     tauri::async_runtime::spawn(task.run());
 
     let previous = {

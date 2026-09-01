@@ -206,6 +206,7 @@ pub fn skip_reason(task: &TaskSummary, unattended_runs_allowed: bool) -> Option<
 mod tests {
     use super::*;
     use crate::db::{MutationSource, StrategyMode, Task};
+    use crate::strategy::StrategyOrigin;
     use chrono::{DateTime, Utc};
     use pretty_assertions::assert_eq;
 
@@ -237,6 +238,13 @@ mod tests {
             dependency_count: 0,
             blocked_by_incomplete: false,
             last_run: None,
+            // Nothing configured anywhere, which is what the queue sees for a
+            // task nobody has given a strategy: eligibility does not read these
+            // and must not start doing so — what a task runs *with* is task
+            // 020's, what the queue may claim is ADR-0007's.
+            effective_model: None,
+            effective_effort: None,
+            effective_origin: StrategyOrigin::ClaudeCode,
         }
     }
 

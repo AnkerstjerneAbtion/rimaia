@@ -25,11 +25,23 @@
 //! one-line continuation picks up mid-plan rather than restarting, so re-sending
 //! the composed prompt would only re-spend the tokens.
 //!
+//! # A third pair, for the run that decides how the work is done
+//!
+//! [`compose_strategy_prompt`] and [`compose_strategy_system_append`] are task
+//! 020's planner (ADR-0016, seam-contract D17.9). The planner reads the same
+//! plan an implementation run would and answers with a single MCP call; it
+//! writes nothing. Its prompt **takes no base instructions at all** — see that
+//! function's own note, and ADR-0009's 2026-08-28 amendment, for why that is a
+//! missing parameter rather than an empty argument.
+//!
 //! Everything here is pure. Nothing reads the database: task 008 loads the base
 //! instructions through [`crate::db::settings`] and passes them in, which is
 //! what keeps composition unit-testable without a pool or a process.
 
+use serde::Deserialize;
+
 use crate::db::{Repository, TaskLink};
+use crate::strategy::{Catalogue, CatalogueEntry};
 use crate::tasks::TaskDetail;
 
 /// Section headings, in ADR-0009's fixed order.
@@ -39,26 +51,60 @@ use crate::tasks::TaskDetail;
 const BASE_INSTRUCTIONS_HEADING: &str = "# Base instructions";
 const TASK_CONTEXT_HEADING: &str = "# Task context";
 const PLAN_HEADING: &str = "# Plan";
+/// The fifth section ADR-0009's 2026-08-28 amendment adds, fourth in order.
+const EXECUTION_STRATEGY_HEADING: &str = "# Execution strategy";
 const EXTRA_INSTRUCTIONS_HEADING: &str = "# Extra instructions";
+
+/// The strategy prompt's own headings, in seam-contract D17.9's order. `#
+/// Task context`, `# Plan` and `# Extra instructions` are shared with the
+/// implementation prompt above, which is the point of reusing them: the planner
+/// judges exactly the text the run it is planning would be given.
+const YOUR_JOB_HEADING: &str = "# Your job";
+const AVAILABLE_MODELS_HEADING: &str = "# Available models";
+const AVAILABLE_EFFORTS_HEADING: &str = "# Available effort levels";
+const HOW_TO_ANSWER_HEADING: &str = "# How to answer";
+
+/// The planner's one way to answer, as Claude Code spells an MCP tool:
+/// `mcp__<server>__<tool>`, and the server is `rimaia` because that is the key
+/// the runner writes into `--mcp-config` (seam-contract D17.4).
+///
+/// Exported so that the caller of [`compose_strategy_system_append`] passes this
+/// same name rather than retyping it — the two channels naming different tools
+/// would be a defect no compiler catches.
+pub const SET_TASK_STRATEGY_TOOL: &str = "mcp__rimaia__set_task_strategy";
 
 /// A blank line between a heading and its body, and between sections.
 const SECTION_SEPARATOR: &str = "\n\n";
 
 /// The whole prompt for one run, in ADR-0009's order: base instructions, task
-/// context, plan, extra instructions.
+/// context, plan, execution strategy, extra instructions.
 ///
 /// `base` is the raw `settings.base_instructions` text, template variables
 /// unexpanded; this expands them. Empty sections are omitted entirely, heading
 /// and all — a section whose body is only whitespace counts as empty, because a
 /// plan of three newlines and no plan at all are the same thing to the agent.
 ///
+/// `guidance` is what a planner proposed for this task, and it is a parameter
+/// rather than something read off `task` because the caller is the one that
+/// knows whether the proposal is the strategy this run is actually executing:
+/// the strategy run hands over the guidance it has just recorded, and a run that
+/// did not plan passes `None`. A proposal with nothing to say — single-agent,
+/// no phases — composes exactly what `None` composes, which is what keeps task
+/// 006's byte-for-byte preview criterion true for every task that has never been
+/// planned.
+///
 /// There is no trailing newline. The string is stored verbatim in `runs.prompt`
 /// and compared byte for byte against the Settings preview, so it ends exactly
 /// where its last section does.
-pub fn compose_prompt(base: &str, task: &TaskDetail, repo: &Repository) -> String {
+pub fn compose_prompt(
+    base: &str,
+    task: &TaskDetail,
+    repo: &Repository,
+    guidance: Option<&StrategyGuidance>,
+) -> String {
     let variables = Variables::of(task, repo);
 
-    let mut sections = Vec::with_capacity(4);
+    let mut sections = Vec::with_capacity(5);
     push_section(
         &mut sections,
         BASE_INSTRUCTIONS_HEADING,
@@ -76,11 +122,99 @@ pub fn compose_prompt(base: &str, task: &TaskDetail, repo: &Repository) -> Strin
     );
     push_section(
         &mut sections,
+        EXECUTION_STRATEGY_HEADING,
+        &guidance.map(execution_strategy).unwrap_or_default(),
+    );
+    push_section(
+        &mut sections,
         EXTRA_INSTRUCTIONS_HEADING,
         task.task.extra_instructions.as_deref().unwrap_or_default(),
     );
 
     sections.join(SECTION_SEPARATOR)
+}
+
+/// The whole prompt for a strategy run (ADR-0016, seam-contract D17.9): what the
+/// job is, the same task context and plan an implementation run would get, the
+/// catalogue to choose from, and the one way to answer.
+///
+/// **There is no `base` parameter, and that is the design.** Base instructions
+/// are implementation workflow — commit as you work, run the suite, open a pull
+/// request — and a planner that opens a pull request is a defect. Passing an
+/// empty string would leave the wiring one plausible edit away; having nowhere
+/// to pass them makes it impossible, which is the cheapest place to enforce a
+/// rule that would otherwise be a comment (ADR-0009's 2026-08-28 amendment).
+///
+/// Composed by exactly the rules [`compose_prompt`] follows: level-1 headings,
+/// the same separator, empty sections omitted with their heading, no trailing
+/// newline. An empty catalogue list is therefore an omitted section rather than
+/// an empty one — an operator who turned a dropdown off has said something, and
+/// what `# How to answer` then asks for is an id the planner has to name on its
+/// own.
+pub fn compose_strategy_prompt(
+    task: &TaskDetail,
+    repo: &Repository,
+    catalogue: &Catalogue,
+) -> String {
+    let mut sections = Vec::with_capacity(7);
+    push_section(&mut sections, YOUR_JOB_HEADING, YOUR_JOB);
+    push_section(
+        &mut sections,
+        TASK_CONTEXT_HEADING,
+        &task_context(task, repo),
+    );
+    push_section(
+        &mut sections,
+        PLAN_HEADING,
+        task.task.plan.as_deref().unwrap_or_default(),
+    );
+    push_section(
+        &mut sections,
+        EXTRA_INSTRUCTIONS_HEADING,
+        task.task.extra_instructions.as_deref().unwrap_or_default(),
+    );
+    push_section(
+        &mut sections,
+        AVAILABLE_MODELS_HEADING,
+        &choices(&catalogue.models),
+    );
+    push_section(
+        &mut sections,
+        AVAILABLE_EFFORTS_HEADING,
+        &choices(&catalogue.efforts),
+    );
+    push_section(
+        &mut sections,
+        HOW_TO_ANSWER_HEADING,
+        &how_to_answer(&task.task.id),
+    );
+
+    sections.join(SECTION_SEPARATOR)
+}
+
+/// The orchestrator constraints for a strategy run's `--append-system-prompt`
+/// (ADR-0012's 2026-08-28 amendment).
+///
+/// The same channel and the same rules as [`compose_system_append`], for a run
+/// whose facts are different ones: it is unattended and nobody can answer it, it
+/// writes nothing at all, and its whole output is one call to `tool` for
+/// `task_id`. The task id is here as well as in the prompt because it is the one
+/// fact the planner must not reason its way out of — a proposal addressed to
+/// someone else's card is refused by the scoped handle (seam-contract D17.4),
+/// and a run that has been told which task it is cannot spend turns discovering
+/// that.
+///
+/// `tool` is a parameter rather than [`SET_TASK_STRATEGY_TOOL`] read directly,
+/// so the runner passes the name it actually wired; the constant is what it
+/// passes.
+pub fn compose_strategy_system_append(task_id: &str, tool: &str) -> String {
+    format!(
+        "You are running unattended, started by Rimaia to decide how one task should be executed. What follows is how this session works, not a preference you may weigh against the job.\n\
+         \n\
+         - Nobody is watching and nobody can answer a question. There is no interactive terminal, and anything you ask will go unread until a human reviews this transcript, which may be many hours from now.\n\
+         - You are not implementing anything. Write no files, run no commands, commit nothing, and open no pull request. The tools that would let you are denied for this session.\n\
+         - Your whole answer is one call to `{tool}`, made exactly once, for the task `{task_id}` and no other. Anything you print instead of that call is read by nobody."
+    )
 }
 
 /// The orchestrator constraints for `--append-system-prompt` (ADR-0012).
@@ -162,6 +296,259 @@ fn task_context(task: &TaskDetail, repo: &Repository) -> String {
         }
     }
     lines.join("\n")
+}
+
+// ---------------------------------------------------------------------------
+// The strategy prompt's own sections
+// ---------------------------------------------------------------------------
+
+/// `# Your job`, and the whole of it — a constant rather than a `format!`
+/// because nothing about the job varies by task. What varies is the plan it is
+/// judging, and that is the section below it.
+///
+/// It says "not implementing" three ways on purpose. The planner is a Claude
+/// Code session sitting in a prepared worktree with a plan in front of it, which
+/// is exactly the situation it has been trained to start working in; the denied
+/// tools stop it, but a run that spends six turns trying to edit files and then
+/// stops has still answered nothing.
+const YOUR_JOB: &str = "You are choosing how another agent should execute the task below. You are not implementing it, and nothing you decide here is code.
+
+Read the plan and answer three questions:
+
+- **Which model should run it.** Pick from the models listed below.
+- **How much reasoning effort it needs.** Pick from the effort levels listed below. Reach for the expensive end only where the plan genuinely earns it: every task in the queue is paid for out of one subscription, and effort spent on a mechanical task is effort a hard one later tonight will not have.
+- **Whether the work fans out.** Most tasks do not. Propose a multi-agent workflow only when the plan holds parts that can genuinely be worked in parallel, and name those phases; the agent that implements this task will run them itself, with its own subagents.
+
+The plan and any extra instructions below are what you are judging, not what you are carrying out.";
+
+/// One catalogue list, as the planner has to read it: the id it must copy
+/// verbatim, then the label a human would recognise.
+///
+/// The id is in backticks and first because it is the part that reaches
+/// `--model` or `--effort`; the label is there so a planner choosing between
+/// `xhigh` and `max` has the words the operator chose for them.
+fn choices(entries: &[CatalogueEntry]) -> String {
+    entries
+        .iter()
+        .map(|entry| format!("- `{}` — {}", entry.id, entry.label))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// `# How to answer`: the tool, its arguments, and the instruction to print
+/// nothing else.
+///
+/// **There is no printed-JSON fallback, and this section is where that shows.**
+/// Seam-contract D17.9 gives the argument in full: a second way in would be a
+/// second writer with its own parser duplicating every invariant
+/// `set_task_strategy` enforces, extracting it would mean a heuristic over
+/// free-form prose, and the scope check lives on the MCP path. A planner that
+/// reasons well and then forgets the call is detected by the runner and recorded
+/// as a failure — not rescued by parsing its prose.
+fn how_to_answer(task_id: &str) -> String {
+    format!(
+        "Answer with one tool call and nothing else.\n\
+         \n\
+         Call `{SET_TASK_STRATEGY_TOOL}` exactly once, with:\n\
+         \n\
+         - `task_id`: `{task_id}` — this task, and no other. A call naming a different task is refused.\n\
+         - `model`: one id from **Available models** above, copied verbatim.\n\
+         - `effort`: one id from **Available effort levels** above, copied verbatim.\n\
+         - `rationale`: one to three sentences on why that pairing suits this plan. A human reads it on the card.\n\
+         - `workflow`: `multi_agent`, with a `phases` list, only if the work genuinely fans out into parts that can be worked in parallel. Otherwise `single_agent`, and no phases.\n\
+         \n\
+         Then stop. Print nothing else: the tool call is the only answer that reaches Rimaia, and prose beside it is read by nobody. Do not edit files, run commands, or open a pull request."
+    )
+}
+
+// ---------------------------------------------------------------------------
+// Execution strategy
+// ---------------------------------------------------------------------------
+
+/// What a recorded proposal contributes to the prompt of the run that executes
+/// it (ADR-0009's 2026-08-28 amendment).
+///
+/// A **projection** of the `strategy_plan` envelope (seam-contract D17.3), not a
+/// second model of it. Two fields, because two are all the section renders, and
+/// keeping composition independent of the envelope's full shape is what lets
+/// task 021 extend that document without silently changing what a run is asked
+/// to do.
+///
+/// `multi_agent` is a `bool` rather than a copy of the envelope's `workflow`
+/// enum for the same reason: the only thing this section renders differently is
+/// whether the work fans out, and a second enum spelling the same two variants
+/// would be a thing to keep in step for no gain.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct StrategyGuidance {
+    pub multi_agent: bool,
+    pub phases: Vec<GuidancePhase>,
+}
+
+/// One phase of a multi-agent proposal, as the prompt renders it.
+///
+/// **No model and no effort**, though the envelope carries them per phase.
+/// ADR-0009's amendment is explicit that this section never restates either:
+/// they are `--model` and `--effort`, already applied to this process by the
+/// time it reads this, and Rimaia cannot apply a different pair to a subagent it
+/// does not run. Putting them in prose would invite the run to argue with a
+/// decision it cannot change. The panel renders them; the prompt does not.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct GuidancePhase {
+    pub name: String,
+    #[serde(default)]
+    pub agents: Option<u32>,
+    #[serde(default)]
+    pub summary: Option<String>,
+}
+
+impl StrategyGuidance {
+    /// The guidance a task's recorded proposal carries, or `None` when it has
+    /// none to give.
+    ///
+    /// One derivation, reached by both callers — the strategy run and the
+    /// Settings preview — so that what the preview shows and what a run receives
+    /// cannot differ (task 006's criterion, ADR-0006's rule about a rule
+    /// enforced in one adapter).
+    pub fn for_task(task: &TaskDetail) -> Option<Self> {
+        Self::from_plan(task.task.strategy_plan.as_deref()?)
+    }
+
+    /// Reads the guidance fields out of a stored `strategy_plan` document.
+    ///
+    /// `None` for anything that is not a proposal with something to say: a
+    /// `failed` envelope, a status this build does not recognise, a
+    /// single-agent proposal with no phases, or JSON that will not parse at all.
+    /// Tolerant rather than fallible, the rule
+    /// [`crate::strategy::catalogue::catalogue`] and
+    /// [`RunEnvironment::from_stored`](crate::db::RunEnvironment) already
+    /// state — a mangled row costs a log line and a prompt without this
+    /// section, never a queue.
+    pub fn from_plan(plan: &str) -> Option<Self> {
+        let proposal = match serde_json::from_str::<Proposal>(plan) {
+            Ok(proposal) => proposal,
+            Err(error) => {
+                tracing::warn!(
+                    %error,
+                    "unreadable strategy_plan; composing the prompt without an execution strategy"
+                );
+                return None;
+            }
+        };
+
+        if proposal.status != ProposalStatus::Proposed {
+            return None;
+        }
+
+        let guidance = Self {
+            multi_agent: proposal.workflow == Workflow::MultiAgent,
+            phases: proposal.phases,
+        };
+
+        // A proposal that neither fans out nor names a phase has nothing the
+        // prompt could say, and saying it anyway would move the bytes of every
+        // single-agent task's prompt.
+        (guidance.multi_agent || !guidance.phases.is_empty()).then_some(guidance)
+    }
+}
+
+/// The subset of seam-contract D17.3's envelope this module reads. Unknown
+/// fields are ignored rather than denied: task 021 extends this document, and a
+/// field it adds must not cost the run its phases.
+#[derive(Debug, Deserialize)]
+struct Proposal {
+    #[serde(default)]
+    status: ProposalStatus,
+    #[serde(default)]
+    workflow: Workflow,
+    #[serde(default)]
+    phases: Vec<GuidancePhase>,
+}
+
+/// `#[serde(other)]` on both of these is the tolerance rule as a type: a status
+/// or workflow written by a newer Rimaia parses into a variant this build knows
+/// it does not understand, and the guidance is dropped, rather than the whole
+/// document failing and taking the rest of the prompt's fidelity with it.
+#[derive(Debug, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum ProposalStatus {
+    Proposed,
+    Failed,
+    #[serde(other)]
+    #[default]
+    Unrecognised,
+}
+
+#[derive(Debug, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum Workflow {
+    #[default]
+    SingleAgent,
+    MultiAgent,
+    #[serde(other)]
+    Unrecognised,
+}
+
+/// The body of `# Execution strategy`, or an empty string when the guidance has
+/// nothing to say — which [`push_section`] then omits, heading and all.
+fn execution_strategy(guidance: &StrategyGuidance) -> String {
+    if !guidance.multi_agent && guidance.phases.is_empty() {
+        return String::new();
+    }
+
+    let mut parts = vec![
+        "A planning run read the plan above and proposed how to execute it. Treat it as guidance from an agent that saw the whole task at once: follow it unless the code tells you otherwise once you are in it, and say so in your final message if it does.".to_string(),
+    ];
+
+    if guidance.multi_agent {
+        parts.push(
+            "This work fans out. Run it with subagents rather than as one linear pass, giving each only the part of the plan it needs."
+                .to_string(),
+        );
+    }
+
+    if !guidance.phases.is_empty() {
+        parts.push("Phases, in order:".to_string());
+        parts.push(
+            guidance
+                .phases
+                .iter()
+                .enumerate()
+                .map(|(index, phase)| phase.render(index + 1))
+                .collect::<Vec<_>>()
+                .join("\n"),
+        );
+    }
+
+    // ADR-0016's boundary, in the prompt rather than only in an ADR: Rimaia
+    // injects a strategy, it never orchestrates one.
+    parts.push(
+        "Rimaia does not run these phases; you do, in this session, with your own subagents."
+            .to_string(),
+    );
+
+    parts.join(SECTION_SEPARATOR)
+}
+
+impl GuidancePhase {
+    /// `1. **Schema** (2 agents) — Add the columns.`
+    ///
+    /// The agent count and the summary are each omitted when the planner gave
+    /// none, for [`task_context`]'s reason: a phase rendered `(0 agents)` or
+    /// trailing an empty dash tells the run less than one that says nothing.
+    fn render(&self, number: usize) -> String {
+        let name = self.name.trim();
+        let agents = match self.agents {
+            Some(1) => " (1 agent)".to_string(),
+            Some(agents) => format!(" ({agents} agents)"),
+            None => String::new(),
+        };
+        let summary = match self.summary.as_deref().map(str::trim) {
+            Some(summary) if !summary.is_empty() => format!(" — {summary}"),
+            _ => String::new(),
+        };
+
+        format!("{number}. **{name}**{agents}{summary}")
+    }
 }
 
 /// The links as top-level bullets, in the order [`crate::tasks::get_task`]

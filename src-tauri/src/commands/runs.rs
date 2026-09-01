@@ -17,7 +17,7 @@
 //! second way.
 
 use rimaia_core::runner::events::RunTail;
-use rimaia_core::runner::{probe_cli, run_task, RunRequest, RunTrigger, RunnerConfig};
+use rimaia_core::runner::{probe_cli, run_task, RunRequest, RunTrigger};
 use rimaia_core::scheduler::{self, ClaimOutcome};
 use rimaia_core::{repo, tasks, Error, Result};
 use tauri::State;
@@ -34,9 +34,25 @@ use crate::state::{AppState, RunRegistry};
 /// that card is refused with "a run is already in progress" and nothing —
 /// short of restarting the app — clears it. `Drop` runs on unwind as well as
 /// on a normal return, which is the property this guard exists for.
-struct ReleaseOnDrop {
+///
+/// `pub(crate)` since task 020: `commands::strategy::plan_task_strategy` starts
+/// a second kind of child process against the same registry entry and needs the
+/// same guarantee. One guard rather than two, for the same reason there is now
+/// one `RunnerConfig` — a second copy is a second place for the release to be
+/// forgotten.
+pub(crate) struct ReleaseOnDrop {
     registry: RunRegistry,
     task_id: String,
+}
+
+impl ReleaseOnDrop {
+    /// Takes over the registry entry [`RunRegistry::start`] has already
+    /// claimed for `task_id`. It claims nothing itself — a guard that could
+    /// also claim would be a second door onto the refusal `start` exists to
+    /// make.
+    pub(crate) fn new(registry: RunRegistry, task_id: String) -> Self {
+        Self { registry, task_id }
+    }
 }
 
 impl Drop for ReleaseOnDrop {
@@ -94,13 +110,13 @@ pub async fn start_task_run(state: State<'_, AppState>, task_id: String) -> Resu
     // Releases the claim above on every exit from here on — the early `?`
     // returns immediately below, or, once moved into the spawned future,
     // however `run_task` ends there.
-    let release = ReleaseOnDrop {
-        registry: state.runs.clone(),
-        task_id: task_id.clone(),
-    };
+    let release = ReleaseOnDrop::new(state.runs.clone(), task_id.clone());
 
     let context = state.context.clone();
-    let config = RunnerConfig::default();
+    // The process-wide config, not a fresh default: the queue spawns from this
+    // same value, and a button that configured its child differently from the
+    // queue's would be a difference nothing on screen could explain.
+    let config = state.runner.clone();
 
     let detail = tasks::get_task(&context, &task_id).await?;
     let repository = repo::get(&context, &detail.task.repository_id).await?;
