@@ -32,9 +32,10 @@ reviewable in the app afterwards.
 | 19 | [016](016-worktree-lifecycle-and-cleanup.md) | Worktree lifecycle and cleanup | v0.3 | 007, 009 | — |
 | 20 | [017](017-morning-review-flow.md) | Morning review flow | v0.3 | 015 | — |
 | 21 | [018](018-preflight-doctor-and-packaging.md) | Preflight doctor and packaging | v0.3 | 008 | — |
-| 22 | [022](022-per-repository-git-credentials.md) | Per-repository git credentials | v0.3 | 003, 008 | — |
-| 23 | [021](021-review-and-fix-loop.md) | Review-and-fix loop | v0.4 | 015, 017, 020 | — |
-| 24 | [024](024-analytics.md) | Analytics — what the queue has actually done | v0.4 | 015 | — |
+| 22 | [025](025-startup-failure-dialog.md) | A startup failure a double-clicked bundle can see | v0.3 | 018 | — |
+| 23 | [022](022-per-repository-git-credentials.md) | Per-repository git credentials | v0.3 | 003, 008 | — |
+| 24 | [021](021-review-and-fix-loop.md) | Review-and-fix loop | v0.4 | 015, 017, 020 | — |
+| 25 | [024](024-analytics.md) | Analytics — what the queue has actually done | v0.4 | 015 | — |
 
 ## Before task 001
 
