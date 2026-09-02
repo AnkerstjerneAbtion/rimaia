@@ -774,20 +774,31 @@ mod tests {
     use super::*;
     use crate::testing::TestContext;
     use pretty_assertions::assert_eq;
+    use tempfile::TempDir;
 
-    fn queue(harness: &TestContext) -> (QueueHandle, QueueTask) {
-        build(
-            harness.context.clone(),
-            AppPaths::new("/tmp/rimaia-queue-unit-test"),
-            RunnerConfig::default(),
-            InFlight::new(),
-        )
+    /// A queue whose preflight can actually pass.
+    ///
+    /// The [`TempDir`] is returned rather than dropped on the way out, and every
+    /// caller binds it: it owns both the app directory `data_directory` reports
+    /// on and the stand-in binary the two `claude` checks spawn, so letting it
+    /// drop here would delete the environment the gate is about to inspect.
+    ///
+    /// This used to be `AppPaths::new("/tmp/…")` and `RunnerConfig::default()`,
+    /// which was fine until task 018 put the doctor on `start()`. A bare
+    /// `RunnerConfig::default()` resolves `claude` on `PATH`, and `claude` is a
+    /// prerequisite the project deliberately never bundles (ADR-0004) — so that
+    /// version of this helper passed on a developer's machine and failed on CI,
+    /// where no CLI is installed. See `testing::doctor::passing_queue_environment`.
+    fn queue(harness: &TestContext) -> (TempDir, QueueHandle, QueueTask) {
+        let (root, paths, runner) = crate::testing::doctor::passing_queue_environment();
+        let (handle, task) = build(harness.context.clone(), paths, runner, InFlight::new());
+        (root, handle, task)
     }
 
     #[tokio::test]
     async fn the_control_verbs_write_the_switch_the_next_launch_reads() {
         let harness = TestContext::new().await;
-        let (handle, _task) = queue(&harness);
+        let (_root, handle, _task) = queue(&harness);
 
         handle.start().await.expect("start the queue");
         assert_eq!(
@@ -828,7 +839,7 @@ mod tests {
         // The Stop button is pressed by a human who cannot see whether the
         // current run finished half a second ago.
         let harness = TestContext::new().await;
-        let (handle, _task) = queue(&harness);
+        let (_root, handle, _task) = queue(&harness);
 
         handle.stop().await.expect("stop an idle queue");
 
@@ -840,7 +851,7 @@ mod tests {
         // `send_modify` always marks the value changed, which is what makes a
         // wake that lands between two polls survive to the next one.
         let harness = TestContext::new().await;
-        let (handle, task) = queue(&harness);
+        let (_root, handle, task) = queue(&harness);
         let signals = task.shared.signals.subscribe();
 
         handle.shared.wake();
@@ -851,7 +862,7 @@ mod tests {
     #[tokio::test]
     async fn shutdown_is_visible_to_the_loop_without_awaiting_anything() {
         let harness = TestContext::new().await;
-        let (handle, task) = queue(&harness);
+        let (_root, handle, task) = queue(&harness);
         assert!(!task.shared.is_shutting_down());
 
         handle.shutdown();

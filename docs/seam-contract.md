@@ -1038,11 +1038,24 @@ The `pass`/`warn`/`fail` split is a three-way distinction on purpose. Two status
 force every check to choose between blocking the night and being ignorable, and the four
 checks that warn are precisely the ones where neither is right.
 
-**Consequence for tests, stated because it surprised this task.** `QueueHandle::start` now
-spawns real subprocesses and measures the real volume, so **every test that starts a queue
-transitively exercises the host environment.** Two things follow for
-`crates/core/tests/scheduler.rs` and anything like it:
+**Consequence for tests, stated because it surprised this task twice.** `QueueHandle::start`
+now spawns real subprocesses and measures the real volume, so **every test that starts a queue
+transitively exercises the host environment.** Three things follow for
+`crates/core/tests/scheduler.rs`, for `queue.rs`'s own unit tests, and for anything like them:
 
+- **Any test that reaches `start()` or `resume()` must supply a stand-in `claude`, because CI
+  has none.** `claude` is a prerequisite the project deliberately never bundles (ADR-0004), so
+  it is on every developer's machine and on no runner. A queue built from a bare
+  `RunnerConfig::default()` — whose `program` is `claude` resolved on `PATH` — therefore passes
+  locally and fails in CI with a preflight refusal. This is the one place where "the same
+  command" is not enough: `cargo test -p rimaia-core` is verbatim what CI runs, and it still
+  disagreed, because the *environment* differed. `testing::doctor::passing_queue_environment`
+  exists for exactly this and hands back a temp app directory and a runner pointing at a
+  stand-in; `tests/scheduler.rs` has a richer one that also replays run fixtures.
+  **The stand-in satisfies the gate rather than disabling it** — a test that switched the
+  doctor off would prove less than the one it replaced.
+  To check before pushing, run the suite with the CLI off `PATH`:
+  `PATH=/usr/bin:/bin:$HOME/.cargo/bin cargo test -p rimaia-core`.
 - The stand-in `claude` must answer `auth`, not only `--version`. A stand-in that answers
   only the latter lets the doctor's auth probe fall through to the run dispatch, which
   derives a task id from the working directory and records a phantom run in the spawn log
@@ -1052,6 +1065,10 @@ transitively exercises the host environment.** Two things follow for
   the doctor's message rather than their own. That message names the shortage plainly, so
   it is discoverable rather than mysterious — but it is a real prerequisite for running the
   tests, not a flake.
+
+**Task 013 in particular.** A scheduled start goes through `QueueHandle::start`, so every test
+of "the queue woke at 23:00 and began" inherits all three points above — a stand-in `claude`
+included. Read this before writing the first one, rather than after CI disagrees.
 
 If that coupling ever costs more than it is worth, the fix is to inject `doctor::Environment`
 into `scheduler::build` the way `InFlight` already is and the way `RimaiaServer::new` already
