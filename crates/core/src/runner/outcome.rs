@@ -899,3 +899,51 @@ mod tests {
         assert_eq!(status_for(ExitClass::Fatal), RunStatus::Failed);
     }
 }
+
+/// What this installation's finished runs have actually cost.
+///
+/// Exists so the Settings copy can put
+/// [`ENVIRONMENT_SETUP_COST_USD`](crate::db::settings::ENVIRONMENT_SETUP_COST_USD)
+/// in proportion against real runs rather than against the spike's one-word
+/// prompt. Without it the panel can only quote a ratio measured on a run that
+/// did no work, which overstates the cost of `inherit` by an order of magnitude
+/// on anything substantial.
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RunCostSummary {
+    /// `None` until something has finished and reported a cost.
+    pub median_usd: Option<f64>,
+    pub sample_size: i64,
+}
+
+/// The median cost of a finished run, and how many there were to look at.
+///
+/// **Median, not mean.** Run costs are wildly skewed — one $32 implementation
+/// sits beside a dozen runs under a dollar — and a mean would let a single
+/// outlier decide what the panel tells the user about every run they do.
+///
+/// Only runs that reported a cost count. A cancelled run that died before its
+/// `result` has `NULL` here, and treating that as zero would drag the answer
+/// toward nothing.
+pub async fn observed_run_cost(pool: &sqlx::SqlitePool) -> Result<RunCostSummary> {
+    let costs: Vec<f64> = sqlx::query_scalar!(
+        r#"SELECT cost_usd AS "cost_usd!: f64" FROM runs
+           WHERE cost_usd IS NOT NULL AND cost_usd > 0 ORDER BY cost_usd ASC"#,
+    )
+    .fetch_all(pool)
+    .await?;
+
+    let sample_size = costs.len() as i64;
+    let median_usd = match costs.len() {
+        0 => None,
+        // The lower of the two middles on an even count, rather than their
+        // mean: it is an actual run the user paid for, which is easier to
+        // defend in a sentence than a number no run ever cost.
+        n => Some(costs[(n - 1) / 2]),
+    };
+
+    Ok(RunCostSummary {
+        median_usd,
+        sample_size,
+    })
+}

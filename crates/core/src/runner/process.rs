@@ -22,9 +22,12 @@
 //! # Two environment rules that are not the same rule
 //!
 //! 1. [`RunEnvironment`] is the operator's *choice* — `inherit` (default) or
-//!    `strict_local`, read through task 006's accessor. Inheriting costs ~3.6x
-//!    per run (`spike/FINDINGS.md` §2) and buys the operator's own MCP servers,
-//!    which ADR-0004's amendment decides is worth it by default.
+//!    `strict_local`, read through task 006's accessor. Inheriting adds a fixed
+//!    ~$0.08 of setup per run — ~13,300 cache-creation tokens, charged once per
+//!    session and not per turn (`spike/FINDINGS.md` §2) — and buys the
+//!    operator's own MCP servers, which ADR-0004's amendment decides is worth
+//!    it by default. See `db::settings::ENVIRONMENT_SETUP_COST_USD` for why the
+//!    spike's "3.6x" is the misleading way to state that.
 //! 2. **Stripping `CLAUDE_*` is not a choice** and is not configurable. Those
 //!    variables are process identity, not user config: a child told
 //!    `CLAUDE_CODE_SESSION_ID` believes it is a nested session of whatever
@@ -450,6 +453,22 @@ where
 ///
 /// Built from [`Tool::ALL`](crate::mcp::Tool::ALL) rather than spelled out, so a
 /// tool added later is denied by existing.
+///
+/// # A trap for task 021
+///
+/// This denies by *tool name*, and a scoped handle registers under the same
+/// server name — so it will block a legitimate scoped handle just as
+/// effectively as the inherited operator one. That is correct today, because an
+/// implementation run gets `mcp_config: None` and has no scoped handle to
+/// block. It stops being correct the moment task 021 gives one to a run so it
+/// can write findings back to its own card, which is exactly what ADR-0017
+/// plans.
+///
+/// Whoever does that has three options and should pick deliberately: register
+/// the run-scoped handle under a distinct server name, apply this denial only
+/// when no grant was minted for the run, or establish that `--allowedTools`
+/// overrides `--disallowedTools` in the CLI — which is **not verified here**
+/// and should not be assumed.
 fn rimaia_tools_denied_to_a_run() -> Vec<String> {
     // The bare server name denies the whole server where Claude Code supports
     // it; the per-tool entries are what make the denial exact if it does not.

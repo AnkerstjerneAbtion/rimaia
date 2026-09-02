@@ -16,6 +16,7 @@ import type {
   Repository,
   RimaiaError,
   Run,
+  RunCostSummary,
   RunDetail,
   RunEnvironment,
   RunFilterInput,
@@ -217,6 +218,11 @@ export function setBaseInstructions(value: string): Promise<void> {
 export function getRunEnvironment(): Promise<RunEnvironment> {
   return call<RunEnvironment>("get_run_environment");
 }
+/** What runs on this machine have actually cost — see `RunCostSummary`. */
+export async function getRunCostSummary(): Promise<RunCostSummary> {
+  return call<RunCostSummary>("get_run_cost_summary");
+}
+
 
 export function setRunEnvironment(value: RunEnvironment): Promise<void> {
   return call<void>("set_run_environment", { value });

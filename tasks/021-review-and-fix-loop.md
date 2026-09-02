@@ -81,6 +81,22 @@ implement → review → findings? → fix → review → … → clean, or budg
 
 ## Notes
 
+**The scoped handle is denied to implementation runs today, and this task has to
+undo that deliberately.** Task 020 found that an implementation run inherits the
+operator's Claude Code config, which registers the *unscoped* `/mcp`, and that
+`bypassPermissions` auto-approves MCP calls — so every run silently held
+`move_task`, `create_task` and every configuration tool `RunScope` marks
+`Refused`. The fix denies `mcp__rimaia*` to implementation runs regardless of the
+operator's blocklist (`runner::process::rimaia_tools_denied_to_a_run`).
+
+That denial is by tool name, and a scoped handle registers under the same server
+name, so it will block this task's write-back too. Three ways out, to be chosen
+rather than stumbled into: give the run-scoped handle its own server name;
+apply the denial only when no grant was minted for that run; or establish that
+`--allowedTools` overrides `--disallowedTools`, which task 020 did not verify.
+Whichever is chosen, the property to preserve is the one the denial bought —
+a run reaches its **own** card and nothing else.
+
 The failure mode to design against is false confidence: a task marked reviewed and clean
 that is not. Hence no auto-advance to `done`, and loop count plus findings history shown
 rather than a green tick.

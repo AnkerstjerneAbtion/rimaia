@@ -224,6 +224,44 @@ impl StrategyPlan {
     /// take a panel or a queue down (ADR-0003 makes the user a supported writer
     /// of this file). **[`needs_planning`] deliberately does not use this**: it
     /// reads the column, so an unreadable envelope still suppresses a re-plan.
+    /// Repairs a proposal a planner serialized badly, before it is stored.
+    ///
+    /// # Why this exists
+    ///
+    /// Observed on a real run, not imagined. A planner decomposed a task into
+    /// four phases and meant to say `multi_agent`, but emitted a corrupted
+    /// closing tag for the `rationale` parameter — `</anionale>` — so the
+    /// `workflow` parameter that followed was never parsed as one. It arrived
+    /// as literal text *inside* the rationale, and `workflow` arrived as
+    /// `None`. Nothing rejected the result: the card recorded four phases, no
+    /// workflow, and a rationale ending in tool-call debris.
+    ///
+    /// A malformed tool call is a thing models do occasionally, and the
+    /// planner is the one place in this product where a model's output is
+    /// stored verbatim and later shown to a human and fed to another agent. So
+    /// the repair belongs here, in the single writer, where the board and the
+    /// MCP server both reach it (ADR-0006) — not in `mcp::requests`, where only
+    /// one door would get it.
+    fn repaired(mut self) -> Self {
+        // Phases *are* the description of a fan-out. A proposal that names four
+        // of them and no workflow is contradictory, and the contradiction is
+        // costly in one direction only: `StrategyGuidance` renders the phase
+        // list either way, but withholds "This work fans out, run it with
+        // subagents" unless the workflow says so. The run would get the
+        // decomposition and no instruction to use it.
+        //
+        // Only `None` is inferred. An explicit `single_agent` with phases is a
+        // different statement — sequential steps for one agent — and is left
+        // alone.
+        if self.workflow.is_none() && !self.phases.is_empty() {
+            self.workflow = Some(StrategyWorkflow::MultiAgent);
+        }
+
+        self.rationale = self.rationale.map(|text| sanitize_rationale(&text));
+
+        self
+    }
+
     pub fn from_stored(stored: Option<&str>) -> Option<Self> {
         let stored = stored?;
         match serde_json::from_str::<Self>(stored) {
@@ -315,6 +353,7 @@ pub async fn set_task_strategy(
     plan: StrategyPlan,
     source: StrategySource,
 ) -> Result<Task> {
+    let plan = plan.repaired();
     let stored = plan.to_stored()?;
 
     // Read outside the transaction: `strategy::settings` takes the pool, and
@@ -475,6 +514,33 @@ pub(super) async fn defaults_for_repository(
     })
 }
 
+/// Cuts a rationale off at the first sign of tool-call debris.
+///
+/// The rationale is prose a human reads in the panel and, indirectly, context
+/// another agent works from. When a tool call is serialized badly the tail of
+/// this field is where the wreckage lands — see [`StrategyPlan::repaired`].
+///
+/// Two markers, both chosen because they are close to impossible in a sentence
+/// about why a model was picked: `<parameter` opens a tool-call argument, and
+/// `</` opens a closing tag. Everything from the earlier of them is dropped.
+///
+/// **This is a heuristic and it can cost a real sentence** — a rationale that
+/// legitimately mentioned `</Suspense>` would be truncated at it. That trade is
+/// deliberate: losing the tail of an explanation is a smaller harm than
+/// rendering a half-parsed tool call to the user as if the planner had written
+/// it. If it ever bites, the fix is a narrower marker, not a wider one.
+fn sanitize_rationale(text: &str) -> String {
+    let cut = ["<parameter", "</"]
+        .iter()
+        .filter_map(|marker| text.find(marker))
+        .min();
+
+    match cut {
+        Some(at) => text[..at].trim_end().to_string(),
+        None => text.to_string(),
+    }
+}
+
 /// How a mode reads inside a refusal. The stored spelling, so the sentence and
 /// the row agree.
 fn mode_word(mode: StrategyMode) -> &'static str {
@@ -488,6 +554,90 @@ fn mode_word(mode: StrategyMode) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // -----------------------------------------------------------------------
+    // Repairing a badly serialized proposal
+    //
+    // The literal below is what a real planner actually wrote on 2026-09-01,
+    // trimmed. It meant `multi_agent`; a corrupted `</rationale>` closing tag
+    // swallowed the parameter that would have said so.
+    // -----------------------------------------------------------------------
+
+    const MALFORMED_RATIONALE: &str = "Sonnet is sufficient for the full-stack work. \
+The plan explicitly identifies four independent parts, enabling efficient parallel \
+execution.</anionale>\n<parameter name=\"workflow\">multi_agent";
+
+    fn proposal_with_phases(workflow: Option<StrategyWorkflow>) -> StrategyPlan {
+        StrategyPlan {
+            workflow,
+            phases: vec![StrategyPhase {
+                name: "Transcript viewer".to_string(),
+                model: None,
+                effort: None,
+                agents: 1,
+                summary: "Virtualized JSONL rendering".to_string(),
+            }],
+            ..StrategyPlan::proposed(Some("sonnet".to_string()), Some("high".to_string()))
+        }
+    }
+
+    #[test]
+    fn phases_with_no_workflow_are_read_as_a_fan_out() {
+        // The costly half of the contradiction: `StrategyGuidance` renders the
+        // phase list either way, but withholds "run it with subagents" unless
+        // the workflow says so — so the run would get the decomposition and no
+        // instruction to use it.
+        let repaired = proposal_with_phases(None).repaired();
+
+        assert_eq!(repaired.workflow, Some(StrategyWorkflow::MultiAgent));
+    }
+
+    #[test]
+    fn an_explicit_single_agent_keeps_its_phases_without_becoming_a_fan_out() {
+        // Sequential steps for one agent is a different statement, and a legal
+        // one. Only `None` is inferred.
+        let repaired = proposal_with_phases(Some(StrategyWorkflow::SingleAgent)).repaired();
+
+        assert_eq!(repaired.workflow, Some(StrategyWorkflow::SingleAgent));
+        assert_eq!(repaired.phases.len(), 1);
+    }
+
+    #[test]
+    fn a_proposal_with_no_phases_is_left_alone() {
+        let repaired = StrategyPlan::proposed(Some("haiku".to_string()), None).repaired();
+
+        assert_eq!(repaired.workflow, None);
+    }
+
+    #[test]
+    fn tool_call_debris_is_cut_off_the_end_of_a_rationale() {
+        let repaired = StrategyPlan {
+            rationale: Some(MALFORMED_RATIONALE.to_string()),
+            ..proposal_with_phases(None)
+        }
+        .repaired();
+
+        assert_eq!(
+            repaired.rationale.as_deref(),
+            Some(
+                "Sonnet is sufficient for the full-stack work. The plan explicitly identifies \
+four independent parts, enabling efficient parallel execution."
+            ),
+            "the sentence survives; the half-parsed tool call does not",
+        );
+    }
+
+    #[test]
+    fn a_clean_rationale_is_returned_unchanged() {
+        let clean = "Straightforward metadata edits in one file; no architectural decisions.";
+        let repaired = StrategyPlan {
+            rationale: Some(clean.to_string()),
+            ..StrategyPlan::proposed(None, None)
+        }
+        .repaired();
+
+        assert_eq!(repaired.rationale.as_deref(), Some(clean));
+    }
     use pretty_assertions::assert_eq;
     use serde_json::json;
 
