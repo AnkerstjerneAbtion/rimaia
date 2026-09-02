@@ -40,7 +40,7 @@ use rimaia_core::repo::{self, NewRepository};
 use rimaia_core::runner::events::RunTail;
 use rimaia_core::runner::outcome::{start_run, NewRun};
 use rimaia_core::runner::{run_task, CancelSignal, RunRequest, RunTrigger, RunnerConfig};
-use rimaia_core::scheduler::{self, ClaimOutcome, QueueHandle, QueueState, SkipReason};
+use rimaia_core::scheduler::{self, ClaimOutcome, InFlight, QueueHandle, QueueState, SkipReason};
 use rimaia_core::startup;
 use rimaia_core::tasks::{self, NewTask, TaskFilter, TaskSummary};
 use rimaia_core::testing::fixtures::{fixture_lines, fixture_path};
@@ -479,8 +479,8 @@ async fn a_queue_state_written_before_a_crash_is_what_the_next_launch_reads() {
         QueueState::Running
     );
     assert_eq!(
-        after_the_crash.in_flight_task_id(),
-        None,
+        after_the_crash.in_flight_task_ids(),
+        Vec::<String>::new(),
         "a process does not survive the app that started it"
     );
 
@@ -999,7 +999,7 @@ async fn once_the_run_is_live(mut tail: Receiver<RunTail>) {
 /// tests using this are built around, is almost immediately.
 async fn wait_until_in_flight(queue: &QueueHandle, task_id: &str) {
     tokio::time::timeout(TEST_TIMEOUT, async {
-        while queue.in_flight_task_id().as_deref() != Some(task_id) {
+        while !queue.holds(task_id) {
             tokio::task::yield_now().await;
         }
     })
@@ -1011,7 +1011,7 @@ async fn wait_until_in_flight(queue: &QueueHandle, task_id: &str) {
 /// released whatever it held, win or lose.
 async fn wait_until_not_in_flight(queue: &QueueHandle) {
     tokio::time::timeout(TEST_TIMEOUT, async {
-        while queue.in_flight_task_id().is_some() {
+        while !queue.in_flight_task_ids().is_empty() {
             tokio::task::yield_now().await;
         }
     })
@@ -1312,10 +1312,13 @@ impl Fixture {
     /// Wires a queue over this fixture's context and spawns its one long-lived
     /// task. Several tests build two, standing in for two launches.
     fn spawn_queue(&self) -> QueueHandle {
+        // Each fixture-built queue gets its own registry, which is what makes
+        // "two launches" two processes rather than one with a shared map.
         let (handle, task) = scheduler::build(
             self.harness.context.clone(),
             self.paths.clone(),
             self.runner(),
+            InFlight::new(),
         );
         tokio::spawn(task.run());
         handle

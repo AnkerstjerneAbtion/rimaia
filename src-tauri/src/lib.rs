@@ -14,7 +14,7 @@ use rimaia_core::mcp::{self, McpState, RunHandles};
 use rimaia_core::runner::events::RunTail;
 use rimaia_core::runner::process::DEFAULT_GRACE_PERIOD;
 use rimaia_core::runner::RunnerConfig;
-use rimaia_core::scheduler;
+use rimaia_core::scheduler::{self, InFlight};
 use rimaia_core::{
     db, startup, worktree, AppPaths, ChangeEvent, Error, ServiceContext, SystemClock,
 };
@@ -22,7 +22,7 @@ use tauri::{Emitter, Manager, RunEvent};
 use tokio::sync::broadcast;
 use tokio::sync::broadcast::error::RecvError;
 
-use crate::state::{AppState, RunRegistry};
+use crate::state::{AppState, RunTails};
 
 /// The label of the one window `tauri.conf.json` declares. Spelled out because
 /// that file leaves it implicit and Tauri fills it in — an unlabelled window
@@ -102,17 +102,17 @@ pub fn run() {
             tauri::async_runtime::spawn(forward_change_events(app.handle().clone(), change_events));
 
             // Task 008's D14 channel, subscribed the same way and for the same
-            // reason: once, here, before anything can publish to it. `runs`
-            // is the shell's own bookkeeping — which task has a process in
-            // flight, and the latest tail snapshot for it (see
-            // `state::RunRegistry`'s doc) — and the forwarder is what keeps
-            // the second half current.
-            let runs = RunRegistry::new();
+            // reason: once, here, before anything can publish to it. `tails` is
+            // the shell's own bookkeeping — the latest tail snapshot per run
+            // (see `state::RunTails`'s doc) — and the forwarder is what keeps
+            // it current. Which tasks have a process in flight used to be here
+            // too; it is `rimaia_core::scheduler::InFlight` now.
+            let tails = RunTails::new();
             let tail_events = context.subscribe_tail();
             tauri::async_runtime::spawn(forward_run_tail(
                 app.handle().clone(),
                 tail_events,
-                runs.clone(),
+                tails.clone(),
             ));
 
             // Task 009's repair for `survey`'s `tasks_left_running` finding
@@ -164,11 +164,16 @@ pub fn run() {
             // `tauri::async_runtime::spawn` rather than a bare `tokio::spawn`
             // for the reason every other background task in this hook uses
             // it: Tauri's async runtime *is* Tokio, so this rides the runtime
-            // already here instead of starting a second. `runs.attach_queue`
-            // is what lets a manual "Run now" and the queue's own claim
-            // refuse to double-spawn a process for the same task — see
-            // `RunRegistry::attach_queue`'s doc — and it has to happen before
-            // `app.manage` hands `runs` to any command.
+            // already here instead of starting a second.
+            //
+            // `in_flight` is built here and handed to both the queue and
+            // `AppState`, which is what lets a manual "Run now", a "Plan now"
+            // and the queue's own claim refuse to double-spawn a process for
+            // the same task. It used to be an `attach_queue` back-reference
+            // from a shell-side map onto the queue's private one; one registry
+            // both doors read needs no wiring between them, and is reachable
+            // from `rimaia-core` — which is what ADR-0021's known gap was
+            // waiting on.
             //
             // Task 020's two shared values are built here, ahead of the queue,
             // rather than inside `scheduler::build`, because each is shared
@@ -189,9 +194,13 @@ pub fn run() {
                 run_handles: run_handles.clone(),
                 ..RunnerConfig::default()
             };
-            let (queue, queue_task) =
-                scheduler::build(context.clone(), paths.clone(), runner.clone());
-            runs.attach_queue(queue.clone());
+            let in_flight = InFlight::new();
+            let (queue, queue_task) = scheduler::build(
+                context.clone(),
+                paths.clone(),
+                runner.clone(),
+                in_flight.clone(),
+            );
             tauri::async_runtime::spawn(queue_task.run());
 
             // Task 010's MCP server (ADR-0006). Last of the startup steps on
@@ -239,7 +248,8 @@ pub fn run() {
             app.manage(AppState {
                 context,
                 paths,
-                runs,
+                in_flight,
+                tails,
                 queue,
                 runner,
                 run_handles,
@@ -443,8 +453,8 @@ pub fn run() {
 /// one ends (`scheduler::queue`'s own module doc explains why racing that
 /// loop's next claim against this exit path, instead of ordering against it,
 /// would leave a task claimed with nobody left supervising it). Cancelling
-/// the run actually in flight is `runs.cancel_all()` right after, which
-/// reaches the queue's own run through `RunRegistry::attach_queue` exactly as
+/// the run actually in flight is `AppState::cancel_everything` right after,
+/// which reaches every lease in the shared registry exactly as
 /// it reaches a manual one. Net effect: quitting mid-run cancels that one run
 /// the same way pressing the queue's own Stop button would — including that
 /// button's side effect of leaving `queue_state = paused` for the next
@@ -466,13 +476,13 @@ async fn shut_down(app: &tauri::AppHandle) {
         .expect("the mcp handle mutex is poisoned")
         .shutdown();
     state.queue.shutdown();
-    if !state.runs.cancel_all().await {
+    if !state.cancel_everything().await {
         return;
     }
 
     tracing::info!("cancelling in-flight runs before exiting");
     let deadline = tokio::time::Instant::now() + DEFAULT_GRACE_PERIOD + Duration::from_secs(5);
-    while state.runs.has_in_flight_runs() {
+    while state.has_in_flight_runs() {
         if tokio::time::Instant::now() >= deadline {
             tracing::warn!(
                 "some runs were still terminating when Rimaia exited; \
@@ -562,18 +572,18 @@ fn emit_change_event(app: &tauri::AppHandle, event: ChangeEvent) {
 /// for a lossy, high-frequency view channel is exactly the mistake D14
 /// separated this channel from `ChangeEvent` to avoid.
 ///
-/// Every snapshot is also recorded into `runs` — the shell's own catch-up
-/// cache (`state::RunRegistry`) — before it is forwarded, so a client that
-/// starts watching mid-run and calls `get_run_tail` sees at least this one.
+/// Every snapshot is also recorded into the shell's own catch-up cache
+/// (`state::RunTails`) before it is forwarded, so a client that starts watching
+/// mid-run and calls `get_run_tail` sees at least this one.
 async fn forward_run_tail(
     app: tauri::AppHandle,
-    mut tails: broadcast::Receiver<RunTail>,
-    runs: RunRegistry,
+    mut events: broadcast::Receiver<RunTail>,
+    tails: RunTails,
 ) {
     loop {
-        match tails.recv().await {
+        match events.recv().await {
             Ok(tail) => {
-                runs.record_tail(tail.clone());
+                tails.record(tail.clone());
                 if let Err(error) = app.emit("runs:tail", &tail) {
                     tracing::error!(%error, "failed to forward a run-tail snapshot to the frontend");
                 }

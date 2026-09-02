@@ -620,7 +620,12 @@ export interface QueueStatus {
   state: QueueState;
   /** The task whose process the queue is supervising right now. `null`
    *  between runs, while paused, or with nothing to do. */
-  runningTaskId: string | null;
+  /** Every task this process has a `claude` child for right now, in a stable
+   *  order — the queue's own runs and any a button started, since they share
+   *  one registry. A list rather than the single id this was: task 012 fills
+   *  more than one slot, and a wire field that changed shape once a setting was
+   *  flipped would be worse than one that is always a list. */
+  runningTaskIds: string[];
   /** Every `ready` task in board order, with the reason the queue will pass
    *  over each one it cannot start. Re-read fresh on every call — never a
    *  snapshot from when the queue was started — so a card dragged to the top

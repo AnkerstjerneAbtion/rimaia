@@ -69,7 +69,7 @@ function repository(overrides: Partial<Repository> = {}): Repository {
 function queueStatus(overrides: Partial<QueueStatus> = {}): QueueStatus {
   return {
     state: "paused",
-    runningTaskId: null,
+    runningTaskIds: [],
     plan: [],
     lastStepError: null,
     ...overrides,
@@ -402,12 +402,12 @@ describe("RunsView", () => {
     });
 
     it("keeps Stop offered through a paused queue with a run still in flight", async () => {
-      // `runningTaskId` non-null while `state` is already `paused` is exactly
+      // A non-empty `runningTaskIds` while `state` is already `paused` is exactly
       // ADR-0010's "Pause lets the current run finish" — `QueueControls`
       // itself is unit-tested against this combination directly; this proves
-      // `RunsView` actually wires `queueStatus.runningTaskId` into it rather
+      // `RunsView` actually wires `queueStatus.runningTaskIds` into it rather
       // than, say, always passing `false`.
-      mockBackend({ queue: queueStatus({ state: "paused", runningTaskId: "task-1" }) });
+      mockBackend({ queue: queueStatus({ state: "paused", runningTaskIds: ["task-1"] }) });
       render(<RunsView />);
 
       expect(await screen.findByText("Paused")).toBeInTheDocument();
@@ -526,7 +526,7 @@ describe("RunsView", () => {
           call += 1;
           // First read: the queue is mid-run on task-1. Second read (after
           // `tasks:changed` fires below): task-1 is no longer in flight.
-          return queueStatus({ state: "running", runningTaskId: call === 1 ? "task-1" : null });
+          return queueStatus({ state: "running", runningTaskIds: call === 1 ? ["task-1"] : [] });
         }
         if (command === "get_task") {
           const taskId = (args as { id: string }).id;
@@ -582,7 +582,7 @@ describe("RunsView", () => {
         if (command === "get_run_environment") return "inherit";
         if (command === "get_queue_status") {
           statusCall += 1;
-          return queueStatus({ state: "running", runningTaskId: statusCall === 1 ? "task-1" : null });
+          return queueStatus({ state: "running", runningTaskIds: statusCall === 1 ? ["task-1"] : [] });
         }
         if (command === "get_task") {
           getTaskCall += 1;
@@ -624,7 +624,7 @@ describe("RunsView", () => {
 
       // Both events fire for the same transition — a run's own `runs:changed`
       // and the board's `tasks:changed` — and both independently re-read
-      // `get_queue_status`, which keeps reporting `runningTaskId: null` once
+      // `get_queue_status`, which keeps reporting an empty `runningTaskIds` once
       // task-1 has finished. The second re-read must not re-resolve the
       // outcome: the transition (task-1 -> null) already happened once.
       act(() => fire("tasks:changed", ["task-1"]));
@@ -654,9 +654,9 @@ describe("RunsView", () => {
         if (command === "get_queue_status") {
           statusCall += 1;
           // task-1 running -> task-2 running -> nothing running.
-          const runningTaskId =
-            statusCall === 1 ? "task-1" : statusCall === 2 ? "task-2" : null;
-          return queueStatus({ state: "running", runningTaskId });
+          const runningTaskIds =
+            statusCall === 1 ? ["task-1"] : statusCall === 2 ? ["task-2"] : [];
+          return queueStatus({ state: "running", runningTaskIds });
         }
         if (command === "get_task") {
           const taskId = (args as { id: string }).id;

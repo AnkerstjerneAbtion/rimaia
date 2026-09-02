@@ -106,7 +106,7 @@ function mockBackend({
   mockInvoke.mockImplementation(async (command) => {
     if (command === "list_repositories") return repositories;
     if (command === "get_queue_status") {
-      return { state: "paused", runningTaskId: null, plan: queuePlan };
+      return { state: "paused", runningTaskIds: [], plan: queuePlan };
     }
     throw new Error(`unexpected command: ${command}`);
   });
@@ -368,7 +368,7 @@ describe("TaskCard", () => {
     it("calls start_task_run with the task id when clicked", async () => {
       mockInvoke.mockImplementation(async (command) => {
         if (command === "list_repositories") return [repository({ allowUnattendedRuns: true })];
-        if (command === "get_queue_status") return { state: "paused", runningTaskId: null, plan: [] };
+        if (command === "get_queue_status") return { state: "paused", runningTaskIds: [], plan: [] };
         if (command === "start_task_run") return undefined;
         throw new Error(`unexpected command: ${command}`);
       });
@@ -385,7 +385,7 @@ describe("TaskCard", () => {
     it("does not open the task panel when Run now is clicked", async () => {
       mockInvoke.mockImplementation(async (command) => {
         if (command === "list_repositories") return [repository({ allowUnattendedRuns: true })];
-        if (command === "get_queue_status") return { state: "paused", runningTaskId: null, plan: [] };
+        if (command === "get_queue_status") return { state: "paused", runningTaskIds: [], plan: [] };
         if (command === "start_task_run") return undefined;
         throw new Error(`unexpected command: ${command}`);
       });
@@ -400,7 +400,7 @@ describe("TaskCard", () => {
     it("shows the backend's own rejection message when start_task_run fails", async () => {
       mockInvoke.mockImplementation(async (command) => {
         if (command === "list_repositories") return [repository({ allowUnattendedRuns: true })];
-        if (command === "get_queue_status") return { state: "paused", runningTaskId: null, plan: [] };
+        if (command === "get_queue_status") return { state: "paused", runningTaskIds: [], plan: [] };
         if (command === "start_task_run") {
           throw { code: "invalid", message: "a run is already in progress for this task" };
         }
@@ -598,7 +598,7 @@ describe("TaskCard", () => {
           }
           return {
             state: "paused",
-            runningTaskId: null,
+            runningTaskIds: [],
             plan: [
               {
                 taskId: "task-1",
@@ -621,7 +621,7 @@ describe("TaskCard", () => {
       taskChangedListeners[0]?.({ payload: [] });
 
       // The first (now stale) fetch finally settles.
-      resolveFirstFetch?.({ state: "paused", runningTaskId: null, plan: [] });
+      resolveFirstFetch?.({ state: "paused", runningTaskIds: [], plan: [] });
 
       expect(await screen.findByText("Queued #3")).toBeInTheDocument();
       expect(queueStatusCalls).toBe(2);

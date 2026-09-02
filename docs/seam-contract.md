@@ -807,6 +807,63 @@ constrain. A comment in `runner/outcome.rs` reaches only the first.
 
 ---
 
+## D19 — Where "is this task already in flight" lives
+
+**Question.** Two things needed the same answer and each had its own. The queue held a
+private `Option` for the run it was supervising; `src-tauri`'s `RunRegistry` held a
+`HashMap` for runs a button had started, and deferred to the queue's `Option` through an
+`attach_queue` back-reference. ADR-0021 named the underlying question and assigned it to
+tasks 012 and 014. Where does it live, and what does the answer change?
+
+**Decision.** **`rimaia_core::scheduler::inflight::InFlight`**, built once in `setup()`,
+handed to `scheduler::build` and held on `AppState` as a clone of the same value. Five
+choices come with it, and each is a thing a diff would otherwise not explain:
+
+1. **It is a `build` parameter, not a sixth field on `ServiceContext`.** ADR-0019 fixes
+   that struct's shape and says a later field is a later record — and it would be wrong
+   anyway: store, clock, channels and attribution are things *any* service may use, while
+   an in-flight map is only meaningful to something that can spawn. That is three call
+   sites, not every function. The precedent is `RunnerConfig::run_handles`: one value
+   built in `setup()`, handed to everything that needs it, no ordering constraint between
+   the subsystems that take it.
+2. **A `Lease` is RAII, and the RAII is the point.** `Drop` frees the slot on every path
+   out of a supervising future, panics included. It replaces `src-tauri`'s hand-written
+   `ReleaseOnDrop` guard, which existed for exactly that property but had to be remembered
+   by each caller. Counting and inserting happen under **one** lock; a caller that asked
+   for a count and then inserted would have written the double-start bug with extra steps.
+3. **`QueueStatus.running_task_id: Option<String>` became `running_task_ids: Vec<String>`**,
+   and `QueueHandle::in_flight_task_id` became `in_flight_task_ids` plus `holds`. Wire
+   visible, mirrored in `src/types.ts`. A list from the start rather than an `Option` that
+   changes shape the day a mode setting is flipped. The Runs view's session-outcome
+   detector became a set difference for the same reason: "the one id changed" cannot see
+   two runs ending between two reads, or one ending while another starts.
+4. **`QueueHandle::stop` is scoped to `LeaseOwner::Queue`.** While the maps were separate
+   this was true by accident; sharing one makes it a decision. Stopping the queue is a
+   statement about the queue, and a run the operator started by hand in front of them is
+   not part of it. Quitting *is* a statement about everything, which is why the exit path
+   calls `cancel_all` as well.
+5. **The caps bound the scheduler, not a human.** A button takes `acquire_unbounded`:
+   subject to the per-task exclusion and to `CONCURRENCY_CEILING`, but not to
+   `max_concurrency` or the per-repository cap. Those settings are properties of the *run
+   configuration* (ADR-0010), and a person clicking "Run now" with the app in front of
+   them is not the mis-set-configuration failure they exist for. The ceiling is a constant
+   rather than a setting, because a ceiling a user can raise is not one.
+
+**Why.** ADR-0006 makes a rule enforced in one adapter and not the other a defect, and
+"one process per task" was living in `src-tauri`. That is also why ADR-0021 could not put
+`plan_task_strategy` on the MCP surface — the MCP server cannot reach a `src-tauri` type.
+And it could not grow: a slot map with per-repository caps is not an `Option`, and a
+second door onto it is not a back-reference.
+
+One bug closed on the way past, worth recording because nothing tests for its absence
+directly: "Plan now" claimed in the shell while the queue claimed on the database row, so
+a planner and a queued run genuinely could both start for one task. Task 023's Notes name
+that hazard. It is fixed by there being one registry, not by a new check.
+
+**Binds.** 009, 012, 014, 020, 023.
+
+---
+
 ## How to use this
 
 An implementation task reads the entries its number appears in, before writing code:
@@ -820,16 +877,16 @@ An implementation task reads the entries its number appears in, before writing c
 | [006](../tasks/006-base-instructions-and-prompt-composition.md) | D3 · D4 · D5 · D8 |
 | [007](../tasks/007-git-worktree-service.md) | D5 · D8 · D10 · D13 |
 | [008](../tasks/008-claude-code-runner.md) | D2 · D3 · D5 · D7 · D8 · D9 · D10 · D14 · D15 · D18 |
-| [009](../tasks/009-sequential-run-queue.md) | D2 · D5 · D7 · D8 · D9 · D10 · D14 · D15 |
+| [009](../tasks/009-sequential-run-queue.md) | D2 · D5 · D7 · D8 · D9 · D10 · D14 · D15 · D19 |
 | [010](../tasks/010-local-mcp-server.md) | D2 · D3 · D4 · D5 · D6 · D8 · D10 · D12 · D13 · D16 |
 | [011](../tasks/011-task-dependencies-and-blocking.md) | D4 · D12 · D16 |
-| [012](../tasks/012-parallel-execution.md) | D2 · D4 · D5 · D8 · D9 · D12 · D14 · D15 |
+| [012](../tasks/012-parallel-execution.md) | D2 · D4 · D5 · D8 · D9 · D12 · D14 · D15 · D19 |
 | [013](../tasks/013-run-scheduling.md) | D4 · D15 |
-| [014](../tasks/014-usage-limit-resilience.md) | D3 · D5 · D8 · D9 · D12 · D14 · D15 |
+| [014](../tasks/014-usage-limit-resilience.md) | D3 · D5 · D8 · D9 · D12 · D14 · D15 · D19 |
 | [015](../tasks/015-run-history-and-log-viewer.md) | D14 · D18 |
 | [016](../tasks/016-worktree-lifecycle-and-cleanup.md) | D17 · D18 |
 | [018](../tasks/018-preflight-doctor-and-packaging.md) | D11 · D16 |
-| [020](../tasks/020-per-task-execution-strategy.md) | D2 · D3 · D4 · D5 · D8 · D10 · D12 · D16 · D17 |
+| [020](../tasks/020-per-task-execution-strategy.md) | D2 · D3 · D4 · D5 · D8 · D10 · D12 · D16 · D17 · D19 |
 | [021](../tasks/021-review-and-fix-loop.md) | D17 |
 | [024](../tasks/024-analytics.md) | D4 · D5 · D12 · D18 |
 | every task | D4 and D6 as prohibitions |

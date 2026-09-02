@@ -6,14 +6,21 @@
 //! recomputable from the database, so a crash loses at most the in-flight
 //! process — which is what [`reconcile`] then repairs on the next launch.
 //!
-//! # The four pieces, and why they are separate
+//! # The five pieces, and why they are separate
 //!
 //! [`selection`] is pure ordering and eligibility over a board read; [`claim`]
-//! is the conditional write that decides who owns a task; [`state`] is the
-//! on/off switch, stored in `settings` rather than in a struct field; [`queue`]
-//! is the loop that ties them together and the handle the shell holds. Only the
-//! last of those needs a runtime, which is what makes the other three testable
-//! as functions.
+//! is the conditional write that decides who owns a task *across* processes;
+//! [`inflight`] is the in-memory fact of which tasks *this* process has a child
+//! for; [`state`] is the on/off switch, stored in `settings` rather than in a
+//! struct field; [`queue`] is the loop that ties them together and the handle
+//! the shell holds. Only the last of those needs a runtime, which is what makes
+//! the other four testable as functions.
+//!
+//! [`claim`] and [`inflight`] answer different questions and both are needed.
+//! The claim is a conditional write that survives a restart and stops two
+//! writers disagreeing about a row; the registry is what knows whether the
+//! process on the end of that row is ours. The queue takes the lease *before*
+//! the claim, so a Pause pressed mid-claim has something to act on.
 //!
 //! # Nothing here waits on the clock
 //!
@@ -38,12 +45,16 @@
 //! (ADR-0006), and a scheduler is exactly the second place it would happen.
 
 pub mod claim;
+pub mod inflight;
 pub mod queue;
 pub mod reconcile;
 pub mod selection;
 pub mod state;
 
 pub use claim::{claim, release, ClaimOutcome};
+pub use inflight::{
+    Capacity, Counts, InFlight, Lease, LeaseOwner, LeaseRefused, CONCURRENCY_CEILING,
+};
 pub use queue::{build, QueueHandle, QueueStatus, QueueTask};
 pub use reconcile::reconcile_interrupted;
 pub use selection::{next_to_start, plan, skip_reason, QueueEntry, SkipReason};

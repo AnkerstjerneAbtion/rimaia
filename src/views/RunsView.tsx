@@ -201,19 +201,31 @@ export function RunsView() {
     // `tasks:changed`) must not list the same finished run twice.
     const resolvedRunIds = new Set<string>();
     // `undefined` means "no read yet": the very first fetch has nothing to
-    // compare against, only a starting point to record. `null` means the
+    // compare against, only a starting point to record. An empty set means the
     // queue was idle at the last read.
-    let previousRunningTaskId: string | null | undefined;
+    //
+    // A *set* difference rather than "the one id changed". That inference held
+    // only while there could be one run at a time: with several slots, two runs
+    // finishing between two reads would look like one transition, and a run
+    // starting while another finished would look like nothing happened at all.
+    // Comparing the sets says exactly what left, however many did.
+    let previousRunningTaskIds: Set<string> | undefined;
 
-    function noteCompletion(runningTaskId: string | null) {
-      const previous = previousRunningTaskId;
-      previousRunningTaskId = runningTaskId;
-      if (previous === undefined || previous === null || previous === runningTaskId) return;
+    function noteCompletions(runningTaskIds: readonly string[]) {
+      const previous = previousRunningTaskIds;
+      previousRunningTaskIds = new Set(runningTaskIds);
+      if (previous === undefined) return;
 
-      // `previous` is no longer the queue's in-flight task, so whatever it
-      // was doing has ended — its own `lastRun` is the only source of truth
-      // for how (D14: the live tail is never that source).
-      getTask(previous).then(
+      for (const taskId of previous) {
+        if (!previousRunningTaskIds.has(taskId)) noteCompletion(taskId);
+      }
+    }
+
+    function noteCompletion(taskId: string) {
+      // `taskId` is no longer in flight, so whatever it was doing has ended —
+      // its own `lastRun` is the only source of truth for how (D14: the live
+      // tail is never that source).
+      getTask(taskId).then(
         (detail) => {
           if (!active || !detail.lastRun || resolvedRunIds.has(detail.lastRun.id)) return;
           resolvedRunIds.add(detail.lastRun.id);
@@ -248,7 +260,7 @@ export function RunsView() {
           setQueueStatus(status);
           setQueueError(null);
           if (status.state === "running") setHasRunBefore(true);
-          noteCompletion(status.runningTaskId);
+          noteCompletions(status.runningTaskIds);
         },
         (thrown) => {
           if (active) setQueueError(toRimaiaError(thrown));
@@ -371,7 +383,7 @@ export function RunsView() {
             <QueueControls
               state={queueStatus.state}
               hasRunBefore={hasRunBefore}
-              hasRunInFlight={queueStatus.runningTaskId !== null}
+              hasRunInFlight={queueStatus.runningTaskIds.length > 0}
             />
 
             <h3>Up next</h3>

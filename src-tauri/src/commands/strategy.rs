@@ -16,15 +16,15 @@
 
 use rimaia_core::db::{settings, Task};
 use rimaia_core::runner::{probe_cli, strategy as runner_strategy};
+use rimaia_core::scheduler::LeaseOwner;
 use rimaia_core::strategy::{
     catalogue, settings as strategy_settings, Catalogue, StrategyApproval, StrategyDefaults,
     DEFAULT_CATALOGUE_JSON,
 };
-use rimaia_core::{repo, tasks, Result};
+use rimaia_core::{repo, tasks, Error, Result};
 use serde::Serialize;
 use tauri::State;
 
-use crate::commands::runs::ReleaseOnDrop;
 use crate::state::AppState;
 
 /// Everything Settings' catalogue editor and every strategy dropdown need, in
@@ -192,29 +192,41 @@ pub async fn clear_task_strategy(state: State<'_, AppState>, task_id: String) ->
 /// nobody is watching. Both are read-only, and the planner performs them again
 /// as part of its own contract.
 ///
-/// `state.runs.start` is what a second click fails against, and it is also what
-/// makes "Plan now" and "Run now" refuse each other: they claim the same
+/// The in-flight lease is what a second click fails against, and it is also
+/// what makes "Plan now" and "Run now" refuse each other: they take the same
 /// registry entry, so a planner in flight cannot be joined by an implementation
 /// run in the same worktree.
+///
+/// That registry is now `rimaia_core::scheduler::InFlight` rather than a map in
+/// `src-tauri`, and the queue takes its leases from the same value. Before
+/// that, the queue claimed on the database row and the planner claimed in the
+/// shell, so a planner and a queued run genuinely could both start for one task
+/// — the hazard task 023 names in its Notes, closed here as a consequence of
+/// there being one registry rather than two.
 #[tauri::command]
 pub async fn plan_task_strategy(state: State<'_, AppState>, task_id: String) -> Result<()> {
-    let cancel = state.runs.start(&task_id)?;
-    // Releases the claim above however this ends — the early `?` returns just
-    // below, or, once moved into the spawned future, whatever happens to the
-    // planner there, panic included.
-    let release = ReleaseOnDrop::new(state.runs.clone(), task_id.clone());
-
     let context = state.context.clone();
     let paths = state.paths.clone();
     let config = state.runner.clone();
 
+    // Read before the lease: a lease is taken per repository, and this is the
+    // only thing that knows which one. Both reads are read-only.
     let detail = tasks::get_task(&context, &task_id).await?;
     let repository = repo::get(&context, &detail.task.repository_id).await?;
+
+    // `Manual`, because "Plan now" is a button: a Stop pressed on the queue
+    // must not kill a planner the operator started deliberately.
+    let lease = state
+        .in_flight
+        .acquire_unbounded(&task_id, &repository.id, LeaseOwner::Manual)
+        .map_err(|refused| Error::invalid(refused.message()))?;
+    let cancel = lease.cancel_signal();
+
     repo::ensure_unattended_runs_allowed(&repository)?;
     probe_cli(&config.program).await?;
 
     tauri::async_runtime::spawn(async move {
-        let _release = release;
+        let _lease = lease;
         if let Err(error) =
             runner_strategy::plan_task(&context, &paths, &config, &task_id, cancel).await
         {

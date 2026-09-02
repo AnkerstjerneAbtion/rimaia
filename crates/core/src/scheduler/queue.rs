@@ -46,9 +46,9 @@
 //!
 //! # A Pause, a Stop or a shutdown pressed mid-claim is not lost
 //!
-//! `try_step` registers `Shared`'s in-flight entry — the one thing
-//! [`QueueHandle::stop`] has to signal, and the one thing that makes
-//! [`QueueHandle::in_flight_task_id`] true — **before** the `claude`
+//! `try_step` takes its [`Lease`] on the shared [`InFlight`] registry — the one
+//! thing [`QueueHandle::stop`] has to signal, and the one thing that makes
+//! [`QueueHandle::in_flight_task_ids`] non-empty — **before** the `claude`
 //! prerequisite check and the claim itself, not after either succeeds. Both
 //! await, so without this a Pause, a Stop or [`QueueHandle::shutdown`]
 //! pressed in that window found nothing cancellable and nothing that
@@ -57,6 +57,20 @@
 //! two points that window used to hide from — right after the probe, and
 //! right after the claim succeeds — releasing a claim it already won rather
 //! than spawn a process nobody asked for any more.
+//!
+//! # The queue does not own the in-flight map any more
+//!
+//! It used to: a private `Option<InFlight>` on `Shared`, with `src-tauri`'s
+//! `RunRegistry` holding a back-reference to this handle so the two maps could
+//! agree. That put a business rule — one process per task — in the shell, which
+//! ADR-0006 calls a bug, and it is the reason ADR-0021 could not put
+//! `plan_task_strategy` on the MCP surface.
+//!
+//! Now [`build`] takes an [`InFlight`] the shell also holds, and both doors
+//! read the same map. `Shared` keeps only what is genuinely the *queue's* —
+//! its control signals and the last step error. The `Option` is gone rather
+//! than widened, which is what makes task 012's slot map an ordinary change to
+//! one type instead of a second rewrite of this one.
 
 use std::sync::{Arc, Mutex};
 
@@ -71,6 +85,7 @@ use crate::events::ChangeEvent;
 use crate::paths::AppPaths;
 use crate::runner::{probe_cli, run_task, CancelSignal, RunRequest, RunTrigger, RunnerConfig};
 use crate::scheduler::claim::{self, ClaimOutcome};
+use crate::scheduler::inflight::{Capacity, InFlight, LeaseOwner};
 use crate::scheduler::selection::{self, QueueEntry};
 use crate::scheduler::state::{self, QueueState};
 
@@ -83,9 +98,14 @@ use crate::scheduler::state::{self, QueueState};
 #[serde(rename_all = "camelCase")]
 pub struct QueueStatus {
     pub state: QueueState,
-    /// The task whose process the queue is supervising. `None` when it is
-    /// between runs, paused, or has nothing to do.
-    pub running_task_id: Option<String>,
+    /// Every task this process has a `claude` child for right now, in a stable
+    /// order — the queue's own runs and any a button started, because they
+    /// share one registry and the Runs view renders them the same way.
+    ///
+    /// A `Vec` rather than the `Option` this was: task 012 fills more than one
+    /// slot, and a wire field that changes shape once a mode setting is flipped
+    /// would be worse than one that is always a list and usually has one entry.
+    pub running_task_ids: Vec<String>,
     /// Every `ready` task in board order, with the reason the queue will pass
     /// over each one it cannot start, and its queue position when it will.
     pub plan: Vec<QueueEntry>,
@@ -115,10 +135,22 @@ pub struct QueueTask {
 }
 
 /// Wires a queue: the handle to keep, and the task to spawn.
+///
+/// `in_flight` is passed rather than created here, and rather than living on
+/// [`ServiceContext`]. Not on the context because ADR-0019 fixes that struct's
+/// shape and a sixth field would be a new record — and because it would be
+/// wrong on the merits: store, clock, channels and attribution are things *any*
+/// service may use, while an in-flight map is only meaningful to something that
+/// can spawn, which is three call sites rather than every function. Passed
+/// rather than created because the shell needs the same value for its own
+/// doors, which is the precedent `RunnerConfig::run_handles` already sets: one
+/// value built in `setup()` and handed to everything that needs it, with no
+/// ordering constraint between the subsystems that take it.
 pub fn build(
     ctx: ServiceContext,
     paths: AppPaths,
     runner: RunnerConfig,
+    in_flight: InFlight,
 ) -> (QueueHandle, QueueTask) {
     // Every write this queue makes is the machine's, not the user's
     // (ADR-0019). Re-sourced here, once, rather than at each service call
@@ -135,7 +167,7 @@ pub fn build(
     let shared = Arc::new(Shared {
         ctx,
         signals,
-        in_flight: Mutex::new(None),
+        in_flight,
         last_step_error: Mutex::new(None),
     });
 
@@ -175,18 +207,23 @@ impl QueueHandle {
         self.set(QueueState::Paused).await
     }
 
-    /// Pause, plus cancel whatever is running.
+    /// Pause, plus cancel whatever *the queue* is running.
     ///
     /// The switch is written **before** the cancellation, so the loop can never
     /// observe the run ending while the queue still reads `running` and pick up
     /// the next task. The cancelled run lands `failed` (ADR-0010: cancel-one on
     /// a running task "goes to `failed` with `cancelled` reason"), which is not
     /// a state the queue re-selects — so a stopped task stays stopped.
+    ///
+    /// Scoped to [`LeaseOwner::Queue`]. Before the registries were merged this
+    /// was true by accident, because a manual run lived in a different map that
+    /// this handle could not reach; now that they share one it has to be said.
+    /// Stopping the queue is a statement about the queue, and a run the
+    /// operator started by hand in front of them is not part of it.
     pub async fn stop(&self) -> Result<()> {
         self.pause().await?;
-        if let Some(in_flight) = self.shared.in_flight() {
-            tracing::info!(task_id = %in_flight.task_id, "stopping the queue's current run");
-            in_flight.cancel.cancel();
+        if self.shared.in_flight.cancel_owned_by(LeaseOwner::Queue) {
+            tracing::info!("stopping the run queue's own in-flight runs");
         }
         Ok(())
     }
@@ -195,22 +232,25 @@ impl QueueHandle {
     pub async fn status(&self) -> Result<QueueStatus> {
         Ok(QueueStatus {
             state: state::queue_state(&self.shared.ctx.pool).await?,
-            running_task_id: self.in_flight_task_id(),
+            running_task_ids: self.in_flight_task_ids(),
             plan: selection::plan(&self.shared.ctx).await?,
             last_step_error: self.shared.step_error(),
         })
     }
 
-    /// The task this queue has a process for right now.
+    /// Every task this process has a `claude` child for right now.
     ///
     /// The one piece of queue state that is *not* in the database, because it
     /// is not a fact about stored state: the row says `run_state = running`
     /// either way, and what this answers is "is the process on the end of it
-    /// mine?".
-    pub fn in_flight_task_id(&self) -> Option<String> {
-        self.shared
-            .in_flight()
-            .map(|in_flight| in_flight.task_id.clone())
+    /// ours?".
+    pub fn in_flight_task_ids(&self) -> Vec<String> {
+        self.shared.in_flight.task_ids()
+    }
+
+    /// Whether `task_id` has a run in flight in this process, by either door.
+    pub fn holds(&self, task_id: &str) -> bool {
+        self.shared.in_flight.holds(task_id)
     }
 
     /// Ends the loop after the current run, without cancelling it. See this
@@ -310,48 +350,54 @@ impl QueueTask {
         };
         let task_id = entry.task_id.clone();
 
-        // Registered *before* the prerequisite check and the claim below, not
-        // after either succeeds — see this module's header amendment on the
-        // window that left open otherwise. A Pause, a Stop or a shutdown
-        // pressed anywhere from here on now has a `CancelSignal` to act on
+        // Taken *before* the prerequisite check and the claim below, not after
+        // either succeeds — see this module's header amendment on the window
+        // that left open otherwise. A Pause, a Stop or a shutdown pressed
+        // anywhere from here on now has a `CancelSignal` to act on
         // (`QueueHandle::stop`) and a switch this function re-checks itself,
-        // rather than landing in the gap where `stop` found nothing to
-        // cancel and nothing here noticed the switch had changed underneath
-        // it. `finish()` on every path back out below is what keeps this
-        // from leaving `in_flight` — and so `running_task_id` — pointing at a
-        // task nothing is actually doing anything about.
-        let cancel = CancelSignal::new();
-        self.shared.begin(&task_id, cancel.clone());
+        // rather than landing in the gap where `stop` found nothing to cancel
+        // and nothing here noticed the switch had changed underneath it.
+        //
+        // The lease is what replaces the explicit `finish()` that used to be
+        // needed on all six paths back out of this function: `Drop` frees the
+        // slot on every one of them, and on a panic too, which no trailing
+        // statement could.
+        //
+        // A refusal here is not an error. The registry is shared with the
+        // button now, so "a human already started this one" is an ordinary
+        // race the queue loses gracefully — it looks at the board again rather
+        // than recording a step error nobody needs to read.
+        let lease = match self.shared.in_flight.acquire(
+            &task_id,
+            &entry.repository_id,
+            LeaseOwner::Queue,
+            Capacity::SEQUENTIAL,
+        ) {
+            Ok(lease) => lease,
+            Err(refused) => {
+                tracing::info!(%task_id, reason = %refused.message(), "passing over a task");
+                return Ok(Step::Idle);
+            }
+        };
+        let cancel = lease.cancel_signal();
 
         // The prerequisite, before the claim rather than after it — task 008's
         // acceptance criterion ("a missing binary is refused before any run
         // state is written") is worth as much to a queue as to a button. A
         // queue that claimed first would spend a night walking the board
         // marking every task failed because `claude` is not installed.
-        if let Err(error) = probe_cli(&self.runner.program).await {
-            self.shared.finish();
-            return Err(error);
-        }
+        probe_cli(&self.runner.program).await?;
 
         if self.interrupted_since(&cancel).await? {
             // Nothing has been claimed yet, so there is nothing to release —
             // just stop before spending a claim on a task nobody wants
             // started any more.
-            self.shared.finish();
             return Ok(Step::Idle);
         }
 
-        let claimed = match claim::claim(ctx, &task_id).await {
-            Ok(outcome) => outcome,
-            Err(error) => {
-                self.shared.finish();
-                return Err(error);
-            }
-        };
-        if claimed == ClaimOutcome::Lost {
+        if claim::claim(ctx, &task_id).await? == ClaimOutcome::Lost {
             // Somebody else has it. The board says something different from
             // what it said a moment ago, so look again rather than waiting.
-            self.shared.finish();
             return Ok(Step::Worked);
         }
 
@@ -361,7 +407,6 @@ impl QueueTask {
             // spawn a process for a queue that was told to stop before this
             // one started.
             claim::release(ctx, &task_id).await;
-            self.shared.finish();
             return Ok(Step::Idle);
         }
 
@@ -381,7 +426,11 @@ impl QueueTask {
             },
         )
         .await;
-        self.shared.finish();
+
+        // Explicit rather than left to the end of the scope: the slot must be
+        // free before the logging below, so nothing can observe a finished run
+        // still occupying one.
+        drop(lease);
 
         match outcome {
             Ok(run) => tracing::info!(
@@ -431,15 +480,11 @@ enum Step {
 struct Shared {
     ctx: ServiceContext,
     signals: watch::Sender<Signal>,
-    /// `std::sync::Mutex` rather than tokio's: it is only ever held across two
-    /// field accesses, never across an `await`, and a lock that cannot be held
-    /// across a yield point is one fewer thing to reason about.
-    in_flight: Mutex<Option<InFlight>>,
+    /// Not the queue's own map any more — the shell holds a clone of the same
+    /// registry, and both doors read it. See this module's header.
+    in_flight: InFlight,
     /// The reason [`QueueTask::step`]'s last pass could not be completed, if
-    /// it couldn't. Its own lock, separate from `in_flight`'s: the two are
-    /// written at different points of a pass (this one only in `step`, never
-    /// inside `try_step` itself) and reading one has no business waiting on
-    /// the other.
+    /// it couldn't. Written only in `step`, never inside `try_step` itself.
     last_step_error: Mutex<Option<String>>,
 }
 
@@ -450,29 +495,6 @@ impl Shared {
 
     fn is_shutting_down(&self) -> bool {
         self.signals.borrow().shutdown
-    }
-
-    fn in_flight(&self) -> Option<InFlight> {
-        self.lock().clone()
-    }
-
-    fn begin(&self, task_id: &str, cancel: CancelSignal) {
-        *self.lock() = Some(InFlight {
-            task_id: task_id.to_string(),
-            cancel,
-        });
-    }
-
-    fn finish(&self) {
-        *self.lock() = None;
-    }
-
-    fn lock(&self) -> std::sync::MutexGuard<'_, Option<InFlight>> {
-        // The guard never spans caller code, so the only way to poison this is
-        // a panic inside one of the four statements above.
-        self.in_flight
-            .lock()
-            .expect("queue in-flight lock poisoned")
     }
 
     fn record_step_error(&self, error: String) {
@@ -495,13 +517,6 @@ impl Shared {
             .expect("queue step-error lock poisoned")
             .clone()
     }
-}
-
-/// The run this queue is supervising, and the button that stops it.
-#[derive(Clone)]
-struct InFlight {
-    task_id: String,
-    cancel: CancelSignal,
 }
 
 /// Why the control channel is a `watch` and not a `Notify`.
@@ -545,6 +560,7 @@ mod tests {
             harness.context.clone(),
             AppPaths::new("/tmp/rimaia-queue-unit-test"),
             RunnerConfig::default(),
+            InFlight::new(),
         )
     }
 
@@ -596,7 +612,7 @@ mod tests {
 
         handle.stop().await.expect("stop an idle queue");
 
-        assert_eq!(handle.in_flight_task_id(), None);
+        assert!(handle.in_flight_task_ids().is_empty());
     }
 
     #[tokio::test]

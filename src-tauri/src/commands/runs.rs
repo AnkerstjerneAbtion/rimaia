@@ -12,7 +12,7 @@
 //! "Read the *most recent* run's outcome and its log path" needs no command
 //! of its own: that is `TaskDetail.lastRun`, which `commands::tasks::get_task`
 //! already returns — the run this crate just started **is** the task's most
-//! recent attempt for as long as [`crate::state::RunRegistry`] refuses a
+//! recent attempt for as long as the in-flight registry refuses a
 //! second concurrent one. Task 015's [`get_run`] below is a different read:
 //! *any* attempt by id, with the branch's diff and commits alongside it
 //! (ADR-0013), for a history list that shows every attempt rather than only
@@ -26,50 +26,13 @@ use rimaia_core::runner::events::RunTail;
 use rimaia_core::runner::{probe_cli, run_task, RunRequest, RunTrigger};
 use rimaia_core::runs::transcript::{self, SearchHit, TranscriptPage};
 use rimaia_core::runs::{self, PruneCriterion, PruneResult, RunDetail, RunFilter, RunListEntry};
-use rimaia_core::scheduler::{self, ClaimOutcome};
+use rimaia_core::scheduler::{self, ClaimOutcome, LeaseOwner};
 use rimaia_core::{repo, tasks, Error, Result};
 use serde::Deserialize;
 use tauri::State;
 use tauri_plugin_opener::OpenerExt;
 
-use crate::state::{AppState, RunRegistry};
-
-/// Releases `task_id`'s claim in `registry` on every exit from the scope that
-/// holds it — the early `?` returns below, and (moved into the spawned
-/// future) whatever happens to `run_task` after, panic included.
-///
-/// A trailing `registry.finish(&task_id)` statement only runs when the
-/// future it is in returns normally; a panic anywhere in `run_task` unwinds
-/// past it and leaves `task_id` claimed forever, so every later "Run now" on
-/// that card is refused with "a run is already in progress" and nothing —
-/// short of restarting the app — clears it. `Drop` runs on unwind as well as
-/// on a normal return, which is the property this guard exists for.
-///
-/// `pub(crate)` since task 020: `commands::strategy::plan_task_strategy` starts
-/// a second kind of child process against the same registry entry and needs the
-/// same guarantee. One guard rather than two, for the same reason there is now
-/// one `RunnerConfig` — a second copy is a second place for the release to be
-/// forgotten.
-pub(crate) struct ReleaseOnDrop {
-    registry: RunRegistry,
-    task_id: String,
-}
-
-impl ReleaseOnDrop {
-    /// Takes over the registry entry [`RunRegistry::start`] has already
-    /// claimed for `task_id`. It claims nothing itself — a guard that could
-    /// also claim would be a second door onto the refusal `start` exists to
-    /// make.
-    pub(crate) fn new(registry: RunRegistry, task_id: String) -> Self {
-        Self { registry, task_id }
-    }
-}
-
-impl Drop for ReleaseOnDrop {
-    fn drop(&mut self) {
-        self.registry.finish(&self.task_id);
-    }
-}
+use crate::state::AppState;
 
 /// Starts a manual run of `task_id` and returns as soon as it is under way —
 /// **not once it finishes.**
@@ -98,38 +61,54 @@ impl Drop for ReleaseOnDrop {
 ///
 /// # Why this also takes `scheduler::claim` before spawning anything
 ///
-/// `state.runs.start`'s `queue_owns` check is an in-memory read of the
-/// queue's own `in_flight_task_id` — set only once the queue's own claim has
-/// already committed — so a click that lands in the gap between that commit
-/// and the in-memory flag being set sails straight through it. Four awaits
-/// separate that check from the spawn below (this function's own body,
-/// unchanged since task 008), which is window enough: by the time
-/// `run_task` re-reads the task, the queue may already have moved it to
-/// `running`, and `run_task`'s own internal claim treats an already-`running`
-/// task as "already mine" and spawns anyway (the arm task 008 wrote for
-/// exactly one starter, before there was a second). The transactional claim
-/// here closes that race for real, at the row: whichever caller's
-/// `set_run_state` commits first owns the task, and `run_task`'s own claim
-/// then no-ops on top of a state this call already produced. Refusing on
-/// `Lost` rather than propagating a raw transition error also gives the
-/// button the same sentence `queue_owns` already shows for the case it does
-/// catch.
+/// The lease is an in-memory fact about *this process*, and it is taken
+/// before the queue's own claim can possibly have committed for a task the
+/// queue picked in the same instant. Several awaits separate the lease from
+/// the spawn below, which is window enough: by the time `run_task` re-reads
+/// the task, the queue may already have moved it to `running`, and
+/// `run_task`'s own internal claim treats an already-`running` task as
+/// "already mine" and spawns anyway (the arm task 008 wrote for exactly one
+/// starter, before there was a second). The transactional claim here closes
+/// that race for real, at the row: whichever caller's `set_run_state` commits
+/// first owns the task, and `run_task`'s own claim then no-ops on top of a
+/// state this call already produced.
+///
+/// The two guards are not redundant. The lease stops *this* process starting
+/// two children for one task, including the "Plan now" / "Run now" pair, which
+/// no database state distinguishes. The claim stops two writers disagreeing
+/// about a row, which an in-memory map cannot survive a restart to do.
 #[tauri::command]
 pub async fn start_task_run(state: State<'_, AppState>, task_id: String) -> Result<()> {
-    let cancel = state.runs.start(&task_id)?;
-    // Releases the claim above on every exit from here on — the early `?`
-    // returns immediately below, or, once moved into the spawned future,
-    // however `run_task` ends there.
-    let release = ReleaseOnDrop::new(state.runs.clone(), task_id.clone());
-
     let context = state.context.clone();
     // The process-wide config, not a fresh default: the queue spawns from this
     // same value, and a button that configured its child differently from the
     // queue's would be a difference nothing on screen could explain.
     let config = state.runner.clone();
 
+    // Read before the lease rather than after, because a lease is taken per
+    // repository and this is the only thing that knows which one. Both reads
+    // are read-only, so the pair costs a query and changes nothing that a
+    // second click could race: `acquire` is still the atomic step, and it is
+    // still ahead of every spawn.
     let detail = tasks::get_task(&context, &task_id).await?;
     let repository = repo::get(&context, &detail.task.repository_id).await?;
+
+    // `acquire_unbounded`, not `acquire`: the concurrency caps bound what the
+    // *scheduler* starts, and a person clicking Run now with the app in front
+    // of them is not the mis-set-configuration failure those settings exist
+    // for. The per-task exclusion and the absolute ceiling still apply.
+    //
+    // The lease is also what replaced the hand-written `ReleaseOnDrop` guard
+    // that used to live in this file: `Lease`'s own `Drop` frees the slot on
+    // every path out of here, including a panic inside the spawned future, and
+    // it is owned by the thing that hands out the claim rather than by each
+    // caller who remembers to write the guard.
+    let lease = state
+        .in_flight
+        .acquire_unbounded(&task_id, &repository.id, LeaseOwner::Manual)
+        .map_err(|refused| Error::invalid(refused.message()))?;
+    let cancel = lease.cancel_signal();
+
     repo::ensure_unattended_runs_allowed(&repository)?;
     probe_cli(&config.program).await?;
 
@@ -148,7 +127,7 @@ pub async fn start_task_run(state: State<'_, AppState>, task_id: String) -> Resu
     };
 
     tauri::async_runtime::spawn(async move {
-        let _release = release;
+        let _lease = lease;
         if let Err(error) = run_task(&context, &paths, &config, request).await {
             tracing::error!(
                 %task_id, %error,
@@ -168,7 +147,7 @@ pub async fn start_task_run(state: State<'_, AppState>, task_id: String) -> Resu
 /// `runner::process::execute`; this only delivers the request.
 #[tauri::command]
 pub fn cancel_task_run(state: State<'_, AppState>, task_id: String) -> Result<()> {
-    state.runs.cancel(&task_id);
+    state.in_flight.cancel(&task_id);
     Ok(())
 }
 
@@ -178,11 +157,11 @@ pub fn cancel_task_run(state: State<'_, AppState>, task_id: String) -> Result<()
 /// This is the read half of seam-contract D14: a client that opens the Runs
 /// view after a run has already started has missed every `runs:tail` event
 /// published so far, and this is what it reads once to catch up before
-/// subscribing for the rest. See [`crate::state::RunRegistry`]'s own doc for
+/// subscribing for the rest. See [`crate::state::RunTails`]'s own doc for
 /// why this is the latest snapshot rather than a scrollback of every one.
 #[tauri::command]
 pub fn get_run_tail(state: State<'_, AppState>, run_id: String) -> Result<Option<RunTail>> {
-    Ok(state.runs.tail(&run_id))
+    Ok(state.tails.get(&run_id))
 }
 
 // ---------------------------------------------------------------------------
