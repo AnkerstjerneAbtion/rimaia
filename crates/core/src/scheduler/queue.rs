@@ -9,16 +9,39 @@
 //! before the task does so the shell can wire a command to it in the same
 //! `setup()` hook.
 //!
-//! # It never polls and never sleeps
+//! # It never polls, and it sleeps for exactly one reason
 //!
-//! The loop does work until there is none, then waits on four things: its own
+//! The loop does work until there is none, then waits on five things: its own
 //! control signals; [`ChangeEvent`](crate::ChangeEvent) — ADR-0018's channel,
 //! whose Consequences already anticipated this subscriber ("adding the
 //! scheduler's own view later is another `subscribe()` and no coordination with
-//! anyone"); [`InFlight::releases`]; and its own [`JoinSet`]. A card dragged to
-//! the top of `ready` publishes `Tasks`, the loop wakes, re-reads the board and
-//! claims it. There is no interval to tune and nothing that costs a query while
-//! the board is idle.
+//! anyone"); [`InFlight::releases`]; its own [`JoinSet`]; and — new in task 014
+//! — a **deadline**. A card dragged to the top of `ready` publishes `Tasks`,
+//! the loop wakes, re-reads the board and claims it. There is still no interval
+//! to tune and nothing that costs a query while the board is idle.
+//!
+//! The fifth arm exists because ADR-0011 introduced the one fact nothing
+//! publishes: a `waiting_retry` task becomes due when a wall-clock instant
+//! passes, and no mutation happens at that moment. Without it a task scheduled
+//! to resume at 06:00 would wait for the next unrelated board change, which at
+//! 06:00 is nobody.
+//!
+//! **It waits on [`Clock::sleep_until`](crate::Clock::sleep_until), not on
+//! `tokio::time::sleep`.** The deadline was computed against
+//! [`Clock::now`](crate::Clock::now), so the wait has to be, or a test that
+//! advances a `TestClock` by fifteen minutes would sit through fifteen real
+//! ones and CLAUDE.md's "no sleep in tests, ever" would quietly hold only for
+//! the policy function.
+//!
+//! And the deadline it actually sleeps on is **capped at
+//! [`DEADLINE_CAP`]** — which is not a poll interval, though it will look like
+//! one to anyone who skims. A `tokio` timer measures elapsed *monotonic* time;
+//! a laptop suspended at 23:10 and reopened at 06:30 has elapsed almost none of
+//! it, so a single seven-hour timer would fire hours after the window it was
+//! waiting for reopened. The cap makes the loop re-derive the answer from
+//! `ctx.clock.now()` shortly after each wake, which is the only reading of the
+//! clock that survives a system sleep. A wake with nothing to do costs one
+//! board read a minute at most, and only while something is genuinely waiting.
 //!
 //! Change events are drained *before* the board is read, never after. An event
 //! that arrives between the read and the wait is then still buffered and wakes
@@ -121,6 +144,7 @@
 
 use std::sync::{Arc, Mutex};
 
+use chrono::{DateTime, Duration, Utc};
 use serde::Serialize;
 use tokio::sync::broadcast::error::{RecvError, TryRecvError};
 use tokio::sync::{broadcast, watch};
@@ -131,12 +155,22 @@ use crate::db::MutationSource;
 use crate::error::Result;
 use crate::events::ChangeEvent;
 use crate::paths::AppPaths;
-use crate::runner::{probe_cli, run_task, CancelSignal, RunRequest, RunTrigger, RunnerConfig};
-use crate::scheduler::capacity;
+use crate::runner::{
+    probe_cli, run_task, CancelSignal, ResumeSession, RunRequest, RunTrigger, RunnerConfig,
+};
 use crate::scheduler::claim::{self, ClaimOutcome};
 use crate::scheduler::inflight::{Capacity, InFlight, Lease, LeaseOwner};
 use crate::scheduler::selection::{self, QueueEntry};
 use crate::scheduler::state::{self, QueueState};
+use crate::scheduler::{attempts, capacity, pause};
+
+/// The longest the loop will sleep on one deadline before re-deriving it.
+///
+/// **Not a poll interval** — see this module's header. It exists because a
+/// `tokio` timer cannot be trusted as a wall-clock alarm across a system
+/// suspend, and it costs nothing while nothing is waiting: with no deadline the
+/// loop parks on its channels and this constant is never reached.
+const DEADLINE_CAP: Duration = Duration::seconds(60);
 
 /// Everything the Runs view asks the queue about, in one read.
 ///
@@ -167,6 +201,15 @@ pub struct QueueStatus {
     /// `state` still read `running` and `plan` still listed a full night's
     /// work, with nothing to say why none of it was happening.
     pub last_step_error: Option<String>,
+    /// When ADR-0011's global usage-limit hold lifts, or `None` when there is
+    /// none.
+    ///
+    /// Surfaced for the same reason [`last_step_error`](Self::last_step_error)
+    /// is: it is the other way a queue that reads `running` over a full plan can
+    /// be starting nothing, and a hold the operator cannot see is one they will
+    /// debug as a bug. Read fresh here rather than cached, so a hold that has
+    /// expired stops being reported without anything having to clear it.
+    pub usage_limit_pause_until: Option<DateTime<Utc>>,
 }
 
 /// The queue's control surface. Cheap to clone; every clone drives the same
@@ -279,11 +322,13 @@ impl QueueHandle {
 
     /// The whole picture, for the Runs view.
     pub async fn status(&self) -> Result<QueueStatus> {
+        let ctx = &self.shared.ctx;
         Ok(QueueStatus {
-            state: state::queue_state(&self.shared.ctx.pool).await?,
+            state: state::queue_state(&ctx.pool).await?,
             running_task_ids: self.in_flight_task_ids(),
-            plan: selection::plan(&self.shared.ctx).await?,
+            plan: selection::plan(ctx).await?,
             last_step_error: self.shared.step_error(),
+            usage_limit_pause_until: pause::active_until(&ctx.pool, ctx.clock.now()).await?,
         })
     }
 
@@ -338,6 +383,10 @@ impl QueueTask {
         // `QueueHandle::stop` speaks to the *leases*, which is a request the
         // run itself honours, not an abort that would lose its `finish_run`.
         let mut runs: JoinSet<()> = JoinSet::new();
+        // Held once rather than reached for through the context on every
+        // iteration: the timer future below outlives the borrow of `self` that
+        // `select!` would otherwise need.
+        let clock = Arc::clone(&self.shared.ctx.clock);
 
         tracing::info!("the run queue is watching the board");
 
@@ -349,9 +398,25 @@ impl QueueTask {
             // Before the board read, never after — see this module's header.
             drain(&mut changes);
 
-            if self.step(&mut runs).await == Step::Worked {
+            let step = self.step(&mut runs).await;
+            if step == Step::Worked {
                 continue;
             }
+
+            // The fifth wake source. Capped before it is slept on — see this
+            // module's header on why that is not a poll interval — and built
+            // fresh every iteration, because the deadline is re-derived from a
+            // board that may have changed while the loop was busy.
+            let deadline = step.deadline().map(|at| at.min(clock.now() + DEADLINE_CAP));
+            let clock = Arc::clone(&clock);
+            let due = async move {
+                match deadline {
+                    Some(at) => clock.sleep_until(at).await,
+                    // A queue with nothing waiting parks on its channels, which
+                    // is what keeps an idle night free of timers entirely.
+                    None => std::future::pending().await,
+                }
+            };
 
             tokio::select! {
                 // Every arm is cancel-safe, which is what lets this loop drop
@@ -365,6 +430,11 @@ impl QueueTask {
                 // A slot opened. See this module's header on why `ChangeEvent`
                 // cannot carry this and why the arm below does not cover it.
                 _ = releases.changed() => {},
+                // A deadline passed — or the cap did. Either way the answer is
+                // the same, and it is the one the next pass computes from
+                // `ctx.clock.now()`: this arm carries no information beyond
+                // "look again".
+                _ = due => {},
                 // Guarded, because `join_next` on an empty set returns `None`
                 // immediately — an unguarded arm would make this `select!` a
                 // spin loop for the whole time the queue has nothing running,
@@ -426,6 +496,20 @@ impl QueueTask {
             return Ok(Step::Idle);
         }
 
+        // ADR-0011's global hold, checked **before the plan is even read**.
+        // Both modes therefore honour it by construction rather than by each
+        // having a branch for it, which is the same property `capacity::resolve`
+        // buys by making sequential mode `global = 1`. In-flight runs are
+        // deliberately untouched: a run mid-edit when *another* task hit a wall
+        // has done nothing wrong, and this is a rule about starting.
+        if let Some(until) = pause::active_until(&ctx.pool, ctx.clock.now()).await? {
+            tracing::debug!(
+                until = %until.to_rfc3339(),
+                "the run queue is holding new starts until the usage window reopens",
+            );
+            return Ok(Step::IdleUntil(until));
+        }
+
         // Read fresh every pass, never held: the operator may flip the mode or
         // raise a repository's cap at 23:00 with runs already in flight, and
         // the pass after that write is the one that has to notice.
@@ -438,7 +522,16 @@ impl QueueTask {
             &capacity.per_repository,
         );
         if batch.is_empty() {
-            return Ok(Step::Idle);
+            // Nothing startable now. If something is *waiting* on a deadline,
+            // that instant is the only thing that will change the answer, and
+            // nothing publishes an event when it arrives — so it becomes the
+            // loop's timer. Computed even when the batch is empty for capacity
+            // reasons rather than eligibility ones: a full queue that also has
+            // a task due at 06:00 loses nothing by waking then.
+            return Ok(match selection::next_deadline(&plan) {
+                Some(at) => Step::IdleUntil(at),
+                None => Step::Idle,
+            });
         }
 
         // Every lease first, for the whole batch, and **before** the
@@ -511,7 +604,19 @@ impl QueueTask {
                 break;
             }
 
-            if claim::claim(ctx, &task_id).await? == ClaimOutcome::Lost {
+            // Two claims, one per route into `running`, chosen by what the
+            // board read said this entry *is*. `resume_after` is populated only
+            // for a task in `waiting_retry` (see `QueueEntry::resume_after`),
+            // so this is not a guess: a fresh start walks `idle -> queued ->
+            // running`, and a due retry takes ADR-0007's own
+            // `waiting_retry -> running` edge in one conditional write.
+            let resuming = entry.resume_after.is_some();
+            let claimed = if resuming {
+                claim::claim_retry(ctx, &task_id).await?
+            } else {
+                claim::claim(ctx, &task_id).await?
+            };
+            if claimed == ClaimOutcome::Lost {
                 // Somebody else has it. The board says something different
                 // from what it said a moment ago, so the pass counts as work
                 // and the loop will look again rather than waiting.
@@ -519,6 +624,20 @@ impl QueueTask {
                 worked = true;
                 continue;
             }
+
+            // After the claim, never before: a session read for a task the
+            // queue then lost the race for would be a query spent on somebody
+            // else's run. `None` for a retry whose rows have gone — a pruned
+            // history, a hand-edited database — which starts a fresh session
+            // rather than refusing, because a task with no context to resume is
+            // exactly a task that should be started from the top.
+            let resume = if resuming {
+                attempts::resumable_session(ctx, &task_id)
+                    .await?
+                    .map(|session_id| ResumeSession { session_id })
+            } else {
+                None
+            };
 
             if self.interrupted_since(&cancel).await? {
                 // Won the claim, but a Pause, a Stop or a shutdown landed
@@ -530,7 +649,12 @@ impl QueueTask {
                 break;
             }
 
-            tracing::info!(%task_id, title = %entry.title, "the run queue started a task");
+            tracing::info!(
+                %task_id,
+                title = %entry.title,
+                resuming = resume.is_some(),
+                "the run queue started a task",
+            );
 
             runs.spawn(supervise(
                 ctx.clone(),
@@ -542,6 +666,7 @@ impl QueueTask {
                     // ADR-0012: the unattended path, behind the per-repository
                     // opt-in `selection` already checked.
                     trigger: RunTrigger::Queued,
+                    resume,
                     cancel,
                     // So two runs in one repository take turns creating their
                     // worktrees rather than racing `git worktree add` against
@@ -620,6 +745,23 @@ enum Step {
     Worked,
     /// Nothing to do. Wait to be woken.
     Idle,
+    /// Nothing to do *yet*: something on the board becomes startable at this
+    /// instant and nothing will publish an event when it does.
+    ///
+    /// A separate variant rather than `Idle` carrying an `Option` because the
+    /// two are genuinely different conclusions — "wait for the world to change"
+    /// and "wait for the clock" — and a queue that conflated them would either
+    /// arm a timer it never needs or sleep through a deadline.
+    IdleUntil(DateTime<Utc>),
+}
+
+impl Step {
+    fn deadline(self) -> Option<DateTime<Utc>> {
+        match self {
+            Step::IdleUntil(at) => Some(at),
+            Step::Worked | Step::Idle => None,
+        }
+    }
 }
 
 /// What the control surface and the loop share.

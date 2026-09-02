@@ -43,7 +43,7 @@ use crate::mcp::responses::{
 };
 use crate::mcp::scope::{RunScope, Tool};
 use crate::runner::prompt::TEMPLATE_VARIABLES;
-use crate::scheduler::capacity;
+use crate::scheduler::{self, capacity};
 use crate::strategy::{self, Catalogue, StrategyDefaults};
 use crate::tasks::{NewTask, NewTaskLink, Patch, TaskFilter, TaskPatch};
 use crate::{db, repo, tasks, Result};
@@ -531,6 +531,22 @@ task until somebody accepts it, which is only useful while someone is watching."
     }
 
     #[tool(
+        description = "Stop retrying a task that is waiting to resume, landing it in `failed` so a \
+human reviews it instead. Call this when the error on its last run will not clear on its own and \
+the remaining attempts would hit the same wall; it speaks for that human, so a run cannot call it. \
+Use `move_task` for a card that simply belongs somewhere else, and cancel rather than this for a \
+run that is still in flight."
+    )]
+    pub async fn give_up_on_task(
+        &self,
+        Parameters(request): Parameters<TaskStrategyRequest>,
+    ) -> Result<Json<TaskView>, ToolError> {
+        self.scope.authorize(Tool::GiveUpOnTask, None)?;
+        scheduler::give_up(&self.ctx, &request.task_id).await?;
+        self.task_view(&request.task_id).await
+    }
+
+    #[tool(
         description = "Accept a planner's proposal on behalf of the user, marking the strategy as \
 theirs rather than the planner's. A later planner run will then leave it alone. Call this when a human has \
 reviewed a proposal and is happy with it; it speaks for that human, so a run cannot call it — \
@@ -721,7 +737,7 @@ mod tests {
     /// capability parity a rule. What replaces a count is the property that
     /// actually matters — a registered tool with no run-scope decision cannot
     /// reach the wire.
-    const REGISTERED_TOOLS: [&str; 23] = [
+    const REGISTERED_TOOLS: [&str; 24] = [
         "accept_task_strategy",
         "add_task_link",
         "clear_task_strategy",
@@ -732,6 +748,7 @@ mod tests {
         "get_strategy_catalogue",
         "get_strategy_defaults",
         "get_task",
+        "give_up_on_task",
         "list_repositories",
         "list_tasks",
         "move_task",

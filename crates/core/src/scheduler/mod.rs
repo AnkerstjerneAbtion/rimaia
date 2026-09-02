@@ -32,17 +32,21 @@
 //! process on the end of that row is ours. The queue takes the lease *before*
 //! the claim, so a Pause pressed mid-claim has something to act on.
 //!
-//! # Nothing here waits on the clock
+//! # The one thing here that waits, waits on the injected clock
 //!
-//! The module this replaced said "everything here that waits or times out does
-//! so against an injected [`Clock`](crate::Clock)". Nothing here waits at all:
-//! the loop is woken by [`ChangeEvent`](crate::ChangeEvent) publications
-//! (ADR-0018's "adding the scheduler's own view later is another
-//! `subscribe()`") and by its own control calls, never by a poll interval. The
-//! clock still travels on the [`ServiceContext`](crate::ServiceContext) and
-//! every timestamp the queue causes to be written comes from it — but there is
-//! no backoff and no run window here yet, so there is nothing to sleep through.
-//! ADR-0011's waits arrive with task 014, and they inject the clock then.
+//! Task 009's version of this header said "nothing here waits at all", and that
+//! was true until ADR-0011's backoff arrived: a `waiting_retry` task becomes due
+//! at a wall-clock instant, and no mutation publishes a
+//! [`ChangeEvent`](crate::ChangeEvent) when one passes. So the loop has a fourth
+//! wake source, and it is [`Clock::sleep_until`](crate::Clock::sleep_until) —
+//! not `tokio::time::sleep`, because the deadline was computed against
+//! [`Clock::now`](crate::Clock::now) and a wait measured any other way would be
+//! a second clock (seam-contract D22). Everything else here is still woken by
+//! publications and control calls, never by a poll interval.
+//!
+//! [`retry`] is the policy that produces those deadlines and is entirely pure;
+//! [`attempts`] derives the budget it spends from the `runs` rows; [`pause`] is
+//! ADR-0011's global hold on new starts while a usage window is closed.
 //!
 //! # The scheduler is not a second writer of anything
 //!
@@ -54,24 +58,37 @@
 //! enforced in two places eventually enforces two different invariants
 //! (ADR-0006), and a scheduler is exactly the second place it would happen.
 
+pub mod attempts;
 pub mod capacity;
 pub mod claim;
 pub mod inflight;
+pub mod pause;
 pub mod queue;
 pub mod reconcile;
+pub mod retry;
 pub mod selection;
 pub mod state;
 
+pub use attempts::{history as attempt_history, resumable_session, Ending};
 pub use capacity::{
     configured as configured_capacity, max_concurrency, resolve as resolve_capacity, schedule_mode,
     set_max_concurrency, set_schedule_mode, Resolved, RunCapacity, DEFAULT_MAX_CONCURRENCY,
     DEFAULT_PER_REPOSITORY, MAX_CONCURRENCY, SCHEDULE_MODE,
 };
-pub use claim::{claim, release, ClaimOutcome};
+pub use claim::{claim, claim_retry, give_up, release, ClaimOutcome};
+pub use pause::{
+    active_until as usage_limit_pause_until, note_usage_limit, USAGE_LIMIT_PAUSE_UNTIL,
+};
+pub use retry::{
+    decide as decide_retry, AttemptHistory, GiveUpReason, RetryDecision, RetryKind,
+    MAX_TRANSIENT_ATTEMPTS, USAGE_LIMIT_FALLBACK_POLL,
+};
 pub use inflight::{
     Capacity, Counts, InFlight, Lease, LeaseOwner, LeaseRefused, CONCURRENCY_CEILING,
 };
 pub use queue::{build, QueueHandle, QueueStatus, QueueTask};
 pub use reconcile::reconcile_interrupted;
-pub use selection::{next_batch, next_to_start, plan, skip_reason, QueueEntry, SkipReason};
+pub use selection::{
+    next_batch, next_deadline, next_to_start, plan, skip_reason, QueueEntry, SkipReason,
+};
 pub use state::{queue_state, set_queue_state, QueueState, QUEUE_STATE};

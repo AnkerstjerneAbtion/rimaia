@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE runs\n              SET ended_at = ?1, status = ?2, exit_class = ?3, error_message = ?4,\n                  num_turns = ?5, cost_usd = ?6, pr_url = ?7,\n                  model = ?8, effort = ?9, run_environment = ?10,\n                  input_tokens = ?11, output_tokens = ?12,\n                  cache_read_tokens = ?13, cache_creation_tokens = ?14,\n                  resume_after = ?15\n            WHERE id = ?16",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 16
+    },
+    "nullable": []
+  },
+  "hash": "ad61bce701b6cb0fc26c0e36592a7c6a0adb4bebcce7aaa481cb147ad895b6fc"
+}

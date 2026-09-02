@@ -48,6 +48,7 @@
 
 use std::collections::{HashMap, HashSet};
 
+use chrono::{DateTime, Utc};
 use serde::Serialize;
 
 use crate::context::ServiceContext;
@@ -74,10 +75,26 @@ pub enum SkipReason {
     /// [`RunState::Blocked`] and from [`TaskSummary::blocked_by_incomplete`] —
     /// two spellings of one condition, and neither is computed until task 011.
     DependencyNotSatisfied,
-    /// Something already has this task: it is `queued`, `running`, or waiting
-    /// out a retry. The queue never starts a second process for it, and this is
-    /// where a manual "Run now" that beat the queue to a card shows up.
+    /// Something already has this task: it is `queued` or `running`. The queue
+    /// never starts a second process for it, and this is where a manual "Run
+    /// now" that beat the queue to a card shows up.
+    ///
+    /// Also where a `waiting_retry` task with **no** `resume_after` lands. That
+    /// is a task somebody else's decision put there — a hand-edited row, or a
+    /// future starter this module has not met — and the conservative reading of
+    /// a wait nobody scheduled is that it is not ours to end.
     AlreadyInFlight,
+    /// ADR-0011's `waiting_retry`, with a deadline that has not arrived. The
+    /// queue *will* start this task; it is not time yet.
+    ///
+    /// A fifth variant in a set whose own doc calls it closed, and the
+    /// justification is that this is genuinely a different answer from
+    /// [`AlreadyInFlight`](SkipReason::AlreadyInFlight): nothing is running,
+    /// nothing is wrong, and the card can say *when*. Collapsing it into
+    /// "already started" is what the MVP did while nothing resumed a waiting
+    /// task, and it is the reading that would leave a morning reviewer unable
+    /// to tell a task that is coming back at 06:00 from one that is stuck.
+    WaitingForRetry,
     /// The last attempt ended `failed` or `cancelled`. ADR-0007 leaves such a
     /// card in `ready` deliberately — "a failure should interrupt the morning
     /// review, not hide in a column" — and the queue does not retry it on its
@@ -102,6 +119,7 @@ impl SkipReason {
             }
             SkipReason::DependencyNotSatisfied => "waiting on a dependency",
             SkipReason::AlreadyInFlight => "already started",
+            SkipReason::WaitingForRetry => "waiting to resume",
             SkipReason::NeedsAttention => "the last run did not succeed",
         }
     }
@@ -126,6 +144,18 @@ pub struct QueueEntry {
     pub queue_position: Option<i64>,
     /// `None` when the queue would start this task right now.
     pub skip: Option<SkipReason>,
+    /// When ADR-0011's policy scheduled this task's next attempt.
+    ///
+    /// **Populated only for a task in `waiting_retry`**, which is what makes it
+    /// safe for `try_step` to read `resume_after.is_some()` as "this entry is a
+    /// resume": a task that failed last night and was started again by hand
+    /// still has an old deadline on its last run, and copying it here
+    /// unconditionally would make a fresh start look like a continuation.
+    ///
+    /// Carried on the entry rather than looked up per claim because the loop
+    /// needs the *earliest* of them to know when to wake, and a second query
+    /// per pass to find that would be a poll wearing a different hat.
+    pub resume_after: Option<DateTime<Utc>>,
 }
 
 /// Every `ready` task in board order, with the reason the queue will pass over
@@ -154,10 +184,16 @@ pub async fn plan(ctx: &ServiceContext) -> Result<Vec<QueueEntry>> {
         .map(|repository| repository.id)
         .collect();
 
+    // One instant for the whole pass, not one per entry: two tasks whose
+    // deadlines straddle the microsecond between two `now()` calls would
+    // otherwise be judged against different clocks, and the plan a card renders
+    // would not be the plan the batch was taken from.
+    let now = ctx.clock.now();
+
     let mut plan = Vec::with_capacity(ready.len());
     let mut claimable = 0;
     for summary in &ready {
-        let skip = skip_reason(summary, opted_in.contains(&summary.task.repository_id));
+        let skip = skip_reason(summary, opted_in.contains(&summary.task.repository_id), now);
         let queue_position = skip.is_none().then(|| {
             claimable += 1;
             claimable
@@ -169,10 +205,38 @@ pub async fn plan(ctx: &ServiceContext) -> Result<Vec<QueueEntry>> {
             repository_id: summary.task.repository_id.clone(),
             queue_position,
             skip,
+            resume_after: scheduled_resume(summary),
         });
     }
 
     Ok(plan)
+}
+
+/// The deadline ADR-0011's policy wrote for this task's next attempt, or `None`
+/// for a task that is not waiting on one.
+///
+/// Gated on `run_state` rather than read straight off the last run — see
+/// [`QueueEntry::resume_after`] for the failure that gate closes.
+fn scheduled_resume(task: &TaskSummary) -> Option<DateTime<Utc>> {
+    if task.task.run_state != RunState::WaitingRetry {
+        return None;
+    }
+    task.last_run.as_ref().and_then(|run| run.resume_after)
+}
+
+/// The earliest instant at which anything in `plan` becomes startable, or
+/// `None` when nothing is waiting on the clock.
+///
+/// This is the queue loop's timer, and the reason [`QueueEntry`] carries a
+/// deadline at all: an entry skipped for [`SkipReason::WaitingForRetry`] will
+/// become claimable with no mutation to announce it, so something has to know
+/// *when* to look again. Entries skipped for any other reason contribute
+/// nothing — a blocked or un-opted task is not waiting for a clock.
+pub fn next_deadline(plan: &[QueueEntry]) -> Option<DateTime<Utc>> {
+    plan.iter()
+        .filter(|entry| entry.skip == Some(SkipReason::WaitingForRetry))
+        .filter_map(|entry| entry.resume_after)
+        .min()
 }
 
 /// Every task the queue may start right now, in board order, bounded by the
@@ -267,13 +331,25 @@ pub fn next_to_start(plan: &[QueueEntry]) -> Option<&QueueEntry> {
 /// which reason a card shows when more than one applies, and ADR-0012's opt-in
 /// comes first because it is the one the user has to act on.
 ///
-/// [`RunState::Idle`] is the only state the queue claims from. ADR-0010's list
-/// names `queued`, `running` and `waiting_retry` as ineligible and ADR-0008
-/// adds `blocked`; `failed` and `cancelled` are ineligible because ADR-0007
-/// says failed tasks "accumulate in `ready` unless the user acts", and a queue
-/// that re-selected them would work the top of the board forever instead of
-/// moving on.
-pub fn skip_reason(task: &TaskSummary, unattended_runs_allowed: bool) -> Option<SkipReason> {
+/// [`RunState::Idle`] is one of the two states the queue claims from.
+/// ADR-0010's list names `queued`, `running` and `waiting_retry` as ineligible
+/// and ADR-0008 adds `blocked`; `failed` and `cancelled` are ineligible because
+/// ADR-0007 says failed tasks "accumulate in `ready` unless the user acts", and
+/// a queue that re-selected them would work the top of the board forever
+/// instead of moving on.
+///
+/// **`waiting_retry` is the other one, and it is task 014's whole point.**
+/// ADR-0010 wrote that list before anything resumed a waiting task, so
+/// "ineligible" was the only correct reading of it; now a task whose
+/// `resume_after` has passed is exactly the task the queue is supposed to pick
+/// up, and one whose deadline is still ahead is [`WaitingForRetry`](SkipReason::WaitingForRetry)
+/// rather than a failure. Nothing here waits — `now` is passed in, the *loop*
+/// is what sleeps.
+pub fn skip_reason(
+    task: &TaskSummary,
+    unattended_runs_allowed: bool,
+    now: DateTime<Utc>,
+) -> Option<SkipReason> {
     if !unattended_runs_allowed {
         return Some(SkipReason::UnattendedRunsNotAllowed);
     }
@@ -286,9 +362,16 @@ pub fn skip_reason(task: &TaskSummary, unattended_runs_allowed: bool) -> Option<
 
     match task.task.run_state {
         RunState::Idle => None,
-        RunState::Queued | RunState::Running | RunState::WaitingRetry => {
-            Some(SkipReason::AlreadyInFlight)
-        }
+        RunState::WaitingRetry => match scheduled_resume(task) {
+            // Due: this is ours to claim, through `claim::claim_retry`.
+            Some(at) if at <= now => None,
+            Some(_) => Some(SkipReason::WaitingForRetry),
+            // Waiting on nothing. Whoever put it here did not schedule a
+            // resume, so ending the wait is not this module's call to make —
+            // see `SkipReason::AlreadyInFlight`.
+            None => Some(SkipReason::AlreadyInFlight),
+        },
+        RunState::Queued | RunState::Running => Some(SkipReason::AlreadyInFlight),
         RunState::Blocked => Some(SkipReason::DependencyNotSatisfied),
         RunState::Failed | RunState::Cancelled => Some(SkipReason::NeedsAttention),
     }
@@ -297,10 +380,17 @@ pub fn skip_reason(task: &TaskSummary, unattended_runs_allowed: bool) -> Option<
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::db::{MutationSource, StrategyMode, Task};
+    use crate::db::{MutationSource, RunStatus, StrategyMode, Task};
     use crate::strategy::StrategyOrigin;
-    use chrono::{DateTime, Utc};
+    use crate::tasks::LastRunSummary;
     use pretty_assertions::assert_eq;
+
+    /// The instant every test below judges a deadline against.
+    const NOW: &str = "2026-08-20T02:00:00Z";
+
+    fn now() -> DateTime<Utc> {
+        at(NOW)
+    }
 
     /// A `ready`, idle, never-run task — the one shape the queue claims.
     fn summary(run_state: RunState) -> TaskSummary {
@@ -344,9 +434,22 @@ mod tests {
         rfc3339.parse().expect("a literal timestamp must parse")
     }
 
+    /// A `waiting_retry` task whose policy decision is `resume_after`.
+    fn waiting(resume_after: Option<DateTime<Utc>>) -> TaskSummary {
+        TaskSummary {
+            last_run: Some(LastRunSummary {
+                status: RunStatus::Failed,
+                exit_class: Some(crate::db::ExitClass::UsageLimit),
+                ended_at: Some(at("2026-08-20T01:59:00Z")),
+                resume_after,
+            }),
+            ..summary(RunState::WaitingRetry)
+        }
+    }
+
     #[test]
     fn an_idle_task_in_an_opted_in_repository_is_the_only_thing_the_queue_claims() {
-        assert_eq!(skip_reason(&summary(RunState::Idle), true), None);
+        assert_eq!(skip_reason(&summary(RunState::Idle), true, now()), None);
     }
 
     #[test]
@@ -356,7 +459,7 @@ mod tests {
         // others clear on their own.
         for run_state in [RunState::Idle, RunState::Running, RunState::Failed] {
             assert_eq!(
-                skip_reason(&summary(run_state), false),
+                skip_reason(&summary(run_state), false, now()),
                 Some(SkipReason::UnattendedRunsNotAllowed),
                 "{run_state:?} in an un-opted repository"
             );
@@ -365,13 +468,48 @@ mod tests {
 
     #[test]
     fn a_task_something_else_already_started_is_not_started_again() {
-        for run_state in [RunState::Queued, RunState::Running, RunState::WaitingRetry] {
+        for run_state in [RunState::Queued, RunState::Running] {
             assert_eq!(
-                skip_reason(&summary(run_state), true),
+                skip_reason(&summary(run_state), true, now()),
                 Some(SkipReason::AlreadyInFlight),
                 "{run_state:?}"
             );
         }
+    }
+
+    #[test]
+    fn a_waiting_task_is_passed_over_until_its_deadline_and_claimed_once_it_arrives() {
+        // The predicate the whole of task 014 hangs off. Before task 014 this
+        // task read `already_in_flight` and the queue never came back to it,
+        // which is a night that ends at the first wall.
+        assert_eq!(
+            skip_reason(&waiting(Some(at("2026-08-20T06:00:00Z"))), true, now()),
+            Some(SkipReason::WaitingForRetry),
+        );
+        assert_eq!(
+            skip_reason(&waiting(Some(at("2026-08-20T02:00:00Z"))), true, now()),
+            None,
+            "a deadline exactly now is due, not still waiting",
+        );
+        assert_eq!(
+            skip_reason(&waiting(Some(at("2026-08-20T01:00:00Z"))), true, now()),
+            None,
+        );
+    }
+
+    #[test]
+    fn a_task_waiting_on_nothing_is_not_the_queues_to_resume() {
+        // A hand-edited row, or a starter this module has not met. The wait was
+        // not scheduled here, so ending it is not decided here either.
+        assert_eq!(
+            skip_reason(&waiting(None), true, now()),
+            Some(SkipReason::AlreadyInFlight),
+        );
+        assert_eq!(
+            skip_reason(&summary(RunState::WaitingRetry), true, now()),
+            Some(SkipReason::AlreadyInFlight),
+            "and neither is one with no run at all",
+        );
     }
 
     #[test]
@@ -381,7 +519,7 @@ mod tests {
         // forever and never reach the second one.
         for run_state in [RunState::Failed, RunState::Cancelled] {
             assert_eq!(
-                skip_reason(&summary(run_state), true),
+                skip_reason(&summary(run_state), true, now()),
                 Some(SkipReason::NeedsAttention),
                 "{run_state:?}"
             );
@@ -396,16 +534,55 @@ mod tests {
         // board's own read. Neither is computed until task 011 — this is what
         // proves the scheduler needs no edit when it is.
         assert_eq!(
-            skip_reason(&summary(RunState::Blocked), true),
+            skip_reason(&summary(RunState::Blocked), true, now()),
             Some(SkipReason::DependencyNotSatisfied)
         );
 
         let mut blocked = summary(RunState::Idle);
         blocked.blocked_by_incomplete = true;
         assert_eq!(
-            skip_reason(&blocked, true),
+            skip_reason(&blocked, true, now()),
             Some(SkipReason::DependencyNotSatisfied)
         );
+    }
+
+    #[test]
+    fn only_a_task_that_is_waiting_carries_a_deadline_into_the_plan() {
+        // The gate that stops last night's deadline making tomorrow's fresh
+        // start look like a continuation.
+        let due = at("2026-08-20T06:00:00Z");
+        assert_eq!(scheduled_resume(&waiting(Some(due))), Some(due));
+
+        let restarted = TaskSummary {
+            last_run: waiting(Some(due)).last_run,
+            ..summary(RunState::Idle)
+        };
+        assert_eq!(scheduled_resume(&restarted), None);
+    }
+
+    #[test]
+    fn the_loop_wakes_for_the_earliest_deadline_and_for_nothing_else() {
+        let plan = vec![
+            waiting_entry("late", at("2026-08-20T06:00:00Z")),
+            waiting_entry("early", at("2026-08-20T03:00:00Z")),
+            entry("blocked", Some(SkipReason::DependencyNotSatisfied), None),
+            entry("runnable", None, Some(1)),
+        ];
+
+        assert_eq!(next_deadline(&plan), Some(at("2026-08-20T03:00:00Z")));
+        assert_eq!(
+            next_deadline(&plan[2..]),
+            None,
+            "a blocked task is not waiting for a clock",
+        );
+        assert_eq!(next_deadline(&[]), None);
+    }
+
+    fn waiting_entry(task_id: &str, resume_after: DateTime<Utc>) -> QueueEntry {
+        QueueEntry {
+            resume_after: Some(resume_after),
+            ..entry(task_id, Some(SkipReason::WaitingForRetry), None)
+        }
     }
 
     #[test]
@@ -431,6 +608,7 @@ mod tests {
             repository_id: "repository".to_string(),
             queue_position,
             skip,
+            resume_after: None,
         }
     }
 

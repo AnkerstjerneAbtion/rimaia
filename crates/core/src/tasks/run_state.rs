@@ -148,8 +148,8 @@ pub async fn set_run_state(ctx: &ServiceContext, id: &str, to: RunState) -> Resu
     if !is_legal_run_state_transition(current.run_state, to) {
         return Err(Error::invalid(format!(
             "cannot move task {id} from run state \"{from}\" to \"{to}\": not a legal transition",
-            from = wire_spelling(current.run_state),
-            to = wire_spelling(to),
+            from = run_state_spelling(current.run_state),
+            to = run_state_spelling(to),
         )));
     }
 
@@ -176,7 +176,11 @@ pub async fn set_run_state(ctx: &ServiceContext, id: &str, to: RunState) -> Resu
 /// The schema's own spelling for one `run_state` value — for an error
 /// message a user reads, which should say what the board says
 /// (`waiting_retry`), not what Rust's `Debug` says (`WaitingRetry`).
-fn wire_spelling(state: RunState) -> &'static str {
+///
+/// Exported because `scheduler::claim::give_up` refuses a task that is not
+/// waiting and has to name the state it found. One spelling for both messages,
+/// which is the whole reason this is a function and not a `format!("{:?}")`.
+pub fn run_state_spelling(state: RunState) -> &'static str {
     match state {
         RunState::Idle => "idle",
         RunState::Queued => "queued",

@@ -111,6 +111,10 @@ pub enum Tool {
     SetScheduleMode,
     SetMaxConcurrency,
     SetRepositoryMaxConcurrency,
+
+    /// Task 014's one. `retry_task_now` is deliberately **not** here — see
+    /// `run_access` and seam-contract D22.
+    GiveUpOnTask,
 }
 
 /// What a [`RunScope::Run`] may do with one tool — ADR-0006's amendment table,
@@ -127,7 +131,7 @@ pub enum RunAccess {
 
 impl Tool {
     /// Every tool with a recorded decision, so a test can walk the table.
-    pub const ALL: [Tool; 23] = [
+    pub const ALL: [Tool; 24] = [
         Tool::AddTaskLink,
         Tool::CreateTask,
         Tool::GetBaseInstructions,
@@ -151,6 +155,7 @@ impl Tool {
         Tool::SetScheduleMode,
         Tool::SetMaxConcurrency,
         Tool::SetRepositoryMaxConcurrency,
+        Tool::GiveUpOnTask,
     ];
 
     /// The wired name — what `tools/list` advertises and what the ADR table
@@ -180,6 +185,7 @@ impl Tool {
             Tool::SetScheduleMode => "set_schedule_mode",
             Tool::SetMaxConcurrency => "set_max_concurrency",
             Tool::SetRepositoryMaxConcurrency => "set_repository_max_concurrency",
+            Tool::GiveUpOnTask => "give_up_on_task",
         }
     }
 
@@ -253,7 +259,14 @@ impl Tool {
             | Tool::GetRunCapacity
             | Tool::SetScheduleMode
             | Tool::SetMaxConcurrency
-            | Tool::SetRepositoryMaxConcurrency => RunAccess::Refused,
+            | Tool::SetRepositoryMaxConcurrency
+            // Task 014's, and it is the *first* kind of permanent refusal
+            // ADR-0021 point 4 names rather than the second: giving up on a
+            // task ends a retry loop, and a run that could end its own would
+            // be marking its own homework in the other direction — abandoning
+            // the work it was started to do and reporting it as settled. The
+            // operator endpoint keeps it in full.
+            | Tool::GiveUpOnTask => RunAccess::Refused,
         }
     }
 }

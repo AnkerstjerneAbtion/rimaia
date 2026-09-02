@@ -29,7 +29,7 @@ pub mod prompt;
 pub mod strategy;
 
 pub use process::{
-    execute, probe_cli, run_task, Attempt, CancelSignal, Invocation, PermissionMode, RunRequest,
-    RunTrigger, RunnerConfig,
+    execute, max_turns, probe_cli, run_task, Attempt, CancelSignal, Invocation, PermissionMode,
+    ResumeSession, RunRequest, RunTrigger, RunnerConfig, DEFAULT_MAX_TURNS, MAX_TURNS,
 };
 pub use strategy::{Resolution, STRATEGY_TRANSCRIPT_PREFIX};

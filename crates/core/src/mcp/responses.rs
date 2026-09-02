@@ -428,6 +428,7 @@ mod tests {
                 status: RunStatus::Succeeded,
                 exit_class: Some(ExitClass::Success),
                 ended_at: None,
+                resume_after: None,
             }),
             // The card's badge, which `list_tasks` does not carry for the reason
             // `TaskView` does not: a summary reports what the row says, and the

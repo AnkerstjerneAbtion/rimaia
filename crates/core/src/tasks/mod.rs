@@ -34,7 +34,7 @@ pub use links::{
     add_task_link, get_task_link, remove_task_link, reorder_task_link, update_task_link,
 };
 pub use position::{position_between, rebalance_column, rebalanced_positions, Placement};
-pub use run_state::{is_legal_run_state_transition, set_run_state};
+pub use run_state::{is_legal_run_state_transition, run_state_spelling, set_run_state};
 pub use service::{
     create_task, delete_task, get_task, list_tasks, move_task, move_task_to_bottom, update_task,
     LastRunSummary, TaskDetail, TaskSummary,

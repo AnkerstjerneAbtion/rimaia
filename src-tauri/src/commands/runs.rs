@@ -23,7 +23,7 @@ use std::path::Path;
 use chrono::{DateTime, Utc};
 use rimaia_core::db::{Run, RunStatus};
 use rimaia_core::runner::events::RunTail;
-use rimaia_core::runner::{probe_cli, run_task, RunRequest, RunTrigger};
+use rimaia_core::runner::{probe_cli, run_task, ResumeSession, RunRequest, RunTrigger};
 use rimaia_core::runs::transcript::{self, SearchHit, TranscriptPage};
 use rimaia_core::runs::{self, PruneCriterion, PruneResult, RunDetail, RunFilter, RunListEntry};
 use rimaia_core::scheduler::{self, ClaimOutcome, LeaseOwner};
@@ -123,6 +123,11 @@ pub async fn start_task_run(state: State<'_, AppState>, task_id: String) -> Resu
     let request = RunRequest {
         task_id: task_id.clone(),
         trigger: RunTrigger::Manual,
+        // "Run now" starts, it does not continue. Resuming a session is
+        // `retry_task_now`'s job, and the two are separate buttons because they
+        // mean different things to a human looking at a card: one says "do this
+        // work", the other says "carry on with the work you were doing".
+        resume: None,
         cancel,
         // The same registry the queue hands its own runs, so a "Run now" and a
         // queued run in one repository take turns creating their worktrees
@@ -144,6 +149,85 @@ pub async fn start_task_run(state: State<'_, AppState>, task_id: String) -> Resu
     });
 
     Ok(())
+}
+
+/// Resumes a task that is waiting out a retry, **now**, without waiting for its
+/// deadline.
+///
+/// The operator's override of ADR-0011's wait: they can see that the window
+/// reopened early, or simply want the attempt made while they are watching. It
+/// deliberately ignores two things the queue honours — the task's own
+/// `resume_after` and the global usage-limit hold — for the reason seam-contract
+/// D19 point 5 gives about the concurrency caps: those bound the *scheduler*,
+/// and a person clicking a button with the app in front of them is not the
+/// unattended failure they exist for.
+///
+/// What it does **not** ignore is the session. This continues the attempt chain
+/// rather than starting a fresh one, which is the whole of ADR-0011's "resume,
+/// do not restart" — the worktree keeps its commits and the context is reused.
+/// A task whose runs have been pruned away resumes as a fresh session, because
+/// there is nothing left to continue.
+///
+/// The same two calls in the same order as `start_task_run` — lease, probe,
+/// claim, spawn — with `claim_retry` in place of `claim` because the task is in
+/// `waiting_retry` and that is the edge ADR-0007 gives it.
+#[tauri::command]
+pub async fn retry_task_now(state: State<'_, AppState>, task_id: String) -> Result<()> {
+    let context = state.context.clone();
+    let config = state.runner.clone();
+
+    let detail = tasks::get_task(&context, &task_id).await?;
+    let repository = repo::get(&context, &detail.task.repository_id).await?;
+
+    let lease = state
+        .in_flight
+        .acquire_unbounded(&task_id, &repository.id, LeaseOwner::Manual)
+        .map_err(|refused| Error::invalid(refused.message()))?;
+    let cancel = lease.cancel_signal();
+
+    repo::ensure_unattended_runs_allowed(&repository)?;
+    probe_cli(&config.program).await?;
+
+    if scheduler::claim_retry(&context, &task_id).await? == ClaimOutcome::Lost {
+        return Err(Error::invalid(
+            "this task is not waiting to be retried; the queue may have already picked it up, \
+             or its retries may have run out",
+        ));
+    }
+
+    let resume = scheduler::resumable_session(&context, &task_id)
+        .await?
+        .map(|session_id| ResumeSession { session_id });
+    let paths = state.paths.clone();
+    let request = RunRequest {
+        task_id: task_id.clone(),
+        trigger: RunTrigger::Manual,
+        resume,
+        cancel,
+        in_flight: Some(state.in_flight.clone()),
+    };
+
+    tauri::async_runtime::spawn(async move {
+        let _lease = lease;
+        if let Err(error) = run_task(&context, &paths, &config, request).await {
+            tracing::error!(
+                %task_id, %error,
+                "a resumed run could not be started or supervised",
+            );
+        }
+    });
+
+    Ok(())
+}
+
+/// Ends a task's retry loop: `waiting_retry -> failed`.
+///
+/// Thin over [`scheduler::give_up`], which is where the rule lives — the MCP
+/// tool of the same name calls the identical function, which is what ADR-0006
+/// asks for and ADR-0021 makes a rule.
+#[tauri::command]
+pub async fn give_up_on_task(state: State<'_, AppState>, task_id: String) -> Result<()> {
+    scheduler::give_up(&state.context, &task_id).await
 }
 
 /// Asks `task_id`'s in-flight run to stop.

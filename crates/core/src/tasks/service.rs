@@ -93,10 +93,11 @@ pub struct TaskSummary {
 
 /// What a card shows about a task's most recent attempt.
 ///
-/// Three fields of a [`Run`] rather than the row: the word "interrupted" is
+/// Four fields of a [`Run`] rather than the row: the word "interrupted" is
 /// read off `exit_class` (seam-contract D9), `ended_at` is the card's relative
-/// time, and the prompt, the session id and the transcript path are the
-/// panel's business.
+/// time, `resume_after` is when a `waiting_retry` card says it will come back,
+/// and the prompt, the session id and the transcript path are the panel's
+/// business.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LastRunSummary {
@@ -105,6 +106,17 @@ pub struct LastRunSummary {
     /// `None` while the attempt is still in flight — which is also why the
     /// "last" run is chosen by attempt number and never by this column.
     pub ended_at: Option<DateTime<Utc>>,
+    /// When ADR-0011's retry policy scheduled the next attempt, or `None` for
+    /// an attempt nothing will follow (seam-contract D12's 2026-09-03
+    /// amendment).
+    ///
+    /// The fourth field earns its place twice over: it is what the card badge
+    /// renders as "resumes at 06:12", and it is what
+    /// [`scheduler::selection::skip_reason`](crate::scheduler::skip_reason)
+    /// reads to tell a task that is coming back from one that is stuck. One
+    /// column on a projection the board already reads, rather than a per-card
+    /// query on every pass of the queue loop.
+    pub resume_after: Option<DateTime<Utc>>,
 }
 
 /// Hand-written rather than derived: `last_run` is an `Option<struct>` over
@@ -128,6 +140,7 @@ impl<'r> FromRow<'r, SqliteRow> for TaskSummary {
                 status,
                 exit_class: row.try_get("last_run_exit_class")?,
                 ended_at: row.try_get("last_run_ended_at")?,
+                resume_after: row.try_get("last_run_resume_after")?,
             }),
             None => None,
         };
@@ -167,7 +180,8 @@ SELECT t.*,
        0 AS blocked_by_incomplete,
        r.status AS last_run_status,
        r.exit_class AS last_run_exit_class,
-       r.ended_at AS last_run_ended_at
+       r.ended_at AS last_run_ended_at,
+       r.resume_after AS last_run_resume_after
   FROM tasks t
   LEFT JOIN runs r ON r.task_id = t.id
        AND r.attempt = (SELECT max(attempt) FROM runs WHERE task_id = t.id)
@@ -1209,6 +1223,10 @@ mod tests {
                 status: RunStatus::Interrupted,
                 exit_class: Some(ExitClass::Interrupted),
                 ended_at: Some("2026-08-20T12:29:00Z".parse().expect("a literal timestamp")),
+                // A crash the budget still allows a resume from, which is what
+                // makes this card read "waiting to resume" rather than "failed"
+                // (seam-contract D9's 2026-09-03 amendment).
+                resume_after: Some("2026-08-20T12:29:01Z".parse().expect("a literal timestamp")),
             }),
             effective_model: Some("sonnet".to_string()),
             effective_effort: Some("high".to_string()),
@@ -1233,6 +1251,7 @@ mod tests {
                 "status": "interrupted",
                 "exitClass": "interrupted",
                 "endedAt": "2026-08-20T12:29:00Z",
+                "resumeAfter": "2026-08-20T12:29:01Z",
             })
         );
         assert!(
