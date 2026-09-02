@@ -9,6 +9,7 @@
    `src/styles/*.css`, imported below; do not move them back in here. */
 
 @import "./styles/board.css";
+@import "./styles/doctor.css";
 @import "./styles/runs.css";
 @import "./styles/settings.css";
 
@@ -23,6 +24,13 @@
   --danger-bg: #fdeceb;
   --danger-border: #e5a9a4;
   --danger-text: #8c2b22;
+  /* Task 018 needs a third weight: the doctor's warnings are not errors -
+     they do not block the queue - so rendering them in --danger-* would
+     overstate them, and in --text-muted would hide them. */
+  --warn-bg: #fdf4e3;
+  --warn-border: #e0c184;
+  --warn-text: #7a5410;
+  --ok-text: #1f7a4d;
 
   color-scheme: light dark;
   font-family: Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica,
@@ -46,6 +54,10 @@
     --danger-bg: #3a1f1d;
     --danger-border: #6d3730;
     --danger-text: #f3b5ae;
+    --warn-bg: #352b18;
+    --warn-border: #6b552b;
+    --warn-text: #f0d199;
+    --ok-text: #6bc79b;
   }
 }
 

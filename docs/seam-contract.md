@@ -373,6 +373,36 @@ here so task 002 does not reach for a plugin and task 018 knows it inherits the 
 
 **Binds.** 002, 018.
 
+**Amendment (task 018).** Two things in the paragraph above are now wrong, and task 018 is
+the task that inherited them, so it is the task that has to say so.
+
+*The stated reason no longer holds.* "A modal needs `tauri-plugin-dialog`, which is not a
+dependency" stopped being true at task 003, which added the plugin for the folder picker —
+Rust, npm and `capabilities/default.json` all carry it today. The decision survives its
+premise (a path that has already failed is not where to first reach for a plugin), but it
+now rests only on that second argument, and a future reader should not be told a cost that
+is no longer paid.
+
+*The delegation was misplaced.* D11 hands "that visible-failure story" to task 018's
+preflight doctor. **The doctor cannot take it.** The doctor is a command inside a running
+app; it runs when startup has already *succeeded*. A migration failure is exactly the case
+where no window opens, no command surface exists and nothing can be asked to check anything
+— so no amount of doctor coverage reaches it. The two failures are disjoint: the doctor
+prevents a *run* from failing at 2am, D11 is about the *process* failing at launch.
+
+What task 018 therefore does and does not close:
+
+- **Closed.** The environment half. Eight checks, a blocking refusal on `QueueHandle::start`,
+  and a README that names `<app-data>/logs/rimaia.log` as the first place to look when a
+  double-clicked bundle does not open — which is the only thing that helps a user who has no
+  stderr, short of a dialog.
+- **Still open.** The dialog itself. It is now cheap, and packaging is what makes it matter
+  (a `.app` is precisely the case with nobody watching stderr), but the mechanism is
+  `blocking_show()` on the setup hook's thread, and this task shipped without being able to
+  run a bundled build to prove that does not deadlock on macOS. An unverified blocking call
+  on the launch path is a worse failure than the silence it replaces. Recorded rather than
+  guessed at; it wants its own task and a human at a real bundle.
+
 ## D12 — What the board's bulk read returns
 
 **Question.** Task 005's card must show a link count, a dependency indicator, and — per [D9](#d9)
@@ -963,6 +993,53 @@ a module that has no business owning board order"), since `tasks` does own board
 
 **Binds.** 012, 013, 014.
 
+## D22 — Where the doctor's refusal lives, and what a status means
+
+> D19, D20 and D21 were claimed by tasks 012 and 016 while this task was in flight, so this
+> entry moved twice before settling here. Numbers are never reused.
+
+**Question.** Task 018 adds eight environment checks and says "fails block queue start".
+*Which* code refuses, what exactly does each status promise, and what happens to a queue
+that is already running when the environment breaks?
+
+**Decision.** Three parts.
+
+1. **The refusal lives on `QueueHandle::start` and `QueueHandle::resume`, and nowhere else.**
+   Both run the doctor first and return `Error::invalid(blocking_summary())` **without
+   writing `queue_state`** — a queue that was refused is not a queue that is paused, and
+   leaving state behind would make the next `resume` look like a resumption of something.
+   Task 013's scheduled start goes through the same two functions, which is the whole point:
+   a broken environment is reported in the evening rather than discovered in the morning.
+   The MCP server inherits it for free, per ADR-0006.
+
+2. **`try_step` is deliberately *not* gated.** Checking per-step would spawn `claude`, `git`
+   and `gh` subprocesses before every task in the queue — eight probes per step, on a path
+   that runs unattended for hours. Worse, it would let a transient blip (a volume briefly
+   below the disk threshold, a `gh` token refreshing) halt a queue mid-flight, which is a new
+   failure mode invented to prevent an old one. **The doctor is a gate at the door, not a
+   guard in the corridor.** A run whose environment breaks after it started fails on its own
+   terms and is classified by ADR-0011's rules, which is what those rules are for.
+
+3. **Only `fail` blocks; `warn` never does.** The line between them is *whether the queue can
+   still do its job*. No `claude` binary is a fail — every run dies immediately. An
+   unauthenticated `gh` is a warn: the runs still work, only the pull-request step at the end
+   is skipped, and blocking a night's work over it would cost more than it saves. A `claude`
+   older than the pinned minimum warns rather than fails, because locking a user out of their
+   own queue over a version comparison is worse than letting them try. Every non-passing row
+   carries a `remediation` string naming the specific fix; a status without one is a bug.
+
+**Why.** The rule that "fails block queue start" has to be enforced in exactly one place or
+it is not a rule (ADR-0006) — a doctor the UI consults before enabling a button is a
+suggestion, and the MCP server would not inherit it. Putting it on `start`/`resume` also
+makes it testable without a UI, which is how `a_blocking_report_refuses_to_start_the_queue_and_writes_no_queue_state`
+can assert the "writes no state" half at all.
+
+The `pass`/`warn`/`fail` split is a three-way distinction on purpose. Two statuses would
+force every check to choose between blocking the night and being ignorable, and the four
+checks that warn are precisely the ones where neither is right.
+
+**Binds.** 012, 013, 018.
+
 ---
 
 ## How to use this
@@ -981,12 +1058,12 @@ An implementation task reads the entries its number appears in, before writing c
 | [009](../tasks/009-sequential-run-queue.md) | D2 · D5 · D7 · D8 · D9 · D10 · D14 · D15 · D19 |
 | [010](../tasks/010-local-mcp-server.md) | D2 · D3 · D4 · D5 · D6 · D8 · D10 · D12 · D13 · D16 |
 | [011](../tasks/011-task-dependencies-and-blocking.md) | D4 · D12 · D16 |
-| [012](../tasks/012-parallel-execution.md) | D2 · D4 · D5 · D8 · D9 · D12 · D14 · D15 · D19 · D21 |
-| [013](../tasks/013-run-scheduling.md) | D4 · D15 · D21 |
+| [012](../tasks/012-parallel-execution.md) | D2 · D4 · D5 · D8 · D9 · D12 · D14 · D15 · D19 · D21 · D22 |
+| [013](../tasks/013-run-scheduling.md) | D4 · D15 · D21 · D22 |
 | [014](../tasks/014-usage-limit-resilience.md) | D3 · D5 · D8 · D9 · D12 · D14 · D15 · D19 · D21 |
 | [015](../tasks/015-run-history-and-log-viewer.md) | D14 · D18 |
 | [016](../tasks/016-worktree-lifecycle-and-cleanup.md) | D17 · D18 |
-| [018](../tasks/018-preflight-doctor-and-packaging.md) | D11 · D16 |
+| [018](../tasks/018-preflight-doctor-and-packaging.md) | D11 · D16 · D22 |
 | [020](../tasks/020-per-task-execution-strategy.md) | D2 · D3 · D4 · D5 · D8 · D10 · D12 · D16 · D17 · D19 |
 | [021](../tasks/021-review-and-fix-loop.md) | D17 |
 | [024](../tasks/024-analytics.md) | D4 · D5 · D12 · D18 |
