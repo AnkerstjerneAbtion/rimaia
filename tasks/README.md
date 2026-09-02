@@ -24,7 +24,7 @@ reviewable in the app afterwards.
 | 11 | [010](010-local-mcp-server.md) | Local MCP server | v0.2 | 004, 006 | #5 |
 | 12 | [020](020-per-task-execution-strategy.md) | Per-task execution strategy | v0.2 | 010 | #7 |
 | 13 | [011](011-task-dependencies-and-blocking.md) | Task dependencies and blocking | v0.2 | 009 | — |
-| 14 | [012](012-parallel-execution.md) | Parallel execution | v0.2 | 009 | — |
+| 14 | [012](012-parallel-execution.md) | Parallel execution | v0.2 | 009 | #16 |
 | 15 | [023](023-batch-strategy-planning.md) | Batch strategy planning as a preflight | v0.2 | 020, 012 | — |
 | 16 | [013](013-run-scheduling.md) | Run scheduling and windows | v0.2 | 009 | — |
 | 17 | [014](014-usage-limit-resilience.md) | Usage-limit resilience and resume | v0.2 | 009, 019 | — |
