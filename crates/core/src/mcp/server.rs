@@ -560,7 +560,7 @@ enough that the old proposal no longer describes the work."
 
     // Task 016's read surface. The three commands that *delete* a worktree
     // have no tool here, and that is not an oversight — see this module's own
-    // note and seam-contract D19. What an agent can do is find out what is on
+    // note and seam-contract D20. What an agent can do is find out what is on
     // the disk and say so, which is the half of the problem it can help with
     // without being able to make it irreversible.
 

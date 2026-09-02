@@ -106,7 +106,7 @@ pub enum Tool {
 
     // Task 016. The *reads* and the policy setting only — the three cleanup
     // commands that actually delete a worktree have no tool at all, on
-    // ADR-0021 point 5's `delete_task` reasoning. Seam-contract D19 records it.
+    // ADR-0021 point 5's `delete_task` reasoning. Seam-contract D20 records it.
     ListWorktrees,
     GetWorktreeAutoCleanup,
     SetWorktreeAutoCleanup,

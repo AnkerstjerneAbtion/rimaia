@@ -658,7 +658,7 @@ pub async fn move_task(
     // other way from every existing one: `worktree` reads tasks and calls
     // `set_run_state`. Rust permits the cycle within a crate and the direction
     // is the honest one — the policy belongs to the transition, not to the
-    // directory — but it is worth naming, so seam-contract D19 does.
+    // directory — but it is worth naming, so seam-contract D20 does.
     //
     // After the commit and after the publish, and returning nothing: the move
     // has already succeeded, and a cleanup a guard refuses must not be able to

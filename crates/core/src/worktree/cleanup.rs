@@ -1,5 +1,5 @@
 //! What is on disk, and the guarded ways to take it off again (task 016,
-//! ADR-0005, seam-contract D19).
+//! ADR-0005, seam-contract D20).
 //!
 //! [`super::remove`] has existed since task 007 and does the mechanics: the
 //! directory, git's administrative record, and optionally the branch. This

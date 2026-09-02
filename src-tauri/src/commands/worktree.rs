@@ -15,7 +15,7 @@
 //! standing exception: `delete_task` "stays absent from both … it is a
 //! decision about destructiveness, not about which client is privileged."
 //! [`remove_task_worktree`], [`cleanup_done_worktrees`] and
-//! [`cleanup_merged_worktrees`] join it, and seam-contract D19 records why.
+//! [`cleanup_merged_worktrees`] join it, and seam-contract D20 records why.
 //! The inventory and the policy setting *do* get tools, operator-only — the
 //! read is how an agent finds out what is on disk, and refusing the read while
 //! refusing the write would leave it unable even to explain the problem.

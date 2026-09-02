@@ -364,6 +364,6 @@ pub async fn prune_run_logs(
     };
     // `state.paths` for the second half: task 020's `strategy-*.jsonl` files
     // have no `runs` row, so they are found by walking the filesystem rather
-    // than by any query (seam-contract D17.5, D19).
+    // than by any query (seam-contract D17.5, D20).
     runs::prune_logs(&state.context, &state.paths, criterion).await
 }

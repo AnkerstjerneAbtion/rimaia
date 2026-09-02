@@ -411,7 +411,7 @@ struct SweptTranscripts {
 /// **Dated by mtime**, because there is nothing else to date them by — a
 /// strategy run has no row, so it has no `started_at` and no `ended_at`. That
 /// makes the age rule genuinely different from the row-based half's, not merely
-/// implemented differently, which is why seam-contract D19 states it rather
+/// implemented differently, which is why seam-contract D20 states it rather
 /// than leaving it in this comment:
 ///
 /// - [`PruneCriterion::OlderThanDays`] takes files whose mtime is at least that

@@ -807,7 +807,7 @@ constrain. A comment in `runner/outcome.rs` reaches only the first.
 
 ---
 
-## D19 — Task 016's cleanup: what it refuses, what it may not be forced past, and what it never deletes
+## D20 — Task 016's cleanup: what it refuses, what it may not be forced past, and what it never deletes
 
 **Question.** Task 016 removes worktrees. ADR-0005 fixes where they live, that cleanup is
 "explicit and never automatic on failure", and that the branch is left alone unless asked
@@ -977,11 +977,11 @@ An implementation task reads the entries its number appears in, before writing c
 | [013](../tasks/013-run-scheduling.md) | D4 · D15 |
 | [014](../tasks/014-usage-limit-resilience.md) | D3 · D5 · D8 · D9 · D12 · D14 · D15 |
 | [015](../tasks/015-run-history-and-log-viewer.md) | D14 · D18 |
-| [016](../tasks/016-worktree-lifecycle-and-cleanup.md) | D17 · D18 · D19 |
+| [016](../tasks/016-worktree-lifecycle-and-cleanup.md) | D17 · D18 · D20 |
 | [018](../tasks/018-preflight-doctor-and-packaging.md) | D11 · D16 |
 | [020](../tasks/020-per-task-execution-strategy.md) | D2 · D3 · D4 · D5 · D8 · D10 · D12 · D16 · D17 |
 | [021](../tasks/021-review-and-fix-loop.md) | D17 |
-| [024](../tasks/024-analytics.md) | D4 · D5 · D12 · D18 · D19 |
+| [024](../tasks/024-analytics.md) | D4 · D5 · D12 · D18 · D20 |
 | every task | D4 and D6 as prohibitions |
 
 A reviewer treats any decision visible in a diff that is neither in an ADR nor here as a
