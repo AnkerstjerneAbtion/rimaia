@@ -918,7 +918,8 @@ impl StrategyFixture {
             0,
             handles.clone(),
             testing::doctor::environment(),
-        ).await;
+        )
+        .await;
         tokio::spawn(task_handle.run());
         assert!(
             handles.endpoint().is_some(),

@@ -988,7 +988,8 @@ async fn serving(
         0,
         handles.clone(),
         testing::doctor::environment(),
-    ).await;
+    )
+    .await;
     (handle, tokio::spawn(task.run()))
 }
 
@@ -1141,15 +1142,16 @@ async fn create_task(h: &TestContext, repository_id: &str, title: &str) -> rimai
 /// Read through the *operator's* door, so a test about what a run cannot see
 /// does not depend on the thing it is asserting about.
 async fn board(h: &TestContext, repository_id: &str) -> Vec<String> {
-    let listed: TaskListView = match RimaiaServer::new(h.context.clone(), testing::doctor::environment())
-        .list_tasks(Parameters(request::<ListTasksRequest>(
-            json!({ "repository_id": repository_id }),
-        )))
-        .await
-    {
-        Ok(Json(listed)) => listed,
-        Err(error) => panic!("the operator may always list: {:?}", error.0),
-    };
+    let listed: TaskListView =
+        match RimaiaServer::new(h.context.clone(), testing::doctor::environment())
+            .list_tasks(Parameters(request::<ListTasksRequest>(
+                json!({ "repository_id": repository_id }),
+            )))
+            .await
+        {
+            Ok(Json(listed)) => listed,
+            Err(error) => panic!("the operator may always list: {:?}", error.0),
+        };
 
     listed.tasks.into_iter().map(|task| task.id).collect()
 }

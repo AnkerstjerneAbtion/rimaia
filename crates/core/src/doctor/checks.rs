@@ -8,7 +8,7 @@
 //! and a renamed binary rather than at whatever the machine running the suite
 //! happens to have installed.
 //!
-//! Every pass/warn/fail assignment below is argued in seam-contract D19, not
+//! Every pass/warn/fail assignment below is argued in seam-contract D22, not
 //! here — a reviewer needs one place to check them against, and a doc comment
 //! in the module that made the choice is not a place another task can inherit.
 
@@ -163,7 +163,7 @@ pub async fn claude_cli(program: &Path) -> CheckResult {
 /// subcommand or unparseable output means the check could not be *performed* —
 /// most likely a CLI old enough not to have `auth status` — and reporting "not
 /// signed in" on that evidence would be the doctor lying, which is worse than
-/// the doctor admitting a gap. Seam-contract D19 records the version dependency.
+/// the doctor admitting a gap. Seam-contract D22 records the version dependency.
 pub async fn claude_authenticated(program: &Path) -> CheckResult {
     let mut command = Command::new(program);
     command.args(["auth", "status", "--json"]);
@@ -230,10 +230,7 @@ pub async fn claude_authenticated(program: &Path) -> CheckResult {
         .and_then(serde_json::Value::as_str)
         .map(|method| format!(" via {method}"))
         .unwrap_or_default();
-    CheckResult::pass(
-        Check::ClaudeAuthenticated,
-        format!("Signed in{method}."),
-    )
+    CheckResult::pass(Check::ClaudeAuthenticated, format!("Signed in{method}."))
 }
 
 /// `git`, new enough for worktrees.
@@ -293,7 +290,10 @@ pub async fn git(program: &Path) -> CheckResult {
         // user for the parser.
         None => CheckResult::warn(
             Check::Git,
-            format!("`{} --version` printed no recognisable version: {output}", program.display()),
+            format!(
+                "`{} --version` printed no recognisable version: {output}",
+                program.display()
+            ),
             "Check that `git --version` prints a version number in a terminal. git runs, so \
              worktree creation will most likely still work.",
         ),
@@ -312,10 +312,7 @@ pub fn data_directory(paths: &AppPaths) -> CheckResult {
     if let Err(error) = paths.create_all() {
         return CheckResult::fail(
             Check::DataDirectory,
-            format!(
-                "{} could not be created: {error}",
-                data_dir.display()
-            ),
+            format!("{} could not be created: {error}", data_dir.display()),
             "Check the directory's permissions, and that its parent exists and Rimaia is allowed \
              to write there, then press Re-check. Nothing — not the database, not a single run \
              log — persists without it.",
@@ -347,7 +344,7 @@ pub fn data_directory(paths: &AppPaths) -> CheckResult {
 /// `fs4` because there is no std API for free space and ADR-0002 keeps Windows
 /// and Linux viable, so a `statvfs` call written by hand here would be three
 /// implementations. The import is confined to this one function — seam-contract
-/// D19 records the dependency and this constraint.
+/// D22 records the dependency and this constraint.
 pub fn disk_space(paths: &AppPaths) -> CheckResult {
     let data_dir = paths.data_dir();
     let available = match fs4::available_space(data_dir) {
@@ -402,7 +399,7 @@ pub fn disk_space(paths: &AppPaths) -> CheckResult {
 /// a surprise: a repository with no queued work still blocks the start.
 /// Narrowing this to "only repositories with a `ready` task" would need the
 /// selection plan the doctor deliberately does not read, and is left to whoever
-/// finds the over-blocking worse than the wasted night (seam-contract D19).
+/// finds the over-blocking worse than the wasted night (seam-contract D22).
 pub async fn repository_path(repository: &Repository) -> Result<CheckResult> {
     Ok(match repo::path_problem(repository).await? {
         None => CheckResult::pass(
@@ -412,7 +409,10 @@ pub async fn repository_path(repository: &Repository) -> Result<CheckResult> {
         .about(&repository.name),
         Some(problem) => CheckResult::fail(
             Check::RepositoryPath,
-            format!("{} is registered at {}, but {problem}.", repository.name, repository.path),
+            format!(
+                "{} is registered at {}, but {problem}.",
+                repository.name, repository.path
+            ),
             format!(
                 "Remove \"{}\" in Settings → Repositories and register it at its new path, then \
                  press Re-check. Every run in it would otherwise fail while creating its worktree.",
@@ -489,10 +489,7 @@ pub async fn github_cli(repository: &Repository, program: &Path) -> Result<Check
 /// the whole night over that would refuse work that would have succeeded.
 pub fn mcp_port(configured_port: u16, bound: Option<&str>) -> CheckResult {
     match bound {
-        Some(endpoint) => CheckResult::pass(
-            Check::McpPort,
-            format!("Listening on {endpoint}."),
-        ),
+        Some(endpoint) => CheckResult::pass(Check::McpPort, format!("Listening on {endpoint}.")),
         None => CheckResult::warn(
             Check::McpPort,
             format!(
@@ -528,7 +525,10 @@ mod tests {
 
     #[test]
     fn a_windows_git_version_stops_before_its_platform_suffix() {
-        assert_eq!(parse_version("git version 2.50.0.windows.1"), Some((2, 50, 0)));
+        assert_eq!(
+            parse_version("git version 2.50.0.windows.1"),
+            Some((2, 50, 0))
+        );
     }
 
     #[test]

@@ -530,7 +530,8 @@ mod tests {
             0,
             RunHandles::default(),
             crate::testing::doctor::environment(),
-        ).await;
+        )
+        .await;
         assert_eq!(handle.status().state, McpState::Listening);
         (handle, tokio::spawn(task.run()))
     }
@@ -590,7 +591,8 @@ mod tests {
             taken,
             handles.clone(),
             crate::testing::doctor::environment(),
-        ).await;
+        )
+        .await;
 
         let status = handle.status();
         assert_eq!(status.state, McpState::PortInUse);

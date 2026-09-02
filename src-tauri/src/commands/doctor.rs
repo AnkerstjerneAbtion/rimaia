@@ -1,5 +1,5 @@
 //! Tauri commands for the preflight doctor (task 018; ADR-0004, ADR-0012,
-//! seam-contract D11's 2026-09-02 amendment, D19).
+//! seam-contract D11's 2026-09-02 amendment, D22).
 //!
 //! Thin over `rimaia_core::doctor`, like every other command module. Note what
 //! is *not* here: nothing decides whether a failing report blocks the queue.

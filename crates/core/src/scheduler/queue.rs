@@ -99,7 +99,7 @@
 //! oversight to correct later: `try_step` runs on every change event, so a
 //! doctor there would spawn eight subprocesses per card drag. The queue is a
 //! preflight case, not a watchdog case. The single check that genuinely must be
-//! per-step is `probe_cli`, and it is already there. Seam-contract D19.
+//! per-step is `probe_cli`, and it is already there. Seam-contract D22.
 //!
 //! # Nothing here decides anything twice
 //!
@@ -269,7 +269,7 @@ impl QueueHandle {
     /// ADR-0006's rule satisfied structurally.
     ///
     /// It is deliberately **not** in the loop's own `try_step` — see this
-    /// module's header and `doctor`'s, and seam-contract D19.
+    /// module's header and `doctor`'s, and seam-contract D22.
     pub async fn start(&self) -> Result<()> {
         let report = doctor::run(&self.shared.ctx, &self.shared.doctor_environment()).await?;
         if report.is_blocking() {

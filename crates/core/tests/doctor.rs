@@ -327,7 +327,10 @@ async fn an_unauthenticated_gh_warns_and_names_the_repository() {
         .expect("git must be runnable");
 
     assert_eq!(result.status, CheckStatus::Warn);
-    assert!(!result.status.is_blocking(), "a repository may not need a PR");
+    assert!(
+        !result.status.is_blocking(),
+        "a repository may not need a PR"
+    );
     assert_eq!(result.repository.as_deref(), Some("example"));
     assert!(
         result.detail.contains("example"),
@@ -456,8 +459,12 @@ fn every_failing_result_carries_a_specific_remediation() {
 fn a_blocking_summary_names_every_failing_check_rather_than_counting_them() {
     let report = DoctorReport::new(vec![
         CheckResult::fail(Check::ClaudeCli, "claude is missing.", "Install it."),
-        CheckResult::fail(Check::RepositoryPath, "rimaia has moved.", "Re-register it.")
-            .about("rimaia"),
+        CheckResult::fail(
+            Check::RepositoryPath,
+            "rimaia has moved.",
+            "Re-register it.",
+        )
+        .about("rimaia"),
         CheckResult::warn(Check::McpPort, "nothing is listening.", "Pick a free port."),
     ]);
 
@@ -570,12 +577,10 @@ async fn a_healthy_installation_starts_the_queue_even_with_warnings_outstanding(
         InFlight::new(),
     );
 
-    let report = rimaia_core::doctor::run(
-        &harness.context,
-        &Environment::for_runner(paths, &runner),
-    )
-    .await
-    .expect("the report must be readable");
+    let report =
+        rimaia_core::doctor::run(&harness.context, &Environment::for_runner(paths, &runner))
+            .await
+            .expect("the report must be readable");
     assert!(
         report
             .results

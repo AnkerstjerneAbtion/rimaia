@@ -915,7 +915,8 @@ mod tests {
     #[tokio::test]
     async fn the_server_introduces_itself_as_rimaia_with_instructions() {
         let harness = crate::testing::TestContext::new().await;
-        let info = RimaiaServer::new(harness.context, crate::testing::doctor::environment()).get_info();
+        let info =
+            RimaiaServer::new(harness.context, crate::testing::doctor::environment()).get_info();
 
         assert_eq!(info.server_info.name, "rimaia");
         assert_eq!(info.server_info.version, env!("CARGO_PKG_VERSION"));

@@ -201,7 +201,12 @@ pub async fn onboarding_dismissed(pool: &SqlitePool) -> Result<bool> {
 }
 
 pub async fn set_onboarding_dismissed(ctx: &ServiceContext, value: bool) -> Result<()> {
-    set(ctx, ONBOARDING_DISMISSED, if value { "true" } else { "false" }).await
+    set(
+        ctx,
+        ONBOARDING_DISMISSED,
+        if value { "true" } else { "false" },
+    )
+    .await
 }
 
 #[cfg(test)]

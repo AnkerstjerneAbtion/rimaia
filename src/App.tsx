@@ -17,7 +17,7 @@ function App() {
   //
   // `null` is "we do not yet know where to start": the opening view depends on
   // `onboardingDismissed`, and defaulting to the board would flash it before
-  // the welcome screen replaced it on a first run (seam-contract D21).
+  // the welcome screen replaced it on a first run (seam-contract D22).
   const [view, setView] = useState<View | null>(null);
   const { report } = useDoctor();
 

@@ -1,5 +1,5 @@
 //! The preflight doctor (task 018; ADR-0004, ADR-0012, seam-contract D11, D16,
-//! D19).
+//! D22).
 //!
 //! Eight checks, each corresponding to one way an overnight queue can waste a
 //! night. That is the criterion for adding a ninth, and it is the task file's
@@ -19,7 +19,7 @@
 //! card drag. The one check that genuinely must happen per step is already there
 //! and stays there: `probe_cli` before the claim, for task 008's stated reason.
 //! An environment that breaks *after* the queue started is caught by that probe
-//! (for `claude`) and by the run itself (for everything else). Seam-contract D19
+//! (for `claude`) and by the run itself (for everything else). Seam-contract D22
 //! records this so it is not later "improved" into a watchdog.
 //!
 //! # Every check is a function over injected inputs
@@ -118,7 +118,7 @@ impl Check {
 
 /// Pass, warn, or fail — and only [`Fail`](CheckStatus::Fail) blocks the queue.
 ///
-/// The assignment per check is argued in seam-contract D19 rather than chosen
+/// The assignment per check is argued in seam-contract D22 rather than chosen
 /// per call site, because "does this block the user out of their own queue" is
 /// exactly the kind of decision two agents would answer differently. The two
 /// that most look like mistakes, so they are stated here too: a `claude` older
@@ -293,7 +293,11 @@ impl DoctorReport {
         format!(
             "the run queue was not started because {} preflight {} failing. {}",
             lines.len(),
-            if lines.len() == 1 { "check is" } else { "checks are" },
+            if lines.len() == 1 {
+                "check is"
+            } else {
+                "checks are"
+            },
             lines.join(" "),
         )
     }
@@ -390,7 +394,10 @@ pub async fn run(ctx: &ServiceContext, environment: &Environment) -> Result<Doct
         checks::git(&environment.programs.git).await,
         checks::data_directory(&environment.paths),
         checks::disk_space(&environment.paths),
-        checks::mcp_port(configured_port, environment.run_handles.endpoint().as_deref()),
+        checks::mcp_port(
+            configured_port,
+            environment.run_handles.endpoint().as_deref(),
+        ),
     ];
 
     // Sequentially rather than joined: this spawns up to two subprocesses per
