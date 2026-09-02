@@ -362,6 +362,14 @@
   color: var(--badge-cancelled-text);
 }
 
+/* The resume time on a `waiting_retry` badge (task 014). Lighter than the
+   label it follows, because the badge answers "what state" first and "when"
+   second — and the two have to stay one pill so they wrap together. */
+.run-badge-detail {
+  font-weight: 500;
+  opacity: 0.85;
+}
+
 .run-badge-failed,
 .run-badge-interrupted {
   background: var(--danger-bg);
@@ -810,4 +818,24 @@
   margin: 0.35rem 0 0;
   font-size: 0.8rem;
   overflow-wrap: anywhere;
+}
+
+/* Task 014's manual retry pair. Deliberately quieter than "Run now" on the
+   card: both verbs override a decision the scheduler already made, so neither
+   is the obvious thing to press. */
+.retry-section-actions {
+  display: flex;
+  gap: 0.5rem;
+  margin-top: 0.5rem;
+}
+
+.retry-section-error {
+  margin-top: 0.5rem;
+  font-size: 0.85rem;
+  color: var(--danger-text);
+}
+
+/* The wait an attempt sat out, in the history list. */
+.run-history-wait {
+  font-size: 0.75rem;
 }

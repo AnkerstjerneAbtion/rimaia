@@ -319,7 +319,7 @@ describe("TaskCard", () => {
     renderCard({
       task: {
         ...task({ runState: "failed" }),
-        lastRun: { status: "interrupted", exitClass: "interrupted", endedAt: "2026-08-20T11:50:00Z" },
+        lastRun: { status: "interrupted", exitClass: "interrupted", endedAt: "2026-08-20T11:50:00Z", resumeAfter: null },
       },
     });
     await screen.findByRole("button", { name: "Run now" });
@@ -464,6 +464,7 @@ describe("TaskCard", () => {
             repositoryId: "repo-1",
             queuePosition: 2,
             skip: null,
+            resumeAfter: null,
           },
         ],
       });
@@ -481,6 +482,7 @@ describe("TaskCard", () => {
             repositoryId: "repo-1",
             queuePosition: null,
             skip: "unattended_runs_not_allowed",
+            resumeAfter: null,
           },
         ],
       });
@@ -511,6 +513,7 @@ describe("TaskCard", () => {
             repositoryId: "repo-1",
             queuePosition: 1,
             skip: null,
+            resumeAfter: null,
           },
         ],
       });
@@ -529,6 +532,7 @@ describe("TaskCard", () => {
             repositoryId: "repo-1",
             queuePosition: null,
             skip: "already_in_flight",
+            resumeAfter: null,
           },
         ],
       });
@@ -607,6 +611,7 @@ describe("TaskCard", () => {
                 repositoryId: "repo-1",
                 queuePosition: 3,
                 skip: null,
+                resumeAfter: null,
               },
             ],
           };

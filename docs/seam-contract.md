@@ -322,6 +322,41 @@ rebuild against a migration that has already shipped.
 
 **Binds.** 002, 004, 005, 008, 009.
 
+### Amendment, 2026-09-03 — where the *task* lands, once something resumes it
+
+One of this entry's conclusions no longer holds. It said a run that died with the app leaves
+"the task it belonged to" in `run_state = 'failed'`. Since task 014 that is only true when
+ADR-0011's retry budget is spent: **a crash-interrupted task lands `waiting_retry` with a due
+`resume_after` when the budget allows, and `failed` otherwise.**
+
+Everything else in the entry stands, and the parts that stand are the parts that mattered.
+`run_state` still has exactly ADR-0007's seven values and gains no eighth — SQLite still cannot
+widen a CHECK, so that remains permanent. `interrupted` is still not one of them. The run row
+still carries `status = 'interrupted'` and `exit_class = 'interrupted'`, and the **card still
+reads the word off its last run**, which was this entry's actual subject. Task 009's acceptance
+criterion — "reopening shows accurate state: one `interrupted` task" — is unaffected, because
+it is a statement about what the user sees and the word has not moved.
+
+**Why it changed.** The original conclusion was reached under a condition that has since gone
+away, and `scheduler::reconcile`'s own header said so at the time: the second hop
+`WaitingRetry -> Failed` existed *only* "because nothing resumes waiting_retry yet". Now
+something does. ADR-0010:57-59 and ADR-0011's startup reconciliation both ask for a crashed run
+to be **offered** for resume, and leaving it `failed` was the strictly worse reading — the
+worktree still has the commits, the session is still resumable, and the ADRs both say to offer
+it. `reconcile::settle` therefore keeps the hop only when there is no `resume_after`.
+
+**Offered, not performed**, which is what makes this safe under [D15](#d15): the exit path
+writes `paused`, `QueueState::default()` is `Paused` and `from_stored` falls back to it, so a
+task sitting due at 03:00 starts only when a human presses Start. Three independent guarantees,
+all three asserted by
+`a_launch_offers_a_crashed_run_for_resume_and_starts_nothing_until_the_queue_is_started`.
+
+Recorded as an amendment rather than an edit because the original sentence bound tasks 002, 004,
+005, 008 and 009, and each of them should inherit the corrected version *and* the reason. The
+entry now binds 014 as well.
+
+**Binds.** 002, 004, 005, 008, 009, 014.
+
 ## D10 — Identifiers are strings
 
 **Question.** What Rust type is an id?
@@ -429,6 +464,23 @@ differently from a chosen one, and reconstructing which link of the chain won fr
 value alone is not possible.
 
 The entry now binds 020 as well.
+
+### Amendment, 2026-09-03 — the last-run summary carries `resume_after`
+
+Task 014 adds a fourth field to `last_run`: `resume_after`, one more column on the correlated
+subquery that already joins the latest attempt, mirrored on `LastRunSummary` in `src/types.ts`.
+
+It pays for itself twice, which is why it is on the projection rather than fetched per card.
+It is the **card badge** task 014's Scope asks for — "`waiting_retry` with the time it will
+resume" — and a badge without the time cannot tell a task coming back at 06:12 from one whose
+retries ran out. And it is what `scheduler::selection::skip_reason` reads to decide whether a
+waiting task is *due*, which happens on every pass of the queue loop; a per-task query there
+would be the N+1 this entry exists to refuse, on the hottest path in the product.
+
+One board read still costs one query plus two settings reads, so the argument against N+1 is
+unaffected, and nothing else about the shape changes. `blocked_by_incomplete` is untouched.
+
+The entry now binds 014 as well.
 
 ## D13 — Whether a task can change repository
 
@@ -965,6 +1017,152 @@ a module that has no business owning board order"), since `tasks` does own board
 
 ---
 
+## D23 — Task 014's cross-cutting choices
+
+**Question.** ADR-0011 fixes the retry table, the classes and the resume mechanism, and stops
+there. Making a queue actually survive the five-hour wall needs a dozen smaller answers, and
+several of them widen types that other tasks share.
+
+**Decision.** Nine, taken together by task 014.
+
+1. **`Clock` grows `sleep_until`, and `tokio::time::sleep` was refused.** The queue loop had no
+   timer, and nothing publishes a `ChangeEvent` when a wall-clock deadline passes — so a
+   `waiting_retry` task became due and nobody noticed until the next unrelated mutation. A bare
+   `tokio::time::sleep` in the loop would have been a *second clock*: the deadline is computed
+   against `Clock::now`, and a wait measured any other way is not the same quantity. Concretely
+   it would have made CLAUDE.md's "a fifteen-minute backoff test finishes in milliseconds" true
+   for the policy function and quietly false for the loop, which is the half that matters.
+
+   The method is boxed rather than an `async fn` so the trait stays object-safe (the scheduler
+   holds an `Arc<dyn Clock>`) without an `async-trait` dependency, which [D6](#d6) would forbid.
+   `TestClock`'s instant moved from an `Arc<Mutex<..>>` to a `watch::Sender`, because a mutex can
+   be read but not awaited: `advance` and `set` now resolve pending waiters as a *consequence* of
+   writing, rather than through a second notification anyone could forget to send.
+
+2. **The deadline is capped at 60 seconds before it is slept on, and the cap is not a poll
+   interval.** A `tokio` timer measures elapsed *monotonic* time. A laptop suspended at 23:10 and
+   reopened at 06:30 has elapsed almost none of it, so a single seven-hour timer would fire hours
+   after the window it was waiting for reopened. The cap forces the loop to re-derive the answer
+   from `ctx.clock.now()` shortly after each wake, which is the only reading that survives a
+   system sleep. It costs at most one board read a minute, and only while something is actually
+   waiting: with no deadline the loop parks on its channels and arms no timer at all.
+
+3. **The loop's wake sources become five**, and `Step` grows `IdleUntil(DateTime<Utc>)` to carry
+   the deadline out of `try_step`. A separate variant rather than `Idle` carrying an `Option`,
+   because "wait for the world to change" and "wait for the clock" are different conclusions and
+   conflating them either arms a timer nothing needs or sleeps through one something does.
+
+4. **`SkipReason` grows a fifth variant, `WaitingForRetry`.** Its own doc calls the set closed
+   and serialized for the Runs view, so widening it is a decision rather than a detail. It is
+   justified because it is genuinely a different answer from `AlreadyInFlight`: nothing is
+   running, nothing is wrong, and the card can say *when*. Collapsing the two — which is what the
+   MVP did while nothing resumed a waiting task — leaves a morning reviewer unable to tell a task
+   coming back at 06:00 from one that is stuck. A `waiting_retry` task with **no** `resume_after`
+   still reads `AlreadyInFlight`: that wait was scheduled by something other than this policy,
+   and ending it is not this module's call.
+
+   [D21](#d21) point 3's argument against `RepositoryAtCapacity` does **not** apply here and is
+   worth distinguishing, since they look alike. Capacity is true for ninety seconds and is
+   already answered by `queue_position`. A retry deadline is a fact about the task that persists
+   across restarts, has no other rendering, and is the difference between two states the user
+   must act on differently.
+
+5. **`usage_limit_pause_until` is a `settings` key owned by `scheduler::pause`**, in [D3](#d3)'s
+   shape, exactly as `scheduler::state` and `scheduler::capacity` already use it. ADR-0011 says a
+   usage-limit hit "pauses new starts globally for the duration of the wait, in both modes" and
+   does not say where that lives.
+
+   **Stored, not in memory**, because the case that matters is a relaunch at 03:00: a queue that
+   forgot the hold would burn a start proving the window is still closed. `note_usage_limit`
+   keeps the **later** of two instants, so a second limit reporting an earlier reset cannot
+   shorten a pending wait. `try_step` reads it *before* the plan, so both modes honour it by
+   construction rather than by each having a branch — the same property `capacity::resolve` buys
+   by making sequential mode `global = 1`. In-flight runs are deliberately not killed: a run
+   mid-edit when another task hits a wall has done nothing wrong, and this is a rule about
+   starting. It is surfaced on `QueueStatus` for the reason `last_step_error` is — a hold the
+   operator cannot see is one they will debug as a bug.
+
+6. **`--max-turns` gains a default and a `settings` key, and this changes every implementation
+   run's argv.** ADR-0011 asks for it per attempt; the flag existed on `Invocation` and was never
+   set. The default is **300**, and the number is chosen against two constraints pulling opposite
+   ways: a turn limit classifies as `fatal` (no retry), so a budget set too low does not cost a
+   retry, it *abandons the task* half-done under a verdict the operator did not choose — while a
+   budget set too high does not bound the runaway. The exact-vector assertions in
+   `tests/runner_process.rs` and `tests/runner_strategy.rs` change with it, which is expected and
+   not a regression.
+
+7. **The attempt count is derived from `session_id` and must never become a column.** There is no
+   attempt-count column, [D4](#d4) forbids a migration anyway, and the deeper reason is that a
+   counter is a second source of truth for something the rows answer exactly. `scheduler::attempts`
+   reads `runs` newest-first and counts backwards **only while `session_id` matches**, which is
+   what ADR-0011's "each attempt is a row sharing the task's session id" means operationally: a
+   task the user re-queued in the morning starts a new session and gets a fresh budget, while
+   last night's attempts stay on the board as history.
+
+   `history` takes the ending attempt as a parameter rather than reading it back, because it is
+   called at the one moment the newest row cannot answer for itself — after `execute` returns and
+   *before* `finish_run` closes the row, since what `finish_run` writes is the thing being
+   decided. Two inputs are only in the outcome at that point: `exit_class`, still NULL on the row,
+   and the reported reset time, which has no column at all.
+
+8. **`RunOutcome` keeps `usage_limit_resets_at` *and* gains `resume_after`.** One is what the CLI
+   said, the other what the policy decided — ADR-0011's "reset plus jitter", which for a
+   `transient` ending is not derived from the first at all. A single field would leave a morning
+   reviewer unable to tell "the window reopened at 06:00 and we waited until 06:41" from "we
+   invented 06:41". Only the second is persisted. `apply_to_task` consequently routes on
+   class-**plus-decision**: a retryable class with no deadline is a spent budget and lands
+   `failed`, which is what keeps an exhausted task out of a state nothing will ever leave.
+
+   Jitter is a deterministic FNV-1a of the run id, not a random number. [D6](#d6) forbids the
+   dependency (`rand` included), a spread that is stable per run is easier to reason about at 2am,
+   and a test that had to tolerate randomness would assert less.
+
+9. **The synthesized-fixture discipline.** `spike/FINDINGS.md` §4 and ADR-0011's 2026-08-20
+   amendment both record that the `rate_limit_event` payload when `status` is not `"allowed"` has
+   never been observed. The two fixtures task 014 adds are edited copies of
+   `interrupted-sigterm.jsonl` — not `success.jsonl`, because a limited run does not complete —
+   with exactly two changes inside the existing event: the status value, and a pinned `resetsAt`.
+
+   They get their **own README section and their own `SYNTHESIZED_UNOBSERVED` list**, separate
+   from both the recordings and the three parser-edge synthetics, because they make a weaker
+   claim than either: those synthesize a *shape* against a real payload, these synthesize a
+   *value nobody has seen*. `the_usage_limit_fixtures_are_labelled_unobserved_rather_than_recorded`
+   is what stops a later agent promoting them by accident.
+
+   The invented word is not load-bearing, and proving that is what makes shipping the guess
+   acceptable: the classifier matches on "not `allowed`" and never on a value, asserted by
+   `a_status_the_corpus_never_saw_still_reads_as_a_usage_limit` over five words. Replace both
+   files byte-for-byte the first time a real queue hits the wall, and delete the section.
+
+**Also decided, and smaller.** `claim::claim_retry` is a **sibling** of `claim`, not a branch
+inside it: a single function that read the row and then routed would do the read *outside* the
+transaction, reintroducing the race the module exists to close. `claim::release`'s refusal to
+overwrite `waiting_retry` becomes load-bearing rather than defensive. `QueueEntry` gains
+`resume_after`, populated **only** for a task in `waiting_retry`, so a task started again by hand
+does not look like a continuation because of an old deadline on its last run. And
+`crates/core/src/testing/cli.rs` is `tests/scheduler.rs`'s stand-in promoted behind the `testing`
+feature, with a second dispatch axis (task **and attempt**) plus per-attempt argv and stdin
+capture; the old header's argument against sharing was about `mod common` between test binaries,
+which a feature-gated module is not.
+
+**What is deliberately *not* here.** `retry_task_now` gets a Tauri command and **no MCP tool**,
+against ADR-0021's parity rule, because ADR-0021's own 2026-09-02 amendment names task 014 and
+says so: "tasks 012 and 014 deliberately do not ship the tool... shipping a process-spawning tool
+is a separate decision with its own scope argument". `give_up_on_task` spawns nothing and ships as
+both. And `retry::decide` takes **no run window**, though ADR-0011 says a usage-limit wait is
+"capped by the run window": windows are task 013's, and 013 adds a parameter to that function
+rather than a second policy beside it.
+
+**Why.** Every one of these is a place where the obvious choice is wrong in a way that only shows
+up at 2am — a sleep that is not the injected clock, a timer trusted across a system suspend, a
+budget stored as a counter that drifts from the rows, a reported time and a decided time collapsed
+into one field, a turn limit set low enough to abandon a task under a verdict nobody chose, and a
+guessed payload value that the classifier must never depend on.
+
+**Binds.** 013, 014, 015, 019.
+
+---
+
 ## How to use this
 
 An implementation task reads the entries its number appears in, before writing code:
@@ -982,9 +1180,9 @@ An implementation task reads the entries its number appears in, before writing c
 | [010](../tasks/010-local-mcp-server.md) | D2 · D3 · D4 · D5 · D6 · D8 · D10 · D12 · D13 · D16 |
 | [011](../tasks/011-task-dependencies-and-blocking.md) | D4 · D12 · D16 |
 | [012](../tasks/012-parallel-execution.md) | D2 · D4 · D5 · D8 · D9 · D12 · D14 · D15 · D19 · D21 |
-| [013](../tasks/013-run-scheduling.md) | D4 · D15 · D21 |
-| [014](../tasks/014-usage-limit-resilience.md) | D3 · D5 · D8 · D9 · D12 · D14 · D15 · D19 · D21 |
-| [015](../tasks/015-run-history-and-log-viewer.md) | D14 · D18 |
+| [013](../tasks/013-run-scheduling.md) | D4 · D15 · D21 · D23 |
+| [014](../tasks/014-usage-limit-resilience.md) | D3 · D4 · D5 · D8 · D9 · D12 · D14 · D15 · D19 · D21 · D23 |
+| [015](../tasks/015-run-history-and-log-viewer.md) | D14 · D18 · D23 |
 | [016](../tasks/016-worktree-lifecycle-and-cleanup.md) | D17 · D18 |
 | [018](../tasks/018-preflight-doctor-and-packaging.md) | D11 · D16 |
 | [020](../tasks/020-per-task-execution-strategy.md) | D2 · D3 · D4 · D5 · D8 · D10 · D12 · D16 · D17 · D19 |

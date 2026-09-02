@@ -9,6 +9,7 @@ import { ExtraInstructionsEditor } from "../panel/ExtraInstructionsEditor";
 import { LinksEditor } from "../panel/LinksEditor";
 import { PlanEditor } from "../panel/PlanEditor";
 import { RepositorySelector } from "../panel/RepositorySelector";
+import { RetrySection } from "../panel/RetrySection";
 import { RunHistorySection } from "../panel/RunHistorySection";
 import { RunInfoSection } from "../panel/RunInfoSection";
 import { RunOutcomeSection } from "../panel/RunOutcomeSection";
@@ -232,6 +233,17 @@ function TaskDetailPanelBody({
           above, not a replacement for it (see this stage's file-ownership
           note in `RunOutcomeSection.tsx`'s own doc comment). */}
       <RunOutcomeSection lastRun={detail?.lastRun ?? null} loading={detailLoading} />
+
+      {/* Task 014's manual pair, immediately under the outcome that caused the
+          wait — "give up" is only a decision if the error is on screen with it.
+          Renders nothing at all unless this task is `waiting_retry`. */}
+      <RetrySection
+        taskId={task.id}
+        runState={task.runState}
+        lastRun={detail?.lastRun ?? null}
+        loading={detailLoading}
+        onChanged={refreshDetail}
+      />
 
       {/* Task 015's full history — every attempt, not only the last one —
           each opening the run detail overlay (outcome, diff, commits, PR,

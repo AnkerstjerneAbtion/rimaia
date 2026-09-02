@@ -307,6 +307,30 @@ impl FakeCli {
         std::fs::write(self.path("version-go"), "").expect("release the version-probe gate");
     }
 
+    /// Every subcommand this stand-in was asked for and does not implement.
+    ///
+    /// Empty is the passing case. It is a *list* rather than a panic inside the
+    /// script because the script's exit code reaches the runner as an ordinary
+    /// failed process, and a test that fails on "the run did not succeed" is
+    /// several steps from the actual cause — this is what turns it into one
+    /// sentence naming the flag. See [`write_script`](Self::write_script).
+    pub fn unhandled_subcommands(&self) -> Vec<String> {
+        match self.read("unhandled") {
+            Some(log) => log.lines().map(str::to_string).collect(),
+            None => Vec::new(),
+        }
+    }
+
+    /// Asserts the stand-in was only ever asked for things it implements.
+    pub fn assert_nothing_fell_through(&self) {
+        assert_eq!(
+            self.unhandled_subcommands(),
+            Vec::<String>::new(),
+            "the stand-in claude was asked for something it does not implement; \
+             teach it that subcommand rather than letting a test work around it",
+        );
+    }
+
     fn read(&self, name: &str) -> Option<String> {
         std::fs::read_to_string(self.path(name)).ok()
     }
@@ -338,6 +362,21 @@ impl FakeCli {
     /// It waits on `version-hold`/`version-go` first, so a test can hold it
     /// open — see [`hold_version_probe`](Self::hold_version_probe).
     ///
+    /// # Anything that is not a run is refused, loudly
+    ///
+    /// A real invocation's first argument is always `-p`
+    /// ([`Invocation::args`](crate::runner::Invocation::args) puts it there),
+    /// so the run branch is gated on exactly that and **everything else exits
+    /// non-zero with a sentence on stderr**.
+    ///
+    /// The alternative — falling through to "start a run" — is not a
+    /// theoretical hazard. Task 018 added a `claude auth` probe, this stand-in
+    /// answered it by dispatching to the run path, and the phantom
+    /// `start <task>` it wrote into the spawn log broke fifteen ordering
+    /// assertions in a way that read as a scheduler bug and was not. The next
+    /// subcommand somebody adds must fail in this file with its own name in
+    /// the message, not somewhere else as a run nobody asked for.
+    ///
     /// `pwd -P` rather than the `pwd` builtin's default, because `PWD` is
     /// inherited from the parent and `Command::current_dir` does not update it.
     ///
@@ -352,6 +391,13 @@ impl FakeCli {
              while [ ! -f '{dir}/version-go' ]; do sleep 0.02; done\n\
              fi\n\
              echo '2.1.234 (Claude Code)'; exit 0\n\
+             fi\n\
+             if [ \"$1\" != '-p' ]; then\n\
+             printf 'unhandled %s\\n' \"$1\" >> '{dir}/unhandled'\n\
+             echo \"the stand-in claude was asked for \\\"$1\\\", which it does not \
+             implement; teach it that subcommand in crates/core/src/testing/cli.rs \
+             rather than letting it fall through to a run\" >&2\n\
+             exit 64\n\
              fi\n\
              dir='{dir}'\n\
              task=\"$(basename \"$(pwd -P)\")\"\n\

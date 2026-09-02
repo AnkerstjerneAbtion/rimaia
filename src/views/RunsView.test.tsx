@@ -43,7 +43,7 @@ function taskSummary(overrides: Partial<TaskSummary> = {}): TaskSummary {
     linkCount: 0,
     dependencyCount: 0,
     blockedByIncomplete: false,
-    lastRun: { status: "running", exitClass: null, endedAt: null },
+    lastRun: { status: "running", exitClass: null, endedAt: null, resumeAfter: null },
     // Nothing configured anywhere, which is what a card with no strategy
     // shows: the badge renders nothing rather than "undefined".
     effectiveModel: null,
@@ -73,6 +73,7 @@ function queueStatus(overrides: Partial<QueueStatus> = {}): QueueStatus {
     runningTaskIds: [],
     plan: [],
     lastStepError: null,
+    usageLimitPauseUntil: null,
     ...overrides,
   };
 }
@@ -491,13 +492,21 @@ describe("RunsView", () => {
       mockBackend({
         queue: queueStatus({
           plan: [
-            { taskId: "task-1", title: "First up", repositoryId: "repo-1", queuePosition: 1, skip: null },
+            {
+              taskId: "task-1",
+              title: "First up",
+              repositoryId: "repo-1",
+              queuePosition: 1,
+              skip: null,
+              resumeAfter: null,
+            },
             {
               taskId: "task-2",
               title: "Second, blocked",
               repositoryId: "repo-1",
               queuePosition: null,
               skip: "unattended_runs_not_allowed",
+              resumeAfter: null,
             },
           ],
         }),

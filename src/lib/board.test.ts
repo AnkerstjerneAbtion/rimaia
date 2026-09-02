@@ -6,6 +6,7 @@ import {
   BOARD_COLUMNS,
   boardReducer,
   cardBadge,
+  formatResumeAfter,
   groupIntoColumns,
   initialBoardState,
   planMove,
@@ -647,5 +648,37 @@ describe("relativeTime", () => {
 
   it("returns nothing for an unparseable timestamp", () => {
     expect(relativeTime("not a date", now)).toBe("");
+  });
+});
+
+describe("formatResumeAfter", () => {
+  const now = new Date("2026-08-20T02:00:00Z");
+
+  it("names a clock time rather than an interval", () => {
+    // Deliberately unlike `relativeTime`, which this file's other formatter is.
+    // A card is not re-rendered while it waits, so "in 4 hours" would be a lie
+    // by 06:00 while "resumes 06:12" stays true whenever the board was drawn.
+    const label = formatResumeAfter("2026-08-20T06:12:00Z", now);
+    expect(label).toMatch(/^resumes /);
+    expect(label).not.toContain("in ");
+  });
+
+  it("names the day when the wait crosses one", () => {
+    // A bare "06:12" on a card whose window reopens tomorrow morning would read
+    // as twenty minutes away.
+    const label = formatResumeAfter("2026-08-22T06:12:00Z", now) ?? "";
+    expect(label.length).toBeGreaterThan("resumes 06:12".length);
+  });
+
+  it("reads a deadline already past as resuming, not as a time gone by", () => {
+    // What it means: the queue is due to pick the card up and has not got to it
+    // yet — or is paused, which is what a launch after a crash looks like.
+    expect(formatResumeAfter("2026-08-20T01:00:00Z", now)).toBe("resuming");
+  });
+
+  it("has nothing to say for a task with no deadline", () => {
+    expect(formatResumeAfter(null, now)).toBeNull();
+    expect(formatResumeAfter(undefined, now)).toBeNull();
+    expect(formatResumeAfter("not a date", now)).toBeNull();
   });
 });

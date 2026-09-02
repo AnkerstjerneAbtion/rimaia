@@ -251,7 +251,7 @@ export interface TaskDetail extends Task, EffectiveStrategyFields {
 }
 
 /**
- * Mirrors `rimaia_core::tasks::LastRunSummary` — the three fields of a `Run`
+ * Mirrors `rimaia_core::tasks::LastRunSummary` — the four fields of a `Run`
  * a card draws, not the row. `interrupted` reaches the board through
  * `exitClass` and nowhere else (seam-contract D9).
  */
@@ -260,6 +260,12 @@ export interface LastRunSummary {
   exitClass: ExitClass | null;
   /** `null` while the attempt is still in flight. */
   endedAt: string | null;
+  /** When ADR-0011's retry policy scheduled the next attempt, or `null` for an
+   *  attempt nothing will follow (seam-contract D12's 2026-09-03 amendment).
+   *  This is what a `waiting_retry` badge shows the time of — a card that says
+   *  only "Waiting for retry" cannot tell a task coming back at 06:12 from one
+   *  that is stuck. */
+  resumeAfter: string | null;
 }
 
 /**
@@ -591,11 +597,16 @@ export type QueueState = "running" | "paused";
  * a severity. Every value but `"unattended_runs_not_allowed"` clears on its
  * own; that one is the only reason the user has to act on before the queue
  * can ever start the task (ADR-0012).
+ *
+ * `"waiting_for_retry"` is task 014's, and it is deliberately not folded into
+ * `"already_in_flight"`: nothing is running, nothing is wrong, and the card can
+ * say *when* it comes back (seam-contract D22).
  */
 export type SkipReason =
   | "unattended_runs_not_allowed"
   | "dependency_not_satisfied"
   | "already_in_flight"
+  | "waiting_for_retry"
   | "needs_attention";
 
 /**
@@ -615,6 +626,10 @@ export interface QueueEntry {
   queuePosition: number | null;
   /** `null` when the queue would start this task right now. */
   skip: SkipReason | null;
+  /** When this task's next attempt becomes due. Populated **only** for a task
+   *  in `waiting_retry`, so an old deadline on a task that has since been
+   *  started again by hand does not read as a pending resume. */
+  resumeAfter: string | null;
 }
 
 /**
@@ -642,6 +657,12 @@ export interface QueueStatus {
    *  {@link state} still read `"running"` over a full {@link plan} while
    *  nothing was happening. */
   lastStepError: string | null;
+  /** When ADR-0011's global usage-limit hold lifts, or `null` when there is
+   *  none. The other way a queue that reads `"running"` over a full
+   *  {@link plan} can be starting nothing — surfaced for the same reason
+   *  {@link lastStepError} is, because a hold the operator cannot see is one
+   *  they will debug as a bug. */
+  usageLimitPauseUntil: string | null;
 }
 
 /**

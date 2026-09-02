@@ -99,6 +99,12 @@ async fn five_ready_tasks_run_in_board_order_without_intervention() {
         "the queue must work the column top-down"
     );
     fixture.cli.assert_never_two_at_once();
+    // The stand-in implements `--version` and a run, and refuses everything
+    // else with its own name in the message. Asserted on the fullest run of
+    // the loop there is, because the failure it guards against is *silent*: a
+    // subcommand that fell through to the run path would write a phantom
+    // `start <task>` into the log every ordering assertion in this file reads.
+    fixture.cli.assert_nothing_fell_through();
     for task_id in &expected {
         let task = fixture.task(task_id).await;
         assert_eq!(task.column, BoardColumn::InReview);

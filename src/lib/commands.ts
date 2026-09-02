@@ -419,6 +419,35 @@ export function cancelRun(taskId: string): Promise<void> {
 }
 
 /**
+ * Resumes a task that is waiting out a retry, **now**, without waiting for its
+ * deadline (ADR-0011).
+ *
+ * The operator's override: they can see the window reopened early, or simply
+ * want the attempt made while they are watching. It continues the same session
+ * rather than starting a fresh one, so the worktree keeps its commits — which
+ * is the difference between this and {@link startRun}, and the reason they are
+ * two buttons rather than one.
+ *
+ * Resolves as soon as the run is under way, not once it finishes — same
+ * contract as {@link startRun}.
+ */
+export function retryTaskNow(taskId: string): Promise<void> {
+  return call<void>("retry_task_now", { taskId });
+}
+
+/**
+ * Ends a task's retry loop, landing it in `failed` for a human to look at.
+ *
+ * For the error that will not clear on its own, where the remaining attempts
+ * would each hit the same wall. Rejects for a task that is not waiting — a run
+ * in flight is stopped with {@link cancelRun}, and there is nothing to give up
+ * on for anything else.
+ */
+export function giveUpOnTask(taskId: string): Promise<void> {
+  return call<void>("give_up_on_task", { taskId });
+}
+
+/**
  * The most recent live-tail snapshot the backend has seen for `runId`, or
  * `null` when it has not seen one yet. This is what a client that opens the
  * Runs view after a run has already started reads once to catch up, before

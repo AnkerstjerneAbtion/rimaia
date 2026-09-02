@@ -553,6 +553,39 @@ export function cardBadge(
   }
 }
 
+/**
+ * When a `waiting_retry` card comes back, in the shortest form that is still
+ * unambiguous — or `null` when nothing is scheduled.
+ *
+ * A clock time rather than a relative "in 4 hours", which is the opposite of
+ * what this file's other time formatter does, and deliberately: a relative
+ * label on a card that is not re-rendered for four hours becomes a lie, while
+ * "resumes 06:12" stays true whether the board was drawn a second ago or last
+ * night. It is the operator's local time because the operator is the one
+ * deciding whether to wait for it.
+ *
+ * A deadline already past reads "resuming", because that is what it means: the
+ * queue is due to pick the card up and has not got to it yet (or is paused).
+ */
+export function formatResumeAfter(
+  resumeAfter: string | null | undefined,
+  now: Date = new Date(),
+): string | null {
+  if (!resumeAfter) return null;
+
+  const at = new Date(resumeAfter);
+  if (Number.isNaN(at.getTime())) return null;
+  if (at.getTime() <= now.getTime()) return "resuming";
+
+  const time = at.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" });
+  // Naming the day only when it is not today: a bare "06:12" on a card whose
+  // window reopens tomorrow morning would read as twenty minutes away.
+  const sameDay = at.toDateString() === now.toDateString();
+  return sameDay
+    ? `resumes ${time}`
+    : `resumes ${at.toLocaleDateString(undefined, { month: "short", day: "numeric" })} ${time}`;
+}
+
 const MINUTE_MS = 60_000;
 const HOUR_MS = 60 * MINUTE_MS;
 const DAY_MS = 24 * HOUR_MS;
