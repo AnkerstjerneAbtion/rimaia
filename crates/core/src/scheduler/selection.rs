@@ -237,6 +237,7 @@ mod tests {
             link_count: 0,
             dependency_count: 0,
             blocked_by_incomplete: false,
+            blocking_title: None,
             last_run: None,
             // Nothing configured anywhere, which is what the queue sees for a
             // task nobody has given a strategy: eligibility does not read these

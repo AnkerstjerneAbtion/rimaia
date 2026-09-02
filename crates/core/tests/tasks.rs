@@ -488,21 +488,220 @@ async fn the_listed_last_run_is_the_highest_attempt_not_the_most_recently_ended(
     );
 }
 
+// ---------------------------------------------------------------------------
+// ADR-0008's blocking predicate, on the board's own read (task 011)
+//
+// Every case here is a sentence of ADR-0008's decision — "satisfied when it
+// reaches `in_review` or `done`" — and, taken together, they are why the
+// predicate is a *column* test rather than a `runs.status = 'succeeded'` one.
+// ---------------------------------------------------------------------------
+
 #[tokio::test]
-async fn blocked_by_incomplete_is_false_for_every_task_until_task_011() {
-    // A dependency edge exists and is counted, and the flag is still false —
-    // pinning seam-contract D12's "ships as a constant now" so that task 011
-    // has a test to change rather than a behaviour to discover.
+async fn a_dependency_in_review_satisfies_and_one_in_ready_does_not() {
     let h = TestContext::new().await;
     let repository_id = seed_repository(&h.context.pool).await;
     let blocker = create_ready(&h, &repository_id, "blocker", "plan").await;
     let dependent = create_ready(&h, &repository_id, "dependent", "plan").await;
     seed_dependency(&h.context.pool, &dependent.id, &blocker.id).await;
 
+    let waiting = list_one(&h, &repository_id, &dependent.id).await;
+    assert_eq!(waiting.dependency_count, 1);
+    assert!(waiting.blocked_by_incomplete);
+    // The card must *name* it, not merely flag it.
+    assert_eq!(waiting.blocking_title.as_deref(), Some("blocker"));
+
+    tasks::move_task(&h.context, &blocker.id, BoardColumn::InReview, None, None)
+        .await
+        .expect("file the blocker for review");
+
+    let unblocked = list_one(&h, &repository_id, &dependent.id).await;
+    assert!(!unblocked.blocked_by_incomplete);
+    assert_eq!(unblocked.blocking_title, None);
+    // The edge is still there — satisfaction is not deletion.
+    assert_eq!(unblocked.dependency_count, 1);
+}
+
+#[tokio::test]
+async fn a_hand_finished_dependency_in_done_satisfies_without_any_run() {
+    // The first reason the predicate is not `runs.status = 'succeeded'`: a task
+    // the user implemented themselves and dragged to `done` has no `runs` row
+    // at all, and under a run-based predicate its dependents would block
+    // forever with no escape hatch short of deleting the edge.
+    let h = TestContext::new().await;
+    let repository_id = seed_repository(&h.context.pool).await;
+    let blocker = create_ready(&h, &repository_id, "did it by hand", "plan").await;
+    let dependent = create_ready(&h, &repository_id, "dependent", "plan").await;
+    seed_dependency(&h.context.pool, &dependent.id, &blocker.id).await;
+
+    tasks::move_task(&h.context, &blocker.id, BoardColumn::Done, None, None)
+        .await
+        .expect("drag the blocker to done");
+
     let summary = list_one(&h, &repository_id, &dependent.id).await;
 
-    assert_eq!(summary.dependency_count, 1);
     assert!(!summary.blocked_by_incomplete);
+    assert_eq!(
+        run_count(&h.context.pool, &blocker.id).await,
+        0,
+        "the point of this test is that nothing ever ran",
+    );
+}
+
+#[tokio::test]
+async fn a_dependency_dragged_back_out_of_in_review_blocks_its_dependents_again() {
+    // The second reason: a run succeeded, the card filed to `in_review`, and
+    // the user dragged it back to `ready` for another go. The `runs` row still
+    // says `succeeded`, so a run-based predicate would keep the dependency
+    // satisfied while the human has explicitly un-satisfied it.
+    let h = TestContext::new().await;
+    let repository_id = seed_repository(&h.context.pool).await;
+    let blocker = create_ready(&h, &repository_id, "blocker", "plan").await;
+    let dependent = create_ready(&h, &repository_id, "dependent", "plan").await;
+    seed_dependency(&h.context.pool, &dependent.id, &blocker.id).await;
+    seed_finished_run(
+        &h.context.pool,
+        &blocker.id,
+        1,
+        RunStatus::Succeeded,
+        ExitClass::Success,
+        "2026-08-20T09:00:00+00:00",
+    )
+    .await;
+
+    tasks::move_task(&h.context, &blocker.id, BoardColumn::InReview, None, None)
+        .await
+        .expect("file the blocker for review");
+    assert!(
+        !list_one(&h, &repository_id, &dependent.id)
+            .await
+            .blocked_by_incomplete
+    );
+
+    // Back below `dependent`, which is the only card left in `ready` — naming a
+    // neighbour because `move_task` refuses an unanchored drop into a column
+    // that is not empty.
+    tasks::move_task(
+        &h.context,
+        &blocker.id,
+        BoardColumn::Ready,
+        Some(&dependent.id),
+        None,
+    )
+    .await
+    .expect("drag it back for another go");
+
+    let summary = list_one(&h, &repository_id, &dependent.id).await;
+    assert!(
+        summary.blocked_by_incomplete,
+        "a succeeded run does not outvote the column the user put the card in",
+    );
+    assert_eq!(summary.blocking_title.as_deref(), Some("blocker"));
+}
+
+#[tokio::test]
+async fn a_failing_dependency_leaves_its_dependents_blocked_and_names_it() {
+    // ADR-0008: "if a dependency fails, its dependents stay blocked. A failed
+    // dependency is surfaced on every dependent card, so one morning glance
+    // shows the whole stalled chain." A failed run leaves the card in `ready`
+    // (ADR-0007's failure rule), which is not a satisfying column — so the
+    // blocking is a consequence of the same one predicate rather than a second
+    // rule about failure.
+    let h = TestContext::new().await;
+    let repository_id = seed_repository(&h.context.pool).await;
+    let a = create_ready(&h, &repository_id, "A", "plan").await;
+    let b = create_ready(&h, &repository_id, "B", "plan").await;
+    let c = create_ready(&h, &repository_id, "C", "plan").await;
+    seed_dependency(&h.context.pool, &b.id, &a.id).await;
+    seed_dependency(&h.context.pool, &c.id, &b.id).await;
+    seed_finished_run(
+        &h.context.pool,
+        &a.id,
+        1,
+        RunStatus::Failed,
+        ExitClass::Fatal,
+        "2026-08-20T09:00:00+00:00",
+    )
+    .await;
+    // Walked rather than jumped: `Idle -> Failed` is not a legal edge, and
+    // going around `set_run_state` to force the row would be testing a state
+    // the machine cannot reach.
+    for state in [RunState::Queued, RunState::Running, RunState::Failed] {
+        tasks::set_run_state(&h.context, &a.id, state)
+            .await
+            .expect("walk A's run to a failure, where ADR-0007 leaves it in ready");
+    }
+
+    let blocked_b = list_one(&h, &repository_id, &b.id).await;
+    let blocked_c = list_one(&h, &repository_id, &c.id).await;
+
+    assert!(blocked_b.blocked_by_incomplete);
+    assert_eq!(blocked_b.blocking_title.as_deref(), Some("A"));
+    // C names B, not A: the card names its own blocker, and following the
+    // chain one card at a time is what makes the stall readable.
+    assert!(blocked_c.blocked_by_incomplete);
+    assert_eq!(blocked_c.blocking_title.as_deref(), Some("B"));
+}
+
+#[tokio::test]
+async fn the_blocking_title_names_the_dependency_the_base_ref_rule_would_pick() {
+    // Two unsatisfied dependencies, `not_ready` before `ready` by board rank.
+    // The card names the same one the worktree would chain from, which is the
+    // whole reason `dependencies_of` owns the comparator rather than each
+    // caller sorting for itself.
+    let h = TestContext::new().await;
+    let repository_id = seed_repository(&h.context.pool).await;
+    let dependent = create_ready(&h, &repository_id, "dependent", "plan").await;
+    let in_ready = create_ready(&h, &repository_id, "in ready", "plan").await;
+    let not_ready = tasks::create_task(
+        &h.context,
+        NewTask {
+            repository_id: repository_id.clone(),
+            title: "not ready yet".to_string(),
+            plan: None,
+            extra_instructions: None,
+            column: Some(BoardColumn::NotReady),
+            links: vec![],
+        },
+    )
+    .await
+    .expect("a not_ready dependency");
+    seed_dependency(&h.context.pool, &dependent.id, &in_ready.id).await;
+    seed_dependency(&h.context.pool, &dependent.id, &not_ready.id).await;
+
+    let summary = list_one(&h, &repository_id, &dependent.id).await;
+
+    assert_eq!(summary.blocking_title.as_deref(), Some("not ready yet"));
+}
+
+#[tokio::test]
+async fn blocking_reason_lists_only_the_unsatisfied_dependencies() {
+    let h = TestContext::new().await;
+    let repository_id = seed_repository(&h.context.pool).await;
+    let dependent = create_ready(&h, &repository_id, "dependent", "plan").await;
+    let waiting = create_ready(&h, &repository_id, "still going", "plan").await;
+    let finished = create_ready(&h, &repository_id, "already reviewed", "plan").await;
+    seed_dependency(&h.context.pool, &dependent.id, &waiting.id).await;
+    seed_dependency(&h.context.pool, &dependent.id, &finished.id).await;
+    tasks::move_task(&h.context, &finished.id, BoardColumn::InReview, None, None)
+        .await
+        .expect("file the finished one for review");
+
+    let blocking = tasks::blocking_reason(&h.context, &dependent.id)
+        .await
+        .expect("the panel's blocking-reason read");
+
+    assert_eq!(
+        blocking
+            .iter()
+            .map(|task| task.title.as_str())
+            .collect::<Vec<_>>(),
+        vec!["still going"],
+    );
+
+    // And an unknown id is a not-found, never an empty list that would read as
+    // "nothing is blocking it".
+    let missing = tasks::blocking_reason(&h.context, "no-such-task").await;
+    assert!(missing.is_err());
 }
 
 // ---------------------------------------------------------------------------
@@ -1687,6 +1886,16 @@ async fn seed_finished_run(
     .await
     .expect("seed a finished run");
     id
+}
+
+/// How many attempts a task has on record. Only the ADR-0008 tests use it, and
+/// only to prove the negative their whole point rests on: that a dependency
+/// satisfied by its *column* was satisfied without any run at all.
+async fn run_count(pool: &SqlitePool, task_id: &str) -> i64 {
+    sqlx::query_scalar!("SELECT count(*) FROM runs WHERE task_id = ?1", task_id)
+        .fetch_one(pool)
+        .await
+        .expect("count a task's runs")
 }
 
 /// Written the way sqlx writes a bound `DateTime<Utc>` — a numeric `+00:00`

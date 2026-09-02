@@ -268,10 +268,15 @@ export interface LastRunSummary {
 export interface TaskSummary extends Task, EffectiveStrategyFields {
   linkCount: number;
   dependencyCount: number;
-  /** Reserved for task 011 and a constant `false` until it lands — the card
-   *  renders it now so that task 011 changes one backend query and nothing
-   *  else (seam-contract D12). */
+  /** At least one dependency is in a column that does not satisfy it —
+   *  ADR-0008's `in_review` or `done`, and nothing else. Derived on every read;
+   *  there is no stored `blocked` state behind it (ADR-0008's 2026-09-02
+   *  amendment). */
   blockedByIncomplete: boolean;
+  /** The first unsatisfied dependency's title, or `null` when nothing is
+   *  blocking. The same dependency the base-ref rule would chain from, so the
+   *  card names the head of the stalled chain. */
+  blockingTitle: string | null;
   lastRun: LastRunSummary | null;
 }
 
@@ -663,7 +668,13 @@ export interface WorktreeStatus {
    *  user can go and look, including when it is gone. */
   path: string | null;
   branch: string | null;
+  /** What the last attempt was actually built on when there was one, and a
+   *  fresh resolution otherwise (ADR-0008's 2026-09-02 amendment). */
   baseRef: string;
+  /** ADR-0008's multi-dependency warning, computed against the **current**
+   *  dependency set rather than the recorded attempt's — it is advice about
+   *  what to do next, not a fact about the past. Rendered verbatim. */
+  dependencyWarning: string | null;
   ahead: number;
   behind: number;
   /** Uncommitted work in the worktree: modified, staged or untracked alike. */

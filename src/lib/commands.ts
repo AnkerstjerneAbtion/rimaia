@@ -203,6 +203,25 @@ export function reorderTaskLink(
   return call<TaskLink>("reorder_task_link", { linkId, beforeId, afterId });
 }
 
+/**
+ * Replaces the whole set of tasks `taskId` is blocked by (ADR-0008).
+ *
+ * **Replace, never merge** — send the complete set every time, and an empty
+ * array clears every dependency. Rejects with the service's own message when
+ * the set would close a cycle (naming the whole path), when a task depends on
+ * itself, or when the dependency is in another repository. Resolves with the
+ * stored set, sorted.
+ */
+export function setTaskDependencies(taskId: string, dependsOn: string[]): Promise<string[]> {
+  return call<string[]>("set_task_dependencies", { taskId, dependsOn });
+}
+
+/** The dependencies keeping a task out of the queue, whole rows, in the order
+ *  ADR-0008 picks a base branch in. Empty means nothing is blocking it. */
+export function getBlockingReason(taskId: string): Promise<Task[]> {
+  return call<Task[]>("get_blocking_reason", { taskId });
+}
+
 // ---------------------------------------------------------------------------
 // Settings (task 006) — see `src-tauri/src/commands/settings.rs`.
 // ---------------------------------------------------------------------------

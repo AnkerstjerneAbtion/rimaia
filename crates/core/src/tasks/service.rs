@@ -75,13 +75,26 @@ pub struct TaskSummary {
     pub task: Task,
     pub link_count: i64,
     pub dependency_count: i64,
-    /// Reserved for task 011, and a constant `false` until it lands
-    /// (seam-contract D12). It ships now, with the card that renders it and
-    /// the TypeScript mirror, so that turning it into a real predicate is a
-    /// change to [`list_tasks`]'s query and nothing else — the `0` literal in
-    /// [`TASK_SUMMARY_SELECT`] is the single place task 011 edits. Deliberate,
-    /// not an unfinished thought.
+    /// At least one of this task's dependencies is in a column that does not
+    /// satisfy it (ADR-0008, seam-contract D12) — see
+    /// [`BoardColumn::satisfies_a_dependency`] for why that is a column test
+    /// and deliberately not a `runs.status` one.
+    ///
+    /// **Derived on every read, never stored.** ADR-0008's amendment of
+    /// 2026-09-02 argues that at length: the predicate for B changes when *A*
+    /// moves column, so a cached copy would live on the wrong row.
     pub blocked_by_incomplete: bool,
+    /// The first unsatisfied dependency's title, in
+    /// [`BoardColumn::board_rank`] then ascending `position` order — the same
+    /// order ADR-0008's base-ref rule picks a base branch in, so the card names
+    /// the head of the stalled chain rather than an arbitrary member of it.
+    ///
+    /// `None` exactly when [`blocked_by_incomplete`](TaskSummary::blocked_by_incomplete)
+    /// is false. The card must *name* the blocker — task 011's acceptance
+    /// criterion is "each showing A as the reason" — and a title is the only
+    /// field that names it, which is why this is a fifth summary field rather
+    /// than a lookup the frontend does per card.
+    pub blocking_title: Option<String>,
     pub last_run: Option<LastRunSummary>,
     /// The same three fields [`TaskDetail`] carries, for the same reason — see
     /// [`apply_effective_strategy`]. The card renders a badge off them and
@@ -137,6 +150,7 @@ impl<'r> FromRow<'r, SqliteRow> for TaskSummary {
             link_count: row.try_get("link_count")?,
             dependency_count: row.try_get("dependency_count")?,
             blocked_by_incomplete: row.try_get("blocked_by_incomplete")?,
+            blocking_title: row.try_get("blocking_title")?,
             last_run,
             effective_model: None,
             effective_effort: None,
@@ -160,11 +174,47 @@ impl<'r> FromRow<'r, SqliteRow> for TaskSummary {
 /// is NULL while a run is in flight. `idx_runs_task_attempt` is UNIQUE on
 /// `(task_id, attempt)`, so that join matches at most one row and needs no
 /// `GROUP BY` of its own.
+///
+/// # Blocking is computed here, on the column, and only here
+///
+/// ADR-0008's condition is `board_column IN ('in_review', 'done')` and nothing
+/// else — [`BoardColumn::satisfies_a_dependency`] carries the two reasons it is
+/// not a `runs.status = 'succeeded'` predicate, and both are ordinary rather
+/// than exotic. The two dependency expressions below are a third and fourth
+/// correlated subquery over `task_dependencies`, which is one user's board and
+/// a handful of rows per task: D12's argument is against *fifty reads per board
+/// read*, not against a subquery, and this keeps the count at one.
+///
+/// `blocking_title` orders by column rank and then ascending `position`,
+/// deliberately not by `board_column ASC`. Within the unsatisfied pair the two
+/// happen to agree — `'not_ready' < 'ready'` alphabetically as well as by rank
+/// — but writing the coincidence down as the rule is how the *satisfied* pair
+/// would later be ordered `done` before `in_review`, which is backwards. See
+/// [`BoardColumn::board_rank`], which
+/// [`the_summary_query_ranks_columns_the_way_board_rank_does`](tests::the_summary_query_ranks_columns_the_way_board_rank_does)
+/// pins this literal against.
 const TASK_SUMMARY_SELECT: &str = r#"
 SELECT t.*,
        (SELECT count(*) FROM task_links WHERE task_id = t.id) AS link_count,
        (SELECT count(*) FROM task_dependencies WHERE task_id = t.id) AS dependency_count,
-       0 AS blocked_by_incomplete,
+       EXISTS (SELECT 1
+                 FROM task_dependencies d
+                 JOIN tasks dep ON dep.id = d.depends_on_task_id
+                WHERE d.task_id = t.id
+                  AND dep.board_column NOT IN ('in_review', 'done')) AS blocked_by_incomplete,
+       (SELECT dep.title
+          FROM task_dependencies d
+          JOIN tasks dep ON dep.id = d.depends_on_task_id
+         WHERE d.task_id = t.id
+           AND dep.board_column NOT IN ('in_review', 'done')
+         ORDER BY CASE dep.board_column
+                    WHEN 'not_ready' THEN 0
+                    WHEN 'ready' THEN 1
+                    WHEN 'in_review' THEN 2
+                    WHEN 'done' THEN 3
+                  END ASC,
+                  dep.position ASC, dep.created_at ASC, dep.id ASC
+         LIMIT 1) AS blocking_title,
        r.status AS last_run_status,
        r.exit_class AS last_run_exit_class,
        r.ended_at AS last_run_ended_at
@@ -564,9 +614,22 @@ pub async fn delete_task(ctx: &ServiceContext, id: &str) -> Result<()> {
     .await?;
 
     if !dependents.is_empty() {
+        // Task 011's Scope: "already in 004; extend the message with the
+        // dependency context". The count and the names were already here; what
+        // was missing is the *next step*, which ADR-0008 states as "the edges
+        // must be removed first" and which is not guessable from a refusal that
+        // only names who objects. Two clauses rather than a pluralized noun, for
+        // the reason `repo::remove` gives at its own count: English inflects the
+        // verb as well.
+        let subject = if dependents.len() == 1 {
+            "1 other task depends on it".to_string()
+        } else {
+            format!("{} other tasks depend on it", dependents.len())
+        };
         return Err(Error::invalid(format!(
-            "cannot delete this task: {count} other task(s) depend on it: {names}",
-            count = dependents.len(),
+            "cannot delete this task: {subject}: {names}. \
+             Each of those branches from this one, so clear the dependency on \
+             it in their task panels before deleting it.",
             names = dependents.join(", "),
         )));
     }
@@ -1089,7 +1152,8 @@ mod tests {
             },
             link_count: 2,
             dependency_count: 1,
-            blocked_by_incomplete: false,
+            blocked_by_incomplete: true,
+            blocking_title: Some("Add the API endpoint".to_string()),
             // seam-contract D9's case: the task is `failed`, and the only place
             // the word "interrupted" reaches the board is this exit class.
             last_run: Some(LastRunSummary {
@@ -1109,7 +1173,10 @@ mod tests {
         assert_eq!(wire["runState"], json!("failed"));
         assert_eq!(wire["linkCount"], json!(2));
         assert_eq!(wire["dependencyCount"], json!(1));
-        assert_eq!(wire["blockedByIncomplete"], json!(false));
+        assert_eq!(wire["blockedByIncomplete"], json!(true));
+        // The card has to *name* the blocker, not just show a badge — task
+        // 011's criterion is "each showing A as the reason".
+        assert_eq!(wire["blockingTitle"], json!("Add the API endpoint"));
         // ADR-0019's provenance, flattened out of the task row like every other
         // column: `ui`, never `Ui`, because the value answers to SQLite's CHECK
         // as well as to TypeScript.
@@ -1155,6 +1222,7 @@ mod tests {
             link_count: 0,
             dependency_count: 0,
             blocked_by_incomplete: false,
+            blocking_title: None,
             last_run: None,
             effective_model: None,
             effective_effort: None,
@@ -1166,6 +1234,7 @@ mod tests {
         // `null`, never an absent key: `lastRun: LastRunSummary | null` in
         // `src/types.ts` is a field the card reads, not one it probes for.
         assert_eq!(wire["lastRun"], json!(null));
+        assert_eq!(wire["blockingTitle"], json!(null));
         // Same rule for the strategy badge: the card reads
         // `effectiveModel: string | null` and draws nothing for `null`, so an
         // absent key would make it render `undefined`.
@@ -1299,6 +1368,50 @@ mod tests {
         assert_eq!(
             strongest_origin(&resolved(StrategyOrigin::Global, StrategyOrigin::Global)),
             StrategyOrigin::Global,
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // ADR-0008's blocking predicate, as SQL
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn the_summary_query_ranks_columns_the_way_board_rank_does() {
+        // The `CASE` in `TASK_SUMMARY_SELECT` is a hand-typed copy of
+        // `BoardColumn::board_rank`, and the two disagreeing is invisible: the
+        // query still runs, still returns a title, and returns the *wrong*
+        // dependency's title only on a board where two dependencies sit in
+        // different columns. This is the check that makes the copy safe.
+        for column in BoardColumn::ALL {
+            assert!(
+                TASK_SUMMARY_SELECT.contains(&format!(
+                    "WHEN '{}' THEN {}",
+                    column.as_sql(),
+                    column.board_rank(),
+                )),
+                "{column:?} is ranked differently in the query than in board_rank",
+            );
+        }
+    }
+
+    #[test]
+    fn the_summary_query_calls_exactly_in_review_and_done_satisfying() {
+        // Spelled out in SQL rather than through `satisfies_a_dependency`, so
+        // this asserts the two agree. A third column quietly added to the `NOT
+        // IN` list would unblock work whose dependency never ran.
+        let satisfying: Vec<&str> = BoardColumn::ALL
+            .into_iter()
+            .filter(|column| column.satisfies_a_dependency())
+            .map(BoardColumn::as_sql)
+            .collect();
+
+        assert_eq!(satisfying, vec!["in_review", "done"]);
+        assert_eq!(
+            TASK_SUMMARY_SELECT
+                .matches("board_column NOT IN ('in_review', 'done')")
+                .count(),
+            2,
+            "both dependency expressions must use the same satisfaction test",
         );
     }
 
@@ -1446,6 +1559,7 @@ mod tests {
             link_count: 0,
             dependency_count: 0,
             blocked_by_incomplete: false,
+            blocking_title: None,
             last_run: None,
             // Unresolved, exactly as `FromRow` leaves them — which is the state
             // `apply_effective_strategy` is given.

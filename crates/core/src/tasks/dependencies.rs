@@ -21,11 +21,14 @@
 //! forbids the one-row `task_id = depends_on_task_id` case, and ADR-0003
 //! counts the user with a `sqlite3` CLI as a supported writer of this file.
 
+use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
 
+use chrono::{DateTime, Utc};
 use sqlx::SqliteConnection;
 
 use crate::context::ServiceContext;
+use crate::db::{BoardColumn, MutationSource, RunState, StrategyMode, StrategySource, Task};
 use crate::error::{Error, Result};
 use crate::events::ChangeEvent;
 use crate::tasks::service::fetch_task_row;
@@ -137,6 +140,83 @@ pub async fn set_task_dependencies(
     let mut stored = requested;
     stored.sort();
     Ok(stored)
+}
+
+/// Every task `task_id` depends on, in ADR-0008's order: board rank first,
+/// then ascending `position`.
+///
+/// The order is the load-bearing part, and it is not `list_tasks`' own
+/// `board_column ASC` — see [`BoardColumn::board_rank`]. It decides two things
+/// that have to agree with each other: which dependency's branch a dependent
+/// task is created from ([`crate::worktree`]'s base-ref resolution) and which
+/// blocker's title a blocked card names. A card that names one task while its
+/// worktree chains off another would be describing a board that does not
+/// exist.
+///
+/// `position` breaks ties within a column, ascending, because ADR-0007 puts the
+/// top of a column first and [`crate::scheduler::selection`] states the same
+/// reading: "`position` ascends downwards". `created_at` then `id` break a
+/// position tie, which the schema permits, exactly as `rebalance_column`
+/// renumbers by.
+pub async fn dependencies_of(ctx: &ServiceContext, task_id: &str) -> Result<Vec<Task>> {
+    let mut rows = sqlx::query_as!(
+        Task,
+        r#"SELECT dep.id, dep.repository_id, dep.title, dep.plan, dep.extra_instructions,
+            dep.board_column AS "column: BoardColumn", dep.position,
+            dep.run_state AS "run_state: RunState", dep.branch, dep.worktree_path,
+            dep.strategy_mode AS "strategy_mode: StrategyMode", dep.model, dep.effort,
+            dep.strategy_plan, dep.strategy_source AS "strategy_source: StrategySource",
+            dep.strategy_updated_at AS "strategy_updated_at: DateTime<Utc>",
+            dep.created_at AS "created_at: DateTime<Utc>",
+            dep.updated_at AS "updated_at: DateTime<Utc>",
+            dep.source AS "source: MutationSource"
+           FROM task_dependencies d
+           JOIN tasks dep ON dep.id = d.depends_on_task_id
+          WHERE d.task_id = ?1"#,
+        task_id,
+    )
+    .fetch_all(&ctx.pool)
+    .await?;
+
+    rows.sort_by(compare_dependency_order);
+    Ok(rows)
+}
+
+/// ADR-0008's order over two dependency rows. Extracted so the base-ref rule
+/// and the blocked card cannot drift apart, and so it is testable without a
+/// database.
+fn compare_dependency_order(left: &Task, right: &Task) -> Ordering {
+    left.column
+        .board_rank()
+        .cmp(&right.column.board_rank())
+        // `total_cmp` rather than `partial_cmp().unwrap()`: `position` is a
+        // `REAL` a user with the `sqlite3` CLI can set to anything, NaN
+        // included, and a comparator that panics on one row would take the
+        // whole board down (ADR-0003 counts that user as a supported writer).
+        .then(left.position.total_cmp(&right.position))
+        .then(left.created_at.cmp(&right.created_at))
+        .then(left.id.cmp(&right.id))
+}
+
+/// The dependencies that are keeping `task_id` out of the queue — ADR-0008's
+/// "the card shows which task is blocking it", as rows the panel can render.
+///
+/// Empty means nothing is blocking it, which is the same answer as
+/// `TaskSummary::blocked_by_incomplete == false` on the board's own read. The
+/// two are deliberately one rule expressed twice at different widths: the board
+/// gets a flag and one title inside its single query (seam-contract D12), the
+/// panel gets the whole list, and both filter on
+/// [`BoardColumn::satisfies_a_dependency`].
+pub async fn blocking_reason(ctx: &ServiceContext, task_id: &str) -> Result<Vec<Task>> {
+    // Reads the row first so an unknown id is `no task with id X` rather than
+    // an empty list that reads as "nothing is blocking it".
+    fetch_task_row(&ctx.pool, task_id).await?;
+
+    Ok(dependencies_of(ctx, task_id)
+        .await?
+        .into_iter()
+        .filter(|dependency| !dependency.column.satisfies_a_dependency())
+        .collect())
 }
 
 /// The ids `task_id` depends on today, in the order they will come back.

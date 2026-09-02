@@ -29,7 +29,7 @@ pub mod service;
 pub mod strategy;
 pub mod types;
 
-pub use dependencies::set_task_dependencies;
+pub use dependencies::{blocking_reason, dependencies_of, set_task_dependencies};
 pub use links::{
     add_task_link, get_task_link, remove_task_link, reorder_task_link, update_task_link,
 };

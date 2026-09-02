@@ -686,6 +686,7 @@ async fn a_run_against_a_task_that_does_not_exist_is_refused_by_name() {
             task_id: "3f2b1c00-0000-4000-8000-00000000dead".to_string(),
             session_id: SESSION_ID.to_string(),
             prompt: "do the thing".to_string(),
+            base_ref: None,
         },
     )
     .await
@@ -1288,6 +1289,7 @@ impl RunFixture {
                 task_id: task_id.to_string(),
                 session_id: SESSION_ID.to_string(),
                 prompt: prompt.to_string(),
+                base_ref: None,
             },
         )
         .await

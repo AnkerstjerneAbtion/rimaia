@@ -69,6 +69,71 @@ pub enum BoardColumn {
     Done,
 }
 
+impl BoardColumn {
+    /// The value stored in `tasks.board_column` — the same spelling the
+    /// schema's `CHECK` lists and `#[sqlx(rename_all = "snake_case")]`
+    /// produces. Needed because ADR-0008's base-ref rule has to name these in
+    /// hand-built SQL (`tasks::service::TASK_SUMMARY_SELECT`), and a literal
+    /// typed out there is a literal that can drift from this enum silently.
+    pub const fn as_sql(self) -> &'static str {
+        match self {
+            BoardColumn::NotReady => "not_ready",
+            BoardColumn::Ready => "ready",
+            BoardColumn::InReview => "in_review",
+            BoardColumn::Done => "done",
+        }
+    }
+
+    /// Where the column sits on the board, left to right — the order
+    /// `COLUMN_TITLES` draws and ADR-0007 lists.
+    ///
+    /// **Not the alphabetical order of [`as_sql`](BoardColumn::as_sql)**, which
+    /// is `done` < `in_review` < `not_ready` < `ready` and therefore ranks the
+    /// two *satisfied* columns backwards. ADR-0008's amendment of 2026-09-02
+    /// makes this rank, then ascending `position`, the order that picks a
+    /// dependent task's base branch, so getting it from a `board_column ASC`
+    /// would silently chain onto the wrong dependency. It exists as a function
+    /// rather than as a `derive(Ord)` because `position` is only comparable
+    /// within a column and a total order on the enum alone would invite
+    /// comparing two whole tasks by it.
+    pub const fn board_rank(self) -> i64 {
+        match self {
+            BoardColumn::NotReady => 0,
+            BoardColumn::Ready => 1,
+            BoardColumn::InReview => 2,
+            BoardColumn::Done => 3,
+        }
+    }
+
+    /// Every column, in [`board_rank`](BoardColumn::board_rank) order.
+    pub const ALL: [BoardColumn; 4] = [
+        BoardColumn::NotReady,
+        BoardColumn::Ready,
+        BoardColumn::InReview,
+        BoardColumn::Done,
+    ];
+
+    /// Whether a dependency in this column counts as satisfied (ADR-0008).
+    ///
+    /// **The column, and nothing else.** ADR-0008's decision sentence is "a
+    /// dependency is satisfied when the dependency's run completes successfully
+    /// — that is, when it reaches `in_review` or `done`", and the clause after
+    /// the dash is the definition rather than a proxy for a `runs` row. Two
+    /// cases make the difference observable, and both are ordinary:
+    ///
+    /// 1. A dependency the user implemented by hand and dragged to `done` has
+    ///    no `runs` row at all. Under a `runs.status = 'succeeded'` predicate
+    ///    its dependents would block forever, with no escape hatch short of
+    ///    deleting the edge.
+    /// 2. A run succeeds, its card files to `in_review`, and the user drags it
+    ///    back to `ready` for another go. The run row still says `succeeded`, so
+    ///    a run-based predicate would keep the dependency satisfied while the
+    ///    human has explicitly un-satisfied it.
+    pub const fn satisfies_a_dependency(self) -> bool {
+        matches!(self, BoardColumn::InReview | BoardColumn::Done)
+    }
+}
+
 /// Where a task is in the *machine's* process (ADR-0007).
 ///
 /// ADR-0007's seven, and only these seven. **`interrupted` is deliberately absent,

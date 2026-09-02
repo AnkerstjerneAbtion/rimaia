@@ -290,7 +290,12 @@ function runNowState(task: CardTask, repositories: ReadonlyMap<string, Repositor
  * which is also the correct reading for a task genuinely built with none.
  */
 type CardTask = Task &
-  Partial<Pick<TaskSummary, "linkCount" | "dependencyCount" | "lastRun">> &
+  Partial<
+    Pick<
+      TaskSummary,
+      "linkCount" | "dependencyCount" | "lastRun" | "blockedByIncomplete" | "blockingTitle"
+    >
+  > &
   Partial<EffectiveStrategyFields>;
 
 interface CardFace {
@@ -322,6 +327,7 @@ interface CardFace {
 function CardFace({ task, repositoryName, now }: CardFace) {
   const linkCount = task.linkCount ?? 0;
   const dependencyCount = task.dependencyCount ?? 0;
+  const blocked = task.blockedByIncomplete ?? false;
 
   // The three effective fields are one projection on the Rust side and arrive
   // together or not at all, so an absent origin means this card was built from
@@ -344,7 +350,11 @@ function CardFace({ task, repositoryName, now }: CardFace) {
       <h4 className="task-card-title">{task.title}</h4>
       <div className="task-card-meta">
         <span className="task-card-repo">{repositoryName}</span>
-        <RunStateBadge runState={task.runState} lastRun={task.lastRun ?? null} />
+        <RunStateBadge
+          runState={task.runState}
+          lastRun={task.lastRun ?? null}
+          blockedByIncomplete={blocked}
+        />
       </div>
       {(strategy || proposalWaiting) && (
         <div className="task-card-strategy">
@@ -389,6 +399,15 @@ function CardFace({ task, repositoryName, now }: CardFace) {
           )}
         </span>
       </div>
+      {/* ADR-0008's "the card shows which task is blocking it", and task 011's
+          acceptance criterion "each showing A as the reason" — a visible line
+          on the card face, not a `title=` attribute. A blocked card without a
+          name on it makes the user open every card in the chain to find the
+          one that stalled, which is the opposite of the one-glance morning
+          review the ADR is written for. */}
+      {blocked && task.blockingTitle && (
+        <p className="task-card-blocked-by">Blocked by {task.blockingTitle}</p>
+      )}
     </>
   );
 }

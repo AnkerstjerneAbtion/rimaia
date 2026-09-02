@@ -106,6 +106,156 @@ async fn five_ready_tasks_run_in_board_order_without_intervention() {
 }
 
 #[tokio::test]
+async fn a_to_b_to_c_run_in_dependency_order_in_one_queue_pass() {
+    // Task 011's first acceptance criterion, and the reason ADR-0008 does not
+    // wait for a human: "A → B → C in `ready` run in dependency order in a
+    // single unattended queue run, with no human interaction."
+    //
+    // The cards are laid out in the *opposite* order on the board — C at the
+    // top, A at the bottom — so board order and dependency order disagree.
+    // Without ADR-0008's predicate the queue would start C first, which is the
+    // failure this test exists to catch; with it, C and B are skipped on the
+    // first pass and become claimable only as their dependencies file
+    // themselves for review.
+    let fixture = Fixture::new().await;
+    let c = fixture.add_task("Charlie").await;
+    let b = fixture.add_task("Bravo").await;
+    let a = fixture.add_task("Alpha").await;
+    tasks::set_task_dependencies(fixture.ctx(), &b, std::slice::from_ref(&a))
+        .await
+        .expect("B depends on A");
+    tasks::set_task_dependencies(fixture.ctx(), &c, std::slice::from_ref(&b))
+        .await
+        .expect("C depends on B");
+
+    // Before anything runs: two of the three cards are held, each naming its
+    // own blocker, and only A is claimable.
+    let plan = scheduler::selection::plan(fixture.ctx())
+        .await
+        .expect("the queue's own plan");
+    assert_eq!(
+        plan.iter()
+            .map(|entry| (entry.task_id.clone(), entry.skip))
+            .collect::<Vec<_>>(),
+        vec![
+            (c.clone(), Some(SkipReason::DependencyNotSatisfied)),
+            (b.clone(), Some(SkipReason::DependencyNotSatisfied)),
+            (a.clone(), None),
+        ],
+    );
+
+    let mut changes = fixture.ctx().subscribe();
+    let queue = fixture.spawn_queue();
+    queue.start().await.expect("start the queue");
+
+    wait_until(
+        &fixture,
+        &mut changes,
+        "every task to reach in_review",
+        |board| {
+            board
+                .iter()
+                .all(|task| task.task.column == BoardColumn::InReview)
+        },
+    )
+    .await;
+
+    assert_eq!(
+        fixture.cli.started(),
+        vec![a.clone(), b.clone(), c.clone()],
+        "dependency order, not board order",
+    );
+    fixture.cli.assert_never_two_at_once();
+
+    // And each attempt recorded what it was branched from: A off the default
+    // branch, B off A's branch, C off B's (ADR-0008's amendment).
+    assert_eq!(
+        recorded_base_ref(&fixture, &a).await.as_deref(),
+        Some("main")
+    );
+    assert_eq!(
+        recorded_base_ref(&fixture, &b).await,
+        fixture.task(&a).await.branch,
+    );
+    assert_eq!(
+        recorded_base_ref(&fixture, &c).await,
+        fixture.task(&b).await.branch,
+    );
+
+    queue.shutdown();
+}
+
+#[tokio::test]
+async fn a_blocked_task_is_left_where_it_is_rather_than_failed() {
+    // ADR-0008: a task with unsatisfied dependencies is "skipped by the queue
+    // rather than failing". The queue drains, the blocked card is still `ready`
+    // and `idle` — *not* `blocked`, which ADR-0008's amendment of 2026-09-02
+    // leaves unwritten — and nothing was spawned for it.
+    let fixture = Fixture::new().await;
+    let runnable = fixture.add_task("Alpha").await;
+    let blocked = fixture.add_task("Bravo").await;
+    let never_ready = tasks::create_task(
+        fixture.ctx(),
+        NewTask {
+            repository_id: fixture.repository_id.clone(),
+            title: "Not ready at all".to_string(),
+            plan: None,
+            extra_instructions: None,
+            column: Some(BoardColumn::NotReady),
+            links: vec![],
+        },
+    )
+    .await
+    .expect("a dependency that will never satisfy on its own");
+    tasks::set_task_dependencies(
+        fixture.ctx(),
+        &blocked,
+        std::slice::from_ref(&never_ready.id),
+    )
+    .await
+    .expect("Bravo depends on it");
+
+    let mut changes = fixture.ctx().subscribe();
+    let queue = fixture.spawn_queue();
+    queue.start().await.expect("start the queue");
+
+    wait_until(
+        &fixture,
+        &mut changes,
+        "Alpha to reach in_review",
+        |board| {
+            board
+                .iter()
+                .any(|task| task.task.id == runnable && task.task.column == BoardColumn::InReview)
+        },
+    )
+    .await;
+    wait_until_not_in_flight(&queue).await;
+
+    let held = fixture.task(&blocked).await;
+    assert_eq!(held.column, BoardColumn::Ready);
+    assert_eq!(
+        held.run_state,
+        RunState::Idle,
+        "blocking is derived at read time; `RunState::Blocked` stays unwritten",
+    );
+    assert_eq!(fixture.attempts(&blocked).await, 0);
+    assert!(!fixture.cli.started().contains(&blocked));
+
+    // And the card can say why, by name.
+    let summary = fixture
+        .board()
+        .await
+        .into_iter()
+        .find(|summary| summary.task.id == blocked)
+        .expect("the blocked card is on the board");
+    assert!(summary.blocked_by_incomplete);
+    assert_eq!(summary.blocking_title.as_deref(), Some("Not ready at all"));
+
+    queue.shutdown();
+}
+
+#[tokio::test]
 async fn a_failing_task_does_not_stop_the_queue() {
     // `max-turns.jsonl` is ADR-0011's `fatal` row: no retry, task -> failed,
     // and ADR-0007 keeps the card in `ready` so it interrupts the morning
@@ -730,6 +880,7 @@ async fn reopening_after_a_crash_shows_one_interrupted_task_and_leaves_the_rest_
             task_id: crashed.clone(),
             session_id: "0b6d3e2e-0000-4000-8000-00000000c0de".to_string(),
             prompt: "implement the plan".to_string(),
+            base_ref: None,
         },
     )
     .await
@@ -873,6 +1024,7 @@ async fn reconciling_a_task_another_repair_already_settled_still_closes_its_run(
             task_id: crashed.clone(),
             session_id: "0b6d3e2e-0000-4000-8000-00000000feed".to_string(),
             prompt: "implement the plan".to_string(),
+            base_ref: None,
         },
     )
     .await
@@ -1017,6 +1169,20 @@ async fn wait_until_not_in_flight(queue: &QueueHandle) {
     })
     .await
     .expect("the queue never released its in-flight task");
+}
+
+/// What the task's most recent attempt recorded as its base — ADR-0008's
+/// amendment, read back off the `runs` row rather than re-resolved, which is
+/// the whole point of it being written there.
+async fn recorded_base_ref(fixture: &Fixture, task_id: &str) -> Option<String> {
+    sqlx::query_scalar!(
+        "SELECT base_ref FROM runs WHERE task_id = ?1 ORDER BY attempt DESC LIMIT 1",
+        task_id,
+    )
+    .fetch_optional(&fixture.ctx().pool)
+    .await
+    .expect("read the run's base ref")
+    .flatten()
 }
 
 fn position_of(positions: &[(&str, Option<i64>)], task_id: &str) -> Option<i64> {
