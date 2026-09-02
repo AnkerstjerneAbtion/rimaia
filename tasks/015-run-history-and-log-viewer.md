@@ -3,6 +3,7 @@ id: "015"
 title: Run history and log viewer
 milestone: v0.3
 status: ready
+landed: "#10"
 depends_on: ["009"]
 adrs: ["0013"]
 size: M
