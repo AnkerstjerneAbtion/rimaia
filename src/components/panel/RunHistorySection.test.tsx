@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { invoke } from "@tauri-apps/api/core";
@@ -187,8 +187,14 @@ describe("RunHistorySection", () => {
     });
 
     render(<RunHistorySection taskId="task-1" />);
-    await waitFor(() => expect(call).toBe(1));
-    expect(screen.getByText(/No runs yet/)).toBeInTheDocument();
+    // Awaited on the *rendered* empty state, not on the call counter. The
+    // counter increments inside the mock, before its promise resolves and
+    // before React commits `setRuns([])` — so a synchronous `getByText` here
+    // could run while the section still reads "Loading…". That won the race on
+    // a fast machine and lost it on CI, which is the worst way for a test to
+    // be wrong.
+    expect(await screen.findByText(/No runs yet/)).toBeInTheDocument();
+    expect(call).toBe(1);
 
     listenHandlers["runs:changed"]?.({ payload: ["run-1"] });
 
