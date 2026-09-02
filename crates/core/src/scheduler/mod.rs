@@ -76,18 +76,18 @@ pub use capacity::{
     DEFAULT_PER_REPOSITORY, MAX_CONCURRENCY, SCHEDULE_MODE,
 };
 pub use claim::{claim, claim_retry, give_up, release, ClaimOutcome};
+pub use inflight::{
+    Capacity, Counts, InFlight, Lease, LeaseOwner, LeaseRefused, CONCURRENCY_CEILING,
+};
 pub use pause::{
     active_until as usage_limit_pause_until, note_usage_limit, USAGE_LIMIT_PAUSE_UNTIL,
 };
+pub use queue::{build, QueueHandle, QueueStatus, QueueTask};
+pub use reconcile::reconcile_interrupted;
 pub use retry::{
     decide as decide_retry, AttemptHistory, GiveUpReason, RetryDecision, RetryKind,
     MAX_TRANSIENT_ATTEMPTS, USAGE_LIMIT_FALLBACK_POLL,
 };
-pub use inflight::{
-    Capacity, Counts, InFlight, Lease, LeaseOwner, LeaseRefused, CONCURRENCY_CEILING,
-};
-pub use queue::{build, QueueHandle, QueueStatus, QueueTask};
-pub use reconcile::reconcile_interrupted;
 pub use selection::{
     next_batch, next_deadline, next_to_start, plan, skip_reason, QueueEntry, SkipReason,
 };

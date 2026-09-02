@@ -422,8 +422,9 @@ async fn a_listed_task_carries_its_link_and_dependency_counts_and_its_last_run()
             status: RunStatus::Running,
             exit_class: None,
             ended_at: None,
+            resume_after: None,
         }),
-        "a run still in flight has no exit class and no end"
+        "a run still in flight has no exit class, no end and nothing scheduled after it"
     );
 }
 
@@ -484,6 +485,10 @@ async fn the_listed_last_run_is_the_highest_attempt_not_the_most_recently_ended(
             status: RunStatus::Interrupted,
             exit_class: Some(ExitClass::Interrupted),
             ended_at: Some(timestamp("2026-08-20T09:00:00+00:00")),
+            // Written by hand here rather than by the policy: this test drives
+            // `finish_run` directly with an outcome it built, and the point is
+            // the projection carrying the column, not what decided it.
+            resume_after: None,
         })
     );
 }

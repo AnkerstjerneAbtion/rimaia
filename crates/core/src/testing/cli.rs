@@ -118,6 +118,37 @@ impl FakeCli {
         ]
     }
 
+    /// Makes an empty commit on `message` in the worktree it was started in,
+    /// and then replays `fixture`.
+    ///
+    /// The one thing a stand-in genuinely has to *do* rather than say, and it
+    /// is the acceptance criterion for resume: "a resumed run continues in the
+    /// same worktree with prior commits intact — verified by checking commit
+    /// history across attempts". CLAUDE.md forbids faking git, so this runs the
+    /// real `git` in the real worktree ADR-0005 gave the run, and the test then
+    /// reads the history back out of it.
+    ///
+    /// `--allow-empty` because what is being asserted is that the *commit*
+    /// survives across attempts, not that a stand-in can write a file.
+    pub fn commits_on_attempt(
+        &self,
+        task_id: &str,
+        attempt: usize,
+        message: &str,
+        fixture: &str,
+        code: i32,
+    ) {
+        self.write_plan(
+            &format!("{task_id}-{attempt}"),
+            &[
+                "commit".to_string(),
+                fixture_path(fixture).display().to_string(),
+                code.to_string(),
+                message.to_string(),
+            ],
+        );
+    }
+
     /// Replays the first `head` lines of `fixture` for `task_id`, then waits
     /// for the returned gate file to appear before replaying the rest.
     ///
@@ -179,7 +210,10 @@ impl FakeCli {
     pub fn argv(&self, task_id: &str, attempt: usize) -> Vec<String> {
         self.read(&format!("argv-{task_id}-{attempt}"))
             .unwrap_or_else(|| {
-                panic!("attempt {attempt} of {task_id} was never spawned: {:?}", self.spawns())
+                panic!(
+                    "attempt {attempt} of {task_id} was never spawned: {:?}",
+                    self.spawns()
+                )
             })
             .lines()
             .map(str::to_string)
@@ -190,7 +224,10 @@ impl FakeCli {
     pub fn stdin(&self, task_id: &str, attempt: usize) -> String {
         self.read(&format!("stdin-{task_id}-{attempt}"))
             .unwrap_or_else(|| {
-                panic!("attempt {attempt} of {task_id} was never spawned: {:?}", self.spawns())
+                panic!(
+                    "attempt {attempt} of {task_id} was never spawned: {:?}",
+                    self.spawns()
+                )
             })
     }
 
@@ -332,6 +369,12 @@ impl FakeCli {
              {{ read -r mode; read -r one; read -r two; read -r three; }} < \"$plan\"\n\
              case \"$mode\" in\n\
              replay)\n\
+               cat \"$one\"\n\
+               printf 'end %s\\n' \"$task\" >> \"$dir/spawns\"\n\
+               exit \"$two\"\n\
+               ;;\n\
+             commit)\n\
+               git commit --allow-empty -q -m \"$three\" >&2\n\
                cat \"$one\"\n\
                printf 'end %s\\n' \"$task\" >> \"$dir/spawns\"\n\
                exit \"$two\"\n\

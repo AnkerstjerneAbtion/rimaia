@@ -46,12 +46,14 @@ use rimaia_core::db::{
 use rimaia_core::mcp::{self, McpHandle, RunHandles, Tool, MCP_SERVER_NAME};
 use rimaia_core::repo::{self, NewRepository};
 use rimaia_core::runner::events::{transcript_path, RunTail};
-use rimaia_core::runner::process::DEFAULT_DISALLOWED_TOOLS;
+use rimaia_core::runner::process::{DEFAULT_DISALLOWED_TOOLS, DEFAULT_MAX_TURNS};
 use rimaia_core::runner::prompt::{
     compose_prompt, compose_strategy_prompt, compose_strategy_system_append, compose_system_append,
     StrategyGuidance, SET_TASK_STRATEGY_TOOL,
 };
-use rimaia_core::runner::{run_task, CancelSignal, RunRequest, RunTrigger, RunnerConfig};
+use rimaia_core::runner::{
+    run_task, CancelSignal, ResumeSession, RunRequest, RunTrigger, RunnerConfig,
+};
 use rimaia_core::strategy::{self, StrategyDefaults};
 use rimaia_core::tasks::{
     self, NewTask, Patch, StrategyPlan, StrategyPlanStatus, StrategyWorkflow, TaskDetail, TaskPatch,
@@ -169,6 +171,55 @@ async fn a_planned_task_spawns_its_planner_with_the_flags_that_let_it_answer() {
 }
 
 #[tokio::test]
+async fn a_resumed_attempt_does_not_run_the_planner_again() {
+    // **The easiest thing in ADR-0011's retry loop to get wrong by omission**,
+    // and the only place in the codebase that can prove it, because a planner
+    // only spawns where there is a bound MCP endpoint for it to answer through.
+    //
+    // Two costs if it were missed, and the second is worse than the first. A
+    // second `claude` process per retry, paid for out of the same window the
+    // task is waiting on — and a planner reading a *half-finished* worktree
+    // could answer differently from the first, changing `model` or `effort`
+    // mid-session. ADR-0011's promise is that a retry continues; a retry that
+    // switched models would be a different run wearing the first one's session
+    // id.
+    let fixture = StrategyFixture::planned().await;
+    let cli = FakeCli::writing_back(&fixture.task_id);
+
+    let first = fixture.run(&cli).await.expect("the run completes");
+    assert_eq!(
+        cli.spawns(),
+        2,
+        "a planner, and then the implementation run"
+    );
+
+    let resumed = fixture
+        .resume(&cli, &first.session_id)
+        .await
+        .expect("the resumed run completes");
+
+    assert_eq!(
+        cli.spawns(),
+        3,
+        "one more process, not two: the planner already answered",
+    );
+    let argv = cli.argv(3);
+    assert!(
+        !argv.iter().any(|arg| arg == "--mcp-config"),
+        "only a planner is handed a scoped handle, so its absence is the proof",
+    );
+    assert_eq!(value_after(&argv, "--resume"), first.session_id);
+    assert_eq!(resumed.session_id, first.session_id);
+
+    // And it carries the same decision the planner made, read off the row
+    // rather than asked for again.
+    assert_eq!(value_after(&argv, "--model"), PROPOSED_MODEL);
+    assert_eq!(value_after(&argv, "--effort"), PROPOSED_EFFORT);
+    let detail = fixture.detail().await;
+    assert_eq!(detail.task.strategy_source, Some(StrategySource::Planner));
+}
+
+#[tokio::test]
 async fn the_implementation_run_spawns_with_exactly_the_model_and_effort_the_planner_chose() {
     // Task 020's acceptance criterion 2, end to end and unattended: the strategy
     // run completes, writes a strategy back over MCP, and the run that follows
@@ -216,6 +267,12 @@ async fn the_implementation_run_spawns_with_exactly_the_model_and_effort_the_pla
             .iter()
             .map(|tool| format!("mcp__{MCP_SERVER_NAME}__{}", tool.as_str())),
     );
+    // ADR-0011's per-attempt bound, which task 014 turned on for every
+    // implementation run. Before it the flag was absent and the CLI's own
+    // default applied — see `runner::process::DEFAULT_MAX_TURNS` on why the
+    // number is what it is, and why too low is worse than too high.
+    expected.push("--max-turns".to_string());
+    expected.push(DEFAULT_MAX_TURNS.to_string());
 
     assert_eq!(cli.argv(2), expected);
     assert!(
@@ -955,6 +1012,28 @@ impl StrategyFixture {
         config: &RunnerConfig,
         cancel: &CancelSignal,
     ) -> rimaia_core::Result<Run> {
+        self.spawn(config, cancel, None).await
+    }
+
+    /// The same, continuing an earlier attempt's session — what the queue does
+    /// when a `waiting_retry` deadline arrives.
+    async fn resume(&self, cli: &FakeCli, session_id: &str) -> rimaia_core::Result<Run> {
+        self.spawn(
+            &self.config(cli),
+            &CancelSignal::new(),
+            Some(ResumeSession {
+                session_id: session_id.to_string(),
+            }),
+        )
+        .await
+    }
+
+    async fn spawn(
+        &self,
+        config: &RunnerConfig,
+        cancel: &CancelSignal,
+        resume: Option<ResumeSession>,
+    ) -> rimaia_core::Result<Run> {
         run_task(
             &self.harness.context,
             &self.paths,
@@ -962,6 +1041,7 @@ impl StrategyFixture {
             RunRequest {
                 task_id: self.task_id.clone(),
                 trigger: RunTrigger::Queued,
+                resume,
                 cancel: cancel.clone(),
                 in_flight: None,
             },

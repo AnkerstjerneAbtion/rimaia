@@ -106,8 +106,13 @@ pub enum RetryDecision {
     /// Resume the session at `at`. Already-past instants are legitimate: an
     /// `interrupted` run resumes immediately, and a reset time the CLI reported
     /// in the past is one that has already happened.
-    ResumeAt { at: DateTime<Utc>, kind: RetryKind },
-    GiveUp { reason: GiveUpReason },
+    ResumeAt {
+        at: DateTime<Utc>,
+        kind: RetryKind,
+    },
+    GiveUp {
+        reason: GiveUpReason,
+    },
 }
 
 impl RetryDecision {
@@ -501,8 +506,7 @@ mod tests {
         for index in 0..256 {
             let offset = jitter(&format!("run-{index}"), USAGE_LIMIT_MAX_JITTER);
             assert!(
-                offset >= Duration::zero()
-                    && offset <= Duration::seconds(USAGE_LIMIT_MAX_JITTER),
+                offset >= Duration::zero() && offset <= Duration::seconds(USAGE_LIMIT_MAX_JITTER),
                 "run-{index} jittered by {offset}",
             );
         }

@@ -23,9 +23,9 @@ use rimaia_core::testing::fixtures::{all_fixtures, fixture_lines, fixtures_dir};
 use rimaia_core::testing::TestClock;
 use serde_json::Value;
 
-/// The scenarios captured from a real `claude` process. The synthesized ones are
-/// listed nowhere: two of them are not valid streams, so every property below
-/// would have to carve them out anyway.
+/// The scenarios captured from a real `claude` process. The three parser-edge
+/// synthetics are listed nowhere: two of them are not valid streams, so every
+/// property below would have to carve them out anyway.
 const RECORDED: [&str; 6] = [
     "env-leak-default-settings",
     "env-leak-isolated-settings",
@@ -34,6 +34,19 @@ const RECORDED: [&str; 6] = [
     "resume-success",
     "success",
 ];
+
+/// The two fixtures that are neither recorded nor an edited *shape*: they carry
+/// a payload **nobody has ever observed** (`spike/FINDINGS.md` §4, ADR-0011's
+/// 2026-08-20 amendment).
+///
+/// Listed separately from [`RECORDED`] rather than added to it, and the
+/// separation is the whole point of the constant. They are valid streams and
+/// they do terminate, so every property below would pass for them — which is
+/// exactly why nothing stops a later agent quietly moving them across and
+/// making the corpus claim more than it can. See
+/// `tests/fixtures/cli/README.md`'s third section, and delete both the constant
+/// and the files the first time a real queue captures the payload.
+const SYNTHESIZED_UNOBSERVED: [&str; 2] = ["usage-limit", "usage-limit-no-reset"];
 
 #[test]
 fn all_fixtures_reports_every_jsonl_in_the_fixtures_directory() {
@@ -181,6 +194,65 @@ fn the_truncated_fixture_never_reaches_a_result_event() {
         parsed.len() + 1,
         "only the final half-written line should fail to parse"
     );
+}
+
+#[test]
+fn the_usage_limit_fixtures_are_labelled_unobserved_rather_than_recorded() {
+    // The label is the claim. `RECORDED` means "these bytes came out of a real
+    // `claude`", and every property in this file rests on that — a fixture
+    // promoted into it by a later agent would silently turn a guess into
+    // evidence, in the one module ADR-0011 says must not have a fabricated
+    // contract.
+    //
+    // Both directions, because either alone is defeatable: the files must exist
+    // (so this fails if they are deleted without the constant being cleaned up)
+    // and must not be listed as recordings (so this fails if they are promoted).
+    let corpus = all_fixtures();
+    for name in SYNTHESIZED_UNOBSERVED {
+        assert!(
+            corpus.contains(&name.to_string()),
+            "{name} is gone; if a real capture replaced it, delete it from \
+             SYNTHESIZED_UNOBSERVED and add it to RECORDED deliberately",
+        );
+        assert!(
+            !RECORDED.contains(&name),
+            "{name} was promoted to RECORDED, but `spike/FINDINGS.md` §4 says nobody has \
+             observed a rate_limit_event whose status is not `allowed`",
+        );
+    }
+
+    // And they are still what they claim to be: valid streams that terminate,
+    // carrying a status the recordings never do.
+    for name in SYNTHESIZED_UNOBSERVED {
+        assert_eq!(last_event(name)["type"], "result", "{name}");
+        let statuses: BTreeSet<String> = fixture_lines(name)
+            .filter_map(|line| serde_json::from_str::<Value>(&line).ok())
+            .filter_map(|event| {
+                event["rate_limit_info"]["status"]
+                    .as_str()
+                    .map(str::to_owned)
+            })
+            .collect();
+        assert_eq!(
+            statuses,
+            BTreeSet::from(["rejected".to_string()]),
+            "{name} exists to carry a status that is not `allowed`",
+        );
+    }
+
+    // The one word they invent appears nowhere in a recording as a
+    // `rate_limit_info.status` — which is what makes them a *different* claim
+    // from the corpus rather than a duplicate of it.
+    for name in RECORDED {
+        for line in fixture_lines(name) {
+            let Ok(event) = serde_json::from_str::<Value>(&line) else {
+                continue;
+            };
+            if let Some(status) = event["rate_limit_info"]["status"].as_str() {
+                assert_eq!(status, "allowed", "{name}");
+            }
+        }
+    }
 }
 
 #[test]

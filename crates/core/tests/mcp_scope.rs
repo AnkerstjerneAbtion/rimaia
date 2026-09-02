@@ -136,7 +136,13 @@ fn the_operator_endpoint_keeps_every_tool_it_had_before_task_020() {
             | Tool::GetRunCapacity
             | Tool::SetScheduleMode
             | Tool::SetMaxConcurrency
-            | Tool::SetRepositoryMaxConcurrency => RunAccess::Refused,
+            | Tool::SetRepositoryMaxConcurrency
+            // Task 014's, and it is the first of ADR-0021 point 4's two
+            // refusals rather than the second: ending a retry loop is a
+            // statement about whether the work will be attempted at all, and a
+            // run abandoning the task it was started for would be marking its
+            // own homework in the other direction.
+            | Tool::GiveUpOnTask => RunAccess::Refused,
         };
         assert_eq!(tool.run_access(), expected, "{}", tool.as_str());
     }

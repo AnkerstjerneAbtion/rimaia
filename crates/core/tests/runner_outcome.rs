@@ -65,9 +65,8 @@ fn every_recorded_scenario_classifies_into_a_self_consistent_outcome() {
             outcome.exit_class == ExitClass::Success,
             "{name}: every class but `success` owes a human a sentence"
         );
-        assert_eq!(
-            outcome.usage_limit_resets_at.is_some(),
-            outcome.exit_class == ExitClass::UsageLimit,
+        assert!(
+            outcome.usage_limit_resets_at.is_none() || outcome.exit_class == ExitClass::UsageLimit,
             "{name}: a reset time on a run that did not hit a limit reads as one that did"
         );
     }
@@ -329,12 +328,24 @@ fn cancelling_a_run_that_had_already_succeeded_is_still_a_cancellation() {
 // Usage limits — the predicate, never a payload
 // ---------------------------------------------------------------------------
 
+/// The two fixtures that carry a status no real capture has ever produced.
+///
+/// Named here rather than derived, because "which files are honest recordings"
+/// is the property `tests/harness.rs` guards and this file is a consumer of it.
+/// See `tests/fixtures/cli/README.md`'s third section.
+const SYNTHESIZED_USAGE_LIMITS: [&str; 2] = ["usage-limit", "usage-limit-no-reset"];
+
 #[test]
 fn the_rate_limit_event_every_run_emits_is_not_a_usage_limit() {
-    // Every recording carries `"status":"allowed"` early and unprompted. Reading
-    // that as a limit would fail every run in the corpus, which is the mistake
-    // this test exists to keep failing loudly.
+    // Every real recording carries `"status":"allowed"` early and unprompted.
+    // Reading that as a limit would fail every run in the corpus, which is the
+    // mistake this test exists to keep failing loudly. The two synthesized
+    // fixtures are carved out because they are the *other* branch — they exist
+    // precisely to carry a status that is not `allowed`.
     for name in all_fixtures() {
+        if SYNTHESIZED_USAGE_LIMITS.contains(&name.as_str()) {
+            continue;
+        }
         let replay = Replay::of(&name);
 
         assert_eq!(
@@ -347,6 +358,97 @@ fn the_rate_limit_event_every_run_emits_is_not_a_usage_limit() {
         );
         assert_ne!(replay.class(), ExitClass::UsageLimit, "{name}");
     }
+}
+
+#[test]
+fn a_stream_whose_window_is_closed_is_a_usage_limit_and_reports_when_it_reopens() {
+    // The fixture ADR-0011's amendment says was missing, doing its job: a run
+    // that stopped at a wall, with the epoch `resetsAt` the retry policy waits
+    // for. 1787209200 is 2026-08-20T07:00:00Z — pinned in the file so the wait
+    // it produces is a number a test can name.
+    let replay = Replay::of("usage-limit");
+
+    assert_eq!(replay.class(), ExitClass::UsageLimit);
+    assert_eq!(
+        replay.outcome().usage_limit_resets_at,
+        Some(
+            "2026-08-20T07:00:00Z"
+                .parse::<chrono::DateTime<chrono::Utc>>()
+                .expect("a literal timestamp")
+        ),
+    );
+    assert!(replay
+        .outcome()
+        .error_message
+        .expect("a limit owes a human a sentence")
+        .contains("usage limit"));
+}
+
+#[test]
+fn a_usage_limit_that_reports_no_reset_still_classifies_as_one() {
+    // ADR-0011's fallback branch. The class must not depend on the reset time
+    // being there: a limit we cannot time is still a limit, and the
+    // fifteen-minute poll is what `scheduler::retry` does about it.
+    let replay = Replay::of("usage-limit-no-reset");
+
+    assert_eq!(replay.class(), ExitClass::UsageLimit);
+    assert_eq!(replay.outcome().usage_limit_resets_at, None);
+}
+
+#[test]
+fn a_status_the_corpus_never_saw_still_reads_as_a_usage_limit() {
+    // **The test that makes the synthesized fixtures safe to ship.**
+    // `spike/FINDINGS.md` §4 records that nobody has observed the payload when
+    // `status` is not `"allowed"`, so `"rejected"` in those files is a guess.
+    // This is what proves the guess is not load-bearing: the classifier matches
+    // on "not `allowed`" and never on a value, so a real capture carrying any
+    // of these — or a word nobody here has thought of — classifies identically.
+    //
+    // Failing closed would be the expensive direction: a real limit misread as
+    // `fatal` is a night that ends at 02:00, which is the exact mistake
+    // ADR-0011 names.
+    for status in ["rejected", "limited", "blocked", "throttled", "over_limit"] {
+        let rate_limit = RateLimitEvent {
+            status: Some(status.to_string()),
+            resets_at: Some(1_787_209_200),
+            rate_limit_type: Some("five_hour".to_string()),
+        };
+        let result = ResultEvent {
+            subtype: Some("error_during_execution".to_string()),
+            terminal_reason: Some("aborted_streaming".to_string()),
+            is_error: true,
+            ..ResultEvent::default()
+        };
+        let termination = Termination {
+            result: Some(&result),
+            rate_limit: Some(&rate_limit),
+            ..Termination::default()
+        };
+
+        assert_eq!(classify(&termination), ExitClass::UsageLimit, "{status:?}");
+    }
+
+    // And the other direction, so this is a predicate and not "anything at all
+    // is a limit": the one word the corpus does prove still means "carry on".
+    let allowed = RateLimitEvent {
+        status: Some("allowed".to_string()),
+        resets_at: Some(1_787_209_200),
+        rate_limit_type: Some("five_hour".to_string()),
+    };
+    let result = ResultEvent {
+        subtype: Some("error_during_execution".to_string()),
+        terminal_reason: Some("aborted_streaming".to_string()),
+        is_error: true,
+        ..ResultEvent::default()
+    };
+    assert_eq!(
+        classify(&Termination {
+            result: Some(&result),
+            rate_limit: Some(&allowed),
+            ..Termination::default()
+        }),
+        ExitClass::Interrupted,
+    );
 }
 
 #[test]
@@ -860,24 +962,57 @@ async fn a_cancelled_run_fails_its_task_because_run_state_has_no_cancelled_for_i
 
 #[tokio::test]
 async fn a_run_that_is_going_to_be_resumed_leaves_its_task_waiting_rather_than_running() {
-    // The three classes the MVP does not act on still have to leave the machine
-    // somewhere true. A task left `running` with no process is a badge that
-    // lies, and `waiting_retry` is where ADR-0011's own table puts a run that is
-    // going to be resumed — task 014 schedules the wait, it does not name it.
-    for scenario in ["interrupted-sigterm", "truncated-stream"] {
+    // A task left `running` with no process is a badge that lies, and
+    // `waiting_retry` is where ADR-0011's table puts a run that is going to be
+    // resumed. Since task 014 that depends on the *decision* and not only on
+    // the class: the deadline is what says an attempt is coming.
+    for scenario in ["interrupted-sigterm", "truncated-stream", "usage-limit"] {
         let mut fixture = RunFixture::new().await;
         let run = fixture.start("do the thing").await;
+        let mut outcome = Replay::of(scenario).outcome();
+        outcome.resume_after = Some(fixture.harness.clock.now() + chrono::Duration::minutes(15));
 
-        let finished = fixture
-            .finish(&run.id, &Replay::of(scenario).outcome())
-            .await;
+        let finished = fixture.finish(&run.id, &outcome).await;
 
         assert_eq!(
             fixture.task().await.run_state,
             RunState::WaitingRetry,
             "{scenario}"
         );
+        assert_eq!(finished.resume_after, outcome.resume_after, "{scenario}");
         assert_eq!(finished.ended_at, Some(fixture.harness.clock.now()));
+    }
+}
+
+#[tokio::test]
+async fn transient_retries_stop_at_the_cap_and_the_task_lands_failed_with_the_reason() {
+    // The other arm, and the one that keeps an exhausted task out of a state
+    // nothing will ever leave. A retryable class with no deadline is a budget
+    // that ran out: ADR-0007 wants that failure to interrupt the morning review,
+    // and a card sitting in `waiting_retry` forever would not.
+    for scenario in ["interrupted-sigterm", "truncated-stream", "usage-limit"] {
+        let mut fixture = RunFixture::new().await;
+        let run = fixture.start("do the thing").await;
+        let outcome = Replay::of(scenario).outcome();
+        assert_eq!(outcome.resume_after, None, "{scenario}");
+
+        let finished = fixture.finish(&run.id, &outcome).await;
+
+        assert_eq!(
+            fixture.task().await.run_state,
+            RunState::Failed,
+            "{scenario}"
+        );
+        assert_eq!(
+            fixture.task().await.column,
+            BoardColumn::Ready,
+            "{scenario}"
+        );
+        assert!(
+            finished.error_message.is_some(),
+            "{scenario}: a task nobody will retry owes the morning a sentence",
+        );
+        assert_eq!(finished.resume_after, None, "{scenario}");
     }
 }
 

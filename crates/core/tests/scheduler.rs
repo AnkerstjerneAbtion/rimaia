@@ -32,23 +32,23 @@
 //! `tests/runner_process.rs`'s header.
 
 use std::collections::HashSet;
-use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use chrono::{DateTime, TimeDelta, Utc};
 use pretty_assertions::assert_eq;
 use rimaia_core::db::{BoardColumn, ExitClass, RunState, RunStatus, ScheduleMode, Task};
 use rimaia_core::repo::{self, NewRepository};
 use rimaia_core::runner::events::RunTail;
 use rimaia_core::runner::outcome::{start_run, NewRun};
+use rimaia_core::runner::prompt::compose_resume_prompt;
 use rimaia_core::runner::{run_task, CancelSignal, RunRequest, RunTrigger, RunnerConfig};
 use rimaia_core::scheduler::{
     self, capacity, ClaimOutcome, InFlight, LeaseOwner, QueueHandle, QueueState, SkipReason,
 };
 use rimaia_core::startup;
 use rimaia_core::tasks::{self, NewTask, TaskFilter, TaskSummary};
-use rimaia_core::testing::fixtures::{fixture_lines, fixture_path};
-use rimaia_core::testing::{TempRepo, TestContext};
-use rimaia_core::{AppPaths, ChangeEvent, ServiceContext};
+use rimaia_core::testing::{open_gate as open, FakeCli, TempRepo, TestContext};
+use rimaia_core::{AppPaths, ChangeEvent, Clock, ServiceContext};
 use tempfile::TempDir;
 use tokio::sync::broadcast::Receiver;
 
@@ -1242,6 +1242,7 @@ async fn a_starter_that_claims_before_it_spawns_never_produces_a_second_process(
                     RunRequest {
                         task_id,
                         trigger: RunTrigger::Queued,
+                        resume: None,
                         cancel: CancelSignal::new(),
                         in_flight: None,
                     },
@@ -1376,7 +1377,18 @@ async fn reopening_after_a_crash_shows_one_interrupted_task_and_leaves_the_rest_
     assert_eq!(closed.status, RunStatus::Interrupted);
     assert_eq!(closed.exit_class, Some(ExitClass::Interrupted));
     assert!(closed.ended_at.is_some(), "an interrupted run is over");
-    assert_eq!(detail.task.run_state, RunState::Failed);
+    // Seam-contract D9's 2026-09-03 amendment. Task 009 landed this on
+    // `failed`, because nothing resumed a `waiting_retry` task and a card
+    // sitting there would have been invisible to the morning review. Task 014
+    // resumes them, so ADR-0010:57-59's "offered for resume" is now what
+    // happens — and the *word* is still read off the run's `exit_class`, which
+    // is the half of D9 that did not change.
+    assert_eq!(detail.task.run_state, RunState::WaitingRetry);
+    assert_eq!(
+        closed.resume_after,
+        Some(fixture.harness.clock.now()),
+        "ADR-0011 resumes an interruption once, immediately",
+    );
     assert_eq!(detail.task.column, BoardColumn::Ready);
 
     // What the card actually reads (seam-contract D12's summary projection).
@@ -1565,6 +1577,792 @@ async fn a_reconciled_task_is_not_picked_up_again_by_the_queue() {
     assert_eq!(scheduler::next_to_start(&plan), None);
 }
 
+#[tokio::test]
+async fn a_launch_offers_a_crashed_run_for_resume_and_starts_nothing_until_the_queue_is_started() {
+    // ADR-0010:57-59 and ADR-0011's startup reconciliation both say a run left
+    // `running` by a crash is **offered** for resume. Offered, not performed —
+    // and three independent things make the second half true, which is why all
+    // three are asserted rather than only the outcome:
+    //
+    //   1. `QueueState`'s `Default` is `Paused`.
+    //   2. `from_stored` falls back to `Paused` for anything unrecognised.
+    //   3. Seam-contract D15 has the exit path write `paused` on the way out.
+    //
+    // Any one of them alone would be an accident. Together they are why a
+    // laptop that force-quit at midnight does not start spending money at 03:00
+    // when the app is reopened.
+    let fixture = Fixture::new().await;
+    let crashed = fixture.add_task("Alpha").await;
+    scheduler::claim(fixture.ctx(), &crashed)
+        .await
+        .expect("claim the task the crash caught");
+    start_run(
+        fixture.ctx(),
+        &fixture.paths,
+        NewRun {
+            task_id: crashed.clone(),
+            session_id: SESSION.to_string(),
+            prompt: "implement the plan".to_string(),
+        },
+    )
+    .await
+    .expect("open the run the crash interrupted");
+
+    // (3) The exit path's write, replayed: this is the state a previous launch
+    // left behind, whatever it had been doing.
+    scheduler::set_queue_state(fixture.ctx(), QueueState::Paused)
+        .await
+        .expect("quitting always stops the queue");
+
+    let report = startup::survey(&fixture.ctx().pool)
+        .await
+        .expect("survey the database");
+    scheduler::reconcile_interrupted(fixture.ctx(), &report)
+        .await
+        .expect("reconcile");
+
+    // Offered: the task is waiting, with a deadline that has already arrived.
+    let detail = fixture.detail(&crashed).await;
+    assert_eq!(detail.task.run_state, RunState::WaitingRetry);
+    let due = detail
+        .last_run
+        .expect("the interrupted run")
+        .resume_after
+        .expect("an interruption is resumed once, immediately");
+    assert!(due <= fixture.harness.clock.now(), "{due} is not yet due");
+    assert_eq!(
+        scheduler::plan(fixture.ctx())
+            .await
+            .expect("read the plan")
+            .iter()
+            .find(|entry| entry.task_id == crashed)
+            .and_then(|entry| entry.skip),
+        None,
+        "a due task is claimable, which is what `offered` means",
+    );
+
+    // Not performed. The loop is running and looking at a claimable task, and
+    // it starts nothing, because (1) and (2) put the switch at `paused`.
+    let queue = fixture.spawn_queue();
+    converge().await;
+    assert_eq!(
+        fixture.cli.started(),
+        Vec::<String>::new(),
+        "a launch must not resume anything before a human asks",
+    );
+    assert_eq!(
+        queue.status().await.expect("read the status").state,
+        QueueState::Paused,
+    );
+    assert_eq!(QueueState::default(), QueueState::Paused);
+
+    // And then it is, the moment they do.
+    let mut changes = fixture.ctx().subscribe();
+    queue.start().await.expect("the human presses Start");
+    let resumed = crashed.clone();
+    wait_until(
+        &fixture,
+        &mut changes,
+        "the offered task to be picked up",
+        move |board| {
+            board
+                .iter()
+                .any(|task| task.task.id == resumed && task.task.column == BoardColumn::InReview)
+        },
+    )
+    .await;
+
+    assert_eq!(fixture.cli.started(), vec![crashed.clone()]);
+    assert!(
+        fixture.argv(&crashed, 1).contains(&"--resume".to_string()),
+        "the offer was a resume, not a restart",
+    );
+
+    queue.shutdown();
+}
+
+// ---------------------------------------------------------------------------
+// Hitting the wall, and coming back (task 014; ADR-0011)
+//
+// Every test here drives the retry loop with the injected `TestClock`. Nothing
+// sleeps: `Clock::sleep_until` resolves when the test moves the clock, so a
+// five-hour usage window and a fifteen-minute backoff both cost microseconds.
+// The reset time in `usage-limit.jsonl` is pinned at 2026-08-20T07:00:00Z, five
+// hours after `test_epoch` — deliberately, because the five-hour window is the
+// wall this whole task exists for.
+// ---------------------------------------------------------------------------
+
+/// What `usage-limit.jsonl`'s `resetsAt` decodes to.
+const REPORTED_RESET: &str = "2026-08-20T07:00:00Z";
+
+/// A session id for a `runs` row a test writes by hand.
+const SESSION: &str = "0b6d3e2e-0000-4000-8000-00000000c0de";
+
+#[tokio::test]
+async fn a_usage_limit_schedules_a_resume_at_the_reported_reset_and_completes_when_it_fires() {
+    // Task 014's first acceptance criterion, and the product's whole premise:
+    // the night does not end at the first wall.
+    let fixture = Fixture::new().await;
+    let task_id = fixture.add_task("Alpha").await;
+    fixture
+        .cli
+        .replays_on_attempt(&task_id, 1, "usage-limit", 143);
+
+    let mut changes = fixture.ctx().subscribe();
+    let queue = fixture.spawn_queue();
+    queue.start().await.expect("start the queue");
+
+    let waiting = task_id.clone();
+    wait_until(
+        &fixture,
+        &mut changes,
+        "the wall to be recorded",
+        move |board| {
+            board.iter().any(|task| {
+                task.task.id == waiting && task.task.run_state == RunState::WaitingRetry
+            })
+        },
+    )
+    .await;
+
+    // The deadline is the reported reset plus at most a minute of jitter — two
+    // tasks hitting one wall must not stampede the reset together.
+    let reset: DateTime<Utc> = REPORTED_RESET.parse().expect("a literal timestamp");
+    let due = fixture
+        .detail(&task_id)
+        .await
+        .last_run
+        .expect("the attempt that hit the wall")
+        .resume_after
+        .expect("a usage limit is always retried");
+    assert!(
+        due >= reset && due <= reset + TimeDelta::minutes(1),
+        "{due} is not the reported reset plus a jitter",
+    );
+
+    // And nothing has happened in the meantime. The queue is holding, not
+    // spinning: it woke on the cap, re-read, and went back to waiting.
+    converge().await;
+    assert_eq!(fixture.cli.attempts(&task_id), 1);
+
+    // Five hours pass in one statement.
+    fixture.harness.clock.set(reset + TimeDelta::minutes(5));
+
+    let finished = task_id.clone();
+    wait_until(
+        &fixture,
+        &mut changes,
+        "the resumed run to finish",
+        move |board| {
+            board
+                .iter()
+                .any(|task| task.task.id == finished && task.task.column == BoardColumn::InReview)
+        },
+    )
+    .await;
+
+    assert_eq!(fixture.cli.attempts(&task_id), 2);
+    assert_eq!(fixture.task(&task_id).await.run_state, RunState::Idle);
+
+    queue.shutdown();
+}
+
+#[tokio::test]
+async fn a_usage_limit_with_no_reported_reset_retries_on_the_fixed_poll() {
+    // ADR-0011's fallback, and `spike/FINDINGS.md` §4's named gap: when the CLI
+    // says a window is closed but not when it reopens, the answer is a fixed
+    // fifteen-minute poll rather than giving up or guessing.
+    let fixture = Fixture::new().await;
+    let task_id = fixture.add_task("Alpha").await;
+    fixture
+        .cli
+        .replays_on_attempt(&task_id, 1, "usage-limit-no-reset", 143);
+
+    let mut changes = fixture.ctx().subscribe();
+    let queue = fixture.spawn_queue();
+    queue.start().await.expect("start the queue");
+
+    let waiting = task_id.clone();
+    wait_until(
+        &fixture,
+        &mut changes,
+        "the wall to be recorded",
+        move |board| {
+            board.iter().any(|task| {
+                task.task.id == waiting && task.task.run_state == RunState::WaitingRetry
+            })
+        },
+    )
+    .await;
+
+    let started_at = rimaia_core::testing::test_epoch();
+    let due = fixture
+        .detail(&task_id)
+        .await
+        .last_run
+        .expect("the attempt that hit the wall")
+        .resume_after
+        .expect("a usage limit is always retried");
+    assert!(
+        due >= started_at + TimeDelta::minutes(15) && due <= started_at + TimeDelta::minutes(16),
+        "{due} is not fifteen minutes after the run, plus a jitter",
+    );
+
+    fixture.harness.clock.advance(TimeDelta::minutes(20));
+
+    let finished = task_id.clone();
+    wait_until(
+        &fixture,
+        &mut changes,
+        "the polled retry to finish",
+        move |board| {
+            board
+                .iter()
+                .any(|task| task.task.id == finished && task.task.column == BoardColumn::InReview)
+        },
+    )
+    .await;
+
+    assert_eq!(fixture.cli.attempts(&task_id), 2);
+
+    queue.shutdown();
+}
+
+#[tokio::test]
+async fn every_attempt_is_its_own_runs_row_sharing_one_session_id() {
+    // ADR-0011: "each attempt is a row in `runs`, sharing the task's session
+    // id, so the history of an overnight task reads as the sequence of walls it
+    // hit". It is also the boundary `scheduler::attempts` counts a retry budget
+    // against, which is why the sharing is asserted and not assumed.
+    let fixture = Fixture::new().await;
+    let task_id = fixture.add_task("Alpha").await;
+    fixture
+        .cli
+        .replays_on_attempt(&task_id, 1, "usage-limit", 143);
+
+    let mut changes = fixture.ctx().subscribe();
+    let queue = fixture.spawn_queue();
+    queue.start().await.expect("start the queue");
+    wait_until_waiting(&fixture, &mut changes, &task_id).await;
+    fixture
+        .harness
+        .clock
+        .set(REPORTED_RESET.parse::<DateTime<Utc>>().unwrap() + TimeDelta::minutes(5));
+    wait_until_in_review(&fixture, &mut changes, &task_id).await;
+
+    let runs = fixture.runs(&task_id).await;
+    assert_eq!(runs.len(), 2, "one row per attempt, not one per task");
+    assert_eq!(
+        runs.iter().map(|run| run.attempt).collect::<Vec<_>>(),
+        vec![2, 1],
+        "newest first, and monotonic",
+    );
+    assert_eq!(
+        runs[0].session_id, runs[1].session_id,
+        "both attempts continue one session",
+    );
+    assert_eq!(runs[1].exit_class, Some(ExitClass::UsageLimit));
+    assert_eq!(runs[0].exit_class, Some(ExitClass::Success));
+    assert!(
+        runs[1].resume_after.is_some() && runs[0].resume_after.is_none(),
+        "the wall scheduled a retry; the success that followed did not",
+    );
+
+    queue.shutdown();
+}
+
+#[tokio::test]
+async fn a_resumed_attempt_is_spawned_with_resume_and_the_session_of_the_attempt_it_continues() {
+    // `spike/FINDINGS.md` §6: "`--session-id` on the first run and `--resume` on
+    // the retry is the right shape". They are alternatives, not companions, and
+    // getting this wrong opens a *new* session under an old name — which looks
+    // fine and throws away every token the first attempt spent.
+    let fixture = Fixture::new().await;
+    let task_id = fixture.add_task("Alpha").await;
+    fixture
+        .cli
+        .replays_on_attempt(&task_id, 1, "usage-limit", 143);
+
+    let mut changes = fixture.ctx().subscribe();
+    let queue = fixture.spawn_queue();
+    queue.start().await.expect("start the queue");
+    wait_until_waiting(&fixture, &mut changes, &task_id).await;
+    fixture
+        .harness
+        .clock
+        .set(REPORTED_RESET.parse::<DateTime<Utc>>().unwrap() + TimeDelta::minutes(5));
+    wait_until_in_review(&fixture, &mut changes, &task_id).await;
+
+    let session = fixture.runs(&task_id).await[0].session_id.clone();
+    let first = fixture.argv(&task_id, 1);
+    let second = fixture.argv(&task_id, 2);
+
+    assert_eq!(value_after(&first, "--session-id"), Some(session.clone()));
+    assert!(
+        !first.iter().any(|arg| arg == "--resume"),
+        "the first attempt opens the session; it does not continue one",
+    );
+    assert_eq!(value_after(&second, "--resume"), Some(session));
+    assert!(
+        !second.iter().any(|arg| arg == "--session-id"),
+        "the two flags are alternatives, never companions",
+    );
+
+    queue.shutdown();
+}
+
+#[tokio::test]
+async fn a_resumed_attempt_is_sent_the_continuation_prompt_and_not_the_composed_one() {
+    // ADR-0009 stores what was *sent*, verbatim, and ADR-0011 says a retry
+    // sends "a short continuation prompt". So a morning reviewer reading four
+    // rows sees one long prompt and three one-liners: the sequence of walls the
+    // task hit. Asserted as an exact string, per CLAUDE.md's rule for prompt
+    // composition — a substring check would pass for a prompt with the composed
+    // one glued onto it, which is the mistake that costs the tokens.
+    let fixture = Fixture::new().await;
+    let task_id = fixture.add_task("Alpha").await;
+    fixture
+        .cli
+        .replays_on_attempt(&task_id, 1, "usage-limit", 143);
+
+    let mut changes = fixture.ctx().subscribe();
+    let queue = fixture.spawn_queue();
+    queue.start().await.expect("start the queue");
+    wait_until_waiting(&fixture, &mut changes, &task_id).await;
+    fixture
+        .harness
+        .clock
+        .set(REPORTED_RESET.parse::<DateTime<Utc>>().unwrap() + TimeDelta::minutes(5));
+    wait_until_in_review(&fixture, &mut changes, &task_id).await;
+
+    let expected = compose_resume_prompt(&fixture.detail(&task_id).await);
+    assert_eq!(fixture.cli.stdin(&task_id, 2), expected);
+    // And the row records the same string, because that is what ADR-0009's
+    // stored copy is *for*.
+    let runs = fixture.runs(&task_id).await;
+    assert_eq!(runs[0].prompt, expected);
+    assert_ne!(
+        runs[1].prompt, expected,
+        "the first attempt was sent the whole composed prompt",
+    );
+    assert!(runs[1].prompt.contains("# Plan"));
+
+    queue.shutdown();
+}
+
+#[tokio::test]
+async fn a_resumed_run_continues_in_the_same_worktree_with_its_earlier_commits_intact() {
+    // ADR-0011: "work already committed stays". Verified against real git in a
+    // real worktree, because a mocked git only proves the mock works — the
+    // stand-in makes an actual commit on each attempt and this reads the
+    // history back out afterwards.
+    let fixture = Fixture::new().await;
+    let task_id = fixture.add_task("Alpha").await;
+    fixture
+        .cli
+        .commits_on_attempt(&task_id, 1, "step one", "usage-limit", 143);
+    fixture
+        .cli
+        .commits_on_attempt(&task_id, 2, "step two", "success", 0);
+
+    let mut changes = fixture.ctx().subscribe();
+    let queue = fixture.spawn_queue();
+    queue.start().await.expect("start the queue");
+    wait_until_waiting(&fixture, &mut changes, &task_id).await;
+
+    let after_the_wall = fixture
+        .task(&task_id)
+        .await
+        .worktree_path
+        .expect("a run has a worktree");
+    assert_eq!(
+        git_log(&after_the_wall),
+        vec!["step one".to_string()],
+        "the first attempt's commit is in the tree",
+    );
+
+    fixture
+        .harness
+        .clock
+        .set(REPORTED_RESET.parse::<DateTime<Utc>>().unwrap() + TimeDelta::minutes(5));
+    wait_until_in_review(&fixture, &mut changes, &task_id).await;
+
+    let after_the_resume = fixture
+        .task(&task_id)
+        .await
+        .worktree_path
+        .expect("a resumed run has the same worktree");
+    assert_eq!(
+        after_the_resume, after_the_wall,
+        "a retry resumes; it does not get a fresh tree",
+    );
+    assert_eq!(
+        git_log(&after_the_resume),
+        vec!["step two".to_string(), "step one".to_string()],
+        "the second attempt built on the first rather than replacing it",
+    );
+
+    queue.shutdown();
+}
+
+#[tokio::test]
+async fn a_fatal_run_is_not_retried() {
+    // ADR-0011's fatal row. `max-turns.jsonl` is the one recorded fatal
+    // scenario, and the property is that nothing is scheduled at all — not a
+    // long wait, not a wait the queue then declines to act on.
+    let fixture = Fixture::new().await;
+    let task_id = fixture.add_task("Alpha").await;
+    fixture.cli.replays(&task_id, "max-turns", 1);
+
+    let mut changes = fixture.ctx().subscribe();
+    let queue = fixture.spawn_queue();
+    queue.start().await.expect("start the queue");
+
+    let failing = task_id.clone();
+    wait_until(
+        &fixture,
+        &mut changes,
+        "the fatal run to settle",
+        move |board| {
+            board
+                .iter()
+                .any(|task| task.task.id == failing && task.task.run_state == RunState::Failed)
+        },
+    )
+    .await;
+
+    // Whatever the clock does, nothing comes back for it.
+    fixture.harness.clock.advance(TimeDelta::hours(6));
+    converge().await;
+
+    assert_eq!(fixture.cli.attempts(&task_id), 1);
+    let run = fixture
+        .detail(&task_id)
+        .await
+        .last_run
+        .expect("the fatal run");
+    assert_eq!(run.exit_class, Some(ExitClass::Fatal));
+    assert_eq!(run.resume_after, None);
+    assert_eq!(fixture.task(&task_id).await.column, BoardColumn::Ready);
+
+    queue.shutdown();
+}
+
+#[tokio::test]
+async fn a_waiting_retry_task_releases_its_slot_so_another_task_runs_while_it_waits() {
+    // ADR-0011: "the scheduler does not block on a waiting task. A task in
+    // `waiting_retry` releases its concurrency slot; the queue continues with
+    // other tasks and comes back to it."
+    //
+    // Two repositories and parallel mode, because the *sequential* answer here
+    // is the opposite one and equally correct: a usage-limit wall pauses
+    // everything, since the next task would hit the same wall. So this uses a
+    // `transient` failure, which schedules a wait without raising the global
+    // hold — which is precisely the case the sentence above is about.
+    let mut fixture = Fixture::new().await;
+    let other_repository = fixture.register_repository(true).await;
+    let waiting = fixture.add_task("Waits").await;
+    let other = fixture.add_task_in(&other_repository, "Carries on").await;
+    // A stream that never reaches a `result` is ADR-0011's "empty stream", and
+    // its class is `transient`.
+    fixture
+        .cli
+        .replays_on_attempt(&waiting, 1, "truncated-stream", 1);
+    fixture.set_parallel(1).await;
+
+    let mut changes = fixture.ctx().subscribe();
+    let queue = fixture.spawn_queue();
+    queue.start().await.expect("start the queue");
+
+    // The wall first, so what follows is genuinely "while it waits" and not
+    // "before it started" — with one slot, board order alone decides which of
+    // the two runs first, and the assertion has to be about the slot.
+    wait_until_waiting(&fixture, &mut changes, &waiting).await;
+
+    // The second task then finishes while the first is waiting out its minute,
+    // on a queue with exactly one slot. If the slot were still held by the
+    // waiting task, this would hang.
+    wait_until_in_review(&fixture, &mut changes, &other).await;
+    assert_eq!(
+        fixture.task(&waiting).await.run_state,
+        RunState::WaitingRetry,
+    );
+    assert_eq!(
+        scheduler::plan(fixture.ctx())
+            .await
+            .expect("read the plan")
+            .iter()
+            .find(|entry| entry.task_id == waiting)
+            .and_then(|entry| entry.skip),
+        Some(SkipReason::WaitingForRetry),
+        "and the card says it is coming back, not that it is stuck",
+    );
+
+    // ADR-0011's first transient step is one minute.
+    fixture.harness.clock.advance(TimeDelta::minutes(2));
+    wait_until_in_review(&fixture, &mut changes, &waiting).await;
+    assert_eq!(fixture.cli.attempts(&waiting), 2);
+
+    queue.shutdown();
+}
+
+#[tokio::test]
+async fn a_usage_limit_pauses_new_starts_globally_in_sequential_mode() {
+    let fixture = Fixture::new().await;
+    assert_a_wall_holds_every_other_start(fixture).await;
+}
+
+#[tokio::test]
+async fn a_usage_limit_pauses_new_starts_globally_in_parallel_mode() {
+    // "In both modes" is ADR-0011's own phrasing, and the reason the check sits
+    // in `try_step` *before* the plan is read: neither mode has a branch for it.
+    let fixture = Fixture::new().await;
+    fixture.set_parallel(4).await;
+    assert_a_wall_holds_every_other_start(fixture).await;
+}
+
+/// The shared body of the two tests above: a task in a *different* repository,
+/// with slots to spare, must not be started into a window that is closed.
+///
+/// A second repository matters — with both tasks in one, the per-repository cap
+/// of one would hold the second back anyway and the test would pass without the
+/// global hold existing at all.
+async fn assert_a_wall_holds_every_other_start(mut fixture: Fixture) {
+    let other_repository = fixture.register_repository(true).await;
+    let limited = fixture.add_task("Hits the wall").await;
+    fixture
+        .cli
+        .replays_on_attempt(&limited, 1, "usage-limit", 143);
+
+    let mut changes = fixture.ctx().subscribe();
+    let queue = fixture.spawn_queue();
+    queue.start().await.expect("start the queue");
+    wait_until_waiting(&fixture, &mut changes, &limited).await;
+
+    // Added *after* the wall, deliberately. A task already on the board when
+    // the queue started would be picked up in the same batch as the limited one
+    // — correctly, since nothing knew about a wall yet — and the test would be
+    // asserting a race rather than the hold. What ADR-0011 forbids is starting
+    // into a window already known to be closed, which is exactly this.
+    let held = fixture
+        .add_task_in(&other_repository, "Would burn a start")
+        .await;
+    converge().await;
+
+    assert_eq!(
+        fixture.cli.started(),
+        vec![limited.clone()],
+        "starting a fresh task into a limited window just burns a start",
+    );
+    assert_eq!(fixture.task(&held).await.run_state, RunState::Idle);
+    let reset: DateTime<Utc> = REPORTED_RESET.parse().expect("a literal timestamp");
+    let until = queue
+        .status()
+        .await
+        .expect("read the status")
+        .usage_limit_pause_until
+        .expect("the hold is on the status the Runs view reads");
+    assert!(until >= reset, "the hold lasts until the window reopens");
+
+    // And it lifts on its own — nothing has to remember to clear it.
+    fixture.harness.clock.set(reset + TimeDelta::minutes(5));
+    wait_until_in_review(&fixture, &mut changes, &held).await;
+    assert_eq!(
+        queue
+            .status()
+            .await
+            .expect("read the status")
+            .usage_limit_pause_until,
+        None,
+    );
+
+    queue.shutdown();
+}
+
+#[tokio::test]
+async fn retry_now_starts_a_waiting_task_before_its_deadline() {
+    // The operator's override. This drives the two core calls the
+    // `retry_task_now` command makes — `claim_retry` and `resumable_session` —
+    // for the same reason `a_starter_that_claims_before_it_spawns_never_produces_a_second_process`
+    // does: `src-tauri` has no test harness of its own, so the closest thing to
+    // a regression test for the button is the core pair it is thin over.
+    let fixture = Fixture::new().await;
+    let task_id = fixture.add_task("Alpha").await;
+    fixture
+        .cli
+        .replays_on_attempt(&task_id, 1, "usage-limit", 143);
+
+    let mut changes = fixture.ctx().subscribe();
+    let queue = fixture.spawn_queue();
+    queue.start().await.expect("start the queue");
+    wait_until_waiting(&fixture, &mut changes, &task_id).await;
+    queue
+        .pause()
+        .await
+        .expect("the queue is not the starter here");
+
+    // Five hours before the deadline, and deliberately so.
+    let due = fixture
+        .detail(&task_id)
+        .await
+        .last_run
+        .expect("the attempt that hit the wall")
+        .resume_after
+        .expect("a scheduled resume");
+    assert!(due > fixture.harness.clock.now());
+
+    assert_eq!(
+        scheduler::claim_retry(fixture.ctx(), &task_id)
+            .await
+            .expect("claim the waiting task"),
+        ClaimOutcome::Claimed,
+    );
+    let session = scheduler::resumable_session(fixture.ctx(), &task_id)
+        .await
+        .expect("read the session")
+        .expect("a task with attempts has one");
+    run_task(
+        fixture.ctx(),
+        &fixture.paths,
+        &fixture.runner(),
+        RunRequest {
+            // `Queued`, not `RunRequest::resuming`'s `Manual`: every recording
+            // in the corpus was captured under `bypassPermissions`, and the
+            // runner verifies the mode `init` echoes back against the one it
+            // asked for. See this file's header.
+            trigger: RunTrigger::Queued,
+            ..RunRequest::resuming(&task_id, &session)
+        },
+    )
+    .await
+    .expect("the resumed run completes");
+
+    assert_eq!(fixture.cli.attempts(&task_id), 2);
+    assert_eq!(fixture.task(&task_id).await.column, BoardColumn::InReview);
+    assert_eq!(
+        value_after(&fixture.argv(&task_id, 2), "--resume"),
+        Some(session),
+        "retry now resumes; it does not restart",
+    );
+
+    queue.shutdown();
+}
+
+#[tokio::test]
+async fn giving_up_lands_a_waiting_task_in_failed() {
+    // The other half of the manual pair, and the one that ends the loop. The
+    // refusals matter as much as the transition: "give up" on a task that is
+    // not waiting is a sentence about the card, not a state-machine error.
+    let fixture = Fixture::new().await;
+    let task_id = fixture.add_task("Alpha").await;
+    fixture
+        .cli
+        .replays_on_attempt(&task_id, 1, "usage-limit", 143);
+
+    let mut changes = fixture.ctx().subscribe();
+    let queue = fixture.spawn_queue();
+    queue.start().await.expect("start the queue");
+    wait_until_waiting(&fixture, &mut changes, &task_id).await;
+    queue.pause().await.expect("pause the queue");
+
+    scheduler::give_up(fixture.ctx(), &task_id)
+        .await
+        .expect("the operator has read the error");
+
+    assert_eq!(fixture.task(&task_id).await.run_state, RunState::Failed);
+    assert_eq!(
+        fixture.task(&task_id).await.column,
+        BoardColumn::Ready,
+        "a failure stays where the morning review trips over it",
+    );
+
+    // The deadline is still on the row — history, not a promise — and the queue
+    // does not act on it, because the task is no longer waiting.
+    assert!(fixture
+        .detail(&task_id)
+        .await
+        .last_run
+        .expect("the attempt that hit the wall")
+        .resume_after
+        .is_some());
+    queue.start().await.expect("resume the queue");
+    fixture.harness.clock.advance(TimeDelta::hours(6));
+    converge().await;
+    assert_eq!(fixture.cli.attempts(&task_id), 1);
+
+    // And giving up twice is a sentence, not a panic.
+    let error = scheduler::give_up(fixture.ctx(), &task_id)
+        .await
+        .expect_err("there is nothing left to give up on");
+    assert!(
+        error.to_string().contains("failed"),
+        "the refusal names the state it found: {error}"
+    );
+
+    queue.shutdown();
+}
+
+/// Resolves once `task_id` is waiting out a retry.
+async fn wait_until_waiting(fixture: &Fixture, changes: &mut Receiver<ChangeEvent>, task_id: &str) {
+    let waiting = task_id.to_string();
+    wait_until(fixture, changes, "the task to be waiting", move |board| {
+        board
+            .iter()
+            .any(|task| task.task.id == waiting && task.task.run_state == RunState::WaitingRetry)
+    })
+    .await;
+}
+
+/// Resolves once `task_id` has reached the morning review.
+async fn wait_until_in_review(
+    fixture: &Fixture,
+    changes: &mut Receiver<ChangeEvent>,
+    task_id: &str,
+) {
+    let finished = task_id.to_string();
+    wait_until(
+        fixture,
+        changes,
+        "the task to reach in_review",
+        move |board| {
+            board
+                .iter()
+                .any(|task| task.task.id == finished && task.task.column == BoardColumn::InReview)
+        },
+    )
+    .await;
+}
+
+/// The value of the argument after `flag`, or `None` when the flag is absent.
+fn value_after(argv: &[String], flag: &str) -> Option<String> {
+    argv.iter()
+        .position(|arg| arg == flag)
+        .and_then(|index| argv.get(index + 1))
+        .cloned()
+}
+
+/// Every commit subject in `worktree`, newest first — real `git` against the
+/// real tree the run was given (ADR-0005), never a stand-in.
+fn git_log(worktree: &str) -> Vec<String> {
+    let output = std::process::Command::new("git")
+        .args(["log", "--format=%s"])
+        .current_dir(worktree)
+        .output()
+        .expect("git must be installed");
+    assert!(
+        output.status.success(),
+        "git log failed in {worktree}: {}",
+        String::from_utf8_lossy(&output.stderr),
+    );
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .map(str::to_string)
+        // `TempRepo::init` seeds the repository with a first commit, which every
+        // worktree inherits and which is not this task's work.
+        .filter(|subject| subject != "Initial commit")
+        .collect()
+}
+
 // ---------------------------------------------------------------------------
 // Waiting on the queue without waiting on a clock
 // ---------------------------------------------------------------------------
@@ -1684,267 +2482,6 @@ fn position_of(positions: &[(&str, Option<i64>)], task_id: &str) -> Option<i64> 
         .iter()
         .find(|(id, _)| *id == task_id)
         .and_then(|(_, position)| *position)
-}
-
-/// Releases a gated stand-in.
-fn open(gate: &Path) {
-    std::fs::write(gate, "go\n").expect("open the gate");
-}
-
-// ---------------------------------------------------------------------------
-// A stand-in for the CLI that can behave differently per task
-// ---------------------------------------------------------------------------
-
-/// One script, dispatching on the task whose worktree it was started in.
-///
-/// A queue's interesting scenarios are the ones where the second task does not
-/// behave like the first, and `RunnerConfig` carries one program for the whole
-/// queue — so the difference has to live inside the script. The worktree is
-/// `<worktree-root>/<task-id>` (ADR-0005), which makes the child's own working
-/// directory the dispatch key and needs nothing threaded through the runner.
-///
-/// A deliberate copy of the technique in `tests/runner_process.rs` rather than
-/// a shared helper: each integration test is its own binary, and a `mod common`
-/// shared between them would make either file's stand-in awkward to change for
-/// the other's sake.
-struct FakeCli {
-    /// Held for its `Drop`; every path below points inside it.
-    dir: TempDir,
-}
-
-impl FakeCli {
-    /// A stand-in that replays `success.jsonl` for every task nothing else has
-    /// been said about.
-    fn new() -> Self {
-        let cli = Self {
-            dir: tempfile::Builder::new()
-                .prefix("rimaia-fake-cli-")
-                .tempdir()
-                .expect("temp dir for the stand-in CLI"),
-        };
-        cli.write_plan(
-            "default",
-            &[
-                "replay",
-                &fixture_path("success").display().to_string(),
-                "0",
-                "",
-            ],
-        );
-        cli.write_script();
-        cli
-    }
-
-    fn program(&self) -> PathBuf {
-        self.path("claude")
-    }
-
-    fn path(&self, name: &str) -> PathBuf {
-        self.dir.path().join(name)
-    }
-
-    /// Replays `fixture` for `task_id` and exits with `code`.
-    fn replays(&self, task_id: &str, fixture: &str, code: i32) {
-        self.write_plan(
-            task_id,
-            &[
-                "replay",
-                &fixture_path(fixture).display().to_string(),
-                &code.to_string(),
-                "",
-            ],
-        );
-    }
-
-    /// Replays the first `head` lines of `fixture` for `task_id`, then waits
-    /// for the returned gate file to appear before replaying the rest.
-    ///
-    /// Not a new fixture: the same recorded bytes handed over in two pieces so
-    /// a test can act between them, exactly as `tests/runner_process.rs` splits
-    /// a recording around a signal.
-    fn gates(&self, task_id: &str, fixture: &str, head: usize) -> PathBuf {
-        let (head_file, rest_file) = self.split(task_id, fixture, head);
-        let gate = self.path(&format!("gate-{task_id}"));
-        self.write_plan(
-            task_id,
-            &[
-                "gate",
-                &head_file.display().to_string(),
-                &rest_file.display().to_string(),
-                &gate.display().to_string(),
-            ],
-        );
-        gate
-    }
-
-    /// Replays the first `head` lines of `fixture` for `task_id` and then waits
-    /// to be stopped — a run that is going nowhere until somebody cancels it.
-    fn hangs(&self, task_id: &str, fixture: &str, head: usize) {
-        let (head_file, _) = self.split(task_id, fixture, head);
-        self.write_plan(task_id, &["hang", &head_file.display().to_string(), "", ""]);
-    }
-
-    /// The task ids the stand-in was started in, in the order it was started.
-    fn started(&self) -> Vec<String> {
-        self.spawns()
-            .into_iter()
-            .filter_map(|line| line.strip_prefix("start ").map(str::to_string))
-            .collect()
-    }
-
-    /// The most stand-ins that were alive at the same moment, walked off their
-    /// own start/end log.
-    ///
-    /// The witness both assertions below rest on, and the only one available:
-    /// two `runs` rows are both `running` for a while whether or not the
-    /// processes ever coexisted, and `started_at` comes from a fake clock. A
-    /// stand-in that is killed or hangs never writes its `end`, which this
-    /// reads as still open — correct, because it is.
-    fn peak_overlap(&self) -> usize {
-        let mut open = 0usize;
-        let mut peak = 0usize;
-        for line in self.spawns() {
-            match line.split_once(' ') {
-                Some(("start", _)) => {
-                    open += 1;
-                    peak = peak.max(open);
-                }
-                Some(("end", _)) => open = open.saturating_sub(1),
-                _ => panic!("unreadable spawn log line: {line}"),
-            }
-        }
-        peak
-    }
-
-    /// Asserts no two runs overlapped — the sequential half of ADR-0010's
-    /// sequential mode, read off the processes themselves rather than off the
-    /// rows they wrote.
-    fn assert_never_two_at_once(&self) {
-        assert_eq!(
-            self.peak_overlap(),
-            1,
-            "two runs overlapped where exactly one was allowed: {:?}",
-            self.spawns(),
-        );
-    }
-
-    /// The inverse, for task 012: at least `at_least` stand-ins were alive at
-    /// the same instant.
-    ///
-    /// `at_least` rather than exactly, because the assertion is about
-    /// parallelism happening and not about the scheduler having reached its
-    /// limit on the exact pass a test looked.
-    fn assert_overlapped(&self, at_least: usize) {
-        let peak = self.peak_overlap();
-        assert!(
-            peak >= at_least,
-            "at most {peak} runs were ever alive at once; expected at least {at_least}: {:?}",
-            self.spawns(),
-        );
-    }
-
-    fn spawns(&self) -> Vec<String> {
-        match std::fs::read_to_string(self.path("spawns")) {
-            Ok(log) => log.lines().map(str::to_string).collect(),
-            // Nothing has been spawned yet, which is a result and not a
-            // failure — several tests assert exactly that.
-            Err(_) => Vec::new(),
-        }
-    }
-
-    fn split(&self, task_id: &str, fixture: &str, head: usize) -> (PathBuf, PathBuf) {
-        let lines: Vec<String> = fixture_lines(fixture).collect();
-        assert!(head < lines.len(), "{fixture} is shorter than {head} lines");
-
-        let head_file = self.path(&format!("head-{task_id}.jsonl"));
-        let rest_file = self.path(&format!("rest-{task_id}.jsonl"));
-        std::fs::write(&head_file, lines[..head].join("\n") + "\n").expect("write the head");
-        std::fs::write(&rest_file, lines[head..].join("\n") + "\n").expect("write the rest");
-        (head_file, rest_file)
-    }
-
-    /// One directive, one line per field, so a path containing a space survives
-    /// `read` — the same reason the production code builds argument vectors and
-    /// never `sh -c`.
-    fn write_plan(&self, key: &str, fields: &[&str; 4]) {
-        std::fs::write(self.path(&format!("plan-{key}")), fields.join("\n") + "\n")
-            .expect("write a stand-in directive");
-    }
-
-    /// Makes every future `--version` probe block until
-    /// [`release_version_probe`](Self::release_version_probe) is called —
-    /// widening, for a test, the window `try_step` leaves open between
-    /// registering its `CancelSignal` and actually claiming a task (finding 4
-    /// of task 009's own verification report). The probe otherwise answers
-    /// instantly, which is correct for every other test in this file and
-    /// exactly why this is opt-in rather than the default.
-    fn hold_version_probe(&self) {
-        std::fs::write(self.path("version-hold"), "").expect("arm the version-probe gate");
-    }
-
-    /// Releases a probe blocked by [`hold_version_probe`](Self::hold_version_probe).
-    fn release_version_probe(&self) {
-        std::fs::write(self.path("version-go"), "").expect("release the version-probe gate");
-    }
-
-    /// A shebang script, executed directly rather than through `sh -c`.
-    ///
-    /// `--version` short-circuits before anything else: the runner probes for
-    /// the prerequisite before it starts a run, and the probe runs in Rimaia's
-    /// own working directory, where the dispatch below would find no task.
-    /// It waits on `version-hold`/`version-go` first, so a test can hold it
-    /// open — see [`hold_version_probe`](Self::hold_version_probe).
-    ///
-    /// `pwd -P` rather than the `pwd` builtin's default, because `PWD` is
-    /// inherited from the parent and `Command::current_dir` does not update it.
-    fn write_script(&self) {
-        let script = format!(
-            "#!/bin/sh\n\
-             if [ \"$1\" = '--version' ]; then\n\
-             if [ -f '{dir}/version-hold' ]; then\n\
-             while [ ! -f '{dir}/version-go' ]; do sleep 0.02; done\n\
-             fi\n\
-             echo '2.1.234 (Claude Code)'; exit 0\n\
-             fi\n\
-             dir='{dir}'\n\
-             task=\"$(basename \"$(pwd -P)\")\"\n\
-             cat > \"$dir/stdin-$task\"\n\
-             printf 'start %s\\n' \"$task\" >> \"$dir/spawns\"\n\
-             plan=\"$dir/plan-$task\"\n\
-             if [ ! -f \"$plan\" ]; then plan=\"$dir/plan-default\"; fi\n\
-             {{ read -r mode; read -r one; read -r two; read -r three; }} < \"$plan\"\n\
-             case \"$mode\" in\n\
-             replay)\n\
-               cat \"$one\"\n\
-               printf 'end %s\\n' \"$task\" >> \"$dir/spawns\"\n\
-               exit \"$two\"\n\
-               ;;\n\
-             gate)\n\
-               cat \"$one\"\n\
-               while [ ! -f \"$three\" ]; do sleep 0.02; done\n\
-               cat \"$two\"\n\
-               printf 'end %s\\n' \"$task\" >> \"$dir/spawns\"\n\
-               exit 0\n\
-               ;;\n\
-             hang)\n\
-               cat \"$one\"\n\
-               sleep 300\n\
-               ;;\n\
-             esac\n",
-            dir = self.dir.path().display(),
-        );
-
-        let program = self.program();
-        std::fs::write(&program, script).expect("write the stand-in CLI");
-        make_executable(&program);
-    }
-}
-
-#[cfg(unix)]
-fn make_executable(path: &Path) {
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755))
-        .expect("make the stand-in executable");
 }
 
 // ---------------------------------------------------------------------------
@@ -2094,6 +2631,19 @@ impl Fixture {
         .await
         .expect("create a ready task")
         .id
+    }
+
+    /// Every `runs` row of a task, newest attempt first — the retry loop's own
+    /// history, read through the same service the panel reads it through.
+    async fn runs(&self, task_id: &str) -> Vec<rimaia_core::db::Run> {
+        rimaia_core::runs::list_runs_for_task(self.ctx(), task_id)
+            .await
+            .expect("read a task's attempts")
+    }
+
+    /// The argument vector one attempt was spawned with.
+    fn argv(&self, task_id: &str, attempt: usize) -> Vec<String> {
+        self.cli.argv(task_id, attempt)
     }
 
     async fn board(&self) -> Vec<TaskSummary> {

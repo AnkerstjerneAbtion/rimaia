@@ -206,8 +206,8 @@ mod tests {
     fn the_ending_attempt_is_counted_from_the_outcome_rather_than_from_its_own_row() {
         // Its row is still open — closing it is what this history is being read
         // to decide — so a fold that trusted the column would count zero.
-        let history = fold(&[row(SESSION, None)], ending(ExitClass::Transient))
-            .expect("a task with one run");
+        let history =
+            fold(&[row(SESSION, None)], ending(ExitClass::Transient)).expect("a task with one run");
 
         assert_eq!(history.exit_class, ExitClass::Transient);
         assert_eq!(history.transient_attempts, 1);
@@ -236,7 +236,9 @@ mod tests {
         // There is no column for it: `runs.resume_after` holds what the policy
         // decided, and the reset the CLI reported reaches this only through the
         // outcome (`runner::outcome`'s own note on the split).
-        let reset = "2026-08-20T06:00:00Z".parse::<DateTime<Utc>>().expect("a literal timestamp");
+        let reset = "2026-08-20T06:00:00Z"
+            .parse::<DateTime<Utc>>()
+            .expect("a literal timestamp");
         let history = fold(
             &[row(SESSION, None)],
             Ending {

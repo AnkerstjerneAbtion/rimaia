@@ -130,8 +130,7 @@ async fn interrupted_after(ctx: &ServiceContext, task_id: &str, run_id: &str) ->
     };
     match attempts::history(ctx, task_id, ending).await {
         Ok(Some(history)) => {
-            outcome.resume_after =
-                retry::decide(&history, ctx.clock.now(), run_id).resume_after();
+            outcome.resume_after = retry::decide(&history, ctx.clock.now(), run_id).resume_after();
         }
         Ok(None) => {}
         Err(error) => tracing::error!(
