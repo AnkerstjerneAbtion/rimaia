@@ -864,7 +864,7 @@ that hazard. It is fixed by there being one registry, not by a new check.
 
 ---
 
-## D20 — Where "how many runs at once" lives, and what it hands task 013
+## D21 — Where "how many runs at once" lives, and what it hands task 013
 
 **Question.** Task 012 needs a run mode and a concurrency limit. `schedules` has carried
 `mode` and `max_concurrency` columns since the initial schema and nothing reads either;
@@ -981,9 +981,9 @@ An implementation task reads the entries its number appears in, before writing c
 | [009](../tasks/009-sequential-run-queue.md) | D2 · D5 · D7 · D8 · D9 · D10 · D14 · D15 · D19 |
 | [010](../tasks/010-local-mcp-server.md) | D2 · D3 · D4 · D5 · D6 · D8 · D10 · D12 · D13 · D16 |
 | [011](../tasks/011-task-dependencies-and-blocking.md) | D4 · D12 · D16 |
-| [012](../tasks/012-parallel-execution.md) | D2 · D4 · D5 · D8 · D9 · D12 · D14 · D15 · D19 · D20 |
-| [013](../tasks/013-run-scheduling.md) | D4 · D15 · D20 |
-| [014](../tasks/014-usage-limit-resilience.md) | D3 · D5 · D8 · D9 · D12 · D14 · D15 · D19 · D20 |
+| [012](../tasks/012-parallel-execution.md) | D2 · D4 · D5 · D8 · D9 · D12 · D14 · D15 · D19 · D21 |
+| [013](../tasks/013-run-scheduling.md) | D4 · D15 · D21 |
+| [014](../tasks/014-usage-limit-resilience.md) | D3 · D5 · D8 · D9 · D12 · D14 · D15 · D19 · D21 |
 | [015](../tasks/015-run-history-and-log-viewer.md) | D14 · D18 |
 | [016](../tasks/016-worktree-lifecycle-and-cleanup.md) | D17 · D18 |
 | [018](../tasks/018-preflight-doctor-and-packaging.md) | D11 · D16 |
