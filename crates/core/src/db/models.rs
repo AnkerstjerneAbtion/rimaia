@@ -250,12 +250,56 @@ pub enum StrategySource {
 /// Concurrency is a property of the run configuration and never of a task, which
 /// is why [`Parallel`](ScheduleMode::Parallel) carries no number of its own and
 /// [`Schedule::max_concurrency`] does.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, sqlx::Type)]
+///
+/// Task 012 gave it a second home. It is still `schedules.mode`, and it is now
+/// also the `schedule_mode` settings key [`scheduler::capacity`] resolves the
+/// queue's capacity from — one enum for both, rather than a second one that
+/// would have to be kept in agreement with this. Which of the two wins once
+/// named schedules exist is task 013's to decide and the new seam-contract
+/// entry names it.
+///
+/// `JsonSchema` for the reason [`StrategyMode`] carries one: `set_schedule_mode`
+/// takes this off the MCP wire, and a tool advertising `mode: string` is a tool
+/// that gets `"parallell"` sent to it.
+///
+/// [`scheduler::capacity`]: crate::scheduler::capacity
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Hash,
+    Default,
+    Serialize,
+    Deserialize,
+    sqlx::Type,
+    schemars::JsonSchema,
+)]
 #[sqlx(rename_all = "snake_case")]
 #[serde(rename_all = "snake_case")]
 pub enum ScheduleMode {
+    /// One run at a time. The default, and what an absent key means — the same
+    /// direction of fallback [`QueueState`] chooses, and for the same reason:
+    /// a typo in the `sqlite3` CLI must not widen what an unattended queue is
+    /// allowed to spawn.
+    ///
+    /// [`QueueState`]: crate::scheduler::QueueState
+    #[default]
     Sequential,
     Parallel,
+}
+
+impl ScheduleMode {
+    /// The stored spelling, which is also the wire spelling — one string, so
+    /// the `schedules` row and the `settings` row stay legible in the `sqlite3`
+    /// CLI (ADR-0003) and say the same word.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            ScheduleMode::Sequential => "sequential",
+            ScheduleMode::Parallel => "parallel",
+        }
+    }
 }
 
 /// Which door a mutation came through (ADR-0019).
@@ -324,6 +368,23 @@ pub struct Repository {
     /// ADR-0012's per-repository opt-in to `--permission-mode bypassPermissions`.
     /// Never widened without amending that ADR.
     pub allow_unattended_runs: bool,
+    /// How many runs this repository will hold at once (ADR-0010), `1` unless
+    /// the user opted out.
+    ///
+    /// A cap of its own rather than a share of the global `max_concurrency`,
+    /// because the thing it protects is not the machine: "two agents in two
+    /// worktrees of the same repo is safe for git, but they will fight over
+    /// ports, test databases, and lockfiles." Worktree isolation (ADR-0005)
+    /// does nothing about any of those, which is why raising this is a
+    /// deliberate per-repository act and not a consequence of turning
+    /// parallelism on.
+    ///
+    /// `i64` because SQLite's `INTEGER` is one and D10's argument against
+    /// clever column types applies here too; [`scheduler::capacity`] is what
+    /// turns a hand-edited `0` into a usable number.
+    ///
+    /// [`scheduler::capacity`]: crate::scheduler::capacity
+    pub max_concurrency: i64,
     pub created_at: DateTime<Utc>,
 }
 
@@ -698,6 +759,7 @@ mod tests {
             worktree_root: "/Users/someone/Library/Application Support/com.rimaia.app/worktrees"
                 .to_string(),
             allow_unattended_runs: true,
+            max_concurrency: 1,
             created_at: timestamp("2026-08-20T12:00:00Z"),
         };
 
@@ -710,6 +772,7 @@ mod tests {
                 "defaultBranch": "main",
                 "worktreeRoot": "/Users/someone/Library/Application Support/com.rimaia.app/worktrees",
                 "allowUnattendedRuns": true,
+                "maxConcurrency": 1,
                 // RFC 3339 UTC, which is byte-for-byte what the TEXT column holds.
                 "createdAt": "2026-08-20T12:00:00Z",
             })

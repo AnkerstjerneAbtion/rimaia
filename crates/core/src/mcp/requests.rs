@@ -17,7 +17,7 @@
 use schemars::JsonSchema;
 use serde::Deserialize;
 
-use crate::db::{BoardColumn, RunState, StrategyMode};
+use crate::db::{BoardColumn, RunState, ScheduleMode, StrategyMode};
 use crate::error::{Error, Result};
 use crate::strategy::StrategyApproval;
 use crate::tasks::{StrategyPhase, StrategyPlan, StrategyWorkflow};
@@ -365,6 +365,41 @@ pub struct SetStrategyCatalogueRequest {
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub struct SetStrategyApprovalRequest {
     pub approval: StrategyApproval,
+}
+
+/// One run at a time, or several (ADR-0010's Modes).
+///
+/// The enum rather than a string, for the reason every other enum on this
+/// surface is one: a tool advertising `mode: string` is a tool that gets
+/// `"concurrent"` sent to it and has to explain why that is not a mode.
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct SetScheduleModeRequest {
+    pub mode: ScheduleMode,
+}
+
+/// How many runs the queue may have in flight at once in parallel mode.
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct SetMaxConcurrencyRequest {
+    /// Between 1 and the ceiling `get_run_capacity` reports. `usize` rather
+    /// than a signed integer so a negative arrives as a schema error naming the
+    /// field, not as a service refusal a caller has to read prose to
+    /// understand.
+    pub max_concurrency: usize,
+}
+
+/// ADR-0010's per-repository opt-out, for one repository.
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct SetRepositoryMaxConcurrencyRequest {
+    /// From `list_repositories` — a UUID, not a name or a path.
+    pub repository_id: String,
+    /// How many runs this repository will hold at once. `1` is the default and
+    /// the safe answer; raising it means two agents in two worktrees of the
+    /// same repository, which git tolerates and ports, test databases and
+    /// lockfiles do not.
+    pub max_concurrency: i64,
 }
 
 #[cfg(test)]

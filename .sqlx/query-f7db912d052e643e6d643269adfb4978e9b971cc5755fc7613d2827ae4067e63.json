@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT task_id AS \"task_id!\" FROM runs WHERE id = ?1",
+  "describe": {
+    "columns": [
+      {
+        "name": "task_id!",
+        "ordinal": 0,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "f7db912d052e643e6d643269adfb4978e9b971cc5755fc7613d2827ae4067e63"
+}

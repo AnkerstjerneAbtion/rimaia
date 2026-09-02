@@ -37,6 +37,11 @@ export interface Repository {
   worktreeRoot: string;
   /** ADR-0012's per-repository opt-in to unattended runs. */
   allowUnattendedRuns: boolean;
+  /** ADR-0010's per-repository cap: how many runs this repository will hold at
+   *  once. `1` unless the user opted out, and the opt-out is deliberate —
+   *  worktree isolation makes two agents in one repository safe for git and
+   *  does nothing about ports, test databases and lockfiles. */
+  maxConcurrency: number;
   /** RFC 3339 UTC, as sqlx writes it — see the module note above `RimaiaError`. */
   createdAt: string;
 }
@@ -618,8 +623,6 @@ export interface QueueEntry {
  */
 export interface QueueStatus {
   state: QueueState;
-  /** The task whose process the queue is supervising right now. `null`
-   *  between runs, while paused, or with nothing to do. */
   /** Every task this process has a `claude` child for right now, in a stable
    *  order — the queue's own runs and any a button started, since they share
    *  one registry. A list rather than the single id this was: task 012 fills
@@ -639,6 +642,36 @@ export interface QueueStatus {
    *  {@link state} still read `"running"` over a full {@link plan} while
    *  nothing was happening. */
   lastStepError: string | null;
+}
+
+/**
+ * Mirrors `rimaia_core::db::ScheduleMode`. How many runs the queue works at
+ * once (ADR-0010's Modes): one at a time, or up to {@link
+ * RunCapacity.maxConcurrency}.
+ *
+ * Not `StrategyMode`, which is ADR-0016's per-task model and effort selection.
+ * The two share the word "mode" and nothing else.
+ */
+export type ScheduleMode = "sequential" | "parallel";
+
+/**
+ * Mirrors `rimaia_core::scheduler::capacity::RunCapacity` — what {@link
+ * getRunCapacity} answers with, and what both of its setters answer with too.
+ */
+export interface RunCapacity {
+  mode: ScheduleMode;
+  /** The **stored** limit, which is deliberately not what `"sequential"`
+   *  resolves to: sequential always runs exactly one, and the number the user
+   *  chose is remembered rather than overwritten, so flipping back to
+   *  `"parallel"` restores it. A control that showed `1` here would make the
+   *  setting look forgotten every time the mode was switched. */
+  maxConcurrency: number;
+  /** The most runs Rimaia will ever supervise, whatever {@link
+   *  maxConcurrency} says — `CONCURRENCY_CEILING`, a Rust constant. Sent over
+   *  the wire rather than duplicated here, because a hard-coded copy of it in
+   *  TypeScript is a second version of a number whose whole purpose is that
+   *  there is one. */
+  ceiling: number;
 }
 
 // ---------------------------------------------------------------------------

@@ -288,6 +288,7 @@ pub fn run() {
         commands::repositories::register_repository,
         commands::repositories::update_repository,
         commands::repositories::set_repository_unattended_runs,
+        commands::repositories::set_repository_max_concurrency,
         commands::repositories::remove_repository,
         commands::repositories::get_repository_remote_info,
         commands::tasks::create_task,
@@ -336,6 +337,9 @@ pub fn run() {
         commands::queue::resume_queue,
         commands::queue::stop_queue,
         commands::queue::get_queue_status,
+        commands::queue::get_run_capacity,
+        commands::queue::set_schedule_mode,
+        commands::queue::set_max_concurrency,
         commands::mcp::get_mcp_status,
         commands::mcp::set_mcp_port,
         commands::mcp::test_mcp_connection,
@@ -348,6 +352,7 @@ pub fn run() {
         commands::repositories::register_repository,
         commands::repositories::update_repository,
         commands::repositories::set_repository_unattended_runs,
+        commands::repositories::set_repository_max_concurrency,
         commands::repositories::remove_repository,
         commands::repositories::get_repository_remote_info,
         commands::tasks::create_task,
@@ -396,6 +401,9 @@ pub fn run() {
         commands::queue::resume_queue,
         commands::queue::stop_queue,
         commands::queue::get_queue_status,
+        commands::queue::get_run_capacity,
+        commands::queue::set_schedule_mode,
+        commands::queue::set_max_concurrency,
         commands::mcp::get_mcp_status,
         commands::mcp::set_mcp_port,
         commands::mcp::test_mcp_connection,
@@ -449,17 +457,28 @@ pub fn run() {
 /// signal already sent are left to finish the job.
 ///
 /// `queue.shutdown()` runs **first** and, by itself, cancels nothing — it
-/// only stops the queue's loop from claiming *another* task once the current
-/// one ends (`scheduler::queue`'s own module doc explains why racing that
-/// loop's next claim against this exit path, instead of ordering against it,
-/// would leave a task claimed with nobody left supervising it). Cancelling
-/// the run actually in flight is `AppState::cancel_everything` right after,
-/// which reaches every lease in the shared registry exactly as
-/// it reaches a manual one. Net effect: quitting mid-run cancels that one run
-/// the same way pressing the queue's own Stop button would — including that
-/// button's side effect of leaving `queue_state = paused` for the next
-/// launch — and the wait loop below is only the backstop for a child that
-/// refuses to die, not what performs the cancellation itself.
+/// only stops the queue's loop from claiming *more* tasks once the ones it is
+/// supervising end (`scheduler::queue`'s own module doc explains why racing
+/// that loop's next claim against this exit path, instead of ordering against
+/// it, would leave a task claimed with nobody left supervising it). Cancelling
+/// the runs actually in flight is `AppState::cancel_everything` right after,
+/// which reaches every lease in the shared registry exactly as it reaches a
+/// manual one. Net effect: quitting mid-run cancels those runs the same way
+/// pressing the queue's own Stop button would — including that button's side
+/// effect of leaving `queue_state = paused` for the next launch — and the wait
+/// loop below is only the backstop for a child that refuses to die, not what
+/// performs the cancellation itself.
+///
+/// **Both halves still hold with N runs (task 012), and neither needed a
+/// change.** `cancel_all` signals every lease in one pass rather than the one
+/// the queue happened to hold, so N children are SIGTERMed at the same instant
+/// and the single grace period below covers all of them rather than N of them
+/// in series. `has_in_flight_runs` is `!in_flight.is_empty()`, which is already
+/// the question "are any left" and not "is the one left". And the two waiters —
+/// this loop, and the queue's own `JoinSet` drain — converge on the same
+/// condition from opposite sides without either being able to block the other:
+/// the drain awaits supervisors that have already been asked to stop, and each
+/// of them frees its lease on the way out, which is what this loop is watching.
 async fn shut_down(app: &tauri::AppHandle) {
     let Some(state) = app.try_state::<AppState>() else {
         // Nothing was ever `manage`d — setup failed before reaching that

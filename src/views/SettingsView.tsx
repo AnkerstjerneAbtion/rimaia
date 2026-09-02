@@ -1,3 +1,4 @@
+import { ConcurrencySection } from "./settings/ConcurrencySection";
 import { DeveloperSection } from "./settings/DeveloperSection";
 import { InstructionsSection } from "./settings/InstructionsSection";
 import { McpSection } from "./settings/McpSection";
@@ -11,8 +12,8 @@ export function SettingsView() {
       <header className="view-header">
         <h2>Settings</h2>
         <p>
-          Repositories, storage, the MCP server, and the instructions and execution strategy
-          every run receives.
+          Repositories, storage, the MCP server, how many runs happen at once, and the
+          instructions and execution strategy every run receives.
         </p>
       </header>
 
@@ -20,6 +21,11 @@ export function SettingsView() {
           bubbling up to one shared banner here, so tasks 003 and 006 can add
           sections without touching this composer. */}
       <RepositoriesSection />
+      {/* Directly under the repositories, because the per-repository cap lives
+          on each row above and this is the global limit those caps sit inside.
+          Read the other way round the number here means nothing: raising it
+          starts nothing extra until some repository is allowed to hold two. */}
+      <ConcurrencySection />
       <InstructionsSection />
       {/* Between the instructions and the MCP server on purpose: the strategy
           decides what a run is spawned with, which reads as the next thing

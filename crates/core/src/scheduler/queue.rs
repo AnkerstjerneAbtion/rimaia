@@ -11,31 +11,78 @@
 //!
 //! # It never polls and never sleeps
 //!
-//! The loop does work until there is none, then waits on two things: its own
-//! control signals, and [`ChangeEvent`](crate::ChangeEvent) — ADR-0018's
-//! channel, whose Consequences already anticipated this subscriber ("adding the
+//! The loop does work until there is none, then waits on four things: its own
+//! control signals; [`ChangeEvent`](crate::ChangeEvent) — ADR-0018's channel,
+//! whose Consequences already anticipated this subscriber ("adding the
 //! scheduler's own view later is another `subscribe()` and no coordination with
-//! anyone"). A card dragged to the top of `ready` publishes `Tasks`, the loop
-//! wakes, re-reads the board and claims it. There is no interval to tune and
-//! nothing that costs a query while the board is idle.
+//! anyone"); [`InFlight::releases`]; and its own [`JoinSet`]. A card dragged to
+//! the top of `ready` publishes `Tasks`, the loop wakes, re-reads the board and
+//! claims it. There is no interval to tune and nothing that costs a query while
+//! the board is idle.
 //!
 //! Change events are drained *before* the board is read, never after. An event
 //! that arrives between the read and the wait is then still buffered and wakes
 //! it immediately; draining afterwards would throw away exactly the
-//! notification that says the plan just went stale.
+//! notification that says the plan just went stale. The `releases` watch needs
+//! no equivalent: `changed()` marks a generation seen only when it *returns*,
+//! so a slot freed while the loop was busy is still there to be found.
+//!
+//! # The `releases` arm is not optional
+//!
+//! `finish_run` publishes its `ChangeEvent`s from *inside* `run_task`, while
+//! the lease is still held. A loop woken only by that channel therefore
+//! computes [`counts`](InFlight::counts) including the run that is finishing,
+//! finds no capacity, and goes back to sleep — with nothing left to wake it
+//! when the lease actually drops. That is a queue that stalls at 2am with free
+//! slots and a full board. The [`JoinSet`] arm does not cover it either, for
+//! the case that matters most: a *manual* run freeing a slot is not a task this
+//! queue spawned, so nothing joins.
+//!
+//! # Several runs at once, and one place that decides how many
+//!
+//! [`capacity::resolve`] answers "how many, and how many per repository";
+//! [`selection::next_batch`] turns that plus a board read into a list;
+//! `try_step` walks that list in board order and hands each entry to
+//! [`supervise`] on the [`JoinSet`]. Sequential mode is not a separate path —
+//! it resolves to `global = 1` and walks the same code.
+//!
+//! One pass is three phases, and the order of them is the part worth reading:
+//!
+//! 1. **Every lease, for the whole batch.** Before anything that awaits, for
+//!    the reason the mid-claim section below gives — and for the whole batch
+//!    rather than one at a time, so a Stop pressed during phase 2 reaches the
+//!    second and third entries and not only the first.
+//! 2. **`probe_cli`, once.** A missing `claude` is a property of the
+//!    installation and not of an entry; probing per entry would spawn N
+//!    processes to learn one fact.
+//! 3. **Claim and spawn, per entry.**
+//!
+//! A stop found mid-batch applies to the *rest of the batch*, not only to the
+//! entry that found it. `break`, not `continue`: a Pause that lands while the
+//! queue is starting the second of three is a Pause, and starting the third
+//! anyway would be the same "the switch changed underneath it" failure the
+//! mid-claim window below is about, one entry later. The leases of the entries
+//! never reached are freed by dropping the rest of the vector, which is the
+//! same RAII that covers the `?` on the probe.
 //!
 //! # Shutdown does not fight the exit path
 //!
 //! [`QueueHandle::shutdown`] stops the loop from starting anything new and lets
-//! it end after the current run. It deliberately does **not** cancel that run:
+//! it end after the runs it started. It deliberately does **not** cancel them:
 //! the app's exit path already asks every in-flight run to stop and waits for
 //! it (SIGTERM, a grace period, then SIGKILL — ADR-0004), and a queue that
 //! raced it would either kill a run twice or, worse, abandon the future
 //! supervising it and lose the `finish_run` that turns the attempt into a
 //! reviewable row. A run this queue abandoned would be indistinguishable from a
 //! crash, and would come back as `interrupted` on the next launch for no
-//! reason. So the loop waits for the run it started, and simply does not start
-//! another.
+//! reason.
+//!
+//! **Which is why [`run`](QueueTask::run) ends by draining its [`JoinSet`]
+//! rather than dropping it.** Dropping a `JoinSet` aborts every task still in
+//! it, which is precisely the abandonment the paragraph above argues against —
+//! and with N runs it is N of them. The drain is the last statement of the
+//! function and sits behind no `?`, so there is no path out of the loop that
+//! skips it.
 //!
 //! # Nothing here decides anything twice
 //!
@@ -77,6 +124,7 @@ use std::sync::{Arc, Mutex};
 use serde::Serialize;
 use tokio::sync::broadcast::error::{RecvError, TryRecvError};
 use tokio::sync::{broadcast, watch};
+use tokio::task::JoinSet;
 
 use crate::context::ServiceContext;
 use crate::db::MutationSource;
@@ -84,8 +132,9 @@ use crate::error::Result;
 use crate::events::ChangeEvent;
 use crate::paths::AppPaths;
 use crate::runner::{probe_cli, run_task, CancelSignal, RunRequest, RunTrigger, RunnerConfig};
+use crate::scheduler::capacity;
 use crate::scheduler::claim::{self, ClaimOutcome};
-use crate::scheduler::inflight::{Capacity, InFlight, LeaseOwner};
+use crate::scheduler::inflight::{Capacity, InFlight, Lease, LeaseOwner};
 use crate::scheduler::selection::{self, QueueEntry};
 use crate::scheduler::state::{self, QueueState};
 
@@ -278,10 +327,17 @@ impl QueueHandle {
 
 impl QueueTask {
     /// Works the board until [`QueueHandle::shutdown`], or until the context
-    /// that owns the change channel is gone.
+    /// that owns the change channel is gone, and then waits for every run it
+    /// started.
     pub async fn run(self) {
         let mut signals = self.shared.signals.subscribe();
         let mut changes = self.shared.ctx.subscribe();
+        let mut releases = self.shared.in_flight.releases();
+        // The runs this queue is supervising. Owned by the loop rather than by
+        // `Shared`, because nothing outside the loop may join or abort them —
+        // `QueueHandle::stop` speaks to the *leases*, which is a request the
+        // run itself honours, not an abort that would lose its `finish_run`.
+        let mut runs: JoinSet<()> = JoinSet::new();
 
         tracing::info!("the run queue is watching the board");
 
@@ -293,22 +349,48 @@ impl QueueTask {
             // Before the board read, never after — see this module's header.
             drain(&mut changes);
 
-            if self.step().await == Step::Worked {
+            if self.step(&mut runs).await == Step::Worked {
                 continue;
             }
 
             tokio::select! {
-                // Both are cancel-safe, which is what lets this loop drop
+                // Every arm is cancel-safe, which is what lets this loop drop
                 // whichever future did not win: `watch::Receiver::changed`
-                // marks a value seen only once it returns, and
+                // marks a value seen only once it returns,
                 // `broadcast::Receiver::recv` holds its position in the
-                // channel rather than in the future.
+                // channel rather than in the future, and `JoinSet::join_next`
+                // leaves an unfinished task in the set.
                 changed = signals.changed() => if changed.is_err() { break },
                 event = changes.recv() => if matches!(event, Err(RecvError::Closed)) { break },
+                // A slot opened. See this module's header on why `ChangeEvent`
+                // cannot carry this and why the arm below does not cover it.
+                _ = releases.changed() => {},
+                // Guarded, because `join_next` on an empty set returns `None`
+                // immediately — an unguarded arm would make this `select!` a
+                // spin loop for the whole time the queue has nothing running,
+                // which is most of the night.
+                Some(joined) = runs.join_next(), if !runs.is_empty() => {
+                    if let Err(error) = joined {
+                        // `supervise` returns `()` and handles its own errors,
+                        // so the only thing this can be is a panic inside it
+                        // (or an abort, which nothing issues). The lease is
+                        // already released — `Drop` runs on unwind — so the
+                        // queue is not stuck; what would otherwise be lost is
+                        // the fact that it happened at all.
+                        tracing::error!(%error, "a run supervisor panicked");
+                    }
+                },
             }
         }
 
-        tracing::info!("the run queue has stopped");
+        // Not `drop(runs)`: dropping a `JoinSet` aborts its tasks, and a run
+        // this queue abandoned is indistinguishable from a crash — see this
+        // module's header. The last statement of the function, behind no `?`.
+        tracing::info!(
+            supervising = runs.len(),
+            "the run queue has stopped starting tasks and is waiting for the runs it started",
+        );
+        while runs.join_next().await.is_some() {}
     }
 
     /// One pass: claim the next task and see it through, or find nothing to do.
@@ -323,8 +405,8 @@ impl QueueTask {
     /// a `claude` that cannot be found used to fail exactly this way with
     /// nothing on [`QueueStatus`] to show for it, so the Runs view read
     /// "Running" over a full plan while nothing happened all night.
-    async fn step(&self) -> Step {
-        match self.try_step().await {
+    async fn step(&self, runs: &mut JoinSet<()>) -> Step {
+        match self.try_step(runs).await {
             Ok(step) => {
                 self.shared.clear_step_error();
                 step
@@ -337,115 +419,140 @@ impl QueueTask {
         }
     }
 
-    async fn try_step(&self) -> Result<Step> {
+    async fn try_step(&self, runs: &mut JoinSet<()>) -> Result<Step> {
         let ctx = &self.shared.ctx;
 
         if state::queue_state(&ctx.pool).await? != QueueState::Running {
             return Ok(Step::Idle);
         }
 
+        // Read fresh every pass, never held: the operator may flip the mode or
+        // raise a repository's cap at 23:00 with runs already in flight, and
+        // the pass after that write is the one that has to notice.
+        let capacity = capacity::resolve(ctx).await?;
         let plan = selection::plan(ctx).await?;
-        let Some(entry) = selection::next_to_start(&plan) else {
+        let batch = selection::next_batch(
+            &plan,
+            &self.shared.in_flight.counts(),
+            capacity.global,
+            &capacity.per_repository,
+        );
+        if batch.is_empty() {
             return Ok(Step::Idle);
-        };
-        let task_id = entry.task_id.clone();
+        }
 
-        // Taken *before* the prerequisite check and the claim below, not after
-        // either succeeds — see this module's header amendment on the window
-        // that left open otherwise. A Pause, a Stop or a shutdown pressed
-        // anywhere from here on now has a `CancelSignal` to act on
-        // (`QueueHandle::stop`) and a switch this function re-checks itself,
-        // rather than landing in the gap where `stop` found nothing to cancel
-        // and nothing here noticed the switch had changed underneath it.
+        // Every lease first, for the whole batch, and **before** the
+        // prerequisite probe below. Both halves of that ordering are
+        // load-bearing.
         //
-        // The lease is what replaces the explicit `finish()` that used to be
-        // needed on all six paths back out of this function: `Drop` frees the
-        // slot on every one of them, and on a panic too, which no trailing
-        // statement could.
+        // Before the probe and before the claim, because both await — see this
+        // module's header on the window that left open otherwise. A Pause, a
+        // Stop or a shutdown pressed anywhere from here on now has a
+        // `CancelSignal` to act on (`QueueHandle::stop`) and a switch this
+        // function re-checks itself, rather than landing in the gap where
+        // `stop` found nothing to cancel and nothing here noticed the switch
+        // had changed underneath it. Taking them for the *whole* batch rather
+        // than one at a time is what extends that guarantee to the second and
+        // third entries too: a Stop during the probe now reaches all of them.
         //
-        // A refusal here is not an error. The registry is shared with the
-        // button now, so "a human already started this one" is an ordinary
-        // race the queue loses gracefully — it looks at the board again rather
-        // than recording a step error nobody needs to read.
-        let lease = match self.shared.in_flight.acquire(
-            &task_id,
-            &entry.repository_id,
-            LeaseOwner::Queue,
-            Capacity::SEQUENTIAL,
-        ) {
-            Ok(lease) => lease,
-            Err(refused) => {
-                tracing::info!(%task_id, reason = %refused.message(), "passing over a task");
-                return Ok(Step::Idle);
+        // The lease is also what replaces the explicit `finish()` that used to
+        // be needed on every path back out of here: `Drop` frees the slot on
+        // all of them — including the early return below, including the `?` on
+        // the probe, and including a panic, which no trailing statement could.
+        //
+        // A refusal is not an error. The registry is shared with the button, so
+        // "a human already started this one" is an ordinary race the queue
+        // loses gracefully — it moves to the next entry rather than recording a
+        // step error nobody needs to read.
+        let mut leased: Vec<(&QueueEntry, Lease)> = Vec::with_capacity(batch.len());
+        for entry in batch {
+            match self.shared.in_flight.acquire(
+                &entry.task_id,
+                &entry.repository_id,
+                LeaseOwner::Queue,
+                Capacity {
+                    global: capacity.global,
+                    per_repository: capacity.for_repository(&entry.repository_id),
+                },
+            ) {
+                Ok(lease) => leased.push((entry, lease)),
+                Err(refused) => tracing::info!(
+                    task_id = %entry.task_id,
+                    reason = %refused.message(),
+                    "passing over a task",
+                ),
             }
-        };
-        let cancel = lease.cancel_signal();
+        }
+        if leased.is_empty() {
+            return Ok(Step::Idle);
+        }
 
-        // The prerequisite, before the claim rather than after it — task 008's
-        // acceptance criterion ("a missing binary is refused before any run
-        // state is written") is worth as much to a queue as to a button. A
-        // queue that claimed first would spend a night walking the board
-        // marking every task failed because `claude` is not installed.
+        // Once for the whole batch. A missing `claude` is a property of this
+        // installation, not of an entry, and probing per entry would spawn N
+        // processes to learn one fact. Before any claim, rather than after —
+        // task 008's acceptance criterion ("a missing binary is refused before
+        // any run state is written") is worth as much to a queue as to a
+        // button, and a queue that claimed first would spend a night walking
+        // the board marking every task failed because `claude` is not
+        // installed.
         probe_cli(&self.runner.program).await?;
 
-        if self.interrupted_since(&cancel).await? {
-            // Nothing has been claimed yet, so there is nothing to release —
-            // just stop before spending a claim on a task nobody wants
-            // started any more.
-            return Ok(Step::Idle);
-        }
+        let mut worked = false;
+        for (entry, lease) in leased {
+            let task_id = entry.task_id.clone();
+            let cancel = lease.cancel_signal();
 
-        if claim::claim(ctx, &task_id).await? == ClaimOutcome::Lost {
-            // Somebody else has it. The board says something different from
-            // what it said a moment ago, so look again rather than waiting.
-            return Ok(Step::Worked);
-        }
-
-        if self.interrupted_since(&cancel).await? {
-            // Won the claim, but a Pause, a Stop or a shutdown landed while
-            // it was in flight: release what was just claimed rather than
-            // spawn a process for a queue that was told to stop before this
-            // one started.
-            claim::release(ctx, &task_id).await;
-            return Ok(Step::Idle);
-        }
-
-        tracing::info!(%task_id, title = %entry.title, "the run queue started a task");
-
-        // Awaited, not raced against shutdown: see this module's header.
-        let outcome = run_task(
-            ctx,
-            &self.paths,
-            &self.runner,
-            RunRequest {
-                task_id: task_id.clone(),
-                // ADR-0012: the unattended path, behind the per-repository
-                // opt-in `selection` already checked.
-                trigger: RunTrigger::Queued,
-                cancel,
-            },
-        )
-        .await;
-
-        // Explicit rather than left to the end of the scope: the slot must be
-        // free before the logging below, so nothing can observe a finished run
-        // still occupying one.
-        drop(lease);
-
-        match outcome {
-            Ok(run) => tracing::info!(
-                %task_id,
-                run_id = %run.id,
-                exit_class = ?run.exit_class,
-                "the run queue finished a task",
-            ),
-            Err(error) => {
-                tracing::error!(%task_id, %error, "a queued run could not be completed");
-                claim::release(ctx, &task_id).await;
+            if self.interrupted_since(&cancel).await? {
+                // Nothing has been claimed yet, so there is nothing to release
+                // — just stop before spending a claim on a task nobody wants
+                // started any more. `break`, not `continue`: a stop applies to
+                // the rest of the batch and not only to this entry.
+                drop(lease);
+                break;
             }
+
+            if claim::claim(ctx, &task_id).await? == ClaimOutcome::Lost {
+                // Somebody else has it. The board says something different
+                // from what it said a moment ago, so the pass counts as work
+                // and the loop will look again rather than waiting.
+                drop(lease);
+                worked = true;
+                continue;
+            }
+
+            if self.interrupted_since(&cancel).await? {
+                // Won the claim, but a Pause, a Stop or a shutdown landed
+                // while it was in flight: release what was just claimed rather
+                // than spawn a process for a queue that was told to stop
+                // before this one started.
+                claim::release(ctx, &task_id).await;
+                drop(lease);
+                break;
+            }
+
+            tracing::info!(%task_id, title = %entry.title, "the run queue started a task");
+
+            runs.spawn(supervise(
+                ctx.clone(),
+                self.paths.clone(),
+                self.runner.clone(),
+                lease,
+                RunRequest {
+                    task_id,
+                    // ADR-0012: the unattended path, behind the per-repository
+                    // opt-in `selection` already checked.
+                    trigger: RunTrigger::Queued,
+                    cancel,
+                    // So two runs in one repository take turns creating their
+                    // worktrees rather than racing `git worktree add` against
+                    // one `.git` — see `InFlight::preparation_lock`.
+                    in_flight: Some(self.shared.in_flight.clone()),
+                },
+            ));
+            worked = true;
         }
 
-        Ok(Step::Worked)
+        Ok(if worked { Step::Worked } else { Step::Idle })
     }
 
     /// Whether a Pause, a Stop or a shutdown landed since `cancel` was
@@ -464,13 +571,52 @@ impl QueueTask {
     }
 }
 
+/// Sees one run through, and gives its slot back.
+///
+/// A free function taking owned clones rather than a method, and deliberately
+/// with no access to [`Shared`]: it outlives the pass that spawned it and may
+/// outlive the loop itself, so anything it could reach through `&self` would be
+/// a lifetime the borrow checker has to be argued out of and a shared field two
+/// concurrent supervisors could disagree over. Everything it needs is cheap to
+/// clone and already designed to be — [`ServiceContext`], [`AppPaths`] and
+/// [`RunnerConfig`] are all handles.
+///
+/// The lease is dropped **last**, after `run_task` has returned and after any
+/// release. Dropping it earlier would wake the loop while `finish_run`'s own
+/// writes were still landing, and the pass it woke would read a board that had
+/// not finished changing.
+async fn supervise(
+    ctx: ServiceContext,
+    paths: AppPaths,
+    runner: RunnerConfig,
+    lease: Lease,
+    request: RunRequest,
+) {
+    let task_id = request.task_id.clone();
+
+    match run_task(&ctx, &paths, &runner, request).await {
+        Ok(run) => tracing::info!(
+            %task_id,
+            run_id = %run.id,
+            exit_class = ?run.exit_class,
+            "the run queue finished a task",
+        ),
+        Err(error) => {
+            tracing::error!(%task_id, %error, "a queued run could not be completed");
+            claim::release(&ctx, &task_id).await;
+        }
+    }
+
+    drop(lease);
+}
+
 /// What one pass of the loop came to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Step {
-    /// Something happened. Look at the board again immediately — this is what
-    /// makes the queue sequential *and* continuous: the next task starts as
-    /// soon as the previous one reached a terminal state, and the board it is
-    /// chosen from is re-read rather than remembered.
+    /// Something happened — a run was spawned, or a claim was lost under the
+    /// queue. Look at the board again immediately. This is what makes the queue
+    /// continuous: the next task starts as soon as there is room for it, and
+    /// the board it is chosen from is re-read rather than remembered.
     Worked,
     /// Nothing to do. Wait to be woken.
     Idle,

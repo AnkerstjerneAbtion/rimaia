@@ -124,6 +124,13 @@ pub async fn start_task_run(state: State<'_, AppState>, task_id: String) -> Resu
         task_id: task_id.clone(),
         trigger: RunTrigger::Manual,
         cancel,
+        // The same registry the queue hands its own runs, so a "Run now" and a
+        // queued run in one repository take turns creating their worktrees
+        // rather than racing `git worktree add` against one `.git` — see
+        // `InFlight::preparation_lock`. This is exactly the pair the caps do
+        // *not* keep apart (D19 point 5), which is what makes it the case that
+        // needs the lock.
+        in_flight: Some(state.in_flight.clone()),
     };
 
     tauri::async_runtime::spawn(async move {

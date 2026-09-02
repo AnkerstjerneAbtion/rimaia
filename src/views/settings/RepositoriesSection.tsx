@@ -10,6 +10,7 @@ import {
   listRepositories,
   registerRepository,
   removeRepository,
+  setRepositoryMaxConcurrency,
   setRepositoryUnattendedRuns,
   setStrategyDefaults,
   toRimaiaError,
@@ -254,6 +255,22 @@ export function RepositoriesSection() {
     });
   }
 
+  // Not optimistic, unlike the strategy defaults above: `set_repository_max_concurrency`
+  // *refuses* a value out of range rather than storing it, so the row has to
+  // repaint from what the backend actually kept. An optimistic 12 that was
+  // never written would leave the control claiming a cap the queue does not
+  // have.
+  async function handleConcurrencyChange(repository: Repository, next: number) {
+    if (!Number.isInteger(next) || next === repository.maxConcurrency) return;
+    setRowErrors((prev) => ({ ...prev, [repository.id]: null }));
+    try {
+      await setRepositoryMaxConcurrency(repository.id, next);
+      refresh();
+    } catch (thrown) {
+      setRowErrors((prev) => ({ ...prev, [repository.id]: toRimaiaError(thrown) }));
+    }
+  }
+
   async function confirmEnableUnattended(repository: Repository) {
     setRowErrors((prev) => ({ ...prev, [repository.id]: null }));
     try {
@@ -412,6 +429,31 @@ export function RepositoriesSection() {
                     />
                     Allow unattended agent runs
                   </label>
+                </div>
+
+                {/* ADR-0010's per-repository opt-out, with its reason beside
+                    it rather than a bare number. The reason is the whole
+                    control: worktree isolation (ADR-0005) genuinely makes two
+                    agents in one repository safe *for git*, which is exactly
+                    why the danger is easy to miss — what they collide over is
+                    ports, test databases and lockfiles, none of which a
+                    worktree separates. */}
+                <div className="repo-concurrency">
+                  <label htmlFor={`concurrency-${repository.id}`}>Runs at once</label>
+                  <input
+                    id={`concurrency-${repository.id}`}
+                    type="number"
+                    min={1}
+                    value={repository.maxConcurrency}
+                    onChange={(event) =>
+                      handleConcurrencyChange(repository, Number(event.target.value))
+                    }
+                  />
+                  <p className="muted">
+                    {repository.maxConcurrency > 1
+                      ? "Two agents in this repository will fight over ports, test databases and lockfiles — git keeps their worktrees apart and nothing keeps those apart."
+                      : "Raise this only for a repository whose tasks genuinely do not interfere. Running several repositories at once needs nothing here."}
+                  </p>
                 </div>
 
                 {/* Beside the opt-in, because the two answer the same

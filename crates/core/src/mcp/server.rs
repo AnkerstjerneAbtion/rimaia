@@ -33,15 +33,17 @@ use crate::mcp::error::ToolError;
 use crate::mcp::requests::{
     AddTaskLinkRequest, ClearableField, CreateTaskRequest, GetStrategyDefaultsRequest,
     GetTaskRequest, ListTasksRequest, MoveTaskRequest, RemoveTaskLinkRequest,
+    SetMaxConcurrencyRequest, SetRepositoryMaxConcurrencyRequest, SetScheduleModeRequest,
     SetStrategyApprovalRequest, SetStrategyCatalogueRequest, SetStrategyDefaultsRequest,
     SetTaskDependenciesRequest, SetTaskStrategyRequest, TaskStrategyRequest, UpdateTaskRequest,
 };
 use crate::mcp::responses::{
-    BaseInstructionsView, RepositoryListView, RepositoryView, StrategyApprovalView, TaskListItem,
-    TaskListView, TaskView,
+    BaseInstructionsView, RepositoryListView, RepositoryView, RunCapacityView,
+    StrategyApprovalView, TaskListItem, TaskListView, TaskView,
 };
 use crate::mcp::scope::{RunScope, Tool};
 use crate::runner::prompt::TEMPLATE_VARIABLES;
+use crate::scheduler::capacity;
 use crate::strategy::{self, Catalogue, StrategyDefaults};
 use crate::tasks::{NewTask, NewTaskLink, Patch, TaskFilter, TaskPatch};
 use crate::{db, repo, tasks, Result};
@@ -556,6 +558,72 @@ enough that the old proposal no longer describes the work."
         let task = tasks::strategy::clear_task_strategy(&self.ctx, &request.task_id).await?;
         self.task_view(&task.id).await
     }
+
+    // Task 012's four (ADR-0010). Every one is refused to a run — see
+    // `scope::Tool::run_access` for the argument, which is ADR-0021 point 4's
+    // second permanent refusal one layer out.
+
+    #[tool(
+        description = "Read how many runs Rimaia will have in flight at once: the mode \
+(`sequential` or `parallel`), the configured limit, and the ceiling no setting can raise. Call \
+this before queueing a long list overnight, to see whether it will be worked one at a time or \
+several at once. The limit is reported as stored, so it survives a switch back to `sequential` \
+even though sequential always runs exactly one."
+    )]
+    pub async fn get_run_capacity(&self) -> Result<Json<RunCapacityView>, ToolError> {
+        self.scope.authorize(Tool::GetRunCapacity, None)?;
+        Ok(Json(capacity::configured(&self.ctx.pool).await?.into()))
+    }
+
+    #[tool(
+        description = "Switch the run queue between one task at a time (`sequential`) and several \
+at once (`parallel`). Call it before an evening of independent tasks across several repositories, \
+which finishes far sooner in parallel. `sequential` is the safe default and the one that matches \
+\"implement these in this order\"; it runs exactly one task at a time whatever the configured \
+limit says."
+    )]
+    pub async fn set_schedule_mode(
+        &self,
+        Parameters(request): Parameters<SetScheduleModeRequest>,
+    ) -> Result<Json<RunCapacityView>, ToolError> {
+        self.scope.authorize(Tool::SetScheduleMode, None)?;
+        capacity::set_schedule_mode(&self.ctx, request.mode).await?;
+        Ok(Json(capacity::configured(&self.ctx.pool).await?.into()))
+    }
+
+    #[tool(
+        description = "Set how many runs parallel mode may have in flight at once. Call this \
+together with `set_schedule_mode`; on its own it changes nothing while the mode is `sequential`. \
+Read `get_run_capacity` first for the ceiling — a value outside that range is refused rather than \
+clamped. It bounds the queue in total; each repository still holds at most its own limit."
+    )]
+    pub async fn set_max_concurrency(
+        &self,
+        Parameters(request): Parameters<SetMaxConcurrencyRequest>,
+    ) -> Result<Json<RunCapacityView>, ToolError> {
+        self.scope.authorize(Tool::SetMaxConcurrency, None)?;
+        capacity::set_max_concurrency(&self.ctx, request.max_concurrency).await?;
+        Ok(Json(capacity::configured(&self.ctx.pool).await?.into()))
+    }
+
+    #[tool(
+        description = "Set how many runs one repository will hold at once. Call this only when \
+that repository's tasks genuinely do not interfere: git isolates the worktrees, but two agents in \
+one repository fight over ports, test databases and lockfiles, which is why the default is 1 even \
+in parallel mode and why raising it is a deliberate act. Parallelism across repositories is the \
+safe kind and needs nothing here."
+    )]
+    pub async fn set_repository_max_concurrency(
+        &self,
+        Parameters(request): Parameters<SetRepositoryMaxConcurrencyRequest>,
+    ) -> Result<Json<RepositoryView>, ToolError> {
+        self.scope
+            .authorize(Tool::SetRepositoryMaxConcurrency, None)?;
+        let repository =
+            repo::set_max_concurrency(&self.ctx, &request.repository_id, request.max_concurrency)
+                .await?;
+        Ok(Json(RepositoryView::from(repository)))
+    }
 }
 
 impl RimaiaServer {
@@ -653,12 +721,13 @@ mod tests {
     /// capability parity a rule. What replaces a count is the property that
     /// actually matters — a registered tool with no run-scope decision cannot
     /// reach the wire.
-    const REGISTERED_TOOLS: [&str; 19] = [
+    const REGISTERED_TOOLS: [&str; 23] = [
         "accept_task_strategy",
         "add_task_link",
         "clear_task_strategy",
         "create_task",
         "get_base_instructions",
+        "get_run_capacity",
         "get_strategy_approval",
         "get_strategy_catalogue",
         "get_strategy_defaults",
@@ -667,6 +736,9 @@ mod tests {
         "list_tasks",
         "move_task",
         "remove_task_link",
+        "set_max_concurrency",
+        "set_repository_max_concurrency",
+        "set_schedule_mode",
         "set_strategy_approval",
         "set_strategy_catalogue",
         "set_strategy_defaults",

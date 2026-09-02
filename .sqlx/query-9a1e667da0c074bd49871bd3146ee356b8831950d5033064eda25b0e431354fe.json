@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "\n        UPDATE repositories\n        SET name = ?1, default_branch = ?2, worktree_root = ?3, max_concurrency = ?4\n        WHERE id = ?5\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 5
+    },
+    "nullable": []
+  },
+  "hash": "9a1e667da0c074bd49871bd3146ee356b8831950d5033064eda25b0e431354fe"
+}

@@ -816,6 +816,7 @@ fn repository() -> Repository {
         worktree_root: "/Users/someone/Library/Application Support/com.rimaia.app/worktrees"
             .to_string(),
         allow_unattended_runs: true,
+        max_concurrency: 1,
         created_at: timestamp(),
     }
 }

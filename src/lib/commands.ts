@@ -16,6 +16,7 @@ import type {
   Repository,
   RimaiaError,
   Run,
+  RunCapacity,
   RunCostSummary,
   RunDetail,
   RunEnvironment,
@@ -23,6 +24,7 @@ import type {
   RunListEntry,
   RunState,
   RunTail,
+  ScheduleMode,
   SearchHit,
   StrategyApproval,
   StrategyCatalogueView,
@@ -119,6 +121,22 @@ export function updateRepository(
  *  passing `allow: true` — this only performs the already-agreed act. */
 export function setRepositoryUnattendedRuns(id: string, allow: boolean): Promise<Repository> {
   return call<Repository>("set_repository_unattended_runs", { id, allow });
+}
+
+/**
+ * Raises or lowers ADR-0010's per-repository cap.
+ *
+ * Its own command rather than a field on {@link updateRepository}, for the
+ * reason the unattended-runs opt-in has one: it is a deliberate act with a
+ * consequence the panel has to state next to it, not a preference to bury in an
+ * "edit name and branch" form. Refused outside `1..=ceiling` — see {@link
+ * getRunCapacity} for the ceiling.
+ */
+export function setRepositoryMaxConcurrency(
+  id: string,
+  maxConcurrency: number,
+): Promise<Repository> {
+  return call<Repository>("set_repository_max_concurrency", { id, maxConcurrency });
 }
 
 export function removeRepository(id: string): Promise<void> {
@@ -525,7 +543,7 @@ export function stopQueue(): Promise<void> {
 
 /**
  * The whole picture for the Runs view: whether the queue is running, which
- * task it holds a process for right now, and every `ready` task in board
+ * tasks it holds processes for right now, and every `ready` task in board
  * order with the reason the queue will pass over each one it cannot start.
  * Re-read fresh on every call — subscribe to {@link subscribeToTasksChanged},
  * {@link subscribeToRunsChanged} and {@link subscribeToSettingsChanged} in
@@ -535,6 +553,26 @@ export function stopQueue(): Promise<void> {
  */
 export function getQueueStatus(): Promise<QueueStatus> {
   return call<QueueStatus>("get_queue_status");
+}
+
+/** How many runs the queue may have in flight, as configured (ADR-0010): the
+ *  mode, the stored limit, and the ceiling no setting can raise. One call for
+ *  all three, because the control renders them together. */
+export function getRunCapacity(): Promise<RunCapacity> {
+  return call<RunCapacity>("get_run_capacity");
+}
+
+/** Switches the queue between one run at a time and several. Answers with the
+ *  whole configuration, so the caller need not re-read what it just wrote. */
+export function setScheduleMode(mode: ScheduleMode): Promise<RunCapacity> {
+  return call<RunCapacity>("set_schedule_mode", { mode });
+}
+
+/** How many runs `"parallel"` may have in flight at once. Refused outside
+ *  `1..=ceiling` with a message the panel renders — a stored value out of range
+ *  is tolerated and clamped, a value from this form is not. */
+export function setMaxConcurrency(value: number): Promise<RunCapacity> {
+  return call<RunCapacity>("set_max_concurrency", { value });
 }
 
 // ---------------------------------------------------------------------------

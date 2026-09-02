@@ -69,8 +69,9 @@ use crate::runner::outcome::{
 };
 use crate::runner::prompt::{compose_prompt, compose_system_append};
 use crate::runner::strategy;
+use crate::scheduler::InFlight;
 use crate::tasks::{self, set_run_state};
-use crate::worktree;
+use crate::worktree::{self, Worktree};
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -672,6 +673,18 @@ pub struct RunRequest {
     pub trigger: RunTrigger,
     /// The caller's half of the cancel button.
     pub cancel: CancelSignal,
+    /// The registry whose per-repository
+    /// [`preparation_lock`](InFlight::preparation_lock) this run takes while
+    /// its worktree is created.
+    ///
+    /// `None` skips the lock, which is right for every caller that cannot have
+    /// a second run in the same repository to collide with: a unit test driving
+    /// one run, and any single-run path. It is an `Option` rather than a
+    /// required field because the alternative is making every such caller mint
+    /// a registry it will never read, and a registry nobody else holds
+    /// serializes against nothing anyway — an argument that would be false the
+    /// moment it were written down as a requirement.
+    pub in_flight: Option<InFlight>,
 }
 
 impl RunRequest {
@@ -682,6 +695,7 @@ impl RunRequest {
             task_id: task_id.into(),
             trigger: RunTrigger::Manual,
             cancel: CancelSignal::new(),
+            in_flight: None,
         }
     }
 }
@@ -706,6 +720,30 @@ pub struct Attempt<'a> {
 // Running one task
 // ---------------------------------------------------------------------------
 
+/// [`worktree::prepare`], serialized per repository when the caller supplied a
+/// registry to serialize on.
+///
+/// The lock is held across this call and nothing else. Everything after it —
+/// the strategy run, the prompt composition, the child process — happens inside
+/// a worktree of its own and has no shared `.git` to contend for, so extending
+/// the lock past this point would turn a per-repository cap of two into a
+/// sequential queue wearing a parallel label.
+async fn prepare_worktree(
+    ctx: &ServiceContext,
+    in_flight: Option<&InFlight>,
+    repository_id: &str,
+    task_id: &str,
+) -> Result<Worktree> {
+    match in_flight {
+        Some(registry) => {
+            let lock = registry.preparation_lock(repository_id);
+            let _held = lock.lock().await;
+            worktree::prepare(ctx, task_id).await
+        }
+        None => worktree::prepare(ctx, task_id).await,
+    }
+}
+
 /// Runs one task end to end: validate, prepare, spawn, stream, classify, record.
 ///
 /// The order of the first four steps is the part worth reading, because each one
@@ -716,10 +754,13 @@ pub struct Attempt<'a> {
 ///    board's disabled "Run now" tooltip and this refusal are one sentence.
 /// 2. **The CLI exists.** Before anything is written, per task 008's acceptance
 ///    criterion — a missing prerequisite must not leave a half-open run.
-/// 3. **The worktree**, through task 007's idempotent [`worktree::prepare`].
-///    This is also what writes `tasks.branch`, which is why the task detail is
-///    re-read afterwards: the composed prompt names the branch, and composing it
-///    from the row as it was a moment earlier would name nothing.
+/// 3. **The worktree**, through task 007's idempotent [`worktree::prepare`],
+///    holding the repository's [`preparation_lock`](InFlight::preparation_lock)
+///    across it when the caller supplied a registry — see
+///    [`prepare_worktree`]. This is also what writes `tasks.branch`, which is
+///    why the task detail is re-read afterwards: the composed prompt names the
+///    branch, and composing it from the row as it was a moment earlier would
+///    name nothing.
 /// 4. **The claim.** The task goes to `run_state = running` before the row is
 ///    opened, mirroring ADR-0010's selection-then-run order.
 pub async fn run_task(
@@ -736,7 +777,8 @@ pub async fn run_task(
     let version = probe_cli(&config.program).await?;
     tracing::debug!(%task_id, cli = %version, "the Claude Code prerequisite is installed");
 
-    let worktree = worktree::prepare(ctx, &task_id).await?;
+    let worktree =
+        prepare_worktree(ctx, request.in_flight.as_ref(), &repository.id, &task_id).await?;
 
     let detail = tasks::get_task(ctx, &task_id).await?;
 

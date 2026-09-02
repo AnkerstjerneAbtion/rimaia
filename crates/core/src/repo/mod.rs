@@ -24,6 +24,7 @@ use crate::context::ServiceContext;
 use crate::db::Repository;
 use crate::error::{Error, Result};
 use crate::events::ChangeEvent;
+use crate::scheduler::CONCURRENCY_CEILING;
 
 /// What registering a new local repository needs.
 ///
@@ -48,6 +49,11 @@ pub struct RepositoryPatch {
     pub name: Option<String>,
     pub default_branch: Option<String>,
     pub worktree_root: Option<String>,
+    /// ADR-0010's per-repository opt-out, in the number of runs this repository
+    /// will hold at once. Held to [`MIN_REPOSITORY_CONCURRENCY`] and
+    /// [`CONCURRENCY_CEILING`] — see [`set_max_concurrency`], which is the door
+    /// the Settings control and the MCP tool both use.
+    pub max_concurrency: Option<i64>,
 }
 
 /// What live inspection of a repository's remote found (task 003's "detect
@@ -72,7 +78,7 @@ pub async fn list(ctx: &ServiceContext) -> Result<Vec<Repository>> {
         Repository,
         r#"
         SELECT id, name, path, default_branch, worktree_root, allow_unattended_runs,
-               created_at AS "created_at: chrono::DateTime<chrono::Utc>"
+               max_concurrency, created_at AS "created_at: chrono::DateTime<chrono::Utc>"
         FROM repositories
         ORDER BY name ASC, created_at ASC
         "#
@@ -103,7 +109,7 @@ where
         Repository,
         r#"
         SELECT id, name, path, default_branch, worktree_root, allow_unattended_runs,
-               created_at AS "created_at: chrono::DateTime<chrono::Utc>"
+               max_concurrency, created_at AS "created_at: chrono::DateTime<chrono::Utc>"
         FROM repositories
         WHERE id = ?1
         "#,
@@ -224,16 +230,20 @@ pub async fn update(ctx: &ServiceContext, id: &str, patch: RepositoryPatch) -> R
     if let Some(worktree_root) = patch.worktree_root {
         repository.worktree_root = require_non_empty(worktree_root, "worktree root")?;
     }
+    if let Some(max_concurrency) = patch.max_concurrency {
+        repository.max_concurrency = require_usable_concurrency(max_concurrency)?;
+    }
 
     sqlx::query!(
         r#"
         UPDATE repositories
-        SET name = ?1, default_branch = ?2, worktree_root = ?3
-        WHERE id = ?4
+        SET name = ?1, default_branch = ?2, worktree_root = ?3, max_concurrency = ?4
+        WHERE id = ?5
         "#,
         repository.name,
         repository.default_branch,
         repository.worktree_root,
+        repository.max_concurrency,
         id,
     )
     .execute(&mut *tx)
@@ -271,6 +281,58 @@ pub async fn set_allow_unattended_runs(
     repository.allow_unattended_runs = allow;
     ctx.publish(ChangeEvent::repositories([id.to_string()]));
     Ok(repository)
+}
+
+/// The smallest per-repository cap that means anything: a repository that will
+/// hold no runs at all is spelled by taking ADR-0012's opt-in away, not by
+/// setting this to zero — a second way to say "never run here" is a second
+/// thing the Settings panel has to explain and a second thing selection has to
+/// agree with.
+pub const MIN_REPOSITORY_CONCURRENCY: i64 = 1;
+
+/// Raises or lowers ADR-0010's per-repository cap.
+///
+/// The reason this is opt-out rather than a share of the global limit is worth
+/// having at the call site, because the Settings control has to say it too:
+/// "two agents in two worktrees of the same repo is safe for git, but they will
+/// fight over ports, test databases, and lockfiles. Parallelism across
+/// *repositories* is the safe default; within one repo it is opt-in."
+///
+/// Strict where the read is tolerant, which is this codebase's settled
+/// asymmetry (`mcp::settings::set_configured_port` states it): a value out of
+/// range from a form or a tool is refused with a sentence the panel renders,
+/// while a value somebody typed into the `sqlite3` CLI is warned about and
+/// clamped by [`scheduler::capacity`] rather than stopping a night's queue.
+///
+/// [`scheduler::capacity`]: crate::scheduler::capacity
+pub async fn set_max_concurrency(
+    ctx: &ServiceContext,
+    id: &str,
+    max_concurrency: i64,
+) -> Result<Repository> {
+    update(
+        ctx,
+        id,
+        RepositoryPatch {
+            max_concurrency: Some(max_concurrency),
+            ..RepositoryPatch::default()
+        },
+    )
+    .await
+}
+
+/// Holds a per-repository cap to the range that has a meaning, naming both
+/// bounds and why each is there.
+fn require_usable_concurrency(max_concurrency: i64) -> Result<i64> {
+    let ceiling = CONCURRENCY_CEILING as i64;
+    if !(MIN_REPOSITORY_CONCURRENCY..=ceiling).contains(&max_concurrency) {
+        return Err(Error::invalid(format!(
+            "a repository may hold between {MIN_REPOSITORY_CONCURRENCY} and {ceiling} runs at \
+             once, not {max_concurrency}. To stop this repository running at all, turn off \
+             unattended agent runs instead."
+        )));
+    }
+    Ok(max_concurrency)
 }
 
 /// Whether `repository` may be used to start a task unattended (ADR-0012).

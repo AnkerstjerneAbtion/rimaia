@@ -103,6 +103,14 @@ pub enum Tool {
     SetStrategyApproval,
     SetStrategyCatalogue,
     SetStrategyDefaults,
+
+    // Task 012's four. Same argument, one layer out: these reconfigure how
+    // many runs the installation will start at once, rather than how any one
+    // of them is spawned.
+    GetRunCapacity,
+    SetScheduleMode,
+    SetMaxConcurrency,
+    SetRepositoryMaxConcurrency,
 }
 
 /// What a [`RunScope::Run`] may do with one tool — ADR-0006's amendment table,
@@ -119,7 +127,7 @@ pub enum RunAccess {
 
 impl Tool {
     /// Every tool with a recorded decision, so a test can walk the table.
-    pub const ALL: [Tool; 19] = [
+    pub const ALL: [Tool; 23] = [
         Tool::AddTaskLink,
         Tool::CreateTask,
         Tool::GetBaseInstructions,
@@ -139,6 +147,10 @@ impl Tool {
         Tool::SetStrategyApproval,
         Tool::SetStrategyCatalogue,
         Tool::SetStrategyDefaults,
+        Tool::GetRunCapacity,
+        Tool::SetScheduleMode,
+        Tool::SetMaxConcurrency,
+        Tool::SetRepositoryMaxConcurrency,
     ];
 
     /// The wired name — what `tools/list` advertises and what the ADR table
@@ -164,6 +176,10 @@ impl Tool {
             Tool::SetStrategyApproval => "set_strategy_approval",
             Tool::SetStrategyCatalogue => "set_strategy_catalogue",
             Tool::SetStrategyDefaults => "set_strategy_defaults",
+            Tool::GetRunCapacity => "get_run_capacity",
+            Tool::SetScheduleMode => "set_schedule_mode",
+            Tool::SetMaxConcurrency => "set_max_concurrency",
+            Tool::SetRepositoryMaxConcurrency => "set_repository_max_concurrency",
         }
     }
 
@@ -221,7 +237,23 @@ impl Tool {
             | Tool::GetStrategyDefaults
             | Tool::SetStrategyApproval
             | Tool::SetStrategyCatalogue
-            | Tool::SetStrategyDefaults => RunAccess::Refused,
+            | Tool::SetStrategyDefaults
+            // Task 012's four, and the decision needs no new argument — it is
+            // the same permanent refusal one layer out. How many runs this
+            // installation starts at once, and how many of them one repository
+            // will hold, are properties of the *run configuration* (ADR-0010),
+            // which is exactly what point 4 names. A run raising the limit is a
+            // run deciding how much the night costs; a run raising its own
+            // repository's cap is a run turning off the thing that keeps a
+            // second agent out of its ports and test databases. The read is
+            // refused with the writes rather than allowed alongside
+            // `get_base_instructions`, because a run has no use for the answer:
+            // it cannot act on it, and it would only be useful for deciding
+            // whether the write is worth attempting.
+            | Tool::GetRunCapacity
+            | Tool::SetScheduleMode
+            | Tool::SetMaxConcurrency
+            | Tool::SetRepositoryMaxConcurrency => RunAccess::Refused,
         }
     }
 }

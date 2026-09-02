@@ -15,9 +15,19 @@
 //!
 //! With the board's repository filter set to "All repositories" the visible
 //! order groups by repository before position, and so does this. That is the
-//! same list, not a second policy; ADR-0010's per-repository interleaving is a
-//! parallel-mode concern (task 012) and there is nothing to interleave while
-//! one run happens at a time.
+//! same list, not a second policy. Task 012 did not change it either:
+//! [`next_batch`] walks that one order and skips whatever is at its cap, so a
+//! repository capped at one contributes its top card and the batch fills from
+//! the next repository down — which is ADR-0010's interleaving, arrived at by
+//! reading the board rather than by a second ordering that would have to be
+//! kept in agreement with it.
+//!
+//! # Eligibility and capacity are different questions
+//!
+//! [`skip_reason`] answers "may this task ever start"; [`next_batch`] answers
+//! "may it start right now". Only the first is a [`SkipReason`], and
+//! `next_batch`'s own doc comment gives the argument for why capacity must not
+//! become one.
 //!
 //! # The one predicate task 011 has to add is already here
 //!
@@ -36,7 +46,7 @@
 //! per-repository opt-in the whole security posture, and a posture the user
 //! cannot see is one they cannot fix at 09:00 when nothing ran overnight.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use serde::Serialize;
 
@@ -44,6 +54,7 @@ use crate::context::ServiceContext;
 use crate::db::{BoardColumn, RunState};
 use crate::error::Result;
 use crate::repo;
+use crate::scheduler::inflight::Counts;
 use crate::tasks::{self, TaskFilter, TaskSummary};
 
 /// Why the queue will not start a `ready` task it can otherwise see.
@@ -164,9 +175,90 @@ pub async fn plan(ctx: &ServiceContext) -> Result<Vec<QueueEntry>> {
     Ok(plan)
 }
 
+/// Every task the queue may start right now, in board order, bounded by the
+/// global limit and by each repository's own cap (ADR-0010's Selection).
+///
+/// `per_repository` is [`capacity::Resolved::per_repository`]: a **missing key
+/// is [`DEFAULT_PER_REPOSITORY`], never "unbounded"**, so a task whose
+/// repository has gone missing between two reads is capped rather than
+/// promoted.
+///
+/// # Capacity is deliberately not a [`SkipReason`]
+///
+/// Eligibility ("may this task ever start") and capacity ("may it start right
+/// now") are different questions with different lifetimes, and only the first
+/// belongs in a set the card renders as a *problem*. The second is already
+/// answered, better, by [`QueueEntry::queue_position`]: the third entry of a
+/// repository capped at one reads `queue_position: 3, skip: None`, which is
+/// exactly "third in line" and needs no badge. A `RepositoryAtCapacity` variant
+/// would put a fact that is true for ninety seconds next to
+/// [`UnattendedRunsNotAllowed`](SkipReason::UnattendedRunsNotAllowed), which is
+/// true until the user acts — and the morning review would then have to tell
+/// them apart. So [`skip_reason`] learns nothing here, and this function reads
+/// the plan rather than changing it.
+///
+/// [`capacity::Resolved::per_repository`]: super::capacity::Resolved::per_repository
+/// [`DEFAULT_PER_REPOSITORY`]: super::capacity::DEFAULT_PER_REPOSITORY
+pub fn next_batch<'a>(
+    plan: &'a [QueueEntry],
+    in_flight: &Counts,
+    global: usize,
+    per_repository: &HashMap<String, usize>,
+) -> Vec<&'a QueueEntry> {
+    let mut free = global.saturating_sub(in_flight.total);
+    let mut taken: HashMap<&str, usize> = HashMap::new();
+    let mut batch = Vec::new();
+
+    for entry in plan {
+        if free == 0 {
+            break;
+        }
+        if entry.skip.is_some() {
+            continue;
+        }
+        // A lease is taken *before* the claim (see `queue`'s header), so
+        // between those two points a task the button already holds still reads
+        // `idle` on the board and carries no skip reason. Passing over it here
+        // costs nothing — `acquire` would refuse it anyway — but counting its
+        // slot as free would hand the batch one more entry than there is room
+        // for, and the last of them would be refused after the whole board had
+        // been walked for it.
+        if in_flight.task_ids.contains(&entry.task_id) {
+            continue;
+        }
+
+        let cap = per_repository
+            .get(&entry.repository_id)
+            .copied()
+            .unwrap_or(super::capacity::DEFAULT_PER_REPOSITORY);
+        let used = in_flight.in_repository(&entry.repository_id)
+            + taken
+                .get(entry.repository_id.as_str())
+                .copied()
+                .unwrap_or(0);
+        if used >= cap {
+            continue;
+        }
+
+        *taken.entry(entry.repository_id.as_str()).or_insert(0) += 1;
+        free -= 1;
+        batch.push(entry);
+    }
+
+    batch
+}
+
 /// The task the queue would claim next, or `None` when there is nothing to do.
+///
+/// One rule, not two: this is [`next_batch`] with nothing in flight and a
+/// single slot, which is what [`Capacity::SEQUENTIAL`](super::Capacity::SEQUENTIAL)
+/// resolves to. Keeping it as a wrapper rather than the separate `find` it used
+/// to be is what stops "what does the queue start next" and "what does the
+/// queue start next when there is room for three" from drifting apart.
 pub fn next_to_start(plan: &[QueueEntry]) -> Option<&QueueEntry> {
-    plan.iter().find(|entry| entry.skip.is_none())
+    next_batch(plan, &Counts::default(), 1, &HashMap::new())
+        .into_iter()
+        .next()
 }
 
 /// Why the queue will not start `task`, or `None` when it will.
@@ -340,5 +432,168 @@ mod tests {
             queue_position,
             skip,
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // next_batch (task 012, ADR-0010's Selection)
+    // -----------------------------------------------------------------------
+
+    fn in_repository(task_id: &str, repository_id: &str) -> QueueEntry {
+        QueueEntry {
+            repository_id: repository_id.to_string(),
+            ..entry(task_id, None, Some(1))
+        }
+    }
+
+    fn caps(pairs: &[(&str, usize)]) -> HashMap<String, usize> {
+        pairs
+            .iter()
+            .map(|(id, cap)| ((*id).to_string(), *cap))
+            .collect()
+    }
+
+    fn ids(batch: Vec<&QueueEntry>) -> Vec<&str> {
+        batch.iter().map(|entry| entry.task_id.as_str()).collect()
+    }
+
+    #[test]
+    fn a_batch_is_taken_in_board_order_up_to_the_global_limit() {
+        let plan = vec![
+            in_repository("first", "a"),
+            in_repository("second", "b"),
+            in_repository("third", "c"),
+        ];
+
+        assert_eq!(
+            ids(next_batch(&plan, &Counts::default(), 2, &caps(&[]))),
+            vec!["first", "second"],
+        );
+    }
+
+    #[test]
+    fn a_repository_at_its_cap_is_stepped_over_rather_than_stopping_the_batch() {
+        // ADR-0010's interleaving, and the reason it needs no second ordering:
+        // the board's own order is walked, and a repository with no room left
+        // simply contributes nothing more.
+        let plan = vec![
+            in_repository("a1", "a"),
+            in_repository("a2", "a"),
+            in_repository("b1", "b"),
+        ];
+
+        assert_eq!(
+            ids(next_batch(&plan, &Counts::default(), 3, &caps(&[]))),
+            vec!["a1", "b1"],
+            "the default cap of one lets `a` contribute exactly one",
+        );
+        assert_eq!(
+            ids(next_batch(&plan, &Counts::default(), 3, &caps(&[("a", 2)]))),
+            vec!["a1", "a2", "b1"],
+            "and its own opt-out lets it contribute two",
+        );
+    }
+
+    #[test]
+    fn what_is_already_in_flight_is_counted_against_both_limits() {
+        let plan = vec![in_repository("a2", "a"), in_repository("b1", "b")];
+        let running = Counts {
+            total: 1,
+            per_repository: caps(&[("a", 1)]),
+            task_ids: HashSet::from(["a1".to_string()]),
+        };
+
+        assert_eq!(
+            ids(next_batch(&plan, &running, 3, &caps(&[]))),
+            vec!["b1"],
+            "`a` is full because of a run this pass did not start",
+        );
+        assert_eq!(
+            next_batch(&plan, &running, 1, &caps(&[("a", 2)])),
+            Vec::<&QueueEntry>::new(),
+            "and the global limit binds even where a repository has room",
+        );
+    }
+
+    #[test]
+    fn a_task_something_already_holds_a_lease_on_never_takes_a_slot() {
+        // The window between `acquire` and the claim: a task the button holds
+        // still reads `idle` on the board and carries no skip reason. Counting
+        // its slot as free would hand the batch one more entry than there is
+        // room for.
+        let plan = vec![in_repository("held", "a"), in_repository("free", "b")];
+        let running = Counts {
+            total: 1,
+            per_repository: caps(&[("a", 1)]),
+            task_ids: HashSet::from(["held".to_string()]),
+        };
+
+        assert_eq!(
+            ids(next_batch(&plan, &running, 4, &caps(&[("a", 4)]))),
+            vec!["free"]
+        );
+    }
+
+    #[test]
+    fn a_repository_the_caps_do_not_name_is_still_capped() {
+        // Never "unbounded": a task whose repository vanished between the board
+        // read and the capacity read must not become the one thing with no
+        // limit.
+        let plan = vec![in_repository("g1", "gone"), in_repository("g2", "gone")];
+
+        assert_eq!(
+            ids(next_batch(&plan, &Counts::default(), 4, &caps(&[("a", 4)]))),
+            vec!["g1"],
+        );
+    }
+
+    #[test]
+    fn a_skipped_task_is_passed_over_without_spending_a_slot() {
+        let plan = vec![
+            entry("skipped", Some(SkipReason::UnattendedRunsNotAllowed), None),
+            in_repository("first", "a"),
+            in_repository("second", "b"),
+        ];
+
+        assert_eq!(
+            ids(next_batch(&plan, &Counts::default(), 2, &caps(&[]))),
+            vec!["first", "second"],
+        );
+    }
+
+    #[test]
+    fn a_full_queue_takes_nothing_rather_than_wrapping_around() {
+        // `global.saturating_sub(total)`: an in-flight count above the limit is
+        // reachable the moment somebody lowers `max_concurrency` with runs
+        // already going, and an unsaturated subtraction would underflow into
+        // "start everything".
+        let plan = vec![in_repository("first", "a")];
+        let over = Counts {
+            total: 5,
+            per_repository: caps(&[("z", 5)]),
+            task_ids: HashSet::new(),
+        };
+
+        assert_eq!(
+            next_batch(&plan, &over, 2, &caps(&[])),
+            Vec::<&QueueEntry>::new()
+        );
+    }
+
+    #[test]
+    fn next_to_start_is_the_first_entry_of_a_single_slot_batch() {
+        // One rule, not two. If these ever disagreed, "what runs next" and
+        // "what runs next when there is room for three" would have drifted.
+        let plan = vec![
+            entry("skipped", Some(SkipReason::NeedsAttention), None),
+            in_repository("first", "a"),
+            in_repository("second", "a"),
+        ];
+
+        assert_eq!(
+            next_to_start(&plan).map(|entry| entry.task_id.as_str()),
+            ids(next_batch(&plan, &Counts::default(), 1, &HashMap::new()))
+                .first()
+                .copied(),
+        );
     }
 }

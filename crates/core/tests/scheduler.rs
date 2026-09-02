@@ -31,16 +31,19 @@
 //! runner's `init` verification is live rather than worked around. See
 //! `tests/runner_process.rs`'s header.
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use pretty_assertions::assert_eq;
-use rimaia_core::db::{BoardColumn, ExitClass, RunState, RunStatus, Task};
+use rimaia_core::db::{BoardColumn, ExitClass, RunState, RunStatus, ScheduleMode, Task};
 use rimaia_core::repo::{self, NewRepository};
 use rimaia_core::runner::events::RunTail;
 use rimaia_core::runner::outcome::{start_run, NewRun};
 use rimaia_core::runner::{run_task, CancelSignal, RunRequest, RunTrigger, RunnerConfig};
-use rimaia_core::scheduler::{self, ClaimOutcome, InFlight, QueueHandle, QueueState, SkipReason};
+use rimaia_core::scheduler::{
+    self, capacity, ClaimOutcome, InFlight, LeaseOwner, QueueHandle, QueueState, SkipReason,
+};
 use rimaia_core::startup;
 use rimaia_core::tasks::{self, NewTask, TaskFilter, TaskSummary};
 use rimaia_core::testing::fixtures::{fixture_lines, fixture_path};
@@ -271,6 +274,619 @@ async fn the_plan_numbers_what_the_queue_will_actually_start() {
     assert_eq!(
         scheduler::next_to_start(&plan).map(|entry| entry.task_id.clone()),
         Some(first)
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Several at once (task 012, ADR-0010)
+//
+// Every test here reads overlap off the stand-in's own start/end log rather
+// than off the rows the runs wrote. Rows cannot answer it: two `runs` rows are
+// both `running` for a while whether or not the two processes ever coexisted,
+// and `started_at` has second-ish resolution against a fake clock. The log is
+// written by the processes themselves, which is the only witness that two of
+// them were alive at the same instant.
+//
+// Overlap is *forced* rather than hoped for, by gating every stand-in and
+// opening the gates only once each has written its `start` line. A replaying
+// stand-in exits in microseconds, so three of them started from a JoinSet would
+// very likely never coexist and a test that asserted they did would fail for
+// the wrong reason.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn three_tasks_in_three_repositories_run_at_once_when_max_concurrency_is_three() {
+    // Task 012's first acceptance criterion. Three repositories, because
+    // ADR-0010 caps each one at a single run: parallelism *across* repositories
+    // is the safe default, and this is that default doing its job.
+    let mut fixture = Fixture::new().await;
+    let mut tasks_and_gates = Vec::new();
+    for index in 0..3 {
+        let repository = fixture.register_repository(true).await;
+        let task_id = fixture
+            .add_task_in(&repository, &format!("Task {index}"))
+            .await;
+        let gate = fixture.cli.gates(&task_id, "success", HEAD_LINES);
+        tasks_and_gates.push((task_id, gate));
+    }
+    fixture.set_parallel(3).await;
+
+    let mut changes = fixture.ctx().subscribe();
+    let queue = fixture.spawn_queue();
+    queue.start().await.expect("start the queue");
+
+    wait_until_started(&fixture, 3).await;
+    fixture.cli.assert_overlapped(3);
+
+    for (_, gate) in &tasks_and_gates {
+        open(gate);
+    }
+    let expected: Vec<String> = tasks_and_gates.iter().map(|(id, _)| id.clone()).collect();
+    let settled = expected.clone();
+    wait_until(
+        &fixture,
+        &mut changes,
+        "all three tasks to reach in_review",
+        move |board| {
+            board
+                .iter()
+                .filter(|task| settled.contains(&task.task.id))
+                .all(|task| task.task.column == BoardColumn::InReview)
+        },
+    )
+    .await;
+
+    for task_id in &expected {
+        assert_eq!(fixture.task(task_id).await.run_state, RunState::Idle);
+    }
+
+    queue.shutdown();
+}
+
+#[tokio::test]
+async fn two_tasks_in_one_repository_run_one_after_the_other_by_default() {
+    // The other half of the same rule, and the one that costs something: the
+    // global limit says three, the repository says one, and the repository
+    // wins. "Two agents in two worktrees of the same repo is safe for git, but
+    // they will fight over ports, test databases, and lockfiles."
+    let fixture = Fixture::new().await;
+    let first = fixture.add_task("Alpha").await;
+    let second = fixture.add_task("Bravo").await;
+    fixture.set_parallel(3).await;
+
+    let mut changes = fixture.ctx().subscribe();
+    let queue = fixture.spawn_queue();
+    queue.start().await.expect("start the queue");
+
+    wait_until(
+        &fixture,
+        &mut changes,
+        "both tasks to reach in_review",
+        |board| {
+            board
+                .iter()
+                .all(|task| task.task.column == BoardColumn::InReview)
+        },
+    )
+    .await;
+
+    assert_eq!(fixture.cli.started(), vec![first, second]);
+    fixture.cli.assert_never_two_at_once();
+
+    queue.shutdown();
+}
+
+#[tokio::test]
+async fn two_tasks_in_one_repository_run_at_once_once_that_repository_opts_out_of_the_cap() {
+    // ADR-0010's opt-out, which is the whole reason the cap is a column and not
+    // a constant.
+    let fixture = Fixture::new().await;
+    let first = fixture.add_task("Alpha").await;
+    let second = fixture.add_task("Bravo").await;
+    let gates = [
+        fixture.cli.gates(&first, "success", HEAD_LINES),
+        fixture.cli.gates(&second, "success", HEAD_LINES),
+    ];
+    fixture.set_parallel(3).await;
+    fixture.opt_repository_out_of_the_cap(2).await;
+
+    let mut changes = fixture.ctx().subscribe();
+    let queue = fixture.spawn_queue();
+    queue.start().await.expect("start the queue");
+
+    wait_until_started(&fixture, 2).await;
+    fixture.cli.assert_overlapped(2);
+
+    for gate in &gates {
+        open(gate);
+    }
+    wait_until(
+        &fixture,
+        &mut changes,
+        "both tasks to reach in_review",
+        |board| {
+            board
+                .iter()
+                .all(|task| task.task.column == BoardColumn::InReview)
+        },
+    )
+    .await;
+
+    queue.shutdown();
+}
+
+#[tokio::test]
+async fn two_worktrees_in_one_repository_are_prepared_without_fighting_over_the_git_lock() {
+    // `worktree::prepare` runs `git fetch --prune`, `git worktree prune` and
+    // `git worktree add` against the **shared** repository, and two of those
+    // take `.git`-level locks. Worktree isolation (ADR-0005) is about the
+    // working trees; it says nothing about the administrative directory they
+    // are all registered in. With a per-repository cap of one this can never
+    // happen — which is why it is invisible until the opt-out above is used,
+    // and why it would first appear as a raw `index.lock` error at 2am.
+    //
+    // Held from the outside, so this asserts that `run_task` *takes* the lock
+    // rather than that a `tokio::Mutex` works: the run cannot spawn a process
+    // without a worktree, so "nothing started while it was held" is the
+    // observation. `converge` yields rather than sleeping — see its own note.
+    let fixture = Fixture::new().await;
+    let blocked = fixture.add_task("Alpha").await;
+    let registry = InFlight::new();
+    let held = registry
+        .preparation_lock(&fixture.repository_id)
+        .lock_owned()
+        .await;
+
+    let mut changes = fixture.ctx().subscribe();
+    let queue = fixture.spawn_queue_with(registry.clone());
+    queue.start().await.expect("start the queue");
+
+    wait_until_in_flight(&queue, &blocked).await;
+    converge().await;
+    assert_eq!(
+        fixture.cli.started(),
+        Vec::<String>::new(),
+        "a run whose repository is mid-preparation must wait for the lock, not race it",
+    );
+    assert_eq!(
+        fixture.task(&blocked).await.worktree_path,
+        None,
+        "and it must not have created a worktree behind the lock either",
+    );
+
+    drop(held);
+
+    let finished = blocked.clone();
+    wait_until(
+        &fixture,
+        &mut changes,
+        "the released task to finish",
+        move |board| {
+            board
+                .iter()
+                .any(|task| task.task.id == finished && task.task.column == BoardColumn::InReview)
+        },
+    )
+    .await;
+
+    assert!(fixture.task(&blocked).await.worktree_path.is_some());
+
+    queue.shutdown();
+}
+
+#[tokio::test]
+async fn cancelling_one_run_leaves_the_others_running() {
+    // Task 012's third acceptance criterion. The cancel is per lease, and the
+    // lease is per task — the registry's own `cancel(task_id)`, which is the
+    // same door the Cancel button on a card uses.
+    let mut fixture = Fixture::new().await;
+    let other_repository = fixture.register_repository(true).await;
+    let doomed = fixture.add_task("Alpha").await;
+    let survivor = fixture.add_task_in(&other_repository, "Bravo").await;
+    fixture
+        .cli
+        .hangs(&doomed, "interrupted-sigterm", HEAD_LINES);
+    let survivor_gate = fixture.cli.gates(&survivor, "success", HEAD_LINES);
+    fixture.set_parallel(2).await;
+
+    let registry = InFlight::new();
+    let mut changes = fixture.ctx().subscribe();
+    let queue = fixture.spawn_queue_with(registry.clone());
+    queue.start().await.expect("start the queue");
+
+    wait_until_started(&fixture, 2).await;
+    assert!(registry.cancel(&doomed), "the doomed run is in flight");
+
+    let cancelled = doomed.clone();
+    wait_until(
+        &fixture,
+        &mut changes,
+        "the cancelled run to be recorded",
+        move |board| {
+            board
+                .iter()
+                .any(|task| task.task.id == cancelled && task.task.run_state == RunState::Failed)
+        },
+    )
+    .await;
+
+    // The survivor was never asked to stop and is still there to be released,
+    // which is the assertion: a cancel that reached both would have killed it
+    // before this gate ever opened.
+    assert!(
+        registry.holds(&survivor),
+        "cancelling one run must leave the other's lease alone"
+    );
+    open(&survivor_gate);
+
+    let finished = survivor.clone();
+    wait_until(
+        &fixture,
+        &mut changes,
+        "the surviving run to finish",
+        move |board| {
+            board
+                .iter()
+                .any(|task| task.task.id == finished && task.task.column == BoardColumn::InReview)
+        },
+    )
+    .await;
+
+    let detail = fixture.detail(&doomed).await;
+    assert_eq!(
+        detail
+            .last_run
+            .expect("a cancelled run records itself")
+            .status,
+        RunStatus::Cancelled,
+    );
+    assert_eq!(fixture.task(&survivor).await.run_state, RunState::Idle);
+
+    queue.shutdown();
+}
+
+#[tokio::test]
+async fn two_concurrent_runs_tail_under_their_own_run_ids() {
+    // Task 012's fourth acceptance criterion: "live logs stay attributed to the
+    // correct run under concurrency". Asserted on the channel (seam-contract
+    // D14) rather than in the UI, because the UI's filter is only correct if
+    // what it filters is: every snapshot must carry the run id of the run that
+    // produced it, and no snapshot may ever carry the other's.
+    let mut fixture = Fixture::new().await;
+    let other_repository = fixture.register_repository(true).await;
+    let first = fixture.add_task("Alpha").await;
+    let second = fixture.add_task_in(&other_repository, "Bravo").await;
+    let gates = [
+        fixture.cli.gates(&first, "success", HEAD_LINES),
+        fixture.cli.gates(&second, "success", HEAD_LINES),
+    ];
+    fixture.set_parallel(2).await;
+
+    let mut tail = fixture.ctx().subscribe_tail();
+    let mut changes = fixture.ctx().subscribe();
+    let queue = fixture.spawn_queue();
+    queue.start().await.expect("start the queue");
+
+    wait_until_started(&fixture, 2).await;
+
+    // Collect snapshots until both runs have spoken, so the assertion is about
+    // two live tails and not about one run that happened to publish twice.
+    let mut seen: HashSet<String> = HashSet::new();
+    tokio::time::timeout(TEST_TIMEOUT, async {
+        loop {
+            match tail.recv().await {
+                Ok(snapshot) => {
+                    seen.insert(snapshot.run_id);
+                    if seen.len() == 2 {
+                        return;
+                    }
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                Err(error) => panic!("the tail channel closed: {error}"),
+            }
+        }
+    })
+    .await
+    .expect("both runs must report themselves");
+
+    // The invariant `ActiveRunCard` rests on, stated as an equality: the run
+    // ids on the channel are exactly the run ids the two cards resolve from
+    // `get_task(..).last_run`. A snapshot carrying the other run's id would
+    // land in the wrong card, and one carrying an id belonging to neither would
+    // land in no card at all.
+    let mut expected: HashSet<String> = HashSet::new();
+    for task_id in [&first, &second] {
+        expected.insert(fixture.last_run_id(task_id).await);
+    }
+    assert_eq!(seen, expected);
+
+    // And each of those ids belongs to one task, not to both — the set
+    // equality above would still hold if one run had somehow been recorded
+    // against the other's card.
+    let mut owners: HashSet<String> = HashSet::new();
+    for run_id in &seen {
+        owners.insert(fixture.task_of_run(run_id).await);
+    }
+    assert_eq!(owners, HashSet::from([first.clone(), second.clone()]));
+
+    for gate in &gates {
+        open(gate);
+    }
+    wait_until(
+        &fixture,
+        &mut changes,
+        "both tasks to reach in_review",
+        |board| {
+            board
+                .iter()
+                .all(|task| task.task.column == BoardColumn::InReview)
+        },
+    )
+    .await;
+
+    queue.shutdown();
+}
+
+#[tokio::test]
+async fn a_dependent_task_never_starts_before_its_dependency_succeeds_even_with_free_slots() {
+    // Task 012's fifth acceptance criterion. Task 011 is landing in parallel
+    // with this one and has not merged here — `list_tasks` still returns
+    // `blocked_by_incomplete` as a constant `0` (seam-contract D12), so there
+    // is no way to make that predicate fire from a test yet. `run_state =
+    // blocked` is ADR-0010's own spelling of the same condition and the arm
+    // `skip_reason` already routes to `DependencyNotSatisfied`, so this asserts
+    // the property through the spelling that is live today. When 011 lands,
+    // the other spelling is covered by the same predicate and this test needs
+    // no edit.
+    let mut fixture = Fixture::new().await;
+    let other_repository = fixture.register_repository(true).await;
+    let dependent = fixture.add_task("Blocked").await;
+    let free = fixture.add_task_in(&other_repository, "Free").await;
+    walk_to(&fixture, &dependent, RunState::Blocked).await;
+    // Four slots for two tasks: whatever stops the blocked one, it is not room.
+    fixture.set_parallel(4).await;
+
+    let mut changes = fixture.ctx().subscribe();
+    let queue = fixture.spawn_queue();
+    queue.start().await.expect("start the queue");
+
+    let finished = free.clone();
+    wait_until(
+        &fixture,
+        &mut changes,
+        "the unblocked task to finish",
+        move |board| {
+            board
+                .iter()
+                .any(|task| task.task.id == finished && task.task.column == BoardColumn::InReview)
+        },
+    )
+    .await;
+    converge().await;
+
+    assert_eq!(
+        fixture.cli.started(),
+        vec![free],
+        "a blocked task must not start however many slots are free",
+    );
+    assert_eq!(fixture.task(&dependent).await.run_state, RunState::Blocked);
+    assert_eq!(
+        scheduler::plan(fixture.ctx())
+            .await
+            .expect("read the plan")
+            .iter()
+            .find(|entry| entry.task_id == dependent)
+            .and_then(|entry| entry.skip),
+        Some(SkipReason::DependencyNotSatisfied),
+    );
+
+    queue.shutdown();
+}
+
+#[tokio::test]
+async fn sequential_mode_still_starts_exactly_one_at_a_time() {
+    // The regression that matters most, because the whole design of
+    // `capacity::resolve` is "sequential is not a special case, it is
+    // `global = 1` on the same path". Three tasks in three repositories — every
+    // per-repository cap is satisfied, so the only thing keeping them apart is
+    // the mode.
+    let mut fixture = Fixture::new().await;
+    let mut expected = Vec::new();
+    for index in 0..3 {
+        let repository = fixture.register_repository(true).await;
+        expected.push(
+            fixture
+                .add_task_in(&repository, &format!("Task {index}"))
+                .await,
+        );
+    }
+    // Deliberately stored, and deliberately not in force.
+    fixture.set_max_concurrency(3).await;
+
+    let mut changes = fixture.ctx().subscribe();
+    let queue = fixture.spawn_queue();
+    queue.start().await.expect("start the queue");
+
+    let settled = expected.clone();
+    wait_until(
+        &fixture,
+        &mut changes,
+        "every task to reach in_review",
+        move |board| {
+            board
+                .iter()
+                .filter(|task| settled.contains(&task.task.id))
+                .all(|task| task.task.column == BoardColumn::InReview)
+        },
+    )
+    .await;
+
+    // A set, not a sequence: with the board filter on "all repositories" the
+    // plan groups by repository before position, and a fixture repository's
+    // name is its temp directory's basename — so *which* of three independent
+    // repositories goes first is not a property this test has any business
+    // pinning. What it pins is that all three ran and that no two ever
+    // overlapped.
+    assert_eq!(
+        fixture.cli.started().into_iter().collect::<HashSet<_>>(),
+        expected.iter().cloned().collect::<HashSet<_>>(),
+    );
+    fixture.cli.assert_never_two_at_once();
+
+    queue.shutdown();
+}
+
+#[tokio::test]
+async fn a_manual_run_occupies_a_slot_the_queue_then_does_not_use() {
+    // D19 point 5: the caps bound the scheduler, not a human. A "Run now" takes
+    // `acquire_unbounded` and is not refused by them — but it is still *in* the
+    // registry, so the queue counts it and starts one fewer. The alternative
+    // would be a global limit of two meaning three processes whenever somebody
+    // pressed a button.
+    let mut fixture = Fixture::new().await;
+    let manual_repository = fixture.register_repository(true).await;
+    let manual = fixture.add_task_in(&manual_repository, "By hand").await;
+    let queued = fixture.add_task("Queued").await;
+    fixture.set_parallel(1).await;
+
+    // Leased and claimed, as the button does both.
+    walk_to(&fixture, &manual, RunState::Running).await;
+    let registry = InFlight::new();
+    let manual_lease = registry
+        .acquire_unbounded(&manual, &manual_repository, LeaseOwner::Manual)
+        .expect("a person clicking Run now is not refused by the caps");
+
+    let queue = fixture.spawn_queue_with(registry.clone());
+    queue.start().await.expect("start the queue");
+    converge().await;
+
+    assert_eq!(
+        fixture.cli.started(),
+        Vec::<String>::new(),
+        "the one slot is taken by a run the queue did not start",
+    );
+    assert_eq!(fixture.task(&queued).await.run_state, RunState::Idle);
+    assert_eq!(queue.in_flight_task_ids(), vec![manual.clone()]);
+
+    // And a Stop leaves it alone (D19 point 4), which is what makes the slot
+    // genuinely the human's rather than merely first in line.
+    queue.stop().await.expect("stop the queue");
+    assert!(!manual_lease.cancel_signal().is_cancelled());
+
+    drop(manual_lease);
+    queue.shutdown();
+}
+
+#[tokio::test]
+async fn the_queue_starts_the_next_task_when_a_slot_is_freed_and_nothing_else_changes() {
+    // The stall this codebase would otherwise ship. `finish_run` publishes its
+    // `ChangeEvent`s from inside `run_task`, while the lease is still held, so
+    // a loop woken only by that channel counts the finishing run, finds no
+    // capacity and goes back to sleep — with nothing left to wake it when the
+    // lease actually drops. A queue asleep at 2am with a free slot.
+    //
+    // Driven through a *manual* lease rather than a queued run, because that is
+    // the case only the `releases` watch can cover: the `JoinSet` arm never
+    // joins a run this queue did not spawn. Dropping the lease below publishes
+    // no `ChangeEvent`, sends no control signal and completes no task — it is
+    // literally the only thing that happens.
+    let mut fixture = Fixture::new().await;
+    let occupied_repository = fixture.register_repository(true).await;
+    let occupant = fixture.add_task_in(&occupied_repository, "Occupant").await;
+    let waiting = fixture.add_task("Waiting").await;
+    fixture.set_parallel(1).await;
+
+    // Claimed as well as leased, which is what a real "Run now" does: the
+    // button takes the lease and then walks the row to `running`. Without the
+    // claim the occupant is still an ordinary `ready` card, and the queue would
+    // be free to pick *it* out of the plan the moment the slot opened — which
+    // is a different (and correct) thing happening, and not the one under test.
+    walk_to(&fixture, &occupant, RunState::Running).await;
+    let registry = InFlight::new();
+    let occupying = registry
+        .acquire_unbounded(&occupant, &occupied_repository, LeaseOwner::Manual)
+        .expect("the only slot");
+
+    let mut changes = fixture.ctx().subscribe();
+    let queue = fixture.spawn_queue_with(registry.clone());
+    queue.start().await.expect("start the queue");
+
+    // The queue has now looked, found no room, and parked on its `select!`.
+    converge().await;
+    assert_eq!(fixture.cli.started(), Vec::<String>::new());
+
+    drop(occupying);
+
+    let finished = waiting.clone();
+    wait_until(
+        &fixture,
+        &mut changes,
+        "the waiting task to run once the slot opened",
+        move |board| {
+            board
+                .iter()
+                .any(|task| task.task.id == finished && task.task.column == BoardColumn::InReview)
+        },
+    )
+    .await;
+
+    assert_eq!(fixture.cli.started(), vec![waiting]);
+
+    queue.shutdown();
+}
+
+#[tokio::test]
+async fn shutdown_waits_for_every_run_it_started() {
+    // The reason `run` drains its `JoinSet` instead of dropping it. Dropping a
+    // `JoinSet` aborts its tasks, and an aborted supervisor never reaches
+    // `finish_run` — so the attempt has an open `runs` row and comes back
+    // `interrupted` on the next launch, for no reason at all. With N runs it is
+    // N of them.
+    let mut fixture = Fixture::new().await;
+    let other_repository = fixture.register_repository(true).await;
+    let first = fixture.add_task("Alpha").await;
+    let second = fixture.add_task_in(&other_repository, "Bravo").await;
+    let gates = [
+        fixture.cli.gates(&first, "success", HEAD_LINES),
+        fixture.cli.gates(&second, "success", HEAD_LINES),
+    ];
+    fixture.set_parallel(2).await;
+
+    let (queue, task) = fixture.build_queue(InFlight::new());
+    let loop_handle = tokio::spawn(task.run());
+    queue.start().await.expect("start the queue");
+    wait_until_started(&fixture, 2).await;
+
+    // Shutdown while both are mid-run. It must not cancel them — that is the
+    // exit path's job, not this one's — so both gates still have to be opened
+    // for the loop to end.
+    queue.shutdown();
+    for gate in &gates {
+        open(gate);
+    }
+
+    tokio::time::timeout(TEST_TIMEOUT, loop_handle)
+        .await
+        .expect("the loop must end once its runs do")
+        .expect("the loop task itself does not panic");
+
+    for task_id in [&first, &second] {
+        let detail = fixture.detail(task_id).await;
+        let run = detail
+            .last_run
+            .expect("a run this queue started and saw out");
+        assert_eq!(run.status, RunStatus::Succeeded, "{task_id}");
+        assert_ne!(
+            run.exit_class,
+            Some(ExitClass::Interrupted),
+            "a run the queue waited for is not a run a crash caught: {task_id}",
+        );
+        assert!(run.ended_at.is_some(), "{task_id} has an open runs row");
+        assert_eq!(detail.task.run_state, RunState::Idle, "{task_id}");
+    }
+    assert!(
+        queue.in_flight_task_ids().is_empty(),
+        "every lease is released by the time the loop returns",
     );
 }
 
@@ -566,6 +1182,10 @@ async fn a_claim_is_refused_for_every_state_that_means_somebody_already_has_the_
 async fn walk_to(fixture: &Fixture, task_id: &str, target: RunState) {
     let route: &[RunState] = match target {
         RunState::Queued => &[RunState::Queued],
+        // `Idle -> Blocked` is deliberately illegal: a task becomes blocked
+        // when the scheduler re-evaluates a candidate it has already queued,
+        // never by skipping the queue (`tasks::run_state`'s own header).
+        RunState::Blocked => &[RunState::Queued, RunState::Blocked],
         RunState::Running => &[RunState::Queued, RunState::Running],
         RunState::WaitingRetry => &[RunState::Queued, RunState::Running, RunState::WaitingRetry],
         RunState::Failed => &[RunState::Queued, RunState::Running, RunState::Failed],
@@ -623,6 +1243,7 @@ async fn a_starter_that_claims_before_it_spawns_never_produces_a_second_process(
                         task_id,
                         trigger: RunTrigger::Queued,
                         cancel: CancelSignal::new(),
+                        in_flight: None,
                     },
                 )
                 .await,
@@ -1007,6 +1628,45 @@ async fn wait_until_in_flight(queue: &QueueHandle, task_id: &str) {
     .unwrap_or_else(|_| panic!("the queue never registered {task_id} as in flight"));
 }
 
+/// Resolves once `count` stand-ins have written their own `start` line.
+///
+/// The processes' own witness, not the rows they wrote: two `runs` rows are
+/// both `running` for a while whether or not the two children ever coexisted.
+/// Cooperative polling for the same reason [`wait_until_in_flight`] uses it —
+/// a stand-in writing a file publishes nothing, so there is no channel to wait
+/// on, and `yield_now` costs no real time and guesses no duration.
+async fn wait_until_started(fixture: &Fixture, count: usize) {
+    tokio::time::timeout(TEST_TIMEOUT, async {
+        while fixture.cli.started().len() < count {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| {
+        panic!(
+            "only {} of {count} stand-ins ever started",
+            fixture.cli.started().len()
+        )
+    });
+}
+
+/// Yields long enough for a queue that was going to do something to have done
+/// it.
+///
+/// The one shape of waiting this file cannot express as a channel: several
+/// tests assert that the queue *did not* start anything, and a negative has no
+/// event to wait for. `yield_now` in a bounded loop is not a sleep — it costs
+/// no wall-clock time, guesses no duration, and hands the executor every other
+/// task including the queue's own loop and the I/O driver. The count is
+/// generous rather than tuned, because being wrong in that direction only
+/// wastes microseconds while being wrong the other way is a test that passes
+/// for the wrong reason.
+async fn converge() {
+    for _ in 0..2_000 {
+        tokio::task::yield_now().await;
+    }
+}
+
 /// The other side of [`wait_until_in_flight`]: resolves once the queue has
 /// released whatever it held, win or lose.
 async fn wait_until_not_in_flight(queue: &QueueHandle) {
@@ -1132,28 +1792,55 @@ impl FakeCli {
             .collect()
     }
 
+    /// The most stand-ins that were alive at the same moment, walked off their
+    /// own start/end log.
+    ///
+    /// The witness both assertions below rest on, and the only one available:
+    /// two `runs` rows are both `running` for a while whether or not the
+    /// processes ever coexisted, and `started_at` comes from a fake clock. A
+    /// stand-in that is killed or hangs never writes its `end`, which this
+    /// reads as still open — correct, because it is.
+    fn peak_overlap(&self) -> usize {
+        let mut open = 0usize;
+        let mut peak = 0usize;
+        for line in self.spawns() {
+            match line.split_once(' ') {
+                Some(("start", _)) => {
+                    open += 1;
+                    peak = peak.max(open);
+                }
+                Some(("end", _)) => open = open.saturating_sub(1),
+                _ => panic!("unreadable spawn log line: {line}"),
+            }
+        }
+        peak
+    }
+
     /// Asserts no two runs overlapped — the sequential half of ADR-0010's
     /// sequential mode, read off the processes themselves rather than off the
     /// rows they wrote.
     fn assert_never_two_at_once(&self) {
-        let mut open: Option<String> = None;
-        for line in self.spawns() {
-            match line.split_once(' ') {
-                Some(("start", task_id)) => {
-                    assert_eq!(open, None, "{task_id} started while {open:?} was running");
-                    open = Some(task_id.to_string());
-                }
-                Some(("end", task_id)) => {
-                    assert_eq!(
-                        open.as_deref(),
-                        Some(task_id),
-                        "{task_id} ended out of turn"
-                    );
-                    open = None;
-                }
-                _ => panic!("unreadable spawn log line: {line}"),
-            }
-        }
+        assert_eq!(
+            self.peak_overlap(),
+            1,
+            "two runs overlapped where exactly one was allowed: {:?}",
+            self.spawns(),
+        );
+    }
+
+    /// The inverse, for task 012: at least `at_least` stand-ins were alive at
+    /// the same instant.
+    ///
+    /// `at_least` rather than exactly, because the assertion is about
+    /// parallelism happening and not about the scheduler having reached its
+    /// limit on the exact pass a test looked.
+    fn assert_overlapped(&self, at_least: usize) {
+        let peak = self.peak_overlap();
+        assert!(
+            peak >= at_least,
+            "at most {peak} runs were ever alive at once; expected at least {at_least}: {:?}",
+            self.spawns(),
+        );
     }
 
     fn spawns(&self) -> Vec<String> {
@@ -1314,14 +2001,52 @@ impl Fixture {
     fn spawn_queue(&self) -> QueueHandle {
         // Each fixture-built queue gets its own registry, which is what makes
         // "two launches" two processes rather than one with a shared map.
-        let (handle, task) = scheduler::build(
+        self.spawn_queue_with(InFlight::new())
+    }
+
+    /// The same, over a registry the test also holds — which is what a test
+    /// needs to stand in for the *other* door: a "Run now" the shell started, a
+    /// preparation lock held from outside, a Cancel pressed on one card.
+    fn spawn_queue_with(&self, in_flight: InFlight) -> QueueHandle {
+        let (handle, task) = self.build_queue(in_flight);
+        tokio::spawn(task.run());
+        handle
+    }
+
+    /// Both halves, unspawned. Only `shutdown_waits_for_every_run_it_started`
+    /// needs this: it has to await the loop's own `JoinHandle`, which is
+    /// exactly the thing `spawn_queue` throws away.
+    fn build_queue(&self, in_flight: InFlight) -> (QueueHandle, scheduler::QueueTask) {
+        scheduler::build(
             self.harness.context.clone(),
             self.paths.clone(),
             self.runner(),
-            InFlight::new(),
-        );
-        tokio::spawn(task.run());
-        handle
+            in_flight,
+        )
+    }
+
+    /// Parallel mode with `limit` slots — the two settings keys, written
+    /// through the same accessors the Settings panel and the MCP tool use.
+    async fn set_parallel(&self, limit: usize) {
+        capacity::set_schedule_mode(self.ctx(), ScheduleMode::Parallel)
+            .await
+            .expect("turn parallelism on");
+        self.set_max_concurrency(limit).await;
+    }
+
+    /// The stored limit, without touching the mode — so a test can prove
+    /// sequential ignores it.
+    async fn set_max_concurrency(&self, limit: usize) {
+        capacity::set_max_concurrency(self.ctx(), limit)
+            .await
+            .expect("store the global limit");
+    }
+
+    /// ADR-0010's per-repository opt-out, for this fixture's own repository.
+    async fn opt_repository_out_of_the_cap(&self, limit: i64) {
+        repo::set_max_concurrency(self.ctx(), &self.repository_id, limit)
+            .await
+            .expect("raise this repository's own cap");
     }
 
     /// Registers another real repository, with ADR-0012's opt-in on or off.
@@ -1385,6 +2110,29 @@ impl Fixture {
 
     async fn task(&self, task_id: &str) -> Task {
         self.detail(task_id).await.task
+    }
+
+    /// The run id a card would resolve for this task — `get_task(..).last_run`,
+    /// which is exactly what `ActiveRunCard` filters its tail snapshots on.
+    async fn last_run_id(&self, task_id: &str) -> String {
+        self.detail(task_id)
+            .await
+            .last_run
+            .expect("a run in flight has a row")
+            .id
+    }
+
+    /// The other direction: which task a run id belongs to. Read from `runs`
+    /// rather than inferred, because the point is whether the recorded
+    /// attribution is right.
+    async fn task_of_run(&self, run_id: &str) -> String {
+        sqlx::query_scalar!(
+            r#"SELECT task_id AS "task_id!" FROM runs WHERE id = ?1"#,
+            run_id
+        )
+        .fetch_one(&self.ctx().pool)
+        .await
+        .expect("read a run's task")
     }
 
     /// How many `runs` rows a task has — the row-level answer to "how many

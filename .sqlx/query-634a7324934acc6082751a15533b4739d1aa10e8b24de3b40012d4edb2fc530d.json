@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "\n        SELECT id AS \"id!: String\"\n        FROM tasks\n        WHERE repository_id = ?1 AND board_column = ?2 AND id != ?3\n        ORDER BY position DESC, created_at DESC, id DESC\n        LIMIT 1\n        ",
+  "describe": {
+    "columns": [
+      {
+        "name": "id!: String",
+        "ordinal": 0,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "634a7324934acc6082751a15533b4739d1aa10e8b24de3b40012d4edb2fc530d"
+}

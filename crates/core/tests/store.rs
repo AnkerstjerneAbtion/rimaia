@@ -169,6 +169,7 @@ async fn a_repository_round_trips_every_field_exactly() {
             worktree_root: "/Users/someone/Library/Application Support/com.rimaia.app/worktrees"
                 .to_string(),
             allow_unattended_runs: true,
+            max_concurrency: 1,
             created_at,
         }
     );
@@ -1313,7 +1314,7 @@ async fn fetch_repository(pool: &SqlitePool, id: &str) -> Repository {
     sqlx::query_as!(
         Repository,
         r#"SELECT id, name, path, default_branch, worktree_root, allow_unattended_runs,
-            created_at AS "created_at: DateTime<Utc>"
+            max_concurrency, created_at AS "created_at: DateTime<Utc>"
            FROM repositories WHERE id = ?1"#,
         id,
     )

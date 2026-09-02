@@ -17,9 +17,10 @@ use schemars::JsonSchema;
 use serde::Serialize;
 
 use crate::db::{
-    BoardColumn, ExitClass, MutationSource, Repository, Run, RunState, RunStatus, StrategyMode,
-    StrategySource, TaskLink,
+    BoardColumn, ExitClass, MutationSource, Repository, Run, RunState, RunStatus, ScheduleMode,
+    StrategyMode, StrategySource, TaskLink,
 };
+use crate::scheduler::RunCapacity;
 use crate::strategy::StrategyApproval;
 use crate::tasks::{TaskDetail, TaskSummary};
 
@@ -35,6 +36,11 @@ pub struct RepositoryView {
     /// between a task that will run unattended tonight and one that will sit
     /// in `ready` waiting for a human to say yes.
     pub allow_unattended_runs: bool,
+    /// ADR-0010's per-repository cap, `1` unless the operator opted out.
+    /// Surfaced for the same reason as the flag above: it is the difference
+    /// between two of this repository's tasks running tonight and them running
+    /// one after the other.
+    pub max_concurrency: i64,
 }
 
 impl From<Repository> for RepositoryView {
@@ -45,6 +51,7 @@ impl From<Repository> for RepositoryView {
             path: repository.path,
             default_branch: repository.default_branch,
             allow_unattended_runs: repository.allow_unattended_runs,
+            max_concurrency: repository.max_concurrency,
         }
     }
 }
@@ -276,6 +283,36 @@ pub struct BaseInstructionsView {
     /// The placeholder names that exist, so an agent writing a plan can use
     /// one rather than inventing it.
     pub template_variables: Vec<String>,
+}
+
+/// What `get_run_capacity`, `set_schedule_mode` and `set_max_concurrency`
+/// answer with — the queue's whole configuration, from any of the three.
+///
+/// A setter answering with the resolved state rather than nothing is the shape
+/// `set_mcp_port` already established on the Tauri side, and it is worth more
+/// over MCP: a caller that had to follow every write with a read would be
+/// paying two round trips to learn what the first one already knew.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub struct RunCapacityView {
+    pub mode: ScheduleMode,
+    /// The *stored* limit, which is not what `sequential` resolves to. See
+    /// `scheduler::capacity::RunCapacity`.
+    pub max_concurrency: usize,
+    /// The most runs Rimaia will supervise whatever this says. A constant, not
+    /// a setting — reported so a caller can bound its own input rather than
+    /// guessing and being refused.
+    pub ceiling: usize,
+}
+
+impl From<RunCapacity> for RunCapacityView {
+    fn from(capacity: RunCapacity) -> Self {
+        Self {
+            mode: capacity.mode,
+            max_concurrency: capacity.max_concurrency,
+            ceiling: capacity.ceiling,
+        }
+    }
 }
 
 /// The approval setting, wrapped.

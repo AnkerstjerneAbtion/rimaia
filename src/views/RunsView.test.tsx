@@ -61,6 +61,7 @@ function repository(overrides: Partial<Repository> = {}): Repository {
     defaultBranch: "main",
     worktreeRoot: "/data/worktrees/rimaia",
     allowUnattendedRuns: true,
+    maxConcurrency: 1,
     createdAt: "2026-08-20T09:00:00Z",
     ...overrides,
   };
@@ -250,6 +251,54 @@ describe("RunsView", () => {
 
     expect(await screen.findByText("Wire up the board")).toBeInTheDocument();
     expect(screen.queryByText("Nothing running right now")).toBeNull();
+  });
+
+  it("renders every concurrent run at once, side by side, rather than one at a time", async () => {
+    // Task 012's "N concurrent runs side by side, each with its own live log".
+    // Both cards are in the document simultaneously — which is also the whole
+    // of "switching between them is one click and does not lose scroll
+    // position": nothing is hidden, so switching costs no clicks, and no card
+    // is ever unmounted, so each keeps its own scroll offset by construction
+    // rather than by saving and restoring one. See `.active-runs-list` in
+    // `src/styles/runs.css`.
+    mockBackend({
+      runningTasks: [
+        taskSummary({ id: "task-1", title: "Wire up the board" }),
+        taskSummary({ id: "task-2", title: "Add the runner" }),
+      ],
+    });
+
+    render(<RunsView />);
+
+    expect(await screen.findByText("Wire up the board")).toBeInTheDocument();
+    expect(screen.getByText("Add the runner")).toBeInTheDocument();
+    expect(document.querySelectorAll(".active-run-card")).toHaveLength(2);
+  });
+
+  it("keeps two concurrent cards mounted across a re-read, so neither loses its place", async () => {
+    // The failure a tab bar would have: re-mounting `ActiveRunCard` resets its
+    // tail state and its scroll offset. Asserted as node identity, because a
+    // component that re-rendered with the same content but a new DOM node
+    // would look identical to `getByText` and behave nothing like it.
+    const { fire } = mockBackend({
+      runningTasks: [taskSummary({ id: "task-1" }), taskSummary({ id: "task-2", title: "Two" })],
+    });
+
+    render(<RunsView />);
+    await screen.findByText("Two");
+    const before = Array.from(document.querySelectorAll(".active-run-card"));
+    expect(before).toHaveLength(2);
+
+    act(() => fire("runs:changed", ["run-for-task-1"]));
+    await waitFor(() =>
+      expect(mockInvoke.mock.calls.filter(([c]) => c === "get_queue_status").length).toBeGreaterThan(
+        1,
+      ),
+    );
+
+    const after = Array.from(document.querySelectorAll(".active-run-card"));
+    expect(after[0]).toBe(before[0]);
+    expect(after[1]).toBe(before[1]);
   });
 
   it("shows the current run_environment setting", async () => {

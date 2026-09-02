@@ -36,8 +36,8 @@ pub use links::{
 pub use position::{position_between, rebalance_column, rebalanced_positions, Placement};
 pub use run_state::{is_legal_run_state_transition, set_run_state};
 pub use service::{
-    create_task, delete_task, get_task, list_tasks, move_task, update_task, LastRunSummary,
-    TaskDetail, TaskSummary,
+    create_task, delete_task, get_task, list_tasks, move_task, move_task_to_bottom, update_task,
+    LastRunSummary, TaskDetail, TaskSummary,
 };
 pub use strategy::{
     accept_task_strategy, clear_task_strategy, needs_planning, set_task_strategy, StrategyPhase,

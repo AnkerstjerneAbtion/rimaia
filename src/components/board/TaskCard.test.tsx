@@ -87,6 +87,7 @@ function repository(overrides: Partial<Repository> = {}): Repository {
     defaultBranch: "main",
     worktreeRoot: "/data/worktrees/rimaia",
     allowUnattendedRuns: true,
+    maxConcurrency: 1,
     createdAt: "2026-08-20T09:00:00Z",
     ...overrides,
   };

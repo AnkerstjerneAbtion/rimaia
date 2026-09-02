@@ -963,6 +963,7 @@ impl StrategyFixture {
                 task_id: self.task_id.clone(),
                 trigger: RunTrigger::Queued,
                 cancel: cancel.clone(),
+                in_flight: None,
             },
         )
         .await

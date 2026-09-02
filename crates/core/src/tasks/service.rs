@@ -613,10 +613,91 @@ pub async fn move_task(
         return Err(Error::invalid("a task cannot be moved next to itself"));
     }
 
-    let mut tx = ctx.pool.begin().await?;
+    move_into_column(
+        ctx,
+        id,
+        column,
+        Destination::Between {
+            before_id,
+            after_id,
+        },
+    )
+    .await
+}
+
+/// Appends a task to the bottom of `column`, with the neighbour looked up
+/// **inside** the transaction that writes.
+///
+/// The distinction is the whole point of the function. `runner::outcome` used
+/// to do the lookup itself and then call [`move_task`] with the id it found,
+/// and accepted the gap in a comment as "an ordering nit in a single-user
+/// desktop app" — which was true while one run finished at a time. It stopped
+/// being true with task 012: two runs finishing in the same millisecond each
+/// read the same bottom card, each computed `position_between(Some(p), None)`
+/// against it, and both landed on `p + 1.0`. Two cards on one position is not
+/// an ordering nit, it is ADR-0007's execution order resolved by a tiebreaker
+/// nobody chose — and `position_between` cannot catch it, because neither call
+/// was ever told about the other.
+///
+/// So the lookup moved here rather than being duplicated in `outcome`, which is
+/// what the old comment's own objection asked for: "the alternative is a second
+/// implementation of the neighbour search inside a module that has no business
+/// owning board order." This module does own it.
+pub async fn move_task_to_bottom(
+    ctx: &ServiceContext,
+    id: &str,
+    column: BoardColumn,
+) -> Result<Task> {
+    move_into_column(ctx, id, column, Destination::Bottom).await
+}
+
+/// Where a move lands a card, as the two callers above spell it.
+enum Destination<'a> {
+    /// Between two named neighbours, as the drag path supplies them.
+    Between {
+        before_id: Option<&'a str>,
+        after_id: Option<&'a str>,
+    },
+    /// Last, with the current last card resolved under the write lock.
+    Bottom,
+}
+
+/// The move both public entry points share.
+///
+/// `BEGIN IMMEDIATE` rather than a plain (deferred) `BEGIN`, for the reason
+/// [`set_run_state`](super::set_run_state) states in full: on the production
+/// pool two callers would each open an unlocked deferred read here and the
+/// loser's `UPDATE` would fail to upgrade with `SQLITE_BUSY_SNAPSHOT`, which
+/// SQLite's busy handler does not retry. That was survivable while the read
+/// inside the transaction was only the moving card's own row; with
+/// [`Destination::Bottom`] the read is the thing the write depends on, so
+/// taking the write lock up front is what makes "the second one sees the first"
+/// true rather than likely.
+async fn move_into_column(
+    ctx: &ServiceContext,
+    id: &str,
+    column: BoardColumn,
+    destination: Destination<'_>,
+) -> Result<Task> {
+    let mut tx = ctx.pool.begin_with("BEGIN IMMEDIATE").await?;
     let task = fetch_task_row(&mut *tx, id).await?;
 
     ensure_ready_has_a_plan(column, &task.plan, &task.title)?;
+
+    let bottom = match destination {
+        Destination::Between { .. } => None,
+        Destination::Bottom => bottom_of_column(&mut tx, &task.repository_id, column, id).await?,
+    };
+    let (before_id, after_id) = match destination {
+        Destination::Between {
+            before_id,
+            after_id,
+        } => (before_id, after_id),
+        // `None` for both is correct only when the column is empty, which is
+        // exactly what an empty lookup means here — and is the one case
+        // `resolve_task_position` accepts it in.
+        Destination::Bottom => (bottom.as_deref(), None),
+    };
 
     let (position, rebalanced_ids) = resolve_task_position(
         &mut tx,
@@ -966,6 +1047,38 @@ async fn resolve_task_position(
             }
         }
     }
+}
+
+/// The last card in a `(repository, column)`, ignoring the one being moved.
+///
+/// `DESC` because `position` ascends downwards — the top of a column is its
+/// *lowest* position, which is why `selection::plan`'s "highest-position ready
+/// task" means the first row of an ascending read. The `created_at`/`id`
+/// tiebreakers match [`rebalance_column`]'s, so a column whose cards already
+/// share a position (the degenerate state a rebalance repairs) still has one
+/// answer to "which is last" rather than whichever SQLite happened to store
+/// second.
+async fn bottom_of_column(
+    tx: &mut SqliteConnection,
+    repository_id: &str,
+    column: BoardColumn,
+    moving_id: &str,
+) -> Result<Option<String>> {
+    let bottom = sqlx::query_scalar!(
+        r#"
+        SELECT id AS "id!: String"
+        FROM tasks
+        WHERE repository_id = ?1 AND board_column = ?2 AND id != ?3
+        ORDER BY position DESC, created_at DESC, id DESC
+        LIMIT 1
+        "#,
+        repository_id,
+        column,
+        moving_id,
+    )
+    .fetch_optional(&mut *tx)
+    .await?;
+    Ok(bottom)
 }
 
 async fn task_neighbour_positions(

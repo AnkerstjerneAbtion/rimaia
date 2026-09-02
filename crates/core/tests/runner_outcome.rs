@@ -753,6 +753,68 @@ async fn a_second_successful_task_lands_below_the_first_in_in_review() {
 }
 
 #[tokio::test]
+async fn two_runs_finishing_at_once_land_on_distinct_positions_in_in_review() {
+    // The bug task 012 created, and the one it had to fix. `move_to_in_review`
+    // used to look the bottom card up against the pool and then hand the id it
+    // found to `move_task`, with the gap between the two accepted in a comment
+    // as "an ordering nit in a single-user desktop app" — true while one run
+    // finished at a time, false the moment two can.
+    //
+    // The interleaving is written out longhand rather than raced, because a
+    // single-connection test pool cannot be made to produce it: what two runs
+    // finishing in the same millisecond do is *both look before either moves*,
+    // and that is exactly the pair of calls below.
+    let mut fixture = RunFixture::new().await;
+    let second = fixture.sibling_task("the second task").await;
+    let third = fixture.sibling_task("the third task").await;
+    let fourth = fixture.sibling_task("the fourth task").await;
+
+    // One card already in `in_review`, so there is a bottom for both to find.
+    let first_run = fixture.start("do the first thing").await;
+    fixture
+        .finish(&first_run.id, &Replay::of("success").outcome())
+        .await;
+    let bottom = fixture.task_id.clone();
+
+    // The old shape: one read, two moves. Both name the same neighbour, both
+    // are handed `position_between(Some(p), None)` against it, and both get
+    // `p + 1.0` — `position_between` cannot catch it, because neither call was
+    // ever told about the other.
+    for task_id in [&second, &third] {
+        tasks::move_task(
+            &fixture.harness.context,
+            task_id,
+            BoardColumn::InReview,
+            Some(&bottom),
+            None,
+        )
+        .await
+        .expect("land under the card both of them read");
+    }
+    assert_eq!(
+        fixture.position_of(&second).await,
+        fixture.position_of(&third).await,
+        "the collision this test exists to explain: two cards, one position",
+    );
+
+    // The shape `finish_run` uses now. The lookup happens inside the
+    // transaction that writes, so the second one sees the first.
+    for task_id in [&second, &fourth] {
+        tasks::move_task_to_bottom(&fixture.harness.context, task_id, BoardColumn::InReview)
+            .await
+            .expect("append to the bottom");
+    }
+    assert_ne!(
+        fixture.position_of(&second).await,
+        fixture.position_of(&fourth).await,
+    );
+    assert!(
+        fixture.position_of(&fourth).await > fixture.position_of(&second).await,
+        "and the later one is genuinely last, not merely different",
+    );
+}
+
+#[tokio::test]
 async fn a_fatal_run_fails_its_task_and_leaves_the_card_where_it_was() {
     // ADR-0011: "no retry. Task -> `run_state = failed`, error surfaced on the
     // card." ADR-0007's failure rule keeps the card in `ready`, because a task
@@ -1314,6 +1376,16 @@ impl RunFixture {
             .await
             .expect("read the task")
             .task
+    }
+
+    /// The raw `position` of one card. Read directly, because it is exactly
+    /// what no projection exposes — board order is a *rendered* thing, and the
+    /// collision this reads for is invisible in the rendering.
+    async fn position_of(&self, task_id: &str) -> f64 {
+        sqlx::query_scalar!("SELECT position FROM tasks WHERE id = ?1", task_id)
+            .fetch_one(&self.harness.context.pool)
+            .await
+            .expect("read a position")
     }
 
     async fn in_review_titles(&self) -> Vec<String> {

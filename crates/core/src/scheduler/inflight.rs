@@ -216,6 +216,17 @@ pub struct InFlight {
     inner: Arc<Inner>,
 }
 
+impl std::fmt::Debug for InFlight {
+    /// The tasks, not the map: a `CancelSignal` has nothing legible to print
+    /// and a `RunRequest` carrying this is logged on paths where "which tasks
+    /// does this process hold" is the only interesting part.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("InFlight")
+            .field("task_ids", &self.task_ids())
+            .finish()
+    }
+}
+
 struct Inner {
     /// `std::sync::Mutex` rather than tokio's, on the same terms
     /// `scheduler::queue::Shared` states for its own: the guard never spans
@@ -225,6 +236,18 @@ struct Inner {
     /// Bumped on every release. The queue selects on this — see the module
     /// header on why `ChangeEvent` cannot do this job.
     releases: watch::Sender<u64>,
+    /// One `tokio::sync::Mutex` per repository, handed out by
+    /// [`InFlight::preparation_lock`]. Tokio's, unlike `entries` above, because
+    /// this one is *designed* to be held across an await — that is the entire
+    /// point of it.
+    ///
+    /// The outer lock is still `std::sync::Mutex`: it is held only long enough
+    /// to clone an `Arc` out of the map. Entries are never removed, which
+    /// bounds the map by the number of repositories the operator has ever
+    /// registered in this process — a handful of empty mutexes, against the
+    /// alternative of reference-counting removal and reintroducing the race the
+    /// lock exists to close.
+    preparations: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
 }
 
 impl Default for Inner {
@@ -232,6 +255,7 @@ impl Default for Inner {
         Self {
             entries: Mutex::new(HashMap::new()),
             releases: watch::channel(0).0,
+            preparations: Mutex::new(HashMap::new()),
         }
     }
 }
@@ -401,6 +425,40 @@ impl InFlight {
     /// why the queue cannot use `ChangeEvent` for this.
     pub fn releases(&self) -> watch::Receiver<u64> {
         self.inner.releases.subscribe()
+    }
+
+    /// The lock two runs in one repository take turns holding while their
+    /// worktrees are created.
+    ///
+    /// `worktree::prepare` runs `git fetch --prune`, `git worktree prune` and
+    /// `git worktree add` against the **shared** repository, and two of those
+    /// take `.git`-level locks. With a per-repository cap of one this can never
+    /// happen; the moment a repository's opt-out is enabled it will, and the
+    /// failure is a raw `index.lock` error at 2am on one of two tasks that were
+    /// both fine. Worktree isolation (ADR-0005) is about the *working trees* —
+    /// it says nothing about the administrative directory they are all
+    /// registered in.
+    ///
+    /// Per repository rather than one global lock, because that is the scope of
+    /// the contention: two repositories have two `.git` directories and nothing
+    /// to fight over, and a global lock would serialize exactly the
+    /// across-repository parallelism ADR-0010 calls the safe default.
+    ///
+    /// It lives on this type rather than in `worktree` because this is already
+    /// the thing every spawner holds, and a second registry keyed by repository
+    /// would be a second map to keep alive for the process lifetime — the
+    /// argument D19 makes for there being one of these at all.
+    pub fn preparation_lock(&self, repository_id: &str) -> Arc<tokio::sync::Mutex<()>> {
+        let mut preparations = self
+            .inner
+            .preparations
+            .lock()
+            .expect("worktree-preparation lock registry poisoned");
+        Arc::clone(
+            preparations
+                .entry(repository_id.to_string())
+                .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(()))),
+        )
     }
 }
 
@@ -670,6 +728,57 @@ mod tests {
         assert_eq!(counts.in_repository(REPO_B), 1);
         assert_eq!(counts.in_repository("repo-nobody-is-using"), 0);
         assert!(counts.task_ids.contains("a1"));
+    }
+
+    #[test]
+    fn one_repository_hands_every_caller_the_same_preparation_lock() {
+        // The property that makes the lock a lock. Two callers that received
+        // two different mutexes would each take one uncontended and run `git
+        // worktree add` against the same `.git` at the same moment, which is
+        // the failure this exists to prevent — and it would look exactly like a
+        // working lock until it didn't.
+        let registry = InFlight::new();
+
+        let first = registry.preparation_lock(REPO_A);
+        let second = registry.preparation_lock(REPO_A);
+        let elsewhere = registry.preparation_lock(REPO_B);
+
+        assert!(Arc::ptr_eq(&first, &second));
+        assert!(
+            !Arc::ptr_eq(&first, &elsewhere),
+            "two repositories have two .git directories and nothing to fight over"
+        );
+
+        // A clone of the registry is the same registry — the shell's door and
+        // the queue's door have to serialize against each other, not each
+        // against itself.
+        assert!(Arc::ptr_eq(
+            &first,
+            &registry.clone().preparation_lock(REPO_A)
+        ));
+    }
+
+    #[tokio::test]
+    async fn a_held_preparation_lock_makes_the_second_caller_wait() {
+        let registry = InFlight::new();
+        let held = registry.preparation_lock(REPO_A).lock_owned().await;
+
+        let same_repository = registry.preparation_lock(REPO_A);
+        let elsewhere = registry.preparation_lock(REPO_B);
+        assert!(
+            same_repository.try_lock().is_err(),
+            "a second preparation in the same repository must queue behind the first"
+        );
+        assert!(
+            elsewhere.try_lock().is_ok(),
+            "another repository has its own .git and is not blocked by it"
+        );
+
+        drop(held);
+        assert!(
+            same_repository.try_lock().is_ok(),
+            "the lock is released with its guard"
+        );
     }
 
     #[test]

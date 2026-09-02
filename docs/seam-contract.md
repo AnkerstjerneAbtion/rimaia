@@ -864,6 +864,107 @@ that hazard. It is fixed by there being one registry, not by a new check.
 
 ---
 
+## D20 — Where "how many runs at once" lives, and what it hands task 013
+
+**Question.** Task 012 needs a run mode and a concurrency limit. `schedules` has carried
+`mode` and `max_concurrency` columns since the initial schema and nothing reads either;
+ADR-0010 calls both "properties of the **run configuration**". D4 forbids a new migration.
+So where does the queue read them from, and what happens when task 013 gives a *named
+schedule* its own answer to the same question?
+
+**Decision.** Five things, and each is a thing a diff would otherwise not explain.
+
+1. **Two `settings` keys, `schedule_mode` and `max_concurrency`, owned by
+   `scheduler::capacity`.** D3's shape, exactly as `scheduler::state` already uses it for
+   `queue_state`: storage through task 006's `db::settings` accessor, the rules about the
+   key with the module that has the rules. `ScheduleMode` is reused rather than a second
+   enum invented — it is now both `schedules.mode` and this key's value, and one spelling
+   for both is what stops the two drifting. Per-repository caps come from
+   `repositories.max_concurrency`, the column the 2026-09-02 migration already shipped
+   (D4's amendment names it); the default is **1**, per ADR-0010.
+
+   **The reconciliation problem this leaves is task 013's, and it is named here so 013
+   inherits it rather than discovering it.** Once a schedule can say "run this list in
+   parallel, three at a time", there are two answers to "what mode is the queue in": the
+   active schedule's, and this default. Neither is wrong. Which one wins while a window is
+   open — and what the Settings control shows while one is — is a decision, and 013 makes
+   it. Task 012 took settings keys because it needs the numbers now and a `schedules` row
+   nothing selects from cannot supply them; 013 layers named schedules on top rather than
+   replacing this.
+
+2. **`resolve` returns `global = 1` in sequential mode regardless of the stored limit.**
+   That is what keeps sequential mode on literally the same code path as parallel instead
+   of on a preserved special case, and it is what makes "turning parallelism on did not
+   change sequential mode" a test rather than an assertion. The stored number is left
+   alone, so flipping back restores the value the user chose — which is also why the
+   Settings control shows the *stored* limit and not the resolved one.
+
+   Reads are tolerant and writes are strict, the asymmetry `mcp::settings` already states:
+   an absent, unparseable or out-of-range stored value warns and falls back, because
+   ADR-0003 counts the user as a supported writer of this file and a queue that refuses to
+   run all night over a typo is the worse outcome. A value from a form or a tool is
+   refused with a sentence.
+
+3. **`selection::next_batch` answers capacity; `skip_reason` learns nothing about it.**
+   Eligibility ("may this task ever start") and capacity ("may it start right now") are
+   different questions with different lifetimes, and only the first belongs in a set the
+   card renders as a *problem*. The second is already answered, better, by
+   `QueueEntry::queue_position`: the third entry of a repository capped at one reads
+   `queue_position: 3, skip: None`, which is exactly "third in line" and needs no badge. A
+   `SkipReason::RepositoryAtCapacity` would sit next to `UnattendedRunsNotAllowed` — true
+   until the user acts — while being true for ninety seconds, and the morning review would
+   then have to tell them apart. `next_to_start` is reimplemented as
+   `next_batch(..).into_iter().next()`, so there is one rule and not two.
+
+4. **A per-repository `worktree::prepare` lock, on `InFlight`.** `prepare` runs
+   `git fetch --prune`, `git worktree prune` and `git worktree add` against the **shared**
+   repository, and two of those take `.git`-level locks. ADR-0005's isolation is about the
+   working *trees*; it says nothing about the administrative directory they are all
+   registered in. `InFlight::preparation_lock(repository_id)` hands out one
+   `tokio::sync::Mutex` per repository and `run_task` holds it across `prepare` and nothing
+   else. It lives on `InFlight` because that is already the thing every spawner holds
+   (D19's argument for there being one), and it reaches `run_task` through an
+   `Option<InFlight>` on `RunRequest` where `None` skips it.
+
+   **This is invisible until a repository's cap is lifted**, which is the whole reason to
+   write it down: with a cap of 1 it can never fire, and the first time it would have is a
+   raw `index.lock` error at 2am on one of two tasks that were both fine.
+
+5. **The queue's `select!` has four arms, and `InFlight::releases` is not optional.**
+   `finish_run` publishes its `ChangeEvent`s from *inside* `run_task`, while the lease is
+   still held. A loop woken only by that channel counts the run that is finishing, finds no
+   capacity, and sleeps — with nothing left to wake it when the lease actually drops. That
+   is a queue asleep at 2am with a free slot and a full board. The `JoinSet` arm does not
+   cover it either for the case that matters most: a *manual* run freeing a slot is not a
+   task this queue spawned, so nothing joins. The `join_next` arm is guarded by
+   `if !runs.is_empty()`, because `join_next` on an empty set returns immediately and an
+   unguarded arm is a spin loop for the whole idle night.
+
+   **And `run()` ends by draining the `JoinSet`, never by dropping it.** Dropping a
+   `JoinSet` aborts its tasks; an aborted supervisor never reaches `finish_run`, so the
+   attempt keeps an open `runs` row and comes back `interrupted` on the next launch for no
+   reason — the exact failure `queue`'s header already argues against for one run, times N.
+   The drain is the last statement of the function and sits behind no `?`.
+
+**Why.** Every one of these is a place where the obvious choice is wrong in a way that only
+shows up at 2am: a `schedules` column nothing selects from, a sequential branch that drifts
+from the parallel one, a transient fact rendered as a problem, a git lock that cannot fire
+until it does, a wake source that looks redundant until it is the only one, and a `Drop`
+that looks like cleanup and is an abort.
+
+One thing fixed on the way past, recorded because it is a behaviour change outside this
+entry's subject: `runner::outcome::move_to_in_review` looked the bottom card up *outside*
+`move_task`'s transaction, accepted in a comment as "an ordering nit in a single-user
+desktop app". Two runs finishing in the same millisecond each read the same bottom card and
+computed the same midpoint against it. The lookup moved into `tasks::move_task_to_bottom`,
+inside the transaction that writes and under `BEGIN IMMEDIATE` — which is what the old
+comment's own objection asked for ("a second implementation of the neighbour search inside
+a module that has no business owning board order"), since `tasks` does own board order.
+
+**Binds.** 012, 013, 014.
+
+---
+
 ## How to use this
 
 An implementation task reads the entries its number appears in, before writing code:
@@ -880,9 +981,9 @@ An implementation task reads the entries its number appears in, before writing c
 | [009](../tasks/009-sequential-run-queue.md) | D2 · D5 · D7 · D8 · D9 · D10 · D14 · D15 · D19 |
 | [010](../tasks/010-local-mcp-server.md) | D2 · D3 · D4 · D5 · D6 · D8 · D10 · D12 · D13 · D16 |
 | [011](../tasks/011-task-dependencies-and-blocking.md) | D4 · D12 · D16 |
-| [012](../tasks/012-parallel-execution.md) | D2 · D4 · D5 · D8 · D9 · D12 · D14 · D15 · D19 |
-| [013](../tasks/013-run-scheduling.md) | D4 · D15 |
-| [014](../tasks/014-usage-limit-resilience.md) | D3 · D5 · D8 · D9 · D12 · D14 · D15 · D19 |
+| [012](../tasks/012-parallel-execution.md) | D2 · D4 · D5 · D8 · D9 · D12 · D14 · D15 · D19 · D20 |
+| [013](../tasks/013-run-scheduling.md) | D4 · D15 · D20 |
+| [014](../tasks/014-usage-limit-resilience.md) | D3 · D5 · D8 · D9 · D12 · D14 · D15 · D19 · D20 |
 | [015](../tasks/015-run-history-and-log-viewer.md) | D14 · D18 |
 | [016](../tasks/016-worktree-lifecycle-and-cleanup.md) | D17 · D18 |
 | [018](../tasks/018-preflight-doctor-and-packaging.md) | D11 · D16 |

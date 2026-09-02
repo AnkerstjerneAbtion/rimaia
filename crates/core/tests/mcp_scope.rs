@@ -12,10 +12,11 @@
 //! keep over time: an eleventh, twelfth or thirteenth tool cannot reach the
 //! wire without someone having said what a run may do with it.
 
-use rimaia_core::db::{BoardColumn, MutationSource};
+use rimaia_core::db::{BoardColumn, MutationSource, ScheduleMode};
 use rimaia_core::mcp::requests::{
     CreateTaskRequest, GetStrategyDefaultsRequest, GetTaskRequest, ListTasksRequest,
-    MoveTaskRequest, SetStrategyApprovalRequest, SetStrategyCatalogueRequest,
+    MoveTaskRequest, SetMaxConcurrencyRequest, SetRepositoryMaxConcurrencyRequest,
+    SetScheduleModeRequest, SetStrategyApprovalRequest, SetStrategyCatalogueRequest,
     SetStrategyDefaultsRequest, SetTaskDependenciesRequest, SetTaskStrategyRequest,
     TaskStrategyRequest, UpdateTaskRequest,
 };
@@ -23,6 +24,8 @@ use rimaia_core::mcp::responses::{StrategyApprovalView, TaskListView, TaskView};
 use rimaia_core::mcp::{
     self, McpHandle, RimaiaServer, RunAccess, RunGrant, RunHandles, RunScope, Tool,
 };
+use rimaia_core::repo;
+use rimaia_core::scheduler::{capacity, CONCURRENCY_CEILING, DEFAULT_MAX_CONCURRENCY};
 use rimaia_core::strategy::{
     self, Catalogue, CatalogueEntry, StrategyApproval, StrategyDefaults, DEFAULT_CATALOGUE_JSON,
 };
@@ -125,7 +128,15 @@ fn the_operator_endpoint_keeps_every_tool_it_had_before_task_020() {
             | Tool::GetStrategyDefaults
             | Tool::SetStrategyApproval
             | Tool::SetStrategyCatalogue
-            | Tool::SetStrategyDefaults => RunAccess::Refused,
+            | Tool::SetStrategyDefaults
+            // Task 012's four, one layer out: how many runs this installation
+            // starts at once, and how many of them one repository holds, are
+            // properties of the run configuration (ADR-0010) — which is what
+            // that refusal names.
+            | Tool::GetRunCapacity
+            | Tool::SetScheduleMode
+            | Tool::SetMaxConcurrency
+            | Tool::SetRepositoryMaxConcurrency => RunAccess::Refused,
         };
         assert_eq!(tool.run_access(), expected, "{}", tool.as_str());
     }
@@ -498,6 +509,144 @@ async fn nothing_adr_0021_added_is_reachable_from_a_run() {
             .await
             .expect("read the global defaults"),
         StrategyDefaults::default(),
+    );
+}
+
+#[tokio::test]
+async fn nothing_task_012_added_is_reachable_from_a_run_either() {
+    // The same permanent refusal one layer out (ADR-0021 point 4, ADR-0010).
+    // How many runs this installation starts at once decides what the night
+    // costs, and a repository's own cap is the thing keeping a second agent out
+    // of this run's ports and test databases — a run raising it would be
+    // removing its own protection. The *read* is refused with the writes
+    // because a run cannot act on the answer.
+    let h = TestContext::new().await;
+    let repository_id = seed_repository(&h.context.pool, "rimaia", "/tmp/rimaia").await;
+    let mine = create_task(&h, &repository_id, "Mine").await;
+    let run = scoped(&h, &mine.id);
+
+    assert_refusal(
+        &as_result(run.get_run_capacity().await),
+        &not_available("get_run_capacity", &mine.id),
+    );
+    assert_refusal(
+        &as_result(
+            run.set_schedule_mode(Parameters(request::<SetScheduleModeRequest>(
+                json!({ "mode": "parallel" }),
+            )))
+            .await,
+        ),
+        &not_available("set_schedule_mode", &mine.id),
+    );
+    assert_refusal(
+        &as_result(
+            run.set_max_concurrency(Parameters(request::<SetMaxConcurrencyRequest>(
+                json!({ "max_concurrency": 8 }),
+            )))
+            .await,
+        ),
+        &not_available("set_max_concurrency", &mine.id),
+    );
+    assert_refusal(
+        &as_result(
+            run.set_repository_max_concurrency(Parameters(request::<
+                SetRepositoryMaxConcurrencyRequest,
+            >(json!({
+                "repository_id": repository_id,
+                "max_concurrency": 4,
+            }))))
+            .await,
+        ),
+        &not_available("set_repository_max_concurrency", &mine.id),
+    );
+
+    // And none of them wrote anything on the way to being refused.
+    let capacity = capacity::configured(&h.context.pool)
+        .await
+        .expect("read the capacity back");
+    assert_eq!(capacity.mode, ScheduleMode::Sequential);
+    assert_eq!(capacity.max_concurrency, DEFAULT_MAX_CONCURRENCY);
+    assert_eq!(
+        repo::get(&h.context, &repository_id)
+            .await
+            .expect("read the repository back")
+            .max_concurrency,
+        1,
+    );
+}
+
+#[tokio::test]
+async fn the_operator_reads_and_writes_the_run_capacity_over_mcp() {
+    // ADR-0021's premise applied to task 012's own surface: each setter is
+    // round-tripped through the reader rather than merely called, because a
+    // setter that stored nothing would pass a smoke test.
+    let h = TestContext::new().await;
+    let repository_id = seed_repository(&h.context.pool, "rimaia", "/tmp/rimaia").await;
+    let operator = RimaiaServer::new(h.context.clone());
+
+    let after_mode = operator
+        .set_schedule_mode(Parameters(request::<SetScheduleModeRequest>(
+            json!({ "mode": "parallel" }),
+        )))
+        .await
+        .expect("the operator may reconfigure the queue")
+        .0;
+    assert_eq!(after_mode.mode, ScheduleMode::Parallel);
+
+    let after_limit = operator
+        .set_max_concurrency(Parameters(request::<SetMaxConcurrencyRequest>(
+            json!({ "max_concurrency": 3 }),
+        )))
+        .await
+        .expect("set the limit")
+        .0;
+    assert_eq!(after_limit.max_concurrency, 3);
+
+    let read_back = operator
+        .get_run_capacity()
+        .await
+        .expect("read it back through the other tool")
+        .0;
+    assert_eq!(read_back, after_limit);
+    assert_eq!(
+        read_back.ceiling, CONCURRENCY_CEILING,
+        "the ceiling is reported so a caller can bound its own input",
+    );
+
+    let repository = operator
+        .set_repository_max_concurrency(Parameters(request::<SetRepositoryMaxConcurrencyRequest>(
+            json!({
+                "repository_id": repository_id,
+                "max_concurrency": 2,
+            }),
+        )))
+        .await
+        .expect("raise one repository's cap")
+        .0;
+    assert_eq!(repository.max_concurrency, 2);
+
+    // A value no form would send is refused with a sentence rather than
+    // clamped — the write side of the read-tolerant/write-strict asymmetry.
+    let refused = as_result(
+        operator
+            .set_max_concurrency(Parameters(request::<SetMaxConcurrencyRequest>(
+                json!({ "max_concurrency": 99 }),
+            )))
+            .await,
+    );
+    assert_eq!(refused.is_error, Some(true), "above the ceiling");
+    assert!(
+        message(&refused).contains("pause the queue"),
+        "the refusal names what the caller probably wanted: {}",
+        message(&refused),
+    );
+    assert_eq!(
+        capacity::configured(&h.context.pool)
+            .await
+            .expect("read it back")
+            .max_concurrency,
+        3,
+        "a refused write leaves the stored limit alone",
     );
 }
 

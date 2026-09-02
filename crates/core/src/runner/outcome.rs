@@ -45,7 +45,7 @@ use crate::paths::AppPaths;
 use crate::runner::events::{
     transcript_path, ContentBlock, EventStream, RateLimitEvent, ResultEvent, RunEvent, TokenUsage,
 };
-use crate::tasks::{move_task, set_run_state};
+use crate::tasks::{move_task_to_bottom, set_run_state};
 
 /// The `terminal_reason` and `subtype` vocabulary the corpus proves. Anything
 /// outside it is an unknown termination, and ADR-0011 says an unknown
@@ -673,7 +673,7 @@ pub async fn start_run(ctx: &ServiceContext, paths: &AppPaths, new_run: NewRun) 
 /// Three transactions rather than one, and the order is the point: the row is
 /// written **first**, so a crash between them leaves the outcome recorded and
 /// only the task stale, which is the recoverable direction. It cannot be one
-/// transaction because [`set_run_state`] and [`move_task`] own theirs — and
+/// transaction because [`set_run_state`] and [`move_task_to_bottom`] own theirs — and
 /// reaching around them to write `run_state` or `board_column` directly is the
 /// exact ADR-0006 bug both of those functions exist to prevent.
 ///
@@ -771,31 +771,21 @@ async fn apply_to_task(ctx: &ServiceContext, task_id: &str, exit_class: ExitClas
 
 /// Appends the task to the bottom of `in_review`.
 ///
-/// Through [`move_task`], naming the current bottom card as the neighbour to
-/// land under — seam-contract D1's rule for every caller: send `before_id` and
-/// `after_id`, never a position. `None` is correct only when the column is
-/// empty, which is exactly what an empty lookup means here.
+/// Through [`move_task_to_bottom`], which does the neighbour lookup inside the
+/// transaction that writes — seam-contract D1's rule still holds (the caller
+/// names neighbours, never a position; the arithmetic stays `position.rs`'s),
+/// it is only the *read* that moved.
 ///
-/// The lookup is its own read rather than part of `move_task`'s transaction, so
-/// a card that lands in `in_review` between the two puts this one second from
-/// the bottom instead of last. That is an ordering nit in a single-user desktop
-/// app, and the alternative is a second implementation of the neighbour search
-/// inside a module that has no business owning board order.
+/// It moved because task 012 made it wrong. This function used to run the
+/// lookup here, against the pool, and pass the id it found to `move_task`; the
+/// gap between the two was accepted in a comment as an ordering nit, on the
+/// stated grounds that a card landing in `in_review` in between would put this
+/// one second from the bottom instead of last. With two runs finishing at once
+/// the consequence is worse than that: both read the same bottom card, both
+/// compute the same midpoint against it, and both land on the same position.
+/// See `tasks::move_task_to_bottom` for the rest of the argument.
 async fn move_to_in_review(ctx: &ServiceContext, task_id: &str) -> Result<()> {
-    let bottom = sqlx::query_scalar!(
-        r#"SELECT id AS "id!: String" FROM tasks
-            WHERE repository_id = (SELECT repository_id FROM tasks WHERE id = ?1)
-              AND board_column = ?2
-              AND id != ?1
-            ORDER BY position DESC, created_at DESC, id DESC
-            LIMIT 1"#,
-        task_id,
-        BoardColumn::InReview,
-    )
-    .fetch_optional(&ctx.pool)
-    .await?;
-
-    move_task(ctx, task_id, BoardColumn::InReview, bottom.as_deref(), None).await?;
+    move_task_to_bottom(ctx, task_id, BoardColumn::InReview).await?;
     Ok(())
 }
 
