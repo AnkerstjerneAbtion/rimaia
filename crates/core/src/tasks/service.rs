@@ -877,7 +877,9 @@ async fn fetch_last_run(pool: &SqlitePool, task_id: &str) -> Result<Option<Run>>
         r#"SELECT id, task_id, attempt, status AS "status: RunStatus", session_id, prompt,
             started_at AS "started_at: DateTime<Utc>", ended_at AS "ended_at: DateTime<Utc>",
             exit_class AS "exit_class: ExitClass", error_message, num_turns, cost_usd, log_path,
-            pr_url, resume_after AS "resume_after: DateTime<Utc>"
+            pr_url, resume_after AS "resume_after: DateTime<Utc>", base_ref,
+            model, effort, run_environment, input_tokens, output_tokens,
+            cache_read_tokens, cache_creation_tokens
            FROM runs WHERE task_id = ?1 ORDER BY attempt DESC LIMIT 1"#,
         task_id,
     )

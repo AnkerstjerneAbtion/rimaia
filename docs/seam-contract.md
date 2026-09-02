@@ -136,6 +136,73 @@ silently changes which model six existing cards run with.
 **The count is now five.** D4's prohibition is otherwise unchanged and still binds
 every other task, for exactly the collision reason the body gives.
 
+### Amendment, 2026-09-02 — one file for four tasks, and the fifth name retired
+
+Two changes, and the first is a correction rather than an addition.
+
+**`20260828120000_dependencies_and_parallel.sql` is retired, unwritten.** The
+amendment above reserved it for tasks 011 and 012 and said the backfill was
+"timestamped after the name reserved for tasks 011 and 012 … so the two cannot
+collide" — a sentence that assumed the reserved file would be applied first. The
+backfill shipped and the reservation did not, so on every database that has run
+since, that assumption is unmeetable: `20260828120000` now sorts *before* an
+already-applied migration.
+
+sqlx would not object, which is why this had to be found by reading rather than by
+running. `Migrator::run` iterates the source in version order and applies whatever
+`_sqlx_migrations` does not already list; `validate_applied_migrations` errors only
+on the reverse case, an applied version with no file on disk (sqlx-core 0.8.6,
+`src/migrate/migrator.rs`). **There is no comparison against the maximum applied
+version anywhere.** So the reserved name would have applied silently and out of
+order — fourth on a fresh install, fifth on every existing one.
+
+That divergence is the objection. `_sqlx_migrations` would stop being able to say
+in what order a given database was built, and ADR-0003 counts reading this file
+with any SQLite tool as supported rather than merely tolerated. `cargo sqlx migrate
+run --target-version` would also refuse outright, with `VersionTooOld`, and
+CLAUDE.md's local prepare loop reuses `target/sqlx-prepare.db` across runs — so
+half the team would get one order and CI's fresh database the other.
+
+Nothing was ever written under the retired name, so retiring it costs nothing and
+serves the collision-avoidance purpose the reservation had. This entry's own rule
+applies to itself: an entry that is wrong is amended, not worked around.
+
+**The rule the mistake teaches, stated so it is inheritable:** a reserved migration
+filename is only safe while nothing else can ship before it. A new timestamp must
+sort after every migration already on disk, and reserving one in advance is a bet
+on merge order that this repository cannot make.
+
+**In its place, one file for four tasks:**
+
+```
+src-tauri/migrations/20260902120000_dependencies_parallelism_scheduling_and_capture.sql
+```
+
+It carries `runs.base_ref` (task 011, ADR-0008), `repositories.max_concurrency`
+(task 012, ADR-0010), `schedules.timezone`, `stop_at`, `last_fired_at` and
+`armed_at` (task 013 — ADR-0010 requires "a cron expression with a timezone" and an
+optional stop time, and the initial schema shipped neither), and ADR-0022's seven
+nullable capture columns on `runs` (task 024's capture half, whose own *Why now*
+asks to ride along with exactly this kind of migration). Every column is inert
+until the task that owns it lands, which is the same bet the initial schema made
+with `task_dependencies` and `schedules`.
+
+**The count is still five — but not the same five.** The list is now:
+
+```
+20260820120000_initial_schema.sql                                          (task 002)
+20260820120100_seed_settings.sql                                           (task 006)
+20260826120000_task_source.sql                                             (task 010)
+20260901000000_backfill_strategy_mode.sql                                  (task 020)
+20260902120000_dependencies_parallelism_scheduling_and_capture.sql         (011, 012, 013, 024)
+```
+
+D4's prohibition is otherwise unchanged and still binds every other task, for
+exactly the collision reason the body gives: a task that believes it needs a sixth
+stops and asks.
+
+**Binds.** 011, 012, 013, 024, in addition to everything this entry already bound.
+
 ## D5 — Compile-time checked queries and the `.sqlx` cache
 
 **Question.** `sqlx::query!` or the runtime `sqlx::query()`, and what enforces that the
@@ -696,6 +763,50 @@ permission posture), which take the decisions this entry is too small for.
 
 ---
 
+## D18 — What a NULL capture column means
+
+**Question.** ADR-0022 adds seven nullable columns to `runs` and says of them: *"NULL
+means 'not recorded', never zero — an analytics view that averages a NULL as zero is
+lying about the past, **and the seam contract should say so**."* This is the entry it
+asks for. What may a reader of `runs.model`, `runs.effort`, `runs.run_environment`,
+`runs.input_tokens`, `runs.output_tokens`, `runs.cache_read_tokens` and
+`runs.cache_creation_tokens` conclude from a NULL?
+
+**Decision.** **Nothing except that the value was not recorded.** Three consequences,
+and all three bind every future reader:
+
+1. **A NULL is never coerced to zero, and never averaged as one.** `SUM` over a column
+   with NULLs is a sum over the rows that have values, which is a different quantity
+   from the total and must not be labelled as it. An aggregate that spans rows without
+   the value **says so on screen** — ADR-0022: *"a view showing 'models used' across a
+   range that predates the migration must say the earlier part is unrecorded rather
+   than silently reporting a smaller total."*
+2. **A NULL is never backfilled, guessed, or repaired.** Not from `tasks.model` (the
+   present tense — a planner or a human rewrites it), not from the current
+   `run_environment` setting (it was a setting when the run started and settings
+   change), and not by re-reading the transcript (which task 015 is designed to
+   delete, and which ADR-0022 part 2 permits precisely because the row survives it).
+   There is no correct value to write; "not recorded" *is* the correct value.
+3. **These seven are written exactly once, by `finish_run`, and never updated.** A run
+   that dies before its terminal `result` event honestly never learns its token
+   counts, and a second writer would be a second source of truth for a fact that has
+   one moment of existence.
+
+**Why.** Two rows with a NULL and a zero in `output_tokens` describe different worlds —
+one where nothing was recorded and one where a run genuinely produced nothing — and
+collapsing them is not a rounding error, it is a claim about history that is false.
+The columns exist at all because history cannot be backfilled; a reader that fills the
+gaps defeats the reason they were added early.
+
+This is an entry rather than a doc comment because it binds three tasks that do not
+share a module: task 008 writes the values, task 015's pruning must leave the row alone
+while deleting the file beside it, and task 024's page is the reader the rule exists to
+constrain. A comment in `runner/outcome.rs` reaches only the first.
+
+**Binds.** 008, 015, 024.
+
+---
+
 ## How to use this
 
 An implementation task reads the entries its number appears in, before writing code:
@@ -708,16 +819,19 @@ An implementation task reads the entries its number appears in, before writing c
 | [005](../tasks/005-kanban-board-ui.md) | D1 · D2 · D6 · D7 · D9 · D12 · D13 |
 | [006](../tasks/006-base-instructions-and-prompt-composition.md) | D3 · D4 · D5 · D8 |
 | [007](../tasks/007-git-worktree-service.md) | D5 · D8 · D10 · D13 |
-| [008](../tasks/008-claude-code-runner.md) | D2 · D3 · D5 · D7 · D8 · D9 · D10 · D14 · D15 |
+| [008](../tasks/008-claude-code-runner.md) | D2 · D3 · D5 · D7 · D8 · D9 · D10 · D14 · D15 · D18 |
 | [009](../tasks/009-sequential-run-queue.md) | D2 · D5 · D7 · D8 · D9 · D10 · D14 · D15 |
 | [010](../tasks/010-local-mcp-server.md) | D2 · D3 · D4 · D5 · D6 · D8 · D10 · D12 · D13 · D16 |
-| [011](../tasks/011-task-dependencies-and-blocking.md) | D12 · D16 |
-| [013](../tasks/013-run-scheduling.md) | D15 |
-| [015](../tasks/015-run-history-and-log-viewer.md) | D14 |
-| [016](../tasks/016-worktree-lifecycle-and-cleanup.md) | D17 |
+| [011](../tasks/011-task-dependencies-and-blocking.md) | D4 · D12 · D16 |
+| [012](../tasks/012-parallel-execution.md) | D2 · D4 · D5 · D8 · D9 · D12 · D14 · D15 |
+| [013](../tasks/013-run-scheduling.md) | D4 · D15 |
+| [014](../tasks/014-usage-limit-resilience.md) | D3 · D5 · D8 · D9 · D12 · D14 · D15 |
+| [015](../tasks/015-run-history-and-log-viewer.md) | D14 · D18 |
+| [016](../tasks/016-worktree-lifecycle-and-cleanup.md) | D17 · D18 |
 | [018](../tasks/018-preflight-doctor-and-packaging.md) | D11 · D16 |
 | [020](../tasks/020-per-task-execution-strategy.md) | D2 · D3 · D4 · D5 · D8 · D10 · D12 · D16 · D17 |
 | [021](../tasks/021-review-and-fix-loop.md) | D17 |
+| [024](../tasks/024-analytics.md) | D4 · D5 · D12 · D18 |
 | every task | D4 and D6 as prohibitions |
 
 A reviewer treats any decision visible in a diff that is neither in an ADR nor here as a

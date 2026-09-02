@@ -63,9 +63,9 @@ use crate::error::{Error, Result};
 use crate::mcp::{RunHandles, MCP_SERVER_NAME};
 use crate::paths::AppPaths;
 use crate::repo;
-use crate::runner::events::{EventStream, InitEvent, RunEvent};
+use crate::runner::events::{EventStream, InitEvent, RunEvent, TokenUsage};
 use crate::runner::outcome::{
-    finish_run, start_run, NewRun, PullRequestWatch, RunOutcome, Termination,
+    finish_run, start_run, NewRun, PullRequestWatch, RunOutcome, SpawnedAs, Termination,
 };
 use crate::runner::prompt::{compose_prompt, compose_system_append};
 use crate::runner::strategy;
@@ -961,6 +961,11 @@ fn runner_fatal(message: String) -> RunOutcome {
         duration_ms: None,
         pr_url: None,
         usage_limit_resets_at: None,
+        // Supervision itself failed, so there is no evidence the process ever
+        // ran as anything. Seam-contract D18 makes that NULL rather than a
+        // record of what we intended to spawn.
+        spawned_as: SpawnedAs::default(),
+        usage: TokenUsage::default(),
     }
 }
 
@@ -1037,6 +1042,9 @@ pub async fn execute(
     let mut stdout_open = true;
     let mut stderr_open = true;
     let mut status = None;
+    // ADR-0022. Stays `None` for a run that dies before announcing itself, and
+    // seam-contract D18 makes that NULL rather than a guess.
+    let mut observed_model: Option<String> = None;
 
     // Armed only when a termination is ordered; the guards below keep it from
     // being polled before that, which is why it can start already elapsed.
@@ -1061,6 +1069,11 @@ pub async fn execute(
                     Ok(Some(event)) => {
                         pull_request.observe(&event);
                         if let RunEvent::Init(init) = &event {
+                            // ADR-0022's `runs.model`. Taken from `init` rather
+                            // than from the flag because the flag may have been
+                            // absent (the CLI's own default) or an alias, and
+                            // this is the resolved name a later chart groups by.
+                            observed_model.clone_from(&init.model);
                             report_applied_environment(init, attempt.invocation);
                             if let Err(error) =
                                 verify_permission_mode(init, attempt.invocation.permission_mode)
@@ -1176,6 +1189,17 @@ pub async fn execute(
     if let Some(message) = fatal {
         override_as_fatal(&mut outcome, message);
     }
+
+    // This is the only place the invocation and the run's own account of itself
+    // are both in scope, which is why ADR-0022's three "spawned as" columns are
+    // filled here rather than at `finish_run`. Falling back to the flag when
+    // `init` never arrived keeps a killed run's model recorded; falling all the
+    // way to `None` when neither exists is D18's "not recorded".
+    outcome.spawned_as = SpawnedAs {
+        model: observed_model.or_else(|| attempt.invocation.model.clone()),
+        effort: attempt.invocation.effort.clone(),
+        run_environment: Some(attempt.invocation.run_environment.as_str().to_string()),
+    };
 
     if stream.malformed_lines() > 0 {
         tracing::warn!(

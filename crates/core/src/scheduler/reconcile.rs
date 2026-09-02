@@ -61,7 +61,8 @@
 use crate::context::ServiceContext;
 use crate::db::{ExitClass, RunState, RunStatus};
 use crate::error::Result;
-use crate::runner::outcome::{finish_run, RunOutcome};
+use crate::runner::events::TokenUsage;
+use crate::runner::outcome::{finish_run, RunOutcome, SpawnedAs};
 use crate::startup::ReconciliationReport;
 use crate::tasks::set_run_state;
 
@@ -82,6 +83,12 @@ fn interrupted() -> RunOutcome {
         duration_ms: None,
         pr_url: None,
         usage_limit_resets_at: None,
+        // The same argument as the metrics above, and seam-contract D18 states
+        // it: this reconciler never saw the process, so what it was spawned as
+        // and what it spent are *not recorded* rather than zero. The run's own
+        // `execute` would have filled these had it lived to return.
+        spawned_as: SpawnedAs::default(),
+        usage: TokenUsage::default(),
     }
 }
 

@@ -448,6 +448,14 @@ mod tests {
             log_path: "/tmp/run-1.jsonl".to_string(),
             pr_url: None,
             resume_after: None,
+            base_ref: None,
+            model: None,
+            effort: None,
+            run_environment: None,
+            input_tokens: None,
+            output_tokens: None,
+            cache_read_tokens: None,
+            cache_creation_tokens: None,
         });
 
         let wire = serde_json::to_value(&view).expect("a DTO must always serialize");

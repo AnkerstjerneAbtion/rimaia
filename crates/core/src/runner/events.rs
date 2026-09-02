@@ -285,6 +285,41 @@ pub struct ResultEvent {
     /// Kept whole: nothing reads its shape yet, and ADR-0012 makes a denial
     /// something a reviewer will want in full when it does.
     pub permission_denials: Vec<Value>,
+    /// The four token counts ADR-0022 persists. Absent fields stay `None`.
+    pub usage: TokenUsage,
+}
+
+/// What one attempt spent, off the terminal event's `usage` object.
+///
+/// Four scalars out of a much larger object, chosen by ADR-0022 and no more:
+/// the recorded corpus also carries `output_tokens_details`, `server_tool_use`,
+/// `cache_creation`, `service_tier`, `iterations` and `speed`, none of which any
+/// decision needs. `modelUsage` is deliberately *not* read either — it is a
+/// per-model map, and ADR-0022 asked for four numbers on a row, not a document.
+///
+/// Every field is `Option`, and seam-contract D18 is the reason: a run that dies
+/// before its `result` never learns these, and `None` must survive to the column
+/// as NULL rather than being flattened to a zero that reads as a measurement.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct TokenUsage {
+    pub input_tokens: Option<i64>,
+    pub output_tokens: Option<i64>,
+    /// `cache_read_input_tokens`, renamed to the column ADR-0022 names.
+    pub cache_read_tokens: Option<i64>,
+    /// `cache_creation_input_tokens`, likewise.
+    pub cache_creation_tokens: Option<i64>,
+}
+
+impl TokenUsage {
+    fn from_value(raw: &Value) -> Self {
+        let usage = raw.get("usage").unwrap_or(&Value::Null);
+        Self {
+            input_tokens: integer(usage, "input_tokens"),
+            output_tokens: integer(usage, "output_tokens"),
+            cache_read_tokens: integer(usage, "cache_read_input_tokens"),
+            cache_creation_tokens: integer(usage, "cache_creation_input_tokens"),
+        }
+    }
 }
 
 /// An event this version does not model, kept whole.
@@ -410,6 +445,7 @@ impl ResultEvent {
             result: text(raw, "result"),
             errors: strings(raw, "errors"),
             permission_denials: array(raw, "permission_denials").to_vec(),
+            usage: TokenUsage::from_value(raw),
         }
     }
 }

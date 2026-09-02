@@ -43,7 +43,7 @@ use crate::error::{Error, Result};
 use crate::events::ChangeEvent;
 use crate::paths::AppPaths;
 use crate::runner::events::{
-    transcript_path, ContentBlock, EventStream, RateLimitEvent, ResultEvent, RunEvent,
+    transcript_path, ContentBlock, EventStream, RateLimitEvent, ResultEvent, RunEvent, TokenUsage,
 };
 use crate::tasks::{move_task, set_run_state};
 
@@ -250,6 +250,32 @@ pub struct RunOutcome {
     /// leaves that column NULL: ADR-0011 defines it as the reset *plus jitter*,
     /// and jitter is retry policy, which task 008 is explicitly not.
     pub usage_limit_resets_at: Option<DateTime<Utc>>,
+    /// What the attempt was spawned as. Filled by [`crate::runner::execute`],
+    /// which is the only caller holding the [`Invocation`](crate::runner::Invocation)
+    /// and the `init` event at once; `None` everywhere else, including the
+    /// hand-made outcomes reconciliation and a failed spawn produce.
+    pub spawned_as: SpawnedAs,
+    /// What the attempt spent, off the terminal `result` event.
+    pub usage: TokenUsage,
+}
+
+/// The three ADR-0022 columns that describe *how* a run was started.
+///
+/// They ride on the outcome rather than being read at `finish_run` time because
+/// none of them can be recovered afterwards: `tasks.model` is rewritten by a
+/// planner or a human (ADR-0016) and `run_environment` was a setting when the run
+/// started. Seam-contract D18: every `None` here reaches the column as NULL and
+/// means *not recorded*.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct SpawnedAs {
+    /// The model the run actually used. Preferring the `init` event over the
+    /// invocation is deliberate: the flag may have been absent (the CLI's own
+    /// default) or an alias, and `init` echoes back the resolved name — which is
+    /// the thing a later chart wants to group by.
+    pub model: Option<String>,
+    pub effort: Option<String>,
+    /// `inherit` or `strict_local`, in the wire spelling the setting uses.
+    pub run_environment: Option<String>,
 }
 
 impl RunOutcome {
@@ -276,6 +302,10 @@ impl RunOutcome {
                     .and_then(RateLimitEvent::resets_at_utc),
                 _ => None,
             },
+            // Not known here: this function sees a termination, not the
+            // invocation that caused it. `execute` fills it.
+            spawned_as: SpawnedAs::default(),
+            usage: result.map(|result| result.usage).unwrap_or_default(),
         }
     }
 }
@@ -662,11 +692,21 @@ pub async fn finish_run(ctx: &ServiceContext, run_id: &str, outcome: &RunOutcome
 
     let pr_url = outcome.pr_url.as_deref();
     let error_message = outcome.error_message.as_deref();
+    // ADR-0022's seven, written here and nowhere else, once per row. Every one
+    // of them is `Option` all the way from the event to the bind, so a value
+    // nobody observed lands as NULL rather than as a zero a later chart would
+    // average (seam-contract D18).
+    let model = outcome.spawned_as.model.as_deref();
+    let effort = outcome.spawned_as.effort.as_deref();
+    let run_environment = outcome.spawned_as.run_environment.as_deref();
     sqlx::query!(
         r#"UPDATE runs
               SET ended_at = ?1, status = ?2, exit_class = ?3, error_message = ?4,
-                  num_turns = ?5, cost_usd = ?6, pr_url = ?7
-            WHERE id = ?8"#,
+                  num_turns = ?5, cost_usd = ?6, pr_url = ?7,
+                  model = ?8, effort = ?9, run_environment = ?10,
+                  input_tokens = ?11, output_tokens = ?12,
+                  cache_read_tokens = ?13, cache_creation_tokens = ?14
+            WHERE id = ?15"#,
         ended_at,
         outcome.status,
         outcome.exit_class,
@@ -674,6 +714,13 @@ pub async fn finish_run(ctx: &ServiceContext, run_id: &str, outcome: &RunOutcome
         outcome.num_turns,
         outcome.cost_usd,
         pr_url,
+        model,
+        effort,
+        run_environment,
+        outcome.usage.input_tokens,
+        outcome.usage.output_tokens,
+        outcome.usage.cache_read_tokens,
+        outcome.usage.cache_creation_tokens,
         run_id,
     )
     .execute(&mut *tx)
@@ -765,7 +812,9 @@ where
         r#"SELECT id, task_id, attempt, status AS "status: RunStatus", session_id, prompt,
             started_at AS "started_at: DateTime<Utc>", ended_at AS "ended_at: DateTime<Utc>",
             exit_class AS "exit_class: ExitClass", error_message, num_turns, cost_usd, log_path,
-            pr_url, resume_after AS "resume_after: DateTime<Utc>"
+            pr_url, resume_after AS "resume_after: DateTime<Utc>", base_ref,
+            model, effort, run_environment, input_tokens, output_tokens,
+            cache_read_tokens, cache_creation_tokens
            FROM runs WHERE id = ?1"#,
         id,
     )

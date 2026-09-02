@@ -461,6 +461,25 @@ pub struct Run {
     /// When the next attempt may start: the usage-limit reset plus jitter, or the
     /// current backoff step (ADR-0011).
     pub resume_after: Option<DateTime<Utc>>,
+    /// The branch this attempt was created from (ADR-0008): the repository's
+    /// default branch, or a dependency's branch when the task has one. A fact
+    /// about the attempt, not about what the resolver would answer today.
+    pub base_ref: Option<String>,
+    /// ADR-0022's capture columns: what this attempt was spawned as, and what it
+    /// spent. Written once by `finish_run` and never updated.
+    ///
+    /// **NULL means "not recorded", never zero** (seam-contract D18). Every row
+    /// written before the capture migration honestly has none, and a run that
+    /// dies before its terminal `result` event never learns its token counts.
+    /// Nothing backfills these — `tasks.model` is the present tense and
+    /// `run_environment` is a setting that changes.
+    pub model: Option<String>,
+    pub effort: Option<String>,
+    pub run_environment: Option<String>,
+    pub input_tokens: Option<i64>,
+    pub output_tokens: Option<i64>,
+    pub cache_read_tokens: Option<i64>,
+    pub cache_creation_tokens: Option<i64>,
 }
 
 /// A named run configuration (ADR-0010).

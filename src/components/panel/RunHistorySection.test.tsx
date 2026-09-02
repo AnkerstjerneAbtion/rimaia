@@ -36,6 +36,14 @@ function run(overrides: Partial<Run> = {}): Run {
     logPath: "/data/runs/task-1/run-1.jsonl",
     prUrl: null,
     resumeAfter: null,
+    baseRef: null,
+    model: null,
+    effort: null,
+    runEnvironment: null,
+    inputTokens: null,
+    outputTokens: null,
+    cacheReadTokens: null,
+    cacheCreationTokens: null,
     ...overrides,
   };
 }

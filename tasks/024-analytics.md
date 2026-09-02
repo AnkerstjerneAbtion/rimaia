@@ -31,12 +31,27 @@ another reason before this task starts, these columns should ride along with it.
 
 ## Scope
 
-**Capture (ADR-0022, do this first and separately if possible)**
+**Capture (ADR-0022, do this first and separately if possible) — ✅ landed, see below**
 
 - The seven nullable columns on `runs`: `model`, `effort`, `run_environment`,
   `input_tokens`, `output_tokens`, `cache_read_tokens`, `cache_creation_tokens`.
 - Written once by `finish_run`, never updated. NULL means *not recorded*, never zero.
 - A seam-contract entry naming the migration, per D4.
+
+> **The capture half has shipped; the page has not, and this task is not landed.**
+> The columns arrived in
+> `src-tauri/migrations/20260902120000_dependencies_parallelism_scheduling_and_capture.sql`
+> (seam-contract D4's 2026-09-02 amendment names it), `finish_run` is their only
+> writer, and **seam-contract D18** states the NULL rule ADR-0022 asked the seam
+> contract to carry. `runner::events::TokenUsage` reads the four counts off the
+> terminal `result` event's `usage` object; `runner::outcome::SpawnedAs` carries
+> the other three, filled by `execute` because it is the only place the
+> `Invocation` and the run's own `init` event are both in scope.
+>
+> It shipped early on ADR-0022's own argument: history cannot be backfilled, so
+> every night the queue ran without these columns would have been permanently
+> blank. **The page below is untouched and is what this task still owes.** Do not
+> mark this task landed until it exists.
 
 **The page**
 

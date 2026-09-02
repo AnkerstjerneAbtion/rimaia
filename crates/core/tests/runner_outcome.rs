@@ -28,7 +28,7 @@ use pretty_assertions::assert_eq;
 use rimaia_core::db::{settings, BoardColumn, ExitClass, RunState, RunStatus};
 use rimaia_core::runner::events::{parse_line, EventStream, RateLimitEvent, ResultEvent, RunEvent};
 use rimaia_core::runner::outcome::{
-    classify, finish_run, start_run, NewRun, PullRequestWatch, RunOutcome, Termination,
+    classify, finish_run, start_run, NewRun, PullRequestWatch, RunOutcome, SpawnedAs, Termination,
 };
 use rimaia_core::runner::prompt::compose_prompt;
 use rimaia_core::tasks::{self, NewTask};
@@ -924,6 +924,119 @@ async fn a_stream_classifies_the_same_way_whether_it_is_replayed_or_read_off_the
     let outcome = RunOutcome::of(&Termination::from_stream(&stream), None);
     assert_eq!(outcome.exit_class, ExitClass::Fatal);
     assert_eq!(outcome, Replay::of("max-turns").outcome());
+}
+
+// ---------------------------------------------------------------------------
+// ADR-0022's capture, and seam-contract D18's NULL rule
+// ---------------------------------------------------------------------------
+
+#[test]
+fn a_recorded_run_carries_the_four_token_counts_off_its_result_event() {
+    // The exact numbers in `success.jsonl`. Asserted as literals rather than
+    // recomputed from the file, because the point of the test is that the four
+    // field names ADR-0022 reads — `input_tokens`, `output_tokens`,
+    // `cache_read_input_tokens`, `cache_creation_input_tokens` — are the ones
+    // the corpus actually spells. A test that re-derived them from the same
+    // keys it is checking would pass on a rename.
+    let usage = Replay::of("success").outcome().usage;
+
+    assert_eq!(usage.input_tokens, Some(10));
+    assert_eq!(usage.output_tokens, Some(1949));
+    assert_eq!(usage.cache_read_tokens, Some(163_145));
+    assert_eq!(usage.cache_creation_tokens, Some(11_819));
+}
+
+#[test]
+fn a_failed_run_still_records_what_it_spent_getting_there() {
+    // The cost of a wasted night is the thing ADR-0022's failure-rate and
+    // cost-per-completed-task numbers are made of, so a run that ended badly
+    // must still carry its tokens. `max-turns.jsonl` is `fatal`; it spent real
+    // money before hitting the wall.
+    let outcome = Replay::of("max-turns").outcome();
+
+    assert_eq!(outcome.exit_class, ExitClass::Fatal);
+    assert_eq!(outcome.usage.input_tokens, Some(4));
+    assert_eq!(outcome.usage.output_tokens, Some(1016));
+    assert_eq!(outcome.usage.cache_read_tokens, Some(57_999));
+    assert_eq!(outcome.usage.cache_creation_tokens, Some(9_557));
+}
+
+#[test]
+fn a_stream_that_never_reached_a_result_records_no_tokens_rather_than_zero() {
+    // Seam-contract D18, stated as an assertion: NULL means *not recorded*.
+    // `truncated-stream.jsonl` is a run whose stream stopped mid-flight, so it
+    // honestly never learned what it spent. Four zeroes here would be a claim
+    // that it spent nothing, which a later average would repeat as a fact.
+    let outcome = Replay::of("truncated-stream").outcome();
+
+    assert_eq!(outcome.usage.input_tokens, None);
+    assert_eq!(outcome.usage.output_tokens, None);
+    assert_eq!(outcome.usage.cache_read_tokens, None);
+    assert_eq!(outcome.usage.cache_creation_tokens, None);
+}
+
+#[test]
+fn classification_never_reads_the_usage_numbers() {
+    // The two are independent by design: ADR-0011 classifies on
+    // `terminal_reason` and `subtype`, and ADR-0022's numbers are a record, not
+    // a signal. Proven by walking the corpus — every fixture keeps its class
+    // whether or not it carried a `usage` object.
+    for name in all_fixtures() {
+        let replay = Replay::of(&name);
+        let outcome = replay.outcome();
+        assert_eq!(
+            outcome.exit_class,
+            replay.class(),
+            "{name} classified differently once its usage was read",
+        );
+    }
+}
+
+#[tokio::test]
+async fn finishing_a_run_records_what_it_was_spawned_as_and_what_it_spent() {
+    let mut fixture = RunFixture::new().await;
+    let prompt = fixture.composed_prompt().await;
+    let run = fixture.start(&prompt).await;
+
+    let mut outcome = Replay::of("success").outcome();
+    outcome.spawned_as = SpawnedAs {
+        model: Some("claude-sonnet-5".to_string()),
+        effort: Some("high".to_string()),
+        run_environment: Some("inherit".to_string()),
+    };
+
+    let stored = fixture.finish(&run.id, &outcome).await;
+
+    assert_eq!(stored.model.as_deref(), Some("claude-sonnet-5"));
+    assert_eq!(stored.effort.as_deref(), Some("high"));
+    assert_eq!(stored.run_environment.as_deref(), Some("inherit"));
+    assert_eq!(stored.input_tokens, Some(10));
+    assert_eq!(stored.output_tokens, Some(1949));
+    assert_eq!(stored.cache_read_tokens, Some(163_145));
+    assert_eq!(stored.cache_creation_tokens, Some(11_819));
+}
+
+#[tokio::test]
+async fn a_run_that_learned_nothing_leaves_every_capture_column_null() {
+    // The other half of D18, through the database rather than in memory: an
+    // outcome with nothing recorded must reach the row as seven NULLs. This is
+    // the shape `scheduler::reconcile` writes for a run that died with the app,
+    // and the one a later analytics view has to be able to tell apart from a
+    // run that genuinely cost nothing.
+    let mut fixture = RunFixture::new().await;
+    let prompt = fixture.composed_prompt().await;
+    let run = fixture.start(&prompt).await;
+
+    let outcome = Replay::of("truncated-stream").outcome();
+    let stored = fixture.finish(&run.id, &outcome).await;
+
+    assert_eq!(stored.model, None);
+    assert_eq!(stored.effort, None);
+    assert_eq!(stored.run_environment, None);
+    assert_eq!(stored.input_tokens, None);
+    assert_eq!(stored.output_tokens, None);
+    assert_eq!(stored.cache_read_tokens, None);
+    assert_eq!(stored.cache_creation_tokens, None);
 }
 
 // ---------------------------------------------------------------------------

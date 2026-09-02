@@ -190,6 +190,21 @@ export interface Run {
   logPath: string;
   prUrl: string | null;
   resumeAfter: string | null;
+  /** The branch this attempt was created from (ADR-0008) — the repository's
+   *  default branch, or a dependency's branch when the task has one. */
+  baseRef: string | null;
+  /** ADR-0022's capture columns. **`null` means "not recorded", never zero**
+   *  (seam-contract D18): every row written before the capture migration
+   *  honestly has none, and a run that dies before its terminal `result` event
+   *  never learns its token counts. Nothing here is ever backfilled, and a view
+   *  that averages a `null` as zero is lying about the past. */
+  model: string | null;
+  effort: string | null;
+  runEnvironment: string | null;
+  inputTokens: number | null;
+  outputTokens: number | null;
+  cacheReadTokens: number | null;
+  cacheCreationTokens: number | null;
 }
 
 /**
