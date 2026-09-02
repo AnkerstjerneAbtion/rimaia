@@ -20,6 +20,7 @@ use crate::db::{
     BoardColumn, ExitClass, MutationSource, Repository, Run, RunState, RunStatus, ScheduleMode,
     StrategyMode, StrategySource, TaskLink,
 };
+use crate::doctor::{CheckResult, DoctorReport};
 use crate::scheduler::RunCapacity;
 use crate::strategy::StrategyApproval;
 use crate::tasks::{TaskDetail, TaskSummary};
@@ -179,6 +180,76 @@ pub struct RepositoryListView {
 #[serde(rename_all = "snake_case")]
 pub struct TaskListView {
     pub tasks: Vec<TaskListItem>,
+}
+
+/// One row of what `run_doctor` answers with (task 018).
+///
+/// A projection rather than [`CheckResult`] re-serialized, for the reason this
+/// module's header gives — and for one more that is specific to this pair.
+/// `is_blocking` and `blocking_summary` on [`DoctorReportView`] are *derived*
+/// here rather than left for the caller to recompute: an agent asked to decide
+/// whether the queue can start should not have to know that "blocking" means
+/// "any status is fail", which is exactly the kind of rule ADR-0006 refuses to
+/// let a second surface reimplement.
+#[derive(Debug, Clone, PartialEq, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub struct CheckResultView {
+    pub check: String,
+    pub label: String,
+    pub status: String,
+    /// The repository this row is about, for the two per-repository checks.
+    pub repository: Option<String>,
+    pub detail: String,
+    pub remediation: Option<String>,
+}
+
+impl From<&CheckResult> for CheckResultView {
+    fn from(result: &CheckResult) -> Self {
+        Self {
+            check: result.check.as_str().to_string(),
+            label: result.label.to_string(),
+            status: result.status.as_str().to_string(),
+            repository: result.repository.clone(),
+            detail: result.detail.clone(),
+            remediation: result.remediation.clone(),
+        }
+    }
+}
+
+/// What `run_doctor` answers with. Wrapped for the reason
+/// [`RepositoryListView`] gives.
+#[derive(Debug, Clone, PartialEq, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub struct DoctorReportView {
+    pub results: Vec<CheckResultView>,
+    /// Whether the queue would refuse to start right now.
+    pub is_blocking: bool,
+    /// The exact sentence `start_queue` would refuse with, or `null` when it
+    /// would not refuse. Carried so an agent reporting the problem to a human
+    /// quotes the same words the window does.
+    pub blocking_summary: Option<String>,
+}
+
+impl From<&DoctorReport> for DoctorReportView {
+    fn from(report: &DoctorReport) -> Self {
+        Self {
+            results: report.results.iter().map(CheckResultView::from).collect(),
+            is_blocking: report.is_blocking(),
+            blocking_summary: report.is_blocking().then(|| report.blocking_summary()),
+        }
+    }
+}
+
+/// What `dismiss_onboarding` answers with.
+///
+/// An object rather than nothing at all, because a tool that answers with no
+/// content gives a caller no way to tell "it worked" from "the schema was
+/// wrong" — and because echoing the stored value back makes the write's effect
+/// legible without a second call.
+#[derive(Debug, Clone, PartialEq, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub struct OnboardingView {
+    pub onboarding_dismissed: bool,
 }
 
 /// One card's worth of a task, as `list_tasks` reports it.

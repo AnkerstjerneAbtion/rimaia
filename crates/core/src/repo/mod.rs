@@ -16,6 +16,11 @@
 mod git;
 mod naming;
 
+/// The two binaries this module shells out to, resolved through `PATH`.
+/// Re-exported so task 018's doctor probes the same names, rather than
+/// spelling them a second time somewhere they could drift apart.
+pub use git::{GH_CLI, GIT_CLI};
+
 use std::path::{Path, PathBuf};
 
 use serde::Serialize;
@@ -432,6 +437,66 @@ pub async fn remote_info(repository: &Repository) -> Result<RemoteInfo> {
         remote_url,
         gh_ready,
     })
+}
+
+/// Whether a repository is ready to have a pull request opened against its
+/// remote, with the two unready cases told apart.
+///
+/// [`RemoteInfo::gh_ready`] collapses them into `Some(false)`, which is all
+/// task 003's row warning needs. Task 018's doctor needs them separate: the
+/// remediation for one is "install the GitHub CLI" and for the other "run
+/// `gh auth login`", and offering the wrong one is worse than offering none.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GhStatus {
+    /// No `origin`, or an `origin` with no host — a local path remote. There
+    /// is no pull request to open, so `gh` is not a question here.
+    NoRemote,
+    NotInstalled,
+    NotAuthenticated,
+    Ready,
+}
+
+/// [`remote_info`]'s finer sibling, for the doctor.
+///
+/// Same subprocesses, same never-fails-on-`gh` contract; it only declines to
+/// throw away which of the two failures happened. `program` is injected for
+/// the reason [`git::gh_probe`] gives — a test cannot depend on whether the
+/// machine running it happens to be logged in to GitHub.
+pub async fn gh_status(repository: &Repository, program: &Path) -> Result<GhStatus> {
+    let remote_url = git::remote_url(Path::new(&repository.path)).await?;
+    let Some(host) = remote_url.as_deref().and_then(git::host_from_remote_url) else {
+        return Ok(GhStatus::NoRemote);
+    };
+
+    Ok(match git::gh_probe(program, &host).await {
+        git::GhProbe::NotInstalled => GhStatus::NotInstalled,
+        git::GhProbe::NotAuthenticated => GhStatus::NotAuthenticated,
+        git::GhProbe::Ready => GhStatus::Ready,
+    })
+}
+
+/// Why a registered repository's stored path is no longer usable, or `None`
+/// when it still is.
+///
+/// The doctor's version of the checks [`validate_directory`] and
+/// [`register`] run at registration time, asked again later: a path that was
+/// valid when it was registered is not a path that is valid tonight. Renaming
+/// a project directory is an ordinary thing to do and nothing tells Rimaia.
+pub async fn path_problem(repository: &Repository) -> Result<Option<String>> {
+    let path = Path::new(&repository.path);
+
+    let Ok(metadata) = tokio::fs::metadata(path).await else {
+        return Ok(Some("the directory no longer exists".to_string()));
+    };
+    if !metadata.is_dir() {
+        return Ok(Some("the path is no longer a directory".to_string()));
+    }
+    if git::git_dirs(path).await?.is_none() {
+        return Ok(Some(
+            "the directory is no longer a git repository".to_string(),
+        ));
+    }
+    Ok(None)
 }
 
 /// Checks the first of task 003's four validations and resolves the path to

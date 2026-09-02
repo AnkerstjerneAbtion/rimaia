@@ -111,6 +111,11 @@ pub enum Tool {
     SetScheduleMode,
     SetMaxConcurrency,
     SetRepositoryMaxConcurrency,
+
+    // Task 018. Both inspect or reconfigure *this installation* rather than any
+    // task, which is ADR-0021 point 4's second permanent refusal.
+    RunDoctor,
+    DismissOnboarding,
 }
 
 /// What a [`RunScope::Run`] may do with one tool — ADR-0006's amendment table,
@@ -127,7 +132,7 @@ pub enum RunAccess {
 
 impl Tool {
     /// Every tool with a recorded decision, so a test can walk the table.
-    pub const ALL: [Tool; 23] = [
+    pub const ALL: [Tool; 25] = [
         Tool::AddTaskLink,
         Tool::CreateTask,
         Tool::GetBaseInstructions,
@@ -151,6 +156,8 @@ impl Tool {
         Tool::SetScheduleMode,
         Tool::SetMaxConcurrency,
         Tool::SetRepositoryMaxConcurrency,
+        Tool::RunDoctor,
+        Tool::DismissOnboarding,
     ];
 
     /// The wired name — what `tools/list` advertises and what the ADR table
@@ -180,6 +187,8 @@ impl Tool {
             Tool::SetScheduleMode => "set_schedule_mode",
             Tool::SetMaxConcurrency => "set_max_concurrency",
             Tool::SetRepositoryMaxConcurrency => "set_repository_max_concurrency",
+            Tool::RunDoctor => "run_doctor",
+            Tool::DismissOnboarding => "dismiss_onboarding",
         }
     }
 
@@ -254,6 +263,17 @@ impl Tool {
             | Tool::SetScheduleMode
             | Tool::SetMaxConcurrency
             | Tool::SetRepositoryMaxConcurrency => RunAccess::Refused,
+
+            // Task 018, and the same clause of ADR-0021 point 4 read one step
+            // wider: these are about the *installation*, not about any task.
+            // `run_doctor` reports which binaries are on the operator's PATH,
+            // whether they are signed in, and where every registered repository
+            // lives on disk — a reconnaissance surface a run has no business
+            // reading, and one whose only actionable remediations are things
+            // only a human standing at the machine can do. `dismiss_onboarding`
+            // writes a preference about the operator's own window, which is
+            // nothing a run inside a worktree has an opinion about.
+            Tool::RunDoctor | Tool::DismissOnboarding => RunAccess::Refused,
         }
     }
 }

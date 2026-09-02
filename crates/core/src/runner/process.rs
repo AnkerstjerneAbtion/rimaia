@@ -400,7 +400,11 @@ pub fn is_process_identity(name: &str) -> bool {
 /// `to_string_lossy` is safe here because [`is_process_identity`] only ever
 /// compares an ASCII prefix — a name that is not valid UTF-8 is never one of
 /// the `CLAUDE*` variables being stripped anyway.
-fn strip_process_identity(command: &mut Command) {
+/// `pub(crate)` so task 018's doctor strips the same variables when it runs
+/// `claude auth status`. "Always strip" is easier to keep true than "strip on
+/// the paths that matter", and a second copy of the rule in another module is
+/// exactly how the two would come to disagree.
+pub(crate) fn strip_process_identity(command: &mut Command) {
     let names = std::env::vars_os().map(|(name, _)| name.to_string_lossy().into_owned());
     for name in inherited_identity_vars(names) {
         command.env_remove(name);

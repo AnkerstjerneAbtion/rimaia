@@ -10,6 +10,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use rimaia_core::db::MutationSource;
+use rimaia_core::doctor;
 use rimaia_core::mcp::{self, McpState, RunHandles};
 use rimaia_core::runner::events::RunTail;
 use rimaia_core::runner::process::DEFAULT_GRACE_PERIOD;
@@ -222,6 +223,12 @@ pub fn run() {
                 context.clone(),
                 mcp_port,
                 run_handles.clone(),
+                // The shell's own paths and runner, not `Programs::default` —
+                // so `run_doctor` over MCP reports on the same `claude` binary
+                // and the same data directory the window does. ADR-0021's
+                // parity is only worth having if both surfaces answer about the
+                // same installation.
+                doctor::Environment::for_runner(paths.clone(), &runner),
             ));
             let mcp_status = mcp_handle.status();
             match mcp_status.state {
@@ -343,6 +350,8 @@ pub fn run() {
         commands::mcp::get_mcp_status,
         commands::mcp::set_mcp_port,
         commands::mcp::test_mcp_connection,
+        commands::doctor::run_doctor,
+        commands::doctor::dismiss_onboarding,
     ]);
     #[cfg(not(debug_assertions))]
     let builder = builder.invoke_handler(tauri::generate_handler![
@@ -407,6 +416,8 @@ pub fn run() {
         commands::mcp::get_mcp_status,
         commands::mcp::set_mcp_port,
         commands::mcp::test_mcp_connection,
+        commands::doctor::run_doctor,
+        commands::doctor::dismiss_onboarding,
     ]);
 
     // `Builder::run(context)` is exactly `build(context)?.run(|_, _| {})`

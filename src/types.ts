@@ -19,9 +19,64 @@ export interface AppInfo {
   dataDir: string;
   dbFile: string;
   logsDir: string;
+  /**
+   * Task 018's first-run flag. It rides on this read rather than having a
+   * command of its own because the opening view has to be decided before the
+   * first frame — a second round trip is a flash of the board before the
+   * welcome screen replaces it.
+   */
+  onboardingDismissed: boolean;
 }
 
-export type View = "board" | "runs" | "settings";
+/**
+ * `welcome` is deliberately **not** in `Sidebar`'s `VIEWS` array: it is a
+ * destination the app can *start* on and that Settings can send you to, not a
+ * permanent nav item. Task 001's no-router decision still holds — four views,
+ * no URLs, no nesting, nothing to deep-link.
+ */
+export type View = "board" | "runs" | "settings" | "welcome";
+
+// ---------------------------------------------------------------------------
+// The preflight doctor (task 018) — mirrors `rimaia_core::doctor`.
+// ---------------------------------------------------------------------------
+
+/** Mirrors `rimaia_core::doctor::Check`. */
+export type DoctorCheck =
+  | "claude_cli"
+  | "claude_authenticated"
+  | "git"
+  | "github_cli"
+  | "data_directory"
+  | "disk_space"
+  | "repository_path"
+  | "mcp_port";
+
+/** Mirrors `rimaia_core::doctor::CheckStatus`. Only `fail` blocks queue start. */
+export type DoctorStatus = "pass" | "warn" | "fail";
+
+/** Mirrors `rimaia_core::doctor::CheckResult`. */
+export interface DoctorCheckResult {
+  check: DoctorCheck;
+  /** `Check::label()`, sent rather than re-spelled here — there is one place
+   *  the words for a check live, and it is Rust. */
+  label: string;
+  /**
+   * The repository this row is about, for the two per-repository checks;
+   * `null` for the six that describe the installation as a whole. `detail`
+   * names it too — a sentence that only makes sense beside its own heading is
+   * not a warning that "names the affected repository".
+   */
+  repository: string | null;
+  status: DoctorStatus;
+  detail: string;
+  /** `null` only on a passing row. */
+  remediation: string | null;
+}
+
+/** Mirrors `rimaia_core::doctor::DoctorReport`, in `Check::ALL` order. */
+export interface DoctorReport {
+  results: DoctorCheckResult[];
+}
 
 // ---------------------------------------------------------------------------
 // Repositories (task 003) — mirrors `rimaia_core::db::{Repository, ...}` and

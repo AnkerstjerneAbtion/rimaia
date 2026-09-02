@@ -13,6 +13,7 @@
 pub mod clock;
 pub mod context;
 pub mod db;
+pub mod doctor;
 pub mod error;
 pub mod events;
 pub mod mcp;
