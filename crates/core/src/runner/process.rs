@@ -1185,6 +1185,19 @@ pub async fn execute(
         );
     }
 
+    // Logged whatever the class, because a refused run can end any way at all:
+    // the interesting fact is that the agent spent the attempt being told no,
+    // and the permission mode beside it is the lever that changes that
+    // (ADR-0012).
+    if stream.denied_tool_calls() > 0 {
+        tracing::warn!(
+            run_id = %attempt.run_id,
+            denied = stream.denied_tool_calls(),
+            permission_mode = attempt.invocation.permission_mode.as_str(),
+            "tool calls were refused for want of approval",
+        );
+    }
+
     Ok(outcome)
 }
 

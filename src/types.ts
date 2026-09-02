@@ -659,6 +659,200 @@ export interface WorktreeStatus {
   diff: DiffStat;
 }
 
+/** Mirrors `rimaia_core::worktree::FileDiffStat` (task 015) — one file's
+ *  insertions and deletions out of a {@link DiffSummary}. Both counts are
+ *  `null` for a binary file, which `git diff --numstat` reports as `-` in
+ *  both columns; that is a different fact from "zero lines changed". */
+export interface FileDiffStat {
+  path: string;
+  insertions: number | null;
+  deletions: number | null;
+}
+
+/** Mirrors `rimaia_core::worktree::CommitSummary` (ADR-0013) — one commit on
+ *  a task's branch, as a review lists it. */
+export interface CommitSummary {
+  sha: string;
+  shortSha: string;
+  subject: string;
+  author: string;
+  committedAt: string;
+}
+
+/**
+ * Mirrors `rimaia_core::worktree::DiffSummary` (ADR-0013, task 015): the
+ * diff and the commits a run detail view opens with, second only to the
+ * run's own outcome. Scoped to the branch, not to one attempt — every
+ * attempt of a task shares one branch (ADR-0005), so this is the same
+ * summary regardless of which attempt's detail view fetched it.
+ */
+export interface DiffSummary {
+  taskId: string;
+  branch: string | null;
+  baseRef: string;
+  diff: DiffStat;
+  /** The same diff, broken out per file — `diff`'s totals are a sum over
+   *  this list. */
+  files: FileDiffStat[];
+  /** Newest first. */
+  commits: CommitSummary[];
+}
+
+// ---------------------------------------------------------------------------
+// Run history and the transcript viewer (task 015) — mirrors
+// `rimaia_core::runs` and `rimaia_core::runs::transcript`
+// (ADR-0013, seam-contract D14).
+// ---------------------------------------------------------------------------
+
+/**
+ * Mirrors `rimaia_core::runs::RunListEntry` — one row of the global Runs
+ * view's history, filterable by repository, outcome and date range. A
+ * per-task history list has no need of `taskTitle`/`repositoryName` — it
+ * already knows which task it is looking at — so {@link listRunsForTask}
+ * returns bare {@link Run} rows instead of this.
+ */
+export interface RunListEntry extends Run {
+  taskTitle: string;
+  repositoryId: string;
+  repositoryName: string;
+  /** Computed fresh on every read, never trusted from a cache — ADR-0013's
+   *  "a runs row pointing at a missing file is marked, not trusted". `false`
+   *  is what "Reveal raw log" and the transcript viewer disable themselves on,
+   *  rendering "log unavailable" instead of erroring. */
+  logAvailable: boolean;
+}
+
+/** What {@link listRuns} sends. Mirrors `rimaia_core::runs::RunFilter` via
+ *  `commands::runs::RunFilterInput` — a field left out matches everything. */
+export interface RunFilterInput {
+  repositoryId?: string;
+  status?: RunStatus;
+  /** Matches a run started at or after this instant (RFC 3339). */
+  since?: string;
+  /** Matches a run started at or before this instant (RFC 3339). */
+  until?: string;
+}
+
+/**
+ * Mirrors `rimaia_core::runs::RunDetail` — what a run detail view opens on,
+ * in ADR-0013's order: the run's own outcome (status, exit class, duration,
+ * turn count, cost, attempt — all on the flattened {@link Run} fields), then
+ * `diff` (files changed, insertions, deletions, the per-file breakdown, and
+ * the commits), then the PR link (`prUrl`) and the exact prompt (`prompt`) —
+ * already on {@link Run}. The transcript itself is read separately, page by
+ * page, through {@link readRunTranscriptPage}.
+ */
+export interface RunDetail extends Run {
+  diff: DiffSummary;
+  logAvailable: boolean;
+}
+
+/** Mirrors `rimaia_core::runs::transcript::TranscriptBlock` — one block
+ *  inside a transcript entry's `content` array. Unlike {@link ToolCall}'s
+ *  live-tail rendering, `content` on a `tool_result` block is kept whole
+ *  rather than dropped, because this is read on demand from disk rather than
+ *  held resident in a bounded ring buffer. */
+export type TranscriptBlock =
+  | { kind: "text"; text: string }
+  | { kind: "tool_use"; id: string; name: string; input: unknown }
+  | { kind: "tool_result"; toolUseId: string; isError: boolean; content: string | null }
+  | { kind: "other" };
+
+/** Mirrors `rimaia_core::runs::transcript::TranscriptEntryKind` — what one
+ *  transcript line was. `"malformed"` is a line that was not valid JSON at
+ *  all, kept in place rather than skipped so a page's entry count still
+ *  matches what a reader counts by eye in the raw file. */
+export type TranscriptEntryKind =
+  | { type: "assistant"; blocks: TranscriptBlock[] }
+  | { type: "user"; blocks: TranscriptBlock[] }
+  | { type: "result"; summary: string | null; errors: string[]; isError: boolean }
+  | { type: "other"; eventType: string; subtype: string | null }
+  | { type: "malformed"; raw: string };
+
+/**
+ * Mirrors `rimaia_core::runs::transcript::TranscriptEntry` — one line of a
+ * transcript, as the viewer renders it. `line` is the 1-based line number in
+ * the file *including* blank lines, for "open in editor"-style links; it is
+ * not the same count {@link TranscriptPage.offset} advances over, which
+ * counts only non-blank entries.
+ */
+export interface TranscriptEntry {
+  line: number;
+  kind: TranscriptEntryKind;
+}
+
+/**
+ * Mirrors `rimaia_core::runs::transcript::TranscriptPage` — one bounded page
+ * of a transcript, read straight off disk rather than loading the whole
+ * file: the hard requirement behind this shape is that a 50MB transcript
+ * opens without freezing the UI, which pagination (not virtualization)
+ * satisfies by bounding both the backend read and the IPC payload to
+ * `entries.length` lines at a time. See {@link readRunTranscriptPage}.
+ */
+export interface TranscriptPage {
+  entries: TranscriptEntry[];
+  /** How many non-blank lines precede this page. */
+  offset: number;
+  /** How many non-blank lines the whole file holds — enough to render
+   *  "page 3 of 40" and disable "next" on the last page. */
+  totalLines: number;
+}
+
+/**
+ * Mirrors `rimaia_core::runs::transcript::TranscriptSummary` — the few facts
+ * that explain a run's shape before anyone reads its thousand lines: what the
+ * CLI said it was running under, how many tool calls it was refused, and
+ * whether the stream ever reached a `result`. Read once per run detail, via
+ * {@link summarizeRunTranscript}; every field is already in the transcript
+ * and none of them is findable by paging it.
+ */
+export interface TranscriptSummary {
+  permissionMode: string | null;
+  model: string | null;
+  deniedToolCalls: number;
+  endedWithResult: boolean;
+  /** The last entry would not parse — a stream cut mid-write, not a bad line
+   *  in the middle of a run that carried on past it. */
+  endsMidLine: boolean;
+  malformedLines: number;
+}
+
+/**
+ * Mirrors `rimaia_core::runs::transcript::SearchHit` — one line matching a
+ * {@link searchRunTranscript} query. The search itself runs against the raw
+ * JSON text of every line, not the parsed {@link TranscriptEntry} model,
+ * which is what lets it find a match inside a tool call's input and not only
+ * inside assistant text.
+ */
+export interface SearchHit {
+  /** The same 1-based file line {@link TranscriptEntry.line} uses — what to
+   *  show a reader. */
+  line: number;
+  /** Where the hit sits in the entry numbering {@link TranscriptPage.offset}
+   *  advances over: 0-based, blank lines not counted. Pass it straight to
+   *  {@link readRunTranscriptPage} as the offset — `line` cannot be
+   *  converted into it without re-reading the file. */
+  entry: number;
+  /** A bounded excerpt centred on the match. */
+  snippet: string;
+}
+
+/** What {@link pruneRunLogs} sends. Mirrors
+ *  `commands::runs::PruneCriterionInput` — the by-age and by-task actions
+ *  task 015's Scope names, and nothing else: there is deliberately no
+ *  "prune everything". */
+export type PruneCriterionInput =
+  | { kind: "older_than_days"; days: number }
+  | { kind: "task"; taskId: string };
+
+/** Mirrors `rimaia_core::runs::PruneResult` — what one prune actually
+ *  removed, so Settings can report it and refresh the total size against a
+ *  number that agrees with what just happened. */
+export interface PruneResult {
+  runsPruned: number;
+  bytesFreed: number;
+}
+
 // ---------------------------------------------------------------------------
 // The local MCP server (task 010) — see `crates/core/src/mcp/mod.rs`.
 // ---------------------------------------------------------------------------

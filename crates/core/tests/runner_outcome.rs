@@ -217,6 +217,63 @@ fn a_truncated_stream_says_what_it_could_not_read_and_what_the_process_did() {
     );
 }
 
+/// A run refused every command it tried ends with no `result` to speak for
+/// it, and "the stream ended" is a true sentence that explains nothing — it
+/// reads as a CLI fault when the cause was a permission mode that could not
+/// approve anything (ADR-0012). The count is the difference between those two
+/// readings, so it belongs in the message a reviewer actually sees.
+#[test]
+fn a_stream_that_ended_after_refusals_names_them_rather_than_only_its_own_silence() {
+    let termination = Termination {
+        exit_code: Some(0),
+        denied_tool_calls: 24,
+        ..Termination::default()
+    };
+
+    assert_eq!(
+        RunOutcome::of(&termination, None).error_message,
+        Some(
+            "the event stream ended without a result event; the process exited with code 0; \
+             24 tool calls were refused for want of approval, so the run could not do anything \
+             its permission mode had not already allowed"
+                .to_string()
+        )
+    );
+}
+
+#[test]
+fn a_single_refusal_is_worded_as_one() {
+    let termination = Termination {
+        denied_tool_calls: 1,
+        ..Termination::default()
+    };
+
+    assert_eq!(
+        RunOutcome::of(&termination, None).error_message,
+        Some(
+            "the event stream ended without a result event; 1 tool call was refused for want of \
+             approval, so the run could not do anything its permission mode had not already \
+             allowed"
+                .to_string()
+        )
+    );
+}
+
+/// The refusals are a note on a run that ended unexplained, not a class of
+/// their own: ADR-0011's six classes are decided by the terminal vocabulary,
+/// and a refused run is still transient — retrying it under a mode that can
+/// approve is exactly the right next move.
+#[test]
+fn refusals_are_reported_but_never_classify_a_run() {
+    let refused = Termination {
+        denied_tool_calls: 24,
+        ..Termination::default()
+    };
+
+    assert_eq!(classify(&refused), classify(&Termination::default()));
+    assert_eq!(classify(&refused), ExitClass::Transient);
+}
+
 #[test]
 fn a_line_the_parser_had_to_skip_does_not_change_the_outcome() {
     // `malformed-line.jsonl` is `success.jsonl` with exactly one unreadable line

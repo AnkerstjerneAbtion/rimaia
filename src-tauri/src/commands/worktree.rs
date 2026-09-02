@@ -9,7 +9,7 @@
 //! standing in front of a rule the MCP server also has to obey — there is no
 //! such rule to share.
 
-use rimaia_core::worktree::{self, WorktreeStatus};
+use rimaia_core::worktree::{self, DiffSummary, WorktreeStatus};
 use rimaia_core::{tasks, Error, Result};
 use tauri::State;
 use tauri_plugin_opener::OpenerExt;
@@ -25,6 +25,15 @@ pub async fn get_worktree_status(
     task_id: String,
 ) -> Result<WorktreeStatus> {
     worktree::status(&state.context, &task_id).await
+}
+
+/// The diff and the commits a run detail view opens with (task 015,
+/// ADR-0013): files changed, insertions, deletions, the per-file breakdown,
+/// and the commit list — the branch's current state, not a snapshot of any
+/// one attempt, since every attempt of a task shares one branch (ADR-0005).
+#[tauri::command]
+pub async fn get_diff_summary(state: State<'_, AppState>, task_id: String) -> Result<DiffSummary> {
+    worktree::diff_summary(&state.context, &task_id).await
 }
 
 /// Opens the task's worktree directory in the OS file manager.

@@ -3357,6 +3357,7 @@ dependencies = [
 name = "rimaia"
 version = "0.1.0"
 dependencies = [
+ "chrono",
  "rimaia-core",
  "serde",
  "serde_json",

@@ -9,6 +9,7 @@ import { ExtraInstructionsEditor } from "../panel/ExtraInstructionsEditor";
 import { LinksEditor } from "../panel/LinksEditor";
 import { PlanEditor } from "../panel/PlanEditor";
 import { RepositorySelector } from "../panel/RepositorySelector";
+import { RunHistorySection } from "../panel/RunHistorySection";
 import { RunInfoSection } from "../panel/RunInfoSection";
 import { RunOutcomeSection } from "../panel/RunOutcomeSection";
 import { StrategySection } from "../panel/StrategySection";
@@ -231,6 +232,11 @@ function TaskDetailPanelBody({
           above, not a replacement for it (see this stage's file-ownership
           note in `RunOutcomeSection.tsx`'s own doc comment). */}
       <RunOutcomeSection lastRun={detail?.lastRun ?? null} loading={detailLoading} />
+
+      {/* Task 015's full history — every attempt, not only the last one —
+          each opening the run detail overlay (outcome, diff, commits, PR,
+          prompt, transcript, in ADR-0013's order). */}
+      <RunHistorySection taskId={task.id} />
 
       <WorktreeSection taskId={task.id} />
 

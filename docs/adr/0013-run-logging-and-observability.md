@@ -72,3 +72,24 @@ run-log size alongside worktree size.
 - **Transcript in a `TEXT` column on `runs`.** Simple, and forces every board query to
   either project carefully or drag megabytes.
 - **Log to stdout only.** Nothing to review in the morning, which is the entire product.
+
+## Amendment, 2026-09-01 — a missing log is noticed on read, not at startup
+
+This ADR says a `runs` row whose transcript is gone is "reconciled at startup". Task 015
+does **not** do that, and the deviation is recorded here rather than left to be discovered
+in a diff.
+
+`log_available` is computed with `try_exists` on every read of a run, and `startup::survey`
+is untouched. The reason is seam-contract D4: a startup pass that *marks* a row needs
+somewhere to write the mark, which is a column, which is a migration the seam contract
+caps — and the cap exists for a good reason that a nicety should not overturn.
+
+Computing it live is also the more honest answer. A stored mark is a claim about the
+filesystem as it was at the last launch, and the file can vanish an hour later; a check at
+read time cannot be stale. `WorktreeStatus::exists` already works this way, for the same
+reason, so this is the codebase's existing pattern rather than a new one.
+
+What the ADR was actually asking for — that a missing log is **surfaced rather than
+trusted**, and never presented as an error — holds either way. The cost is one `stat` per
+run rendered, which is not a cost.
+

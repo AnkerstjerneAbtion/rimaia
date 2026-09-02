@@ -3,18 +3,21 @@ import { useEffect, useRef, useState } from "react";
 import { ActiveRunCard } from "../components/runs/ActiveRunCard";
 import { QueueControls } from "../components/runs/QueueControls";
 import { QueuePlanList } from "../components/runs/QueuePlanList";
+import { RunDetailOverlay } from "../components/runs/RunDetailOverlay";
 import { SessionOutcomesList } from "../components/runs/SessionOutcomesList";
 import type { RunCostSummary } from "../types";
 import type { SessionOutcome } from "../components/runs/SessionOutcomesList";
 import { EmptyState } from "../components/EmptyState";
 import { environmentOverheadNote } from "../lib/runEnvironment";
 import { ErrorBanner } from "../components/ErrorBanner";
+import { EXIT_CLASS_LABELS } from "../components/panel/RunOutcomeSection";
 import {
   getQueueStatus,
   getRunCostSummary,
   getRunEnvironment,
   getTask,
   listRepositories,
+  listRuns,
   listTasks,
   toRimaiaError,
 } from "../lib/commands";
@@ -23,7 +26,61 @@ import {
   subscribeToSettingsChanged,
   subscribeToTasksChanged,
 } from "../lib/events";
-import type { QueueStatus, RimaiaError, RunEnvironment, TaskSummary } from "../types";
+import type {
+  QueueStatus,
+  RimaiaError,
+  RunEnvironment,
+  RunFilterInput,
+  RunListEntry,
+  RunStatus,
+  TaskSummary,
+} from "../types";
+
+/** The Runs view's history filter: every field left `undefined` matches
+ *  everything, the same "narrows, never widens" contract
+ *  {@link RunFilterInput} states on the wire. Dates are plain
+ *  `<input type="date">` values (`YYYY-MM-DD`), turned into RFC 3339 instants
+ *  at the day's boundary before they reach {@link listRuns}. */
+interface HistoryFilterState {
+  repositoryId: string;
+  status: RunStatus | "";
+  since: string;
+  until: string;
+}
+
+const EMPTY_HISTORY_FILTER: HistoryFilterState = {
+  repositoryId: "",
+  status: "",
+  since: "",
+  until: "",
+};
+
+const RUN_STATUS_OPTIONS: RunStatus[] = [
+  "running",
+  "succeeded",
+  "failed",
+  "cancelled",
+  "interrupted",
+];
+
+function toRunFilterInput(filter: HistoryFilterState): RunFilterInput {
+  return {
+    repositoryId: filter.repositoryId || undefined,
+    status: filter.status || undefined,
+    // A date input names a calendar day; `since` starts at its beginning and
+    // `until` at the start of the *next* day, so the day the user picked is
+    // included whichever field it is in rather than excluding whatever ran
+    // after midnight.
+    since: filter.since ? `${filter.since}T00:00:00Z` : undefined,
+    until: filter.until ? nextDayStart(filter.until) : undefined,
+  };
+}
+
+function nextDayStart(day: string): string {
+  const next = new Date(`${day}T00:00:00Z`);
+  next.setUTCDate(next.getUTCDate() + 1);
+  return next.toISOString();
+}
 
 /**
  * Task 008's Runs view: whatever task is running right now, live, with a
@@ -51,6 +108,14 @@ export function RunsView() {
   const [queueError, setQueueError] = useState<RimaiaError | null>(null);
   const [hasRunBefore, setHasRunBefore] = useState(false);
   const [sessionOutcomes, setSessionOutcomes] = useState<SessionOutcome[]>([]);
+
+  // Task 015's global history: every run matching `historyFilter`, across
+  // every repository — the Runs view's morning-review counterpart to a
+  // single task's own history list in the detail panel.
+  const [historyFilter, setHistoryFilter] = useState<HistoryFilterState>(EMPTY_HISTORY_FILTER);
+  const [historyEntries, setHistoryEntries] = useState<RunListEntry[] | null>(null);
+  const [historyError, setHistoryError] = useState<RimaiaError | null>(null);
+  const [selectedRunId, setSelectedRunId] = useState<string | null>(null);
 
   // Read inside the queue-status effect below, which subscribes once rather
   // than on every `repositoryNames` change — same reason `ActiveRunCard`'s
@@ -223,6 +288,55 @@ export function RunsView() {
     };
   }, []);
 
+  // Re-read on every filter change, and on any mutation a run's outcome
+  // could come from (`runs:changed`) or that could rename a task or
+  // repository shown in the list (`tasks:changed`) — the same "narrow
+  // filter, wholesale re-read on change" shape `listTasks` above already
+  // uses for the board.
+  useEffect(() => {
+    let active = true;
+
+    function refresh() {
+      listRuns(toRunFilterInput(historyFilter)).then(
+        (entries) => {
+          if (active) {
+            setHistoryEntries(entries);
+            setHistoryError(null);
+          }
+        },
+        (thrown) => {
+          if (active) setHistoryError(toRimaiaError(thrown));
+        },
+      );
+    }
+
+    refresh();
+
+    const unlistens: Array<() => void> = [];
+    function settle(subscription: Promise<() => void>) {
+      subscription.then(
+        (fn) => {
+          if (active) {
+            unlistens.push(fn);
+          } else {
+            fn();
+          }
+        },
+        () => {
+          // No event bridge (tests, or a non-Tauri preview) — the initial
+          // `refresh()` above is all this section will ever show.
+        },
+      );
+    }
+    settle(subscribeToRunsChanged(() => active && refresh()));
+    settle(subscribeToTasksChanged(() => active && refresh()));
+
+    return () => {
+      active = false;
+      for (const unlisten of unlistens) unlisten();
+    };
+  }, [historyFilter]);
+
   const overheadNote = environmentOverheadNote(runCosts);
 
   return (
@@ -287,7 +401,7 @@ export function RunsView() {
         <EmptyState
           title="Nothing running right now"
           body="Each run lands here with its elapsed time, turn count, current tool call, recent assistant text, and a Cancel button, for as long as it is in progress."
-          arrivesIn="Full history, diffs and the transcript viewer land in task 015."
+          arrivesIn="See History below for every past run, its diff and commits, and its transcript."
         />
       )}
 
@@ -301,6 +415,115 @@ export function RunsView() {
             />
           ))}
         </div>
+      )}
+
+      {/* Task 015's global history — every run across every repository,
+          filterable by repository, outcome and date range, each opening the
+          same run detail overlay a task's own history list does. */}
+      <section className="runs-history-section">
+        <h2>History</h2>
+
+        <div className="runs-history-filters">
+          <label>
+            Repository
+            <select
+              value={historyFilter.repositoryId}
+              onChange={(event) =>
+                setHistoryFilter((filter) => ({ ...filter, repositoryId: event.target.value }))
+              }
+            >
+              <option value="">All repositories</option>
+              {[...repositoryNames.entries()].map(([id, name]) => (
+                <option key={id} value={id}>
+                  {name}
+                </option>
+              ))}
+            </select>
+          </label>
+
+          <label>
+            Outcome
+            <select
+              value={historyFilter.status}
+              onChange={(event) =>
+                setHistoryFilter((filter) => ({
+                  ...filter,
+                  status: event.target.value as RunStatus | "",
+                }))
+              }
+            >
+              <option value="">Any outcome</option>
+              {RUN_STATUS_OPTIONS.map((status) => (
+                <option key={status} value={status}>
+                  {status}
+                </option>
+              ))}
+            </select>
+          </label>
+
+          <label>
+            From
+            <input
+              type="date"
+              value={historyFilter.since}
+              onChange={(event) =>
+                setHistoryFilter((filter) => ({ ...filter, since: event.target.value }))
+              }
+            />
+          </label>
+
+          <label>
+            To
+            <input
+              type="date"
+              value={historyFilter.until}
+              onChange={(event) =>
+                setHistoryFilter((filter) => ({ ...filter, until: event.target.value }))
+              }
+            />
+          </label>
+
+          {Object.values(historyFilter).some((value) => value !== "") && (
+            <button type="button" onClick={() => setHistoryFilter(EMPTY_HISTORY_FILTER)}>
+              Clear filters
+            </button>
+          )}
+        </div>
+
+        {historyError && (
+          <ErrorBanner error={historyError} onDismiss={() => setHistoryError(null)} />
+        )}
+        {historyEntries === null && !historyError && <p className="muted">Reading history…</p>}
+        {historyEntries && historyEntries.length === 0 && (
+          <p className="muted">No runs match these filters.</p>
+        )}
+
+        {historyEntries && historyEntries.length > 0 && (
+          <ul className="runs-history-list">
+            {historyEntries.map((entry) => (
+              <li key={entry.id}>
+                <button type="button" onClick={() => setSelectedRunId(entry.id)}>
+                  <span className="session-outcome-title">{entry.taskTitle}</span>
+                  <span className="session-outcome-repo">{entry.repositoryName}</span>
+                  <span
+                    className={
+                      entry.exitClass
+                        ? `exit-class-badge exit-class-${entry.exitClass}`
+                        : "muted"
+                    }
+                  >
+                    {entry.exitClass ? EXIT_CLASS_LABELS[entry.exitClass] : "Running"}
+                  </span>
+                  <span className="muted">{new Date(entry.startedAt).toLocaleString()}</span>
+                </button>
+              </li>
+            ))}
+          </ul>
+        )}
+      </section>
+
+      {selectedRunId && (
+        <RunDetailOverlay runId={selectedRunId} onClose={() => setSelectedRunId(null)} />
       )}
     </div>
   );

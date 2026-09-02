@@ -1,11 +1,11 @@
-import { act, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 
 import { RunsView } from "./RunsView";
-import type { QueueStatus, Repository, TaskDetail, TaskSummary } from "../types";
+import type { QueueStatus, Repository, RunListEntry, TaskDetail, TaskSummary } from "../types";
 
 // Mocked at the Tauri seam, not `lib/commands.ts`/`lib/events.ts` — see
 // `StorageSection.test.tsx`'s own comment for why.
@@ -106,6 +106,31 @@ function taskDetailFor(taskId: string, overrides: Partial<TaskDetail> = {}): Tas
   };
 }
 
+function runListEntry(overrides: Partial<RunListEntry> = {}): RunListEntry {
+  return {
+    id: "run-1",
+    taskId: "task-1",
+    attempt: 1,
+    status: "succeeded",
+    sessionId: "session-1",
+    prompt: "prompt",
+    startedAt: "2026-08-20T11:00:00Z",
+    endedAt: "2026-08-20T11:30:00Z",
+    exitClass: "success",
+    errorMessage: null,
+    numTurns: 4,
+    costUsd: 0.05,
+    logPath: "/data/runs/task-1/run-1.jsonl",
+    prUrl: null,
+    resumeAfter: null,
+    taskTitle: "Wire up the board",
+    repositoryId: "repo-1",
+    repositoryName: "rimaia",
+    logAvailable: true,
+    ...overrides,
+  };
+}
+
 /** Every test's default backend: no running tasks, one repository, a paused
  *  empty queue, and every `listen` subscription resolves and never fires on
  *  its own — the same shape `Board.test.tsx`'s own `mockBackend` uses.
@@ -117,6 +142,7 @@ function mockBackend({
   repositories = [repository()],
   runEnvironment = "inherit" as "inherit" | "strict_local",
   queue = queueStatus(),
+  historyEntries = [] as RunListEntry[],
 } = {}) {
   // Arrays, not a bare handler per name: task 009 adds a second `tasks:changed`
   // subscriber (the queue-status effect, alongside the pre-existing
@@ -174,6 +200,7 @@ function mockBackend({
       };
     }
     if (command === "get_run_tail") return null;
+    if (command === "list_runs") return historyEntries;
     throw new Error(`unexpected command: ${command}`);
   });
 
@@ -654,6 +681,84 @@ describe("RunsView", () => {
       await waitFor(() => expect(screen.getAllByRole("listitem").length).toBeGreaterThan(0));
       expect(screen.getAllByRole("listitem")).toHaveLength(1);
       expect(screen.queryByText("First")).toBeNull();
+    });
+  });
+
+  // ---------------------------------------------------------------------------
+  // Run history and filtering (task 015; ADR-0013).
+  // ---------------------------------------------------------------------------
+
+  describe("history", () => {
+    it("lists every run list_runs reports, across every repository", async () => {
+      mockBackend({
+        historyEntries: [
+          runListEntry({ id: "run-1", taskTitle: "First task" }),
+          runListEntry({ id: "run-2", taskTitle: "Second task", exitClass: "fatal" }),
+        ],
+      });
+
+      render(<RunsView />);
+
+      expect(await screen.findByText("First task")).toBeInTheDocument();
+      expect(screen.getByText("Second task")).toBeInTheDocument();
+    });
+
+    it("shows a message when no runs match the filters", async () => {
+      mockBackend({ historyEntries: [] });
+
+      render(<RunsView />);
+
+      expect(await screen.findByText("No runs match these filters.")).toBeInTheDocument();
+    });
+
+    it("re-reads the history list on runs:changed", async () => {
+      let call = 0;
+      const { fire } = mockBackend({});
+      mockInvoke.mockImplementation(async (command) => {
+        if (command === "list_tasks") return [];
+        if (command === "list_repositories") return [repository()];
+        if (command === "get_run_environment") return "inherit";
+        if (command === "get_queue_status") return queueStatus();
+        if (command === "list_runs") {
+          call += 1;
+          return call === 1 ? [] : [runListEntry({ taskTitle: "Freshly finished" })];
+        }
+        throw new Error(`unexpected command: ${command}`);
+      });
+
+      render(<RunsView />);
+      await waitFor(() => expect(call).toBe(1));
+      expect(screen.getByText("No runs match these filters.")).toBeInTheDocument();
+
+      act(() => fire("runs:changed", ["run-1"]));
+
+      expect(await screen.findByText("Freshly finished")).toBeInTheDocument();
+    });
+
+    it("sends the chosen repository as a filter to list_runs", async () => {
+      mockListen.mockResolvedValue(vi.fn());
+      let lastFilter: unknown;
+      mockInvoke.mockImplementation(async (command, args) => {
+        if (command === "list_tasks") return [];
+        if (command === "list_repositories") {
+          return [repository({ id: "repo-1", name: "rimaia" }), repository({ id: "repo-2", name: "other" })];
+        }
+        if (command === "get_run_environment") return "inherit";
+        if (command === "get_queue_status") return queueStatus();
+        if (command === "list_runs") {
+          lastFilter = (args as { filter: unknown }).filter;
+          return [];
+        }
+        throw new Error(`unexpected command: ${command}`);
+      });
+
+      render(<RunsView />);
+      await screen.findByText("other");
+      expect(lastFilter).toEqual({});
+
+      fireEvent.change(screen.getByLabelText("Repository"), { target: { value: "repo-2" } });
+
+      await waitFor(() => expect(lastFilter).toEqual({ repositoryId: "repo-2" }));
     });
   });
 });

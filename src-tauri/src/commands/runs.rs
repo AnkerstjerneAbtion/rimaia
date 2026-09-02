@@ -9,18 +9,28 @@
 //! returns before the work it started is done, and something for a second
 //! click on the same task to fail against instead of a second child process.
 //!
-//! "Read a run's outcome and its log path" needs no command of its own: that
-//! is `TaskDetail.lastRun`, which `commands::tasks::get_task` already
-//! returns — the run this crate just started **is** the task's most recent
-//! attempt for as long as [`crate::state::RunRegistry`] refuses a second
-//! concurrent one, so a dedicated `get_run` would only read the same row a
-//! second way.
+//! "Read the *most recent* run's outcome and its log path" needs no command
+//! of its own: that is `TaskDetail.lastRun`, which `commands::tasks::get_task`
+//! already returns — the run this crate just started **is** the task's most
+//! recent attempt for as long as [`crate::state::RunRegistry`] refuses a
+//! second concurrent one. Task 015's [`get_run`] below is a different read:
+//! *any* attempt by id, with the branch's diff and commits alongside it
+//! (ADR-0013), for a history list that shows every attempt rather than only
+//! the last one.
 
+use std::path::Path;
+
+use chrono::{DateTime, Utc};
+use rimaia_core::db::{Run, RunStatus};
 use rimaia_core::runner::events::RunTail;
 use rimaia_core::runner::{probe_cli, run_task, RunRequest, RunTrigger};
+use rimaia_core::runs::transcript::{self, SearchHit, TranscriptPage};
+use rimaia_core::runs::{self, PruneCriterion, PruneResult, RunDetail, RunFilter, RunListEntry};
 use rimaia_core::scheduler::{self, ClaimOutcome};
 use rimaia_core::{repo, tasks, Error, Result};
+use serde::Deserialize;
 use tauri::State;
+use tauri_plugin_opener::OpenerExt;
 
 use crate::state::{AppState, RunRegistry};
 
@@ -173,4 +183,184 @@ pub fn cancel_task_run(state: State<'_, AppState>, task_id: String) -> Result<()
 #[tauri::command]
 pub fn get_run_tail(state: State<'_, AppState>, run_id: String) -> Result<Option<RunTail>> {
     Ok(state.runs.tail(&run_id))
+}
+
+// ---------------------------------------------------------------------------
+// Run history, run detail and the transcript viewer (task 015, ADR-0013)
+// ---------------------------------------------------------------------------
+
+/// Every run of `task_id`, newest attempt first — the task detail panel's
+/// history list.
+#[tauri::command]
+pub async fn list_runs_for_task(state: State<'_, AppState>, task_id: String) -> Result<Vec<Run>> {
+    runs::list_runs_for_task(&state.context, &task_id).await
+}
+
+/// What the frontend sends [`list_runs`]. Mirrors
+/// [`rimaia_core::runs::RunFilter`] — a field left out matches everything,
+/// the same contract [`super::tasks::TaskFilterInput`] states for the board.
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RunFilterInput {
+    #[serde(default)]
+    pub repository_id: Option<String>,
+    #[serde(default)]
+    pub status: Option<RunStatus>,
+    #[serde(default)]
+    pub since: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub until: Option<DateTime<Utc>>,
+}
+
+/// The global Runs view's history: every run matching `filter`, newest
+/// first, with its task's title and repository name for a list that spans
+/// every repository.
+#[tauri::command]
+pub async fn list_runs(
+    state: State<'_, AppState>,
+    filter: RunFilterInput,
+) -> Result<Vec<RunListEntry>> {
+    runs::list_runs(
+        &state.context,
+        RunFilter {
+            repository_id: filter.repository_id,
+            status: filter.status,
+            since: filter.since,
+            until: filter.until,
+        },
+    )
+    .await
+}
+
+/// One run's full detail: its own outcome, the branch's diff and commits
+/// (ADR-0013's ordering), and whether its transcript file still resolves.
+#[tauri::command]
+pub async fn get_run(state: State<'_, AppState>, run_id: String) -> Result<RunDetail> {
+    runs::get_run(&state.context, &run_id).await
+}
+
+/// One page of `run_id`'s transcript, oldest-shown-line first.
+///
+/// `limit` defaults to [`transcript::DEFAULT_PAGE_SIZE`] rather than being
+/// required, so a caller that just wants "the next page" does not have to
+/// repeat the constant on every call.
+#[tauri::command]
+pub async fn read_run_transcript_page(
+    state: State<'_, AppState>,
+    run_id: String,
+    offset: usize,
+    limit: Option<usize>,
+) -> Result<TranscriptPage> {
+    let run = runs::get_run_row(&state.context, &run_id).await?;
+    transcript::read_page(
+        Path::new(&run.log_path),
+        offset,
+        limit.unwrap_or(transcript::DEFAULT_PAGE_SIZE),
+    )
+    .await
+}
+
+/// How `run_id`'s transcript begins and ends: the permission mode and model
+/// the CLI reported, how many tool calls were refused, and whether the stream
+/// reached a `result` at all.
+///
+/// A separate read from [`get_run`] rather than a field on it, because it
+/// costs a scan of the file: a caller listing runs pays nothing, and the run
+/// detail view — which is about to page that same file anyway — pays it once.
+#[tauri::command]
+pub async fn summarize_run_transcript(
+    state: State<'_, AppState>,
+    run_id: String,
+) -> Result<transcript::TranscriptSummary> {
+    let run = runs::get_run_row(&state.context, &run_id).await?;
+    transcript::summarize(Path::new(&run.log_path)).await
+}
+
+/// Text search across `run_id`'s whole transcript — inside tool inputs as
+/// well as assistant messages, since [`transcript::search`] matches the raw
+/// JSON line rather than a rendering of it.
+#[tauri::command]
+pub async fn search_run_transcript(
+    state: State<'_, AppState>,
+    run_id: String,
+    query: String,
+) -> Result<Vec<SearchHit>> {
+    let run = runs::get_run_row(&state.context, &run_id).await?;
+    transcript::search(Path::new(&run.log_path), &query).await
+}
+
+/// Reveals `run_id`'s raw JSONL transcript in the OS file manager — task
+/// 015's "reveals the JSONL file". "Copy log path" needs no command: every
+/// caller already has `Run.logPath` from [`get_run`] or
+/// [`list_runs_for_task`], and the system clipboard is a browser API away.
+///
+/// # `reveal_item_in_dir`, not `open_path`
+///
+/// `open_path` hands the file to whatever the OS has registered for
+/// `.jsonl`, through a **detached** child process: on a machine with no
+/// handler for that extension the launch fails after this call has already
+/// returned `Ok`, so the button did nothing and had nothing to say about it —
+/// which is exactly how this was found. Revealing the file has no such gap
+/// (the plugin canonicalizes the path and the failure comes back here), and
+/// it is the better action anyway: a run's transcript is megabytes of JSONL,
+/// and "show me where it is" is what a reviewer wants from it, not "open it
+/// in a text editor".
+///
+/// The existence check is `rimaia_core::runs::log_path_to_reveal`'s, not this
+/// adapter's — a missing transcript is the same fact `get_run` reports as
+/// `logAvailable`, and it is stated once, in core (ADR-0006).
+#[tauri::command]
+pub async fn reveal_run_log(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    run_id: String,
+) -> Result<()> {
+    let log_path = runs::log_path_to_reveal(&state.context, &run_id).await?;
+    app.opener()
+        .reveal_item_in_dir(log_path)
+        .map_err(|e| Error::internal(format!("could not reveal the log file: {e}")))
+}
+
+// ---------------------------------------------------------------------------
+// Storage housekeeping (ADR-0013's "Retention")
+// ---------------------------------------------------------------------------
+
+/// Total bytes on disk across every run's transcript, for Settings' storage
+/// report alongside worktree size.
+#[tauri::command]
+pub async fn get_run_log_size(state: State<'_, AppState>) -> Result<u64> {
+    Ok(runs::total_log_size(&state.paths).await)
+}
+
+/// What the frontend sends [`prune_run_logs`]. Mirrors
+/// [`rimaia_core::runs::PruneCriterion`] — the by-age and by-task actions
+/// task 015's Scope names, and nothing else.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "kind")]
+pub enum PruneCriterionInput {
+    OlderThanDays {
+        days: i64,
+    },
+    // The enum-level `rename_all` only cases the variant tag; this field's
+    // own casing needs stating separately so the wire key stays `taskId`
+    // like every other id on this boundary.
+    #[serde(rename_all = "camelCase")]
+    Task {
+        task_id: String,
+    },
+}
+
+/// Deletes transcript (and stderr) files matching `criterion`, leaving every
+/// `runs` row untouched — see [`rimaia_core::runs::prune_logs`]'s own doc for
+/// why the row survives.
+#[tauri::command]
+pub async fn prune_run_logs(
+    state: State<'_, AppState>,
+    criterion: PruneCriterionInput,
+) -> Result<PruneResult> {
+    let criterion = match criterion {
+        PruneCriterionInput::OlderThanDays { days } => PruneCriterion::OlderThanDays(days),
+        PruneCriterionInput::Task { task_id } => PruneCriterion::Task(task_id),
+    };
+    runs::prune_logs(&state.context, criterion).await
 }

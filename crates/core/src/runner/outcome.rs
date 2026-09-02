@@ -87,6 +87,11 @@ pub struct Termination<'a> {
     /// Carried for the error message, never for the classification — see this
     /// module's header on why 143 makes the exit code untrustworthy here.
     pub exit_code: Option<i32>,
+    /// How many tool calls were refused for want of approval. Carried for the
+    /// message on the same terms as [`exit_code`](Self::exit_code): a run that
+    /// was refused into stopping ends with no `result` to speak for it, and
+    /// "the stream ended" is a true sentence that explains nothing.
+    pub denied_tool_calls: u64,
 }
 
 impl<'a> Termination<'a> {
@@ -97,6 +102,7 @@ impl<'a> Termination<'a> {
             rate_limit: stream.rate_limit(),
             cancel_requested: false,
             exit_code: None,
+            denied_tool_calls: stream.denied_tool_calls(),
         }
     }
 
@@ -304,14 +310,35 @@ fn error_message(exit_class: ExitClass, termination: &Termination<'_>) -> Option
             // The exit code earns its keep here and nowhere else: it does not
             // classify anything, but "exited 137" versus "exited 1" is the
             // difference between an OOM kill and a crash for whoever reads this.
-            None => match termination.exit_code {
-                Some(code) => format!(
-                    "the event stream ended without a result event; the process exited with code {code}"
-                ),
-                None => "the event stream ended without a result event".to_string(),
-            },
+            None => {
+                let mut message = match termination.exit_code {
+                    Some(code) => format!(
+                        "the event stream ended without a result event; the process exited with code {code}"
+                    ),
+                    None => "the event stream ended without a result event".to_string(),
+                };
+                // The one fact that turns "it stopped" into "it was never
+                // allowed to start". Appended only here, where there is no
+                // `result` to say anything better.
+                if termination.denied_tool_calls > 0 {
+                    message.push_str(&refusal_clause(termination.denied_tool_calls));
+                }
+                message
+            }
         }),
     }
+}
+
+/// Names the refusals, and what the operator can do about them: the mode is
+/// the actual lever (ADR-0012 — a manual run is deliberately `acceptEdits`,
+/// and a queued one on an opted-in repository is not).
+fn refusal_clause(denied: u64) -> String {
+    format!(
+        "; {denied} tool call{} {} refused for want of approval, so the run could not do \
+         anything its permission mode had not already allowed",
+        if denied == 1 { "" } else { "s" },
+        if denied == 1 { "was" } else { "were" },
+    )
 }
 
 fn failure_message(result: &ResultEvent) -> String {

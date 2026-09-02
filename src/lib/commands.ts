@@ -3,19 +3,27 @@ import { invoke } from "@tauri-apps/api/core";
 import type {
   AppInfo,
   BoardColumn,
+  DiffSummary,
   McpProbe,
   McpStatus,
   NewTaskInput,
   NewTaskLinkInput,
+  PruneCriterionInput,
+  PruneResult,
   QueueStatus,
   RegisterRepositoryInput,
   RemoteInfo,
   Repository,
   RimaiaError,
+  Run,
   RunCostSummary,
+  RunDetail,
   RunEnvironment,
+  RunFilterInput,
+  RunListEntry,
   RunState,
   RunTail,
+  SearchHit,
   StrategyApproval,
   StrategyCatalogueView,
   StrategyDefaults,
@@ -26,6 +34,8 @@ import type {
   TaskLinkPatchInput,
   TaskPatchInput,
   TaskSummary,
+  TranscriptPage,
+  TranscriptSummary,
   UpdateRepositoryInput,
   WorktreeStatus,
 } from "../types";
@@ -342,6 +352,17 @@ export function getWorktreeStatus(taskId: string): Promise<WorktreeStatus> {
 }
 
 /**
+ * The diff and the commits a run detail view opens with (task 015,
+ * ADR-0013): files changed, insertions, deletions, the per-file breakdown,
+ * and the commit list. Scoped to the branch, not to one attempt — every
+ * attempt of a task shares one branch, so this is the same summary
+ * regardless of which run's detail view fetched it.
+ */
+export function getDiffSummary(taskId: string): Promise<DiffSummary> {
+  return call<DiffSummary>("get_diff_summary", { taskId });
+}
+
+/**
  * Opens the task's worktree directory in the OS file manager. "Copy path"
  * needs no command — a component already has the path from
  * {@link getWorktreeStatus} or from `TaskDetail.worktreePath`, and the
@@ -389,6 +410,91 @@ export function cancelRun(taskId: string): Promise<void> {
  */
 export function getRunTail(runId: string): Promise<RunTail | null> {
   return call<RunTail | null>("get_run_tail", { runId });
+}
+
+// ---------------------------------------------------------------------------
+// Run history and the transcript viewer (task 015, ADR-0013) — see
+// `src-tauri/src/commands/runs.rs`.
+// ---------------------------------------------------------------------------
+
+/** Every run of `taskId`, newest attempt first — the task detail panel's
+ *  history list. */
+export function listRunsForTask(taskId: string): Promise<Run[]> {
+  return call<Run[]>("list_runs_for_task", { taskId });
+}
+
+/**
+ * The global Runs view's history: every run matching `filter`, newest first,
+ * with its task's title and repository name for a list that spans every
+ * repository. `filter` narrows the result; an empty object matches every run.
+ */
+export function listRuns(filter: RunFilterInput = {}): Promise<RunListEntry[]> {
+  return call<RunListEntry[]>("list_runs", { filter });
+}
+
+/**
+ * One run's full detail: its own outcome, the branch's diff and commits
+ * (ADR-0013's ordering), the exact prompt it received, and whether its
+ * transcript file still resolves.
+ */
+export function getRun(runId: string): Promise<RunDetail> {
+  return call<RunDetail>("get_run", { runId });
+}
+
+/**
+ * One page of `runId`'s transcript, oldest-shown-line first. `limit`
+ * defaults on the backend to a few hundred lines — pass it explicitly only
+ * to change the page size, never to page through a 50MB file in one call.
+ */
+export function readRunTranscriptPage(
+  runId: string,
+  offset: number,
+  limit?: number,
+): Promise<TranscriptPage> {
+  return call<TranscriptPage>("read_run_transcript_page", { runId, offset, limit });
+}
+
+/**
+ * Text search across `runId`'s whole transcript — inside tool inputs as well
+ * as assistant messages, since the backend matches the raw JSON line rather
+ * than a rendering of it.
+ */
+export function searchRunTranscript(runId: string, query: string): Promise<SearchHit[]> {
+  return call<SearchHit[]>("search_run_transcript", { runId, query });
+}
+
+/**
+ * How `runId`'s transcript begins and ends — permission mode, model, refused
+ * tool calls, and whether the stream reached a `result`. One scan of the file
+ * on the backend, so it is read once per run detail rather than carried on
+ * every {@link getRun}.
+ */
+export function summarizeRunTranscript(runId: string): Promise<TranscriptSummary> {
+  return call<TranscriptSummary>("summarize_run_transcript", { runId });
+}
+
+/** Reveals `runId`'s raw JSONL transcript in the OS file manager. "Copy log
+ *  path" needs no command — every caller already has `Run.logPath` from
+ *  {@link getRun} or {@link listRunsForTask}, and the system clipboard is a
+ *  browser API away. */
+export function revealRunLog(runId: string): Promise<void> {
+  return call<void>("reveal_run_log", { runId });
+}
+
+/** Total bytes on disk across every run's transcript, for Settings' storage
+ *  report alongside worktree size. */
+export function getRunLogSize(): Promise<number> {
+  return call<number>("get_run_log_size");
+}
+
+/**
+ * Deletes transcript (and stderr) files matching `criterion`, leaving every
+ * `runs` row untouched — a pruned run's outcome, diff and commits are still
+ * real history, and its log simply reads "unavailable" afterwards, the same
+ * state a deleted-by-hand transcript already renders rather than errors on.
+ */
+export function pruneRunLogs(criterion: PruneCriterionInput): Promise<PruneResult> {
+  return call<PruneResult>("prune_run_logs", { criterion });
 }
 
 // ---------------------------------------------------------------------------
