@@ -865,8 +865,106 @@ export type PruneCriterionInput =
  *  number that agrees with what just happened. */
 export interface PruneResult {
   runsPruned: number;
+  /** Task 020's planner transcripts, counted separately because they are
+   *  counted differently: `runsPruned` is a number of rows whose file went,
+   *  and a `strategy-<uuid>.jsonl` has no row at all (seam-contract D17.5,
+   *  D19). Adding them together would report more runs pruned than the
+   *  database holds. */
+  strategyTranscriptsPruned: number;
   bytesFreed: number;
 }
+
+// ---------------------------------------------------------------------------
+// Worktree lifecycle and cleanup (task 016) —
+// see `crates/core/src/worktree/cleanup.rs`.
+// ---------------------------------------------------------------------------
+
+/** Mirrors `rimaia_core::worktree::ForceRemoval`. The dangerous value is the
+ *  one that has to be typed — a `boolean` would make it the easier one. */
+export type ForceRemoval = "no" | "confirmed_by_user";
+
+/** Mirrors `rimaia_core::worktree::BranchDisposition` (ADR-0005: "the branch
+ *  is left alone unless the user asks for it to go").
+ *
+ *  `delete_even_if_unmerged` is the *separate* confirmation task 016 requires:
+ *  authorising the loss of a worktree is not the same act as authorising the
+ *  loss of the only copy of its commits. */
+export type BranchDisposition = "keep" | "delete_if_merged" | "delete_even_if_unmerged";
+
+/** Mirrors `commands::worktree::RemovalAuthorizationInput` — camelCase here,
+ *  snake_case in core, because MCP is (seam-contract D16.1).
+ *
+ *  Every field is optional and every omission authorises nothing. */
+export interface RemovalAuthorizationInput {
+  uncommittedChanges?: ForceRemoval;
+  unpushedCommits?: ForceRemoval;
+  branch?: BranchDisposition;
+}
+
+/** Mirrors `rimaia_core::worktree::WorktreeInventoryEntry` — everything
+ *  Settings → Storage needs to decide whether a checkout is finished with. */
+export interface WorktreeInventoryEntry {
+  taskId: string;
+  taskTitle: string;
+  repositoryId: string;
+  repositoryName: string;
+  column: BoardColumn;
+  runState: RunState;
+  path: string;
+  /** The directory is on disk **and** git still lists it. `false` is one
+   *  deleted outside the app, which startup reconciliation clears. */
+  exists: boolean;
+  branch: string | null;
+  baseRef: string;
+  sizeBytes: number;
+  /** The newest mtime under the worktree, or `null` when there is nothing to
+   *  read one off — a different fact from "last touched in 1970". */
+  lastActivity: string | null;
+  merged: boolean;
+  uncommittedChanges: number;
+  unpushedCommits: number;
+  /** A run is working here, so nothing removes it and no confirmation
+   *  changes that. Comes from the backend rather than being re-derived from
+   *  `runState`, so the rule has one home. */
+  live: boolean;
+}
+
+/** Mirrors `rimaia_core::worktree::WorktreeInventory`. */
+export interface WorktreeInventory {
+  entries: WorktreeInventoryEntry[];
+  totalBytes: number;
+}
+
+/** Mirrors `rimaia_core::worktree::RemovedWorktree`. */
+export interface RemovedWorktree {
+  taskId: string;
+  path: string;
+  bytesFreed: number;
+  branchDeleted: string | null;
+}
+
+/** Mirrors `rimaia_core::worktree::RefusedWorktree` — one worktree a bulk
+ *  action declined to touch, carrying the sentence the individual call would
+ *  have raised. */
+export interface RefusedWorktree {
+  taskId: string;
+  taskTitle: string;
+  reason: string;
+}
+
+/** Mirrors `rimaia_core::worktree::CleanupReport`. A bulk action reports
+ *  rather than aborting: one dirty worktree must not cost the user the nine
+ *  clean ones, and must not vanish silently either. */
+export interface CleanupReport {
+  removed: RemovedWorktree[];
+  refused: RefusedWorktree[];
+  bytesFreed: number;
+}
+
+/** Mirrors `rimaia_core::worktree::AutoCleanup`. The "on" value spells its own
+ *  acknowledgement, so enabling the policy means having typed what it
+ *  deletes. */
+export type AutoCleanup = "off" | "on_done_acknowledged";
 
 // ---------------------------------------------------------------------------
 // The local MCP server (task 010) — see `crates/core/src/mcp/mod.rs`.

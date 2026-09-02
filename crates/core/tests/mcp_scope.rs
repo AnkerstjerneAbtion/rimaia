@@ -125,7 +125,14 @@ fn the_operator_endpoint_keeps_every_tool_it_had_before_task_020() {
             | Tool::GetStrategyDefaults
             | Tool::SetStrategyApproval
             | Tool::SetStrategyCatalogue
-            | Tool::SetStrategyDefaults => RunAccess::Refused,
+            | Tool::SetStrategyDefaults
+            // Task 016. The setting reconfigures the installation, which is the
+            // same clause; the two reads are refused on `list_tasks`'s ground
+            // instead — an inventory is by construction an enumeration of every
+            // task's directory, and a run's entitlement is its own.
+            | Tool::ListWorktrees
+            | Tool::GetWorktreeAutoCleanup
+            | Tool::SetWorktreeAutoCleanup => RunAccess::Refused,
         };
         assert_eq!(tool.run_access(), expected, "{}", tool.as_str());
     }

@@ -8,9 +8,24 @@
 //! so unlike every other command in this crate it is not a thin wrapper
 //! standing in front of a rule the MCP server also has to obey — there is no
 //! such rule to share.
+//!
+//! # The three commands here that deliberately have no MCP tool
+//!
+//! ADR-0021 makes a Tauri command without a tool a defect, and names one
+//! standing exception: `delete_task` "stays absent from both … it is a
+//! decision about destructiveness, not about which client is privileged."
+//! [`remove_task_worktree`], [`cleanup_done_worktrees`] and
+//! [`cleanup_merged_worktrees`] join it, and seam-contract D19 records why.
+//! The inventory and the policy setting *do* get tools, operator-only — the
+//! read is how an agent finds out what is on disk, and refusing the read while
+//! refusing the write would leave it unable even to explain the problem.
 
-use rimaia_core::worktree::{self, DiffSummary, WorktreeStatus};
+use rimaia_core::worktree::{
+    self, AutoCleanup, CleanupReport, DiffSummary, RemovalAuthorization, RemovedWorktree,
+    WorktreeInventory, WorktreeStatus,
+};
 use rimaia_core::{tasks, Error, Result};
+use serde::Deserialize;
 use tauri::State;
 use tauri_plugin_opener::OpenerExt;
 
@@ -60,4 +75,90 @@ pub async fn reveal_task_worktree(
     app.opener()
         .open_path(path, None::<&str>)
         .map_err(|e| Error::internal(format!("could not open the worktree directory: {e}")))
+}
+
+// ---------------------------------------------------------------------------
+// Cleanup (task 016) — see `rimaia_core::worktree::cleanup`.
+// ---------------------------------------------------------------------------
+
+/// What the frontend sends [`remove_task_worktree`].
+///
+/// Mirrors [`RemovalAuthorization`] and exists only to case its fields the way
+/// this boundary does — the core type is `snake_case`, because MCP is
+/// (seam-contract D16.1), and every other key crossing the Tauri boundary is
+/// `camelCase`. The same split [`crate::commands::runs::PruneCriterionInput`]
+/// makes, for the same reason.
+///
+/// **Every field defaults to the refusing value**, so a caller that omits one
+/// has authorised nothing. The dangerous values are the ones that have to be
+/// typed, which is [`rimaia_core::worktree::ForceRemoval`]'s whole argument
+/// carried across the wire.
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase", default, deny_unknown_fields)]
+pub struct RemovalAuthorizationInput {
+    pub uncommitted_changes: rimaia_core::worktree::ForceRemoval,
+    pub unpushed_commits: rimaia_core::worktree::ForceRemoval,
+    pub branch: rimaia_core::worktree::BranchDisposition,
+}
+
+impl From<RemovalAuthorizationInput> for RemovalAuthorization {
+    fn from(input: RemovalAuthorizationInput) -> Self {
+        RemovalAuthorization {
+            uncommitted_changes: input.uncommitted_changes,
+            unpushed_commits: input.unpushed_commits,
+            branch: input.branch,
+        }
+    }
+}
+
+/// Every worktree with its task, branch, size, last activity and merged state,
+/// plus the total task 016 shows alongside task 015's run-log usage.
+#[tauri::command]
+pub async fn get_worktree_inventory(state: State<'_, AppState>) -> Result<WorktreeInventory> {
+    worktree::inventory(&state.context).await
+}
+
+/// Removes one task's worktree, subject to every guard in
+/// `rimaia_core::worktree::cleanup`.
+#[tauri::command]
+pub async fn remove_task_worktree(
+    state: State<'_, AppState>,
+    task_id: String,
+    authorization: RemovalAuthorizationInput,
+) -> Result<RemovedWorktree> {
+    worktree::remove_worktree(&state.context, &task_id, authorization.into()).await
+}
+
+/// Removes the worktree of every task in `done`, with every force off and every
+/// branch kept — see [`rimaia_core::worktree::remove_done_worktrees`] on why a
+/// bulk action may not carry more authority than the individual one.
+#[tauri::command]
+pub async fn cleanup_done_worktrees(state: State<'_, AppState>) -> Result<CleanupReport> {
+    worktree::remove_done_worktrees(&state.context).await
+}
+
+/// The same, for every worktree whose branch the default branch already
+/// contains.
+#[tauri::command]
+pub async fn cleanup_merged_worktrees(state: State<'_, AppState>) -> Result<CleanupReport> {
+    worktree::remove_merged_worktrees(&state.context).await
+}
+
+/// Whether a task reaching `done` takes its worktree with it. Off unless
+/// somebody turned it on.
+#[tauri::command]
+pub async fn get_worktree_auto_cleanup(state: State<'_, AppState>) -> Result<AutoCleanup> {
+    worktree::auto_cleanup(&state.context.pool).await
+}
+
+/// Sets that policy. The `on` value is spelled `on_done_acknowledged` on the
+/// wire as well as in the row: task 016 requires that enabling it means
+/// acknowledging what it deletes, and the spelling is how the acknowledgement
+/// survives past the dialog that collected it.
+#[tauri::command]
+pub async fn set_worktree_auto_cleanup(
+    state: State<'_, AppState>,
+    setting: AutoCleanup,
+) -> Result<()> {
+    worktree::set_auto_cleanup(&state.context, setting).await
 }

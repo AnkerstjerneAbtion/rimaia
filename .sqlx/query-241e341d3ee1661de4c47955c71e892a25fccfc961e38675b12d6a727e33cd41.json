@@ -1,0 +1,74 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT t.id AS task_id, t.title AS task_title, t.repository_id,\n                  t.branch, t.worktree_path,\n                  t.board_column AS \"column: BoardColumn\",\n                  t.run_state AS \"run_state: RunState\",\n                  r.name AS repository_name, r.path AS repository_path,\n                  r.default_branch\n             FROM tasks t\n             JOIN repositories r ON r.id = t.repository_id\n            WHERE t.worktree_path IS NOT NULL\n            ORDER BY r.name, t.title",
+  "describe": {
+    "columns": [
+      {
+        "name": "task_id",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "task_title",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "repository_id",
+        "ordinal": 2,
+        "type_info": "Text"
+      },
+      {
+        "name": "branch",
+        "ordinal": 3,
+        "type_info": "Text"
+      },
+      {
+        "name": "worktree_path",
+        "ordinal": 4,
+        "type_info": "Text"
+      },
+      {
+        "name": "column: BoardColumn",
+        "ordinal": 5,
+        "type_info": "Text"
+      },
+      {
+        "name": "run_state: RunState",
+        "ordinal": 6,
+        "type_info": "Text"
+      },
+      {
+        "name": "repository_name",
+        "ordinal": 7,
+        "type_info": "Text"
+      },
+      {
+        "name": "repository_path",
+        "ordinal": 8,
+        "type_info": "Text"
+      },
+      {
+        "name": "default_branch",
+        "ordinal": 9,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      true,
+      true,
+      false,
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "241e341d3ee1661de4c47955c71e892a25fccfc961e38675b12d6a727e33cd41"
+}

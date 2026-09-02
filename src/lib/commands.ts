@@ -2,7 +2,9 @@ import { invoke } from "@tauri-apps/api/core";
 
 import type {
   AppInfo,
+  AutoCleanup,
   BoardColumn,
+  CleanupReport,
   DiffSummary,
   McpProbe,
   McpStatus,
@@ -13,6 +15,8 @@ import type {
   QueueStatus,
   RegisterRepositoryInput,
   RemoteInfo,
+  RemovalAuthorizationInput,
+  RemovedWorktree,
   Repository,
   RimaiaError,
   Run,
@@ -37,6 +41,7 @@ import type {
   TranscriptPage,
   TranscriptSummary,
   UpdateRepositoryInput,
+  WorktreeInventory,
   WorktreeStatus,
 } from "../types";
 
@@ -370,6 +375,57 @@ export function getDiffSummary(taskId: string): Promise<DiffSummary> {
  */
 export function revealTaskWorktree(taskId: string): Promise<void> {
   return call<void>("reveal_task_worktree", { taskId });
+}
+
+// ---------------------------------------------------------------------------
+// Worktree cleanup (task 016) — see `crates/core/src/worktree/cleanup.rs`.
+// ---------------------------------------------------------------------------
+
+/** Every worktree with its task, branch, size, last activity and merged state,
+ *  plus the total shown alongside {@link getRunLogSize}. */
+export function getWorktreeInventory(): Promise<WorktreeInventory> {
+  return call<WorktreeInventory>("get_worktree_inventory");
+}
+
+/**
+ * Removes one task's worktree, subject to every guard.
+ *
+ * `authorization` defaults, field by field, to refusing: an omitted key is
+ * *not* permission. Only two of the guards can be overridden at all — a task
+ * in `running` or `waiting_retry` keeps its worktree whatever is sent, because
+ * a process is writing in there.
+ */
+export function removeTaskWorktree(
+  taskId: string,
+  authorization: RemovalAuthorizationInput = {},
+): Promise<RemovedWorktree> {
+  return call<RemovedWorktree>("remove_task_worktree", { taskId, authorization });
+}
+
+/** Removes the worktree of every task in `done`, with every force off and
+ *  every branch kept — a bulk action carries no more authority than the user
+ *  would have granted one worktree at a time. */
+export function cleanupDoneWorktrees(): Promise<CleanupReport> {
+  return call<CleanupReport>("cleanup_done_worktrees");
+}
+
+/** The same, for every worktree whose branch the default branch already
+ *  contains. A squash-merged branch reads as unmerged and is left alone: the
+ *  false negative costs a click, the false positive costs a commit. */
+export function cleanupMergedWorktrees(): Promise<CleanupReport> {
+  return call<CleanupReport>("cleanup_merged_worktrees");
+}
+
+/** Whether a task reaching `done` takes its worktree with it. Off unless
+ *  somebody turned it on. */
+export function getWorktreeAutoCleanup(): Promise<AutoCleanup> {
+  return call<AutoCleanup>("get_worktree_auto_cleanup");
+}
+
+/** Sets that policy. `on_done_acknowledged` is the only "on" spelling, so
+ *  enabling it means having been told what it deletes. */
+export function setWorktreeAutoCleanup(setting: AutoCleanup): Promise<void> {
+  return call<void>("set_worktree_auto_cleanup", { setting });
 }
 
 // ---------------------------------------------------------------------------

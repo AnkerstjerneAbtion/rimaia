@@ -2,7 +2,8 @@
 //! housekeeping (task 015, ADR-0013).
 //!
 //! This module is reads (and, for [`prune_logs`], deletes on disk) — it is
-//! not a third writer of the `runs` table. [`crate::runner::outcome`] is
+//! not a third writer of the `runs` table, and **it deletes no rows at all**
+//! (ADR-0022 part 2). [`crate::runner::outcome`] is
 //! still the only thing that inserts or updates a row (ADR-0006), and the
 //! diff and commits a run detail view opens with are
 //! [`crate::worktree::diff_summary`]'s, re-read fresh rather than duplicated
@@ -312,8 +313,25 @@ pub enum PruneCriterion {
 #[serde(rename_all = "camelCase")]
 pub struct PruneResult {
     pub runs_pruned: u64,
+    /// Task 020's planner transcripts, counted separately because they are
+    /// counted *differently*: `runs_pruned` is a number of rows whose file
+    /// went, and these have no row at all (seam-contract D17.5). Adding them
+    /// together would report "12 runs pruned" for a database holding nine.
+    pub strategy_transcripts_pruned: u64,
+    /// Across both, since a byte is a byte wherever it was reclaimed from.
     pub bytes_freed: u64,
 }
+
+/// How recently a `strategy-*.jsonl` file may have been written and still be
+/// deleted.
+///
+/// The row-based half of [`prune_logs`] refuses an unfinished run through
+/// `ended_at IS NOT NULL`. A strategy transcript has no row, so it has no
+/// `ended_at`, and the only evidence it is not being written to *right now* is
+/// its mtime. This floor is that guard's stand-in, and it applies whatever the
+/// criterion says — a planner is a minutes-long run, so an hour is generous
+/// while still leaving a file from yesterday collectable.
+const STRATEGY_TRANSCRIPT_FLOOR: chrono::Duration = chrono::Duration::hours(1);
 
 /// Deletes transcript and stderr files matching `criterion`, leaving every
 /// `runs` row untouched.
@@ -323,11 +341,29 @@ pub struct PruneResult {
 /// `log_path` no longer resolving is exactly the "log unavailable" state
 /// [`get_run`] already renders rather than errors on. Pruning is simply the
 /// deliberate, user-requested version of the same condition startup
-/// reconciliation finds by accident.
-pub async fn prune_logs(ctx: &ServiceContext, criterion: PruneCriterion) -> Result<PruneResult> {
-    let log_paths: Vec<String> = match criterion {
+/// reconciliation finds by accident. ADR-0022 part 2 makes that binding: "it
+/// does not delete `runs` rows, and neither does task 016's worktree cleanup."
+///
+/// # Two halves, because two kinds of file live in that directory
+///
+/// The `SELECT`s below enumerate `log_path` **through the database**, which is
+/// the right thing for a run's own transcript and misses every one of task
+/// 020's. A strategy run gets no `runs` row (seam-contract D17.5), so its
+/// `strategy-<uuid>.jsonl` is invisible to any query — while
+/// [`total_log_size`] walks the filesystem and has been counting them all
+/// along. Before task 016 that meant Settings reported disk the prune button
+/// could not reclaim, and the number never went down as far as it promised.
+/// [`prune_strategy_transcripts`] is the second half that closes it, and it
+/// takes `paths` for the same reason `total_log_size` does: this is a question
+/// about the filesystem, not about SQLite.
+pub async fn prune_logs(
+    ctx: &ServiceContext,
+    paths: &AppPaths,
+    criterion: PruneCriterion,
+) -> Result<PruneResult> {
+    let log_paths: Vec<String> = match &criterion {
         PruneCriterion::OlderThanDays(days) => {
-            let cutoff = ctx.clock.now() - chrono::Duration::days(days);
+            let cutoff = ctx.clock.now() - chrono::Duration::days(*days);
             sqlx::query_scalar(
                 "SELECT log_path FROM runs WHERE started_at < ?1 AND ended_at IS NOT NULL",
             )
@@ -356,7 +392,124 @@ pub async fn prune_logs(ctx: &ServiceContext, criterion: PruneCriterion) -> Resu
         result.bytes_freed += remove_log_files(Path::new(&log_path)).await;
         result.runs_pruned += 1;
     }
+
+    let strategy = prune_strategy_transcripts(ctx, paths, &criterion).await;
+    result.strategy_transcripts_pruned = strategy.count;
+    result.bytes_freed += strategy.bytes;
     Ok(result)
+}
+
+#[derive(Default)]
+struct SweptTranscripts {
+    count: u64,
+    bytes: u64,
+}
+
+/// The filesystem half of [`prune_logs`]: task 020's planner transcripts,
+/// which no `SELECT` can find.
+///
+/// **Dated by mtime**, because there is nothing else to date them by — a
+/// strategy run has no row, so it has no `started_at` and no `ended_at`. That
+/// makes the age rule genuinely different from the row-based half's, not merely
+/// implemented differently, which is why seam-contract D19 states it rather
+/// than leaving it in this comment:
+///
+/// - [`PruneCriterion::OlderThanDays`] takes files whose mtime is at least that
+///   old, across every task's directory. Mtime is "when the planner last wrote"
+///   where `started_at` is "when the run began"; for a run measured in minutes
+///   and an age measured in days, the difference cannot change an answer.
+/// - [`PruneCriterion::Task`] takes that one task's, with no age of its own —
+///   the user named the task, which is the whole criterion.
+/// - **Both** are floored by [`STRATEGY_TRANSCRIPT_FLOOR`], which stands in for
+///   the `ended_at IS NOT NULL` guard the row-based half gets for free. A file
+///   written in the last hour may be one a planner is writing right now, and
+///   deleting it out from under a live run is the thing that guard exists to
+///   prevent.
+///
+/// Errors are logged, never propagated. This runs after the row-based half has
+/// already deleted files; failing the whole call because one directory was
+/// unreadable would report "nothing was pruned" about a prune that did most of
+/// its work.
+async fn prune_strategy_transcripts(
+    ctx: &ServiceContext,
+    paths: &AppPaths,
+    criterion: &PruneCriterion,
+) -> SweptTranscripts {
+    let floor = ctx.clock.now() - STRATEGY_TRANSCRIPT_FLOOR;
+    let (directories, cutoff) = match criterion {
+        PruneCriterion::OlderThanDays(days) => {
+            let by_age = ctx.clock.now() - chrono::Duration::days(*days);
+            (task_log_directories(paths).await, by_age.min(floor))
+        }
+        PruneCriterion::Task(task_id) => (vec![paths.runs_dir().join(task_id)], floor),
+    };
+
+    let mut swept = SweptTranscripts::default();
+    for directory in directories {
+        let Ok(mut files) = tokio::fs::read_dir(&directory).await else {
+            // No directory for this task yet, or it cannot be read. Nothing to
+            // prune either way.
+            continue;
+        };
+
+        while let Ok(Some(file)) = files.next_entry().await {
+            let name = file.file_name();
+            let Some(name) = name.to_str() else { continue };
+            // The prefix, not a literal — `runner::strategy` owns the naming
+            // and exports it precisely so this cannot drift from what it
+            // writes.
+            if !name.starts_with(crate::runner::STRATEGY_TRANSCRIPT_PREFIX) {
+                continue;
+            }
+
+            let Ok(metadata) = file.metadata().await else {
+                continue;
+            };
+            if !metadata.is_file() {
+                continue;
+            }
+            let Ok(modified) = metadata.modified() else {
+                // No mtime is no evidence of age, and this file's age is the
+                // only guard it has. Left alone.
+                continue;
+            };
+            if DateTime::<Utc>::from(modified) >= cutoff {
+                continue;
+            }
+
+            let size = metadata.len();
+            match tokio::fs::remove_file(file.path()).await {
+                Ok(()) => {
+                    swept.count += 1;
+                    swept.bytes += size;
+                }
+                Err(error) => tracing::warn!(
+                    path = %file.path().display(),
+                    %error,
+                    "could not delete a strategy transcript",
+                ),
+            }
+        }
+    }
+
+    swept
+}
+
+/// Every per-task subdirectory of `<data>/runs`, which is the same traversal
+/// [`total_log_size`] makes — deliberately, so that the sweep sees exactly the
+/// files the reported total counts.
+async fn task_log_directories(paths: &AppPaths) -> Vec<PathBuf> {
+    let mut directories = Vec::new();
+    let Ok(mut entries) = tokio::fs::read_dir(paths.runs_dir()).await else {
+        return directories;
+    };
+
+    while let Ok(Some(entry)) = entries.next_entry().await {
+        if matches!(entry.file_type().await, Ok(file_type) if file_type.is_dir()) {
+            directories.push(entry.path());
+        }
+    }
+    directories
 }
 
 /// Removes one run's transcript and, if it was ever written, its stderr log
@@ -488,6 +641,225 @@ mod tests {
         .await
         .expect("seed a run");
         id
+    }
+
+    /// An [`AppPaths`] rooted at a test's own temp directory.
+    ///
+    /// The row-based half of pruning takes absolute `log_path`s off the rows
+    /// and never consults these paths at all, so the tests that predate task
+    /// 016 pass one whose `runs/` subdirectory does not exist — which is
+    /// exactly what "there are no strategy transcripts" looks like on disk,
+    /// and is the reason those tests keep asserting what they always did.
+    fn paths_at(dir: &tempfile::TempDir) -> AppPaths {
+        AppPaths::new(dir.path())
+    }
+
+    /// Writes a `strategy-<id>.jsonl` under `<data>/runs/<task-id>/` with an
+    /// explicit mtime — the only thing that dates a file with no `runs` row,
+    /// and therefore the only thing the sweep's age rule can read.
+    ///
+    /// `filetime`-free: `std::fs::File::set_times` has been stable since
+    /// 1.75 and seam-contract D6 (extended to Cargo by D16.3) closes the
+    /// dependency list, so a crate for two lines is not available and is not
+    /// needed.
+    fn seed_strategy_transcript(
+        paths: &AppPaths,
+        task_id: &str,
+        contents: &str,
+        modified: DateTime<Utc>,
+    ) -> PathBuf {
+        let dir = paths.runs_dir().join(task_id);
+        std::fs::create_dir_all(&dir).expect("create the task's log directory");
+        let path = dir.join(format!(
+            "{}0000-0000-4000-8000-000000000000.jsonl",
+            crate::runner::STRATEGY_TRANSCRIPT_PREFIX
+        ));
+        std::fs::write(&path, contents).expect("write a strategy transcript");
+
+        let file = std::fs::File::options()
+            .write(true)
+            .open(&path)
+            .expect("reopen the transcript to stamp it");
+        let stamp = std::fs::FileTimes::new().set_modified(modified.into());
+        file.set_times(stamp).expect("stamp the transcript's mtime");
+        path
+    }
+
+    #[tokio::test]
+    async fn pruning_reclaims_the_strategy_transcripts_the_database_cannot_see() {
+        // Seam-contract D17.5: a strategy run has no `runs` row, so the
+        // `SELECT log_path FROM runs` half of pruning misses it entirely —
+        // while `total_log_size` walks the filesystem and has been counting it
+        // all along. Before task 016 that combination reported disk the prune
+        // button could not reclaim.
+        let h = TestContext::new().await;
+        let repository_id = seed_repository(&h.context, "repo").await;
+        let task_id = seed_task(&h.context, &repository_id, "a task").await;
+
+        let dir = tempfile::tempdir().expect("temp dir");
+        let paths = paths_at(&dir);
+        let stale = seed_strategy_transcript(
+            &paths,
+            &task_id,
+            "a planner's transcript",
+            "2026-08-01T00:00:00Z".parse().expect("literal timestamp"),
+        );
+        let size_before = total_log_size(&paths).await;
+        assert_eq!(
+            size_before,
+            "a planner's transcript".len() as u64,
+            "the size report already counts what the database cannot see",
+        );
+
+        let result = prune_logs(&h.context, &paths, PruneCriterion::OlderThanDays(10))
+            .await
+            .expect("prune");
+
+        assert_eq!(result.runs_pruned, 0, "there is no row to prune");
+        assert_eq!(result.strategy_transcripts_pruned, 1);
+        assert_eq!(result.bytes_freed, size_before);
+        assert!(!stale.exists());
+        assert_eq!(
+            total_log_size(&paths).await,
+            0,
+            "the reported total now agrees with what the prune actually freed",
+        );
+    }
+
+    #[tokio::test]
+    async fn a_strategy_transcript_written_in_the_last_hour_survives_any_criterion() {
+        // The floor standing in for the `ended_at IS NOT NULL` guard the
+        // row-based half gets for free: a file this recent may be one a
+        // planner is writing right now, and there is no row to ask.
+        let h = TestContext::new().await;
+        let repository_id = seed_repository(&h.context, "repo").await;
+        let task_id = seed_task(&h.context, &repository_id, "a task").await;
+
+        let dir = tempfile::tempdir().expect("temp dir");
+        let paths = paths_at(&dir);
+        let fresh = seed_strategy_transcript(
+            &paths,
+            &task_id,
+            "being written right now",
+            h.context.clock.now() - chrono::Duration::minutes(5),
+        );
+
+        let by_age = prune_logs(&h.context, &paths, PruneCriterion::OlderThanDays(1))
+            .await
+            .expect("prune by age");
+        let by_task = prune_logs(&h.context, &paths, PruneCriterion::Task(task_id))
+            .await
+            .expect("prune by task");
+
+        assert_eq!(by_age.strategy_transcripts_pruned, 0);
+        assert_eq!(by_task.strategy_transcripts_pruned, 0);
+        assert!(fresh.exists());
+    }
+
+    #[tokio::test]
+    async fn pruning_by_task_reclaims_only_that_tasks_strategy_transcripts() {
+        let h = TestContext::new().await;
+        let repository_id = seed_repository(&h.context, "repo").await;
+        let task_id = seed_task(&h.context, &repository_id, "a task").await;
+        let other_task_id = seed_task(&h.context, &repository_id, "another task").await;
+
+        let dir = tempfile::tempdir().expect("temp dir");
+        let paths = paths_at(&dir);
+        let long_ago: DateTime<Utc> = "2026-08-01T00:00:00Z".parse().expect("literal timestamp");
+        let mine = seed_strategy_transcript(&paths, &task_id, "mine", long_ago);
+        let theirs = seed_strategy_transcript(&paths, &other_task_id, "not mine", long_ago);
+
+        let result = prune_logs(&h.context, &paths, PruneCriterion::Task(task_id))
+            .await
+            .expect("prune");
+
+        assert_eq!(result.strategy_transcripts_pruned, 1);
+        assert!(!mine.exists());
+        assert!(
+            theirs.exists(),
+            "another task's planner transcript is untouched"
+        );
+    }
+
+    #[tokio::test]
+    async fn pruning_logs_leaves_every_runs_row_and_its_totals_intact() {
+        // ADR-0022 part 2, made mechanical: "prune deletes JSONL files and sets
+        // a marker on the row. It does not delete `runs` rows." A transcript is
+        // tens of megabytes read a handful of times; a row is a few hundred
+        // bytes read forever, and reclaiming disk must not cost the record of
+        // what was spent. The marker is `log_available`, computed fresh —
+        // pruning reaches "marked, not trusted" deliberately rather than by
+        // accident.
+        let h = TestContext::new().await;
+        // A real repository, because the read-back below goes through
+        // `get_run`, which runs git against its path — and the point of the
+        // read-back is that *everything except the log* is intact.
+        let source = TempRepo::init();
+        let repository_id = seed_repository_at(
+            &h.context,
+            "repo",
+            source.path().to_str().expect("temp path is UTF-8"),
+        )
+        .await;
+        let task_id = seed_task(&h.context, &repository_id, "a task").await;
+
+        let dir = tempfile::tempdir().expect("temp dir");
+        let log = dir.path().join("attempt-1.jsonl");
+        std::fs::write(&log, "a transcript").expect("write a log");
+        let long_ago: DateTime<Utc> = "2026-08-01T00:00:00Z".parse().expect("literal timestamp");
+        let run_id = seed_run(
+            &h.context,
+            &task_id,
+            1,
+            RunStatus::Succeeded,
+            Some(ExitClass::Success),
+            long_ago,
+            true,
+            log.to_str().expect("temp path is UTF-8"),
+        )
+        .await;
+
+        let rows_before: i64 = sqlx::query_scalar("SELECT count(*) FROM runs")
+            .fetch_one(&h.context.pool)
+            .await
+            .expect("count runs");
+        let cost_before: Option<f64> = sqlx::query_scalar("SELECT sum(cost_usd) FROM runs")
+            .fetch_one(&h.context.pool)
+            .await
+            .expect("total the cost");
+
+        prune_logs(
+            &h.context,
+            &paths_at(&dir),
+            PruneCriterion::OlderThanDays(10),
+        )
+        .await
+        .expect("prune");
+
+        assert!(!log.exists(), "the file is what pruning is for");
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT count(*) FROM runs")
+                .fetch_one(&h.context.pool)
+                .await
+                .expect("count runs"),
+            rows_before,
+            "no `runs` row is deleted by pruning, ever",
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, Option<f64>>("SELECT sum(cost_usd) FROM runs")
+                .fetch_one(&h.context.pool)
+                .await
+                .expect("total the cost"),
+            cost_before,
+            "and the totals a later analytics view reads are unchanged",
+        );
+
+        // And the row is still readable, reporting its transcript as gone
+        // rather than erroring on it.
+        let detail = get_run(&h.context, &run_id)
+            .await
+            .expect("read the run back");
+        assert!(!detail.log_available);
     }
 
     #[tokio::test]
@@ -879,9 +1251,13 @@ mod tests {
         )
         .await;
 
-        let result = prune_logs(&h.context, PruneCriterion::OlderThanDays(10))
-            .await
-            .expect("prune");
+        let result = prune_logs(
+            &h.context,
+            &paths_at(&dir),
+            PruneCriterion::OlderThanDays(10),
+        )
+        .await
+        .expect("prune");
 
         assert_eq!(result.runs_pruned, 1);
         assert_eq!(result.bytes_freed, "old transcript".len() as u64);
@@ -915,9 +1291,13 @@ mod tests {
         // A cutoff just one day back from the test clock's `test_epoch` is
         // still decades after `very_old` — if the `ended_at IS NOT NULL`
         // guard were missing, this would prune it.
-        let result = prune_logs(&h.context, PruneCriterion::OlderThanDays(1))
-            .await
-            .expect("prune");
+        let result = prune_logs(
+            &h.context,
+            &paths_at(&dir),
+            PruneCriterion::OlderThanDays(1),
+        )
+        .await
+        .expect("prune");
 
         assert_eq!(result.runs_pruned, 0);
         assert!(in_flight_log.exists());
@@ -978,7 +1358,7 @@ mod tests {
         )
         .await;
 
-        let result = prune_logs(&h.context, PruneCriterion::Task(task_id))
+        let result = prune_logs(&h.context, &paths_at(&dir), PruneCriterion::Task(task_id))
             .await
             .expect("prune");
 

@@ -647,6 +647,26 @@ pub async fn move_task(
         std::iter::once(id.to_string()).chain(rebalanced_ids.into_iter().filter(|rid| rid != id)),
     ));
     let updated = fetch_task_row(&ctx.pool, id).await?;
+
+    // Task 016's optional auto-removal, here rather than in a command so that
+    // the board and the MCP server get it identically (ADR-0006) — a policy
+    // enforced in one adapter and not the other is the bug that ADR exists to
+    // prevent, and "the worktree disappears when I move the card" would be a
+    // conspicuous one to only half-have.
+    //
+    // **This is the one edge from `tasks` to `worktree`**, and it runs the
+    // other way from every existing one: `worktree` reads tasks and calls
+    // `set_run_state`. Rust permits the cycle within a crate and the direction
+    // is the honest one — the policy belongs to the transition, not to the
+    // directory — but it is worth naming, so seam-contract D19 does.
+    //
+    // After the commit and after the publish, and returning nothing: the move
+    // has already succeeded, and a cleanup a guard refuses must not be able to
+    // report it as having failed.
+    if column == BoardColumn::Done {
+        crate::worktree::cleanup::auto_remove_on_done(ctx, id).await;
+    }
+
     Ok(updated)
 }
 

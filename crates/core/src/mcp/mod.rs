@@ -605,7 +605,7 @@ mod tests {
         assert_eq!(probed.endpoint, format!("http://{address}/mcp"));
         assert_eq!(probed.server_name, "rimaia");
         assert_eq!(
-            probed.tool_count, 19,
+            probed.tool_count, 22,
             "every registered tool, over the wire this time (ADR-0021)"
         );
         assert!(!probed.protocol_version.is_empty());

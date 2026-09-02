@@ -29,10 +29,27 @@
 //!
 //! [`resolve_base_ref`] is task 011's seam and is deliberately one line. See
 //! its own doc.
+//!
+//! # Removal, and the layer above it
+//!
+//! [`remove`] is the mechanism: directory, git's administrative record, and
+//! optionally the branch. It takes no view on whether removing was a good idea
+//! — task 007 gave it exactly one question to ask, and [`ForceRemoval`] is the
+//! caller's answer to it. Everything that decides *whether* (the guards, the
+//! inventory they are read off, the bulk actions and the auto-on-`done`
+//! policy) is task 016's and lives in [`cleanup`], on top of this rather than
+//! inside it.
 
+pub mod cleanup;
 mod git;
 mod naming;
 mod safety;
+
+pub use cleanup::{
+    auto_cleanup, inventory, remove_done_worktrees, remove_merged_worktrees, remove_worktree,
+    set_auto_cleanup, AutoCleanup, BranchDisposition, CleanupReport, RefusedWorktree,
+    RemovalAuthorization, RemovedWorktree, WorktreeInventory, WorktreeInventoryEntry,
+};
 
 use std::path::{Path, PathBuf};
 
@@ -156,11 +173,15 @@ pub struct DiffSummary {
 /// anywhere, and task 007's Scope allows it "only on explicit user
 /// confirmation". A `bool` would make the dangerous value the one that is
 /// easier to type; this way the call site has to name it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+/// [`Default`] is [`No`](ForceRemoval::No), so a struct holding one of these
+/// (task 016's `RemovalAuthorization`) derives the *refusing* posture rather
+/// than needing every field named at every call site to stay safe.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ForceRemoval {
     /// `git worktree remove` refuses a dirty worktree, and that refusal
     /// reaches the user as the error message.
+    #[default]
     No,
     /// The user was shown what would be discarded and said yes.
     ConfirmedByUser,

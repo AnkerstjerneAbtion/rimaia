@@ -22,6 +22,7 @@ use crate::db::{
 };
 use crate::strategy::StrategyApproval;
 use crate::tasks::{TaskDetail, TaskSummary};
+use crate::worktree::{AutoCleanup, WorktreeInventoryEntry};
 
 /// One registered repository, as `list_repositories` reports it.
 #[derive(Debug, Clone, PartialEq, Serialize, JsonSchema)]
@@ -287,6 +288,75 @@ pub struct BaseInstructionsView {
 #[serde(rename_all = "snake_case")]
 pub struct StrategyApprovalView {
     pub approval: StrategyApproval,
+}
+
+/// One worktree, as `list_worktrees` reports it (task 016).
+///
+/// A projection for this module's usual reason — the core type is `camelCase`
+/// for the frontend — and it drops two fields rather than mirroring: the
+/// `repository_id` and `base_ref` an agent has no use for here, since it cannot
+/// act on either through this surface. What it keeps is everything needed to
+/// *explain* the disk: which task, how big, how long since anyone touched it,
+/// and the three facts that decide whether removing it is safe.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub struct WorktreeView {
+    pub task_id: String,
+    pub task_title: String,
+    pub repository_name: String,
+    pub column: BoardColumn,
+    pub run_state: RunState,
+    pub path: String,
+    /// The directory is on disk and git still lists it. `false` is a worktree
+    /// deleted outside the app, which startup reconciliation clears.
+    pub exists: bool,
+    pub branch: Option<String>,
+    pub size_bytes: u64,
+    pub last_activity: Option<DateTime<Utc>>,
+    pub merged: bool,
+    pub uncommitted_changes: i64,
+    pub unpushed_commits: i64,
+    /// A run is working here, so nothing removes it — not even the window, and
+    /// not with any confirmation.
+    pub live: bool,
+}
+
+impl From<WorktreeInventoryEntry> for WorktreeView {
+    fn from(entry: WorktreeInventoryEntry) -> Self {
+        WorktreeView {
+            task_id: entry.task_id,
+            task_title: entry.task_title,
+            repository_name: entry.repository_name,
+            column: entry.column,
+            run_state: entry.run_state,
+            path: entry.path,
+            exists: entry.exists,
+            branch: entry.branch,
+            size_bytes: entry.size_bytes,
+            last_activity: entry.last_activity,
+            merged: entry.merged,
+            uncommitted_changes: entry.uncommitted_changes,
+            unpushed_commits: entry.unpushed_commits,
+            live: entry.live,
+        }
+    }
+}
+
+/// The list, wrapped — MCP requires an object output schema and Claude Code
+/// refuses the *entire* `tools/list` response when one tool disagrees, which is
+/// why [`RepositoryListView`] does the same.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub struct WorktreeListView {
+    pub worktrees: Vec<WorktreeView>,
+    pub total_bytes: u64,
+}
+
+/// The auto-removal policy, wrapped for [`StrategyApprovalView`]'s reason.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub struct WorktreeAutoCleanupView {
+    pub setting: AutoCleanup,
 }
 
 #[cfg(test)]

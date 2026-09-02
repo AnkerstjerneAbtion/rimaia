@@ -21,6 +21,7 @@ use crate::db::{BoardColumn, RunState, StrategyMode};
 use crate::error::{Error, Result};
 use crate::strategy::StrategyApproval;
 use crate::tasks::{StrategyPhase, StrategyPlan, StrategyWorkflow};
+use crate::worktree::AutoCleanup;
 
 /// `create_task`: a whole plan, handed over in one call.
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
@@ -365,6 +366,18 @@ pub struct SetStrategyCatalogueRequest {
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub struct SetStrategyApprovalRequest {
     pub approval: StrategyApproval,
+}
+
+/// The worktree auto-removal policy to store (task 016).
+///
+/// One field, and it is an enum whose "on" value spells its own
+/// acknowledgement — `on_done_acknowledged` rather than `true`. An agent
+/// setting this has to type the word, which is the closest a tool schema comes
+/// to the sentence the Settings panel puts in front of a human.
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct SetWorktreeAutoCleanupRequest {
+    pub setting: AutoCleanup,
 }
 
 #[cfg(test)]

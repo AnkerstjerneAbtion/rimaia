@@ -236,8 +236,60 @@ pub(super) async fn ahead_behind(dir: &Path, base: &str, branch: &str) -> Result
 /// modifications, staged changes or untracked files alike, since all three are
 /// work a removal would destroy.
 pub(super) async fn is_dirty(worktree: &Path) -> Result<bool> {
+    Ok(dirty_file_count(worktree).await? > 0)
+}
+
+/// How many paths [`is_dirty`] is answering "yes" about.
+///
+/// A count rather than a bool because task 016's refusal has to *name* what it
+/// is protecting — "3 uncommitted changes" is a sentence the user can check
+/// against their own memory of the run, where "the worktree is dirty" is a
+/// sentence they can only take on trust. One line of `--porcelain` is one
+/// path, including a rename's `R  old -> new`, which is one change.
+pub(super) async fn dirty_file_count(worktree: &Path) -> Result<i64> {
     let stdout = checked(worktree, &["status", "--porcelain"]).await?;
-    Ok(!stdout.is_empty())
+    Ok(stdout.lines().filter(|line| !line.is_empty()).count() as i64)
+}
+
+/// Commits on `branch`, past `base`, that exist on no remote-tracking ref.
+///
+/// `--not <base> --remotes` excludes two sets at once: what the branch was
+/// created from, and everything any remote already has. What is left is
+/// precisely the work that would be gone for good if the branch went with the
+/// worktree — which is the question the unpushed-commits guard is asking, and
+/// not the same question as "is this branch ahead of its upstream". A branch
+/// that was never pushed has no upstream at all, and counting against one would
+/// silently answer zero for the case that matters most.
+///
+/// A repository with no remote reports every commit the run made, which is
+/// correct rather than unfortunate: nothing has a second copy of them.
+pub(super) async fn unpushed_commits(dir: &Path, base: &str, branch: &str) -> Result<i64> {
+    let stdout = checked(
+        dir,
+        &["rev-list", "--count", branch, "--not", base, "--remotes"],
+    )
+    .await?;
+    Ok(stdout.trim().parse().unwrap_or(0))
+}
+
+/// Whether every commit on `branch` is already reachable from `base`.
+///
+/// `merge-base --is-ancestor` rather than parsing `git branch --merged`: it
+/// answers about one branch instead of listing all of them, it needs no output
+/// parsing, and its exit status *is* the answer. Both are the same predicate —
+/// `--merged` is documented as "branches whose tips are reachable from the
+/// specified commit".
+///
+/// It says **no** for a branch that was squash-merged or rebased onto the
+/// default, because those produce different commits and git cannot tell them
+/// from work that was never merged at all. That false negative is the one to
+/// have: it costs a user one extra click on "delete the branch anyway", where
+/// the false positive costs them the only copy of a commit.
+pub(super) async fn is_merged(dir: &Path, base: &str, branch: &str) -> Result<bool> {
+    // Not `checked`: exit 1 is "not an ancestor", an answer rather than a
+    // failure, and `checked` would turn every unmerged branch into an error.
+    let output = run(dir, &["merge-base", "--is-ancestor", branch, base]).await?;
+    Ok(output.success)
 }
 
 /// Files changed, insertions and deletions between the merge base of `base`
