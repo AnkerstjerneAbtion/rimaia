@@ -27,7 +27,7 @@ reviewable in the app afterwards.
 | 14 | [012](012-parallel-execution.md) | Parallel execution | v0.2 | 009 | #16 |
 | 15 | [023](023-batch-strategy-planning.md) | Batch strategy planning as a preflight | v0.2 | 020, 012 | — |
 | 16 | [013](013-run-scheduling.md) | Run scheduling and windows | v0.2 | 009 | — |
-| 17 | [014](014-usage-limit-resilience.md) | Usage-limit resilience and resume | v0.2 | 009, 019 | — |
+| 17 | [014](014-usage-limit-resilience.md) | Usage-limit resilience and resume | v0.2 | 009, 019 | [#18](https://github.com/AnkerstjerneAbtion/rimaia/pull/18) |
 | 18 | [015](015-run-history-and-log-viewer.md) | Run history and log viewer | v0.3 | 009 | #10 |
 | 19 | [016](016-worktree-lifecycle-and-cleanup.md) | Worktree lifecycle and cleanup | v0.3 | 007, 009 | — |
 | 20 | [017](017-morning-review-flow.md) | Morning review flow | v0.3 | 015 | — |
