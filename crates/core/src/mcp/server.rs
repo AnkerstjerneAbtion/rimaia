@@ -40,8 +40,7 @@ use crate::mcp::requests::{
 };
 use crate::mcp::responses::{
     BaseInstructionsView, DoctorReportView, OnboardingView, RepositoryListView, RepositoryView,
-    RunCapacityView,
-    StrategyApprovalView, TaskListItem, TaskListView, TaskView,
+    RunCapacityView, StrategyApprovalView, TaskListItem, TaskListView, TaskView,
 };
 use crate::mcp::scope::{RunScope, Tool};
 use crate::runner::prompt::TEMPLATE_VARIABLES;

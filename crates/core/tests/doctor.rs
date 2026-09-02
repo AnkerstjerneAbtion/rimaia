@@ -533,8 +533,7 @@ async fn a_blocking_report_refuses_to_start_the_queue_and_writes_no_queue_state(
         program: root.path().join("claude-that-is-not-installed"),
         ..RunnerConfig::default()
     };
-    let (queue, _task) =
-        scheduler::build(harness.context.clone(), paths, runner, InFlight::new());
+    let (queue, _task) = scheduler::build(harness.context.clone(), paths, runner, InFlight::new());
 
     let refusal = queue
         .start()

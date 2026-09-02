@@ -1893,7 +1893,23 @@ impl FakeCli {
     /// the prerequisite before it starts a run, and the probe runs in Rimaia's
     /// own working directory, where the dispatch below would find no task.
     /// It waits on `version-hold`/`version-go` first, so a test can hold it
-    /// open — see [`hold_version_probe`](Self::hold_version_probe).
+    /// open — see [`hold_version_probe`](Self::hold_version_probe) — but only
+    /// once `auth-seen` exists. That second condition is what keeps the hold
+    /// aimed at the probe it was written for. Task 018's doctor probes
+    /// `--version` too, from inside `QueueHandle::start`, so a hold armed
+    /// before `start()` (which is the only place a test can arm it: the loop
+    /// races the next statement) would deadlock the very call meant to get the
+    /// queue running. The doctor asks `--version` and then `auth`, and the loop
+    /// asks `--version` after both, so "auth has been asked once" is exactly
+    /// the line between the preflight and the loop.
+    ///
+    /// `auth` short-circuits for the same reason, and it is not optional:
+    /// task 018's doctor asks `claude auth status --json` on every
+    /// `QueueHandle::start`. Without this arm that question falls through to
+    /// the dispatch below, which derives a task id from the working directory
+    /// — Rimaia's own, not a worktree — and records a phantom `start core` in
+    /// the spawn log every assertion here reads. A stand-in that treats "are
+    /// you signed in?" as a run is not modelling the CLI it stands in for.
     ///
     /// `pwd -P` rather than the `pwd` builtin's default, because `PWD` is
     /// inherited from the parent and `Command::current_dir` does not update it.
@@ -1901,10 +1917,14 @@ impl FakeCli {
         let script = format!(
             "#!/bin/sh\n\
              if [ \"$1\" = '--version' ]; then\n\
-             if [ -f '{dir}/version-hold' ]; then\n\
+             if [ -f '{dir}/version-hold' ] && [ -f '{dir}/auth-seen' ]; then\n\
              while [ ! -f '{dir}/version-go' ]; do sleep 0.02; done\n\
              fi\n\
              echo '2.1.234 (Claude Code)'; exit 0\n\
+             fi\n\
+             if [ \"$1\" = 'auth' ]; then\n\
+             : > '{dir}/auth-seen'\n\
+             echo '{{\"loggedIn\": true}}'; exit 0\n\
              fi\n\
              dir='{dir}'\n\
              task=\"$(basename \"$(pwd -P)\")\"\n\

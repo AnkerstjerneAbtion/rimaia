@@ -1038,6 +1038,27 @@ The `pass`/`warn`/`fail` split is a three-way distinction on purpose. Two status
 force every check to choose between blocking the night and being ignorable, and the four
 checks that warn are precisely the ones where neither is right.
 
+**Consequence for tests, stated because it surprised this task.** `QueueHandle::start` now
+spawns real subprocesses and measures the real volume, so **every test that starts a queue
+transitively exercises the host environment.** Two things follow for
+`crates/core/tests/scheduler.rs` and anything like it:
+
+- The stand-in `claude` must answer `auth`, not only `--version`. A stand-in that answers
+  only the latter lets the doctor's auth probe fall through to the run dispatch, which
+  derives a task id from the working directory and records a phantom run in the spawn log
+  every ordering assertion reads.
+- **The suite requires about 1 GB free on the volume holding `TMPDIR`.** Below that,
+  `disk_space` fails, `start()` refuses, and roughly twenty queue tests fail at once with
+  the doctor's message rather than their own. That message names the shortage plainly, so
+  it is discoverable rather than mysterious — but it is a real prerequisite for running the
+  tests, not a flake.
+
+If that coupling ever costs more than it is worth, the fix is to inject `doctor::Environment`
+into `scheduler::build` the way `InFlight` already is and the way `RimaiaServer::new` already
+takes one, and let the harness supply a deterministic one. That was not done here because it
+changes a signature task 012 had only just landed, and the coupling is honest: a queue whose
+preflight is real is the entire point of this entry.
+
 **Binds.** 012, 013, 018.
 
 ---
