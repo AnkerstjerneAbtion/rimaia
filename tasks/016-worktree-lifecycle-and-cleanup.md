@@ -6,6 +6,7 @@ status: ready
 depends_on: ["007", "009"]
 adrs: ["0005"]
 size: S
+landed: "#14"
 ---
 
 # Worktree lifecycle and cleanup
