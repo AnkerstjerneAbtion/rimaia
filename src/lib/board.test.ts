@@ -589,39 +589,58 @@ describe("settlementReproducesMove", () => {
 
 describe("cardBadge", () => {
   it("shows nothing for an idle task", () => {
-    expect(cardBadge("idle", null)).toBeNull();
+    expect(cardBadge("idle", null, false)).toBeNull();
   });
 
   it("shows the run state itself for every state but failed", () => {
     const states: RunState[] = ["running", "queued", "blocked", "waiting_retry", "cancelled"];
 
     for (const state of states) {
-      expect(cardBadge(state, null), state).toBe(state);
+      expect(cardBadge(state, null, false), state).toBe(state);
     }
   });
 
   it("reads interrupted off the last run's exit class, not off the run state", () => {
     // Seam-contract D9: `run_state` has no `interrupted`. A run that died with
     // the app leaves the task `failed` and the word on the run row.
-    expect(cardBadge("failed", { exitClass: "interrupted" })).toBe("interrupted");
+    expect(cardBadge("failed", { exitClass: "interrupted" }, false)).toBe("interrupted");
   });
 
   it("shows failed when the last run stopped for any other reason", () => {
     const classes: ExitClass[] = ["fatal", "transient", "usage_limit", "cancelled", "success"];
 
     for (const exitClass of classes) {
-      expect(cardBadge("failed", { exitClass }), exitClass).toBe("failed");
+      expect(cardBadge("failed", { exitClass }, false), exitClass).toBe("failed");
     }
   });
 
   it("shows failed when no run has been recorded yet", () => {
-    expect(cardBadge("failed", null)).toBe("failed");
-    expect(cardBadge("failed", { exitClass: null })).toBe("failed");
+    expect(cardBadge("failed", null, false)).toBe("failed");
+    expect(cardBadge("failed", { exitClass: null }, false)).toBe("failed");
   });
 
   it("ignores an interrupted last run once the task is queued again", () => {
-    expect(cardBadge("queued", { exitClass: "interrupted" })).toBe("queued");
-    expect(cardBadge("idle", { exitClass: "interrupted" })).toBeNull();
+    expect(cardBadge("queued", { exitClass: "interrupted" }, false)).toBe("queued");
+    expect(cardBadge("idle", { exitClass: "interrupted" }, false)).toBeNull();
+  });
+
+  it("shows blocked for an idle task whose dependency is not satisfied", () => {
+    // ADR-0008, and the one place `run_state`'s `blocked` value and the derived
+    // `blocked_by_incomplete` flag meet: the state on the row is `idle`,
+    // because the amendment of 2026-09-02 leaves `blocked` unwritten.
+    expect(cardBadge("idle", null, true)).toBe("blocked");
+  });
+
+  it("does not let a blocked dependency overwrite what a card is doing now", () => {
+    // A *running* task whose dependency moved is still running, and a *failed*
+    // one is still failed — ADR-0007's failure rule wants that visible so it
+    // interrupts the morning review rather than hiding behind "blocked".
+    expect(cardBadge("running", null, true)).toBe("running");
+    expect(cardBadge("queued", null, true)).toBe("queued");
+    expect(cardBadge("waiting_retry", null, true)).toBe("waiting_retry");
+    expect(cardBadge("cancelled", null, true)).toBe("cancelled");
+    expect(cardBadge("failed", null, true)).toBe("failed");
+    expect(cardBadge("failed", { exitClass: "interrupted" }, true)).toBe("interrupted");
   });
 });
 

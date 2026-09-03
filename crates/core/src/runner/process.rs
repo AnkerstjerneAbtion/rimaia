@@ -1013,6 +1013,10 @@ pub async fn run_task(
             task_id: task_id.clone(),
             session_id: invocation.session_id.clone(),
             prompt: prompt.clone(),
+            // ADR-0008: what this attempt was actually branched from, taken off
+            // the worktree `prepare` just resolved rather than resolved again,
+            // so the row records the base the branch really has.
+            base_ref: Some(worktree.base_ref.clone()),
         },
     )
     .await

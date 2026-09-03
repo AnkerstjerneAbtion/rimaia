@@ -658,6 +658,7 @@ mod tests {
             link_count: 2,
             dependency_count: 1,
             blocked_by_incomplete: false,
+            blocking_title: None,
             last_run: Some(LastRunSummary {
                 status: RunStatus::Succeeded,
                 exit_class: Some(ExitClass::Success),
@@ -693,6 +694,7 @@ mod tests {
             link_count: 0,
             dependency_count: 0,
             blocked_by_incomplete: false,
+            blocking_title: None,
             last_run: None,
             effective_model: None,
             effective_effort: None,

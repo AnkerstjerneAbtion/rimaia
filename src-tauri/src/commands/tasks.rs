@@ -291,3 +291,31 @@ pub async fn reorder_task_link(
     )
     .await
 }
+
+/// Replaces the whole set of tasks `task_id` is blocked by (ADR-0008).
+///
+/// **Replace, never merge** — an empty list clears every dependency, which is
+/// how the panel removes one edge without a second command for it. Cycle
+/// detection, the self-edge refusal and the cross-repository refusal all live in
+/// `tasks::set_task_dependencies`, which task 010 shipped for the MCP door
+/// (seam-contract D16.4); this is the second door onto the same function, so the
+/// board cannot enforce a different graph from an agent (ADR-0006).
+#[tauri::command]
+pub async fn set_task_dependencies(
+    state: State<'_, AppState>,
+    task_id: String,
+    depends_on: Vec<String>,
+) -> Result<Vec<String>> {
+    tasks::set_task_dependencies(&state.context, &task_id, &depends_on).await
+}
+
+/// The dependencies keeping a task out of the queue, as whole rows — ADR-0008's
+/// "the card shows which task is blocking it", at panel width.
+///
+/// The board's own read already carries the flag and the first blocker's title
+/// on every card (seam-contract D12); this is for the one task the panel is
+/// open on, where the user needs the whole list and each one's column.
+#[tauri::command]
+pub async fn get_blocking_reason(state: State<'_, AppState>, task_id: String) -> Result<Vec<Task>> {
+    tasks::blocking_reason(&state.context, &task_id).await
+}

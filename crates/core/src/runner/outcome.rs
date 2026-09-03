@@ -618,6 +618,20 @@ pub struct NewRun {
     /// "editing base instructions does not alter any already-stored run prompt"
     /// is satisfied here and only here.
     pub prompt: String,
+    /// What the worktree this attempt runs in was branched from — ADR-0008's
+    /// chaining, as resolved by `worktree::prepare` for *this* attempt.
+    ///
+    /// Passed in rather than resolved here for the reason the rest of this
+    /// struct exists: `runner::outcome` is the only writer of the `runs` table,
+    /// and it writes what the caller decided rather than deciding anything. It
+    /// is also the only way the value can be right — `prepare` is what actually
+    /// created the branch, and re-resolving would answer a question about the
+    /// graph as it is now instead of the one the branch was built from.
+    ///
+    /// `Option` because the column is nullable and rows written before ADR-0008
+    /// landed have nothing in it; a caller with no worktree has nothing to say
+    /// here and says nothing.
+    pub base_ref: Option<String>,
 }
 
 /// Opens the `runs` row for an attempt that is about to start.
@@ -664,9 +678,15 @@ pub async fn start_run(ctx: &ServiceContext, paths: &AppPaths, new_run: NewRun) 
     .await?;
     let attempt = previous.unwrap_or(0) + 1;
 
+    // `base_ref` is written here, at the *open*, and never at `finish_run`:
+    // ADR-0008's amendment of 2026-09-02 makes it a property of what the
+    // attempt was spawned against, which is known before the process starts and
+    // does not survive the run failing. A run that dies without a `result`
+    // event still leaves a review able to say what it was building on.
     sqlx::query!(
-        r#"INSERT INTO runs (id, task_id, attempt, status, session_id, prompt, started_at, log_path)
-           VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)"#,
+        r#"INSERT INTO runs
+            (id, task_id, attempt, status, session_id, prompt, started_at, log_path, base_ref)
+           VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)"#,
         id,
         new_run.task_id,
         attempt,
@@ -675,6 +695,7 @@ pub async fn start_run(ctx: &ServiceContext, paths: &AppPaths, new_run: NewRun) 
         new_run.prompt,
         started_at,
         log_path,
+        new_run.base_ref,
     )
     .execute(&mut *tx)
     .await?;

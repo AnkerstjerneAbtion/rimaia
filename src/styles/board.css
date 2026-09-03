@@ -638,6 +638,75 @@
   flex: 1 1 10rem;
 }
 
+/* Dependencies (ADR-0008, task 011) — deliberately the same shell as the links
+   list above, because they are the same kind of thing: a short list of rows,
+   each with its own remove button, plus one add form underneath. The one
+   addition is a resolved-status word per edge, which is what task 011's Scope
+   asks this list to show and what the links list has no equivalent of. */
+
+.dependency-list {
+  list-style: none;
+  margin: 0 0 0.75rem;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.dependency-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  padding: 0.4rem 0.55rem;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  flex-wrap: wrap;
+}
+
+.dependency-title {
+  overflow-wrap: anywhere;
+  flex: 1 1 8rem;
+}
+
+.dependency-status {
+  font-size: 0.75rem;
+  flex-shrink: 0;
+}
+
+/* The two colours the badges already use for the same two meanings — a
+   satisfied dependency is the success case `.run-outcome-success` names, and a
+   waiting one is the blocked badge's own colour, so the panel and the card
+   agree without a third palette. */
+.dependency-status-satisfied {
+  color: var(--exit-success-text);
+}
+
+.dependency-status-waiting {
+  color: var(--badge-blocked-text);
+}
+
+.dependency-item-actions {
+  display: flex;
+  gap: 0.3rem;
+  flex-shrink: 0;
+}
+
+.dependency-item-actions button {
+  padding: 0.2rem 0.5rem;
+  font-size: 0.8rem;
+}
+
+.dependency-add-form {
+  display: flex;
+  gap: 0.4rem;
+  flex-wrap: wrap;
+}
+
+.dependency-add-form input {
+  flex: 1 1 10rem;
+}
+
 /* Model & effort — plain dropdowns until task 020 (ADR-0016); see
    `ModelEffortOverrides`'s own doc comment. */
 
@@ -742,6 +811,21 @@
   overflow-wrap: anywhere;
 }
 
+/* Blocked by (ADR-0008, task 011) — the same short-line treatment as
+   `.task-card-queue-skip` above, deliberately: this is a sentence about why a
+   card is not moving, which is the same kind of thing. It takes the blocked
+   badge's own colour rather than the muted grey, because unlike a skip reason
+   the user usually has to act on it - and because the `Blocked` badge is
+   already drawn a few lines above in that colour, so the two read as one
+   statement. `anywhere` for the same reason: a task title is arbitrary text and
+   a long one must wrap rather than widen the column. */
+.task-card-blocked-by {
+  margin: 0.35rem 0 0;
+  font-size: 0.75rem;
+  color: var(--badge-blocked-text);
+  overflow-wrap: anywhere;
+}
+
 /* Run outcome (task 008) — extends `.task-detail-section`'s shell above.
    New tokens for the six ADR-0011 exit classes: `success` gets its own
    (nothing in the app has needed a positive/green token before this); the
@@ -809,6 +893,18 @@
   display: flex;
   gap: 0.5rem;
   margin-top: 0.5rem;
+}
+
+/* ADR-0008's multi-dependency warning. The waiting-retry amber rather than the
+   danger tokens, deliberately: nothing is broken and no run has failed — the
+   user is being told that work they expect to be in the base is not, which is
+   the same "still recoverable, act on it" severity `.run-badge-waiting_retry`
+   already carries. */
+.worktree-dependency-warning {
+  margin: 0 0 0.5rem;
+  font-size: 0.8rem;
+  color: var(--badge-waiting-retry-text);
+  overflow-wrap: anywhere;
 }
 
 /* Why "Open" is disabled — same shape as `.repository-locked` (seam-contract

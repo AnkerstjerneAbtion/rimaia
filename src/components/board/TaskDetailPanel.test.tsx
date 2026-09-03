@@ -74,6 +74,7 @@ function worktreeStatus(overrides: Partial<WorktreeStatus> = {}): WorktreeStatus
     path: null,
     branch: null,
     baseRef: "main",
+    dependencyWarning: null,
     ahead: 0,
     behind: 0,
     dirty: false,

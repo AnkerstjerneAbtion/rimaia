@@ -522,6 +522,29 @@ value alone is not possible.
 
 The entry now binds 020 as well.
 
+### Amendment, 2026-09-02 — the summary names the blocker
+
+Task 011 adds a fifth field to the projection: `blocking_title: Option<String>`, the title of
+the first unsatisfied dependency in the order
+[ADR-0008](adr/0008-dependency-semantics-and-branch-chaining.md)'s 2026-09-02 amendment fixes
+(column rank, then ascending `position`). `None` exactly when `blocked_by_incomplete` is false.
+
+The card must **name** the blocking task, not merely flag one. Task 011's acceptance criterion
+is "a failing A leaves B and C blocked, each showing A as the reason", and a title is the only
+field that names it — a `title=` attribute on a badge does not satisfy "showing", because the
+morning review it exists for is a glance down a column rather than a hover over each card.
+Reading the name per card any other way would be the `get_task`-per-card N+1 this entry's body
+rejects.
+
+It is a second correlated subquery over `task_dependencies`, alongside the `EXISTS` that
+computes `blocked_by_incomplete`. That does not disturb the argument above: the cost this
+entry is about is *fifty reads per board read*, and a board read is still one query.
+`task_dependencies` holds a handful of rows per task on one desktop user's board.
+
+The field is derived on every read and never stored — see ADR-0008's amendment for why a
+cached `run_state = blocked` would live on the wrong row. The entry now binds 011 for both
+fields rather than only reserving one.
+
 ### Amendment, 2026-09-03 — the last-run summary carries `resume_after`
 
 Task 014 adds a fourth field to `last_run`: `resume_after`, one more column on the correlated

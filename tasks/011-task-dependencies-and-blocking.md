@@ -3,6 +3,7 @@ id: "011"
 title: Task dependencies and blocking
 milestone: v0.2
 status: ready
+landed: "#15"
 depends_on: ["009"]
 adrs: ["0008"]
 size: M

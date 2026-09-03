@@ -5,6 +5,7 @@ import { subscribeToTasksChanged } from "../../lib/events";
 import type { Repository, RimaiaError, Task, TaskDetail } from "../../types";
 import { ErrorBanner } from "../ErrorBanner";
 import { DeleteTaskSection } from "../panel/DeleteTaskSection";
+import { DependenciesEditor } from "../panel/DependenciesEditor";
 import { ExtraInstructionsEditor } from "../panel/ExtraInstructionsEditor";
 import { LinksEditor } from "../panel/LinksEditor";
 import { PlanEditor } from "../panel/PlanEditor";
@@ -199,6 +200,18 @@ function TaskDetailPanelBody({
       <LinksEditor
         taskId={task.id}
         links={detail?.links ?? []}
+        loading={detailLoading}
+        onChanged={refreshDetail}
+      />
+
+      {/* ADR-0008's dependency editor. `dependsOn` is on the detail rather than
+          on `Task`, so it waits for the same fetch `LinksEditor` does; the
+          repository comes off the board's own row, because a dependency must be
+          in the same one and that is also what the picker filters by. */}
+      <DependenciesEditor
+        taskId={task.id}
+        repositoryId={task.repositoryId}
+        dependsOn={detail?.dependsOn ?? []}
         loading={detailLoading}
         onChanged={refreshDetail}
       />

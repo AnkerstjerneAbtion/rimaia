@@ -43,6 +43,7 @@ function taskSummary(overrides: Partial<TaskSummary> = {}): TaskSummary {
     linkCount: 0,
     dependencyCount: 0,
     blockedByIncomplete: false,
+    blockingTitle: null,
     lastRun: { status: "running", exitClass: null, endedAt: null, resumeAfter: null },
     // Nothing configured anywhere, which is what a card with no strategy
     // shows: the badge renders nothing rather than "undefined".
