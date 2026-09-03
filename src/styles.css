@@ -29,7 +29,7 @@
      -success         One accent per run-state family, for icons, dots and
                       text - not full bg/text badge pairs. Leaves that need
                       a badge (board.css, runs.css) keep their own
-                      --badge-*/--exit-* pairs; these are the vocabulary a
+                      --badge- and --exit- pairs; these are the vocabulary a
                       future badge should be built from, not a replacement
                       for the existing ones.
      --danger-bg/-border/-text, --warn-bg/-border/-text, --ok-text
