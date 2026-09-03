@@ -10,14 +10,32 @@
 //! [`attempts`](super::attempts)'s business; what to do with the answer is
 //! [`queue`](super::queue)'s.
 //!
-//! # The run window is deliberately not a parameter
+//! # The run window is a parameter, and only the usage-limit row reads it
 //!
-//! ADR-0011 says a usage-limit wait is "capped by the run window", and this
-//! function has no window in it. That is not an oversight: run windows are task
-//! 013's, and inventing a second, weaker notion of one here is how the queue
-//! would end up with two answers to "may this start at 04:00". When 013 lands it
-//! adds a parameter to *this* function — not a second policy beside it — and the
-//! decision it returns is clamped in one place.
+//! ADR-0011: a usage-limit wait is *"capped only by the run window, because a
+//! limit that resets in four hours should still be picked up at 3am"*. Task 014
+//! left `decide` without one and seam-contract D23 recorded why — run windows
+//! were task 013's, and a second, weaker notion of one invented here is how the
+//! queue ends up with two answers to "may this start at 04:00". Task 013 landed,
+//! and it added a parameter to *this* function rather than a policy beside it,
+//! so the cap is applied in one place.
+//!
+//! `window_closes_at` is the instant new starts stop — [`RunWindow::closes_at`],
+//! passed as a bare instant so this module stays free of the schedule types and
+//! genuinely pure. `None` means no window, which is every manual Start and every
+//! schedule with no stop time, and in that case nothing about the decision
+//! changes: this is a cap, not a new requirement.
+//!
+//! **It caps the usage-limit row and nothing else**, because that is the only
+//! row ADR-0011 says it caps, and the difference is real. A usage-limit wait is
+//! open-ended by design — four hours, sometimes five — so it is the one that can
+//! plausibly outlast a night. A transient backoff is at most fifteen minutes; a
+//! window with less than fifteen minutes left is about to close anyway, and
+//! `try_step` will simply not get to it. Extending the cap to the transient row
+//! would spend a task's retry budget on the clock rather than on the failure,
+//! which is not what the budget is for.
+//!
+//! [`RunWindow::closes_at`]: crate::schedule::window::RunWindow::closes_at
 //!
 //! # Jitter is deterministic, and it is not decoration
 //!
@@ -98,6 +116,18 @@ pub enum GiveUpReason {
     NotRetryable(ExitClass),
     /// The `transient` budget is spent. `attempts` is how many were made.
     AttemptsExhausted { attempts: u32 },
+    /// ADR-0011's "capped only by the run window": the usage window does not
+    /// reopen until after this run window has closed, so waiting for it would be
+    /// waiting for a night that is already over.
+    ///
+    /// Carries both instants rather than collapsing them, so the card can say
+    /// "the limit clears at 07:00 and the window shut at 06:00" — which is a
+    /// sentence the user acts on (move the stop time, or start it by hand)
+    /// rather than one they have to reconstruct.
+    OutlastsRunWindow {
+        resets_at: DateTime<Utc>,
+        window_closes_at: DateTime<Utc>,
+    },
 }
 
 /// What ADR-0011's table says to do next.
@@ -140,7 +170,16 @@ impl RetryDecision {
 ///
 /// `seed` is the run id of the attempt that just ended — see this module's
 /// header on why the jitter is derived from it rather than drawn.
-pub fn decide(history: &AttemptHistory, now: DateTime<Utc>, seed: &str) -> RetryDecision {
+///
+/// `window_closes_at` is ADR-0011's cap, and `None` — no window at all — leaves
+/// every row exactly as task 014 wrote it. See this module's header on why it
+/// binds the usage-limit row and no other.
+pub fn decide(
+    history: &AttemptHistory,
+    now: DateTime<Utc>,
+    seed: &str,
+    window_closes_at: Option<DateTime<Utc>>,
+) -> RetryDecision {
     match history.exit_class {
         ExitClass::UsageLimit => {
             // Never earlier than `now`: a reset the CLI reported in the past —
@@ -153,9 +192,23 @@ pub fn decide(history: &AttemptHistory, now: DateTime<Utc>, seed: &str) -> Retry
                 .usage_limit_resets_at
                 .unwrap_or_else(|| now + Duration::seconds(USAGE_LIMIT_FALLBACK_POLL))
                 .max(now);
-            RetryDecision::ResumeAt {
-                at: reset + jitter(seed, USAGE_LIMIT_MAX_JITTER),
-                kind: RetryKind::UsageLimit,
+            let resume = reset + jitter(seed, USAGE_LIMIT_MAX_JITTER);
+
+            // ADR-0011's cap. Compared against the *jittered* instant, which is
+            // the one the queue would actually wait for — capping the reset and
+            // then jittering past the close is the off-by-a-minute this ordering
+            // avoids.
+            match window_closes_at {
+                Some(closes_at) if resume >= closes_at => RetryDecision::GiveUp {
+                    reason: GiveUpReason::OutlastsRunWindow {
+                        resets_at: reset,
+                        window_closes_at: closes_at,
+                    },
+                },
+                _ => RetryDecision::ResumeAt {
+                    at: resume,
+                    kind: RetryKind::UsageLimit,
+                },
             }
         }
 
@@ -271,7 +324,7 @@ mod tests {
         let mut history = first(ExitClass::UsageLimit);
         history.usage_limit_resets_at = Some(at("2026-08-20T06:00:00Z"));
 
-        let decision = decide(&history, at(NOW), SEED);
+        let decision = decide(&history, at(NOW), SEED, None);
 
         let RetryDecision::ResumeAt { at: resume, kind } = decision else {
             panic!("a usage limit is always retried: {decision:?}");
@@ -288,7 +341,7 @@ mod tests {
     fn usage_limit_without_reset_time_falls_back_to_fixed_poll() {
         // ADR-0011's fallback, and the branch `spike/FINDINGS.md` §4 says we
         // have never seen a real payload for.
-        let decision = decide(&first(ExitClass::UsageLimit), at(NOW), SEED);
+        let decision = decide(&first(ExitClass::UsageLimit), at(NOW), SEED, None);
 
         let RetryDecision::ResumeAt { at: resume, .. } = decision else {
             panic!("a usage limit is always retried: {decision:?}");
@@ -311,7 +364,7 @@ mod tests {
         };
 
         assert!(matches!(
-            decide(&history, at(NOW), SEED),
+            decide(&history, at(NOW), SEED, None),
             RetryDecision::ResumeAt {
                 kind: RetryKind::UsageLimit,
                 ..
@@ -324,11 +377,129 @@ mod tests {
         let mut history = first(ExitClass::UsageLimit);
         history.usage_limit_resets_at = Some(at("2026-08-20T01:00:00Z"));
 
-        let RetryDecision::ResumeAt { at: resume, .. } = decide(&history, at(NOW), SEED) else {
+        let RetryDecision::ResumeAt { at: resume, .. } = decide(&history, at(NOW), SEED, None) else {
             panic!("a usage limit is always retried");
         };
 
         assert!(resume >= at(NOW), "{resume} is before the clock");
+    }
+
+    // -----------------------------------------------------------------------
+    // The run window's cap (task 013, ADR-0011's "capped only by the run window")
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn a_limit_that_reopens_inside_the_window_is_still_waited_for() {
+        // ADR-0011's own example: "a limit that resets in four hours should
+        // still be picked up at 3am". The cap must not turn that into a refusal.
+        let mut history = first(ExitClass::UsageLimit);
+        history.usage_limit_resets_at = Some(at("2026-08-20T06:00:00Z"));
+
+        let decision = decide(
+            &history,
+            at(NOW),
+            SEED,
+            Some(at("2026-08-20T09:00:00Z")),
+        );
+
+        assert!(matches!(
+            decision,
+            RetryDecision::ResumeAt {
+                kind: RetryKind::UsageLimit,
+                ..
+            },
+        ));
+    }
+
+    #[test]
+    fn a_limit_that_outlasts_the_window_gives_up_and_names_both_instants() {
+        // The window shuts at 06:00 and the wall does not come down until 07:00.
+        // Scheduling a resume into a night that will already be over is a
+        // deadline the queue would never honour and the card would show forever.
+        let mut history = first(ExitClass::UsageLimit);
+        history.usage_limit_resets_at = Some(at("2026-08-20T07:00:00Z"));
+
+        let decision = decide(
+            &history,
+            at(NOW),
+            SEED,
+            Some(at("2026-08-20T06:00:00Z")),
+        );
+
+        assert_eq!(
+            decision,
+            RetryDecision::GiveUp {
+                reason: GiveUpReason::OutlastsRunWindow {
+                    resets_at: at("2026-08-20T07:00:00Z"),
+                    window_closes_at: at("2026-08-20T06:00:00Z"),
+                },
+            },
+        );
+        assert_eq!(decision.resume_after(), None);
+    }
+
+    #[test]
+    fn the_cap_is_measured_against_the_jittered_instant_the_queue_would_wait_for() {
+        // Capping the reset and then jittering past the close would schedule a
+        // resume up to a minute after the window shut — the off-by-a-minute the
+        // ordering inside `decide` exists to avoid. Asserted over a spread of
+        // seeds, because a single one might jitter to zero.
+        let mut history = first(ExitClass::UsageLimit);
+        history.usage_limit_resets_at = Some(at("2026-08-20T06:00:00Z"));
+        let closes_at = at("2026-08-20T06:00:30Z");
+
+        for index in 0..64 {
+            let seed = format!("run-{index}");
+            if let RetryDecision::ResumeAt { at: resume, .. } =
+                decide(&history, at(NOW), &seed, Some(closes_at))
+            {
+                assert!(
+                    resume < closes_at,
+                    "{seed} was scheduled to resume at {resume}, after the window shut",
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn no_window_leaves_every_row_exactly_as_it_was() {
+        // A manual Start opens no window, and a schedule with no stop time
+        // closes none. The cap is a cap, not a new requirement — so `None` has
+        // to be indistinguishable from the function task 014 shipped.
+        for class in [
+            ExitClass::UsageLimit,
+            ExitClass::Transient,
+            ExitClass::Interrupted,
+            ExitClass::Fatal,
+        ] {
+            let decided = decide(&first(class), at(NOW), SEED, None);
+            assert_eq!(
+                decided,
+                decide(&first(class), at(NOW), SEED, Some(at("2036-01-01T00:00:00Z"))),
+                "{class:?} must not depend on a window it finishes long before",
+            );
+        }
+    }
+
+    #[test]
+    fn the_window_never_shortens_a_transient_backoff() {
+        // The cap binds the usage-limit row and no other — see this module's
+        // header. A fifteen-minute backoff inside a window with ten minutes left
+        // is not a reason to abandon a task; the window simply closes and
+        // `try_step` does not get to it.
+        let history = AttemptHistory {
+            attempts_in_session: 3,
+            transient_attempts: 3,
+            ..first(ExitClass::Transient)
+        };
+
+        assert_eq!(
+            decide(&history, at(NOW), SEED, Some(at("2026-08-20T02:10:00Z"))),
+            RetryDecision::ResumeAt {
+                at: at(NOW) + Duration::minutes(15),
+                kind: RetryKind::Transient,
+            },
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -345,7 +516,7 @@ mod tests {
             };
 
             assert_eq!(
-                decide(&history, at(NOW), SEED),
+                decide(&history, at(NOW), SEED, None),
                 RetryDecision::ResumeAt {
                     at: at(NOW) + Duration::seconds(seconds),
                     kind: RetryKind::Transient,
@@ -369,7 +540,7 @@ mod tests {
 
         let decided_at = at(NOW);
         assert_eq!(
-            decide(&history, decided_at, SEED),
+            decide(&history, decided_at, SEED, None),
             RetryDecision::ResumeAt {
                 at: decided_at + Duration::minutes(15),
                 kind: RetryKind::Transient,
@@ -386,7 +557,7 @@ mod tests {
         };
 
         assert_eq!(
-            decide(&history, at(NOW), SEED),
+            decide(&history, at(NOW), SEED, None),
             RetryDecision::GiveUp {
                 reason: GiveUpReason::AttemptsExhausted {
                     attempts: MAX_TRANSIENT_ATTEMPTS
@@ -402,7 +573,7 @@ mod tests {
     #[test]
     fn an_interrupted_run_resumes_once_immediately_and_then_backs_off_like_a_transient_one() {
         assert_eq!(
-            decide(&first(ExitClass::Interrupted), at(NOW), SEED),
+            decide(&first(ExitClass::Interrupted), at(NOW), SEED, None),
             RetryDecision::ResumeAt {
                 at: at(NOW),
                 kind: RetryKind::Interrupted,
@@ -416,7 +587,7 @@ mod tests {
             ..first(ExitClass::Interrupted)
         };
         assert_eq!(
-            decide(&twice, at(NOW), SEED),
+            decide(&twice, at(NOW), SEED, None),
             RetryDecision::ResumeAt {
                 at: at(NOW) + Duration::seconds(60),
                 kind: RetryKind::Transient,
@@ -436,7 +607,7 @@ mod tests {
         };
 
         assert_eq!(
-            decide(&history, at(NOW), SEED),
+            decide(&history, at(NOW), SEED, None),
             RetryDecision::GiveUp {
                 reason: GiveUpReason::AttemptsExhausted { attempts: 6 },
             },
@@ -453,7 +624,7 @@ mod tests {
         // by being tried again at 03:00.
         for class in [ExitClass::Fatal, ExitClass::Cancelled, ExitClass::Success] {
             assert_eq!(
-                decide(&first(class), at(NOW), SEED),
+                decide(&first(class), at(NOW), SEED, None),
                 RetryDecision::GiveUp {
                     reason: GiveUpReason::NotRetryable(class),
                 },
@@ -465,10 +636,10 @@ mod tests {
     #[test]
     fn a_decision_not_to_retry_stores_no_deadline() {
         assert_eq!(
-            decide(&first(ExitClass::Fatal), at(NOW), SEED).resume_after(),
+            decide(&first(ExitClass::Fatal), at(NOW), SEED, None).resume_after(),
             None
         );
-        assert!(decide(&first(ExitClass::UsageLimit), at(NOW), SEED)
+        assert!(decide(&first(ExitClass::UsageLimit), at(NOW), SEED, None)
             .resume_after()
             .is_some());
     }

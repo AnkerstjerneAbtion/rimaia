@@ -546,24 +546,58 @@ pub struct Run {
 /// A named run configuration (ADR-0010).
 ///
 /// Mode and concurrency are properties of the configuration, never of a task.
-/// Nothing reads this table until task 013; it is modelled now for the same reason
-/// [`TaskDependency`] is.
+/// Task 013 is what reads this table; the rules about which combinations of the
+/// columns below are legal live in [`schedule`](crate::schedule), not here and
+/// deliberately not in a `CHECK` — SQLite cannot drop one, and the domain was
+/// still open when the table shipped.
 #[derive(Debug, Clone, PartialEq, Serialize, sqlx::FromRow)]
 #[serde(rename_all = "camelCase")]
 pub struct Schedule {
     pub id: String,
     pub name: String,
     pub mode: ScheduleMode,
-    /// A cron expression with a timezone, or a wall-clock time, or neither for
-    /// "run now". Which combinations are legal is task 013's design, and is
-    /// deliberately unconstrained here as it is in the schema.
+    /// A cron expression, read in [`timezone`](Self::timezone). Exclusive with
+    /// [`start_at`](Self::start_at) — a row with both, or with neither, is
+    /// refused by [`schedule::fire::trigger`](crate::schedule::fire::trigger).
+    ///
+    /// The initial schema's comment offered a third reading, "neither for run
+    /// now". Task 013 declined it: `QueueHandle::start` already *is* Run now.
+    /// Seam-contract D24.
     pub cron: Option<String>,
+    /// ADR-0010's "Start at" — a one-off wall-clock instant. Fires once.
     pub start_at: Option<DateTime<Utc>>,
     /// Read only in [`ScheduleMode::Parallel`]. ADR-0010 caps *per-repository*
     /// concurrency at 1 regardless of this number, because two agents in one repo
     /// fight over ports, test databases and lockfiles.
     pub max_concurrency: i64,
     pub enabled: bool,
+    /// An IANA name — `"Europe/Copenhagen"`, never an offset and never an
+    /// abbreviation.
+    ///
+    /// **Nullable here, required by the service for every row it writes.** A
+    /// `NOT NULL DEFAULT 'UTC'` would let a nightly schedule be created silently
+    /// in the wrong zone, which is exactly the failure the DST acceptance
+    /// criterion exists to catch — a wrong answer that looks like an answer.
+    pub timezone: Option<String>,
+    /// A **local wall-clock time of day**, `HH:MM`, resolved through
+    /// [`timezone`](Self::timezone) — not an instant.
+    ///
+    /// "Stop at 06:00" is the sentence the user says. An absolute instant cannot
+    /// express a stop that repeats, and a duration would move the stop whenever
+    /// the start moved and end a spring-forward window an hour early.
+    pub stop_at: Option<String>,
+    /// When the schedule **actually** fired, never when it was due.
+    ///
+    /// The distinction is what makes ADR-0010's "fires late rather than
+    /// skipping" work without becoming a re-fire loop.
+    pub last_fired_at: Option<DateTime<Utc>>,
+    /// The instant from which missed occurrences count — set on create, re-set
+    /// on every enable.
+    ///
+    /// Without it a nightly 22:00 schedule created at 23:00 fires immediately
+    /// for an occurrence that predates its own existence, and one disabled for a
+    /// month fires the second it is re-enabled.
+    pub armed_at: Option<DateTime<Utc>>,
 }
 
 #[cfg(test)]

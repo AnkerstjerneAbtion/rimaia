@@ -11,11 +11,28 @@
 //! [`db::settings`](crate::db::settings), the rules about the key here, in the
 //! module that has the rules.
 //!
-//! That leaves a reconciliation task 013 inherits rather than discovers, and
-//! the seam-contract entry names it: once a schedule can say "run this list in
-//! parallel, three at a time", there are two answers to "what mode is the queue
-//! in" — the active schedule's and this default. Neither is wrong; which one
-//! wins while a window is open is a decision, and it is 013's.
+//! # The reconciliation D21 left open, and how 013 settled it
+//!
+//! Once a schedule can say "run this list in parallel, three at a time", there
+//! are two answers to "what mode is the queue in" — the active schedule's, and
+//! this default. **The open window wins; the default wins whenever no window is
+//! open.** [`resolve`] reads [`window::active`] first and takes the window's
+//! `mode` and `max_concurrency` when there is one.
+//!
+//! The argument is in [`schedule::window`](crate::schedule::window)'s header and
+//! in seam-contract D24; the two consequences worth stating *here*, where the
+//! numbers are read, are these. A manual Start opens no window, so pressing the
+//! button still resolves against these keys and nothing about task 012's
+//! behaviour changed on a night nobody has scheduled. And [`configured`] — what
+//! the Settings control renders — deliberately still answers with the **stored
+//! default**, never with what a window has overridden it to: that is the same
+//! argument this module already makes for showing the stored `max_concurrency`
+//! rather than the `1` sequential resolves to, one layer out. A control that
+//! rewrote itself at 22:00 would read as the user's own setting having been
+//! silently changed. Where "what is happening right now" belongs is
+//! [`QueueStatus`](super::QueueStatus), which carries the window itself.
+//!
+//! [`window::active`]: crate::schedule::window::active
 //!
 //! # Sequential resolves to one slot, whatever the number says
 //!
@@ -48,6 +65,7 @@ use crate::context::ServiceContext;
 use crate::db::{settings, ScheduleMode};
 use crate::error::{Error, Result};
 use crate::repo;
+use crate::schedule::window;
 use crate::scheduler::inflight::CONCURRENCY_CEILING;
 
 /// The `settings` key holding [`ScheduleMode`] for the queue's default
@@ -126,13 +144,37 @@ pub async fn configured(pool: &SqlitePool) -> Result<RunCapacity> {
 
 /// Reads the mode and both limits, and resolves them into the numbers one pass
 /// of the queue loop is bounded by.
+///
+/// Reads the open run window **first**, and takes its configuration over these
+/// settings keys when there is one — see this module's header for why that
+/// direction and not the other. One place decides, so the loop needs no branch
+/// and neither mode has a special case.
 pub async fn resolve(ctx: &ServiceContext) -> Result<Resolved> {
-    let global = match schedule_mode(&ctx.pool).await? {
+    let window = window::active(&ctx.pool).await?;
+    let (mode, limit) = match &window {
+        Some(window) => (
+            window.mode,
+            // Held to the same range a stored settings value is, and by the
+            // same rule: `schedules.max_concurrency` has no `CHECK` either, so a
+            // hand-edited row must not be the one thing that can spawn ten
+            // agents. Named in the warning, because the operator has to know
+            // which row to fix.
+            usable_repository_concurrency(&window.schedule_name, window.max_concurrency),
+        ),
+        None => (
+            schedule_mode(&ctx.pool).await?,
+            max_concurrency(&ctx.pool).await?,
+        ),
+    };
+
+    let global = match mode {
         // Not `max_concurrency.min(1)` and not a branch further down: this is
         // the whole of what sequential mode *is* now, and stating it here is
-        // what stops a later reader looking for the second code path.
+        // what stops a later reader looking for the second code path. It applies
+        // to a window's own mode identically, which is the point of resolving
+        // both through one expression.
         ScheduleMode::Sequential => 1,
-        ScheduleMode::Parallel => max_concurrency(&ctx.pool).await?,
+        ScheduleMode::Parallel => limit,
     };
 
     let per_repository = repo::list(ctx)

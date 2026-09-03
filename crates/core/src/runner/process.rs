@@ -1113,9 +1113,29 @@ async fn apply_retry_policy(
         return;
     };
 
+    // ADR-0011's "capped only by the run window". Read here rather than passed
+    // in, because a run that started inside a window may well be finishing
+    // outside one — the operator pressed Stop, or the stop time arrived while
+    // this run was allowed to finish — and the cap that matters is the one in
+    // force when the decision is made.
+    //
+    // A failure to read it is "no window", which is the direction that keeps
+    // ADR-0011's unbounded retry rather than inventing a cap out of a database
+    // hiccup.
+    let window_closes_at = match crate::schedule::window::active(&ctx.pool).await {
+        Ok(window) => window.and_then(|window| window.closes_at),
+        Err(error) => {
+            tracing::warn!(
+                %task_id, %run_id, %error,
+                "could not read the run window; deciding this retry without its cap",
+            );
+            None
+        }
+    };
+
     // The run id as the jitter seed — see `retry::jitter` on why the spread is
     // derived rather than drawn, and why it has to differ per run.
-    let decision = retry::decide(&history, ctx.clock.now(), run_id);
+    let decision = retry::decide(&history, ctx.clock.now(), run_id, window_closes_at);
     outcome.resume_after = decision.resume_after();
 
     if outcome.exit_class == ExitClass::UsageLimit {

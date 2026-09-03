@@ -9,6 +9,22 @@ members = ["crates/core", "src-tauri"]
 anyhow = "1"
 axum = "0.8"
 chrono = { version = "0.4", features = ["serde"] }
+# Task 013's two, and both are confined to `schedule::cron` (seam-contract D24).
+#
+# `croner` is the only maintained cron crate with *defined* DST semantics: its
+# searches move in real time rather than wall-clock time, which is what makes
+# ADR-0010's "a nightly schedule shows the correct next fire time across a DST
+# boundary" answerable at all. `cron 0.17`'s behaviour inside a skipped hour is
+# unspecified, and `saffron` hands the timezone question back to the caller,
+# which this task's Notes forbid. Its own README calls the API "subject to
+# change", so it is reachable from exactly one file — one file plus its tests is
+# the whole cost of swapping it.
+#
+# `chrono-tz` supplies the IANA zones the schema's `schedules.timezone` holds,
+# and `TZ_VARIANTS` is what feeds the picker — so the frontend needs **no** npm
+# timezone package, which is the dependency D6 would otherwise have had to weigh.
+croner = "4"
+chrono-tz = "0.10"
 # Task 018's one doctor check that std cannot answer: free space on the volume
 # the app data directory lives on. Cross-platform, which is the point — ADR-0002
 # keeps Windows and Linux viable, and a hand-rolled `statvfs` here would be three

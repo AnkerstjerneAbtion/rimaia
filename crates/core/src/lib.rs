@@ -21,6 +21,7 @@ pub mod paths;
 pub mod repo;
 pub mod runner;
 pub mod runs;
+pub mod schedule;
 pub mod scheduler;
 pub mod startup;
 pub mod strategy;

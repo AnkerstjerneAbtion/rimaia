@@ -130,7 +130,13 @@ async fn interrupted_after(ctx: &ServiceContext, task_id: &str, run_id: &str) ->
     };
     match attempts::history(ctx, task_id, ending).await {
         Ok(Some(history)) => {
-            outcome.resume_after = retry::decide(&history, ctx.clock.now(), run_id).resume_after();
+            // No window, unconditionally, and that is not a shortcut. This runs
+            // at *launch*, where seam-contract D15's amendment guarantees there
+            // is none: quitting closes the window, and a launch starts paused.
+            // Passing the window that will be open at 22:00 tonight would cap a
+            // decision about last night against a night that has not happened.
+            outcome.resume_after = retry::decide(&history, ctx.clock.now(), run_id, None)
+                .resume_after();
         }
         Ok(None) => {}
         Err(error) => tracing::error!(

@@ -1,0 +1,80 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT id, name, mode AS \"mode: ScheduleMode\", cron,\n            start_at AS \"start_at: DateTime<Utc>\", max_concurrency,\n            enabled AS \"enabled: bool\", timezone, stop_at,\n            last_fired_at AS \"last_fired_at: DateTime<Utc>\",\n            armed_at AS \"armed_at: DateTime<Utc>\"\n           FROM schedules WHERE id = ?1",
+  "describe": {
+    "columns": [
+      {
+        "name": "id",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "name",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "mode: ScheduleMode",
+        "ordinal": 2,
+        "type_info": "Text"
+      },
+      {
+        "name": "cron",
+        "ordinal": 3,
+        "type_info": "Text"
+      },
+      {
+        "name": "start_at: DateTime<Utc>",
+        "ordinal": 4,
+        "type_info": "Text"
+      },
+      {
+        "name": "max_concurrency",
+        "ordinal": 5,
+        "type_info": "Integer"
+      },
+      {
+        "name": "enabled: bool",
+        "ordinal": 6,
+        "type_info": "Bool"
+      },
+      {
+        "name": "timezone",
+        "ordinal": 7,
+        "type_info": "Text"
+      },
+      {
+        "name": "stop_at",
+        "ordinal": 8,
+        "type_info": "Text"
+      },
+      {
+        "name": "last_fired_at: DateTime<Utc>",
+        "ordinal": 9,
+        "type_info": "Text"
+      },
+      {
+        "name": "armed_at: DateTime<Utc>",
+        "ordinal": 10,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      true,
+      true,
+      false,
+      false,
+      true,
+      true,
+      true,
+      true
+    ]
+  },
+  "hash": "2cb15034188efddc39451a536288657c04e1a7b65daa1391942b64b751ef7b19"
+}

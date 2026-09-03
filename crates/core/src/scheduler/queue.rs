@@ -50,6 +50,45 @@
 //! no equivalent: `changed()` marks a generation seen only when it *returns*,
 //! so a slot freed while the loop was busy is still there to be found.
 //!
+//! # The schedule timer is a third arm, not a second task (task 013)
+//!
+//! [`tick_schedules`](QueueTask::tick_schedules) runs inside this loop, and the
+//! wake it needs is folded into the same deadline the retry arm already
+//! computes. It is emphatically **not** a `tokio::spawn`ed timer calling
+//! [`QueueHandle::start`], and there are three reasons, in order of weight:
+//!
+//! 1. **ADR-0010 makes the scheduler the only component allowed to move a task
+//!    into `running`.** A separate timer task calling `start()` would be a
+//!    second decider racing `try_step`'s own switch re-checks — the exact window
+//!    the "a Pause, a Stop or a shutdown pressed mid-claim" section below was
+//!    written to close, reopened from the other side.
+//! 2. **ADR-0018's "another `subscribe()` and no coordination with anyone" is
+//!    about *subscribers*.** A timer is not a subscriber. This is the same loop
+//!    learning to wake on time as well as on events, which is what it already
+//!    learned to do for ADR-0011's deadlines.
+//! 3. **It costs one future** in a `select!` whose arms are already cancel-safe,
+//!    and no new channel, no new task, and no new ordering constraint in the
+//!    shell's `setup()`.
+//!
+//! The order inside the loop is shutdown check → [`drain`] → `tick_schedules` →
+//! [`step`](QueueTask::step), and `tick_schedules` running **first** is
+//! load-bearing rather than arbitrary: it **closes a window before anything
+//! selects**, so a task cannot be claimed one millisecond after the window it
+//! would have run in shut. Doing it the other way round would let every pass
+//! that happened to land on the stop time start one more task.
+//!
+//! `tick_schedules` does three things, in this order. **Close first** — an open
+//! window whose stop time has arrived is paused (ADR-0010: reaching the stop
+//! time stops *starting*, and lets the in-flight run finish, so it is `pause`
+//! and never `stop`). **Then fire** — the first due schedule in a stable order
+//! runs task 018's doctor, writes the window, and flips the switch. **Otherwise
+//! idle**, reporting the earliest instant anything is waiting for.
+//!
+//! A failure anywhere in it is logged and recorded on `last_step_error` exactly
+//! as [`step`](QueueTask::step)'s is, and **never ends the loop**: a queue that
+//! stopped for the night because one cron expression was hand-edited into
+//! nonsense is the failure mode this whole product exists to prevent.
+//!
 //! # The `releases` arm is not optional
 //!
 //! `finish_run` publishes its `ChangeEvent`s from *inside* `run_task`, while
@@ -173,6 +212,8 @@ use crate::doctor;
 use crate::error::{Error, Result};
 use crate::events::ChangeEvent;
 use crate::paths::AppPaths;
+use crate::schedule::window::{self, RunWindow};
+use crate::schedule::{self, fire, preflight, Due};
 use crate::runner::{
     probe_cli, run_task, CancelSignal, ResumeSession, RunRequest, RunTrigger, RunnerConfig,
 };
@@ -228,6 +269,21 @@ pub struct QueueStatus {
     /// debug as a bug. Read fresh here rather than cached, so a hold that has
     /// expired stops being reported without anything having to clear it.
     pub usage_limit_pause_until: Option<DateTime<Utc>>,
+    /// The run window a schedule opened, or `None` when the queue is running
+    /// because somebody pressed Start (task 013).
+    ///
+    /// Here rather than on a schedules read of its own, because it answers a
+    /// question about *the queue*: the Runs view says "Running until 06:00 —
+    /// Nightly" while it is open and, once the stop time has passed and the
+    /// switch has gone back to `paused`, this is the one thing that explains a
+    /// queue which stopped by itself at 06:00 with work still on the board.
+    /// Without it, that reads exactly like the queue having failed.
+    ///
+    /// It is deliberately **not** on the Settings panel, which keeps showing the
+    /// stored default configuration — see [`capacity`](super::capacity)'s header
+    /// and seam-contract D24 on why a control that rewrote itself at 22:00 would
+    /// be worse than one that does not move.
+    pub window: Option<RunWindow>,
 }
 
 /// The queue's control surface. Cheap to clone; every clone drives the same
@@ -323,6 +379,12 @@ impl QueueHandle {
             return Err(Error::invalid(report.blocking_summary()));
         }
 
+        // A human has acted and the environment has just been proved good, so
+        // whatever a *scheduled* start failed with last night no longer
+        // describes anything. Cleared here rather than left to the next
+        // successful pass, because a pass would not clear it — see
+        // `Shared::record_schedule_error` on why that reason is sticky.
+        self.shared.clear_schedule_error();
         self.set(QueueState::Running).await
     }
 
@@ -343,8 +405,19 @@ impl QueueHandle {
     }
 
     /// Starts nothing new; lets the current run finish.
+    ///
+    /// **Closes the run window too** (task 013, seam-contract D15's amendment).
+    /// Pause inside a window means pause, not "pause until the timer looks
+    /// again" — and the timer would look again within the minute, because
+    /// `tick_schedules` reads a window that is still open as a night still in
+    /// progress. Leaving the window behind would make the Pause button undo
+    /// itself.
+    ///
+    /// The schedule's *next* occurrence still fires. A window is one night; a
+    /// schedule is the standing instruction that produces them.
     pub async fn pause(&self) -> Result<()> {
-        self.set(QueueState::Paused).await
+        self.set(QueueState::Paused).await?;
+        window::close(&self.shared.ctx).await
     }
 
     /// Pause, plus cancel whatever *the queue* is running.
@@ -377,6 +450,7 @@ impl QueueHandle {
             plan: selection::plan(ctx).await?,
             last_step_error: self.shared.step_error(),
             usage_limit_pause_until: pause::active_until(&ctx.pool, ctx.clock.now()).await?,
+            window: window::active(&ctx.pool).await?,
         })
     }
 
@@ -446,16 +520,31 @@ impl QueueTask {
             // Before the board read, never after — see this module's header.
             drain(&mut changes);
 
+            // **Before `step`, never after.** A window whose stop time has
+            // arrived is closed here, so the pass below cannot claim one more
+            // task a millisecond after the night was supposed to end.
+            let tick = self.tick_schedules().await;
+            if tick == Step::Worked {
+                continue;
+            }
+
             let step = self.step(&mut runs).await;
             if step == Step::Worked {
                 continue;
             }
 
-            // The fifth wake source. Capped before it is slept on — see this
-            // module's header on why that is not a poll interval — and built
-            // fresh every iteration, because the deadline is re-derived from a
-            // board that may have changed while the loop was busy.
-            let deadline = step.deadline().map(|at| at.min(clock.now() + DEADLINE_CAP));
+            // The fifth wake source, now serving two questions: when a
+            // `waiting_retry` task becomes due, and when a schedule fires or a
+            // window closes. The earliest of them, because either changes the
+            // answer and waking for one and sleeping through the other would be
+            // the same bug twice.
+            //
+            // Capped before it is slept on — see this module's header on why
+            // that is not a poll interval — and built fresh every iteration,
+            // because both deadlines are re-derived from state that may have
+            // changed while the loop was busy.
+            let deadline = earliest(tick.deadline(), step.deadline())
+                .map(|at| at.min(clock.now() + DEADLINE_CAP));
             let clock = Arc::clone(&clock);
             let due = async move {
                 match deadline {
@@ -535,6 +624,229 @@ impl QueueTask {
                 Step::Idle
             }
         }
+    }
+
+    /// One look at the schedules: close a window that is over, fire one that is
+    /// due, or report when to look again (task 013, ADR-0010's Triggering).
+    ///
+    /// A failure is logged and recorded exactly as [`step`](Self::step)'s is,
+    /// and treated as "nothing to do" rather than ending the loop. One
+    /// hand-edited cron expression must not be able to end a night — and unlike
+    /// a step failure, nobody is awake to notice this one, which is precisely
+    /// why it is recorded rather than only logged.
+    async fn tick_schedules(&self) -> Step {
+        match self.try_tick_schedules().await {
+            Ok(step) => step,
+            Err(error) => {
+                tracing::error!(%error, "the run queue could not check its schedules");
+                self.shared.record_step_error(error.to_string());
+                Step::Idle
+            }
+        }
+    }
+
+    async fn try_tick_schedules(&self) -> Result<Step> {
+        let ctx = &self.shared.ctx;
+        let now = ctx.clock.now();
+        let open = window::active(&ctx.pool).await?;
+
+        // 1. Close first, before anything selects.
+        if let Some(window) = &open {
+            if window.has_closed(now) {
+                return self.close_window(window).await;
+            }
+        }
+
+        // 2. Fire. A stable order, because two schedules due in the same minute
+        //    produce one window and *which* of them owns the night has to be
+        //    the same answer on every pass and after every restart.
+        let mut wake: Option<DateTime<Utc>> = open.as_ref().and_then(|window| window.closes_at);
+        for schedule in schedule::enabled(&ctx.pool).await? {
+            // Per row, not per pass: one unreadable row must not stop every
+            // other schedule being looked at. The row is named, because the
+            // operator has to know which one to fix.
+            let due = match fire::due(&schedule, now) {
+                Ok(due) => due,
+                Err(error) => {
+                    tracing::error!(
+                        schedule = %schedule.name, %error,
+                        "a schedule could not be read; it will not fire until it is fixed",
+                    );
+                    continue;
+                }
+            };
+
+            match due {
+                Due::Fire {
+                    occurrence,
+                    closes_at,
+                } => {
+                    if let Some(window) = &open {
+                        // Deliberately not a second window. `last_fired_at` is
+                        // still written, so this occurrence is honoured and does
+                        // not come round again the moment the other window
+                        // closes — the schedule fired, it simply found the
+                        // machine already working.
+                        tracing::info!(
+                            schedule = %schedule.name,
+                            active = %window.schedule_name,
+                            closes_at = ?window.closes_at,
+                            "a schedule came due while another schedule's window is still open; \
+                             not opening a second one",
+                        );
+                        schedule::record_fire(ctx, &schedule.id, now).await?;
+                        return Ok(Step::Worked);
+                    }
+                    return self.open_window(&schedule, occurrence, closes_at, now).await;
+                }
+
+                // Due, and too late to matter. Nothing is written — see
+                // `Due::Expired` on why lying to `last_fired_at` would be worse
+                // than recomputing this — so the only thing to do is wait for
+                // the next occurrence, which the wake below picks up.
+                Due::Expired {
+                    occurrence,
+                    closed_at,
+                } => tracing::info!(
+                    schedule = %schedule.name,
+                    occurrence = %occurrence.to_rfc3339(),
+                    closed_at = %closed_at.to_rfc3339(),
+                    "a schedule was due while the app was closed, but its run window has already \
+                     ended; waiting for the next one",
+                ),
+
+                Due::NotDue => {}
+            }
+
+            // **Strictly future instants only.** `next_wake_at`, never
+            // `next_fire_at`: the latter reports an overdue occurrence in the
+            // past, and a deadline in the past resolves immediately, which would
+            // turn this loop into a spin until morning.
+            match fire::next_wake_at(&schedule, now) {
+                Ok(next) => wake = earliest(wake, next),
+                Err(error) => tracing::debug!(
+                    schedule = %schedule.name, %error,
+                    "a schedule has no next occurrence to wake for",
+                ),
+            }
+        }
+
+        Ok(match wake {
+            Some(at) => Step::IdleUntil(at),
+            None => Step::Idle,
+        })
+    }
+
+    /// The stop time arrived: start nothing more, and let what is running
+    /// finish.
+    ///
+    /// **`pause`, never `stop`.** ADR-0010 is explicit — "reaching it stops
+    /// *starting* new tasks; in-flight runs are allowed to finish rather than
+    /// being killed mid-edit" — and the difference is a run that was three
+    /// minutes from a commit at 06:00.
+    ///
+    /// The switch is written **before** the window is cleared, for the same
+    /// reason [`QueueHandle::stop`] writes it before cancelling: a crash between
+    /// the two leaves a paused queue with a stale window, which the next tick
+    /// tidies, rather than a running queue with no window, which would spend the
+    /// morning working the board under the default configuration.
+    async fn close_window(&self, window: &RunWindow) -> Result<Step> {
+        let ctx = &self.shared.ctx;
+        state::set_queue_state(ctx, QueueState::Paused).await?;
+        window::close(ctx).await?;
+
+        tracing::info!(
+            schedule = %window.schedule_name,
+            closes_at = ?window.closes_at,
+            still_running = self.shared.in_flight.task_ids().len(),
+            "the run window closed; starting nothing new and letting the current runs finish",
+        );
+        Ok(Step::Worked)
+    }
+
+    /// A schedule came due: check the environment, record what will happen, and
+    /// flip the switch.
+    ///
+    /// # The doctor runs here, and a blocking report stops the night
+    ///
+    /// A scheduled start is the one nobody is watching, which is exactly task
+    /// 018's case: "a broken environment is reported in the evening rather than
+    /// discovered in the morning". A blocking report therefore **does not flip
+    /// the switch**, records [`blocking_summary`](doctor::DoctorReport::blocking_summary)
+    /// where the Runs view will show it, and logs at `error`.
+    ///
+    /// It **still writes `last_fired_at`**, and that is the part worth stating:
+    /// without it the occurrence stays due, the next wake finds it again, and a
+    /// missing `claude` becomes eight subprocess spawns a minute until morning.
+    /// The schedule fired; what it found was a broken machine.
+    async fn open_window(
+        &self,
+        schedule: &crate::db::Schedule,
+        occurrence: DateTime<Utc>,
+        closes_at: Option<DateTime<Utc>>,
+        now: DateTime<Utc>,
+    ) -> Result<Step> {
+        let ctx = &self.shared.ctx;
+
+        let report = doctor::run(ctx, &self.shared.doctor_environment()).await?;
+        if report.is_blocking() {
+            schedule::record_fire(ctx, &schedule.id, now).await?;
+            let summary = report.blocking_summary();
+            tracing::error!(
+                schedule = %schedule.name,
+                blocking = report.blocking().count(),
+                summary = %summary,
+                "a scheduled start was refused by the preflight doctor; the queue was not started",
+            );
+            self.shared.record_schedule_error(summary);
+            // So the Runs view re-reads and shows it. `queue_state` was not
+            // written, so nothing else on this path would have announced
+            // anything at all.
+            ctx.publish(ChangeEvent::Settings);
+            return Ok(Step::Worked);
+        }
+
+        // Computed, never stored, and the same object the evening's Preview
+        // button showed — so the log line a morning review reads and the
+        // sentence the user read before leaving came from one function.
+        match preflight::preview(ctx, &schedule.id).await {
+            Ok(summary) => tracing::info!(
+                schedule = %schedule.name,
+                will_start = summary.startable(),
+                blocked = summary.blocked(),
+                order = ?summary
+                    .plan
+                    .iter()
+                    .filter(|entry| entry.skip.is_none())
+                    .map(|entry| entry.title.as_str())
+                    .collect::<Vec<_>>(),
+                "a schedule fired",
+            ),
+            // A summary is a log line, not a precondition. Refusing to start the
+            // night because the *description* of it could not be built would be
+            // the preflight preventing the thing it exists to protect.
+            Err(error) => tracing::warn!(
+                schedule = %schedule.name, %error,
+                "a schedule fired, but its preflight summary could not be built",
+            ),
+        }
+
+        let window = RunWindow::opened_by(schedule, now, closes_at);
+        window::open(ctx, &window).await?;
+        schedule::record_fire(ctx, &schedule.id, now).await?;
+        self.shared.clear_schedule_error();
+        state::set_queue_state(ctx, QueueState::Running).await?;
+
+        tracing::info!(
+            schedule = %window.schedule_name,
+            occurrence = %occurrence.to_rfc3339(),
+            closes_at = ?window.closes_at,
+            mode = window.mode.as_str(),
+            max_concurrency = window.max_concurrency,
+            late_by_seconds = (now - occurrence).num_seconds(),
+            "the run window is open",
+        );
+        Ok(Step::Worked)
     }
 
     async fn try_step(&self, runs: &mut JoinSet<()>) -> Result<Step> {
@@ -838,9 +1150,29 @@ struct Shared {
     /// Not the queue's own map any more — the shell holds a clone of the same
     /// registry, and both doors read it. See this module's header.
     in_flight: InFlight,
-    /// The reason [`QueueTask::step`]'s last pass could not be completed, if
-    /// it couldn't. Written only in `step`, never inside `try_step` itself.
-    last_step_error: Mutex<Option<String>>,
+    /// The reason the queue is not doing what the switch says, if there is one.
+    /// Written only in [`QueueTask::step`] and
+    /// [`QueueTask::tick_schedules`], never inside `try_step` itself.
+    last_step_error: Mutex<Option<StepError>>,
+}
+
+/// A recorded reason, and how long it outlives the pass that recorded it.
+///
+/// Two lifetimes, because there are genuinely two kinds of reason. An ordinary
+/// step failure — a locked database, a `claude` that could not be probed — is
+/// true of *one pass*, and the next pass that gets all the way through has
+/// disproved it. A **scheduled start refused by the doctor** is not: the queue it
+/// refused to start is `paused`, so `try_step` returns immediately at its switch
+/// check and every subsequent pass would "succeed" without having proved
+/// anything at all. Left non-sticky, the message the user is meant to find in
+/// the morning would be cleared microseconds after it was written, by a pass
+/// that did nothing.
+#[derive(Debug, Clone)]
+struct StepError {
+    message: String,
+    /// Whether an ordinary successful pass may clear it. Cleared instead by the
+    /// next successful fire, or by a human pressing Start.
+    sticky: bool,
 }
 
 impl Shared {
@@ -860,24 +1192,52 @@ impl Shared {
     }
 
     fn record_step_error(&self, error: String) {
-        *self
-            .last_step_error
-            .lock()
-            .expect("queue step-error lock poisoned") = Some(error);
+        self.set_step_error(Some(StepError {
+            message: error,
+            sticky: false,
+        }));
     }
 
+    /// Records why a *scheduled* start did not happen, in a way an ordinary
+    /// pass will not erase. See [`StepError`].
+    fn record_schedule_error(&self, error: String) {
+        self.set_step_error(Some(StepError {
+            message: error,
+            sticky: true,
+        }));
+    }
+
+    /// Clears what one pass proved wrong, and only that.
     fn clear_step_error(&self) {
+        let mut held = self
+            .last_step_error
+            .lock()
+            .expect("queue step-error lock poisoned");
+        if held.as_ref().is_none_or(|error| !error.sticky) {
+            *held = None;
+        }
+    }
+
+    /// Clears everything, including a sticky refusal — for the two things that
+    /// genuinely supersede one: a fire that got through, and a human pressing
+    /// Start.
+    fn clear_schedule_error(&self) {
+        self.set_step_error(None);
+    }
+
+    fn set_step_error(&self, error: Option<StepError>) {
         *self
             .last_step_error
             .lock()
-            .expect("queue step-error lock poisoned") = None;
+            .expect("queue step-error lock poisoned") = error;
     }
 
     fn step_error(&self) -> Option<String> {
         self.last_step_error
             .lock()
             .expect("queue step-error lock poisoned")
-            .clone()
+            .as_ref()
+            .map(|error| error.message.clone())
     }
 }
 
@@ -893,6 +1253,19 @@ impl Shared {
 struct Signal {
     generation: u64,
     shutdown: bool,
+}
+
+/// The earlier of two instants, either of which may be absent.
+///
+/// The loop now has two independent reasons to wake on a clock — a retry
+/// deadline and a schedule — and waking for the earlier is the only answer that
+/// serves both. `Option::min` would be wrong in the obvious way: `None` sorts
+/// below `Some`, so a queue with one deadline and one absent would arm nothing.
+fn earliest(left: Option<DateTime<Utc>>, right: Option<DateTime<Utc>>) -> Option<DateTime<Utc>> {
+    match (left, right) {
+        (Some(left), Some(right)) => Some(left.min(right)),
+        (found, None) | (None, found) => found,
+    }
 }
 
 /// Throws away every change event already buffered.

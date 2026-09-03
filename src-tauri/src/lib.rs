@@ -349,6 +349,13 @@ pub fn run() {
         commands::queue::get_run_capacity,
         commands::queue::set_schedule_mode,
         commands::queue::set_max_concurrency,
+        commands::schedules::list_schedules,
+        commands::schedules::create_schedule,
+        commands::schedules::update_schedule,
+        commands::schedules::set_schedule_enabled,
+        commands::schedules::delete_schedule,
+        commands::schedules::preview_schedule_preflight,
+        commands::schedules::list_timezones,
         commands::mcp::get_mcp_status,
         commands::mcp::set_mcp_port,
         commands::mcp::test_mcp_connection,
@@ -417,6 +424,13 @@ pub fn run() {
         commands::queue::get_run_capacity,
         commands::queue::set_schedule_mode,
         commands::queue::set_max_concurrency,
+        commands::schedules::list_schedules,
+        commands::schedules::create_schedule,
+        commands::schedules::update_schedule,
+        commands::schedules::set_schedule_enabled,
+        commands::schedules::delete_schedule,
+        commands::schedules::preview_schedule_preflight,
+        commands::schedules::list_timezones,
         commands::mcp::get_mcp_status,
         commands::mcp::set_mcp_port,
         commands::mcp::test_mcp_connection,
@@ -571,6 +585,11 @@ async fn forward_change_events(
                 emit_change_event(&app, ChangeEvent::tasks(Vec::<String>::new()));
                 emit_change_event(&app, ChangeEvent::repositories(Vec::<String>::new()));
                 emit_change_event(&app, ChangeEvent::runs(Vec::<String>::new()));
+                // Not compiler-forced, unlike `emit_change_event`'s own match:
+                // a variant left out here compiles and simply stops the
+                // schedules panel refreshing after a lag, which is the quietest
+                // possible failure. Listed for that reason.
+                emit_change_event(&app, ChangeEvent::schedules(Vec::<String>::new()));
                 emit_change_event(&app, ChangeEvent::Settings);
             }
             Err(RecvError::Closed) => break,
@@ -586,6 +605,7 @@ fn emit_change_event(app: &tauri::AppHandle, event: ChangeEvent) {
         ChangeEvent::Tasks(ids) => app.emit("tasks:changed", ids.as_ref()),
         ChangeEvent::Repositories(ids) => app.emit("repositories:changed", ids.as_ref()),
         ChangeEvent::Runs(ids) => app.emit("runs:changed", ids.as_ref()),
+        ChangeEvent::Schedules(ids) => app.emit("schedules:changed", ids.as_ref()),
         ChangeEvent::Settings => app.emit("settings:changed", ()),
     };
     if let Err(error) = result {

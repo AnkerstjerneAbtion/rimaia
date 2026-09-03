@@ -557,6 +557,13 @@ async fn a_schedule_round_trips_every_field_exactly() {
             start_at: Some(start_at),
             max_concurrency: 4,
             enabled: false,
+            // Task 013's four, all still NULL: this row was inserted by the
+            // column list the initial schema shipped, which is exactly the
+            // shape every row written before task 013 has.
+            timezone: None,
+            stop_at: None,
+            last_fired_at: None,
+            armed_at: None,
         }
     );
 }
@@ -587,6 +594,10 @@ async fn a_schedule_without_a_cron_or_start_at_takes_its_declared_defaults() {
             start_at: None,
             max_concurrency: 2,
             enabled: true,
+            timezone: None,
+            stop_at: None,
+            last_fired_at: None,
+            armed_at: None,
         }
     );
 }
@@ -1401,7 +1412,10 @@ async fn fetch_schedule(pool: &SqlitePool, id: &str) -> Schedule {
     sqlx::query_as!(
         Schedule,
         r#"SELECT id, name, mode AS "mode: ScheduleMode", cron,
-            start_at AS "start_at: DateTime<Utc>", max_concurrency, enabled
+            start_at AS "start_at: DateTime<Utc>", max_concurrency,
+            enabled AS "enabled: bool", timezone, stop_at,
+            last_fired_at AS "last_fired_at: DateTime<Utc>",
+            armed_at AS "armed_at: DateTime<Utc>"
            FROM schedules WHERE id = ?1"#,
         id,
     )
