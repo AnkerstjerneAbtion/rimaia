@@ -260,6 +260,33 @@ coordinated edits, not one: `package.json`, `src-tauri/Cargo.toml`, the plugin i
 
 **Binds.** 003, 005, and every other task as a prohibition.
 
+### Amendment, 2026-09-03 — a fifth, for task 013
+
+`@tauri-apps/plugin-notification` and its Rust half `tauri-plugin-notification` are
+approved, for task 013's "optional OS notification when a scheduled queue starts and when it
+finishes".
+
+It is the same kind of entry `plugin-dialog` is: not a convenience, but the requirement
+itself. The whole premise of a scheduled queue is that **the user is not at the machine** —
+that is what "start a queue when I leave the office" means — so an in-window banner reaches
+nobody, and there is no other surface that does. The four coordinated edits are as this
+entry already lists them: `package.json`, `src-tauri/Cargo.toml`, the plugin init in
+`src-tauri/src/lib.rs`, and a capability in `src-tauri/capabilities/default.json`.
+
+**The count is now five, and five is the whole list.** The prohibition above is otherwise
+unchanged. Recorded rather than added quietly for this entry's own stated reason: a list
+that says "the list is closed" while the tree carries an unlisted dependency teaches the
+next agent that the list is advisory.
+
+Two things task 013 did **not** take, so the absences read as decisions:
+
+- **No timezone package.** `chrono-tz`'s `TZ_VARIANTS` is exposed through a
+  `list_timezones` command, so the list the picker offers and the list the service accepts
+  come from one table. A bundled copy in TypeScript would be a second IANA database to keep
+  in step with the first.
+- **No date library.** `Intl.RelativeTimeFormat` and `toLocaleString` are the whole of what
+  `date-fns` or `luxon` would have been added for, and both ship with the platform.
+
 ## D7 — The event-subscription seam in the frontend
 
 **Question.** Three MVP tasks add Tauri events the UI listens to. Where does the frontend
@@ -633,6 +660,70 @@ instruction of exactly the kind this entry declines to infer, and once it exists
 default may change.
 
 **Binds.** 008, 009, 013.
+
+### Amendment, 2026-09-03 — the revisit this entry asked for (task 013)
+
+**Quitting still always stops the queue. A schedule is not queue state.** `queue_state` is
+still written `paused` on exit and still starts `paused` on launch; `QueueState::default()`
+is still `Paused` and `from_stored` still falls back to it. Nothing in the body is
+withdrawn.
+
+What changes is that `paused` no longer means "nothing will happen". An **enabled
+`schedules` row is a standing instruction the user gave in advance**, which is exactly what
+the body declined to *infer* — inferring "they probably want it running again" from a queue
+that happened to be running is not the same act as reading a row that says "every night at
+22:00". The go signal is still owned by a human; there are now two explicit ways to give it,
+and the second one is a row they created, named, and can see the next fire time of.
+
+Three consequences, and all three are asserted:
+
+1. **A schedule whose time passed while the app was closed fires on next launch** — late,
+   once, and not at all if that occurrence's own stop time has already passed. Firing the
+   most recent missed occurrence rather than each of them is what makes "fires late rather
+   than skipping" (ADR-0010) survive a laptop that was shut for a week.
+   (`a_schedule_whose_time_passed_while_the_app_was_closed_fires_once_on_next_launch`,
+   `a_schedule_that_missed_five_occurrences_fires_once_not_five_times`,
+   `a_window_whose_stop_time_already_passed_does_not_open`.)
+
+2. **Quitting mid-window closes the window.** The exit path already calls
+   `QueueHandle::stop`, which now clears `active_run_window` alongside writing `paused`, so
+   relaunching at 03:00 does not silently resume a night the user quit out of — while the
+   schedule's *next* occurrence still fires, because the schedule is the standing
+   instruction and the window is only one night of it.
+   (`quitting_mid_window_closes_the_window_and_the_next_occurrence_still_fires`.)
+
+   **A crash does not close it, and that asymmetry is deliberate rather than an oversight.**
+   The body's objection was to one *user action* having two outcomes depending on whether a
+   child process happened to exist; quitting and crashing are two different actions, and the
+   difference between "I am done" and "the process died" is exactly the kind of thing a
+   window should respect. A crash therefore leaves the window open and the launch after it
+   still `paused`, so the user who presses Start gets their night back **with its stop time
+   intact** rather than an unbounded queue. Nothing starts without them either way, which is
+   the guarantee the body actually makes.
+
+3. **`stop` and `pause` clear the window too.** Stop inside a window means stop, not "stop
+   until the timer looks again" — and the timer would look again within the minute, because
+   `tick_schedules` reads an open window as a night still in progress. Without this the
+   Pause button would undo itself.
+
+**The ADR-0010 / ADR-0011 tension, settled.** ADR-0010:57-59 says runs left `running` at a
+crash are "eligible for resume", and task 014 made that real: `reconcile` lands such a run
+in `waiting_retry` with a `resume_after` that is already due when ADR-0011's budget allows.
+**Eligible is not automatic, and the schedule is not what makes it automatic.** A fire does
+three things — run the doctor, write the window, flip the switch — and moves no task's
+`run_state` at all. Whether any individual task resumes is ADR-0011's per-run decision,
+taken by `selection::skip_reason` inside an **open window with the switch on**; a fire that
+opens no window resumes nothing, however due the deadline is
+(`a_schedule_firing_tonight_does_not_resume_a_run_last_night_crashed_on`).
+
+The converse is asserted beside it, and matters as much: once the window *is* open, the
+crashed run resumes **exactly as pressing Start resumes it**, `--resume` and all
+(`a_schedule_that_does_open_a_window_resumes_exactly_what_start_would`). A standing
+instruction that was quietly weaker than the button would be a third behaviour nobody asked
+for, and this amendment's whole argument is that the two are the same go signal given two
+ways.
+
+The entry now binds 013 as an implementer rather than only as a revisit point.
 
 
 ## D16 — Task 010's cross-cutting choices
@@ -1278,6 +1369,167 @@ guessed payload value that the classifier must never depend on.
 
 ---
 
+## D24 — Task 013's cross-cutting choices
+
+**Question.** ADR-0010 fixes the three triggers, the run window and the modes, and stops
+there. The `schedules` table has carried `mode`, `max_concurrency`, `cron`, `start_at` and
+`enabled` since the initial schema and the 2026-09-02 migration added four more columns —
+none of them read by anything. Turning that into a queue that starts itself at 22:00 needs a
+dozen smaller answers, and [D21](#d21) explicitly handed one of them to this task by name.
+
+**Decision.** Eight, taken together by task 013.
+
+1. **The four columns, and what each one means.**
+
+   `timezone` is an **IANA name**, never an offset and never an abbreviation. Nullable in
+   the schema and **required by the service for every row it writes** — a
+   `NOT NULL DEFAULT 'UTC'` would let a nightly schedule be created silently in the wrong
+   zone, which is exactly the failure the DST acceptance criterion exists to catch. It is
+   the one read in this codebase that is **strict where every other `settings`-shaped read
+   is tolerant**: the tolerant rule is right for a key whose fallback is *safe*, and there
+   is no safe fallback for a zone. Reading an unknown name as UTC is how a nightly queue
+   runs at 23:00 in January and 22:00 in June with nothing to say so.
+
+   `stop_at` is a **local wall-clock time of day, `HH:MM`** — not an instant, and not a
+   duration. "Stop at 06:00" is the sentence the user says; a recurring window needs a
+   repeating stop, which an absolute instant cannot express, and a duration column would
+   move the stop whenever the start moved *and* end a spring-forward window an hour early.
+   Resolved through the schedule's own `timezone`, so a window crossing the gap is seven
+   real hours and still ends at 06:00 local.
+
+   `last_fired_at` is when the schedule **actually fired**, never when it was due. That
+   distinction is the whole of what makes ADR-0010's "fires late rather than skipping" work
+   without becoming a re-fire loop: the occurrence is in the past, the fire is now, and
+   comparing against *now* is what stops the same missed night firing again a millisecond
+   later. It is written even when the doctor refuses the start, because the schedule did
+   fire — what it found was a broken machine — and not writing it turns a missing `claude`
+   into eight subprocess spawns a minute until morning.
+
+   `armed_at` is the instant from which missed occurrences count: set on create, re-set on
+   every enable, by both doors. Without it a nightly 22:00 schedule created at 23:00 fires
+   immediately for an occurrence that predates its own existence, and one disabled for a
+   month fires the second it is re-enabled. **The recurring baseline is
+   `max(last_fired_at, armed_at)`.**
+
+2. **Run now is not a `schedules` row, contradicting the initial schema's own comment.**
+   That comment anticipated one — "a cron expression with a timezone, or a wall-clock time,
+   **or neither for run now**" — and task 013 declines it. `QueueHandle::start` already *is*
+   Run now: it is the button, it runs the doctor, and it flips the switch. A row nothing
+   ever fires would be a second spelling of that button, with its own enable toggle to leave
+   in the wrong position and its own next-fire time to render as "never". `schedule::fire`
+   refuses such a row with a message that names the button, so the absence reads as a
+   decision rather than an omission. Recorded here because the schema expected otherwise.
+
+3. **The timer is a third arm of the queue's existing `select!`, not a second task.** Three
+   reasons, in order of weight. ADR-0010 makes the scheduler **the only component allowed to
+   move a task into `running`**, so a separate timer calling `QueueHandle::start` would be a
+   second decider racing `try_step`'s own switch re-checks — the exact window `queue`'s
+   mid-claim section was written to close, reopened from the other side. ADR-0018's "another
+   `subscribe()` and no coordination with anyone" is about *subscribers*, and a timer is not
+   one; this is the same loop learning to wake on time as well as on events, which it
+   already learned to do for ADR-0011's deadlines. And it costs one future in a `select!`
+   whose arms are already cancel-safe.
+
+   The order is shutdown → `drain` → **`tick_schedules`** → `step`, and `tick_schedules`
+   running first is load-bearing: it **closes a window before anything selects**, so a task
+   cannot be claimed one millisecond after the night was meant to end.
+
+   **The deadline cap is [D23](#d23) point 2's, and it is still not a poll.** The schedule's
+   next wake is folded into the same deadline the retry arm computes — the earlier of the
+   two — and capped at 60 seconds before it is slept on, because a `tokio` timer measures
+   elapsed *monotonic* time and a laptop suspended at 23:10 and reopened at 06:30 has
+   elapsed almost none of it. A single seven-hour timer to a 22:00 occurrence would fire
+   hours late. The cap forces the loop to re-derive the answer from `ctx.clock.now()`, which
+   is the only reading that survives a system sleep, and it arms nothing at all while
+   nothing is waiting. The timer feeds it `next_wake_at` and never `next_fire_at`: the
+   latter reports an *overdue* occurrence, which is in the past, and a deadline in the past
+   resolves immediately and would spin the loop until morning.
+
+4. **The active window lives in `settings` under `active_run_window`, owned by
+   `schedule::window`.** [D3](#d3)'s shape, exactly as `scheduler::state` uses it for
+   `queue_state` and `scheduler::pause` for the usage-limit hold. [D4](#d4) forbids a
+   column, and a column would be wrong anyway: at most one window is open, so this is a
+   singleton fact about the installation, which is what that table is. **Stored rather than
+   held in memory**, for `pause`'s reason: a window opened at 22:00 must still know it
+   closes at 06:00 after a relaunch at 03:00.
+
+   It carries the schedule's **name** as well as its id, denormalised on purpose. The Runs
+   view says "Running until 06:00 — Nightly", and a caption that re-read the row would fail
+   the moment the schedule was renamed or deleted mid-window. The window is a record of what
+   was decided at 22:00; it does not become untrue afterwards.
+
+5. **The [D21](#d21) reconciliation, settled: the open window wins, the default wins
+   whenever none is open.** `capacity::resolve` reads `window::active` first and takes its
+   `mode` and `max_concurrency` over the `schedule_mode` / `max_concurrency` settings keys.
+   Three reasons: the schedule is the more specific instruction and the more recent
+   deliberate act; it is what makes ADR-0010's own `schedules.mode` and
+   `schedules.max_concurrency` columns mean anything at all, which D21 point 1 deferred only
+   because "a `schedules` row nothing selects from cannot supply them"; and a manual Start
+   opens **no** window, so the button still resolves against the settings keys and nothing
+   about task 012's behaviour changes on a night nobody has scheduled.
+
+   **And what the Settings control shows while a window is open: the stored default,
+   unchanged.** That is D21 point 2's own argument one layer out — the control already shows
+   the stored `max_concurrency` rather than the `1` sequential resolves to, because a number
+   that changed every time a mode was flipped would look forgotten. One that rewrote itself
+   at 22:00 would be worse: it would read as the user's own setting having been silently
+   changed. "What is happening right now" belongs on `QueueStatus`, which carries the window
+   itself. The window's number is still clamped to `CONCURRENCY_CEILING` on read, by the
+   same helper a hand-edited repository cap goes through.
+
+6. **Late firing coalesces, and the window's own stop time bounds it.** `due` asks for the
+   **most recent** occurrence at or before now, not for a walk forward from the baseline, so
+   three nights asleep produce one instant and one fire. Honouring the *oldest* missed
+   occurrence instead is the reading that never runs: its stop time was three mornings ago.
+   And the newest one is bounded too — a machine woken at 11:00 on a 22:00-to-06:00 schedule
+   has genuinely missed the night, and `Due::Expired` says so rather than starting a full
+   night's work in the middle of a working morning. **An expired occurrence writes no
+   `last_fired_at`**, because that column means "it fired" and lying to it to save a
+   recomputation would cost more than the one cron search it saves.
+
+7. **`ChangeEvent::Schedules(Arc<[ScheduleId]>)` is a new variant, not a reuse of
+   `Settings`.** `settings` is a key/value table whose every consumer re-reads all of it,
+   which is why that variant carries no ids; `schedules` is a table of **entities** the user
+   creates, names, edits and deletes, the same kind of thing `tasks` and `repositories` are,
+   so it carries ids for the same reason they do. A panel listing thirty schedules is not
+   obliged to re-read them because a base-instructions textarea was saved.
+
+   The *window* is a settings key and does announce itself as `Settings`. That is not an
+   inconsistency: it is one singleton fact, and the Runs view reading it re-reads the whole
+   queue status anyway.
+
+8. **A doctor refusal is recorded stickily on `last_step_error`.** Task 018's preflight runs
+   before a scheduled start — D22 point 1 promised exactly this — and a blocking report does
+   not flip the switch. But the ordinary `last_step_error` is cleared by the next pass that
+   gets all the way through, and the queue a refusal left `paused` returns from `try_step`
+   at its switch check on *every* pass, having proved nothing. Left non-sticky, the message
+   the user is meant to find in the morning would be cleared microseconds after it was
+   written. It is cleared instead by the two things that genuinely supersede it: a fire that
+   got through, and a human pressing Start.
+
+**Why.** Every one of these is a place where the obvious choice is wrong in a way that only
+shows up at 2am, or at 09:00 the next day: a zone defaulted to UTC, a stop time stored as an
+instant that cannot repeat, a fire time recorded as the occurrence so the same night fires
+forever, a month of disabled nights arriving at once, a timer task racing the one component
+allowed to start a run, a deadline in the past spinning a loop until morning, five missed
+occurrences opening five windows, and a refusal cleared before anybody read it.
+
+**What is deliberately *not* here.** `retry::decide` gains the run-window parameter
+[D23](#d23) reserved for this task, and ADR-0011's "capped only by the run window" now binds
+the **usage-limit row only** — a transient backoff is at most fifteen minutes, and a window
+with less than fifteen minutes left is about to close anyway, so extending the cap there
+would spend a task's retry budget on the clock rather than on the failure. And there is no
+per-task schedule and no schedule-level task filter: ADR-0010 rejected the first, and the
+second would be a second answer to "what runs next" beside board order (ADR-0007).
+
+**See also** [D15](#d15)'s 2026-09-03 amendment, which settles what a schedule means for
+quitting and for a crashed run's resume, and ADR-0010's, which takes the three refinements
+large enough to be argued at product scale.
+
+**Binds.** 013, and 023 as the next task to read `PreflightSummary`.
+
+---
+
 ## How to use this
 
 An implementation task reads the entries its number appears in, before writing code:
@@ -1295,7 +1547,7 @@ An implementation task reads the entries its number appears in, before writing c
 | [010](../tasks/010-local-mcp-server.md) | D2 · D3 · D4 · D5 · D6 · D8 · D10 · D12 · D13 · D16 |
 | [011](../tasks/011-task-dependencies-and-blocking.md) | D4 · D12 · D16 |
 | [012](../tasks/012-parallel-execution.md) | D2 · D4 · D5 · D8 · D9 · D12 · D14 · D15 · D19 · D21 · D22 |
-| [013](../tasks/013-run-scheduling.md) | D4 · D15 · D21 · D22 · D23 |
+| [013](../tasks/013-run-scheduling.md) | D4 · D6 · D15 · D21 · D22 · D23 · D24 |
 | [014](../tasks/014-usage-limit-resilience.md) | D3 · D4 · D5 · D8 · D9 · D12 · D14 · D15 · D19 · D21 · D22 · D23 |
 | [015](../tasks/015-run-history-and-log-viewer.md) | D14 · D18 · D23 |
 | [016](../tasks/016-worktree-lifecycle-and-cleanup.md) | D17 · D18 |

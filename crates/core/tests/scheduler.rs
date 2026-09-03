@@ -42,6 +42,8 @@ use rimaia_core::runner::events::RunTail;
 use rimaia_core::runner::outcome::{start_run, NewRun};
 use rimaia_core::runner::prompt::compose_resume_prompt;
 use rimaia_core::runner::{run_task, CancelSignal, RunRequest, RunTrigger, RunnerConfig};
+use rimaia_core::schedule::window::RunWindow;
+use rimaia_core::schedule::{self as scheduler_schedule, ScheduleInput};
 use rimaia_core::scheduler::{
     self, capacity, ClaimOutcome, InFlight, LeaseOwner, QueueHandle, QueueState, SkipReason,
 };
@@ -2370,6 +2372,631 @@ fn git_log(worktree: &str) -> Vec<String> {
 }
 
 // ---------------------------------------------------------------------------
+// Starting by itself, and stopping by itself (task 013; ADR-0010)
+//
+// Every test here drives the schedule timer with the injected `TestClock`.
+// Nothing sleeps: the loop waits on `Clock::sleep_until`, so a nightly schedule
+// two minutes out and a window that closes eight hours later both cost
+// microseconds.
+//
+// The clock starts at `test_epoch` — 2026-08-20T02:00:00Z, which is 04:00 on a
+// Thursday morning in Europe/Copenhagen, summer time. Every local time below is
+// stated in that zone.
+// ---------------------------------------------------------------------------
+
+/// The zone every schedule in this section is read in.
+const ZONE: &str = "Europe/Copenhagen";
+
+/// 22:00 every night, which is the schedule this whole task is named for.
+const NIGHTLY: &str = "0 22 * * *";
+
+#[tokio::test]
+async fn a_schedule_due_two_minutes_from_now_starts_the_queue_at_that_time() {
+    // Task 013's first acceptance criterion, end to end: nobody presses
+    // anything, and a card is in `in_review` in the morning.
+    let fixture = Fixture::new().await;
+    let task_id = fixture.add_task("Alpha").await;
+    let due = fixture.harness.clock.now() + TimeDelta::minutes(2);
+    let schedule = fixture.add_schedule(once_at("Tonight", due)).await;
+
+    let mut changes = fixture.ctx().subscribe();
+    let queue = fixture.spawn_queue();
+
+    // Nothing has happened yet, and that is half the assertion: the queue does
+    // not start early just because a schedule exists.
+    converge().await;
+    assert_eq!(fixture.queue_state().await, QueueState::Paused);
+    assert_eq!(fixture.cli.started(), Vec::<String>::new());
+
+    fixture.harness.clock.advance(TimeDelta::minutes(2));
+
+    let started = task_id.clone();
+    wait_until(
+        &fixture,
+        &mut changes,
+        "the scheduled task to finish",
+        move |board| {
+            board
+                .iter()
+                .any(|task| task.task.id == started && task.task.column == BoardColumn::InReview)
+        },
+    )
+    .await;
+
+    assert_eq!(fixture.cli.started(), vec![task_id]);
+    assert_eq!(fixture.queue_state().await, QueueState::Running);
+    let window = fixture.window().await.expect("a schedule opened a window");
+    assert_eq!(window.schedule_id, schedule);
+    assert_eq!(window.schedule_name, "Tonight");
+
+    queue.shutdown();
+}
+
+#[tokio::test]
+async fn a_schedule_whose_time_passed_while_the_app_was_closed_fires_once_on_next_launch() {
+    // ADR-0010: "A wall-clock time in the past fires immediately rather than
+    // being skipped; the machine having been asleep is the common case." The
+    // launch is `spawn_queue`, which is what a launch is in this file.
+    let fixture = Fixture::new().await;
+    let task_id = fixture.add_task("Alpha").await;
+    let missed = fixture.harness.clock.now() - TimeDelta::hours(3);
+    let schedule = fixture.add_schedule(once_at("Last night", missed)).await;
+
+    let mut changes = fixture.ctx().subscribe();
+    let queue = fixture.spawn_queue();
+
+    let started = task_id.clone();
+    wait_until(
+        &fixture,
+        &mut changes,
+        "the missed schedule to fire",
+        move |board| {
+            board
+                .iter()
+                .any(|task| task.task.id == started && task.task.column == BoardColumn::InReview)
+        },
+    )
+    .await;
+
+    assert_eq!(fixture.cli.started(), vec![task_id]);
+    assert_eq!(
+        fixture.schedule(&schedule).await.last_fired_at,
+        Some(fixture.harness.clock.now()),
+        "`last_fired_at` is when it actually fired, not when it was due",
+    );
+
+    // Once, not repeatedly: the column that records the fire is what stops the
+    // same overdue occurrence being honoured again on the very next pass.
+    let opened_at = fixture.window().await.expect("a window").opened_at;
+    fixture.harness.clock.advance(TimeDelta::minutes(5));
+    converge().await;
+    assert_eq!(
+        fixture
+            .window()
+            .await
+            .expect("still the same window")
+            .opened_at,
+        opened_at
+    );
+
+    queue.shutdown();
+}
+
+#[tokio::test]
+async fn a_schedule_that_missed_five_occurrences_fires_once_not_five_times() {
+    // Coalescing, and the half of it that matters: the window that opens is the
+    // **newest** missed occurrence's. Honouring the oldest would open a window
+    // whose stop time was five mornings ago, which is a night that never runs.
+    let fixture = Fixture::new().await;
+    fixture.add_task("Alpha").await;
+    // Armed six days back, so five nights at 22:00 have come and gone. The
+    // clock is 04:00 on the sixth morning, before this morning's 06:00 stop, so
+    // last night's window is still open.
+    let schedule = fixture
+        .add_schedule(nightly_at("Nightly", Some("06:00")))
+        .await;
+    fixture
+        .arm_schedule(&schedule, fixture.harness.clock.now() - TimeDelta::days(6))
+        .await;
+
+    let mut changes = fixture.ctx().subscribe();
+    let queue = fixture.spawn_queue();
+
+    wait_until(
+        &fixture,
+        &mut changes,
+        "the queue to be started by the schedule",
+        |_| true,
+    )
+    .await;
+    wait_until_running(&fixture).await;
+
+    let window = fixture.window().await.expect("one window");
+    assert_eq!(
+        window.closes_at,
+        Some(at("2026-08-20T04:00:00Z")),
+        "06:00 Copenhagen *this* morning — the newest missed night, not the oldest",
+    );
+    assert_eq!(
+        fixture.schedule(&schedule).await.last_fired_at,
+        Some(fixture.harness.clock.now()),
+    );
+
+    // And the other four do not follow it in.
+    converge().await;
+    assert_eq!(
+        fixture.window().await.expect("still one window").opened_at,
+        window.opened_at
+    );
+
+    queue.shutdown();
+}
+
+#[tokio::test]
+async fn a_window_whose_stop_time_already_passed_does_not_open() {
+    // The bound on late firing. A laptop opened at 11:00 has genuinely missed
+    // the 22:00-to-06:00 night; starting a full night's work in the middle of a
+    // working morning is not what "fires late rather than skipping" means.
+    let fixture = Fixture::new().await;
+    fixture.add_task("Alpha").await;
+    let schedule = fixture
+        .add_schedule(nightly_at("Nightly", Some("06:00")))
+        .await;
+    fixture
+        .arm_schedule(&schedule, fixture.harness.clock.now() - TimeDelta::days(2))
+        .await;
+    // 11:00 Copenhagen, five hours after the window this occurrence would have
+    // opened was due to close.
+    fixture.harness.clock.set(at("2026-08-20T09:00:00Z"));
+
+    let queue = fixture.spawn_queue();
+    converge().await;
+
+    assert_eq!(fixture.queue_state().await, QueueState::Paused);
+    assert_eq!(fixture.window().await, None);
+    assert_eq!(fixture.cli.started(), Vec::<String>::new());
+    assert_eq!(
+        fixture.schedule(&schedule).await.last_fired_at,
+        None,
+        "nothing fired, so nothing may claim it did — `last_fired_at` is not a lie \
+         told to stop a recomputation",
+    );
+
+    queue.shutdown();
+}
+
+#[tokio::test]
+async fn a_stop_time_starts_nothing_new_and_lets_the_in_flight_run_finish() {
+    // Task 013's third acceptance criterion, and ADR-0010's own sentence:
+    // "Reaching it stops *starting* new tasks; in-flight runs are allowed to
+    // finish rather than being killed mid-edit."
+    let fixture = Fixture::new().await;
+    let first = fixture.add_task("Alpha").await;
+    let second = fixture.add_task("Bravo").await;
+    let gate = fixture.cli.gates(&first, "success", HEAD_LINES);
+    // Opens now (04:00 Copenhagen) and stops at 05:00, an hour out.
+    let now = fixture.harness.clock.now();
+    let schedule = ScheduleInput {
+        stop_at: Some("05:00".to_string()),
+        ..once_at("Tonight", now)
+    };
+    fixture.add_schedule(schedule).await;
+
+    let mut changes = fixture.ctx().subscribe();
+    let queue = fixture.spawn_queue();
+
+    wait_until_started(&fixture, 1).await;
+    assert_eq!(fixture.cli.started(), vec![first.clone()]);
+
+    // The stop time arrives while Alpha is still mid-run.
+    fixture.harness.clock.advance(TimeDelta::hours(1));
+    // Waiting on the *window*, not on the switch: `close_window` writes
+    // `paused` first and clears the window second — deliberately, so a crash
+    // between the two leaves a paused queue with a stale window rather than a
+    // running queue with none — so the switch alone is reachable one write
+    // early.
+    wait_until_window_closed(&fixture).await;
+    assert_eq!(fixture.queue_state().await, QueueState::Paused);
+
+    // Alpha was not killed: it finishes, and lands in review.
+    open(&gate);
+    let finished = first.clone();
+    wait_until(
+        &fixture,
+        &mut changes,
+        "the in-flight run to finish",
+        move |board| {
+            board
+                .iter()
+                .any(|task| task.task.id == finished && task.task.column == BoardColumn::InReview)
+        },
+    )
+    .await;
+
+    // And Bravo never started.
+    converge().await;
+    assert_eq!(fixture.cli.started(), vec![first]);
+    assert_eq!(fixture.task(&second).await.run_state, RunState::Idle);
+    assert_eq!(fixture.task(&second).await.column, BoardColumn::Ready);
+
+    queue.shutdown();
+}
+
+#[tokio::test]
+async fn disabling_a_schedule_stops_it_firing_without_deleting_it() {
+    // Task 013's fifth acceptance criterion, both halves: it does not fire, and
+    // its configuration is still there to be switched back on.
+    let fixture = Fixture::new().await;
+    let task_id = fixture.add_task("Alpha").await;
+    let due = fixture.harness.clock.now() - TimeDelta::minutes(5);
+    let schedule = fixture
+        .add_schedule(ScheduleInput {
+            enabled: false,
+            ..once_at("Tonight", due)
+        })
+        .await;
+
+    let queue = fixture.spawn_queue();
+    converge().await;
+
+    assert_eq!(fixture.queue_state().await, QueueState::Paused);
+    assert_eq!(fixture.cli.started(), Vec::<String>::new());
+    let off = fixture.schedule(&schedule).await;
+    assert_eq!(
+        off.start_at,
+        Some(due),
+        "disabling keeps the configuration — that is the whole difference from deleting",
+    );
+
+    // And switching it back on is all it takes.
+    let mut changes = fixture.ctx().subscribe();
+    scheduler_schedule::set_enabled(fixture.ctx(), &schedule, true)
+        .await
+        .expect("turn it back on");
+
+    let started = task_id.clone();
+    wait_until(
+        &fixture,
+        &mut changes,
+        "the re-enabled schedule to fire",
+        move |board| {
+            board
+                .iter()
+                .any(|task| task.task.id == started && task.task.column == BoardColumn::InReview)
+        },
+    )
+    .await;
+    assert_eq!(fixture.cli.started(), vec![task_id]);
+
+    queue.shutdown();
+}
+
+#[tokio::test]
+async fn a_blocking_doctor_report_stops_a_scheduled_start_and_says_why() {
+    // Task 018's own sentence, and the reason its doctor is on this path: "a
+    // broken environment is reported in the evening rather than discovered in
+    // the morning". A scheduled start is the one nobody is watching.
+    let fixture = Fixture::new().await;
+    fixture.add_task("Alpha").await;
+    let due = fixture.harness.clock.now();
+    let schedule = fixture.add_schedule(once_at("Tonight", due)).await;
+
+    // A `claude` that is not there, which is the doctor's one unambiguous
+    // `fail`: every run would die at the same place.
+    let queue = fixture.spawn_queue_with_runner(RunnerConfig {
+        program: fixture.paths.data_dir().join("no-such-claude"),
+        ..RunnerConfig::default()
+    });
+    wait_until_fired(&fixture, &schedule).await;
+    converge().await;
+
+    assert_eq!(
+        fixture.queue_state().await,
+        QueueState::Paused,
+        "a refused start writes no queue state — the switch is untouched",
+    );
+    assert_eq!(fixture.window().await, None);
+    assert_eq!(fixture.cli.started(), Vec::<String>::new());
+
+    let reported = queue
+        .status()
+        .await
+        .expect("read the status")
+        .last_step_error
+        .expect("the refusal has to be visible, not only logged");
+    assert!(
+        reported.contains("preflight") && reported.contains("Claude Code"),
+        "the refusal names the check and the fix: {reported}",
+    );
+
+    // And it still recorded the fire. Without that, the occurrence stays due,
+    // the next wake finds it again, and a missing binary becomes eight
+    // subprocess spawns a minute until morning.
+    assert!(fixture.schedule(&schedule).await.last_fired_at.is_some());
+
+    queue.shutdown();
+}
+
+#[tokio::test]
+async fn quitting_mid_window_closes_the_window_and_the_next_occurrence_still_fires() {
+    // Seam-contract D15's amendment, in one test. Quitting still always stops
+    // the queue, and now also closes the window — so relaunching at 03:00 does
+    // not silently resume a night the user quit out of. The *schedule* is
+    // untouched, because it is a standing instruction rather than queue state.
+    let fixture = Fixture::new().await;
+    fixture.add_task("Alpha").await;
+    let schedule = fixture
+        .add_schedule(nightly_at("Nightly", Some("06:00")))
+        .await;
+    // 21:59 Copenhagen, a minute before tonight's occurrence.
+    fixture.harness.clock.set(at("2026-08-20T19:59:00Z"));
+
+    let first_launch = fixture.spawn_queue();
+    fixture.harness.clock.advance(TimeDelta::minutes(1));
+    wait_until_running(&fixture).await;
+    assert!(fixture.window().await.is_some());
+
+    // Quitting: `AppState::cancel_everything` calls this, unconditionally, on
+    // every exit — which is what makes D15 hold between runs as well as during
+    // one.
+    first_launch.stop().await.expect("quit");
+    first_launch.shutdown();
+
+    assert_eq!(fixture.queue_state().await, QueueState::Paused);
+    assert_eq!(
+        fixture.window().await,
+        None,
+        "a window the user quit out of is not a window a relaunch resumes",
+    );
+    let after_quitting = fixture.schedule(&schedule).await;
+    assert!(
+        after_quitting.enabled && after_quitting.cron.is_some(),
+        "the standing instruction survives; only the night does not",
+    );
+
+    // A second launch at 03:00 starts nothing, and then tomorrow's 22:00 does.
+    fixture.harness.clock.set(at("2026-08-21T01:00:00Z"));
+    let second_launch = fixture.spawn_queue();
+    converge().await;
+    assert_eq!(
+        fixture.queue_state().await,
+        QueueState::Paused,
+        "relaunching inside the hours the window covered resumes nothing",
+    );
+
+    fixture.harness.clock.set(at("2026-08-21T20:00:00Z"));
+    wait_until_running(&fixture).await;
+    assert_eq!(
+        fixture
+            .window()
+            .await
+            .expect("the next occurrence fires")
+            .schedule_id,
+        schedule,
+    );
+
+    second_launch.shutdown();
+}
+
+#[tokio::test]
+async fn a_schedule_firing_tonight_does_not_resume_a_run_last_night_crashed_on() {
+    // ADR-0010:57-59 says runs left `running` at a crash are "eligible for
+    // resume", and task 014 made that real: `reconcile` lands such a run in
+    // `waiting_retry` with a deadline that is already due. **Eligible is not
+    // automatic**, and this is what that means concretely: a schedule's fire is
+    // not itself a resume. Nothing about the timer reaching 22:00 moves a task.
+    //
+    // What actually resumes the run is ADR-0011's per-run decision, taken by
+    // `selection` inside an **open window with the queue running** — so a fire
+    // that opens no window resumes nothing, however due the deadline is. That
+    // is the half asserted here, because it is the half that would otherwise
+    // let a schedule quietly override a per-run policy it knows nothing about.
+    let fixture = Fixture::new().await;
+    let crashed = fixture.add_task("Alpha").await;
+    scheduler::claim(fixture.ctx(), &crashed)
+        .await
+        .expect("claim the task the crash caught");
+    start_run(
+        fixture.ctx(),
+        &fixture.paths,
+        NewRun {
+            task_id: crashed.clone(),
+            session_id: SESSION.to_string(),
+            prompt: "implement the plan".to_string(),
+        },
+    )
+    .await
+    .expect("open the run the crash interrupted");
+
+    // The launch after the crash: D15's exit-path write, then the repair.
+    scheduler::set_queue_state(fixture.ctx(), QueueState::Paused)
+        .await
+        .expect("quitting always stops the queue");
+    let report = startup::survey(&fixture.ctx().pool)
+        .await
+        .expect("survey the database");
+    scheduler::reconcile_interrupted(fixture.ctx(), &report)
+        .await
+        .expect("reconcile");
+
+    // Offered: the deadline is due, so the *only* thing standing between this
+    // task and a resume is the go signal.
+    assert_eq!(
+        fixture.task(&crashed).await.run_state,
+        RunState::WaitingRetry
+    );
+    assert_eq!(
+        scheduler::plan(fixture.ctx())
+            .await
+            .expect("read the plan")
+            .iter()
+            .find(|entry| entry.task_id == crashed)
+            .and_then(|entry| entry.skip),
+        None,
+        "due, and therefore claimable the moment something starts the queue",
+    );
+
+    // A schedule that comes due into a window that has already closed. It
+    // fires in the sense that its occurrence is honoured; it opens nothing.
+    let schedule = fixture
+        .add_schedule(nightly_at("Nightly", Some("06:00")))
+        .await;
+    fixture
+        .arm_schedule(&schedule, fixture.harness.clock.now() - TimeDelta::days(2))
+        .await;
+    fixture.harness.clock.set(at("2026-08-20T09:00:00Z"));
+
+    let queue = fixture.spawn_queue();
+    converge().await;
+
+    assert_eq!(fixture.window().await, None);
+    assert_eq!(fixture.queue_state().await, QueueState::Paused);
+    assert_eq!(
+        fixture.cli.started(),
+        Vec::<String>::new(),
+        "the timer reaching a schedule's hour is not a go signal, and a due \
+         `resume_after` is not one either",
+    );
+    assert_eq!(
+        fixture.task(&crashed).await.run_state,
+        RunState::WaitingRetry,
+        "the fire moved no task at all — resume is ADR-0011's per-run policy, \
+         and a schedule has no opinion about it",
+    );
+
+    queue.shutdown();
+}
+
+#[tokio::test]
+async fn a_schedule_that_does_open_a_window_resumes_exactly_what_start_would() {
+    // The converse of the test above, and the reason it is a pair. A schedule
+    // is a standing instruction the user gave in advance (seam-contract D15's
+    // amendment), so it must be neither weaker nor stronger than the button:
+    // once the window is open and the switch is on, the same per-run policy
+    // runs, and the crashed run is resumed exactly as pressing Start resumes
+    // it.
+    let fixture = Fixture::new().await;
+    let crashed = fixture.add_task("Alpha").await;
+    scheduler::claim(fixture.ctx(), &crashed)
+        .await
+        .expect("claim the task the crash caught");
+    start_run(
+        fixture.ctx(),
+        &fixture.paths,
+        NewRun {
+            task_id: crashed.clone(),
+            session_id: SESSION.to_string(),
+            prompt: "implement the plan".to_string(),
+        },
+    )
+    .await
+    .expect("open the run the crash interrupted");
+    let report = startup::survey(&fixture.ctx().pool)
+        .await
+        .expect("survey the database");
+    scheduler::reconcile_interrupted(fixture.ctx(), &report)
+        .await
+        .expect("reconcile");
+
+    let due = fixture.harness.clock.now() + TimeDelta::minutes(2);
+    fixture.add_schedule(once_at("Tonight", due)).await;
+
+    let mut changes = fixture.ctx().subscribe();
+    let queue = fixture.spawn_queue();
+    fixture.harness.clock.advance(TimeDelta::minutes(2));
+
+    let resumed = crashed.clone();
+    wait_until(
+        &fixture,
+        &mut changes,
+        "the offered task to be picked up",
+        move |board| {
+            board
+                .iter()
+                .any(|task| task.task.id == resumed && task.task.column == BoardColumn::InReview)
+        },
+    )
+    .await;
+
+    assert_eq!(fixture.cli.started(), vec![crashed.clone()]);
+    assert!(
+        fixture.argv(&crashed, 1).contains(&"--resume".to_string()),
+        "a schedule's window resumes, exactly as Start does — not a fresh restart",
+    );
+
+    queue.shutdown();
+}
+
+/// A one-off schedule at `at`, in Copenhagen, with no stop time.
+fn once_at(name: &str, at: DateTime<Utc>) -> ScheduleInput {
+    ScheduleInput {
+        name: name.to_string(),
+        mode: ScheduleMode::Sequential,
+        max_concurrency: 2,
+        timezone: ZONE.to_string(),
+        cron: None,
+        start_at: Some(at),
+        stop_at: None,
+        enabled: true,
+    }
+}
+
+/// A nightly 22:00 Copenhagen schedule, optionally stopping at `stop_at`.
+fn nightly_at(name: &str, stop_at: Option<&str>) -> ScheduleInput {
+    ScheduleInput {
+        cron: Some(NIGHTLY.to_string()),
+        start_at: None,
+        stop_at: stop_at.map(str::to_string),
+        ..once_at(name, Utc::now())
+    }
+}
+
+fn at(rfc3339: &str) -> DateTime<Utc> {
+    rfc3339.parse().expect("a literal timestamp must parse")
+}
+
+/// Resolves once the schedule timer has started the queue.
+///
+/// Cooperative polling, for the same reason [`wait_until_in_flight`] uses it:
+/// `yield_now` costs no real time and guesses no duration.
+async fn wait_until_running(fixture: &Fixture) {
+    tokio::time::timeout(TEST_TIMEOUT, async {
+        while fixture.queue_state().await != QueueState::Running {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("the schedule never started the queue");
+}
+
+/// Resolves once the open run window has been cleared.
+///
+/// The window rather than the switch, because `close_window` writes `paused`
+/// first and clears the window second — so a test that waited on the switch
+/// would see the intermediate state that ordering deliberately produces.
+async fn wait_until_window_closed(fixture: &Fixture) {
+    tokio::time::timeout(TEST_TIMEOUT, async {
+        while fixture.window().await.is_some() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("the window never closed");
+}
+
+/// Resolves once `schedule_id` has recorded a fire — which a refused start does
+/// too, so this is the one wake a doctor-refusal test can wait on.
+async fn wait_until_fired(fixture: &Fixture, schedule_id: &str) {
+    tokio::time::timeout(TEST_TIMEOUT, async {
+        while fixture.schedule(schedule_id).await.last_fired_at.is_none() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("the schedule never fired");
+}
+
+// ---------------------------------------------------------------------------
 // Waiting on the queue without waiting on a clock
 // ---------------------------------------------------------------------------
 
@@ -2637,6 +3264,61 @@ impl Fixture {
         .await
         .expect("create a ready task")
         .id
+    }
+
+    /// Wires a queue over a runner this test chose — for the one case that
+    /// needs the preflight doctor to *fail*.
+    fn spawn_queue_with_runner(&self, runner: RunnerConfig) -> QueueHandle {
+        let (handle, task) = scheduler::build(
+            self.harness.context.clone(),
+            self.paths.clone(),
+            runner,
+            InFlight::new(),
+        );
+        tokio::spawn(task.run());
+        handle
+    }
+
+    async fn add_schedule(&self, input: ScheduleInput) -> String {
+        scheduler_schedule::create(self.ctx(), input)
+            .await
+            .expect("create a schedule")
+            .id
+    }
+
+    /// Back-dates `armed_at`, standing in for a schedule that has existed since
+    /// before the occurrences a test wants it to have missed.
+    ///
+    /// Written past the service on purpose: `create` arms from the clock, which
+    /// is the behaviour every other test relies on, and there is no reason to
+    /// add a service function whose only caller would be this line.
+    async fn arm_schedule(&self, id: &str, armed_at: DateTime<Utc>) {
+        sqlx::query!(
+            "UPDATE schedules SET armed_at = ?2 WHERE id = ?1",
+            id,
+            armed_at
+        )
+        .execute(&self.ctx().pool)
+        .await
+        .expect("back-date a schedule");
+    }
+
+    async fn schedule(&self, id: &str) -> rimaia_core::db::Schedule {
+        scheduler_schedule::get(self.ctx(), id)
+            .await
+            .expect("read a schedule")
+    }
+
+    async fn queue_state(&self) -> QueueState {
+        scheduler::queue_state(&self.ctx().pool)
+            .await
+            .expect("read the queue state")
+    }
+
+    async fn window(&self) -> Option<RunWindow> {
+        rimaia_core::schedule::window::active(&self.ctx().pool)
+            .await
+            .expect("read the run window")
     }
 
     /// Every `runs` row of a task, newest attempt first — the retry loop's own
