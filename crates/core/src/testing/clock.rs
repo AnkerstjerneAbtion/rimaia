@@ -4,49 +4,88 @@
 //! waiting on a fifteen-minute backoff is exercised by advancing this clock
 //! fifteen minutes, not by sleeping (ADR-0015). Cloning is cheap and shares the
 //! same instant, so the test and the code under test can each hold one.
+//!
+//! # Why the instant lives in a `watch` channel rather than a `Mutex`
+//!
+//! [`Clock::sleep_until`] has to *resolve* when the test moves time, or task
+//! 014's queue would sit on a real timer inside a test that thinks it advanced
+//! four hours. A `Mutex` can be read but not awaited; a `watch` can be both, so
+//! [`advance`](TestClock::advance) and [`set`](TestClock::set) wake every
+//! pending waiter as a consequence of writing rather than through a second
+//! notification anyone could forget to send.
 
-use std::sync::{Arc, Mutex};
+use std::future::Future;
+use std::pin::Pin;
+use std::sync::Arc;
 
 use chrono::{DateTime, Duration, Utc};
+use tokio::sync::watch;
 
 use crate::clock::Clock;
 
 #[derive(Debug, Clone)]
 pub struct TestClock {
     /// Shared rather than owned so that `advance` on the test's handle is
-    /// visible to the copy the scheduler is holding.
-    instant: Arc<Mutex<DateTime<Utc>>>,
+    /// visible to — and awaited by — the copy the scheduler is holding. The
+    /// `Arc` is what makes a clone drive the same channel; the sender is kept
+    /// (rather than a receiver) because this value outlives every waiter it
+    /// hands out.
+    instant: Arc<watch::Sender<DateTime<Utc>>>,
 }
 
 impl TestClock {
     pub fn new(start: DateTime<Utc>) -> Self {
+        let (instant, _) = watch::channel(start);
         Self {
-            instant: Arc::new(Mutex::new(start)),
+            instant: Arc::new(instant),
         }
     }
 
-    /// Jumps forward (or back, with a negative duration) by `by`.
+    /// Jumps forward (or back, with a negative duration) by `by`, and resolves
+    /// every [`sleep_until`](Clock::sleep_until) the jump reached.
     pub fn advance(&self, by: Duration) {
-        let mut instant = self.lock();
-        *instant += by;
+        let now = self.now();
+        self.set(now + by);
     }
 
     /// Pins the clock to an absolute instant — for tests driven by a
     /// `rate_limit_event`'s epoch `resetsAt` rather than by an elapsed interval.
+    ///
+    /// `send_replace` rather than `send`: the latter reports an error when no
+    /// receiver exists, which is the ordinary state of a clock nobody is
+    /// currently waiting on.
     pub fn set(&self, at: DateTime<Utc>) {
-        *self.lock() = at;
-    }
-
-    fn lock(&self) -> std::sync::MutexGuard<'_, DateTime<Utc>> {
-        // The guard never spans caller code, so the only way to poison this is a
-        // panic inside the two statements above.
-        self.instant.lock().expect("TestClock mutex poisoned")
+        self.instant.send_replace(at);
     }
 }
 
 impl Clock for TestClock {
     fn now(&self) -> DateTime<Utc> {
-        *self.lock()
+        *self.instant.borrow()
+    }
+
+    /// Resolves once the test has moved the clock to `at` or past it.
+    ///
+    /// A loop rather than a single `changed()`, because a test may advance in
+    /// several steps and only the last one reaches the deadline. `borrow_and_update`
+    /// before the first await is what makes an already-elapsed deadline resolve
+    /// immediately instead of waiting for an advance nobody is going to make.
+    fn sleep_until(&self, at: DateTime<Utc>) -> Pin<Box<dyn Future<Output = ()> + Send + 'static>> {
+        let mut receiver = self.instant.subscribe();
+        Box::pin(async move {
+            loop {
+                if *receiver.borrow_and_update() >= at {
+                    return;
+                }
+                if receiver.changed().await.is_err() {
+                    // Unreachable while the `TestClock` is alive, and waiting
+                    // forever is the safe reading if it is not: a wait that
+                    // resolved because the clock was dropped would look to the
+                    // caller like time having passed.
+                    std::future::pending::<()>().await;
+                }
+            }
+        })
     }
 }
 
@@ -95,5 +134,32 @@ mod tests {
         clock.advance(Duration::seconds(30));
 
         assert_eq!(injected.now(), at("2026-08-20T02:00:30Z"));
+    }
+
+    #[tokio::test]
+    async fn advancing_the_clock_resolves_a_wait_the_advance_reached() {
+        // The property the whole channel exists for. Without it a queue parked
+        // on a fifteen-minute backoff inside a test would sit through fifteen
+        // real minutes, and CLAUDE.md's "no sleep in tests, ever" would hold
+        // for the policy function and quietly fail for the loop.
+        let clock = TestClock::new(at("2026-08-20T02:00:00Z"));
+        let waiter = clock.clone();
+        let waiting = tokio::spawn(async move {
+            waiter.sleep_until(at("2026-08-20T02:15:00Z")).await;
+        });
+
+        // In two steps, so the loop rather than a single `changed()` is what is
+        // being exercised: the first advance moves the clock without reaching
+        // the deadline.
+        clock.advance(Duration::minutes(5));
+        clock.advance(Duration::minutes(10));
+
+        waiting.await.expect("the wait must resolve");
+    }
+
+    #[tokio::test]
+    async fn a_deadline_already_past_resolves_without_any_advance() {
+        let clock = TestClock::new(at("2026-08-20T02:00:00Z"));
+        clock.sleep_until(at("2026-08-20T01:00:00Z")).await;
     }
 }

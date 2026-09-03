@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "\n        UPDATE schedules\n           SET name = ?2, mode = ?3, cron = ?4, start_at = ?5, max_concurrency = ?6,\n               enabled = ?7, timezone = ?8, stop_at = ?9, armed_at = ?10\n         WHERE id = ?1\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 10
+    },
+    "nullable": []
+  },
+  "hash": "188d9196b4f2c2b0d1a6cde430aed6899c190b7f6c48072ab51bb1fb0f51eb34"
+}

@@ -11,6 +11,7 @@ function entry(overrides: Partial<QueueEntry> = {}): QueueEntry {
     repositoryId: "repo-1",
     queuePosition: 1,
     skip: null,
+    resumeAfter: null,
     ...overrides,
   };
 }

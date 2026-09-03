@@ -1,7 +1,7 @@
 import { useDroppable } from "@dnd-kit/core";
 import { SortableContext, verticalListSortingStrategy } from "@dnd-kit/sortable";
 
-import type { BoardColumn as BoardColumnId, Task } from "../../types";
+import type { BoardColumn as BoardColumnId, EffectiveStrategyFields, Task, TaskSummary } from "../../types";
 import { TaskCard } from "./TaskCard";
 
 /** Task 005's display names, ADR-0007's board order. */
@@ -22,9 +22,29 @@ export const COLUMN_EMPTY_HINTS: Record<BoardColumnId, string> = {
   done: "Nothing finished yet. Reviewed and accepted tasks land here.",
 };
 
+/**
+ * What a column will pass to a card: `Board` hands it `TaskSummary` rows
+ * (seam-contract D12) and this file's own tests hand it bare `Task`s, so the
+ * summary fields are optional here exactly as they are in `TaskCard`'s
+ * `CardTask`.
+ *
+ * Widened from a bare `readonly Task[]` by task 011. It had been narrower than
+ * what `Board` actually passes ever since D12 landed, which cost nothing while
+ * the extra fields were only ever *read* through `??` defaults — but a card
+ * that must name its blocker cannot be given a type that has erased the name.
+ */
+type ColumnCard = Task &
+  Partial<
+    Pick<
+      TaskSummary,
+      "linkCount" | "dependencyCount" | "lastRun" | "blockedByIncomplete" | "blockingTitle"
+    >
+  > &
+  Partial<EffectiveStrategyFields>;
+
 interface ColumnProps {
   readonly column: BoardColumnId;
-  readonly cards: readonly Task[];
+  readonly cards: readonly ColumnCard[];
   readonly repositoriesById: ReadonlyMap<string, string>;
   readonly selectedTaskId: string | null;
   readonly onSelect: (id: string) => void;

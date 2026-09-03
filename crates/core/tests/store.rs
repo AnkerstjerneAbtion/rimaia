@@ -169,6 +169,7 @@ async fn a_repository_round_trips_every_field_exactly() {
             worktree_root: "/Users/someone/Library/Application Support/com.rimaia.app/worktrees"
                 .to_string(),
             allow_unattended_runs: true,
+            max_concurrency: 1,
             created_at,
         }
     );
@@ -395,8 +396,11 @@ async fn a_run_round_trips_every_field_exactly() {
     sqlx::query!(
         "INSERT INTO runs (
             id, task_id, attempt, status, session_id, prompt, started_at, ended_at,
-            exit_class, error_message, num_turns, cost_usd, log_path, pr_url, resume_after
-         ) VALUES (?1, ?2, 2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+            exit_class, error_message, num_turns, cost_usd, log_path, pr_url, resume_after,
+            base_ref, model, effort, run_environment,
+            input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens
+         ) VALUES (?1, ?2, 2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14,
+                   ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22)",
         id,
         task_id,
         RunStatus::Failed,
@@ -411,6 +415,14 @@ async fn a_run_round_trips_every_field_exactly() {
         "/tmp/rimaia-runs/task/run.jsonl",
         "https://github.com/example/pr/9",
         resume_after,
+        "main",
+        "claude-sonnet-5",
+        "high",
+        "inherit",
+        10_i64,
+        1949_i64,
+        163_145_i64,
+        11_819_i64,
     )
     .execute(&pool)
     .await
@@ -436,6 +448,14 @@ async fn a_run_round_trips_every_field_exactly() {
             log_path: "/tmp/rimaia-runs/task/run.jsonl".to_string(),
             pr_url: Some("https://github.com/example/pr/9".to_string()),
             resume_after: Some(resume_after),
+            base_ref: Some("main".to_string()),
+            model: Some("claude-sonnet-5".to_string()),
+            effort: Some("high".to_string()),
+            run_environment: Some("inherit".to_string()),
+            input_tokens: Some(10),
+            output_tokens: Some(1949),
+            cache_read_tokens: Some(163_145),
+            cache_creation_tokens: Some(11_819),
         }
     );
 }
@@ -446,6 +466,11 @@ async fn a_run_round_trips_while_still_in_flight() {
     // `resume_after` are `NULL` for the whole time a run is active, per the schema's own
     // comment. A struct built from an in-flight row has to come back with every one of
     // those fields `None`, not merely not error.
+    //
+    // ADR-0022's capture columns are `None` here for a stronger reason than
+    // "not yet": seam-contract D18 makes NULL mean *not recorded*, and a run
+    // still in flight has not recorded them. A zero here would be a claim that
+    // it had spent nothing.
     let pool = test_pool().await;
     let repository_id = insert_repository(&pool).await;
     let task_id = insert_task(&pool, &repository_id, BoardColumn::Ready, RunState::Running).await;
@@ -487,6 +512,14 @@ async fn a_run_round_trips_while_still_in_flight() {
             log_path: "/tmp/rimaia-runs/task/run-1.jsonl".to_string(),
             pr_url: None,
             resume_after: None,
+            base_ref: None,
+            model: None,
+            effort: None,
+            run_environment: None,
+            input_tokens: None,
+            output_tokens: None,
+            cache_read_tokens: None,
+            cache_creation_tokens: None,
         }
     );
 }
@@ -524,6 +557,13 @@ async fn a_schedule_round_trips_every_field_exactly() {
             start_at: Some(start_at),
             max_concurrency: 4,
             enabled: false,
+            // Task 013's four, all still NULL: this row was inserted by the
+            // column list the initial schema shipped, which is exactly the
+            // shape every row written before task 013 has.
+            timezone: None,
+            stop_at: None,
+            last_fired_at: None,
+            armed_at: None,
         }
     );
 }
@@ -554,6 +594,10 @@ async fn a_schedule_without_a_cron_or_start_at_takes_its_declared_defaults() {
             start_at: None,
             max_concurrency: 2,
             enabled: true,
+            timezone: None,
+            stop_at: None,
+            last_fired_at: None,
+            armed_at: None,
         }
     );
 }
@@ -1281,7 +1325,7 @@ async fn fetch_repository(pool: &SqlitePool, id: &str) -> Repository {
     sqlx::query_as!(
         Repository,
         r#"SELECT id, name, path, default_branch, worktree_root, allow_unattended_runs,
-            created_at AS "created_at: DateTime<Utc>"
+            max_concurrency, created_at AS "created_at: DateTime<Utc>"
            FROM repositories WHERE id = ?1"#,
         id,
     )
@@ -1353,7 +1397,9 @@ async fn fetch_run(pool: &SqlitePool, id: &str) -> Run {
         r#"SELECT id, task_id, attempt, status AS "status: RunStatus", session_id, prompt,
             started_at AS "started_at: DateTime<Utc>", ended_at AS "ended_at: DateTime<Utc>",
             exit_class AS "exit_class: ExitClass", error_message, num_turns, cost_usd, log_path,
-            pr_url, resume_after AS "resume_after: DateTime<Utc>"
+            pr_url, resume_after AS "resume_after: DateTime<Utc>", base_ref,
+            model, effort, run_environment, input_tokens, output_tokens,
+            cache_read_tokens, cache_creation_tokens
            FROM runs WHERE id = ?1"#,
         id,
     )
@@ -1366,7 +1412,10 @@ async fn fetch_schedule(pool: &SqlitePool, id: &str) -> Schedule {
     sqlx::query_as!(
         Schedule,
         r#"SELECT id, name, mode AS "mode: ScheduleMode", cron,
-            start_at AS "start_at: DateTime<Utc>", max_concurrency, enabled
+            start_at AS "start_at: DateTime<Utc>", max_concurrency,
+            enabled AS "enabled: bool", timezone, stop_at,
+            last_fired_at AS "last_fired_at: DateTime<Utc>",
+            armed_at AS "armed_at: DateTime<Utc>"
            FROM schedules WHERE id = ?1"#,
         id,
     )

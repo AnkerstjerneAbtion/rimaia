@@ -115,6 +115,17 @@ export function RunHistorySection({ taskId }: RunHistorySectionProps) {
                     {run.exitClass ? EXIT_CLASS_LABELS[run.exitClass] : "Running"}
                   </span>
                   <span className="muted">{new Date(run.startedAt).toLocaleString()}</span>
+                  {/* ADR-0011: the history of an overnight task "reads as the
+                      sequence of walls it hit", and a wall is only legible with
+                      the wait beside it — four attempts an hour apart and four
+                      in the same minute are different stories. Absent on the
+                      attempt that finally succeeded, which is what its absence
+                      means. */}
+                  {run.resumeAfter && (
+                    <span className="muted run-history-wait">
+                      waited until {new Date(run.resumeAfter).toLocaleTimeString()}
+                    </span>
+                  )}
                 </button>
               </li>
             ))}

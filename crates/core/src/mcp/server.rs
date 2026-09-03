@@ -29,22 +29,30 @@ use rmcp::{tool, tool_handler, tool_router, ServerHandler};
 
 use crate::context::ServiceContext;
 use crate::db::{BoardColumn, StrategySource};
+use crate::doctor;
 use crate::mcp::error::ToolError;
 use crate::mcp::requests::{
     AddTaskLinkRequest, ClearableField, CreateTaskRequest, GetStrategyDefaultsRequest,
     GetTaskRequest, ListTasksRequest, MoveTaskRequest, RemoveTaskLinkRequest,
+    ScheduleConfigRequest, ScheduleRequest, SetMaxConcurrencyRequest,
+    SetRepositoryMaxConcurrencyRequest, SetScheduleEnabledRequest, SetScheduleModeRequest,
     SetStrategyApprovalRequest, SetStrategyCatalogueRequest, SetStrategyDefaultsRequest,
-    SetTaskDependenciesRequest, SetTaskStrategyRequest, TaskStrategyRequest, UpdateTaskRequest,
+    SetTaskDependenciesRequest, SetTaskStrategyRequest, SetWorktreeAutoCleanupRequest,
+    TaskStrategyRequest, UpdateScheduleRequest, UpdateTaskRequest,
 };
 use crate::mcp::responses::{
-    BaseInstructionsView, RepositoryListView, RepositoryView, StrategyApprovalView, TaskListItem,
-    TaskListView, TaskView,
+    BaseInstructionsView, DoctorReportView, OnboardingView, PreflightView, RepositoryListView,
+    RepositoryView, RunCapacityView, ScheduleDeletedView, ScheduleListView, ScheduleView,
+    StrategyApprovalView, TaskListItem, TaskListView, TaskView, TimezoneListView,
+    WorktreeAutoCleanupView, WorktreeListView, WorktreeView,
 };
 use crate::mcp::scope::{RunScope, Tool};
 use crate::runner::prompt::TEMPLATE_VARIABLES;
+use crate::schedule;
+use crate::scheduler::{self, capacity};
 use crate::strategy::{self, Catalogue, StrategyDefaults};
 use crate::tasks::{NewTask, NewTaskLink, Patch, TaskFilter, TaskPatch};
-use crate::{db, repo, tasks, Result};
+use crate::{db, repo, tasks, worktree, Result};
 
 /// What Claude Code is told this server is for, before it has read a single
 /// tool description.
@@ -68,6 +76,17 @@ pub struct RimaiaServer {
     /// Carried on the *value*, not on the request, which is the whole argument
     /// for putting the token in the path — see [`RunScope`].
     scope: RunScope,
+    /// What `run_doctor` reports about (task 018).
+    ///
+    /// An explicit constructor parameter rather than a default, because the two
+    /// things it carries cannot be guessed from here and a wrong guess would be
+    /// a doctor that reassures about the wrong installation: the app data
+    /// directory is a platform lookup only the shell can do (see
+    /// [`AppPaths`](crate::AppPaths)), and `programs.claude` must be the very
+    /// binary the runner would spawn. This is also the gap ADR-0021 names for
+    /// `plan_task_strategy` — the MCP server not knowing the shell's `AppPaths`
+    /// — closed for the one tool that only *reads* it.
+    doctor: doctor::Environment,
 }
 
 /// `vis = "pub"` so `tests/mcp_scope.rs`, which lives outside this crate, can
@@ -81,13 +100,12 @@ impl RimaiaServer {
     /// has to remember that its writes are `mcp` (ADR-0019).
     ///
     /// [`RunScope::Operator`], because `/mcp` is what this constructor serves
-    /// and task 020 takes nothing away from it. Keeping the operator surface on
-    /// the unchanged constructor is also what lets every direct-call handler
-    /// test in `tests/mcp_tools.rs` stay exactly as it was.
-    pub fn new(ctx: ServiceContext) -> Self {
+    /// and task 020 takes nothing away from it.
+    pub fn new(ctx: ServiceContext, doctor: doctor::Environment) -> Self {
         Self {
             ctx,
             scope: RunScope::Operator,
+            doctor,
         }
     }
 
@@ -96,13 +114,49 @@ impl RimaiaServer {
     /// A second constructor rather than a parameter on [`new`](Self::new),
     /// because a scope is not something the operator path should be able to get
     /// wrong by passing the wrong argument.
-    pub fn scoped(ctx: ServiceContext, task_id: impl Into<String>) -> Self {
+    pub fn scoped(
+        ctx: ServiceContext,
+        doctor: doctor::Environment,
+        task_id: impl Into<String>,
+    ) -> Self {
         Self {
             ctx,
             scope: RunScope::Run {
                 task_id: task_id.into(),
             },
+            doctor,
         }
+    }
+
+    #[tool(
+        description = "Check this Rimaia installation for the environment problems that make an \
+overnight queue fail: a missing or signed-out Claude Code CLI, a git too old for worktrees, a \
+GitHub CLI that cannot open a pull request, an unwritable or full data directory, a registered \
+repository whose directory has moved, and an MCP port nothing is listening on. Call this when the \
+user reports that runs are failing, before telling them to start the queue, or when \
+`start_queue` has refused — every result carries the specific command that fixes it, and \
+`is_blocking` says whether the queue would refuse to start right now."
+    )]
+    pub async fn run_doctor(&self) -> Result<Json<DoctorReportView>, ToolError> {
+        self.scope.authorize(Tool::RunDoctor, None)?;
+
+        let report = doctor::run(&self.ctx, &self.doctor).await?;
+        Ok(Json(DoctorReportView::from(&report)))
+    }
+
+    #[tool(
+        description = "Record that the first-run walkthrough has been seen, so Rimaia opens on \
+the board instead of the welcome screen. Call it only when the user says they are done with \
+setup, or want to skip it — it changes nothing about how runs work, and un-dismissing it is not \
+something this surface offers."
+    )]
+    pub async fn dismiss_onboarding(&self) -> Result<Json<OnboardingView>, ToolError> {
+        self.scope.authorize(Tool::DismissOnboarding, None)?;
+
+        db::settings::set_onboarding_dismissed(&self.ctx, true).await?;
+        Ok(Json(OnboardingView {
+            onboarding_dismissed: true,
+        }))
     }
 
     #[tool(
@@ -529,6 +583,84 @@ task until somebody accepts it, which is only useful while someone is watching."
     }
 
     #[tool(
+        description = "Stop retrying a task that is waiting to resume, landing it in `failed` so a \
+human reviews it instead. Call this when the error on its last run will not clear on its own and \
+the remaining attempts would hit the same wall; it speaks for that human, so a run cannot call it. \
+Use `move_task` for a card that simply belongs somewhere else, and cancel rather than this for a \
+run that is still in flight."
+    )]
+    pub async fn give_up_on_task(
+        &self,
+        Parameters(request): Parameters<TaskStrategyRequest>,
+    ) -> Result<Json<TaskView>, ToolError> {
+        self.scope.authorize(Tool::GiveUpOnTask, None)?;
+        scheduler::give_up(&self.ctx, &request.task_id).await?;
+        self.task_view(&request.task_id).await
+    }
+
+    // Task 016's read surface. The three commands that *delete* a worktree
+    // have no tool here, and that is not an oversight — see this module's own
+    // note and seam-contract D20. What an agent can do is find out what is on
+    // the disk and say so, which is the half of the problem it can help with
+    // without being able to make it irreversible.
+
+    #[tool(
+        description = "List every git worktree Rimaia has created, with the task it belongs to, \
+its branch, its size on disk, when anything last wrote in it, and whether its branch is already \
+merged into the repository's default branch. Call this when the user asks what is taking up \
+space, or before suggesting a cleanup: `uncommitted_changes` and `unpushed_commits` are work that \
+exists nowhere else, and a worktree with either is one to leave alone. Removing a worktree is \
+deliberately not available here — it is irreversible, so it lives only in Settings → Storage, \
+where a human confirms it."
+    )]
+    pub async fn list_worktrees(&self) -> Result<Json<WorktreeListView>, ToolError> {
+        self.scope.authorize(Tool::ListWorktrees, None)?;
+
+        let inventory = worktree::inventory(&self.ctx).await?;
+        Ok(Json(WorktreeListView {
+            worktrees: inventory
+                .entries
+                .into_iter()
+                .map(WorktreeView::from)
+                .collect(),
+            total_bytes: inventory.total_bytes,
+        }))
+    }
+
+    #[tool(
+        description = "Read whether a task reaching the `done` column automatically has its git \
+worktree removed. Call this before advising on disk usage: when it is `off`, which is the \
+default, every finished task keeps a full checkout until somebody clears it by hand, and that is \
+usually the explanation for a large `worktrees` directory."
+    )]
+    pub async fn get_worktree_auto_cleanup(
+        &self,
+    ) -> Result<Json<WorktreeAutoCleanupView>, ToolError> {
+        self.scope.authorize(Tool::GetWorktreeAutoCleanup, None)?;
+        Ok(Json(WorktreeAutoCleanupView {
+            setting: worktree::auto_cleanup(&self.ctx.pool).await?,
+        }))
+    }
+
+    #[tool(
+        description = "Turn automatic worktree removal on or off. Call it with \
+`on_done_acknowledged` only after telling the user what it deletes: every task they move to \
+`done` will lose its checkout, including any uncommitted file in it that a run left behind. It \
+never forces and never deletes a branch, so work that was committed survives — but work that was \
+not is gone. `off` restores the default."
+    )]
+    pub async fn set_worktree_auto_cleanup(
+        &self,
+        Parameters(request): Parameters<SetWorktreeAutoCleanupRequest>,
+    ) -> Result<Json<WorktreeAutoCleanupView>, ToolError> {
+        self.scope.authorize(Tool::SetWorktreeAutoCleanup, None)?;
+        worktree::set_auto_cleanup(&self.ctx, request.setting).await?;
+        Ok(Json(WorktreeAutoCleanupView {
+            setting: request.setting,
+        }))
+    }
+
+    #[tool(
         description = "Accept a planner's proposal on behalf of the user, marking the strategy as \
 theirs rather than the planner's. A later planner run will then leave it alone. Call this when a human has \
 reviewed a proposal and is happy with it; it speaks for that human, so a run cannot call it — \
@@ -555,6 +687,194 @@ enough that the old proposal no longer describes the work."
         self.scope.authorize(Tool::ClearTaskStrategy, None)?;
         let task = tasks::strategy::clear_task_strategy(&self.ctx, &request.task_id).await?;
         self.task_view(&task.id).await
+    }
+
+    // Task 012's four (ADR-0010). Every one is refused to a run — see
+    // `scope::Tool::run_access` for the argument, which is ADR-0021 point 4's
+    // second permanent refusal one layer out.
+
+    #[tool(
+        description = "Read how many runs Rimaia will have in flight at once: the mode \
+(`sequential` or `parallel`), the configured limit, and the ceiling no setting can raise. Call \
+this before queueing a long list overnight, to see whether it will be worked one at a time or \
+several at once. The limit is reported as stored, so it survives a switch back to `sequential` \
+even though sequential always runs exactly one."
+    )]
+    pub async fn get_run_capacity(&self) -> Result<Json<RunCapacityView>, ToolError> {
+        self.scope.authorize(Tool::GetRunCapacity, None)?;
+        Ok(Json(capacity::configured(&self.ctx.pool).await?.into()))
+    }
+
+    #[tool(
+        description = "Switch the run queue between one task at a time (`sequential`) and several \
+at once (`parallel`). Call it before an evening of independent tasks across several repositories, \
+which finishes far sooner in parallel. `sequential` is the safe default and the one that matches \
+\"implement these in this order\"; it runs exactly one task at a time whatever the configured \
+limit says."
+    )]
+    pub async fn set_schedule_mode(
+        &self,
+        Parameters(request): Parameters<SetScheduleModeRequest>,
+    ) -> Result<Json<RunCapacityView>, ToolError> {
+        self.scope.authorize(Tool::SetScheduleMode, None)?;
+        capacity::set_schedule_mode(&self.ctx, request.mode).await?;
+        Ok(Json(capacity::configured(&self.ctx.pool).await?.into()))
+    }
+
+    #[tool(
+        description = "Set how many runs parallel mode may have in flight at once. Call this \
+together with `set_schedule_mode`; on its own it changes nothing while the mode is `sequential`. \
+Read `get_run_capacity` first for the ceiling — a value outside that range is refused rather than \
+clamped. It bounds the queue in total; each repository still holds at most its own limit."
+    )]
+    pub async fn set_max_concurrency(
+        &self,
+        Parameters(request): Parameters<SetMaxConcurrencyRequest>,
+    ) -> Result<Json<RunCapacityView>, ToolError> {
+        self.scope.authorize(Tool::SetMaxConcurrency, None)?;
+        capacity::set_max_concurrency(&self.ctx, request.max_concurrency).await?;
+        Ok(Json(capacity::configured(&self.ctx.pool).await?.into()))
+    }
+
+    #[tool(
+        description = "Set how many runs one repository will hold at once. Call this only when \
+that repository's tasks genuinely do not interfere: git isolates the worktrees, but two agents in \
+one repository fight over ports, test databases and lockfiles, which is why the default is 1 even \
+in parallel mode and why raising it is a deliberate act. Parallelism across repositories is the \
+safe kind and needs nothing here."
+    )]
+    pub async fn set_repository_max_concurrency(
+        &self,
+        Parameters(request): Parameters<SetRepositoryMaxConcurrencyRequest>,
+    ) -> Result<Json<RepositoryView>, ToolError> {
+        self.scope
+            .authorize(Tool::SetRepositoryMaxConcurrency, None)?;
+        let repository =
+            repo::set_max_concurrency(&self.ctx, &request.repository_id, request.max_concurrency)
+                .await?;
+        Ok(Json(RepositoryView::from(repository)))
+    }
+    // -----------------------------------------------------------------------
+    // Schedules (task 013, ADR-0010). Operator-only, every one.
+    // -----------------------------------------------------------------------
+
+    #[tool(
+        description = "List the schedules that start Rimaia's run queue by themselves, each with \
+the time it will next fire. Call this whenever the user asks when work will run, or says a \
+nightly queue did not happen — an overdue schedule reports the occurrence it *owes*, which is in \
+the past, and a schedule whose cron expression cannot be read reports why instead of a time. \
+Schedules are the operator's own standing instructions, so a run cannot read or change them."
+    )]
+    pub async fn list_schedules(&self) -> Result<Json<ScheduleListView>, ToolError> {
+        self.scope.authorize(Tool::ListSchedules, None)?;
+        Ok(Json(ScheduleListView {
+            schedules: schedule::list(&self.ctx)
+                .await?
+                .into_iter()
+                .map(ScheduleView::from)
+                .collect(),
+        }))
+    }
+
+    #[tool(
+        description = "Create a schedule that starts the run queue at a chosen time — once, or \
+every night. Call this when the user says something like \"run the queue at 22:00 and stop at \
+06:00\": give it `cron` (\"0 22 * * *\") or `start_at`, never both, plus the IANA `timezone` the \
+times are read in, which `list_timezones` supplies. `stop_at` is a local time of day at which the \
+queue stops starting new tasks and lets the ones in flight finish. It spawns runs unattended, so \
+a run cannot call it."
+    )]
+    pub async fn create_schedule(
+        &self,
+        Parameters(request): Parameters<ScheduleConfigRequest>,
+    ) -> Result<Json<ScheduleView>, ToolError> {
+        self.scope.authorize(Tool::CreateSchedule, None)?;
+        let created = schedule::create(&self.ctx, request.into()).await?;
+        Ok(Json(created.into()))
+    }
+
+    #[tool(
+        description = "Replace a schedule's whole configuration — its name, times, timezone, stop \
+time, mode and concurrency. Call this to change when or how a scheduled queue runs; send every \
+field, because this replaces rather than patches, and the fields constrain each other. It leaves \
+the schedule's fire history alone, so editing tonight's stop time does not make tonight's start \
+happen again. Reconfiguring an unattended queue is the operator's, so a run cannot call it."
+    )]
+    pub async fn update_schedule(
+        &self,
+        Parameters(request): Parameters<UpdateScheduleRequest>,
+    ) -> Result<Json<ScheduleView>, ToolError> {
+        self.scope.authorize(Tool::UpdateSchedule, None)?;
+        let updated =
+            schedule::update(&self.ctx, &request.schedule_id, request.config.into()).await?;
+        Ok(Json(updated.into()))
+    }
+
+    #[tool(
+        description = "Turn a schedule on or off without deleting what it is set to. Call this \
+when the user wants to skip the automatic runs for a while — it is the reversible answer, and \
+`delete_schedule` is not. Turning one back on re-arms it from that moment, so a schedule that \
+spent a month off does not immediately fire for the last of thirty nights it missed. A run cannot \
+call it."
+    )]
+    pub async fn set_schedule_enabled(
+        &self,
+        Parameters(request): Parameters<SetScheduleEnabledRequest>,
+    ) -> Result<Json<ScheduleView>, ToolError> {
+        self.scope.authorize(Tool::SetScheduleEnabled, None)?;
+        let updated =
+            schedule::set_enabled(&self.ctx, &request.schedule_id, request.enabled).await?;
+        Ok(Json(updated.into()))
+    }
+
+    #[tool(
+        description = "Delete a schedule outright. Call it only when the user wants the schedule \
+gone rather than paused — `set_schedule_enabled` is the reversible option and is almost always \
+what they mean. A window this schedule already opened keeps running; deleting the instruction is \
+not the same act as stopping tonight. A run cannot call it."
+    )]
+    pub async fn delete_schedule(
+        &self,
+        Parameters(request): Parameters<ScheduleRequest>,
+    ) -> Result<Json<ScheduleDeletedView>, ToolError> {
+        self.scope.authorize(Tool::DeleteSchedule, None)?;
+        schedule::delete(&self.ctx, &request.schedule_id).await?;
+        Ok(Json(ScheduleDeletedView {
+            schedule_id: request.schedule_id,
+            deleted: true,
+        }))
+    }
+
+    #[tool(
+        description = "Preview what a schedule would do: which tasks it will run, in what order, \
+and which it will pass over and why. Call this in the evening, before the user leaves — it is the \
+answer to \"what will happen tonight\", and it is computed from the board as it is right now, so \
+it changes when a card is dragged. A task listed with a `skipped_because` will still be sitting \
+there in the morning unless somebody acts. A run cannot call it."
+    )]
+    pub async fn preview_schedule_preflight(
+        &self,
+        Parameters(request): Parameters<ScheduleRequest>,
+    ) -> Result<Json<PreflightView>, ToolError> {
+        self.scope.authorize(Tool::PreviewSchedulePreflight, None)?;
+        Ok(Json(
+            schedule::preview(&self.ctx, &request.schedule_id)
+                .await?
+                .into(),
+        ))
+    }
+
+    #[tool(
+        description = "List every IANA timezone name a schedule may be configured with. Call it \
+before `create_schedule` or `update_schedule` to get the exact spelling — a schedule needs a real \
+zone name such as \"Europe/Copenhagen\", never an offset or an abbreviation, because a nightly \
+queue configured with one of those runs an hour out for half the year and nothing says so."
+    )]
+    pub async fn list_timezones(&self) -> Result<Json<TimezoneListView>, ToolError> {
+        self.scope.authorize(Tool::ListTimezones, None)?;
+        Ok(Json(TimezoneListView {
+            timezones: schedule::timezones(),
+        }))
     }
 }
 
@@ -653,25 +973,42 @@ mod tests {
     /// capability parity a rule. What replaces a count is the property that
     /// actually matters — a registered tool with no run-scope decision cannot
     /// reach the wire.
-    const REGISTERED_TOOLS: [&str; 19] = [
+    const REGISTERED_TOOLS: [&str; 36] = [
         "accept_task_strategy",
         "add_task_link",
         "clear_task_strategy",
+        "create_schedule",
         "create_task",
+        "delete_schedule",
+        "dismiss_onboarding",
         "get_base_instructions",
+        "get_run_capacity",
         "get_strategy_approval",
         "get_strategy_catalogue",
         "get_strategy_defaults",
         "get_task",
+        "get_worktree_auto_cleanup",
+        "give_up_on_task",
         "list_repositories",
+        "list_schedules",
         "list_tasks",
+        "list_timezones",
+        "list_worktrees",
         "move_task",
+        "preview_schedule_preflight",
         "remove_task_link",
+        "run_doctor",
+        "set_max_concurrency",
+        "set_repository_max_concurrency",
+        "set_schedule_enabled",
+        "set_schedule_mode",
         "set_strategy_approval",
         "set_strategy_catalogue",
         "set_strategy_defaults",
         "set_task_dependencies",
         "set_task_strategy",
+        "set_worktree_auto_cleanup",
+        "update_schedule",
         "update_task",
     ];
 
@@ -793,7 +1130,8 @@ mod tests {
     #[tokio::test]
     async fn the_server_introduces_itself_as_rimaia_with_instructions() {
         let harness = crate::testing::TestContext::new().await;
-        let info = RimaiaServer::new(harness.context).get_info();
+        let info =
+            RimaiaServer::new(harness.context, crate::testing::doctor::environment()).get_info();
 
         assert_eq!(info.server_info.name, "rimaia");
         assert_eq!(info.server_info.version, env!("CARGO_PKG_VERSION"));

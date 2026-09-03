@@ -3,6 +3,7 @@ id: "018"
 title: Preflight doctor and packaging
 milestone: v0.3
 status: ready
+landed: "#17"
 depends_on: ["008"]
 adrs: ["0004", "0012"]
 size: S

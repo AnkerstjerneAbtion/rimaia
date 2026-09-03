@@ -17,11 +17,15 @@ use schemars::JsonSchema;
 use serde::Serialize;
 
 use crate::db::{
-    BoardColumn, ExitClass, MutationSource, Repository, Run, RunState, RunStatus, StrategyMode,
-    StrategySource, TaskLink,
+    BoardColumn, ExitClass, MutationSource, Repository, Run, RunState, RunStatus, Schedule,
+    ScheduleMode, StrategyMode, StrategySource, TaskLink,
 };
+use crate::doctor::{CheckResult, DoctorReport};
+use crate::schedule::{PreflightSummary, ScheduleView as CoreScheduleView};
+use crate::scheduler::RunCapacity;
 use crate::strategy::StrategyApproval;
 use crate::tasks::{TaskDetail, TaskSummary};
+use crate::worktree::{AutoCleanup, WorktreeInventoryEntry};
 
 /// One registered repository, as `list_repositories` reports it.
 #[derive(Debug, Clone, PartialEq, Serialize, JsonSchema)]
@@ -35,6 +39,11 @@ pub struct RepositoryView {
     /// between a task that will run unattended tonight and one that will sit
     /// in `ready` waiting for a human to say yes.
     pub allow_unattended_runs: bool,
+    /// ADR-0010's per-repository cap, `1` unless the operator opted out.
+    /// Surfaced for the same reason as the flag above: it is the difference
+    /// between two of this repository's tasks running tonight and them running
+    /// one after the other.
+    pub max_concurrency: i64,
 }
 
 impl From<Repository> for RepositoryView {
@@ -45,6 +54,7 @@ impl From<Repository> for RepositoryView {
             path: repository.path,
             default_branch: repository.default_branch,
             allow_unattended_runs: repository.allow_unattended_runs,
+            max_concurrency: repository.max_concurrency,
         }
     }
 }
@@ -174,6 +184,76 @@ pub struct TaskListView {
     pub tasks: Vec<TaskListItem>,
 }
 
+/// One row of what `run_doctor` answers with (task 018).
+///
+/// A projection rather than [`CheckResult`] re-serialized, for the reason this
+/// module's header gives — and for one more that is specific to this pair.
+/// `is_blocking` and `blocking_summary` on [`DoctorReportView`] are *derived*
+/// here rather than left for the caller to recompute: an agent asked to decide
+/// whether the queue can start should not have to know that "blocking" means
+/// "any status is fail", which is exactly the kind of rule ADR-0006 refuses to
+/// let a second surface reimplement.
+#[derive(Debug, Clone, PartialEq, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub struct CheckResultView {
+    pub check: String,
+    pub label: String,
+    pub status: String,
+    /// The repository this row is about, for the two per-repository checks.
+    pub repository: Option<String>,
+    pub detail: String,
+    pub remediation: Option<String>,
+}
+
+impl From<&CheckResult> for CheckResultView {
+    fn from(result: &CheckResult) -> Self {
+        Self {
+            check: result.check.as_str().to_string(),
+            label: result.label.to_string(),
+            status: result.status.as_str().to_string(),
+            repository: result.repository.clone(),
+            detail: result.detail.clone(),
+            remediation: result.remediation.clone(),
+        }
+    }
+}
+
+/// What `run_doctor` answers with. Wrapped for the reason
+/// [`RepositoryListView`] gives.
+#[derive(Debug, Clone, PartialEq, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub struct DoctorReportView {
+    pub results: Vec<CheckResultView>,
+    /// Whether the queue would refuse to start right now.
+    pub is_blocking: bool,
+    /// The exact sentence `start_queue` would refuse with, or `null` when it
+    /// would not refuse. Carried so an agent reporting the problem to a human
+    /// quotes the same words the window does.
+    pub blocking_summary: Option<String>,
+}
+
+impl From<&DoctorReport> for DoctorReportView {
+    fn from(report: &DoctorReport) -> Self {
+        Self {
+            results: report.results.iter().map(CheckResultView::from).collect(),
+            is_blocking: report.is_blocking(),
+            blocking_summary: report.is_blocking().then(|| report.blocking_summary()),
+        }
+    }
+}
+
+/// What `dismiss_onboarding` answers with.
+///
+/// An object rather than nothing at all, because a tool that answers with no
+/// content gives a caller no way to tell "it worked" from "the schema was
+/// wrong" — and because echoing the stored value back makes the write's effect
+/// legible without a second call.
+#[derive(Debug, Clone, PartialEq, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub struct OnboardingView {
+    pub onboarding_dismissed: bool,
+}
+
 /// One card's worth of a task, as `list_tasks` reports it.
 ///
 /// **No plan** (seam-contract D16): fifty tasks times a multi-thousand-word
@@ -278,6 +358,36 @@ pub struct BaseInstructionsView {
     pub template_variables: Vec<String>,
 }
 
+/// What `get_run_capacity`, `set_schedule_mode` and `set_max_concurrency`
+/// answer with — the queue's whole configuration, from any of the three.
+///
+/// A setter answering with the resolved state rather than nothing is the shape
+/// `set_mcp_port` already established on the Tauri side, and it is worth more
+/// over MCP: a caller that had to follow every write with a read would be
+/// paying two round trips to learn what the first one already knew.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub struct RunCapacityView {
+    pub mode: ScheduleMode,
+    /// The *stored* limit, which is not what `sequential` resolves to. See
+    /// `scheduler::capacity::RunCapacity`.
+    pub max_concurrency: usize,
+    /// The most runs Rimaia will supervise whatever this says. A constant, not
+    /// a setting — reported so a caller can bound its own input rather than
+    /// guessing and being refused.
+    pub ceiling: usize,
+}
+
+impl From<RunCapacity> for RunCapacityView {
+    fn from(capacity: RunCapacity) -> Self {
+        Self {
+            mode: capacity.mode,
+            max_concurrency: capacity.max_concurrency,
+            ceiling: capacity.ceiling,
+        }
+    }
+}
+
 /// The approval setting, wrapped.
 ///
 /// An object rather than a bare string because every other tool on this surface
@@ -287,6 +397,237 @@ pub struct BaseInstructionsView {
 #[serde(rename_all = "snake_case")]
 pub struct StrategyApprovalView {
     pub approval: StrategyApproval,
+}
+
+// ---------------------------------------------------------------------------
+// Schedules (task 013, ADR-0010)
+// ---------------------------------------------------------------------------
+
+/// One schedule, with the one thing about it that is computed rather than
+/// stored.
+#[derive(Debug, Clone, PartialEq, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub struct ScheduleView {
+    pub id: String,
+    pub name: String,
+    pub mode: ScheduleMode,
+    pub max_concurrency: i64,
+    /// The IANA name every local time on this row is read in.
+    pub timezone: Option<String>,
+    pub cron: Option<String>,
+    pub start_at: Option<DateTime<Utc>>,
+    /// A local time of day, `"HH:MM"`.
+    pub stop_at: Option<String>,
+    pub enabled: bool,
+    /// When it **actually** last fired, never when it was due.
+    pub last_fired_at: Option<DateTime<Utc>>,
+    /// The instant from which missed occurrences count.
+    pub armed_at: Option<DateTime<Utc>>,
+    /// When it fires next. **In the past when the schedule is overdue**, which
+    /// is the one case worth seeing — reporting tomorrow's time for a schedule
+    /// that should have started an hour ago would hide it.
+    pub next_fire_at: Option<DateTime<Utc>>,
+    /// Why there is no next fire time, when a broken row is the reason. A field
+    /// rather than a failed read, so one unparseable cron expression does not
+    /// make the whole list — the list the caller would use to *fix* it —
+    /// unreadable.
+    pub next_fire_error: Option<String>,
+}
+
+impl From<CoreScheduleView> for ScheduleView {
+    fn from(view: CoreScheduleView) -> Self {
+        Self {
+            id: view.schedule.id,
+            name: view.schedule.name,
+            mode: view.schedule.mode,
+            max_concurrency: view.schedule.max_concurrency,
+            timezone: view.schedule.timezone,
+            cron: view.schedule.cron,
+            start_at: view.schedule.start_at,
+            stop_at: view.schedule.stop_at,
+            enabled: view.schedule.enabled,
+            last_fired_at: view.schedule.last_fired_at,
+            armed_at: view.schedule.armed_at,
+            next_fire_at: view.next_fire_at,
+            next_fire_error: view.next_fire_error,
+        }
+    }
+}
+
+impl From<Schedule> for ScheduleView {
+    /// A row a write just returned, with no next fire time computed.
+    ///
+    /// `next_fire_at` is deliberately `None` here rather than calculated: this
+    /// conversion has no clock, and inventing one would put a second answer to
+    /// "when does this fire" beside `list_schedules`'. A caller that wants the
+    /// time asks the list, which is the one place it is computed.
+    fn from(schedule: Schedule) -> Self {
+        Self::from(CoreScheduleView {
+            schedule,
+            next_fire_at: None,
+            next_fire_error: None,
+        })
+    }
+}
+
+/// What `list_schedules` answers with.
+///
+/// An object wrapping the array, for the reason [`RepositoryListView`] gives:
+/// MCP requires an object `outputSchema`, and a bare array makes Claude Code
+/// drop the entire `tools/list` response — every other tool with it.
+#[derive(Debug, Clone, PartialEq, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub struct ScheduleListView {
+    pub schedules: Vec<ScheduleView>,
+}
+
+/// What `delete_schedule` answers with.
+///
+/// An echo object rather than nothing at all, on [`OnboardingView`]'s
+/// precedent: a tool that answers with no content gives a caller no way to tell
+/// "it worked" from "the schema was wrong".
+#[derive(Debug, Clone, PartialEq, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub struct ScheduleDeletedView {
+    pub schedule_id: String,
+    pub deleted: bool,
+}
+
+/// What `list_timezones` answers with — every IANA name the service accepts.
+#[derive(Debug, Clone, PartialEq, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub struct TimezoneListView {
+    pub timezones: Vec<String>,
+}
+
+/// What `preview_schedule_preflight` answers with: which tasks a schedule would
+/// run, in what order, and which are blocked and why.
+#[derive(Debug, Clone, PartialEq, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub struct PreflightView {
+    pub schedule_id: String,
+    pub schedule_name: String,
+    pub next_fire_at: Option<DateTime<Utc>>,
+    pub closes_at: Option<DateTime<Utc>>,
+    pub mode: ScheduleMode,
+    pub max_concurrency: i64,
+    /// How many tasks the window will get through.
+    pub will_start: usize,
+    /// How many it will pass over — and therefore how many will still be
+    /// sitting there in the morning.
+    pub blocked: usize,
+    /// Every `ready` task in board order, including the ones the queue will
+    /// pass over, each carrying its reason. Filtering the skipped ones out
+    /// would answer "which tasks will run" and silently drop "and which are
+    /// blocked and why", which is the half that costs a night.
+    pub plan: Vec<PreflightEntryView>,
+}
+
+/// One task in a [`PreflightView`].
+#[derive(Debug, Clone, PartialEq, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub struct PreflightEntryView {
+    pub task_id: String,
+    pub title: String,
+    /// `1` is next up. `null` for a task the queue will pass over.
+    pub queue_position: Option<i64>,
+    /// `null` when the queue would start this task. Otherwise the reason, in
+    /// the same words the board's own badge uses.
+    pub skipped_because: Option<String>,
+}
+
+impl From<PreflightSummary> for PreflightView {
+    fn from(summary: PreflightSummary) -> Self {
+        Self {
+            schedule_id: summary.schedule_id.clone(),
+            schedule_name: summary.schedule_name.clone(),
+            next_fire_at: summary.next_fire_at,
+            closes_at: summary.closes_at,
+            mode: summary.mode,
+            max_concurrency: summary.max_concurrency,
+            will_start: summary.startable(),
+            blocked: summary.blocked(),
+            plan: summary
+                .plan
+                .into_iter()
+                .map(|entry| PreflightEntryView {
+                    task_id: entry.task_id,
+                    title: entry.title,
+                    queue_position: entry.queue_position,
+                    skipped_because: entry.skip.map(|skip| skip.explanation().to_string()),
+                })
+                .collect(),
+        }
+    }
+}
+
+/// One worktree, as `list_worktrees` reports it (task 016).
+///
+/// A projection for this module's usual reason — the core type is `camelCase`
+/// for the frontend — and it drops two fields rather than mirroring: the
+/// `repository_id` and `base_ref` an agent has no use for here, since it cannot
+/// act on either through this surface. What it keeps is everything needed to
+/// *explain* the disk: which task, how big, how long since anyone touched it,
+/// and the three facts that decide whether removing it is safe.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub struct WorktreeView {
+    pub task_id: String,
+    pub task_title: String,
+    pub repository_name: String,
+    pub column: BoardColumn,
+    pub run_state: RunState,
+    pub path: String,
+    /// The directory is on disk and git still lists it. `false` is a worktree
+    /// deleted outside the app, which startup reconciliation clears.
+    pub exists: bool,
+    pub branch: Option<String>,
+    pub size_bytes: u64,
+    pub last_activity: Option<DateTime<Utc>>,
+    pub merged: bool,
+    pub uncommitted_changes: i64,
+    pub unpushed_commits: i64,
+    /// A run is working here, so nothing removes it — not even the window, and
+    /// not with any confirmation.
+    pub live: bool,
+}
+
+impl From<WorktreeInventoryEntry> for WorktreeView {
+    fn from(entry: WorktreeInventoryEntry) -> Self {
+        WorktreeView {
+            task_id: entry.task_id,
+            task_title: entry.task_title,
+            repository_name: entry.repository_name,
+            column: entry.column,
+            run_state: entry.run_state,
+            path: entry.path,
+            exists: entry.exists,
+            branch: entry.branch,
+            size_bytes: entry.size_bytes,
+            last_activity: entry.last_activity,
+            merged: entry.merged,
+            uncommitted_changes: entry.uncommitted_changes,
+            unpushed_commits: entry.unpushed_commits,
+            live: entry.live,
+        }
+    }
+}
+
+/// The list, wrapped — MCP requires an object output schema and Claude Code
+/// refuses the *entire* `tools/list` response when one tool disagrees, which is
+/// why [`RepositoryListView`] does the same.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub struct WorktreeListView {
+    pub worktrees: Vec<WorktreeView>,
+    pub total_bytes: u64,
+}
+
+/// The auto-removal policy, wrapped for [`StrategyApprovalView`]'s reason.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub struct WorktreeAutoCleanupView {
+    pub setting: AutoCleanup,
 }
 
 #[cfg(test)]
@@ -387,10 +728,12 @@ mod tests {
             link_count: 2,
             dependency_count: 1,
             blocked_by_incomplete: false,
+            blocking_title: None,
             last_run: Some(LastRunSummary {
                 status: RunStatus::Succeeded,
                 exit_class: Some(ExitClass::Success),
                 ended_at: None,
+                resume_after: None,
             }),
             // The card's badge, which `list_tasks` does not carry for the reason
             // `TaskView` does not: a summary reports what the row says, and the
@@ -421,6 +764,7 @@ mod tests {
             link_count: 0,
             dependency_count: 0,
             blocked_by_incomplete: false,
+            blocking_title: None,
             last_run: None,
             effective_model: None,
             effective_effort: None,
@@ -448,6 +792,14 @@ mod tests {
             log_path: "/tmp/run-1.jsonl".to_string(),
             pr_url: None,
             resume_after: None,
+            base_ref: None,
+            model: None,
+            effort: None,
+            run_environment: None,
+            input_tokens: None,
+            output_tokens: None,
+            cache_read_tokens: None,
+            cache_creation_tokens: None,
         });
 
         let wire = serde_json::to_value(&view).expect("a DTO must always serialize");

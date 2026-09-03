@@ -21,6 +21,14 @@ function run(overrides: Partial<Run> = {}): Run {
     logPath: "/tmp/run.jsonl",
     prUrl: null,
     resumeAfter: null,
+    baseRef: null,
+    model: null,
+    effort: null,
+    runEnvironment: null,
+    inputTokens: null,
+    outputTokens: null,
+    cacheReadTokens: null,
+    cacheCreationTokens: null,
     ...overrides,
   };
 }

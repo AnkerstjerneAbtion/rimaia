@@ -335,9 +335,41 @@ async fn deleting_a_task_something_depends_on_is_still_refused() {
         .expect_err("a task with dependents cannot be deleted");
 
     assert_eq!(error.code(), ErrorCode::Invalid);
-    assert!(
-        error.to_string().contains("Call the API"),
-        "the refusal names what still depends on it: {error}"
+    // Task 011 extended the message with the dependency context ADR-0008 gives
+    // — "the edges must be removed first" — because a refusal that only names
+    // who objects leaves the next step to be guessed. Asserted in full rather
+    // than by substring: the sentence *is* the affordance (seam-contract D8).
+    assert_eq!(
+        error.to_string(),
+        "cannot delete this task: 1 other task depends on it: Call the API. \
+         Each of those branches from this one, so clear the dependency on it in \
+         their task panels before deleting it.",
+    );
+}
+
+#[tokio::test]
+async fn the_delete_refusal_inflects_for_more_than_one_dependent() {
+    // English inflects the verb as well as the noun, which is why the count is
+    // two clauses rather than one pluralized format string.
+    let h = TestContext::new().await;
+    let repository_id = seed_repository(&h.context.pool, "rimaia", "/tmp/rimaia").await;
+    let api = create_task(&h, &repository_id, "Add the API").await;
+    for title in ["Call the API", "Document the API"] {
+        let dependent = create_task(&h, &repository_id, title).await;
+        tasks::set_task_dependencies(&h.context, &dependent.id, slice::from_ref(&api.id))
+            .await
+            .expect("store one edge");
+    }
+
+    let error = tasks::delete_task(&h.context, &api.id)
+        .await
+        .expect_err("a task with dependents cannot be deleted");
+
+    assert_eq!(
+        error.to_string(),
+        "cannot delete this task: 2 other tasks depend on it: Call the API, Document the API. \
+         Each of those branches from this one, so clear the dependency on it in \
+         their task panels before deleting it.",
     );
 }
 

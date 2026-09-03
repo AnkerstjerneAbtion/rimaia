@@ -1,6 +1,6 @@
 {
   "db_name": "SQLite",
-  "query": "\n        SELECT id, name, path, default_branch, worktree_root, allow_unattended_runs,\n               created_at AS \"created_at: chrono::DateTime<chrono::Utc>\"\n        FROM repositories\n        WHERE id = ?1\n        ",
+  "query": "\n        SELECT id, name, path, default_branch, worktree_root, allow_unattended_runs,\n               max_concurrency, created_at AS \"created_at: chrono::DateTime<chrono::Utc>\"\n        FROM repositories\n        WHERE id = ?1\n        ",
   "describe": {
     "columns": [
       {
@@ -34,8 +34,13 @@
         "type_info": "Bool"
       },
       {
-        "name": "created_at: chrono::DateTime<chrono::Utc>",
+        "name": "max_concurrency",
         "ordinal": 6,
+        "type_info": "Integer"
+      },
+      {
+        "name": "created_at: chrono::DateTime<chrono::Utc>",
+        "ordinal": 7,
         "type_info": "Text"
       }
     ],
@@ -49,8 +54,9 @@
       false,
       false,
       false,
+      false,
       false
     ]
   },
-  "hash": "4f1c81f544966958359e5e5b2099e61773e6a043171379b8fd5aff5889eb1f56"
+  "hash": "fc110949f39df9cb7b28a4951416fee5d11b16ee1d569d51fe4379fc9c5045c1"
 }

@@ -28,7 +28,7 @@ use pretty_assertions::assert_eq;
 use rimaia_core::db::{settings, BoardColumn, ExitClass, RunState, RunStatus};
 use rimaia_core::runner::events::{parse_line, EventStream, RateLimitEvent, ResultEvent, RunEvent};
 use rimaia_core::runner::outcome::{
-    classify, finish_run, start_run, NewRun, PullRequestWatch, RunOutcome, Termination,
+    classify, finish_run, start_run, NewRun, PullRequestWatch, RunOutcome, SpawnedAs, Termination,
 };
 use rimaia_core::runner::prompt::compose_prompt;
 use rimaia_core::tasks::{self, NewTask};
@@ -65,9 +65,8 @@ fn every_recorded_scenario_classifies_into_a_self_consistent_outcome() {
             outcome.exit_class == ExitClass::Success,
             "{name}: every class but `success` owes a human a sentence"
         );
-        assert_eq!(
-            outcome.usage_limit_resets_at.is_some(),
-            outcome.exit_class == ExitClass::UsageLimit,
+        assert!(
+            outcome.usage_limit_resets_at.is_none() || outcome.exit_class == ExitClass::UsageLimit,
             "{name}: a reset time on a run that did not hit a limit reads as one that did"
         );
     }
@@ -329,12 +328,24 @@ fn cancelling_a_run_that_had_already_succeeded_is_still_a_cancellation() {
 // Usage limits — the predicate, never a payload
 // ---------------------------------------------------------------------------
 
+/// The two fixtures that carry a status no real capture has ever produced.
+///
+/// Named here rather than derived, because "which files are honest recordings"
+/// is the property `tests/harness.rs` guards and this file is a consumer of it.
+/// See `tests/fixtures/cli/README.md`'s third section.
+const SYNTHESIZED_USAGE_LIMITS: [&str; 2] = ["usage-limit", "usage-limit-no-reset"];
+
 #[test]
 fn the_rate_limit_event_every_run_emits_is_not_a_usage_limit() {
-    // Every recording carries `"status":"allowed"` early and unprompted. Reading
-    // that as a limit would fail every run in the corpus, which is the mistake
-    // this test exists to keep failing loudly.
+    // Every real recording carries `"status":"allowed"` early and unprompted.
+    // Reading that as a limit would fail every run in the corpus, which is the
+    // mistake this test exists to keep failing loudly. The two synthesized
+    // fixtures are carved out because they are the *other* branch — they exist
+    // precisely to carry a status that is not `allowed`.
     for name in all_fixtures() {
+        if SYNTHESIZED_USAGE_LIMITS.contains(&name.as_str()) {
+            continue;
+        }
         let replay = Replay::of(&name);
 
         assert_eq!(
@@ -347,6 +358,97 @@ fn the_rate_limit_event_every_run_emits_is_not_a_usage_limit() {
         );
         assert_ne!(replay.class(), ExitClass::UsageLimit, "{name}");
     }
+}
+
+#[test]
+fn a_stream_whose_window_is_closed_is_a_usage_limit_and_reports_when_it_reopens() {
+    // The fixture ADR-0011's amendment says was missing, doing its job: a run
+    // that stopped at a wall, with the epoch `resetsAt` the retry policy waits
+    // for. 1787209200 is 2026-08-20T07:00:00Z — pinned in the file so the wait
+    // it produces is a number a test can name.
+    let replay = Replay::of("usage-limit");
+
+    assert_eq!(replay.class(), ExitClass::UsageLimit);
+    assert_eq!(
+        replay.outcome().usage_limit_resets_at,
+        Some(
+            "2026-08-20T07:00:00Z"
+                .parse::<chrono::DateTime<chrono::Utc>>()
+                .expect("a literal timestamp")
+        ),
+    );
+    assert!(replay
+        .outcome()
+        .error_message
+        .expect("a limit owes a human a sentence")
+        .contains("usage limit"));
+}
+
+#[test]
+fn a_usage_limit_that_reports_no_reset_still_classifies_as_one() {
+    // ADR-0011's fallback branch. The class must not depend on the reset time
+    // being there: a limit we cannot time is still a limit, and the
+    // fifteen-minute poll is what `scheduler::retry` does about it.
+    let replay = Replay::of("usage-limit-no-reset");
+
+    assert_eq!(replay.class(), ExitClass::UsageLimit);
+    assert_eq!(replay.outcome().usage_limit_resets_at, None);
+}
+
+#[test]
+fn a_status_the_corpus_never_saw_still_reads_as_a_usage_limit() {
+    // **The test that makes the synthesized fixtures safe to ship.**
+    // `spike/FINDINGS.md` §4 records that nobody has observed the payload when
+    // `status` is not `"allowed"`, so `"rejected"` in those files is a guess.
+    // This is what proves the guess is not load-bearing: the classifier matches
+    // on "not `allowed`" and never on a value, so a real capture carrying any
+    // of these — or a word nobody here has thought of — classifies identically.
+    //
+    // Failing closed would be the expensive direction: a real limit misread as
+    // `fatal` is a night that ends at 02:00, which is the exact mistake
+    // ADR-0011 names.
+    for status in ["rejected", "limited", "blocked", "throttled", "over_limit"] {
+        let rate_limit = RateLimitEvent {
+            status: Some(status.to_string()),
+            resets_at: Some(1_787_209_200),
+            rate_limit_type: Some("five_hour".to_string()),
+        };
+        let result = ResultEvent {
+            subtype: Some("error_during_execution".to_string()),
+            terminal_reason: Some("aborted_streaming".to_string()),
+            is_error: true,
+            ..ResultEvent::default()
+        };
+        let termination = Termination {
+            result: Some(&result),
+            rate_limit: Some(&rate_limit),
+            ..Termination::default()
+        };
+
+        assert_eq!(classify(&termination), ExitClass::UsageLimit, "{status:?}");
+    }
+
+    // And the other direction, so this is a predicate and not "anything at all
+    // is a limit": the one word the corpus does prove still means "carry on".
+    let allowed = RateLimitEvent {
+        status: Some("allowed".to_string()),
+        resets_at: Some(1_787_209_200),
+        rate_limit_type: Some("five_hour".to_string()),
+    };
+    let result = ResultEvent {
+        subtype: Some("error_during_execution".to_string()),
+        terminal_reason: Some("aborted_streaming".to_string()),
+        is_error: true,
+        ..ResultEvent::default()
+    };
+    assert_eq!(
+        classify(&Termination {
+            result: Some(&result),
+            rate_limit: Some(&allowed),
+            ..Termination::default()
+        }),
+        ExitClass::Interrupted,
+    );
 }
 
 #[test]
@@ -686,6 +788,7 @@ async fn a_run_against_a_task_that_does_not_exist_is_refused_by_name() {
             task_id: "3f2b1c00-0000-4000-8000-00000000dead".to_string(),
             session_id: SESSION_ID.to_string(),
             prompt: "do the thing".to_string(),
+            base_ref: None,
         },
     )
     .await
@@ -753,6 +856,68 @@ async fn a_second_successful_task_lands_below_the_first_in_in_review() {
 }
 
 #[tokio::test]
+async fn two_runs_finishing_at_once_land_on_distinct_positions_in_in_review() {
+    // The bug task 012 created, and the one it had to fix. `move_to_in_review`
+    // used to look the bottom card up against the pool and then hand the id it
+    // found to `move_task`, with the gap between the two accepted in a comment
+    // as "an ordering nit in a single-user desktop app" — true while one run
+    // finished at a time, false the moment two can.
+    //
+    // The interleaving is written out longhand rather than raced, because a
+    // single-connection test pool cannot be made to produce it: what two runs
+    // finishing in the same millisecond do is *both look before either moves*,
+    // and that is exactly the pair of calls below.
+    let mut fixture = RunFixture::new().await;
+    let second = fixture.sibling_task("the second task").await;
+    let third = fixture.sibling_task("the third task").await;
+    let fourth = fixture.sibling_task("the fourth task").await;
+
+    // One card already in `in_review`, so there is a bottom for both to find.
+    let first_run = fixture.start("do the first thing").await;
+    fixture
+        .finish(&first_run.id, &Replay::of("success").outcome())
+        .await;
+    let bottom = fixture.task_id.clone();
+
+    // The old shape: one read, two moves. Both name the same neighbour, both
+    // are handed `position_between(Some(p), None)` against it, and both get
+    // `p + 1.0` — `position_between` cannot catch it, because neither call was
+    // ever told about the other.
+    for task_id in [&second, &third] {
+        tasks::move_task(
+            &fixture.harness.context,
+            task_id,
+            BoardColumn::InReview,
+            Some(&bottom),
+            None,
+        )
+        .await
+        .expect("land under the card both of them read");
+    }
+    assert_eq!(
+        fixture.position_of(&second).await,
+        fixture.position_of(&third).await,
+        "the collision this test exists to explain: two cards, one position",
+    );
+
+    // The shape `finish_run` uses now. The lookup happens inside the
+    // transaction that writes, so the second one sees the first.
+    for task_id in [&second, &fourth] {
+        tasks::move_task_to_bottom(&fixture.harness.context, task_id, BoardColumn::InReview)
+            .await
+            .expect("append to the bottom");
+    }
+    assert_ne!(
+        fixture.position_of(&second).await,
+        fixture.position_of(&fourth).await,
+    );
+    assert!(
+        fixture.position_of(&fourth).await > fixture.position_of(&second).await,
+        "and the later one is genuinely last, not merely different",
+    );
+}
+
+#[tokio::test]
 async fn a_fatal_run_fails_its_task_and_leaves_the_card_where_it_was() {
     // ADR-0011: "no retry. Task -> `run_state = failed`, error surfaced on the
     // card." ADR-0007's failure rule keeps the card in `ready`, because a task
@@ -798,24 +963,57 @@ async fn a_cancelled_run_fails_its_task_because_run_state_has_no_cancelled_for_i
 
 #[tokio::test]
 async fn a_run_that_is_going_to_be_resumed_leaves_its_task_waiting_rather_than_running() {
-    // The three classes the MVP does not act on still have to leave the machine
-    // somewhere true. A task left `running` with no process is a badge that
-    // lies, and `waiting_retry` is where ADR-0011's own table puts a run that is
-    // going to be resumed — task 014 schedules the wait, it does not name it.
-    for scenario in ["interrupted-sigterm", "truncated-stream"] {
+    // A task left `running` with no process is a badge that lies, and
+    // `waiting_retry` is where ADR-0011's table puts a run that is going to be
+    // resumed. Since task 014 that depends on the *decision* and not only on
+    // the class: the deadline is what says an attempt is coming.
+    for scenario in ["interrupted-sigterm", "truncated-stream", "usage-limit"] {
         let mut fixture = RunFixture::new().await;
         let run = fixture.start("do the thing").await;
+        let mut outcome = Replay::of(scenario).outcome();
+        outcome.resume_after = Some(fixture.harness.clock.now() + chrono::Duration::minutes(15));
 
-        let finished = fixture
-            .finish(&run.id, &Replay::of(scenario).outcome())
-            .await;
+        let finished = fixture.finish(&run.id, &outcome).await;
 
         assert_eq!(
             fixture.task().await.run_state,
             RunState::WaitingRetry,
             "{scenario}"
         );
+        assert_eq!(finished.resume_after, outcome.resume_after, "{scenario}");
         assert_eq!(finished.ended_at, Some(fixture.harness.clock.now()));
+    }
+}
+
+#[tokio::test]
+async fn transient_retries_stop_at_the_cap_and_the_task_lands_failed_with_the_reason() {
+    // The other arm, and the one that keeps an exhausted task out of a state
+    // nothing will ever leave. A retryable class with no deadline is a budget
+    // that ran out: ADR-0007 wants that failure to interrupt the morning review,
+    // and a card sitting in `waiting_retry` forever would not.
+    for scenario in ["interrupted-sigterm", "truncated-stream", "usage-limit"] {
+        let mut fixture = RunFixture::new().await;
+        let run = fixture.start("do the thing").await;
+        let outcome = Replay::of(scenario).outcome();
+        assert_eq!(outcome.resume_after, None, "{scenario}");
+
+        let finished = fixture.finish(&run.id, &outcome).await;
+
+        assert_eq!(
+            fixture.task().await.run_state,
+            RunState::Failed,
+            "{scenario}"
+        );
+        assert_eq!(
+            fixture.task().await.column,
+            BoardColumn::Ready,
+            "{scenario}"
+        );
+        assert!(
+            finished.error_message.is_some(),
+            "{scenario}: a task nobody will retry owes the morning a sentence",
+        );
+        assert_eq!(finished.resume_after, None, "{scenario}");
     }
 }
 
@@ -924,6 +1122,119 @@ async fn a_stream_classifies_the_same_way_whether_it_is_replayed_or_read_off_the
     let outcome = RunOutcome::of(&Termination::from_stream(&stream), None);
     assert_eq!(outcome.exit_class, ExitClass::Fatal);
     assert_eq!(outcome, Replay::of("max-turns").outcome());
+}
+
+// ---------------------------------------------------------------------------
+// ADR-0022's capture, and seam-contract D18's NULL rule
+// ---------------------------------------------------------------------------
+
+#[test]
+fn a_recorded_run_carries_the_four_token_counts_off_its_result_event() {
+    // The exact numbers in `success.jsonl`. Asserted as literals rather than
+    // recomputed from the file, because the point of the test is that the four
+    // field names ADR-0022 reads — `input_tokens`, `output_tokens`,
+    // `cache_read_input_tokens`, `cache_creation_input_tokens` — are the ones
+    // the corpus actually spells. A test that re-derived them from the same
+    // keys it is checking would pass on a rename.
+    let usage = Replay::of("success").outcome().usage;
+
+    assert_eq!(usage.input_tokens, Some(10));
+    assert_eq!(usage.output_tokens, Some(1949));
+    assert_eq!(usage.cache_read_tokens, Some(163_145));
+    assert_eq!(usage.cache_creation_tokens, Some(11_819));
+}
+
+#[test]
+fn a_failed_run_still_records_what_it_spent_getting_there() {
+    // The cost of a wasted night is the thing ADR-0022's failure-rate and
+    // cost-per-completed-task numbers are made of, so a run that ended badly
+    // must still carry its tokens. `max-turns.jsonl` is `fatal`; it spent real
+    // money before hitting the wall.
+    let outcome = Replay::of("max-turns").outcome();
+
+    assert_eq!(outcome.exit_class, ExitClass::Fatal);
+    assert_eq!(outcome.usage.input_tokens, Some(4));
+    assert_eq!(outcome.usage.output_tokens, Some(1016));
+    assert_eq!(outcome.usage.cache_read_tokens, Some(57_999));
+    assert_eq!(outcome.usage.cache_creation_tokens, Some(9_557));
+}
+
+#[test]
+fn a_stream_that_never_reached_a_result_records_no_tokens_rather_than_zero() {
+    // Seam-contract D18, stated as an assertion: NULL means *not recorded*.
+    // `truncated-stream.jsonl` is a run whose stream stopped mid-flight, so it
+    // honestly never learned what it spent. Four zeroes here would be a claim
+    // that it spent nothing, which a later average would repeat as a fact.
+    let outcome = Replay::of("truncated-stream").outcome();
+
+    assert_eq!(outcome.usage.input_tokens, None);
+    assert_eq!(outcome.usage.output_tokens, None);
+    assert_eq!(outcome.usage.cache_read_tokens, None);
+    assert_eq!(outcome.usage.cache_creation_tokens, None);
+}
+
+#[test]
+fn classification_never_reads_the_usage_numbers() {
+    // The two are independent by design: ADR-0011 classifies on
+    // `terminal_reason` and `subtype`, and ADR-0022's numbers are a record, not
+    // a signal. Proven by walking the corpus — every fixture keeps its class
+    // whether or not it carried a `usage` object.
+    for name in all_fixtures() {
+        let replay = Replay::of(&name);
+        let outcome = replay.outcome();
+        assert_eq!(
+            outcome.exit_class,
+            replay.class(),
+            "{name} classified differently once its usage was read",
+        );
+    }
+}
+
+#[tokio::test]
+async fn finishing_a_run_records_what_it_was_spawned_as_and_what_it_spent() {
+    let mut fixture = RunFixture::new().await;
+    let prompt = fixture.composed_prompt().await;
+    let run = fixture.start(&prompt).await;
+
+    let mut outcome = Replay::of("success").outcome();
+    outcome.spawned_as = SpawnedAs {
+        model: Some("claude-sonnet-5".to_string()),
+        effort: Some("high".to_string()),
+        run_environment: Some("inherit".to_string()),
+    };
+
+    let stored = fixture.finish(&run.id, &outcome).await;
+
+    assert_eq!(stored.model.as_deref(), Some("claude-sonnet-5"));
+    assert_eq!(stored.effort.as_deref(), Some("high"));
+    assert_eq!(stored.run_environment.as_deref(), Some("inherit"));
+    assert_eq!(stored.input_tokens, Some(10));
+    assert_eq!(stored.output_tokens, Some(1949));
+    assert_eq!(stored.cache_read_tokens, Some(163_145));
+    assert_eq!(stored.cache_creation_tokens, Some(11_819));
+}
+
+#[tokio::test]
+async fn a_run_that_learned_nothing_leaves_every_capture_column_null() {
+    // The other half of D18, through the database rather than in memory: an
+    // outcome with nothing recorded must reach the row as seven NULLs. This is
+    // the shape `scheduler::reconcile` writes for a run that died with the app,
+    // and the one a later analytics view has to be able to tell apart from a
+    // run that genuinely cost nothing.
+    let mut fixture = RunFixture::new().await;
+    let prompt = fixture.composed_prompt().await;
+    let run = fixture.start(&prompt).await;
+
+    let outcome = Replay::of("truncated-stream").outcome();
+    let stored = fixture.finish(&run.id, &outcome).await;
+
+    assert_eq!(stored.model, None);
+    assert_eq!(stored.effort, None);
+    assert_eq!(stored.run_environment, None);
+    assert_eq!(stored.input_tokens, None);
+    assert_eq!(stored.output_tokens, None);
+    assert_eq!(stored.cache_read_tokens, None);
+    assert_eq!(stored.cache_creation_tokens, None);
 }
 
 // ---------------------------------------------------------------------------
@@ -1175,6 +1486,7 @@ impl RunFixture {
                 task_id: task_id.to_string(),
                 session_id: SESSION_ID.to_string(),
                 prompt: prompt.to_string(),
+                base_ref: None,
             },
         )
         .await
@@ -1201,6 +1513,16 @@ impl RunFixture {
             .await
             .expect("read the task")
             .task
+    }
+
+    /// The raw `position` of one card. Read directly, because it is exactly
+    /// what no projection exposes — board order is a *rendered* thing, and the
+    /// collision this reads for is invisible in the rendering.
+    async fn position_of(&self, task_id: &str) -> f64 {
+        sqlx::query_scalar!("SELECT position FROM tasks WHERE id = ?1", task_id)
+            .fetch_one(&self.harness.context.pool)
+            .await
+            .expect("read a position")
     }
 
     async fn in_review_titles(&self) -> Vec<String> {

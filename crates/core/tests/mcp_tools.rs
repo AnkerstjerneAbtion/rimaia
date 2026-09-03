@@ -20,7 +20,7 @@ use rimaia_core::mcp::responses::{TaskListView, TaskView};
 use rimaia_core::mcp::RimaiaServer;
 use rimaia_core::strategy::{settings as strategy_settings, StrategyDefaults};
 use rimaia_core::tasks::{self, NewTask, StrategyPlan, TaskPatch};
-use rimaia_core::testing::TestContext;
+use rimaia_core::testing::{self, TestContext};
 use rimaia_core::{ChangeEvent, Error};
 
 use pretty_assertions::assert_eq;
@@ -654,7 +654,10 @@ const NOW: &str = "2026-08-20T02:00:00+00:00";
 /// A server on the same context the harness subscribed to, re-sourced the way
 /// `mcp::build` does it.
 fn server(h: &TestContext) -> RimaiaServer {
-    RimaiaServer::new(h.context.with_source(MutationSource::Mcp))
+    RimaiaServer::new(
+        h.context.with_source(MutationSource::Mcp),
+        testing::doctor::environment(),
+    )
 }
 
 /// The request an agent would send, deserialized through the real schema.

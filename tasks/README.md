@@ -23,18 +23,19 @@ reviewable in the app afterwards.
 | 10 | [009](009-sequential-run-queue.md) | Sequential run queue | MVP | 008 | #3 |
 | 11 | [010](010-local-mcp-server.md) | Local MCP server | v0.2 | 004, 006 | #5 |
 | 12 | [020](020-per-task-execution-strategy.md) | Per-task execution strategy | v0.2 | 010 | #7 |
-| 13 | [011](011-task-dependencies-and-blocking.md) | Task dependencies and blocking | v0.2 | 009 | — |
-| 14 | [012](012-parallel-execution.md) | Parallel execution | v0.2 | 009 | — |
+| 13 | [011](011-task-dependencies-and-blocking.md) | Task dependencies and blocking | v0.2 | 009 | #15 |
+| 14 | [012](012-parallel-execution.md) | Parallel execution | v0.2 | 009 | #16 |
 | 15 | [023](023-batch-strategy-planning.md) | Batch strategy planning as a preflight | v0.2 | 020, 012 | — |
-| 16 | [013](013-run-scheduling.md) | Run scheduling and windows | v0.2 | 009 | — |
-| 17 | [014](014-usage-limit-resilience.md) | Usage-limit resilience and resume | v0.2 | 009, 019 | — |
+| 16 | [013](013-run-scheduling.md) | Run scheduling and windows | v0.2 | 009 | [#20](https://github.com/AnkerstjerneAbtion/rimaia/pull/20) |
+| 17 | [014](014-usage-limit-resilience.md) | Usage-limit resilience and resume | v0.2 | 009, 019 | [#18](https://github.com/AnkerstjerneAbtion/rimaia/pull/18) |
 | 18 | [015](015-run-history-and-log-viewer.md) | Run history and log viewer | v0.3 | 009 | #10 |
-| 19 | [016](016-worktree-lifecycle-and-cleanup.md) | Worktree lifecycle and cleanup | v0.3 | 007, 009 | — |
+| 19 | [016](016-worktree-lifecycle-and-cleanup.md) | Worktree lifecycle and cleanup | v0.3 | 007, 009 | #14 |
 | 20 | [017](017-morning-review-flow.md) | Morning review flow | v0.3 | 015 | — |
-| 21 | [018](018-preflight-doctor-and-packaging.md) | Preflight doctor and packaging | v0.3 | 008 | — |
-| 22 | [022](022-per-repository-git-credentials.md) | Per-repository git credentials | v0.3 | 003, 008 | — |
-| 23 | [021](021-review-and-fix-loop.md) | Review-and-fix loop | v0.4 | 015, 017, 020 | — |
-| 24 | [024](024-analytics.md) | Analytics — what the queue has actually done | v0.4 | 015 | — |
+| 21 | [018](018-preflight-doctor-and-packaging.md) | Preflight doctor and packaging | v0.3 | 008 | #17 |
+| 22 | [025](025-startup-failure-dialog.md) | A startup failure a double-clicked bundle can see | v0.3 | 018 | — |
+| 23 | [022](022-per-repository-git-credentials.md) | Per-repository git credentials | v0.3 | 003, 008 | — |
+| 24 | [021](021-review-and-fix-loop.md) | Review-and-fix loop | v0.4 | 015, 017, 020 | — |
+| 25 | [024](024-analytics.md) | Analytics — what the queue has actually done | v0.4 | 015 | — |
 
 ## Before task 001
 

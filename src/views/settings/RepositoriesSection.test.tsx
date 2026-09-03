@@ -45,6 +45,7 @@ function repository(overrides: Partial<Repository> = {}): Repository {
     defaultBranch: "main",
     worktreeRoot: "/Users/dev/.local/share/rimaia/worktrees/rimaia",
     allowUnattendedRuns: false,
+    maxConcurrency: 1,
     createdAt: "2026-08-20T12:00:00+00:00",
     ...overrides,
   };
@@ -327,6 +328,72 @@ describe("RepositoriesSection", () => {
     );
     expect(model).toHaveValue("sonnet");
     expect(stored["repo-1"]).toEqual({ mode: "planned", model: "sonnet" });
+  });
+
+  it("defaults the per-repository cap to one and says why raising it is deliberate", async () => {
+    // ADR-0010's rule, and the sentence that makes it actionable. Worktree
+    // isolation genuinely makes two agents in one repository safe *for git*,
+    // which is exactly why the reason to leave this at 1 has to be on screen
+    // rather than in an ADR nobody reading this panel has open.
+    mockBackend((command) => {
+      if (command === "list_repositories") return [repository()];
+      if (command === "get_repository_remote_info") return { remoteUrl: null, ghReady: null };
+      throw new Error(`unexpected command: ${command}`);
+    });
+
+    render(<RepositoriesSection />);
+
+    expect(await screen.findByLabelText("Runs at once")).toHaveValue(1);
+    expect(
+      screen.getByText(/Raise this only for a repository whose tasks genuinely do not interfere/),
+    ).toBeInTheDocument();
+  });
+
+  it("writes the per-repository cap and warns about what two agents in one repository share", async () => {
+    let stored = 1;
+    mockBackend((command, args) => {
+      if (command === "list_repositories") return [repository({ maxConcurrency: stored })];
+      if (command === "get_repository_remote_info") return { remoteUrl: null, ghReady: null };
+      if (command === "set_repository_max_concurrency") {
+        stored = (args as { maxConcurrency: number }).maxConcurrency;
+        return repository({ maxConcurrency: stored });
+      }
+      throw new Error(`unexpected command: ${command}`);
+    });
+
+    render(<RepositoriesSection />);
+    fireEvent.change(await screen.findByLabelText("Runs at once"), { target: { value: "2" } });
+
+    await waitFor(() =>
+      expect(mockInvoke).toHaveBeenCalledWith("set_repository_max_concurrency", {
+        id: "repo-1",
+        maxConcurrency: 2,
+      }),
+    );
+    expect(
+      await screen.findByText(/fight over ports, test databases and lockfiles/),
+    ).toBeInTheDocument();
+  });
+
+  it("repaints the cap from what the backend kept when the write is refused", async () => {
+    // Not optimistic, unlike the strategy dropdown above: this setter *refuses*
+    // an out-of-range value rather than storing it, so a row that painted the
+    // 40 optimistically would go on claiming a cap the queue does not have.
+    mockBackend((command) => {
+      if (command === "list_repositories") return [repository()];
+      if (command === "get_repository_remote_info") return { remoteUrl: null, ghReady: null };
+      if (command === "set_repository_max_concurrency") {
+        throw { code: "invalid", message: "a repository may hold between 1 and 8 runs at once" };
+      }
+      throw new Error(`unexpected command: ${command}`);
+    });
+
+    render(<RepositoriesSection />);
+    const input = await screen.findByLabelText("Runs at once");
+    fireEvent.change(input, { target: { value: "40" } });
+
+    expect(await screen.findByRole("alert")).toHaveTextContent("between 1 and 8 runs at once");
+    await waitFor(() => expect(input).toHaveValue(1));
   });
 
   it("reverts the row's strategy dropdown and shows the backend's refusal when the write fails", async () => {

@@ -103,6 +103,46 @@ pub enum Tool {
     SetStrategyApproval,
     SetStrategyCatalogue,
     SetStrategyDefaults,
+
+    // Task 012's four. Same argument, one layer out: these reconfigure how
+    // many runs the installation will start at once, rather than how any one
+    // of them is spawned.
+    GetRunCapacity,
+    SetScheduleMode,
+    SetMaxConcurrency,
+    SetRepositoryMaxConcurrency,
+
+    /// Task 014's one. `retry_task_now` is deliberately **not** here — see
+    /// `run_access` and seam-contract D23.
+    GiveUpOnTask,
+
+    // Task 018. Both inspect or reconfigure *this installation* rather than any
+    // task, which is ADR-0021 point 4's second permanent refusal.
+    RunDoctor,
+    DismissOnboarding,
+
+    // Task 013's seven. Every one is *both* of ADR-0021 point 4's permanent
+    // refusals at once: a schedule spawns runs — it is the thing that starts
+    // the queue at 22:00 — and it reconfigures the installation, since an open
+    // window overrides the mode and concurrency the whole queue runs under.
+    // `list_timezones` rides with them rather than being `Unscoped` on the
+    // grounds that it reads nothing: it exists only to fill in a field of the
+    // four tools above it, so a run that may not use those has no use for it,
+    // and a surface is easier to reason about when a feature is in or out
+    // whole.
+    ListSchedules,
+    CreateSchedule,
+    UpdateSchedule,
+    SetScheduleEnabled,
+    DeleteSchedule,
+    PreviewSchedulePreflight,
+    ListTimezones,
+    // Task 016. The *reads* and the policy setting only — the three cleanup
+    // commands that actually delete a worktree have no tool at all, on
+    // ADR-0021 point 5's `delete_task` reasoning. Seam-contract D20 records it.
+    ListWorktrees,
+    GetWorktreeAutoCleanup,
+    SetWorktreeAutoCleanup,
 }
 
 /// What a [`RunScope::Run`] may do with one tool — ADR-0006's amendment table,
@@ -119,7 +159,7 @@ pub enum RunAccess {
 
 impl Tool {
     /// Every tool with a recorded decision, so a test can walk the table.
-    pub const ALL: [Tool; 19] = [
+    pub const ALL: [Tool; 36] = [
         Tool::AddTaskLink,
         Tool::CreateTask,
         Tool::GetBaseInstructions,
@@ -139,6 +179,23 @@ impl Tool {
         Tool::SetStrategyApproval,
         Tool::SetStrategyCatalogue,
         Tool::SetStrategyDefaults,
+        Tool::GetRunCapacity,
+        Tool::SetScheduleMode,
+        Tool::SetMaxConcurrency,
+        Tool::SetRepositoryMaxConcurrency,
+        Tool::GiveUpOnTask,
+        Tool::RunDoctor,
+        Tool::DismissOnboarding,
+        Tool::ListSchedules,
+        Tool::CreateSchedule,
+        Tool::UpdateSchedule,
+        Tool::SetScheduleEnabled,
+        Tool::DeleteSchedule,
+        Tool::PreviewSchedulePreflight,
+        Tool::ListTimezones,
+        Tool::ListWorktrees,
+        Tool::GetWorktreeAutoCleanup,
+        Tool::SetWorktreeAutoCleanup,
     ];
 
     /// The wired name — what `tools/list` advertises and what the ADR table
@@ -164,6 +221,23 @@ impl Tool {
             Tool::SetStrategyApproval => "set_strategy_approval",
             Tool::SetStrategyCatalogue => "set_strategy_catalogue",
             Tool::SetStrategyDefaults => "set_strategy_defaults",
+            Tool::GetRunCapacity => "get_run_capacity",
+            Tool::SetScheduleMode => "set_schedule_mode",
+            Tool::SetMaxConcurrency => "set_max_concurrency",
+            Tool::SetRepositoryMaxConcurrency => "set_repository_max_concurrency",
+            Tool::GiveUpOnTask => "give_up_on_task",
+            Tool::RunDoctor => "run_doctor",
+            Tool::DismissOnboarding => "dismiss_onboarding",
+            Tool::ListSchedules => "list_schedules",
+            Tool::CreateSchedule => "create_schedule",
+            Tool::UpdateSchedule => "update_schedule",
+            Tool::SetScheduleEnabled => "set_schedule_enabled",
+            Tool::DeleteSchedule => "delete_schedule",
+            Tool::PreviewSchedulePreflight => "preview_schedule_preflight",
+            Tool::ListTimezones => "list_timezones",
+            Tool::ListWorktrees => "list_worktrees",
+            Tool::GetWorktreeAutoCleanup => "get_worktree_auto_cleanup",
+            Tool::SetWorktreeAutoCleanup => "set_worktree_auto_cleanup",
         }
     }
 
@@ -221,7 +295,65 @@ impl Tool {
             | Tool::GetStrategyDefaults
             | Tool::SetStrategyApproval
             | Tool::SetStrategyCatalogue
-            | Tool::SetStrategyDefaults => RunAccess::Refused,
+            | Tool::SetStrategyDefaults
+            // Task 012's four, and the decision needs no new argument — it is
+            // the same permanent refusal one layer out. How many runs this
+            // installation starts at once, and how many of them one repository
+            // will hold, are properties of the *run configuration* (ADR-0010),
+            // which is exactly what point 4 names. A run raising the limit is a
+            // run deciding how much the night costs; a run raising its own
+            // repository's cap is a run turning off the thing that keeps a
+            // second agent out of its ports and test databases. The read is
+            // refused with the writes rather than allowed alongside
+            // `get_base_instructions`, because a run has no use for the answer:
+            // it cannot act on it, and it would only be useful for deciding
+            // whether the write is worth attempting.
+            | Tool::GetRunCapacity
+            | Tool::SetScheduleMode
+            | Tool::SetMaxConcurrency
+            | Tool::SetRepositoryMaxConcurrency
+            // Task 014's, and it is the *first* kind of permanent refusal
+            // ADR-0021 point 4 names rather than the second: giving up on a
+            // task ends a retry loop, and a run that could end its own would
+            // be marking its own homework in the other direction — abandoning
+            // the work it was started to do and reporting it as settled. The
+            // operator endpoint keeps it in full.
+            | Tool::GiveUpOnTask => RunAccess::Refused,
+
+            // Task 018, and the same clause of ADR-0021 point 4 read one step
+            // wider: these are about the *installation*, not about any task.
+            // `run_doctor` reports which binaries are on the operator's PATH,
+            // whether they are signed in, and where every registered repository
+            // lives on disk — a reconnaissance surface a run has no business
+            // reading, and one whose only actionable remediations are things
+            // only a human standing at the machine can do. `dismiss_onboarding`
+            // writes a preference about the operator's own window, which is
+            // nothing a run inside a worktree has an opinion about.
+            Tool::RunDoctor | Tool::DismissOnboarding => RunAccess::Refused,
+
+            // Task 013's seven. See the enum for why every one of them is
+            // refused rather than only the four that write.
+            Tool::ListSchedules
+            | Tool::CreateSchedule
+            | Tool::UpdateSchedule
+            | Tool::SetScheduleEnabled
+            | Tool::DeleteSchedule
+            | Tool::PreviewSchedulePreflight
+            | Tool::ListTimezones => RunAccess::Refused,
+
+            // Task 016, and the same ADR-0021 point 4 clause: worktrees are
+            // installation state. `set_worktree_auto_cleanup` reconfigures what
+            // every *later* task's directory is worth, which is the loop that
+            // clause names. `list_worktrees` and `get_worktree_auto_cleanup`
+            // are refused for a narrower reason of their own — a run's
+            // entitlement is its own task, and an inventory is by construction
+            // an enumeration of everybody else's, exactly `list_tasks`'s
+            // objection. A run has no business knowing what else is on the
+            // disk, still less that its own directory is the one due to be
+            // reclaimed.
+            Tool::ListWorktrees | Tool::GetWorktreeAutoCleanup | Tool::SetWorktreeAutoCleanup => {
+                RunAccess::Refused
+            }
         }
     }
 }

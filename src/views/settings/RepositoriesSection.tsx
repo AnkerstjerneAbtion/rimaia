@@ -1,15 +1,14 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 
-import { open } from "@tauri-apps/plugin-dialog";
-
 import { ErrorBanner } from "../../components/ErrorBanner";
+import { RepositoryAddForm } from "../../components/RepositoryAddForm";
 import {
   getRepositoryRemoteInfo,
   getStrategyCatalogue,
   getStrategyDefaults,
   listRepositories,
-  registerRepository,
   removeRepository,
+  setRepositoryMaxConcurrency,
   setRepositoryUnattendedRuns,
   setStrategyDefaults,
   toRimaiaError,
@@ -55,8 +54,6 @@ function draftFrom(repository: Repository): EditDraft {
 export function RepositoriesSection() {
   const [repositories, setRepositories] = useState<Repository[] | null>(null);
   const [listError, setListError] = useState<RimaiaError | null>(null);
-  const [addError, setAddError] = useState<RimaiaError | null>(null);
-  const [adding, setAdding] = useState(false);
   const [rowErrors, setRowErrors] = useState<Record<string, RimaiaError | null>>({});
   const [remoteInfos, setRemoteInfos] = useState<Record<string, RemoteInfoState>>({});
   const [editingId, setEditingId] = useState<string | null>(null);
@@ -157,28 +154,6 @@ export function RepositoriesSection() {
     }
   }, [repositories]);
 
-  async function handleAdd() {
-    setAddError(null);
-    let selected: string | string[] | null;
-    try {
-      selected = await open({ directory: true, multiple: false, title: "Choose a repository" });
-    } catch (thrown) {
-      setAddError(toRimaiaError(thrown));
-      return;
-    }
-    if (!selected || Array.isArray(selected)) return; // cancelled
-
-    setAdding(true);
-    try {
-      await registerRepository({ path: selected });
-      refresh();
-    } catch (thrown) {
-      setAddError(toRimaiaError(thrown));
-    } finally {
-      setAdding(false);
-    }
-  }
-
   function beginEdit(repository: Repository) {
     setEditingId(repository.id);
     setDraft(draftFrom(repository));
@@ -254,6 +229,22 @@ export function RepositoriesSection() {
     });
   }
 
+  // Not optimistic, unlike the strategy defaults above: `set_repository_max_concurrency`
+  // *refuses* a value out of range rather than storing it, so the row has to
+  // repaint from what the backend actually kept. An optimistic 12 that was
+  // never written would leave the control claiming a cap the queue does not
+  // have.
+  async function handleConcurrencyChange(repository: Repository, next: number) {
+    if (!Number.isInteger(next) || next === repository.maxConcurrency) return;
+    setRowErrors((prev) => ({ ...prev, [repository.id]: null }));
+    try {
+      await setRepositoryMaxConcurrency(repository.id, next);
+      refresh();
+    } catch (thrown) {
+      setRowErrors((prev) => ({ ...prev, [repository.id]: toRimaiaError(thrown) }));
+    }
+  }
+
   async function confirmEnableUnattended(repository: Repository) {
     setRowErrors((prev) => ({ ...prev, [repository.id]: null }));
     try {
@@ -274,12 +265,7 @@ export function RepositoriesSection() {
         <ErrorBanner error={catalogueError} onDismiss={() => setCatalogueError(null)} />
       )}
 
-      <div className="repo-add">
-        {addError && <ErrorBanner error={addError} onDismiss={() => setAddError(null)} />}
-        <button type="button" onClick={handleAdd} disabled={adding}>
-          {adding ? "Adding…" : "Add repository"}
-        </button>
-      </div>
+      <RepositoryAddForm onRegistered={refresh} />
 
       {repositories === null && !listError && <p className="muted">Reading…</p>}
       {repositories && repositories.length === 0 && (
@@ -412,6 +398,31 @@ export function RepositoriesSection() {
                     />
                     Allow unattended agent runs
                   </label>
+                </div>
+
+                {/* ADR-0010's per-repository opt-out, with its reason beside
+                    it rather than a bare number. The reason is the whole
+                    control: worktree isolation (ADR-0005) genuinely makes two
+                    agents in one repository safe *for git*, which is exactly
+                    why the danger is easy to miss — what they collide over is
+                    ports, test databases and lockfiles, none of which a
+                    worktree separates. */}
+                <div className="repo-concurrency">
+                  <label htmlFor={`concurrency-${repository.id}`}>Runs at once</label>
+                  <input
+                    id={`concurrency-${repository.id}`}
+                    type="number"
+                    min={1}
+                    value={repository.maxConcurrency}
+                    onChange={(event) =>
+                      handleConcurrencyChange(repository, Number(event.target.value))
+                    }
+                  />
+                  <p className="muted">
+                    {repository.maxConcurrency > 1
+                      ? "Two agents in this repository will fight over ports, test databases and lockfiles — git keeps their worktrees apart and nothing keeps those apart."
+                      : "Raise this only for a repository whose tasks genuinely do not interfere. Running several repositories at once needs nothing here."}
+                  </p>
                 </div>
 
                 {/* Beside the opt-in, because the two answer the same

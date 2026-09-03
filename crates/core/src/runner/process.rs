@@ -63,14 +63,16 @@ use crate::error::{Error, Result};
 use crate::mcp::{RunHandles, MCP_SERVER_NAME};
 use crate::paths::AppPaths;
 use crate::repo;
-use crate::runner::events::{EventStream, InitEvent, RunEvent};
+use crate::runner::events::{EventStream, InitEvent, RunEvent, TokenUsage};
 use crate::runner::outcome::{
-    finish_run, start_run, NewRun, PullRequestWatch, RunOutcome, Termination,
+    finish_run, start_run, NewRun, PullRequestWatch, RunOutcome, SpawnedAs, Termination,
 };
-use crate::runner::prompt::{compose_prompt, compose_system_append};
+use crate::runner::prompt::{compose_prompt, compose_resume_prompt, compose_system_append};
 use crate::runner::strategy;
+use crate::scheduler::attempts::{self, Ending};
+use crate::scheduler::{pause, retry, InFlight};
 use crate::tasks::{self, set_run_state};
-use crate::worktree;
+use crate::worktree::{self, Worktree};
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -155,6 +157,33 @@ pub const DEFAULT_DISALLOWED_TOOLS: [&str; 11] = [
 /// The prefix that marks an environment variable as Claude Code's own process
 /// identity. See [`is_process_identity`].
 const IDENTITY_PREFIX: &str = "CLAUDE";
+
+/// The `settings` key holding the per-attempt turn budget (ADR-0011:
+/// "`--max-turns` per attempt bounds runaway loops").
+///
+/// Here rather than in [`settings`], for the same seam-contract D3 reason
+/// [`DISALLOWED_TOOLS`] gives: the vocabulary is the runner's, and nothing
+/// outside this module has any business knowing that a "turn" is a Claude Code
+/// concept.
+pub const MAX_TURNS: &str = "max_turns";
+
+/// How many turns one attempt may take when nobody has set a budget.
+///
+/// Chosen from two constraints pulling in opposite directions. A turn limit is
+/// [`ExitClass::Fatal`] (`runner::outcome`'s rule 4, and ADR-0011's fatal row
+/// names it): a budget set too low does not cost a retry, it **abandons the
+/// task**, half-done, with a card that says "failed" for a reason the operator
+/// did not choose. And a budget set too high does not bound the runaway
+/// ADR-0011 wants bounded. The spike's recorded runs took four to forty turns
+/// for one-file work, so a substantial overnight plan plausibly wants a few
+/// hundred; three hundred is comfortably above honest work and far below a loop
+/// that has stopped making progress.
+///
+/// **This changes every implementation run's argv**, which is why
+/// `tests/runner_process.rs` asserts the vector with `--max-turns 300` in it
+/// rather than without: before task 014 the flag was never passed at all, and
+/// the CLI's own default applied.
+pub const DEFAULT_MAX_TURNS: u32 = 300;
 
 // ---------------------------------------------------------------------------
 // What a run is allowed to do
@@ -399,7 +428,11 @@ pub fn is_process_identity(name: &str) -> bool {
 /// `to_string_lossy` is safe here because [`is_process_identity`] only ever
 /// compares an ASCII prefix — a name that is not valid UTF-8 is never one of
 /// the `CLAUDE*` variables being stripped anyway.
-fn strip_process_identity(command: &mut Command) {
+/// `pub(crate)` so task 018's doctor strips the same variables when it runs
+/// `claude auth status`. "Always strip" is easier to keep true than "strip on
+/// the paths that matter", and a second copy of the rule in another module is
+/// exactly how the two would come to disagree.
+pub(crate) fn strip_process_identity(command: &mut Command) {
     let names = std::env::vars_os().map(|(name, _)| name.to_string_lossy().into_owned());
     for name in inherited_identity_vars(names) {
         command.env_remove(name);
@@ -505,6 +538,31 @@ pub async fn disallowed_tools(pool: &sqlx::SqlitePool) -> Result<Vec<String>> {
         .filter(|line| !line.is_empty())
         .map(str::to_string)
         .collect())
+}
+
+/// The per-attempt turn budget, or [`DEFAULT_MAX_TURNS`] when nobody has set
+/// one.
+///
+/// Tolerant on read, like every other key in this codebase and for ADR-0003's
+/// reason — but note what "tolerant" costs here and does not: an unusable value
+/// falls back to a budget that is generous, never to *no* budget, because "no
+/// budget" is the runaway ADR-0011 asked for a bound against.
+pub async fn max_turns(pool: &sqlx::SqlitePool) -> Result<u32> {
+    let Some(stored) = settings::get(pool, MAX_TURNS).await? else {
+        return Ok(DEFAULT_MAX_TURNS);
+    };
+
+    match stored.trim().parse::<u32>() {
+        Ok(0) | Err(_) => {
+            tracing::warn!(
+                value = stored,
+                default = DEFAULT_MAX_TURNS,
+                "unusable max_turns; falling back to the default"
+            );
+            Ok(DEFAULT_MAX_TURNS)
+        }
+        Ok(value) => Ok(value),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -665,13 +723,47 @@ impl Default for RunnerConfig {
     }
 }
 
+/// The session a retry continues (ADR-0011: "retries resume, they do not
+/// restart").
+///
+/// A one-field struct rather than a bare `Option<String>` on the request,
+/// because "some string" is exactly what a caller could get wrong here and the
+/// consequence is not a compile error: a run id, a task id or a stale session
+/// would all spawn happily and start a *new* conversation under an old name,
+/// throwing away the context the resume exists to keep.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResumeSession {
+    pub session_id: String,
+}
+
 /// What [`run_task`] is asked to do.
 #[derive(Debug, Clone)]
 pub struct RunRequest {
     pub task_id: String,
     pub trigger: RunTrigger,
+    /// Continue an earlier attempt's session rather than open a new one.
+    ///
+    /// `Some` turns three things on together, and they belong together: the
+    /// `--resume` argv branch, the one-line continuation prompt instead of the
+    /// composed one, and **not running the planner again**. Splitting them into
+    /// three flags would let a caller ask for two of the three, and the
+    /// combination that would go unnoticed is the expensive one — a planner
+    /// process spawned per retry, quietly rewriting the model mid-chain.
+    pub resume: Option<ResumeSession>,
     /// The caller's half of the cancel button.
     pub cancel: CancelSignal,
+    /// The registry whose per-repository
+    /// [`preparation_lock`](InFlight::preparation_lock) this run takes while
+    /// its worktree is created.
+    ///
+    /// `None` skips the lock, which is right for every caller that cannot have
+    /// a second run in the same repository to collide with: a unit test driving
+    /// one run, and any single-run path. It is an `Option` rather than a
+    /// required field because the alternative is making every such caller mint
+    /// a registry it will never read, and a registry nobody else holds
+    /// serializes against nothing anyway — an argument that would be false the
+    /// moment it were written down as a requirement.
+    pub in_flight: Option<InFlight>,
 }
 
 impl RunRequest {
@@ -681,7 +773,20 @@ impl RunRequest {
         Self {
             task_id: task_id.into(),
             trigger: RunTrigger::Manual,
+            resume: None,
             cancel: CancelSignal::new(),
+            in_flight: None,
+        }
+    }
+
+    /// The same, continuing `session_id` — a "Retry now" pressed on a task that
+    /// is waiting out a wall.
+    pub fn resuming(task_id: impl Into<String>, session_id: impl Into<String>) -> Self {
+        Self {
+            resume: Some(ResumeSession {
+                session_id: session_id.into(),
+            }),
+            ..Self::manual(task_id)
         }
     }
 }
@@ -706,6 +811,30 @@ pub struct Attempt<'a> {
 // Running one task
 // ---------------------------------------------------------------------------
 
+/// [`worktree::prepare`], serialized per repository when the caller supplied a
+/// registry to serialize on.
+///
+/// The lock is held across this call and nothing else. Everything after it —
+/// the strategy run, the prompt composition, the child process — happens inside
+/// a worktree of its own and has no shared `.git` to contend for, so extending
+/// the lock past this point would turn a per-repository cap of two into a
+/// sequential queue wearing a parallel label.
+async fn prepare_worktree(
+    ctx: &ServiceContext,
+    in_flight: Option<&InFlight>,
+    repository_id: &str,
+    task_id: &str,
+) -> Result<Worktree> {
+    match in_flight {
+        Some(registry) => {
+            let lock = registry.preparation_lock(repository_id);
+            let _held = lock.lock().await;
+            worktree::prepare(ctx, task_id).await
+        }
+        None => worktree::prepare(ctx, task_id).await,
+    }
+}
+
 /// Runs one task end to end: validate, prepare, spawn, stream, classify, record.
 ///
 /// The order of the first four steps is the part worth reading, because each one
@@ -716,10 +845,13 @@ pub struct Attempt<'a> {
 ///    board's disabled "Run now" tooltip and this refusal are one sentence.
 /// 2. **The CLI exists.** Before anything is written, per task 008's acceptance
 ///    criterion — a missing prerequisite must not leave a half-open run.
-/// 3. **The worktree**, through task 007's idempotent [`worktree::prepare`].
-///    This is also what writes `tasks.branch`, which is why the task detail is
-///    re-read afterwards: the composed prompt names the branch, and composing it
-///    from the row as it was a moment earlier would name nothing.
+/// 3. **The worktree**, through task 007's idempotent [`worktree::prepare`],
+///    holding the repository's [`preparation_lock`](InFlight::preparation_lock)
+///    across it when the caller supplied a registry — see
+///    [`prepare_worktree`]. This is also what writes `tasks.branch`, which is
+///    why the task detail is re-read afterwards: the composed prompt names the
+///    branch, and composing it from the row as it was a moment earlier would
+///    name nothing.
 /// 4. **The claim.** The task goes to `run_state = running` before the row is
 ///    opened, mirroring ADR-0010's selection-then-run order.
 pub async fn run_task(
@@ -736,7 +868,8 @@ pub async fn run_task(
     let version = probe_cli(&config.program).await?;
     tracing::debug!(%task_id, cli = %version, "the Claude Code prerequisite is installed");
 
-    let worktree = worktree::prepare(ctx, &task_id).await?;
+    let worktree =
+        prepare_worktree(ctx, request.in_flight.as_ref(), &repository.id, &task_id).await?;
 
     let detail = tasks::get_task(ctx, &task_id).await?;
 
@@ -749,39 +882,58 @@ pub async fn run_task(
     // run — the only new thing is that it now also covers the planner.
     claim(ctx, &detail.task).await?;
 
-    let resolved = match strategy::resolve(
-        ctx,
-        paths,
-        config,
-        &detail,
-        &repository,
-        Path::new(&worktree.path),
-        &request.cancel,
-    )
-    .await
-    {
-        Ok(resolved) => resolved,
-        Err(error) => {
-            release(ctx, &task_id).await;
-            return Err(error);
-        }
-    };
+    // **A resume does not run the planner again**, and this is the easiest
+    // thing in the retry loop to get wrong by omission. `strategy::resolve`
+    // spawns a whole second Claude Code process to decide how the work should
+    // be done; running it per retry would pay for that decision once per wall
+    // the task hits, and — worse — a second planner reading a half-finished
+    // worktree could answer differently from the first, changing the model or
+    // the effort *mid-session*. The attempt continues what the first one
+    // started, so it continues with what the first one was given: the effective
+    // values already on the row (ADR-0016's precedence chain, resolved by
+    // `tasks::get_task`), and no fresh guidance, because the guidance the
+    // planner produced is already in the session being resumed.
+    let (model, effort, guidance) = if request.resume.is_some() {
+        (
+            detail.effective_model.clone(),
+            detail.effective_effort.clone(),
+            None,
+        )
+    } else {
+        let resolved = match strategy::resolve(
+            ctx,
+            paths,
+            config,
+            &detail,
+            &repository,
+            Path::new(&worktree.path),
+            &request.cancel,
+        )
+        .await
+        {
+            Ok(resolved) => resolved,
+            Err(error) => {
+                release(ctx, &task_id).await;
+                return Err(error);
+            }
+        };
 
-    let (model, effort, guidance) = match resolved {
-        strategy::Resolution::Ready {
-            model,
-            effort,
-            guidance,
-        } => (model, effort, guidance),
-        // Stopped while planning. Spawning the implementation run now would run
-        // the very thing the user just cancelled, so the claim goes back and
-        // nothing else happens.
-        strategy::Resolution::Cancelled => {
-            release(ctx, &task_id).await;
-            return Err(Error::invalid(format!(
-                "\"{}\" was cancelled while its strategy was being planned",
-                detail.task.title,
-            )));
+        match resolved {
+            strategy::Resolution::Ready {
+                model,
+                effort,
+                guidance,
+            } => (model, effort, guidance),
+            // Stopped while planning. Spawning the implementation run now would
+            // run the very thing the user just cancelled, so the claim goes
+            // back and nothing else happens.
+            strategy::Resolution::Cancelled => {
+                release(ctx, &task_id).await;
+                return Err(Error::invalid(format!(
+                    "\"{}\" was cancelled while its strategy was being planned",
+                    detail.task.title,
+                )));
+            }
         }
     };
 
@@ -799,11 +951,12 @@ pub async fn run_task(
         let base = settings::base_instructions(&ctx.pool).await?;
         let run_environment = settings::run_environment(&ctx.pool).await?;
         let disallowed = disallowed_tools(&ctx.pool).await?;
-        Ok::<_, Error>((detail, base, run_environment, disallowed))
+        let turns = max_turns(&ctx.pool).await?;
+        Ok::<_, Error>((detail, base, run_environment, disallowed, turns))
     }
     .await;
 
-    let (detail, base, run_environment, disallowed) = match prepared {
+    let (detail, base, run_environment, disallowed, turns) = match prepared {
         Ok(prepared) => prepared,
         Err(error) => {
             release(ctx, &task_id).await;
@@ -811,11 +964,22 @@ pub async fn run_task(
         }
     };
 
-    let prompt = compose_prompt(&base, &detail, &repository, guidance.as_ref());
+    // ADR-0011: "retries resume, they do not restart... every retry is
+    // `claude -p --resume <session-id>` with a short continuation prompt". The
+    // composed prompt is already in the session; sending it again would
+    // re-spend the tokens that produced the context this attempt exists to
+    // reuse, and would read to the agent as a fresh instruction to start over.
+    let prompt = match &request.resume {
+        Some(_) => compose_resume_prompt(&detail),
+        None => compose_prompt(&base, &detail, &repository, guidance.as_ref()),
+    };
 
     let invocation = Invocation {
-        session_id: new_id(),
-        resume: false,
+        session_id: match &request.resume {
+            Some(resume) => resume.session_id.clone(),
+            None => new_id(),
+        },
+        resume: request.resume.is_some(),
         permission_mode: request.trigger.permission_mode(),
         run_environment,
         system_append: compose_system_append(&detail, &repository),
@@ -836,7 +1000,10 @@ pub async fn run_task(
         // handle exists so a *planner* can answer, and ADR-0016 gives the
         // implementation run no reason to write to its own card.
         mcp_config: None,
-        max_turns: config.max_turns,
+        // The setting, unless this installation's wiring overrides it — which
+        // in production it never does (`RunnerConfig::default` leaves it
+        // `None`), and which a test or a future strategy caller may.
+        max_turns: config.max_turns.or(Some(turns)),
     };
 
     let run = match start_run(
@@ -846,6 +1013,10 @@ pub async fn run_task(
             task_id: task_id.clone(),
             session_id: invocation.session_id.clone(),
             prompt: prompt.clone(),
+            // ADR-0008: what this attempt was actually branched from, taken off
+            // the worktree `prepare` just resolved rather than resolved again,
+            // so the row records the base the branch really has.
+            base_ref: Some(worktree.base_ref.clone()),
         },
     )
     .await
@@ -870,13 +1041,22 @@ pub async fn run_task(
     };
 
     match execute(ctx, paths, config, attempt).await {
-        Ok(outcome) => {
+        Ok(mut outcome) => {
+            // ADR-0011's policy, applied at the one call site every starter
+            // passes through — the queue, "Run now", "Retry now", and whatever
+            // starts a run next. Deciding it here rather than in `finish_run`
+            // is what keeps `outcome` the only writer of the `runs` row while
+            // still leaving one place that knows the retry rules; deciding it
+            // in each *caller* would be three copies of ADR-0011's table.
+            apply_retry_policy(ctx, &task_id, &run.id, &mut outcome).await;
+
             tracing::info!(
                 %task_id,
                 run_id = %run.id,
                 exit_class = ?outcome.exit_class,
                 turns = outcome.num_turns,
                 cost_usd = outcome.cost_usd,
+                resume_after = outcome.resume_after.map(|at| at.to_rfc3339()),
                 "run finished",
             );
             finish_run(ctx, &run.id, &outcome).await
@@ -890,6 +1070,86 @@ pub async fn run_task(
                 tracing::error!(run_id = %run.id, %nested, "could not record a failed run");
             }
             Err(error)
+        }
+    }
+}
+
+/// Decides when — or whether — this task is tried again, and records the two
+/// consequences of that decision (ADR-0011).
+///
+/// Fills [`RunOutcome::resume_after`], which `finish_run` writes to the row and
+/// `apply_to_task` routes on, and raises ADR-0011's **global pause** when the
+/// class is `usage_limit`. The pause uses the *same instant* the policy put on
+/// `resume_after` rather than the raw reported reset, so the queue does not
+/// wake a minute of jitter before the task it is waiting for is due.
+///
+/// Infallible by construction: a failure to read the history or to write the
+/// pause is logged and the attempt is left un-retried. That direction is
+/// deliberate — an outcome recorded with no retry is a card a human sees in the
+/// morning, where a propagated error would abandon the `runs` row and leave the
+/// task `running` with no process, which is the one state nothing recovers
+/// from.
+async fn apply_retry_policy(
+    ctx: &ServiceContext,
+    task_id: &str,
+    run_id: &str,
+    outcome: &mut RunOutcome,
+) {
+    let ending = Ending {
+        exit_class: outcome.exit_class,
+        usage_limit_resets_at: outcome.usage_limit_resets_at,
+    };
+
+    let history = match attempts::history(ctx, task_id, ending).await {
+        Ok(history) => history,
+        Err(error) => {
+            tracing::error!(
+                %task_id, %run_id, %error,
+                "could not read this task's attempt history; it will not be retried",
+            );
+            return;
+        }
+    };
+    let Some(history) = history else {
+        // No rows at all, for a run that just wrote one. Unreachable in
+        // practice and not worth a panic: nothing to resume is the safe
+        // reading.
+        return;
+    };
+
+    // ADR-0011's "capped only by the run window". Read here rather than passed
+    // in, because a run that started inside a window may well be finishing
+    // outside one — the operator pressed Stop, or the stop time arrived while
+    // this run was allowed to finish — and the cap that matters is the one in
+    // force when the decision is made.
+    //
+    // A failure to read it is "no window", which is the direction that keeps
+    // ADR-0011's unbounded retry rather than inventing a cap out of a database
+    // hiccup.
+    let window_closes_at = match crate::schedule::window::active(&ctx.pool).await {
+        Ok(window) => window.and_then(|window| window.closes_at),
+        Err(error) => {
+            tracing::warn!(
+                %task_id, %run_id, %error,
+                "could not read the run window; deciding this retry without its cap",
+            );
+            None
+        }
+    };
+
+    // The run id as the jitter seed — see `retry::jitter` on why the spread is
+    // derived rather than drawn, and why it has to differ per run.
+    let decision = retry::decide(&history, ctx.clock.now(), run_id, window_closes_at);
+    outcome.resume_after = decision.resume_after();
+
+    if outcome.exit_class == ExitClass::UsageLimit {
+        if let Some(until) = outcome.resume_after {
+            if let Err(error) = pause::note_usage_limit(ctx, until).await {
+                tracing::error!(
+                    %task_id, %run_id, %error,
+                    "could not record the usage-limit pause; the queue may start into a closed window",
+                );
+            }
         }
     }
 }
@@ -961,6 +1221,16 @@ fn runner_fatal(message: String) -> RunOutcome {
         duration_ms: None,
         pr_url: None,
         usage_limit_resets_at: None,
+        // `fatal` is ADR-0011's no-retry row, so there is nothing to schedule
+        // and the column stays NULL — which is also what puts the task in
+        // `failed` rather than leaving it waiting on a deadline that will
+        // never arrive.
+        resume_after: None,
+        // Supervision itself failed, so there is no evidence the process ever
+        // ran as anything. Seam-contract D18 makes that NULL rather than a
+        // record of what we intended to spawn.
+        spawned_as: SpawnedAs::default(),
+        usage: TokenUsage::default(),
     }
 }
 
@@ -1037,6 +1307,9 @@ pub async fn execute(
     let mut stdout_open = true;
     let mut stderr_open = true;
     let mut status = None;
+    // ADR-0022. Stays `None` for a run that dies before announcing itself, and
+    // seam-contract D18 makes that NULL rather than a guess.
+    let mut observed_model: Option<String> = None;
 
     // Armed only when a termination is ordered; the guards below keep it from
     // being polled before that, which is why it can start already elapsed.
@@ -1061,6 +1334,11 @@ pub async fn execute(
                     Ok(Some(event)) => {
                         pull_request.observe(&event);
                         if let RunEvent::Init(init) = &event {
+                            // ADR-0022's `runs.model`. Taken from `init` rather
+                            // than from the flag because the flag may have been
+                            // absent (the CLI's own default) or an alias, and
+                            // this is the resolved name a later chart groups by.
+                            observed_model.clone_from(&init.model);
                             report_applied_environment(init, attempt.invocation);
                             if let Err(error) =
                                 verify_permission_mode(init, attempt.invocation.permission_mode)
@@ -1176,6 +1454,17 @@ pub async fn execute(
     if let Some(message) = fatal {
         override_as_fatal(&mut outcome, message);
     }
+
+    // This is the only place the invocation and the run's own account of itself
+    // are both in scope, which is why ADR-0022's three "spawned as" columns are
+    // filled here rather than at `finish_run`. Falling back to the flag when
+    // `init` never arrived keeps a killed run's model recorded; falling all the
+    // way to `None` when neither exists is D18's "not recorded".
+    outcome.spawned_as = SpawnedAs {
+        model: observed_model.or_else(|| attempt.invocation.model.clone()),
+        effort: attempt.invocation.effort.clone(),
+        run_environment: Some(attempt.invocation.run_environment.as_str().to_string()),
+    };
 
     if stream.malformed_lines() > 0 {
         tracing::warn!(

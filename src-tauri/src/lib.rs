@@ -1,5 +1,6 @@
 mod commands;
 mod logging;
+mod notify;
 // Public because `AppState`'s context is the shell's whole contract with the
 // tasks that follow — 002 onward read it from commands in this crate.
 pub mod state;
@@ -10,11 +11,12 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use rimaia_core::db::MutationSource;
+use rimaia_core::doctor;
 use rimaia_core::mcp::{self, McpState, RunHandles};
 use rimaia_core::runner::events::RunTail;
 use rimaia_core::runner::process::DEFAULT_GRACE_PERIOD;
 use rimaia_core::runner::RunnerConfig;
-use rimaia_core::scheduler;
+use rimaia_core::scheduler::{self, InFlight};
 use rimaia_core::{
     db, startup, worktree, AppPaths, ChangeEvent, Error, ServiceContext, SystemClock,
 };
@@ -22,7 +24,7 @@ use tauri::{Emitter, Manager, RunEvent};
 use tokio::sync::broadcast;
 use tokio::sync::broadcast::error::RecvError;
 
-use crate::state::{AppState, RunRegistry};
+use crate::state::{AppState, RunTails};
 
 /// The label of the one window `tauri.conf.json` declares. Spelled out because
 /// that file leaves it implicit and Tauri fills it in — an unlabelled window
@@ -34,6 +36,7 @@ pub fn run() {
     let builder = tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_notification::init())
         .setup(|app| {
             // Order matters: the directories have to exist before the log
             // appender opens a file in one of them, and before SQLite is asked
@@ -102,17 +105,17 @@ pub fn run() {
             tauri::async_runtime::spawn(forward_change_events(app.handle().clone(), change_events));
 
             // Task 008's D14 channel, subscribed the same way and for the same
-            // reason: once, here, before anything can publish to it. `runs`
-            // is the shell's own bookkeeping — which task has a process in
-            // flight, and the latest tail snapshot for it (see
-            // `state::RunRegistry`'s doc) — and the forwarder is what keeps
-            // the second half current.
-            let runs = RunRegistry::new();
+            // reason: once, here, before anything can publish to it. `tails` is
+            // the shell's own bookkeeping — the latest tail snapshot per run
+            // (see `state::RunTails`'s doc) — and the forwarder is what keeps
+            // it current. Which tasks have a process in flight used to be here
+            // too; it is `rimaia_core::scheduler::InFlight` now.
+            let tails = RunTails::new();
             let tail_events = context.subscribe_tail();
             tauri::async_runtime::spawn(forward_run_tail(
                 app.handle().clone(),
                 tail_events,
-                runs.clone(),
+                tails.clone(),
             ));
 
             // Task 009's repair for `survey`'s `tasks_left_running` finding
@@ -164,11 +167,16 @@ pub fn run() {
             // `tauri::async_runtime::spawn` rather than a bare `tokio::spawn`
             // for the reason every other background task in this hook uses
             // it: Tauri's async runtime *is* Tokio, so this rides the runtime
-            // already here instead of starting a second. `runs.attach_queue`
-            // is what lets a manual "Run now" and the queue's own claim
-            // refuse to double-spawn a process for the same task — see
-            // `RunRegistry::attach_queue`'s doc — and it has to happen before
-            // `app.manage` hands `runs` to any command.
+            // already here instead of starting a second.
+            //
+            // `in_flight` is built here and handed to both the queue and
+            // `AppState`, which is what lets a manual "Run now", a "Plan now"
+            // and the queue's own claim refuse to double-spawn a process for
+            // the same task. It used to be an `attach_queue` back-reference
+            // from a shell-side map onto the queue's private one; one registry
+            // both doors read needs no wiring between them, and is reachable
+            // from `rimaia-core` — which is what ADR-0021's known gap was
+            // waiting on.
             //
             // Task 020's two shared values are built here, ahead of the queue,
             // rather than inside `scheduler::build`, because each is shared
@@ -189,10 +197,27 @@ pub fn run() {
                 run_handles: run_handles.clone(),
                 ..RunnerConfig::default()
             };
-            let (queue, queue_task) =
-                scheduler::build(context.clone(), paths.clone(), runner.clone());
-            runs.attach_queue(queue.clone());
+            let in_flight = InFlight::new();
+            let (queue, queue_task) = scheduler::build(
+                context.clone(),
+                paths.clone(),
+                runner.clone(),
+                in_flight.clone(),
+            );
             tauri::async_runtime::spawn(queue_task.run());
+
+            // Task 013's notification watcher. Subscribed here, after the queue
+            // exists and before anything can publish — the same "subscribe
+            // first, then let writers start" order every other listener in this
+            // hook keeps. It is a third subscriber to ADR-0018's channel, which
+            // that ADR's Consequences already anticipated costing nothing but a
+            // `subscribe()`.
+            tauri::async_runtime::spawn(notify::announce_run_windows(
+                app.handle().clone(),
+                context.clone(),
+                queue.clone(),
+                context.subscribe(),
+            ));
 
             // Task 010's MCP server (ADR-0006). Last of the startup steps on
             // purpose: this is the first thing in this hook that a process
@@ -213,6 +238,12 @@ pub fn run() {
                 context.clone(),
                 mcp_port,
                 run_handles.clone(),
+                // The shell's own paths and runner, not `Programs::default` —
+                // so `run_doctor` over MCP reports on the same `claude` binary
+                // and the same data directory the window does. ADR-0021's
+                // parity is only worth having if both surfaces answer about the
+                // same installation.
+                doctor::Environment::for_runner(paths.clone(), &runner),
             ));
             let mcp_status = mcp_handle.status();
             match mcp_status.state {
@@ -239,7 +270,8 @@ pub fn run() {
             app.manage(AppState {
                 context,
                 paths,
-                runs,
+                in_flight,
+                tails,
                 queue,
                 runner,
                 run_handles,
@@ -278,6 +310,7 @@ pub fn run() {
         commands::repositories::register_repository,
         commands::repositories::update_repository,
         commands::repositories::set_repository_unattended_runs,
+        commands::repositories::set_repository_max_concurrency,
         commands::repositories::remove_repository,
         commands::repositories::get_repository_remote_info,
         commands::tasks::create_task,
@@ -291,6 +324,8 @@ pub fn run() {
         commands::tasks::update_task_link,
         commands::tasks::remove_task_link,
         commands::tasks::reorder_task_link,
+        commands::tasks::set_task_dependencies,
+        commands::tasks::get_blocking_reason,
         commands::settings::get_base_instructions,
         commands::settings::set_base_instructions,
         commands::settings::get_run_environment,
@@ -309,8 +344,16 @@ pub fn run() {
         commands::worktree::get_worktree_status,
         commands::worktree::get_diff_summary,
         commands::worktree::reveal_task_worktree,
+        commands::worktree::get_worktree_inventory,
+        commands::worktree::remove_task_worktree,
+        commands::worktree::cleanup_done_worktrees,
+        commands::worktree::cleanup_merged_worktrees,
+        commands::worktree::get_worktree_auto_cleanup,
+        commands::worktree::set_worktree_auto_cleanup,
         commands::runs::start_task_run,
         commands::runs::cancel_task_run,
+        commands::runs::retry_task_now,
+        commands::runs::give_up_on_task,
         commands::runs::get_run_tail,
         commands::runs::list_runs_for_task,
         commands::runs::list_runs,
@@ -326,9 +369,21 @@ pub fn run() {
         commands::queue::resume_queue,
         commands::queue::stop_queue,
         commands::queue::get_queue_status,
+        commands::queue::get_run_capacity,
+        commands::queue::set_schedule_mode,
+        commands::queue::set_max_concurrency,
+        commands::schedules::list_schedules,
+        commands::schedules::create_schedule,
+        commands::schedules::update_schedule,
+        commands::schedules::set_schedule_enabled,
+        commands::schedules::delete_schedule,
+        commands::schedules::preview_schedule_preflight,
+        commands::schedules::list_timezones,
         commands::mcp::get_mcp_status,
         commands::mcp::set_mcp_port,
         commands::mcp::test_mcp_connection,
+        commands::doctor::run_doctor,
+        commands::doctor::dismiss_onboarding,
     ]);
     #[cfg(not(debug_assertions))]
     let builder = builder.invoke_handler(tauri::generate_handler![
@@ -338,6 +393,7 @@ pub fn run() {
         commands::repositories::register_repository,
         commands::repositories::update_repository,
         commands::repositories::set_repository_unattended_runs,
+        commands::repositories::set_repository_max_concurrency,
         commands::repositories::remove_repository,
         commands::repositories::get_repository_remote_info,
         commands::tasks::create_task,
@@ -351,6 +407,8 @@ pub fn run() {
         commands::tasks::update_task_link,
         commands::tasks::remove_task_link,
         commands::tasks::reorder_task_link,
+        commands::tasks::set_task_dependencies,
+        commands::tasks::get_blocking_reason,
         commands::settings::get_base_instructions,
         commands::settings::set_base_instructions,
         commands::settings::get_run_environment,
@@ -369,8 +427,16 @@ pub fn run() {
         commands::worktree::get_worktree_status,
         commands::worktree::get_diff_summary,
         commands::worktree::reveal_task_worktree,
+        commands::worktree::get_worktree_inventory,
+        commands::worktree::remove_task_worktree,
+        commands::worktree::cleanup_done_worktrees,
+        commands::worktree::cleanup_merged_worktrees,
+        commands::worktree::get_worktree_auto_cleanup,
+        commands::worktree::set_worktree_auto_cleanup,
         commands::runs::start_task_run,
         commands::runs::cancel_task_run,
+        commands::runs::retry_task_now,
+        commands::runs::give_up_on_task,
         commands::runs::get_run_tail,
         commands::runs::list_runs_for_task,
         commands::runs::list_runs,
@@ -386,9 +452,21 @@ pub fn run() {
         commands::queue::resume_queue,
         commands::queue::stop_queue,
         commands::queue::get_queue_status,
+        commands::queue::get_run_capacity,
+        commands::queue::set_schedule_mode,
+        commands::queue::set_max_concurrency,
+        commands::schedules::list_schedules,
+        commands::schedules::create_schedule,
+        commands::schedules::update_schedule,
+        commands::schedules::set_schedule_enabled,
+        commands::schedules::delete_schedule,
+        commands::schedules::preview_schedule_preflight,
+        commands::schedules::list_timezones,
         commands::mcp::get_mcp_status,
         commands::mcp::set_mcp_port,
         commands::mcp::test_mcp_connection,
+        commands::doctor::run_doctor,
+        commands::doctor::dismiss_onboarding,
     ]);
 
     // `Builder::run(context)` is exactly `build(context)?.run(|_, _| {})`
@@ -439,17 +517,28 @@ pub fn run() {
 /// signal already sent are left to finish the job.
 ///
 /// `queue.shutdown()` runs **first** and, by itself, cancels nothing — it
-/// only stops the queue's loop from claiming *another* task once the current
-/// one ends (`scheduler::queue`'s own module doc explains why racing that
-/// loop's next claim against this exit path, instead of ordering against it,
-/// would leave a task claimed with nobody left supervising it). Cancelling
-/// the run actually in flight is `runs.cancel_all()` right after, which
-/// reaches the queue's own run through `RunRegistry::attach_queue` exactly as
-/// it reaches a manual one. Net effect: quitting mid-run cancels that one run
-/// the same way pressing the queue's own Stop button would — including that
-/// button's side effect of leaving `queue_state = paused` for the next
-/// launch — and the wait loop below is only the backstop for a child that
-/// refuses to die, not what performs the cancellation itself.
+/// only stops the queue's loop from claiming *more* tasks once the ones it is
+/// supervising end (`scheduler::queue`'s own module doc explains why racing
+/// that loop's next claim against this exit path, instead of ordering against
+/// it, would leave a task claimed with nobody left supervising it). Cancelling
+/// the runs actually in flight is `AppState::cancel_everything` right after,
+/// which reaches every lease in the shared registry exactly as it reaches a
+/// manual one. Net effect: quitting mid-run cancels those runs the same way
+/// pressing the queue's own Stop button would — including that button's side
+/// effect of leaving `queue_state = paused` for the next launch — and the wait
+/// loop below is only the backstop for a child that refuses to die, not what
+/// performs the cancellation itself.
+///
+/// **Both halves still hold with N runs (task 012), and neither needed a
+/// change.** `cancel_all` signals every lease in one pass rather than the one
+/// the queue happened to hold, so N children are SIGTERMed at the same instant
+/// and the single grace period below covers all of them rather than N of them
+/// in series. `has_in_flight_runs` is `!in_flight.is_empty()`, which is already
+/// the question "are any left" and not "is the one left". And the two waiters —
+/// this loop, and the queue's own `JoinSet` drain — converge on the same
+/// condition from opposite sides without either being able to block the other:
+/// the drain awaits supervisors that have already been asked to stop, and each
+/// of them frees its lease on the way out, which is what this loop is watching.
 async fn shut_down(app: &tauri::AppHandle) {
     let Some(state) = app.try_state::<AppState>() else {
         // Nothing was ever `manage`d — setup failed before reaching that
@@ -466,13 +555,13 @@ async fn shut_down(app: &tauri::AppHandle) {
         .expect("the mcp handle mutex is poisoned")
         .shutdown();
     state.queue.shutdown();
-    if !state.runs.cancel_all().await {
+    if !state.cancel_everything().await {
         return;
     }
 
     tracing::info!("cancelling in-flight runs before exiting");
     let deadline = tokio::time::Instant::now() + DEFAULT_GRACE_PERIOD + Duration::from_secs(5);
-    while state.runs.has_in_flight_runs() {
+    while state.has_in_flight_runs() {
         if tokio::time::Instant::now() >= deadline {
             tracing::warn!(
                 "some runs were still terminating when Rimaia exited; \
@@ -527,6 +616,11 @@ async fn forward_change_events(
                 emit_change_event(&app, ChangeEvent::tasks(Vec::<String>::new()));
                 emit_change_event(&app, ChangeEvent::repositories(Vec::<String>::new()));
                 emit_change_event(&app, ChangeEvent::runs(Vec::<String>::new()));
+                // Not compiler-forced, unlike `emit_change_event`'s own match:
+                // a variant left out here compiles and simply stops the
+                // schedules panel refreshing after a lag, which is the quietest
+                // possible failure. Listed for that reason.
+                emit_change_event(&app, ChangeEvent::schedules(Vec::<String>::new()));
                 emit_change_event(&app, ChangeEvent::Settings);
             }
             Err(RecvError::Closed) => break,
@@ -542,6 +636,7 @@ fn emit_change_event(app: &tauri::AppHandle, event: ChangeEvent) {
         ChangeEvent::Tasks(ids) => app.emit("tasks:changed", ids.as_ref()),
         ChangeEvent::Repositories(ids) => app.emit("repositories:changed", ids.as_ref()),
         ChangeEvent::Runs(ids) => app.emit("runs:changed", ids.as_ref()),
+        ChangeEvent::Schedules(ids) => app.emit("schedules:changed", ids.as_ref()),
         ChangeEvent::Settings => app.emit("settings:changed", ()),
     };
     if let Err(error) = result {
@@ -562,18 +657,18 @@ fn emit_change_event(app: &tauri::AppHandle, event: ChangeEvent) {
 /// for a lossy, high-frequency view channel is exactly the mistake D14
 /// separated this channel from `ChangeEvent` to avoid.
 ///
-/// Every snapshot is also recorded into `runs` — the shell's own catch-up
-/// cache (`state::RunRegistry`) — before it is forwarded, so a client that
-/// starts watching mid-run and calls `get_run_tail` sees at least this one.
+/// Every snapshot is also recorded into the shell's own catch-up cache
+/// (`state::RunTails`) before it is forwarded, so a client that starts watching
+/// mid-run and calls `get_run_tail` sees at least this one.
 async fn forward_run_tail(
     app: tauri::AppHandle,
-    mut tails: broadcast::Receiver<RunTail>,
-    runs: RunRegistry,
+    mut events: broadcast::Receiver<RunTail>,
+    tails: RunTails,
 ) {
     loop {
-        match tails.recv().await {
+        match events.recv().await {
             Ok(tail) => {
-                runs.record_tail(tail.clone());
+                tails.record(tail.clone());
                 if let Err(error) = app.emit("runs:tail", &tail) {
                     tracing::error!(%error, "failed to forward a run-tail snapshot to the frontend");
                 }

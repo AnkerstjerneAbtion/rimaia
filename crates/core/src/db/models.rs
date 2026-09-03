@@ -69,6 +69,71 @@ pub enum BoardColumn {
     Done,
 }
 
+impl BoardColumn {
+    /// The value stored in `tasks.board_column` — the same spelling the
+    /// schema's `CHECK` lists and `#[sqlx(rename_all = "snake_case")]`
+    /// produces. Needed because ADR-0008's base-ref rule has to name these in
+    /// hand-built SQL (`tasks::service::TASK_SUMMARY_SELECT`), and a literal
+    /// typed out there is a literal that can drift from this enum silently.
+    pub const fn as_sql(self) -> &'static str {
+        match self {
+            BoardColumn::NotReady => "not_ready",
+            BoardColumn::Ready => "ready",
+            BoardColumn::InReview => "in_review",
+            BoardColumn::Done => "done",
+        }
+    }
+
+    /// Where the column sits on the board, left to right — the order
+    /// `COLUMN_TITLES` draws and ADR-0007 lists.
+    ///
+    /// **Not the alphabetical order of [`as_sql`](BoardColumn::as_sql)**, which
+    /// is `done` < `in_review` < `not_ready` < `ready` and therefore ranks the
+    /// two *satisfied* columns backwards. ADR-0008's amendment of 2026-09-02
+    /// makes this rank, then ascending `position`, the order that picks a
+    /// dependent task's base branch, so getting it from a `board_column ASC`
+    /// would silently chain onto the wrong dependency. It exists as a function
+    /// rather than as a `derive(Ord)` because `position` is only comparable
+    /// within a column and a total order on the enum alone would invite
+    /// comparing two whole tasks by it.
+    pub const fn board_rank(self) -> i64 {
+        match self {
+            BoardColumn::NotReady => 0,
+            BoardColumn::Ready => 1,
+            BoardColumn::InReview => 2,
+            BoardColumn::Done => 3,
+        }
+    }
+
+    /// Every column, in [`board_rank`](BoardColumn::board_rank) order.
+    pub const ALL: [BoardColumn; 4] = [
+        BoardColumn::NotReady,
+        BoardColumn::Ready,
+        BoardColumn::InReview,
+        BoardColumn::Done,
+    ];
+
+    /// Whether a dependency in this column counts as satisfied (ADR-0008).
+    ///
+    /// **The column, and nothing else.** ADR-0008's decision sentence is "a
+    /// dependency is satisfied when the dependency's run completes successfully
+    /// — that is, when it reaches `in_review` or `done`", and the clause after
+    /// the dash is the definition rather than a proxy for a `runs` row. Two
+    /// cases make the difference observable, and both are ordinary:
+    ///
+    /// 1. A dependency the user implemented by hand and dragged to `done` has
+    ///    no `runs` row at all. Under a `runs.status = 'succeeded'` predicate
+    ///    its dependents would block forever, with no escape hatch short of
+    ///    deleting the edge.
+    /// 2. A run succeeds, its card files to `in_review`, and the user drags it
+    ///    back to `ready` for another go. The run row still says `succeeded`, so
+    ///    a run-based predicate would keep the dependency satisfied while the
+    ///    human has explicitly un-satisfied it.
+    pub const fn satisfies_a_dependency(self) -> bool {
+        matches!(self, BoardColumn::InReview | BoardColumn::Done)
+    }
+}
+
 /// Where a task is in the *machine's* process (ADR-0007).
 ///
 /// ADR-0007's seven, and only these seven. **`interrupted` is deliberately absent,
@@ -250,12 +315,56 @@ pub enum StrategySource {
 /// Concurrency is a property of the run configuration and never of a task, which
 /// is why [`Parallel`](ScheduleMode::Parallel) carries no number of its own and
 /// [`Schedule::max_concurrency`] does.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, sqlx::Type)]
+///
+/// Task 012 gave it a second home. It is still `schedules.mode`, and it is now
+/// also the `schedule_mode` settings key [`scheduler::capacity`] resolves the
+/// queue's capacity from — one enum for both, rather than a second one that
+/// would have to be kept in agreement with this. Which of the two wins once
+/// named schedules exist is task 013's to decide and the new seam-contract
+/// entry names it.
+///
+/// `JsonSchema` for the reason [`StrategyMode`] carries one: `set_schedule_mode`
+/// takes this off the MCP wire, and a tool advertising `mode: string` is a tool
+/// that gets `"parallell"` sent to it.
+///
+/// [`scheduler::capacity`]: crate::scheduler::capacity
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Hash,
+    Default,
+    Serialize,
+    Deserialize,
+    sqlx::Type,
+    schemars::JsonSchema,
+)]
 #[sqlx(rename_all = "snake_case")]
 #[serde(rename_all = "snake_case")]
 pub enum ScheduleMode {
+    /// One run at a time. The default, and what an absent key means — the same
+    /// direction of fallback [`QueueState`] chooses, and for the same reason:
+    /// a typo in the `sqlite3` CLI must not widen what an unattended queue is
+    /// allowed to spawn.
+    ///
+    /// [`QueueState`]: crate::scheduler::QueueState
+    #[default]
     Sequential,
     Parallel,
+}
+
+impl ScheduleMode {
+    /// The stored spelling, which is also the wire spelling — one string, so
+    /// the `schedules` row and the `settings` row stay legible in the `sqlite3`
+    /// CLI (ADR-0003) and say the same word.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            ScheduleMode::Sequential => "sequential",
+            ScheduleMode::Parallel => "parallel",
+        }
+    }
 }
 
 /// Which door a mutation came through (ADR-0019).
@@ -324,6 +433,23 @@ pub struct Repository {
     /// ADR-0012's per-repository opt-in to `--permission-mode bypassPermissions`.
     /// Never widened without amending that ADR.
     pub allow_unattended_runs: bool,
+    /// How many runs this repository will hold at once (ADR-0010), `1` unless
+    /// the user opted out.
+    ///
+    /// A cap of its own rather than a share of the global `max_concurrency`,
+    /// because the thing it protects is not the machine: "two agents in two
+    /// worktrees of the same repo is safe for git, but they will fight over
+    /// ports, test databases, and lockfiles." Worktree isolation (ADR-0005)
+    /// does nothing about any of those, which is why raising this is a
+    /// deliberate per-repository act and not a consequence of turning
+    /// parallelism on.
+    ///
+    /// `i64` because SQLite's `INTEGER` is one and D10's argument against
+    /// clever column types applies here too; [`scheduler::capacity`] is what
+    /// turns a hand-edited `0` into a usable number.
+    ///
+    /// [`scheduler::capacity`]: crate::scheduler::capacity
+    pub max_concurrency: i64,
     pub created_at: DateTime<Utc>,
 }
 
@@ -461,29 +587,82 @@ pub struct Run {
     /// When the next attempt may start: the usage-limit reset plus jitter, or the
     /// current backoff step (ADR-0011).
     pub resume_after: Option<DateTime<Utc>>,
+    /// The branch this attempt was created from (ADR-0008): the repository's
+    /// default branch, or a dependency's branch when the task has one. A fact
+    /// about the attempt, not about what the resolver would answer today.
+    pub base_ref: Option<String>,
+    /// ADR-0022's capture columns: what this attempt was spawned as, and what it
+    /// spent. Written once by `finish_run` and never updated.
+    ///
+    /// **NULL means "not recorded", never zero** (seam-contract D18). Every row
+    /// written before the capture migration honestly has none, and a run that
+    /// dies before its terminal `result` event never learns its token counts.
+    /// Nothing backfills these — `tasks.model` is the present tense and
+    /// `run_environment` is a setting that changes.
+    pub model: Option<String>,
+    pub effort: Option<String>,
+    pub run_environment: Option<String>,
+    pub input_tokens: Option<i64>,
+    pub output_tokens: Option<i64>,
+    pub cache_read_tokens: Option<i64>,
+    pub cache_creation_tokens: Option<i64>,
 }
 
 /// A named run configuration (ADR-0010).
 ///
 /// Mode and concurrency are properties of the configuration, never of a task.
-/// Nothing reads this table until task 013; it is modelled now for the same reason
-/// [`TaskDependency`] is.
+/// Task 013 is what reads this table; the rules about which combinations of the
+/// columns below are legal live in [`schedule`](crate::schedule), not here and
+/// deliberately not in a `CHECK` — SQLite cannot drop one, and the domain was
+/// still open when the table shipped.
 #[derive(Debug, Clone, PartialEq, Serialize, sqlx::FromRow)]
 #[serde(rename_all = "camelCase")]
 pub struct Schedule {
     pub id: String,
     pub name: String,
     pub mode: ScheduleMode,
-    /// A cron expression with a timezone, or a wall-clock time, or neither for
-    /// "run now". Which combinations are legal is task 013's design, and is
-    /// deliberately unconstrained here as it is in the schema.
+    /// A cron expression, read in [`timezone`](Self::timezone). Exclusive with
+    /// [`start_at`](Self::start_at) — a row with both, or with neither, is
+    /// refused by [`schedule::fire::trigger`](crate::schedule::fire::trigger).
+    ///
+    /// The initial schema's comment offered a third reading, "neither for run
+    /// now". Task 013 declined it: `QueueHandle::start` already *is* Run now.
+    /// Seam-contract D24.
     pub cron: Option<String>,
+    /// ADR-0010's "Start at" — a one-off wall-clock instant. Fires once.
     pub start_at: Option<DateTime<Utc>>,
     /// Read only in [`ScheduleMode::Parallel`]. ADR-0010 caps *per-repository*
     /// concurrency at 1 regardless of this number, because two agents in one repo
     /// fight over ports, test databases and lockfiles.
     pub max_concurrency: i64,
     pub enabled: bool,
+    /// An IANA name — `"Europe/Copenhagen"`, never an offset and never an
+    /// abbreviation.
+    ///
+    /// **Nullable here, required by the service for every row it writes.** A
+    /// `NOT NULL DEFAULT 'UTC'` would let a nightly schedule be created silently
+    /// in the wrong zone, which is exactly the failure the DST acceptance
+    /// criterion exists to catch — a wrong answer that looks like an answer.
+    pub timezone: Option<String>,
+    /// A **local wall-clock time of day**, `HH:MM`, resolved through
+    /// [`timezone`](Self::timezone) — not an instant.
+    ///
+    /// "Stop at 06:00" is the sentence the user says. An absolute instant cannot
+    /// express a stop that repeats, and a duration would move the stop whenever
+    /// the start moved and end a spring-forward window an hour early.
+    pub stop_at: Option<String>,
+    /// When the schedule **actually** fired, never when it was due.
+    ///
+    /// The distinction is what makes ADR-0010's "fires late rather than
+    /// skipping" work without becoming a re-fire loop.
+    pub last_fired_at: Option<DateTime<Utc>>,
+    /// The instant from which missed occurrences count — set on create, re-set
+    /// on every enable.
+    ///
+    /// Without it a nightly 22:00 schedule created at 23:00 fires immediately
+    /// for an occurrence that predates its own existence, and one disabled for a
+    /// month fires the second it is re-enabled.
+    pub armed_at: Option<DateTime<Utc>>,
 }
 
 #[cfg(test)]
@@ -679,6 +858,7 @@ mod tests {
             worktree_root: "/Users/someone/Library/Application Support/com.rimaia.app/worktrees"
                 .to_string(),
             allow_unattended_runs: true,
+            max_concurrency: 1,
             created_at: timestamp("2026-08-20T12:00:00Z"),
         };
 
@@ -691,6 +871,7 @@ mod tests {
                 "defaultBranch": "main",
                 "worktreeRoot": "/Users/someone/Library/Application Support/com.rimaia.app/worktrees",
                 "allowUnattendedRuns": true,
+                "maxConcurrency": 1,
                 // RFC 3339 UTC, which is byte-for-byte what the TEXT column holds.
                 "createdAt": "2026-08-20T12:00:00Z",
             })

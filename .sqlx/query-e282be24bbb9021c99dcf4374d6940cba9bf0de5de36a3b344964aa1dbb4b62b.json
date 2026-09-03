@@ -1,6 +1,6 @@
 {
   "db_name": "SQLite",
-  "query": "SELECT id, task_id, attempt, status AS \"status: RunStatus\", session_id, prompt,\n            started_at AS \"started_at: DateTime<Utc>\", ended_at AS \"ended_at: DateTime<Utc>\",\n            exit_class AS \"exit_class: ExitClass\", error_message, num_turns, cost_usd, log_path,\n            pr_url, resume_after AS \"resume_after: DateTime<Utc>\"\n           FROM runs WHERE task_id = ?1 ORDER BY attempt DESC LIMIT 1",
+  "query": "SELECT id, task_id, attempt, status AS \"status: RunStatus\", session_id, prompt,\n            started_at AS \"started_at: DateTime<Utc>\", ended_at AS \"ended_at: DateTime<Utc>\",\n            exit_class AS \"exit_class: ExitClass\", error_message, num_turns, cost_usd, log_path,\n            pr_url, resume_after AS \"resume_after: DateTime<Utc>\", base_ref,\n            model, effort, run_environment, input_tokens, output_tokens,\n            cache_read_tokens, cache_creation_tokens\n           FROM runs WHERE id = ?1",
   "describe": {
     "columns": [
       {
@@ -77,6 +77,46 @@
         "name": "resume_after: DateTime<Utc>",
         "ordinal": 14,
         "type_info": "Text"
+      },
+      {
+        "name": "base_ref",
+        "ordinal": 15,
+        "type_info": "Text"
+      },
+      {
+        "name": "model",
+        "ordinal": 16,
+        "type_info": "Text"
+      },
+      {
+        "name": "effort",
+        "ordinal": 17,
+        "type_info": "Text"
+      },
+      {
+        "name": "run_environment",
+        "ordinal": 18,
+        "type_info": "Text"
+      },
+      {
+        "name": "input_tokens",
+        "ordinal": 19,
+        "type_info": "Integer"
+      },
+      {
+        "name": "output_tokens",
+        "ordinal": 20,
+        "type_info": "Integer"
+      },
+      {
+        "name": "cache_read_tokens",
+        "ordinal": 21,
+        "type_info": "Integer"
+      },
+      {
+        "name": "cache_creation_tokens",
+        "ordinal": 22,
+        "type_info": "Integer"
       }
     ],
     "parameters": {
@@ -97,8 +137,16 @@
       true,
       false,
       true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
       true
     ]
   },
-  "hash": "8c9411d1e3b6cce9a79b0c9ae67cfca9bce1ca6fd52b6b70279e67e2643b7166"
+  "hash": "e282be24bbb9021c99dcf4374d6940cba9bf0de5de36a3b344964aa1dbb4b62b"
 }

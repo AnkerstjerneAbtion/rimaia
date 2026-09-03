@@ -527,21 +527,31 @@ export type CardBadge =
  * The badge a card shows, or `null` for `idle` — a task nothing has happened to
  * yet says nothing, rather than saying "idle".
  *
- * A function of two fields, not one, because of seam-contract D9: a run killed
- * by a crash leaves `exit_class = 'interrupted'` on its `runs` row and the task
- * in `run_state = 'failed'`, and the word the user needs ("interrupted", not a
- * bare "failed" for something they did not do) lives on the run. Every other
- * state renders itself; the exit class only ever refines `failed`, because a
- * task that has moved on to running or queued again is telling the user where
- * it is now, not why it stopped last time.
+ * A function of three fields, not one. Seam-contract D9 accounts for the first
+ * two: a run killed by a crash leaves `exit_class = 'interrupted'` on its `runs`
+ * row and the task in `run_state = 'failed'`, and the word the user needs
+ * ("interrupted", not a bare "failed" for something they did not do) lives on
+ * the run. The exit class only ever refines `failed`, because a task that has
+ * moved on to running or queued again is telling the user where it is now, not
+ * why it stopped last time.
+ *
+ * `blockedByIncomplete` is ADR-0008's, and it is deliberately consulted **only
+ * for `idle`**. `run_state` has a `blocked` value and ADR-0008's amendment of
+ * 2026-09-02 leaves it unwritten — blocking is derived per read, and the state a
+ * blocked card is actually in is `idle` — so this is where the two spellings
+ * meet. It is last rather than first because every other state already says
+ * something truer about right now: a *running* task whose dependency moved is
+ * still running, and a *failed* one is still failed, which ADR-0007's failure
+ * rule wants visible so it interrupts the morning review.
  */
 export function cardBadge(
   runState: RunState,
   lastRun: { readonly exitClass: ExitClass | null } | null,
+  blockedByIncomplete: boolean,
 ): CardBadge | null {
   switch (runState) {
     case "idle":
-      return null;
+      return blockedByIncomplete ? "blocked" : null;
     case "failed":
       return lastRun?.exitClass === "interrupted" ? "interrupted" : "failed";
     case "running":
@@ -551,6 +561,39 @@ export function cardBadge(
     case "cancelled":
       return runState;
   }
+}
+
+/**
+ * When a `waiting_retry` card comes back, in the shortest form that is still
+ * unambiguous — or `null` when nothing is scheduled.
+ *
+ * A clock time rather than a relative "in 4 hours", which is the opposite of
+ * what this file's other time formatter does, and deliberately: a relative
+ * label on a card that is not re-rendered for four hours becomes a lie, while
+ * "resumes 06:12" stays true whether the board was drawn a second ago or last
+ * night. It is the operator's local time because the operator is the one
+ * deciding whether to wait for it.
+ *
+ * A deadline already past reads "resuming", because that is what it means: the
+ * queue is due to pick the card up and has not got to it yet (or is paused).
+ */
+export function formatResumeAfter(
+  resumeAfter: string | null | undefined,
+  now: Date = new Date(),
+): string | null {
+  if (!resumeAfter) return null;
+
+  const at = new Date(resumeAfter);
+  if (Number.isNaN(at.getTime())) return null;
+  if (at.getTime() <= now.getTime()) return "resuming";
+
+  const time = at.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" });
+  // Naming the day only when it is not today: a bare "06:12" on a card whose
+  // window reopens tomorrow morning would read as twenty minutes away.
+  const sameDay = at.toDateString() === now.toDateString();
+  return sameDay
+    ? `resumes ${time}`
+    : `resumes ${at.toLocaleDateString(undefined, { month: "short", day: "numeric" })} ${time}`;
 }
 
 const MINUTE_MS = 60_000;

@@ -19,9 +19,64 @@ export interface AppInfo {
   dataDir: string;
   dbFile: string;
   logsDir: string;
+  /**
+   * Task 018's first-run flag. It rides on this read rather than having a
+   * command of its own because the opening view has to be decided before the
+   * first frame — a second round trip is a flash of the board before the
+   * welcome screen replaces it.
+   */
+  onboardingDismissed: boolean;
 }
 
-export type View = "board" | "runs" | "settings";
+/**
+ * `welcome` is deliberately **not** in `Sidebar`'s `VIEWS` array: it is a
+ * destination the app can *start* on and that Settings can send you to, not a
+ * permanent nav item. Task 001's no-router decision still holds — four views,
+ * no URLs, no nesting, nothing to deep-link.
+ */
+export type View = "board" | "runs" | "settings" | "welcome";
+
+// ---------------------------------------------------------------------------
+// The preflight doctor (task 018) — mirrors `rimaia_core::doctor`.
+// ---------------------------------------------------------------------------
+
+/** Mirrors `rimaia_core::doctor::Check`. */
+export type DoctorCheck =
+  | "claude_cli"
+  | "claude_authenticated"
+  | "git"
+  | "github_cli"
+  | "data_directory"
+  | "disk_space"
+  | "repository_path"
+  | "mcp_port";
+
+/** Mirrors `rimaia_core::doctor::CheckStatus`. Only `fail` blocks queue start. */
+export type DoctorStatus = "pass" | "warn" | "fail";
+
+/** Mirrors `rimaia_core::doctor::CheckResult`. */
+export interface DoctorCheckResult {
+  check: DoctorCheck;
+  /** `Check::label()`, sent rather than re-spelled here — there is one place
+   *  the words for a check live, and it is Rust. */
+  label: string;
+  /**
+   * The repository this row is about, for the two per-repository checks;
+   * `null` for the six that describe the installation as a whole. `detail`
+   * names it too — a sentence that only makes sense beside its own heading is
+   * not a warning that "names the affected repository".
+   */
+  repository: string | null;
+  status: DoctorStatus;
+  detail: string;
+  /** `null` only on a passing row. */
+  remediation: string | null;
+}
+
+/** Mirrors `rimaia_core::doctor::DoctorReport`, in `Check::ALL` order. */
+export interface DoctorReport {
+  results: DoctorCheckResult[];
+}
 
 // ---------------------------------------------------------------------------
 // Repositories (task 003) — mirrors `rimaia_core::db::{Repository, ...}` and
@@ -37,6 +92,11 @@ export interface Repository {
   worktreeRoot: string;
   /** ADR-0012's per-repository opt-in to unattended runs. */
   allowUnattendedRuns: boolean;
+  /** ADR-0010's per-repository cap: how many runs this repository will hold at
+   *  once. `1` unless the user opted out, and the opt-out is deliberate —
+   *  worktree isolation makes two agents in one repository safe for git and
+   *  does nothing about ports, test databases and lockfiles. */
+  maxConcurrency: number;
   /** RFC 3339 UTC, as sqlx writes it — see the module note above `RimaiaError`. */
   createdAt: string;
 }
@@ -190,6 +250,21 @@ export interface Run {
   logPath: string;
   prUrl: string | null;
   resumeAfter: string | null;
+  /** The branch this attempt was created from (ADR-0008) — the repository's
+   *  default branch, or a dependency's branch when the task has one. */
+  baseRef: string | null;
+  /** ADR-0022's capture columns. **`null` means "not recorded", never zero**
+   *  (seam-contract D18): every row written before the capture migration
+   *  honestly has none, and a run that dies before its terminal `result` event
+   *  never learns its token counts. Nothing here is ever backfilled, and a view
+   *  that averages a `null` as zero is lying about the past. */
+  model: string | null;
+  effort: string | null;
+  runEnvironment: string | null;
+  inputTokens: number | null;
+  outputTokens: number | null;
+  cacheReadTokens: number | null;
+  cacheCreationTokens: number | null;
 }
 
 /**
@@ -231,7 +306,7 @@ export interface TaskDetail extends Task, EffectiveStrategyFields {
 }
 
 /**
- * Mirrors `rimaia_core::tasks::LastRunSummary` — the three fields of a `Run`
+ * Mirrors `rimaia_core::tasks::LastRunSummary` — the four fields of a `Run`
  * a card draws, not the row. `interrupted` reaches the board through
  * `exitClass` and nowhere else (seam-contract D9).
  */
@@ -240,6 +315,12 @@ export interface LastRunSummary {
   exitClass: ExitClass | null;
   /** `null` while the attempt is still in flight. */
   endedAt: string | null;
+  /** When ADR-0011's retry policy scheduled the next attempt, or `null` for an
+   *  attempt nothing will follow (seam-contract D12's 2026-09-03 amendment).
+   *  This is what a `waiting_retry` badge shows the time of — a card that says
+   *  only "Waiting for retry" cannot tell a task coming back at 06:12 from one
+   *  that is stuck. */
+  resumeAfter: string | null;
 }
 
 /**
@@ -253,10 +334,15 @@ export interface LastRunSummary {
 export interface TaskSummary extends Task, EffectiveStrategyFields {
   linkCount: number;
   dependencyCount: number;
-  /** Reserved for task 011 and a constant `false` until it lands — the card
-   *  renders it now so that task 011 changes one backend query and nothing
-   *  else (seam-contract D12). */
+  /** At least one dependency is in a column that does not satisfy it —
+   *  ADR-0008's `in_review` or `done`, and nothing else. Derived on every read;
+   *  there is no stored `blocked` state behind it (ADR-0008's 2026-09-02
+   *  amendment). */
   blockedByIncomplete: boolean;
+  /** The first unsatisfied dependency's title, or `null` when nothing is
+   *  blocking. The same dependency the base-ref rule would chain from, so the
+   *  card names the head of the stalled chain. */
+  blockingTitle: string | null;
   lastRun: LastRunSummary | null;
 }
 
@@ -571,11 +657,16 @@ export type QueueState = "running" | "paused";
  * a severity. Every value but `"unattended_runs_not_allowed"` clears on its
  * own; that one is the only reason the user has to act on before the queue
  * can ever start the task (ADR-0012).
+ *
+ * `"waiting_for_retry"` is task 014's, and it is deliberately not folded into
+ * `"already_in_flight"`: nothing is running, nothing is wrong, and the card can
+ * say *when* it comes back (seam-contract D22).
  */
 export type SkipReason =
   | "unattended_runs_not_allowed"
   | "dependency_not_satisfied"
   | "already_in_flight"
+  | "waiting_for_retry"
   | "needs_attention";
 
 /**
@@ -595,6 +686,10 @@ export interface QueueEntry {
   queuePosition: number | null;
   /** `null` when the queue would start this task right now. */
   skip: SkipReason | null;
+  /** When this task's next attempt becomes due. Populated **only** for a task
+   *  in `waiting_retry`, so an old deadline on a task that has since been
+   *  started again by hand does not read as a pending resume. */
+  resumeAfter: string | null;
 }
 
 /**
@@ -603,9 +698,12 @@ export interface QueueEntry {
  */
 export interface QueueStatus {
   state: QueueState;
-  /** The task whose process the queue is supervising right now. `null`
-   *  between runs, while paused, or with nothing to do. */
-  runningTaskId: string | null;
+  /** Every task this process has a `claude` child for right now, in a stable
+   *  order — the queue's own runs and any a button started, since they share
+   *  one registry. A list rather than the single id this was: task 012 fills
+   *  more than one slot, and a wire field that changed shape once a setting was
+   *  flipped would be worse than one that is always a list. */
+  runningTaskIds: string[];
   /** Every `ready` task in board order, with the reason the queue will pass
    *  over each one it cannot start. Re-read fresh on every call — never a
    *  snapshot from when the queue was started — so a card dragged to the top
@@ -619,6 +717,171 @@ export interface QueueStatus {
    *  {@link state} still read `"running"` over a full {@link plan} while
    *  nothing was happening. */
   lastStepError: string | null;
+  /** When ADR-0011's global usage-limit hold lifts, or `null` when there is
+   *  none. The other way a queue that reads `"running"` over a full
+   *  {@link plan} can be starting nothing — surfaced for the same reason
+   *  {@link lastStepError} is, because a hold the operator cannot see is one
+   *  they will debug as a bug. */
+  usageLimitPauseUntil: string | null;
+  /** The run window a schedule opened, or `null` when the queue is running
+   *  because somebody pressed Start (task 013).
+   *
+   *  Here rather than on a schedules read of its own, because it answers a
+   *  question about *the queue*: "Running until 06:00 — Nightly" while it is
+   *  open and, once the stop time has passed and {@link state} has gone back to
+   *  `"paused"`, the one thing that explains a queue which stopped by itself at
+   *  06:00 with work still on the board. Without it that reads exactly like the
+   *  queue having failed. */
+  window: RunWindow | null;
+}
+
+// ---------------------------------------------------------------------------
+// Schedules (task 013) — mirrors `rimaia_core::schedule` (ADR-0010).
+// ---------------------------------------------------------------------------
+
+/**
+ * Mirrors `rimaia_core::db::Schedule` — a named run configuration, and when it
+ * fires.
+ *
+ * Four of these fields are nullable in the schema and are not all equally
+ * optional in practice: `timezone` is **required by the service for every row
+ * it writes**, and a row without one is refused rather than read as UTC, since
+ * a nightly queue in the wrong zone runs an hour out for half the year with
+ * nothing to say so.
+ */
+export interface Schedule {
+  id: string;
+  name: string;
+  /** Overrides the installation default **while this schedule's window is
+   *  open**, and only then — see {@link QueueStatus.window}. */
+  mode: ScheduleMode;
+  /** A cron expression read in {@link timezone}. Exclusive with
+   *  {@link startAt}. */
+  cron: string | null;
+  /** A one-off instant. Fires once. Exclusive with {@link cron}. */
+  startAt: string | null;
+  maxConcurrency: number;
+  enabled: boolean;
+  /** An IANA name — `"Europe/Copenhagen"`, never an offset or an
+   *  abbreviation. */
+  timezone: string | null;
+  /** A **local time of day**, `"HH:MM"`, at which the window stops starting new
+   *  tasks. Not an instant: "stop at 06:00" is the sentence the user says, and
+   *  a window crossing spring-forward is seven real hours and still ends at
+   *  06:00 local. */
+  stopAt: string | null;
+  /** When it **actually** fired, never when it was due. */
+  lastFiredAt: string | null;
+  /** The instant from which missed occurrences count — set on create, re-set on
+   *  every enable, so a schedule that spent a month off does not fire the
+   *  second it comes back. */
+  armedAt: string | null;
+}
+
+/**
+ * Mirrors `rimaia_core::schedule::ScheduleView` — a schedule plus the one thing
+ * about it that is computed rather than stored.
+ *
+ * The Rust type flattens the row, so every {@link Schedule} field is present on
+ * this object directly.
+ */
+export interface ScheduleView extends Schedule {
+  /** When this schedule next fires. **In the past when it is overdue**, which
+   *  is the one case worth seeing — showing tomorrow's 22:00 for a schedule
+   *  that should have started an hour ago would hide it. `null` for a one-off
+   *  that already fired, and for a row whose configuration cannot be read at
+   *  all, in which case {@link nextFireError} says why. */
+  nextFireAt: string | null;
+  /** Why there is no next fire time, when a broken row is the reason. A field
+   *  rather than a failed read, so one unparseable cron expression does not
+   *  make the whole list — the list the user would use to fix it —
+   *  unreadable. */
+  nextFireError: string | null;
+}
+
+/** What {@link createSchedule} and {@link updateSchedule} send. A whole row
+ *  rather than a patch: the fields constrain each other, so "clear the cron and
+ *  set a one-off time" has to be one write or there is an illegal row in the
+ *  middle of it. */
+export interface ScheduleInput {
+  name: string;
+  mode: ScheduleMode;
+  maxConcurrency: number;
+  /** Required, though the column is nullable. */
+  timezone: string;
+  cron?: string | null;
+  startAt?: string | null;
+  stopAt?: string | null;
+  enabled: boolean;
+}
+
+/**
+ * Mirrors `rimaia_core::schedule::window::RunWindow` — the run window that is
+ * open right now.
+ *
+ * Carries the schedule's *name* as well as its id, denormalised on purpose: the
+ * window is a record of what was decided at 22:00, and it does not become
+ * untrue because the schedule was renamed or deleted at midnight.
+ */
+export interface RunWindow {
+  scheduleId: string;
+  scheduleName: string;
+  openedAt: string;
+  /** When new starts stop. `null` for a schedule with no stop time. */
+  closesAt: string | null;
+  mode: ScheduleMode;
+  maxConcurrency: number;
+}
+
+/**
+ * Mirrors `rimaia_core::schedule::PreflightSummary` — what a schedule would do
+ * if it fired now.
+ *
+ * Computed, never stored: it is true of a board at an instant, and a card
+ * dragged at 21:55 changes what runs at 22:00.
+ */
+export interface PreflightSummary {
+  scheduleId: string;
+  scheduleName: string;
+  nextFireAt: string | null;
+  closesAt: string | null;
+  mode: ScheduleMode;
+  maxConcurrency: number;
+  /** Every `ready` task in board order, **including** the ones the queue will
+   *  pass over, each carrying its reason. Filtering the skipped ones out would
+   *  answer "which tasks will run" and silently drop "and which are blocked and
+   *  why", which is the half that costs a night. */
+  plan: QueueEntry[];
+}
+
+/**
+ * Mirrors `rimaia_core::db::ScheduleMode`. How many runs the queue works at
+ * once (ADR-0010's Modes): one at a time, or up to {@link
+ * RunCapacity.maxConcurrency}.
+ *
+ * Not `StrategyMode`, which is ADR-0016's per-task model and effort selection.
+ * The two share the word "mode" and nothing else.
+ */
+export type ScheduleMode = "sequential" | "parallel";
+
+/**
+ * Mirrors `rimaia_core::scheduler::capacity::RunCapacity` — what {@link
+ * getRunCapacity} answers with, and what both of its setters answer with too.
+ */
+export interface RunCapacity {
+  mode: ScheduleMode;
+  /** The **stored** limit, which is deliberately not what `"sequential"`
+   *  resolves to: sequential always runs exactly one, and the number the user
+   *  chose is remembered rather than overwritten, so flipping back to
+   *  `"parallel"` restores it. A control that showed `1` here would make the
+   *  setting look forgotten every time the mode was switched. */
+  maxConcurrency: number;
+  /** The most runs Rimaia will ever supervise, whatever {@link
+   *  maxConcurrency} says — `CONCURRENCY_CEILING`, a Rust constant. Sent over
+   *  the wire rather than duplicated here, because a hard-coded copy of it in
+   *  TypeScript is a second version of a number whose whole purpose is that
+   *  there is one. */
+  ceiling: number;
 }
 
 // ---------------------------------------------------------------------------
@@ -648,7 +911,13 @@ export interface WorktreeStatus {
    *  user can go and look, including when it is gone. */
   path: string | null;
   branch: string | null;
+  /** What the last attempt was actually built on when there was one, and a
+   *  fresh resolution otherwise (ADR-0008's 2026-09-02 amendment). */
   baseRef: string;
+  /** ADR-0008's multi-dependency warning, computed against the **current**
+   *  dependency set rather than the recorded attempt's — it is advice about
+   *  what to do next, not a fact about the past. Rendered verbatim. */
+  dependencyWarning: string | null;
   ahead: number;
   behind: number;
   /** Uncommitted work in the worktree: modified, staged or untracked alike. */
@@ -850,8 +1119,106 @@ export type PruneCriterionInput =
  *  number that agrees with what just happened. */
 export interface PruneResult {
   runsPruned: number;
+  /** Task 020's planner transcripts, counted separately because they are
+   *  counted differently: `runsPruned` is a number of rows whose file went,
+   *  and a `strategy-<uuid>.jsonl` has no row at all (seam-contract D17.5,
+   *  D19). Adding them together would report more runs pruned than the
+   *  database holds. */
+  strategyTranscriptsPruned: number;
   bytesFreed: number;
 }
+
+// ---------------------------------------------------------------------------
+// Worktree lifecycle and cleanup (task 016) —
+// see `crates/core/src/worktree/cleanup.rs`.
+// ---------------------------------------------------------------------------
+
+/** Mirrors `rimaia_core::worktree::ForceRemoval`. The dangerous value is the
+ *  one that has to be typed — a `boolean` would make it the easier one. */
+export type ForceRemoval = "no" | "confirmed_by_user";
+
+/** Mirrors `rimaia_core::worktree::BranchDisposition` (ADR-0005: "the branch
+ *  is left alone unless the user asks for it to go").
+ *
+ *  `delete_even_if_unmerged` is the *separate* confirmation task 016 requires:
+ *  authorising the loss of a worktree is not the same act as authorising the
+ *  loss of the only copy of its commits. */
+export type BranchDisposition = "keep" | "delete_if_merged" | "delete_even_if_unmerged";
+
+/** Mirrors `commands::worktree::RemovalAuthorizationInput` — camelCase here,
+ *  snake_case in core, because MCP is (seam-contract D16.1).
+ *
+ *  Every field is optional and every omission authorises nothing. */
+export interface RemovalAuthorizationInput {
+  uncommittedChanges?: ForceRemoval;
+  unpushedCommits?: ForceRemoval;
+  branch?: BranchDisposition;
+}
+
+/** Mirrors `rimaia_core::worktree::WorktreeInventoryEntry` — everything
+ *  Settings → Storage needs to decide whether a checkout is finished with. */
+export interface WorktreeInventoryEntry {
+  taskId: string;
+  taskTitle: string;
+  repositoryId: string;
+  repositoryName: string;
+  column: BoardColumn;
+  runState: RunState;
+  path: string;
+  /** The directory is on disk **and** git still lists it. `false` is one
+   *  deleted outside the app, which startup reconciliation clears. */
+  exists: boolean;
+  branch: string | null;
+  baseRef: string;
+  sizeBytes: number;
+  /** The newest mtime under the worktree, or `null` when there is nothing to
+   *  read one off — a different fact from "last touched in 1970". */
+  lastActivity: string | null;
+  merged: boolean;
+  uncommittedChanges: number;
+  unpushedCommits: number;
+  /** A run is working here, so nothing removes it and no confirmation
+   *  changes that. Comes from the backend rather than being re-derived from
+   *  `runState`, so the rule has one home. */
+  live: boolean;
+}
+
+/** Mirrors `rimaia_core::worktree::WorktreeInventory`. */
+export interface WorktreeInventory {
+  entries: WorktreeInventoryEntry[];
+  totalBytes: number;
+}
+
+/** Mirrors `rimaia_core::worktree::RemovedWorktree`. */
+export interface RemovedWorktree {
+  taskId: string;
+  path: string;
+  bytesFreed: number;
+  branchDeleted: string | null;
+}
+
+/** Mirrors `rimaia_core::worktree::RefusedWorktree` — one worktree a bulk
+ *  action declined to touch, carrying the sentence the individual call would
+ *  have raised. */
+export interface RefusedWorktree {
+  taskId: string;
+  taskTitle: string;
+  reason: string;
+}
+
+/** Mirrors `rimaia_core::worktree::CleanupReport`. A bulk action reports
+ *  rather than aborting: one dirty worktree must not cost the user the nine
+ *  clean ones, and must not vanish silently either. */
+export interface CleanupReport {
+  removed: RemovedWorktree[];
+  refused: RefusedWorktree[];
+  bytesFreed: number;
+}
+
+/** Mirrors `rimaia_core::worktree::AutoCleanup`. The "on" value spells its own
+ *  acknowledgement, so enabling the policy means having typed what it
+ *  deletes. */
+export type AutoCleanup = "off" | "on_done_acknowledged";
 
 // ---------------------------------------------------------------------------
 // The local MCP server (task 010) — see `crates/core/src/mcp/mod.rs`.

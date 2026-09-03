@@ -8,7 +8,9 @@ import {
   getStrategyApproval,
   getStrategyCatalogue,
   getStrategyDefaults,
+  giveUpOnTask,
   planTaskStrategy,
+  retryTaskNow,
   setStrategyApproval,
   setStrategyCatalogue,
   setStrategyDefaults,
@@ -188,5 +190,49 @@ describe("the execution-strategy wrappers (task 020)", () => {
       code: "invalid",
       message: "the catalogue is not valid JSON: key must be a string at line 1 column 3",
     });
+  });
+});
+
+describe("the retry controls (task 014)", () => {
+  beforeEach(() => {
+    mockInvoke.mockReset();
+  });
+
+  it("resumes a waiting task under the name the command is registered as", () => {
+    // The name matters more than usual here: `check-command-wiring.sh` reads
+    // this literal out of the source to prove the command is registered, so a
+    // template string would make the wrapper invisible to it *and* to the user,
+    // as a command-not-found at 09:00.
+    mockInvoke.mockResolvedValue(undefined);
+
+    return retryTaskNow("task-1").then(() => {
+      expect(mockInvoke).toHaveBeenCalledWith("retry_task_now", { taskId: "task-1" });
+    });
+  });
+
+  it("gives up on a waiting task", () => {
+    mockInvoke.mockResolvedValue(undefined);
+
+    return giveUpOnTask("task-1").then(() => {
+      expect(mockInvoke).toHaveBeenCalledWith("give_up_on_task", { taskId: "task-1" });
+    });
+  });
+
+  it("surfaces a refusal as a readable error rather than an object", () => {
+    // "Give up" on a task that is not waiting is a sentence about the card, and
+    // this is the seam that keeps it one.
+    mockInvoke.mockRejectedValue({
+      code: "invalid",
+      message: "this task is not waiting to be retried (it is running)",
+    });
+
+    return giveUpOnTask("task-1").then(
+      () => expect.fail("a refusal must reject"),
+      (thrown) => {
+        const error = toRimaiaError(thrown);
+        expect(error.code).toBe("invalid");
+        expect(error.message).toContain("not waiting");
+      },
+    );
   });
 });

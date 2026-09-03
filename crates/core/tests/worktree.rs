@@ -21,8 +21,10 @@ use std::process::Command;
 use chrono::{DateTime, Utc};
 use pretty_assertions::assert_eq;
 use rimaia_core::db::{BoardColumn, Repository, RunState, Task};
+use rimaia_core::paths::AppPaths;
 use rimaia_core::repo::{self, NewRepository, RepositoryPatch};
-use rimaia_core::tasks::{self, NewTask};
+use rimaia_core::runner::outcome::{start_run, NewRun};
+use rimaia_core::tasks::{self, NewTask, TaskFilter};
 use rimaia_core::testing::{TempRepo, TestContext};
 use rimaia_core::worktree::{self, ForceRemoval};
 use rimaia_core::{ChangeEvent, ServiceContext};
@@ -299,6 +301,244 @@ async fn preparing_onto_a_directory_left_detached_is_refused_with_an_actionable_
         Path::new(&first.path).exists(),
         "refusing must not delete anything — cleanup stays an explicit act (ADR-0005)"
     );
+}
+
+// ---------------------------------------------------------------------------
+// Branch chaining (ADR-0008, task 011)
+//
+// Every assertion here is made with `git merge-base`, `rev-parse` or `log`
+// against a real repository, which is task 011's own acceptance criterion: "a
+// dependent task's worktree is created from its dependency's branch, verified
+// by `git merge-base`". A test that only read `Worktree::base_ref` back would
+// prove the struct, not the checkout.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn a_dependent_branches_from_its_dependency_and_git_merge_base_proves_it() {
+    let f = Fixture::new().await;
+    let a = f.task("Add the API endpoint").await;
+    let b = f.task("Call it from the UI").await;
+
+    // A runs: its worktree exists, it commits, and its card is filed for review
+    // — which is the whole of what ADR-0008 calls "satisfied".
+    let a_worktree = worktree::prepare(f.ctx(), &a.id).await.expect("prepare A");
+    commit_in(
+        Path::new(&a_worktree.path),
+        "endpoint.rs",
+        "// A\n",
+        "Add A",
+    );
+    let a_tip = git(Path::new(&a_worktree.path), &["rev-parse", "HEAD"]);
+    file_for_review(&f, &a.id).await;
+
+    tasks::set_task_dependencies(f.ctx(), &b.id, std::slice::from_ref(&a.id))
+        .await
+        .expect("B depends on A");
+
+    let b_worktree = worktree::prepare(f.ctx(), &b.id).await.expect("prepare B");
+
+    assert_eq!(b_worktree.base_ref, a_worktree.branch);
+    assert_eq!(
+        b_worktree.dependency_warning, None,
+        "one dependency, nothing to warn about"
+    );
+
+    // The two claims that matter, and neither is readable off the struct:
+    // B starts exactly at A's tip, and A's commit is an ancestor of B's branch.
+    let b_checkout = PathBuf::from(&b_worktree.path);
+    assert_eq!(git(&b_checkout, &["rev-parse", "HEAD"]), a_tip);
+    assert_eq!(
+        git(
+            f.source.path(),
+            &["merge-base", &a_worktree.branch, &b_worktree.branch],
+        ),
+        a_tip,
+        "A's branch must be an ancestor of B's, not merely a name it was given",
+    );
+    assert!(
+        b_checkout.join("endpoint.rs").is_file(),
+        "B is written against code that is actually there — the reason ADR-0008 exists",
+    );
+}
+
+#[tokio::test]
+async fn an_unsatisfied_dependency_leaves_the_dependent_on_the_default_branch() {
+    // A has a branch with commits on it, but its card is still in `ready`
+    // because the run failed. ADR-0008 gates chaining on the column, so B does
+    // not build on work nobody accepted.
+    let f = Fixture::new().await;
+    let a = f.task("Add the API endpoint").await;
+    let b = f.task("Call it from the UI").await;
+    let a_worktree = worktree::prepare(f.ctx(), &a.id).await.expect("prepare A");
+    commit_in(
+        Path::new(&a_worktree.path),
+        "endpoint.rs",
+        "// A\n",
+        "Add A",
+    );
+    tasks::set_task_dependencies(f.ctx(), &b.id, std::slice::from_ref(&a.id))
+        .await
+        .expect("B depends on A");
+
+    let b_worktree = worktree::prepare(f.ctx(), &b.id).await.expect("prepare B");
+
+    assert_eq!(b_worktree.base_ref, "main");
+    assert_eq!(
+        git(Path::new(&b_worktree.path), &["rev-parse", "HEAD"]),
+        f.source.head_sha(),
+    );
+    assert!(
+        b_worktree
+            .dependency_warning
+            .as_deref()
+            .is_some_and(|warning| warning.contains("Add the API endpoint")),
+        "the warning must name what is not in the base: {:?}",
+        b_worktree.dependency_warning,
+    );
+}
+
+#[tokio::test]
+async fn a_dependency_that_has_never_run_cannot_be_a_base() {
+    // Satisfied — dragged straight to `done` by a user who implemented it
+    // themselves — but with no branch to build on. There is nothing to hand
+    // `git worktree add`, so it falls through to the default branch and says so.
+    let f = Fixture::new().await;
+    let a = f.task("Did it by hand").await;
+    let b = f.task("Call it from the UI").await;
+    move_to(&f, &a.id, BoardColumn::Done).await;
+    tasks::set_task_dependencies(f.ctx(), &b.id, std::slice::from_ref(&a.id))
+        .await
+        .expect("B depends on A");
+
+    let b_worktree = worktree::prepare(f.ctx(), &b.id).await.expect("prepare B");
+
+    assert_eq!(b_worktree.base_ref, "main");
+    assert_eq!(
+        b_worktree.dependency_warning.as_deref(),
+        Some(
+            "This task branches from main: none of its dependencies has a branch to build \
+             on yet. \"Did it by hand\" has not produced one — a dependency that has never \
+             run cannot be a base."
+        ),
+    );
+}
+
+#[tokio::test]
+async fn two_dependencies_base_off_the_higher_one_and_warn_about_the_other() {
+    // Both satisfied, both with branches, both in `in_review` — so the tie is
+    // broken by ascending `position`, and `position` ascends downwards
+    // (ADR-0007). A was filed first and sits above B.
+    let f = Fixture::new().await;
+    let a = f.task("Add the API endpoint").await;
+    let b = f.task("Add the schema").await;
+    let c = f.task("Call them from the UI").await;
+
+    let a_worktree = worktree::prepare(f.ctx(), &a.id).await.expect("prepare A");
+    commit_in(
+        Path::new(&a_worktree.path),
+        "endpoint.rs",
+        "// A\n",
+        "Add A",
+    );
+    let a_tip = git(Path::new(&a_worktree.path), &["rev-parse", "HEAD"]);
+    file_for_review(&f, &a.id).await;
+
+    let b_worktree = worktree::prepare(f.ctx(), &b.id).await.expect("prepare B");
+    commit_in(Path::new(&b_worktree.path), "schema.rs", "// B\n", "Add B");
+    file_for_review(&f, &b.id).await;
+
+    tasks::set_task_dependencies(f.ctx(), &c.id, &[a.id.clone(), b.id.clone()])
+        .await
+        .expect("C depends on both");
+
+    let c_worktree = worktree::prepare(f.ctx(), &c.id).await.expect("prepare C");
+
+    assert_eq!(c_worktree.base_ref, a_worktree.branch);
+    assert_eq!(
+        git(Path::new(&c_worktree.path), &["rev-parse", "HEAD"]),
+        a_tip
+    );
+    assert!(
+        !PathBuf::from(&c_worktree.path).join("schema.rs").is_file(),
+        "B's work is genuinely not in C's base — which is exactly what the warning is for",
+    );
+
+    let warning = c_worktree
+        .dependency_warning
+        .as_deref()
+        .expect("two dependencies must produce ADR-0008's explicit warning");
+    assert!(warning.contains("Add the API endpoint"), "{warning}");
+    assert!(warning.contains("\"Add the schema\""), "{warning}");
+}
+
+#[tokio::test]
+async fn the_resolved_base_is_recorded_on_the_run() {
+    // ADR-0008's amendment: `start_run` writes what the attempt was built on,
+    // and `status`/`diff_summary` prefer that recorded value over a fresh
+    // resolution — a task's dependencies can change between attempts, and the
+    // morning is asking about the attempt it is reading.
+    let f = Fixture::new().await;
+    let a = f.task("Add the API endpoint").await;
+    let b = f.task("Call it from the UI").await;
+    let a_worktree = worktree::prepare(f.ctx(), &a.id).await.expect("prepare A");
+    commit_in(
+        Path::new(&a_worktree.path),
+        "endpoint.rs",
+        "// A\n",
+        "Add A",
+    );
+    file_for_review(&f, &a.id).await;
+    tasks::set_task_dependencies(f.ctx(), &b.id, std::slice::from_ref(&a.id))
+        .await
+        .expect("B depends on A");
+
+    let b_worktree = worktree::prepare(f.ctx(), &b.id).await.expect("prepare B");
+    let data = scratch_dir("rimaia-run-data-");
+    let paths = AppPaths::new(data.path());
+    paths.create_all().expect("the app data directories");
+    let run = start_run(
+        f.ctx(),
+        &paths,
+        NewRun {
+            task_id: b.id.clone(),
+            session_id: "0b6d3e2e-0000-4000-8000-00000000ba5e".to_string(),
+            prompt: "implement the plan".to_string(),
+            base_ref: Some(b_worktree.base_ref.clone()),
+        },
+    )
+    .await
+    .expect("open the run row");
+
+    assert_eq!(run.base_ref.as_deref(), Some(a_worktree.branch.as_str()));
+
+    // Now the dependency changes out from under the recorded attempt. The
+    // status still reports the base the branch actually has.
+    tasks::set_task_dependencies(f.ctx(), &b.id, &[])
+        .await
+        .expect("clear B's dependencies");
+
+    let status = worktree::status(f.ctx(), &b.id).await.expect("status");
+    assert_eq!(
+        status.base_ref, a_worktree.branch,
+        "a re-resolution would say `main` and silently re-measure the diff",
+    );
+    let summary = worktree::diff_summary(f.ctx(), &b.id)
+        .await
+        .expect("diff summary");
+    assert_eq!(summary.base_ref, a_worktree.branch);
+}
+
+#[tokio::test]
+async fn a_task_that_has_never_run_reports_a_freshly_resolved_base() {
+    // The other half of the rule: with nothing recorded there is nothing to
+    // prefer, so `status` answers from the current graph.
+    let f = Fixture::new().await;
+    let task = f.task("Add parser").await;
+
+    let status = worktree::status(f.ctx(), &task.id).await.expect("status");
+
+    assert_eq!(status.base_ref, "main");
+    assert_eq!(status.dependency_warning, None);
 }
 
 // ---------------------------------------------------------------------------
@@ -1185,6 +1425,41 @@ fn commit_with_dates(
         .status()
         .expect("run git commit with explicit author and committer dates");
     assert!(status.success(), "git commit with explicit dates failed");
+}
+
+/// Files a card at the bottom of `column`, naming the card currently at that
+/// bottom as its `before` neighbour.
+///
+/// `move_task` refuses an unanchored drop into a column that is not empty (its
+/// own doc says why it is refused rather than guessed as "append"), so a test
+/// that moves two cards into the same column has to name a neighbour for the
+/// second. Reading the bottom back through `list_tasks` is also what makes the
+/// resulting order the one the board would draw, which is what ADR-0008's
+/// position tiebreak is defined against.
+async fn move_to(f: &Fixture, task_id: &str, column: BoardColumn) {
+    let occupants = tasks::list_tasks(
+        f.ctx(),
+        TaskFilter {
+            repository_id: Some(f.repository.id.clone()),
+            column: Some(column),
+            run_state: None,
+        },
+    )
+    .await
+    .expect("read the destination column");
+    let bottom = occupants
+        .iter()
+        .map(|summary| summary.task.id.clone())
+        .next_back();
+
+    tasks::move_task(f.ctx(), task_id, column, bottom.as_deref(), None)
+        .await
+        .expect("file the card");
+}
+
+/// What ADR-0008 calls satisfying a dependency: the card reaches `in_review`.
+async fn file_for_review(f: &Fixture, task_id: &str) {
+    move_to(f, task_id, BoardColumn::InReview).await;
 }
 
 fn scratch_dir(prefix: &str) -> tempfile::TempDir {

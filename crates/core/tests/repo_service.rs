@@ -400,6 +400,7 @@ async fn updating_name_default_branch_and_worktree_root_is_readable_afterward() 
             name: Some("Renamed".to_string()),
             default_branch: Some("develop".to_string()),
             worktree_root: Some("/tmp/somewhere-else".to_string()),
+            ..RepositoryPatch::default()
         },
     )
     .await

@@ -43,7 +43,8 @@ function taskSummary(overrides: Partial<TaskSummary> = {}): TaskSummary {
     linkCount: 0,
     dependencyCount: 0,
     blockedByIncomplete: false,
-    lastRun: { status: "running", exitClass: null, endedAt: null },
+    blockingTitle: null,
+    lastRun: { status: "running", exitClass: null, endedAt: null, resumeAfter: null },
     // Nothing configured anywhere, which is what a card with no strategy
     // shows: the badge renders nothing rather than "undefined".
     effectiveModel: null,
@@ -61,6 +62,7 @@ function repository(overrides: Partial<Repository> = {}): Repository {
     defaultBranch: "main",
     worktreeRoot: "/data/worktrees/rimaia",
     allowUnattendedRuns: true,
+    maxConcurrency: 1,
     createdAt: "2026-08-20T09:00:00Z",
     ...overrides,
   };
@@ -69,9 +71,11 @@ function repository(overrides: Partial<Repository> = {}): Repository {
 function queueStatus(overrides: Partial<QueueStatus> = {}): QueueStatus {
   return {
     state: "paused",
-    runningTaskId: null,
+    runningTaskIds: [],
     plan: [],
     lastStepError: null,
+    usageLimitPauseUntil: null,
+    window: null,
     ...overrides,
   };
 }
@@ -101,6 +105,14 @@ function taskDetailFor(taskId: string, overrides: Partial<TaskDetail> = {}): Tas
       logPath: `/data/runs/${taskId}/run.jsonl`,
       prUrl: null,
       resumeAfter: null,
+      baseRef: null,
+      model: null,
+      effort: null,
+      runEnvironment: null,
+      inputTokens: null,
+      outputTokens: null,
+      cacheReadTokens: null,
+      cacheCreationTokens: null,
     },
     ...overrides,
   };
@@ -123,6 +135,14 @@ function runListEntry(overrides: Partial<RunListEntry> = {}): RunListEntry {
     logPath: "/data/runs/task-1/run-1.jsonl",
     prUrl: null,
     resumeAfter: null,
+    baseRef: null,
+    model: null,
+    effort: null,
+    runEnvironment: null,
+    inputTokens: null,
+    outputTokens: null,
+    cacheReadTokens: null,
+    cacheCreationTokens: null,
     taskTitle: "Wire up the board",
     repositoryId: "repo-1",
     repositoryName: "rimaia",
@@ -196,6 +216,14 @@ function mockBackend({
           logPath: `/data/runs/${taskId}/run.jsonl`,
           prUrl: null,
           resumeAfter: null,
+          baseRef: null,
+          model: null,
+          effort: null,
+          runEnvironment: null,
+          inputTokens: null,
+          outputTokens: null,
+          cacheReadTokens: null,
+          cacheCreationTokens: null,
         },
       };
     }
@@ -226,6 +254,54 @@ describe("RunsView", () => {
 
     expect(await screen.findByText("Wire up the board")).toBeInTheDocument();
     expect(screen.queryByText("Nothing running right now")).toBeNull();
+  });
+
+  it("renders every concurrent run at once, side by side, rather than one at a time", async () => {
+    // Task 012's "N concurrent runs side by side, each with its own live log".
+    // Both cards are in the document simultaneously — which is also the whole
+    // of "switching between them is one click and does not lose scroll
+    // position": nothing is hidden, so switching costs no clicks, and no card
+    // is ever unmounted, so each keeps its own scroll offset by construction
+    // rather than by saving and restoring one. See `.active-runs-list` in
+    // `src/styles/runs.css`.
+    mockBackend({
+      runningTasks: [
+        taskSummary({ id: "task-1", title: "Wire up the board" }),
+        taskSummary({ id: "task-2", title: "Add the runner" }),
+      ],
+    });
+
+    render(<RunsView />);
+
+    expect(await screen.findByText("Wire up the board")).toBeInTheDocument();
+    expect(screen.getByText("Add the runner")).toBeInTheDocument();
+    expect(document.querySelectorAll(".active-run-card")).toHaveLength(2);
+  });
+
+  it("keeps two concurrent cards mounted across a re-read, so neither loses its place", async () => {
+    // The failure a tab bar would have: re-mounting `ActiveRunCard` resets its
+    // tail state and its scroll offset. Asserted as node identity, because a
+    // component that re-rendered with the same content but a new DOM node
+    // would look identical to `getByText` and behave nothing like it.
+    const { fire } = mockBackend({
+      runningTasks: [taskSummary({ id: "task-1" }), taskSummary({ id: "task-2", title: "Two" })],
+    });
+
+    render(<RunsView />);
+    await screen.findByText("Two");
+    const before = Array.from(document.querySelectorAll(".active-run-card"));
+    expect(before).toHaveLength(2);
+
+    act(() => fire("runs:changed", ["run-for-task-1"]));
+    await waitFor(() =>
+      expect(mockInvoke.mock.calls.filter(([c]) => c === "get_queue_status").length).toBeGreaterThan(
+        1,
+      ),
+    );
+
+    const after = Array.from(document.querySelectorAll(".active-run-card"));
+    expect(after[0]).toBe(before[0]);
+    expect(after[1]).toBe(before[1]);
   });
 
   it("shows the current run_environment setting", async () => {
@@ -378,12 +454,12 @@ describe("RunsView", () => {
     });
 
     it("keeps Stop offered through a paused queue with a run still in flight", async () => {
-      // `runningTaskId` non-null while `state` is already `paused` is exactly
+      // A non-empty `runningTaskIds` while `state` is already `paused` is exactly
       // ADR-0010's "Pause lets the current run finish" — `QueueControls`
       // itself is unit-tested against this combination directly; this proves
-      // `RunsView` actually wires `queueStatus.runningTaskId` into it rather
+      // `RunsView` actually wires `queueStatus.runningTaskIds` into it rather
       // than, say, always passing `false`.
-      mockBackend({ queue: queueStatus({ state: "paused", runningTaskId: "task-1" }) });
+      mockBackend({ queue: queueStatus({ state: "paused", runningTaskIds: ["task-1"] }) });
       render(<RunsView />);
 
       expect(await screen.findByText("Paused")).toBeInTheDocument();
@@ -418,13 +494,21 @@ describe("RunsView", () => {
       mockBackend({
         queue: queueStatus({
           plan: [
-            { taskId: "task-1", title: "First up", repositoryId: "repo-1", queuePosition: 1, skip: null },
+            {
+              taskId: "task-1",
+              title: "First up",
+              repositoryId: "repo-1",
+              queuePosition: 1,
+              skip: null,
+              resumeAfter: null,
+            },
             {
               taskId: "task-2",
               title: "Second, blocked",
               repositoryId: "repo-1",
               queuePosition: null,
               skip: "unattended_runs_not_allowed",
+              resumeAfter: null,
             },
           ],
         }),
@@ -502,7 +586,7 @@ describe("RunsView", () => {
           call += 1;
           // First read: the queue is mid-run on task-1. Second read (after
           // `tasks:changed` fires below): task-1 is no longer in flight.
-          return queueStatus({ state: "running", runningTaskId: call === 1 ? "task-1" : null });
+          return queueStatus({ state: "running", runningTaskIds: call === 1 ? ["task-1"] : [] });
         }
         if (command === "get_task") {
           const taskId = (args as { id: string }).id;
@@ -525,6 +609,14 @@ describe("RunsView", () => {
               logPath: "/data/runs/task-1/run-1.jsonl",
               prUrl: null,
               resumeAfter: null,
+              baseRef: null,
+              model: null,
+              effort: null,
+              runEnvironment: null,
+              inputTokens: null,
+              outputTokens: null,
+              cacheReadTokens: null,
+              cacheCreationTokens: null,
             },
           });
         }
@@ -550,7 +642,7 @@ describe("RunsView", () => {
         if (command === "get_run_environment") return "inherit";
         if (command === "get_queue_status") {
           statusCall += 1;
-          return queueStatus({ state: "running", runningTaskId: statusCall === 1 ? "task-1" : null });
+          return queueStatus({ state: "running", runningTaskIds: statusCall === 1 ? ["task-1"] : [] });
         }
         if (command === "get_task") {
           getTaskCall += 1;
@@ -573,6 +665,14 @@ describe("RunsView", () => {
               logPath: "/data/runs/task-1/run-1.jsonl",
               prUrl: null,
               resumeAfter: null,
+              baseRef: null,
+              model: null,
+              effort: null,
+              runEnvironment: null,
+              inputTokens: null,
+              outputTokens: null,
+              cacheReadTokens: null,
+              cacheCreationTokens: null,
             },
           });
         }
@@ -584,7 +684,7 @@ describe("RunsView", () => {
 
       // Both events fire for the same transition — a run's own `runs:changed`
       // and the board's `tasks:changed` — and both independently re-read
-      // `get_queue_status`, which keeps reporting `runningTaskId: null` once
+      // `get_queue_status`, which keeps reporting an empty `runningTaskIds` once
       // task-1 has finished. The second re-read must not re-resolve the
       // outcome: the transition (task-1 -> null) already happened once.
       act(() => fire("tasks:changed", ["task-1"]));
@@ -614,9 +714,9 @@ describe("RunsView", () => {
         if (command === "get_queue_status") {
           statusCall += 1;
           // task-1 running -> task-2 running -> nothing running.
-          const runningTaskId =
-            statusCall === 1 ? "task-1" : statusCall === 2 ? "task-2" : null;
-          return queueStatus({ state: "running", runningTaskId });
+          const runningTaskIds =
+            statusCall === 1 ? ["task-1"] : statusCall === 2 ? ["task-2"] : [];
+          return queueStatus({ state: "running", runningTaskIds });
         }
         if (command === "get_task") {
           const taskId = (args as { id: string }).id;
@@ -653,6 +753,14 @@ describe("RunsView", () => {
         logPath: "/data/runs/run-shared.jsonl",
         prUrl: null,
         resumeAfter: null,
+        baseRef: null,
+        model: null,
+        effort: null,
+        runEnvironment: null,
+        inputTokens: null,
+        outputTokens: null,
+        cacheReadTokens: null,
+        cacheCreationTokens: null,
       };
 
       // Resolved out of dispatch order: task-2's call (dispatched second)

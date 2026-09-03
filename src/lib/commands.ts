@@ -2,20 +2,27 @@ import { invoke } from "@tauri-apps/api/core";
 
 import type {
   AppInfo,
+  AutoCleanup,
   BoardColumn,
+  CleanupReport,
   DiffSummary,
+  DoctorReport,
   McpProbe,
   McpStatus,
   NewTaskInput,
   NewTaskLinkInput,
+  PreflightSummary,
   PruneCriterionInput,
   PruneResult,
   QueueStatus,
   RegisterRepositoryInput,
   RemoteInfo,
+  RemovalAuthorizationInput,
+  RemovedWorktree,
   Repository,
   RimaiaError,
   Run,
+  RunCapacity,
   RunCostSummary,
   RunDetail,
   RunEnvironment,
@@ -23,6 +30,10 @@ import type {
   RunListEntry,
   RunState,
   RunTail,
+  Schedule,
+  ScheduleInput,
+  ScheduleMode,
+  ScheduleView,
   SearchHit,
   StrategyApproval,
   StrategyCatalogueView,
@@ -37,6 +48,7 @@ import type {
   TranscriptPage,
   TranscriptSummary,
   UpdateRepositoryInput,
+  WorktreeInventory,
   WorktreeStatus,
 } from "../types";
 
@@ -121,6 +133,22 @@ export function setRepositoryUnattendedRuns(id: string, allow: boolean): Promise
   return call<Repository>("set_repository_unattended_runs", { id, allow });
 }
 
+/**
+ * Raises or lowers ADR-0010's per-repository cap.
+ *
+ * Its own command rather than a field on {@link updateRepository}, for the
+ * reason the unattended-runs opt-in has one: it is a deliberate act with a
+ * consequence the panel has to state next to it, not a preference to bury in an
+ * "edit name and branch" form. Refused outside `1..=ceiling` — see {@link
+ * getRunCapacity} for the ceiling.
+ */
+export function setRepositoryMaxConcurrency(
+  id: string,
+  maxConcurrency: number,
+): Promise<Repository> {
+  return call<Repository>("set_repository_max_concurrency", { id, maxConcurrency });
+}
+
 export function removeRepository(id: string): Promise<void> {
   return call<void>("remove_repository", { id });
 }
@@ -201,6 +229,25 @@ export function reorderTaskLink(
   afterId: string | null,
 ): Promise<TaskLink> {
   return call<TaskLink>("reorder_task_link", { linkId, beforeId, afterId });
+}
+
+/**
+ * Replaces the whole set of tasks `taskId` is blocked by (ADR-0008).
+ *
+ * **Replace, never merge** — send the complete set every time, and an empty
+ * array clears every dependency. Rejects with the service's own message when
+ * the set would close a cycle (naming the whole path), when a task depends on
+ * itself, or when the dependency is in another repository. Resolves with the
+ * stored set, sorted.
+ */
+export function setTaskDependencies(taskId: string, dependsOn: string[]): Promise<string[]> {
+  return call<string[]>("set_task_dependencies", { taskId, dependsOn });
+}
+
+/** The dependencies keeping a task out of the queue, whole rows, in the order
+ *  ADR-0008 picks a base branch in. Empty means nothing is blocking it. */
+export function getBlockingReason(taskId: string): Promise<Task[]> {
+  return call<Task[]>("get_blocking_reason", { taskId });
 }
 
 // ---------------------------------------------------------------------------
@@ -373,6 +420,57 @@ export function revealTaskWorktree(taskId: string): Promise<void> {
 }
 
 // ---------------------------------------------------------------------------
+// Worktree cleanup (task 016) — see `crates/core/src/worktree/cleanup.rs`.
+// ---------------------------------------------------------------------------
+
+/** Every worktree with its task, branch, size, last activity and merged state,
+ *  plus the total shown alongside {@link getRunLogSize}. */
+export function getWorktreeInventory(): Promise<WorktreeInventory> {
+  return call<WorktreeInventory>("get_worktree_inventory");
+}
+
+/**
+ * Removes one task's worktree, subject to every guard.
+ *
+ * `authorization` defaults, field by field, to refusing: an omitted key is
+ * *not* permission. Only two of the guards can be overridden at all — a task
+ * in `running` or `waiting_retry` keeps its worktree whatever is sent, because
+ * a process is writing in there.
+ */
+export function removeTaskWorktree(
+  taskId: string,
+  authorization: RemovalAuthorizationInput = {},
+): Promise<RemovedWorktree> {
+  return call<RemovedWorktree>("remove_task_worktree", { taskId, authorization });
+}
+
+/** Removes the worktree of every task in `done`, with every force off and
+ *  every branch kept — a bulk action carries no more authority than the user
+ *  would have granted one worktree at a time. */
+export function cleanupDoneWorktrees(): Promise<CleanupReport> {
+  return call<CleanupReport>("cleanup_done_worktrees");
+}
+
+/** The same, for every worktree whose branch the default branch already
+ *  contains. A squash-merged branch reads as unmerged and is left alone: the
+ *  false negative costs a click, the false positive costs a commit. */
+export function cleanupMergedWorktrees(): Promise<CleanupReport> {
+  return call<CleanupReport>("cleanup_merged_worktrees");
+}
+
+/** Whether a task reaching `done` takes its worktree with it. Off unless
+ *  somebody turned it on. */
+export function getWorktreeAutoCleanup(): Promise<AutoCleanup> {
+  return call<AutoCleanup>("get_worktree_auto_cleanup");
+}
+
+/** Sets that policy. `on_done_acknowledged` is the only "on" spelling, so
+ *  enabling it means having been told what it deletes. */
+export function setWorktreeAutoCleanup(setting: AutoCleanup): Promise<void> {
+  return call<void>("set_worktree_auto_cleanup", { setting });
+}
+
+// ---------------------------------------------------------------------------
 // Runs (task 008) — see `src-tauri/src/commands/runs.rs`.
 // ---------------------------------------------------------------------------
 
@@ -398,6 +496,35 @@ export function startRun(taskId: string): Promise<void> {
  */
 export function cancelRun(taskId: string): Promise<void> {
   return call<void>("cancel_task_run", { taskId });
+}
+
+/**
+ * Resumes a task that is waiting out a retry, **now**, without waiting for its
+ * deadline (ADR-0011).
+ *
+ * The operator's override: they can see the window reopened early, or simply
+ * want the attempt made while they are watching. It continues the same session
+ * rather than starting a fresh one, so the worktree keeps its commits — which
+ * is the difference between this and {@link startRun}, and the reason they are
+ * two buttons rather than one.
+ *
+ * Resolves as soon as the run is under way, not once it finishes — same
+ * contract as {@link startRun}.
+ */
+export function retryTaskNow(taskId: string): Promise<void> {
+  return call<void>("retry_task_now", { taskId });
+}
+
+/**
+ * Ends a task's retry loop, landing it in `failed` for a human to look at.
+ *
+ * For the error that will not clear on its own, where the remaining attempts
+ * would each hit the same wall. Rejects for a task that is not waiting — a run
+ * in flight is stopped with {@link cancelRun}, and there is nothing to give up
+ * on for anything else.
+ */
+export function giveUpOnTask(taskId: string): Promise<void> {
+  return call<void>("give_up_on_task", { taskId });
 }
 
 /**
@@ -498,6 +625,66 @@ export function pruneRunLogs(criterion: PruneCriterionInput): Promise<PruneResul
 }
 
 // ---------------------------------------------------------------------------
+// Schedules (task 013) — see `src-tauri/src/commands/schedules.rs`.
+// ---------------------------------------------------------------------------
+
+/**
+ * Every schedule, each with the time it will next fire.
+ *
+ * The next fire time is the reason this is not a plain table read: task 013's
+ * point is that a wrong cron expression is caught **in the evening** rather
+ * than discovered in the morning, and a list without it is a list nobody can
+ * check. A row whose expression cannot be read reports `nextFireError` instead
+ * of a time rather than failing the whole call — the list is where it gets
+ * fixed.
+ *
+ * Re-read on {@link subscribeToSchedulesChanged}.
+ */
+export function listSchedules(): Promise<ScheduleView[]> {
+  return call<ScheduleView[]>("list_schedules");
+}
+
+/** Creates a schedule, armed from now — so one created at 23:00 for "every
+ *  night at 22:00" means tomorrow, not one minute ago. */
+export function createSchedule(input: ScheduleInput): Promise<Schedule> {
+  return call<Schedule>("create_schedule", { input });
+}
+
+/** Replaces a schedule's configuration, leaving its fire history alone: editing
+ *  tonight's stop time does not make tonight's start happen again. */
+export function updateSchedule(id: string, input: ScheduleInput): Promise<Schedule> {
+  return call<Schedule>("update_schedule", { id, input });
+}
+
+/**
+ * Turns a schedule on or off without deleting what it is set to.
+ *
+ * Turning one back on **re-arms** it, so a schedule that spent a month disabled
+ * does not immediately fire for the last of thirty nights it missed.
+ */
+export function setScheduleEnabled(id: string, enabled: boolean): Promise<Schedule> {
+  return call<Schedule>("set_schedule_enabled", { id, enabled });
+}
+
+export function deleteSchedule(id: string): Promise<void> {
+  return call<void>("delete_schedule", { id });
+}
+
+/** What this schedule would do if it fired now: which tasks run, in what order,
+ *  and which are blocked and why. Computed from the same function the queue
+ *  loop itself calls, so it cannot drift from what actually happens. */
+export function previewSchedulePreflight(id: string): Promise<PreflightSummary> {
+  return call<PreflightSummary>("preview_schedule_preflight", { id });
+}
+
+/** Every IANA zone name a schedule may use. The list the picker offers and the
+ *  list the service accepts come from one `chrono-tz` table, which is what
+ *  keeps a timezone package out of `package.json`. */
+export function listTimezones(): Promise<string[]> {
+  return call<string[]>("list_timezones");
+}
+
+// ---------------------------------------------------------------------------
 // The run queue (task 009) — see `src-tauri/src/commands/queue.rs`.
 // ---------------------------------------------------------------------------
 
@@ -525,7 +712,7 @@ export function stopQueue(): Promise<void> {
 
 /**
  * The whole picture for the Runs view: whether the queue is running, which
- * task it holds a process for right now, and every `ready` task in board
+ * tasks it holds processes for right now, and every `ready` task in board
  * order with the reason the queue will pass over each one it cannot start.
  * Re-read fresh on every call — subscribe to {@link subscribeToTasksChanged},
  * {@link subscribeToRunsChanged} and {@link subscribeToSettingsChanged} in
@@ -535,6 +722,26 @@ export function stopQueue(): Promise<void> {
  */
 export function getQueueStatus(): Promise<QueueStatus> {
   return call<QueueStatus>("get_queue_status");
+}
+
+/** How many runs the queue may have in flight, as configured (ADR-0010): the
+ *  mode, the stored limit, and the ceiling no setting can raise. One call for
+ *  all three, because the control renders them together. */
+export function getRunCapacity(): Promise<RunCapacity> {
+  return call<RunCapacity>("get_run_capacity");
+}
+
+/** Switches the queue between one run at a time and several. Answers with the
+ *  whole configuration, so the caller need not re-read what it just wrote. */
+export function setScheduleMode(mode: ScheduleMode): Promise<RunCapacity> {
+  return call<RunCapacity>("set_schedule_mode", { mode });
+}
+
+/** How many runs `"parallel"` may have in flight at once. Refused outside
+ *  `1..=ceiling` with a message the panel renders — a stored value out of range
+ *  is tolerated and clamped, a value from this form is not. */
+export function setMaxConcurrency(value: number): Promise<RunCapacity> {
+  return call<RunCapacity>("set_max_concurrency", { value });
 }
 
 // ---------------------------------------------------------------------------
@@ -569,4 +776,33 @@ export function setMcpPort(port: number): Promise<McpStatus> {
  *  the way a client would — not a "something is listening" check. */
 export function testMcpConnection(): Promise<McpProbe> {
   return call<McpProbe>("test_mcp_connection");
+}
+
+// ---------------------------------------------------------------------------
+// The preflight doctor (task 018) — see `src-tauri/src/commands/doctor.rs`.
+// ---------------------------------------------------------------------------
+
+/**
+ * Every preflight check, passing rows included.
+ *
+ * The passing rows are not padding: {@link WelcomeView} shows each of its four
+ * steps the rows belonging to it, so "done" there is a check passing rather
+ * than a button having been clicked.
+ *
+ * Spawns up to eight subprocesses, and two more per registered repository, so
+ * it is called on mount and on an explicit Re-check — never on an event.
+ */
+export function runDoctor(): Promise<DoctorReport> {
+  return call<DoctorReport>("run_doctor");
+}
+
+/**
+ * Records that the first-run walkthrough is done with, or deliberately skipped.
+ *
+ * There is deliberately no command to un-dismiss it: the welcome screen stays
+ * reachable from Settings, so a second command would exist only to put back a
+ * screen the user can already open.
+ */
+export function dismissOnboarding(): Promise<void> {
+  return call<void>("dismiss_onboarding");
 }

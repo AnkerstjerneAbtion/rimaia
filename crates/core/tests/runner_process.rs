@@ -605,7 +605,9 @@ async fn a_cli_that_applied_a_permission_mode_nobody_asked_for_stops_the_run() {
         RunRequest {
             task_id: fixture.task_id.clone(),
             trigger: RunTrigger::Manual,
+            resume: None,
             cancel: CancelSignal::new(),
+            in_flight: None,
         },
     )
     .await
@@ -649,7 +651,9 @@ async fn a_manual_run_against_an_init_that_echoes_accept_edits_succeeds() {
         RunRequest {
             task_id: fixture.task_id.clone(),
             trigger: RunTrigger::Manual,
+            resume: None,
             cancel: CancelSignal::new(),
+            in_flight: None,
         },
     )
     .await
@@ -1426,7 +1430,11 @@ impl RunnerFixture {
         RunRequest {
             task_id: self.task_id.clone(),
             trigger: RunTrigger::Queued,
+            resume: None,
             cancel: CancelSignal::new(),
+            // One run, so there is nothing in this repository to take turns
+            // with — see `RunRequest::in_flight`.
+            in_flight: None,
         }
     }
 

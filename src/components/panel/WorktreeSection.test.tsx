@@ -26,6 +26,7 @@ function worktreeStatus(overrides: Partial<WorktreeStatus> = {}): WorktreeStatus
     path: "/data/worktrees/repo/task-1",
     branch: "rimaia/task-1-wire-the-board",
     baseRef: "main",
+    dependencyWarning: null,
     ahead: 2,
     behind: 1,
     dirty: true,
@@ -42,6 +43,43 @@ beforeEach(() => {
 });
 
 describe("WorktreeSection", () => {
+  it("shows ADR-0008's multi-dependency warning verbatim, before the task has ever run", async () => {
+    // The warning is about what the *next* run will be built on, so it has to
+    // appear while the user can still act on it — which is exactly the state
+    // where there is no worktree yet.
+    const warning =
+      'This task branches from "Add the API endpoint" (rimaia/task-0-add-the-api-endpoint). ' +
+      '"Add the schema" is also a dependency and is not in that base — merge into it what ' +
+      "you need, or run this task again once the rest have landed.";
+    mockInvoke.mockImplementation(async (command) => {
+      if (command === "get_worktree_status") {
+        return worktreeStatus({
+          exists: false,
+          path: null,
+          branch: null,
+          dependencyWarning: warning,
+        });
+      }
+      throw new Error(`unexpected command: ${command}`);
+    });
+
+    render(<WorktreeSection taskId="task-1" />);
+
+    expect(await screen.findByText(warning)).toBeInTheDocument();
+  });
+
+  it("says nothing when there is nothing to warn about", async () => {
+    mockInvoke.mockImplementation(async (command) => {
+      if (command === "get_worktree_status") return worktreeStatus();
+      throw new Error(`unexpected command: ${command}`);
+    });
+
+    render(<WorktreeSection taskId="task-1" />);
+
+    await screen.findByText("rimaia/task-1-wire-the-board");
+    expect(screen.queryByText(/is also a dependency/)).not.toBeInTheDocument();
+  });
+
   it("renders the deliberate empty case for a task that has never run", async () => {
     mockInvoke.mockImplementation(async (command) => {
       if (command === "get_worktree_status") {

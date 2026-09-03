@@ -6,6 +6,10 @@ Claude Code 2.1.234 (see `spike/FINDINGS.md`) and `strategy-proposal.jsonl` agai
 — and must never be re-recorded, reformatted or pretty-printed. The three synthetic ones
 are edited copies of `success.jsonl`, built to exercise one specific parser edge case each.
 
+The last two are a third kind and are kept apart from both: they synthesize a payload
+**nobody has observed**, which is a weaker claim than the other two sections make. Read
+that section before trusting anything in them.
+
 ## Recorded (real, do not edit)
 
 - `success.jsonl` — a clean run: init, a couple of tool turns, a `vcs_state_changed`
@@ -78,3 +82,40 @@ has to pay for that turn.
   mid-object on line 16 (no closing braces, invalid JSON) with no trailing newline and
   no `result` event at all. Mimics a process killed while writing its own output; a
   parser must treat this as an incomplete/unterminated run, not a parse crash.
+
+## Synthesized against an unobserved payload (ADR-0011's named gap)
+
+- `usage-limit.jsonl` / `usage-limit-no-reset.jsonl` — edited copies of
+  **`interrupted-sigterm.jsonl`**, not of `success.jsonl`: a run stopped at a wall does
+  not complete, so the terminal `result` it needs is the aborted one. Two changes, both
+  inside the `rate_limit_event` that recording already carries — `rate_limit_info.status`
+  from `"allowed"` to `"rejected"`, and a pinned `resetsAt` of `1787209200`
+  (2026-08-20T07:00:00Z), removed entirely in the `-no-reset` variant so the
+  fixed-15-minute fallback path has something to run against. No new fields, no new event
+  types, nothing else touched.
+
+**These are different from the three above, and the difference is why they get their own
+section.** `malformed-line`, `unknown-event-type` and `truncated-stream` synthesize a
+*shape* — a cut line, an unknown type — against payloads that were all really recorded.
+These synthesize a **value nobody has ever seen**. `spike/FINDINGS.md` §4 and ADR-0011's
+2026-08-20 amendment both record it: the `rate_limit_event` payload when `status` is
+something other than `"allowed"` was never observed, so `"rejected"` is a guess. It is
+the least bad guess available — the word appears in the corpus already, as
+`overageStatus`, so nothing in these files is vocabulary that exists nowhere — but it is
+still a guess.
+
+**The invented word is not load-bearing, and that is deliberate.**
+`runner::outcome::Termination::hit_a_usage_limit` matches on "the status is not
+`allowed`" and never on any particular value, so a real capture carrying `"limited"`,
+`"blocked"` or something nobody has thought of classifies identically.
+`a_status_the_corpus_never_saw_still_reads_as_a_usage_limit` in
+`tests/runner_outcome.rs` asserts exactly that, over five words, which is what makes the
+guess safe to ship.
+
+`tests/harness.rs` lists these under `SYNTHESIZED_UNOBSERVED` rather than `RECORDED`, and
+`the_usage_limit_fixtures_are_labelled_unobserved_rather_than_recorded` fails if anyone
+moves them.
+
+**Replace both byte-for-byte the first time a real queue hits the wall**, capture the
+stream, and delete this section. Capturing it is a human's job and it is the one thing
+that turns this branch of the classifier from assumed to proven.

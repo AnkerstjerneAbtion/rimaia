@@ -27,12 +27,33 @@
 //!
 //! # The base ref
 //!
-//! [`resolve_base_ref`] is task 011's seam and is deliberately one line. See
-//! its own doc.
+//! [`base_ref`] owns it — ADR-0008's branch chaining, which task 011 grew out
+//! of the one-line seam task 007 left here. Two rules of this module follow
+//! from it and are stated once, at [`recorded_base_ref`]: [`prepare`] resolves
+//! the base fresh and records it on the run it is about to start, while
+//! [`status`] and [`diff_summary`] prefer the *recorded* value.
+//!
+//! # Removal, and the layer above it
+//!
+//! [`remove`] is the mechanism: directory, git's administrative record, and
+//! optionally the branch. It takes no view on whether removing was a good idea
+//! — task 007 gave it exactly one question to ask, and [`ForceRemoval`] is the
+//! caller's answer to it. Everything that decides *whether* (the guards, the
+//! inventory they are read off, the bulk actions and the auto-on-`done`
+//! policy) is task 016's and lives in [`cleanup`], on top of this rather than
+//! inside it.
 
+mod base_ref;
+pub mod cleanup;
 mod git;
 mod naming;
 mod safety;
+
+pub use cleanup::{
+    auto_cleanup, inventory, remove_done_worktrees, remove_merged_worktrees, remove_worktree,
+    set_auto_cleanup, AutoCleanup, BranchDisposition, CleanupReport, RefusedWorktree,
+    RemovalAuthorization, RemovedWorktree, WorktreeInventory, WorktreeInventoryEntry,
+};
 
 use std::path::{Path, PathBuf};
 
@@ -47,10 +68,11 @@ use crate::events::ChangeEvent;
 /// A task's worktree: where it is, what branch it is on, and what that branch
 /// was created from.
 ///
-/// `base_ref` is carried rather than stored — there is no column for it and
-/// seam-contract D4 forbids a migration to add one — so it is re-derived on
-/// every call by [`resolve_base_ref`]. Task 011 records the resolved base on
-/// the *run*, which is a `runs` column that already exists.
+/// `base_ref` is carried rather than stored **on the task** — there is no
+/// column for it there and seam-contract D4 forbids a migration to add one — so
+/// it is re-derived on every call by [`base_ref::resolve`]. The caller that
+/// starts a run puts it on the `runs` row instead, which is a column that
+/// already exists: see [`recorded_base_ref`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Worktree {
@@ -59,6 +81,11 @@ pub struct Worktree {
     pub path: String,
     pub branch: String,
     pub base_ref: String,
+    /// ADR-0008's explicit multi-dependency warning, or `None`. Carried on the
+    /// worktree as well as on [`WorktreeStatus`] because [`prepare`] is what
+    /// the runner calls, and a warning produced during an unattended run has
+    /// nowhere else to be logged.
+    pub dependency_warning: Option<String>,
 }
 
 /// Files changed, insertions and deletions — ADR-0013's "git diff summary".
@@ -90,7 +117,19 @@ pub struct WorktreeStatus {
     /// shows the path so the user can go and look, including when it is gone.
     pub path: Option<String>,
     pub branch: Option<String>,
+    /// What the last attempt was actually built on when there was one, and a
+    /// fresh resolution otherwise — see [`recorded_base_ref`].
     pub base_ref: String,
+    /// ADR-0008's multi-dependency warning, always computed against the
+    /// **current** dependency set rather than the recorded attempt's.
+    ///
+    /// The split is deliberate and is the reason both fields are here.
+    /// `base_ref` answers "what was this branch built on", which is a fact
+    /// about an attempt that already happened and must not change when the
+    /// board does. This answers "what should you do about it", which is advice
+    /// about the graph as it stands — the ADR's own remedy is "merge them or
+    /// serialize the work", and neither is an instruction about the past.
+    pub dependency_warning: Option<String>,
     pub ahead: i64,
     pub behind: i64,
     /// Uncommitted work in the worktree: modified, staged or untracked alike,
@@ -156,11 +195,15 @@ pub struct DiffSummary {
 /// anywhere, and task 007's Scope allows it "only on explicit user
 /// confirmation". A `bool` would make the dangerous value the one that is
 /// easier to type; this way the call site has to name it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+/// [`Default`] is [`No`](ForceRemoval::No), so a struct holding one of these
+/// (task 016's `RemovalAuthorization`) derives the *refusing* posture rather
+/// than needing every field named at every call site to stay safe.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ForceRemoval {
     /// `git worktree remove` refuses a dirty worktree, and that refusal
     /// reaches the user as the error message.
+    #[default]
     No,
     /// The user was shown what would be discarded and said yes.
     ConfirmedByUser,
@@ -222,9 +265,21 @@ pub async fn prepare(ctx: &ServiceContext, task_id: &str) -> Result<Worktree> {
     let task = fetch_task(ctx, task_id).await?;
     let repository = crate::repo::get(ctx, &task.repository_id).await?;
     let location = locate(&repository).await?;
-    let base_ref = resolve_base_ref(&repository);
+    // Fresh, never the recorded value: this call is what produces the next
+    // attempt, so the answer has to describe the dependency graph as it is now.
+    let resolved = base_ref::resolve(ctx, &task, &repository).await?;
+    let base_ref = resolved.base_ref;
 
-    if let Some(existing) = existing_worktree(&location, &task, &base_ref).await? {
+    if let Some(warning) = &resolved.warning {
+        // Logged as well as returned, because `prepare`'s caller on the
+        // unattended path is the runner, and nobody is reading a return value
+        // at 03:00.
+        tracing::warn!(task_id = %task.id, %base_ref, "{warning}");
+    }
+
+    if let Some(existing) =
+        existing_worktree(&location, &task, &base_ref, resolved.warning.clone()).await?
+    {
         return Ok(existing);
     }
 
@@ -275,6 +330,7 @@ pub async fn prepare(ctx: &ServiceContext, task_id: &str) -> Result<Worktree> {
         path,
         branch,
         base_ref,
+        dependency_warning: resolved.warning,
     })
 }
 
@@ -284,7 +340,10 @@ pub async fn status(ctx: &ServiceContext, task_id: &str) -> Result<WorktreeStatu
     let task = fetch_task(ctx, task_id).await?;
     let repository = crate::repo::get(ctx, &task.repository_id).await?;
     let repository_path = locate_repository(&repository).await?;
-    let base_ref = resolve_base_ref(&repository);
+    let resolved = base_ref::resolve(ctx, &task, &repository).await?;
+    let base_ref = recorded_base_ref(ctx, &task.id)
+        .await?
+        .unwrap_or(resolved.base_ref);
 
     let mut status = WorktreeStatus {
         task_id: task.id.clone(),
@@ -292,6 +351,7 @@ pub async fn status(ctx: &ServiceContext, task_id: &str) -> Result<WorktreeStatu
         path: task.worktree_path.clone(),
         branch: task.branch.clone(),
         base_ref: base_ref.clone(),
+        dependency_warning: resolved.warning,
         ahead: 0,
         behind: 0,
         dirty: false,
@@ -335,7 +395,10 @@ pub async fn diff_summary(ctx: &ServiceContext, task_id: &str) -> Result<DiffSum
     let task = fetch_task(ctx, task_id).await?;
     let repository = crate::repo::get(ctx, &task.repository_id).await?;
     let repository_path = locate_repository(&repository).await?;
-    let base_ref = resolve_base_ref(&repository);
+    let base_ref = match recorded_base_ref(ctx, &task.id).await? {
+        Some(recorded) => recorded,
+        None => base_ref::resolve(ctx, &task, &repository).await?.base_ref,
+    };
 
     let mut summary = DiffSummary {
         task_id: task.id.clone(),
@@ -514,26 +577,40 @@ async fn correct_run_state(ctx: &ServiceContext, task: &Task) -> Result<Option<R
     Ok(Some(corrected))
 }
 
-/// What a task's branch is created from.
+/// What the task's most recent attempt was actually built on, when there is
+/// one — `runs.base_ref`, written by `runner::outcome::start_run`.
 ///
-/// The repository's configured default branch, and nothing else yet
-/// (ADR-0005). **This is task 011's seam**, which is why it is a function
-/// rather than a field read at the one call site that needs it: task 011's own
-/// Scope says "`worktree::prepare` resolves the base ref: no dependencies →
-/// repository default branch; one or more → the branch of the highest-position
-/// dependency" (ADR-0008), and that is a change to this body.
+/// **[`status`] and [`diff_summary`] prefer this over a fresh resolution, and
+/// [`prepare`] never reads it.** ADR-0008's amendment of 2026-09-02 takes that
+/// decision; the argument is that a task's dependencies can change between
+/// attempts, so a re-derivation answers a different question from the one being
+/// asked. The morning review is reading a branch that already exists and wants
+/// to know what it was measured against; re-resolving would silently re-measure
+/// yesterday's diff against a base chosen from today's graph, and the diff would
+/// change without anybody committing anything. `prepare` is the opposite case —
+/// it is producing the next attempt, so the current graph is exactly the right
+/// input.
 ///
-/// A local branch name rather than `origin/<branch>`, deliberately. ADR-0005
-/// says "the repository's configured default branch", and there is a second
-/// reason that outlives the wording: there is no column to record a resolved
-/// base ref in and seam-contract D4 forbids a migration to add one, so
-/// [`status`] and [`diff_summary`] have to re-derive the same answer from the
-/// same row every time they run. Only a derivation from stored state stays
-/// stable; one that consulted the remote would give a different answer after
-/// every fetch, and a branch would appear to gain and lose commits nobody
-/// wrote.
-fn resolve_base_ref(repository: &Repository) -> String {
-    repository.default_branch.clone()
+/// `None` for a task that has never run, where there is nothing recorded and the
+/// fresh resolution is also the only answer available.
+///
+/// Highest `attempt`, never latest `ended_at`, for the reason `list_tasks` gives
+/// at its own last-run join: `ended_at` is NULL while a run is in flight, and
+/// the run in flight is precisely the one whose base a status call is about.
+async fn recorded_base_ref(ctx: &ServiceContext, task_id: &str) -> Result<Option<String>> {
+    let recorded = sqlx::query_scalar!(
+        "SELECT base_ref FROM runs WHERE task_id = ?1 ORDER BY attempt DESC LIMIT 1",
+        task_id,
+    )
+    .fetch_optional(&ctx.pool)
+    .await?
+    // Two layers of `Option`: no run at all, and a run from before this column
+    // was written. Both mean "nothing recorded", and so does a blank string —
+    // `base_ref::has_branch` refuses the same value for the same reason.
+    .flatten()
+    .filter(|base_ref| !base_ref.trim().is_empty());
+
+    Ok(recorded)
 }
 
 /// Resolves and safety-checks the two directories every operation works from.
@@ -578,6 +655,7 @@ async fn existing_worktree(
     location: &Location,
     task: &Task,
     base_ref: &str,
+    dependency_warning: Option<String>,
 ) -> Result<Option<Worktree>> {
     let Some((path, branch)) = live_worktree(&location.repository, task).await? else {
         return Ok(None);
@@ -594,6 +672,7 @@ async fn existing_worktree(
         path: path_to_string(&path)?,
         branch,
         base_ref: base_ref.to_string(),
+        dependency_warning,
     }))
 }
 
@@ -739,7 +818,14 @@ mod tests {
             exists: true,
             path: Some("/data/worktrees/repo/3f2b1c00".to_string()),
             branch: Some("rimaia/3f2b1c00-wire-the-board".to_string()),
-            base_ref: "main".to_string(),
+            base_ref: "rimaia/3f2b1a00-add-the-api-endpoint".to_string(),
+            dependency_warning: Some(
+                "This task branches from \"Add the API endpoint\" \
+                 (rimaia/3f2b1a00-add-the-api-endpoint). \"Seed the fixtures\" is also a \
+                 dependency and is not in that base — merge into it what you need, or run \
+                 this task again once the rest have landed."
+                    .to_string(),
+            ),
             ahead: 3,
             behind: 1,
             dirty: true,
@@ -758,7 +844,14 @@ mod tests {
                 "exists": true,
                 "path": "/data/worktrees/repo/3f2b1c00",
                 "branch": "rimaia/3f2b1c00-wire-the-board",
-                "baseRef": "main",
+                // ADR-0008's chaining: a base that is another task's branch, not
+                // the repository default, and the warning naming what is not in it.
+                "baseRef": "rimaia/3f2b1a00-add-the-api-endpoint",
+                "dependencyWarning":
+                    "This task branches from \"Add the API endpoint\" \
+                     (rimaia/3f2b1a00-add-the-api-endpoint). \"Seed the fixtures\" is also a \
+                     dependency and is not in that base — merge into it what you need, or run \
+                     this task again once the rest have landed.",
                 "ahead": 3,
                 "behind": 1,
                 "dirty": true,

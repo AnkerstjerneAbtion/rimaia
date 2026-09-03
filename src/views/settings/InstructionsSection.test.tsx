@@ -39,6 +39,7 @@ function taskSummary(overrides: Partial<TaskSummary> = {}): TaskSummary {
     linkCount: 0,
     dependencyCount: 0,
     blockedByIncomplete: false,
+    blockingTitle: null,
     lastRun: null,
     // What a run would spawn with, resolved in Rust and carried on the read
     // (task 020, seam-contract D12's amendment). Nothing configured anywhere

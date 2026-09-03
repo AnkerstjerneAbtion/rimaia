@@ -1,6 +1,6 @@
 {
   "db_name": "SQLite",
-  "query": "SELECT id, name, path, default_branch, worktree_root, allow_unattended_runs,\n            created_at AS \"created_at: DateTime<Utc>\"\n           FROM repositories WHERE id = ?1",
+  "query": "SELECT id, name, path, default_branch, worktree_root, allow_unattended_runs,\n            max_concurrency, created_at AS \"created_at: DateTime<Utc>\"\n           FROM repositories WHERE id = ?1",
   "describe": {
     "columns": [
       {
@@ -34,8 +34,13 @@
         "type_info": "Bool"
       },
       {
-        "name": "created_at: DateTime<Utc>",
+        "name": "max_concurrency",
         "ordinal": 6,
+        "type_info": "Integer"
+      },
+      {
+        "name": "created_at: DateTime<Utc>",
+        "ordinal": 7,
         "type_info": "Text"
       }
     ],
@@ -49,8 +54,9 @@
       false,
       false,
       false,
+      false,
       false
     ]
   },
-  "hash": "5c0af8c42c9179f85348f3f94daf96b50073cb3170092cbd08fe8f626f48923a"
+  "hash": "92515466c1144de7bd5b1c1c8c12a42e2c86bb9648aaffd73813e9af13a1d483"
 }

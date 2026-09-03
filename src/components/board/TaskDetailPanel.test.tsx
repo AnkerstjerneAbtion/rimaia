@@ -74,6 +74,7 @@ function worktreeStatus(overrides: Partial<WorktreeStatus> = {}): WorktreeStatus
     path: null,
     branch: null,
     baseRef: "main",
+    dependencyWarning: null,
     ahead: 0,
     behind: 0,
     dirty: false,
@@ -160,6 +161,14 @@ describe("TaskDetailPanel", () => {
             logPath: "/data/runs/task-1/run-1.jsonl",
             prUrl: null,
             resumeAfter: null,
+            baseRef: null,
+            model: null,
+            effort: null,
+            runEnvironment: null,
+            inputTokens: null,
+            outputTokens: null,
+            cacheReadTokens: null,
+            cacheCreationTokens: null,
           },
         });
       }
@@ -230,6 +239,14 @@ describe("TaskDetailPanel", () => {
             logPath: "/tmp/run.jsonl",
             prUrl: null,
             resumeAfter: null,
+            baseRef: null,
+            model: null,
+            effort: null,
+            runEnvironment: null,
+            inputTokens: null,
+            outputTokens: null,
+            cacheReadTokens: null,
+            cacheCreationTokens: null,
           },
         });
       }

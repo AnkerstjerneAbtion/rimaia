@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT resume_after AS \"resume_after: DateTime<Utc>\"\n             FROM runs WHERE task_id = ?1 ORDER BY attempt DESC LIMIT 1",
+  "describe": {
+    "columns": [
+      {
+        "name": "resume_after: DateTime<Utc>",
+        "ordinal": 0,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      true
+    ]
+  },
+  "hash": "571049a7fcb0fdac75f9d9d7829e62d146efc4926d7d1a0b37ea823b0acc037b"
+}

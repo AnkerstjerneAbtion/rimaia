@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT session_id AS \"session_id!: String\",\n                  exit_class AS \"exit_class: ExitClass\"\n             FROM runs\n            WHERE task_id = ?1\n            ORDER BY attempt DESC",
+  "describe": {
+    "columns": [
+      {
+        "name": "session_id!: String",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "exit_class: ExitClass",
+        "ordinal": 1,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      true
+    ]
+  },
+  "hash": "536a9b422461fed3cb7982bb9709042fda1af173e8b0053978765ea12f84bcd5"
+}

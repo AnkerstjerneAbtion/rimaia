@@ -40,7 +40,7 @@
 use crate::context::ServiceContext;
 use crate::db::RunState;
 use crate::error::{Error, ErrorCode, Result};
-use crate::tasks::set_run_state;
+use crate::tasks::{run_state_spelling, set_run_state};
 
 /// What trying to claim a task came to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -114,6 +114,46 @@ pub async fn claim(ctx: &ServiceContext, task_id: &str) -> Result<ClaimOutcome> 
     Ok(ClaimOutcome::Claimed)
 }
 
+/// Takes a task from `waiting_retry` to `running`, or reports that somebody
+/// else got there first.
+///
+/// A **sibling** of [`claim`] rather than a branch inside it, and the shape is
+/// the whole argument: one conditional write, decided by the same
+/// [`set_run_state`] transaction. A single function that read the row and then
+/// routed on what it found would do the read *outside* the transaction, which
+/// reintroduces exactly the race this module exists to close — two starters
+/// both reading `waiting_retry`, both choosing this route, and one of them
+/// spawning a second process for a task the other already owns. Here the loser
+/// is refused by the machine: `Running -> Running` is illegal, so whoever
+/// commits first owns the task.
+///
+/// `WaitingRetry -> Running` is ADR-0007's own edge for this — "the wait
+/// elapsed" — and needs no new one. [`release`]'s deliberate refusal to
+/// overwrite `waiting_retry` is what makes the pair safe, and is now
+/// load-bearing rather than defensive: a run that classified itself as
+/// retryable keeps its verdict even if the starter that follows fails.
+///
+/// One window is left open and is the same one [`claim`] names: `Queued ->
+/// Running` is also legal, so a task that reached `queued` between the board
+/// read and this call would be claimed by this route too. The queue only ever
+/// calls this for an entry it read as `waiting_retry` with a due deadline, it
+/// costs one attempt on a card that was going to be started anyway, and closing
+/// it properly needs a `set_run_state` that takes an expected current state —
+/// a change to task 004's module rather than something to work around here.
+pub async fn claim_retry(ctx: &ServiceContext, task_id: &str) -> Result<ClaimOutcome> {
+    match set_run_state(ctx, task_id, RunState::Running).await {
+        Ok(_) => Ok(ClaimOutcome::Claimed),
+        Err(error) if lost_the_race(&error) => {
+            tracing::debug!(
+                %task_id, %error,
+                "the retry claim was lost; another starter reached this task first",
+            );
+            Ok(ClaimOutcome::Lost)
+        }
+        Err(error) => Err(error),
+    }
+}
+
 /// Lands a claimed task that never became a finished run.
 ///
 /// The backstop for the one gap `runner::process::run_task` leaves a *caller*
@@ -146,6 +186,39 @@ pub async fn release(ctx: &ServiceContext, task_id: &str) {
             %task_id, %error,
             "could not read back a task whose queued run never finished",
         ),
+    }
+}
+
+/// Ends a task's retry loop by hand: `waiting_retry -> failed`.
+///
+/// The operator's half of ADR-0011's cap. The policy gives up on its own when
+/// the budget runs out; this is the person who has read the error and knows the
+/// next four attempts will hit the same wall, and it is a legal edge in
+/// ADR-0007's machine already — "retries exhausted", taken early.
+///
+/// Lives here rather than in a Tauri command because ADR-0006 makes a rule
+/// enforced in one adapter and not the other a defect: the button and the MCP
+/// tool call this same function, so the refusal below is one sentence rather
+/// than two similar ones.
+///
+/// Refuses anything that is not waiting, with a sentence rather than a state
+/// machine error. "Give up" on a task that is running means cancel, on a task
+/// that is idle means nothing at all, and answering either with "illegal
+/// transition WaitingRetry -> Failed" would tell the user about our internals
+/// instead of about their card.
+pub async fn give_up(ctx: &ServiceContext, task_id: &str) -> Result<()> {
+    match current_run_state(ctx, task_id).await? {
+        Some(RunState::WaitingRetry) => {
+            set_run_state(ctx, task_id, RunState::Failed).await?;
+            tracing::info!(%task_id, "the operator ended this task's retry loop");
+            Ok(())
+        }
+        Some(other) => Err(Error::invalid(format!(
+            "this task is not waiting to be retried (it is {}), so there is nothing to give up on. \
+             A run in flight is stopped with Cancel.",
+            run_state_spelling(other),
+        ))),
+        None => Err(Error::not_found(format!("no task with id {task_id}"))),
     }
 }
 

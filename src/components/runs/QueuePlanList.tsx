@@ -17,6 +17,7 @@ export const QUEUE_SKIP_LABELS: Record<SkipReason, string> = {
   unattended_runs_not_allowed: "this repository has not enabled unattended agent runs",
   dependency_not_satisfied: "waiting on a dependency",
   already_in_flight: "already started",
+  waiting_for_retry: "waiting to resume",
   needs_attention: "the last run did not succeed",
 };
 

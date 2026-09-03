@@ -5,10 +5,12 @@ import { subscribeToTasksChanged } from "../../lib/events";
 import type { Repository, RimaiaError, Task, TaskDetail } from "../../types";
 import { ErrorBanner } from "../ErrorBanner";
 import { DeleteTaskSection } from "../panel/DeleteTaskSection";
+import { DependenciesEditor } from "../panel/DependenciesEditor";
 import { ExtraInstructionsEditor } from "../panel/ExtraInstructionsEditor";
 import { LinksEditor } from "../panel/LinksEditor";
 import { PlanEditor } from "../panel/PlanEditor";
 import { RepositorySelector } from "../panel/RepositorySelector";
+import { RetrySection } from "../panel/RetrySection";
 import { RunHistorySection } from "../panel/RunHistorySection";
 import { RunInfoSection } from "../panel/RunInfoSection";
 import { RunOutcomeSection } from "../panel/RunOutcomeSection";
@@ -202,6 +204,18 @@ function TaskDetailPanelBody({
         onChanged={refreshDetail}
       />
 
+      {/* ADR-0008's dependency editor. `dependsOn` is on the detail rather than
+          on `Task`, so it waits for the same fetch `LinksEditor` does; the
+          repository comes off the board's own row, because a dependency must be
+          in the same one and that is also what the picker filters by. */}
+      <DependenciesEditor
+        taskId={task.id}
+        repositoryId={task.repositoryId}
+        dependsOn={detail?.dependsOn ?? []}
+        loading={detailLoading}
+        onChanged={refreshDetail}
+      />
+
       {/* Task 020's execution-strategy control, where task 005's plain
           model/effort dropdowns used to sit. The mode, the two choices and
           the plan envelope come off the board's own `Task` (they are columns,
@@ -232,6 +246,17 @@ function TaskDetailPanelBody({
           above, not a replacement for it (see this stage's file-ownership
           note in `RunOutcomeSection.tsx`'s own doc comment). */}
       <RunOutcomeSection lastRun={detail?.lastRun ?? null} loading={detailLoading} />
+
+      {/* Task 014's manual pair, immediately under the outcome that caused the
+          wait — "give up" is only a decision if the error is on screen with it.
+          Renders nothing at all unless this task is `waiting_retry`. */}
+      <RetrySection
+        taskId={task.id}
+        runState={task.runState}
+        lastRun={detail?.lastRun ?? null}
+        loading={detailLoading}
+        onChanged={refreshDetail}
+      />
 
       {/* Task 015's full history — every attempt, not only the last one —
           each opening the run detail overlay (outcome, diff, commits, PR,

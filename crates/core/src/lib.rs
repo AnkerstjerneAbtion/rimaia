@@ -13,6 +13,7 @@
 pub mod clock;
 pub mod context;
 pub mod db;
+pub mod doctor;
 pub mod error;
 pub mod events;
 pub mod mcp;
@@ -20,6 +21,7 @@ pub mod paths;
 pub mod repo;
 pub mod runner;
 pub mod runs;
+pub mod schedule;
 pub mod scheduler;
 pub mod startup;
 pub mod strategy;

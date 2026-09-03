@@ -43,7 +43,8 @@ function taskSummary(overrides: Partial<TaskSummary> = {}): TaskSummary {
     linkCount: 0,
     dependencyCount: 0,
     blockedByIncomplete: false,
-    lastRun: { status: "running", exitClass: null, endedAt: null },
+    blockingTitle: null,
+    lastRun: { status: "running", exitClass: null, endedAt: null, resumeAfter: null },
     // Nothing configured anywhere, which is what a card with no strategy
     // shows: the badge renders nothing rather than "undefined".
     effectiveModel: null,
@@ -74,6 +75,14 @@ function taskDetail(overrides: Partial<TaskDetail> = {}): TaskDetail {
       logPath: "/data/runs/task-1/run-1.jsonl",
       prUrl: null,
       resumeAfter: null,
+      baseRef: null,
+      model: null,
+      effort: null,
+      runEnvironment: null,
+      inputTokens: null,
+      outputTokens: null,
+      cacheReadTokens: null,
+      cacheCreationTokens: null,
     },
     ...overrides,
   };

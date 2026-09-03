@@ -114,6 +114,13 @@ export function WorktreeSection({ taskId }: WorktreeSectionProps) {
           No worktree yet — this task has never run. Starting a run creates one (task 008).
         </p>
       )}
+      {/* ADR-0008's explicit multi-dependency warning. It sits above the
+          details, and outside the `path !== null` guard, because the thing it
+          warns about is what the *next* run will be built on — a task that has
+          never run is exactly when the user can still act on it. */}
+      {status?.dependencyWarning && (
+        <p className="worktree-dependency-warning">{status.dependencyWarning}</p>
+      )}
       {status && status.path !== null && (
         <WorktreeDetails
           status={status}

@@ -35,6 +35,9 @@ pub type RepositoryId = String;
 /// The id of a row in `runs`. See [`TaskId`].
 pub type RunId = String;
 
+/// The id of a row in `schedules`. See [`TaskId`].
+pub type ScheduleId = String;
+
 /// How many unread events the channel keeps for a receiver that falls behind.
 ///
 /// One desktop user's mutations pass through here, so 256 is ample; it lives in
@@ -56,6 +59,22 @@ pub enum ChangeEvent {
     Tasks(Arc<[TaskId]>),
     Repositories(Arc<[RepositoryId]>),
     Runs(Arc<[RunId]>),
+    /// A row in `schedules` changed (task 013).
+    ///
+    /// **A variant of its own rather than a reuse of [`Settings`](Self::Settings),
+    /// and the distinction is the one this enum is built on.** `settings` is a
+    /// key/value table whose every consumer re-reads all of it, which is why
+    /// that variant carries no ids. `schedules` is a table of *entities* the
+    /// user creates, names, edits and deletes — the same kind of thing `tasks`
+    /// and `repositories` are — so it carries ids for the same reason they do,
+    /// and a panel listing thirty schedules is not obliged to re-read them
+    /// because a base-instructions textarea was saved.
+    ///
+    /// The window a schedule opens *is* a settings key and does announce itself
+    /// as [`Settings`](Self::Settings). That is not an inconsistency: the window
+    /// is one singleton fact about the installation, and the Runs view reading
+    /// it re-reads the whole queue status anyway. Seam-contract D24.
+    Schedules(Arc<[ScheduleId]>),
     /// A key/value setting changed. Unit rather than a list of keys: the whole
     /// table is a handful of rows, and every consumer re-reads all of it.
     Settings,
@@ -74,6 +93,10 @@ impl ChangeEvent {
         Self::Runs(ids.into_iter().collect())
     }
 
+    pub fn schedules(ids: impl IntoIterator<Item = ScheduleId>) -> Self {
+        Self::Schedules(ids.into_iter().collect())
+    }
+
     /// Whether this event names no ids at all.
     ///
     /// An empty array on the wire means "re-read this entity wholesale", and the
@@ -88,6 +111,7 @@ impl ChangeEvent {
             Self::Tasks(ids) => ids.is_empty(),
             Self::Repositories(ids) => ids.is_empty(),
             Self::Runs(ids) => ids.is_empty(),
+            Self::Schedules(ids) => ids.is_empty(),
             Self::Settings => false,
         }
     }
@@ -113,6 +137,7 @@ mod tests {
         assert!(ChangeEvent::tasks([]).is_empty());
         assert!(ChangeEvent::repositories([]).is_empty());
         assert!(ChangeEvent::runs([]).is_empty());
+        assert!(ChangeEvent::schedules([]).is_empty());
     }
 
     #[test]

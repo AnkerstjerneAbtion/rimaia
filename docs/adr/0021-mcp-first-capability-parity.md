@@ -82,6 +82,35 @@ until then "plan this task now" is reachable only from the window. Parity is the
 is the one place it is knowingly unmet, and it has a reason and an owner rather than a
 shrug.
 
+#### Amendment, 2026-09-02 — the question is answered; the gap is now only wiring
+
+**`rimaia_core::scheduler::inflight::InFlight` owns "is this task already running".**
+Task 012's first change moved it there: one registry, holding a `Lease` per task with
+the repository it belongs to, the `CancelSignal` that stops it, and whether the queue or
+a human asked for it. The shell holds a clone of the same value, `scheduler::build` is
+given the same value, and both doors now read one map.
+
+That retires the arrangement this section describes. `RunRegistry` no longer exists;
+`src-tauri`'s `attach_queue` back-reference and its `cancels` map are gone, and with them
+the last business rule this codebase kept in the shell. The refusal a second "Plan now"
+gets is `LeaseRefused`, rendered by core, so the button and any future tool describe it
+identically rather than similarly.
+
+Two consequences worth stating plainly.
+
+**A bug this closed on the way past.** Before the merge, "Plan now" claimed in the shell
+and the queue claimed on the database row — two registries that could not see each other
+— so a planner and a queued implementation run genuinely could both be started for one
+task. Task 023's Notes name that hazard and treat fixing it as a precondition; it is
+fixed, not by a check but by there being one registry to check.
+
+**What is still missing is wiring, and only wiring.** The MCP server would still need
+`AppPaths` and `RunnerConfig` to spawn, and those still live in the shell. That is a
+smaller and more ordinary problem than the one this section named, and it is no longer a
+design question. Tasks 012 and 014 deliberately do **not** ship the tool: the answer they
+owed was the ownership, and shipping a process-spawning tool is a separate decision with
+its own scope argument (point 4 above already says any such tool is operator-only).
+
 ## Consequences
 
 - The tool count is no longer a fixed number anyone should assert. The two tests that

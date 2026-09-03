@@ -87,6 +87,7 @@ function repository(overrides: Partial<Repository> = {}): Repository {
     defaultBranch: "main",
     worktreeRoot: "/data/worktrees/rimaia",
     allowUnattendedRuns: true,
+    maxConcurrency: 1,
     createdAt: "2026-08-20T09:00:00Z",
     ...overrides,
   };
@@ -106,7 +107,7 @@ function mockBackend({
   mockInvoke.mockImplementation(async (command) => {
     if (command === "list_repositories") return repositories;
     if (command === "get_queue_status") {
-      return { state: "paused", runningTaskId: null, plan: queuePlan };
+      return { state: "paused", runningTaskIds: [], plan: queuePlan };
     }
     throw new Error(`unexpected command: ${command}`);
   });
@@ -193,6 +194,75 @@ describe("TaskCard", () => {
     renderCard({ task: task({ runState: "blocked" }) });
     await screen.findByRole("button", { name: "Run now" });
     expect(screen.getByText("Blocked")).toBeInTheDocument();
+  });
+
+  // -------------------------------------------------------------------------
+  // The blocked badge (ADR-0008, task 011)
+  // -------------------------------------------------------------------------
+
+  describe("blocked by a dependency", () => {
+    it("shows the badge and names the blocker on the card face", async () => {
+      // The state on the row is `idle` — ADR-0008's amendment of 2026-09-02
+      // leaves `RunState::Blocked` unwritten — so the badge comes from the
+      // derived flag. And task 011's acceptance criterion is "each showing A as
+      // the reason", so the name has to be readable text rather than a `title=`
+      // attribute nobody hovers over during a morning review.
+      renderCard({
+        task: {
+          ...task({ runState: "idle" }),
+          blockedByIncomplete: true,
+          blockingTitle: "Add the API endpoint",
+          dependencyCount: 1,
+        },
+      });
+      await screen.findByRole("button", { name: "Run now" });
+
+      expect(screen.getByText("Blocked")).toBeInTheDocument();
+      expect(screen.getByText("Blocked by Add the API endpoint")).toBeInTheDocument();
+    });
+
+    it("does not overwrite the badge of a card that is running right now", async () => {
+      // A running task whose dependency moved is still running. The line naming
+      // the blocker stays, because it is true and it is what makes a stalled
+      // chain readable in one pass down the column; only the badge defers.
+      renderCard({
+        task: {
+          ...task({ runState: "running" }),
+          blockedByIncomplete: true,
+          blockingTitle: "Add the API endpoint",
+        },
+      });
+      await screen.findByRole("button", { name: "Running…" });
+
+      expect(screen.getByText("Running")).toBeInTheDocument();
+      expect(screen.queryByText("Blocked")).toBeNull();
+      expect(screen.getByText("Blocked by Add the API endpoint")).toBeInTheDocument();
+    });
+
+    it("leaves a failed card reading failed, so it still interrupts the review", async () => {
+      // ADR-0007's failure rule, which "blocked" would hide behind.
+      renderCard({
+        task: {
+          ...task({ runState: "failed" }),
+          blockedByIncomplete: true,
+          blockingTitle: "Add the API endpoint",
+        },
+      });
+      await screen.findByRole("button", { name: "Run now" });
+
+      expect(screen.getByText("Failed")).toBeInTheDocument();
+      expect(screen.queryByText("Blocked")).toBeNull();
+    });
+
+    it("says nothing about blocking for a card built from a bare task", async () => {
+      // `CardTask` keeps the summary fields optional, and a card with no
+      // opinion must not claim one.
+      renderCard({ task: task({ runState: "idle" }) });
+      await screen.findByRole("button", { name: "Run now" });
+
+      expect(screen.queryByText("Blocked")).toBeNull();
+      expect(screen.queryByText(/Blocked by/)).toBeNull();
+    });
   });
 
   it("calls onSelect with the task id when clicked", async () => {
@@ -318,7 +388,7 @@ describe("TaskCard", () => {
     renderCard({
       task: {
         ...task({ runState: "failed" }),
-        lastRun: { status: "interrupted", exitClass: "interrupted", endedAt: "2026-08-20T11:50:00Z" },
+        lastRun: { status: "interrupted", exitClass: "interrupted", endedAt: "2026-08-20T11:50:00Z", resumeAfter: null },
       },
     });
     await screen.findByRole("button", { name: "Run now" });
@@ -368,7 +438,7 @@ describe("TaskCard", () => {
     it("calls start_task_run with the task id when clicked", async () => {
       mockInvoke.mockImplementation(async (command) => {
         if (command === "list_repositories") return [repository({ allowUnattendedRuns: true })];
-        if (command === "get_queue_status") return { state: "paused", runningTaskId: null, plan: [] };
+        if (command === "get_queue_status") return { state: "paused", runningTaskIds: [], plan: [] };
         if (command === "start_task_run") return undefined;
         throw new Error(`unexpected command: ${command}`);
       });
@@ -385,7 +455,7 @@ describe("TaskCard", () => {
     it("does not open the task panel when Run now is clicked", async () => {
       mockInvoke.mockImplementation(async (command) => {
         if (command === "list_repositories") return [repository({ allowUnattendedRuns: true })];
-        if (command === "get_queue_status") return { state: "paused", runningTaskId: null, plan: [] };
+        if (command === "get_queue_status") return { state: "paused", runningTaskIds: [], plan: [] };
         if (command === "start_task_run") return undefined;
         throw new Error(`unexpected command: ${command}`);
       });
@@ -400,7 +470,7 @@ describe("TaskCard", () => {
     it("shows the backend's own rejection message when start_task_run fails", async () => {
       mockInvoke.mockImplementation(async (command) => {
         if (command === "list_repositories") return [repository({ allowUnattendedRuns: true })];
-        if (command === "get_queue_status") return { state: "paused", runningTaskId: null, plan: [] };
+        if (command === "get_queue_status") return { state: "paused", runningTaskIds: [], plan: [] };
         if (command === "start_task_run") {
           throw { code: "invalid", message: "a run is already in progress for this task" };
         }
@@ -463,6 +533,7 @@ describe("TaskCard", () => {
             repositoryId: "repo-1",
             queuePosition: 2,
             skip: null,
+            resumeAfter: null,
           },
         ],
       });
@@ -480,6 +551,7 @@ describe("TaskCard", () => {
             repositoryId: "repo-1",
             queuePosition: null,
             skip: "unattended_runs_not_allowed",
+            resumeAfter: null,
           },
         ],
       });
@@ -510,6 +582,7 @@ describe("TaskCard", () => {
             repositoryId: "repo-1",
             queuePosition: 1,
             skip: null,
+            resumeAfter: null,
           },
         ],
       });
@@ -528,6 +601,7 @@ describe("TaskCard", () => {
             repositoryId: "repo-1",
             queuePosition: null,
             skip: "already_in_flight",
+            resumeAfter: null,
           },
         ],
       });
@@ -598,7 +672,7 @@ describe("TaskCard", () => {
           }
           return {
             state: "paused",
-            runningTaskId: null,
+            runningTaskIds: [],
             plan: [
               {
                 taskId: "task-1",
@@ -606,6 +680,7 @@ describe("TaskCard", () => {
                 repositoryId: "repo-1",
                 queuePosition: 3,
                 skip: null,
+                resumeAfter: null,
               },
             ],
           };
@@ -621,7 +696,7 @@ describe("TaskCard", () => {
       taskChangedListeners[0]?.({ payload: [] });
 
       // The first (now stale) fetch finally settles.
-      resolveFirstFetch?.({ state: "paused", runningTaskId: null, plan: [] });
+      resolveFirstFetch?.({ state: "paused", runningTaskIds: [], plan: [] });
 
       expect(await screen.findByText("Queued #3")).toBeInTheDocument();
       expect(queueStatusCalls).toBe(2);

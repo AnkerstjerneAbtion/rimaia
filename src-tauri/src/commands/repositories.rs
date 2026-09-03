@@ -81,9 +81,30 @@ pub async fn update_repository(
             name: patch.name,
             default_branch: patch.default_branch,
             worktree_root: patch.worktree_root,
+            // Not on the edit form: raising a repository's cap is the opt-out
+            // ADR-0010 wants taken deliberately, so it has its own command and
+            // its own explanation next to the control.
+            max_concurrency: None,
         },
     )
     .await
+}
+
+/// Raises or lowers ADR-0010's per-repository cap on how many runs this
+/// repository holds at once.
+///
+/// Its own command rather than a field on [`update_repository`] for the same
+/// reason the unattended-runs opt-in is: it is a deliberate act with a
+/// consequence the panel has to state — two agents in one repository fight over
+/// ports, test databases and lockfiles — and burying it in an "edit name and
+/// branch" form would make it look like a preference.
+#[tauri::command]
+pub async fn set_repository_max_concurrency(
+    state: State<'_, AppState>,
+    id: String,
+    max_concurrency: i64,
+) -> Result<Repository> {
+    repo::set_max_concurrency(&state.context, &id, max_concurrency).await
 }
 
 /// Flips ADR-0012's per-repository opt-in to unattended runs. The

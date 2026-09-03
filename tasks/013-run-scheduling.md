@@ -6,6 +6,7 @@ status: ready
 depends_on: ["009"]
 adrs: ["0010"]
 size: M
+landed: "#20"
 ---
 
 # Run scheduling and windows

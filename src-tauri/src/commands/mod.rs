@@ -6,10 +6,12 @@
 //! the two paths is a bug.
 
 pub mod app;
+pub mod doctor;
 pub mod mcp;
 pub mod queue;
 pub mod repositories;
 pub mod runs;
+pub mod schedules;
 pub mod settings;
 pub mod strategy;
 pub mod tasks;
