@@ -1550,6 +1550,153 @@ quitting and for a crashed run's resume, and ADR-0010's, which takes the three r
 large enough to be argued at product scale.
 
 **Binds.** 013, and 023 as the next task to read `PreflightSummary`.
+## D20 — Task 016's cleanup: what it refuses, what it may not be forced past, and what it never deletes
+
+**Question.** Task 016 removes worktrees. ADR-0005 fixes where they live, that cleanup is
+"explicit and never automatic on failure", and that the branch is left alone unless asked
+for; ADR-0022 part 2 fixes that nothing here deletes a `runs` row. Everything else is a
+judgement about *deletion*, which is the one irreversible thing this app does — and a
+reviewer meeting a guard in a diff has nothing to check it against unless it is written
+down. Which guards exist, which of them a user may override, where automatic removal lives
+and with what authority, how files with no database row get an age, and which of these
+capabilities deliberately never reach MCP.
+
+**Decision.** Six, taken together by task 016:
+
+1. **Four guards, and exactly one of them has no override.** In the order
+   `cleanup::remove_worktree` applies them:
+
+   | Guard | Overridable by | Why |
+   | --- | --- | --- |
+   | Task is `running` or `waiting_retry` | **nothing** | A process is writing in that directory |
+   | Uncommitted changes | `uncommitted_changes: confirmed_by_user` | Work committed nowhere at all |
+   | Unpushed commits | `unpushed_commits: confirmed_by_user` | Work that exists on exactly one disk |
+   | Branch is not merged | `branch: delete_even_if_unmerged` | The only copy of the run's commits |
+
+   The first is the one to argue for, because it is the one that looks like an omission.
+   Every other refusal here is about the user's appetite for risk, and a confirmation is
+   the right shape for that. This one is not about their judgement: removing a directory
+   a Claude Code process is writing in produces a half-deleted checkout, a run that fails
+   on an unreadable error, and a `git worktree` record pointing at rubble. There is no
+   answer to "are you sure?" that improves that outcome, so the question is not asked and
+   there is no flag to pass. `waiting_retry` is included on `worktree::correct_run_state`'s
+   reasoning — it means "a process is about to be", and the gap before the next attempt is
+   not a window in which the directory is spare.
+
+   The three overridable answers are **three separate fields, not one `force`**, because
+   they protect three different things and one flag would let a user who meant "yes, drop
+   that scratch file" also authorise losing a branch. `RemovalAuthorization::default()` is
+   the refusing value in all three axes, and a test pins that, so a field added later has
+   to be given a safe default deliberately rather than by whatever `Default` derives.
+
+   **The uncommitted-changes refusal states the count** ("3 uncommitted changes"), because
+   the count is what makes it a decision rather than a shrug: one stray log file and
+   forty-seven edited source files are not the same question.
+
+   "Merged" is `git merge-base --is-ancestor <branch> <base>`. It says **no** for a branch
+   that was squash-merged or rebased, since those produce different commits and git cannot
+   tell them from work that was never merged. That false negative costs a click; the false
+   positive would cost a commit.
+
+2. **Bulk actions report; the single action errors.** "Remove all `done`" and "remove all
+   merged" return a `CleanupReport` carrying both what went and what was refused, with each
+   refusal's own sentence. A bulk action that aborted on its first guard would leave a user
+   unable to reclaim nine safe worktrees because the tenth is dirty, and would not say
+   which. The single-worktree call returns `Result` instead, because there the user asked
+   about exactly one thing and a refusal *is* the answer. Both bulk actions run with
+   `RemovalAuthorization::default()` and nothing else: one click standing in for N
+   decisions may not carry more authority than the user would have granted one at a time.
+
+3. **Auto-removal on `done` lives in `tasks::move_task`, and creates the first `tasks` →
+   `worktree` edge.** In the service, not in a command, so the board and the MCP server get
+   it identically (ADR-0006) — "the worktree disappears when I move the card" would be a
+   conspicuous rule to enforce on only one door. The edge runs opposite to every existing
+   one (`worktree` reads tasks and calls `set_run_state`); Rust permits the cycle within a
+   crate, the direction is the honest one because the policy belongs to the *transition*
+   rather than to the directory, and it is named here rather than met as a surprise.
+
+   Its posture is fixed: **every force off, the branch always kept**, and it is *best
+   effort* — the call returns nothing and a refusal is logged, never propagated. The move
+   has already committed and published by then, and a cleanup a guard declined must not be
+   able to report the move as having failed. An automatic action gets strictly less
+   authority than a human clicking a button, because there is nobody present to read the
+   refusal it would otherwise be overriding.
+
+   The setting is `settings["worktree_auto_cleanup"]`, owned by `worktree::cleanup` in the
+   shape [D3](#d3--who-owns-settings-storage-vs-the-typed-accessor) fixed and
+   [D16](#d16--task-010s-cross-cutting-choices).2 repeated. **Off by default with no seeded
+   row** — an absent key *is* off, which makes "off by default" true of an unconfigured
+   database rather than of a migration ([D4](#d4--migration-file-numbering) forbids one).
+   Its "on" value is spelled `on_done_acknowledged`, not `true`: task 016 requires that
+   enabling it means acknowledging what it deletes, and the spelling is how that
+   acknowledgement survives past the dialog that collected it into the row itself.
+
+4. **`prune_logs` gains a filesystem sweep for `strategy-*.jsonl`, dated by mtime.**
+   [D17](#d17--task-020s-cross-cutting-choices).5 already warned that a strategy run has no
+   `runs` row, so "anything that enumerates transcripts through the database misses them".
+   `runs::prune_logs` was exactly that, while `runs::total_log_size` walks the filesystem
+   and had been counting them all along — so Settings reported disk the prune button could
+   not reclaim, and the number never fell as far as it promised. The sweep matches on
+   `runner::STRATEGY_TRANSCRIPT_PREFIX`, never a literal, and `prune_logs` therefore takes
+   an `AppPaths`.
+
+   The age rule is genuinely different, not merely differently implemented, because there
+   is no `started_at` and no `ended_at` to read:
+   - `older_than_days(n)` → mtime at least `n` days old, across every task's directory.
+   - `task(id)` → that task's directory, with no age of its own; the user named the task.
+   - **Both are floored at one hour.** That floor stands in for the `ended_at IS NOT NULL`
+     guard the row-based half gets for free: a file written in the last hour may be one a
+     planner is writing right now, and there is no row to ask.
+
+   `PruneResult` counts these separately from `runs_pruned`. Adding them together would
+   report more runs pruned than the database holds.
+
+5. **Nothing in task 016 deletes a `runs` row.** ADR-0022 part 2, restated here because it
+   binds a module that ADR does not otherwise touch: worktree cleanup reclaims disk, and
+   the record of what a run cost is not disk worth reclaiming. `runs::prune_logs` deletes
+   files and leaves every row; `worktree::cleanup` deletes directories and branches and
+   touches the `runs` table not at all. **The one exception is not this module's**:
+   deleting a *task* still cascades to its runs through `ON DELETE CASCADE`, because that
+   is a person saying "this never happened", which is a different act from the disk being
+   full.
+
+6. **The three destructive commands have no MCP tool, deliberately.** ADR-0021 point 1
+   makes a Tauri command without a tool a defect, and point 5 names the standing exception:
+   `delete_task` "stays absent from both … a decision about destructiveness, not about
+   which client is privileged". `remove_task_worktree`, `cleanup_done_worktrees` and
+   `cleanup_merged_worktrees` join it on the same ground, and with a sharper edge —
+   `remove_task_worktree` with both forces set destroys work that exists in no commit and
+   on no remote, which is strictly more than `delete_task` can do, and a run-scoped agent
+   could reach its own directory. They live only where a human confirms them.
+
+   What *does* ship is the read and the policy: `list_worktrees`,
+   `get_worktree_auto_cleanup` and `set_worktree_auto_cleanup`, all
+   `RunAccess::Refused`. The setter is ADR-0021 point 4's "reconfigures the installation"
+   clause verbatim. The two reads are refused on a narrower ground of their own — an
+   inventory is by construction an enumeration of every *other* task's directory, which is
+   [D16](#d16--task-010s-cross-cutting-choices).6's objection to `list_tasks`, and a run
+   has no business knowing what else is on the disk, still less that its own directory is
+   the one due to be reclaimed. Refusing the read as well as the write would have left an
+   operator's agent unable even to explain a full disk, which is the half of the problem it
+   can help with without being able to make anything irreversible.
+
+**Why.** Every one of these is a place two agents would have answered differently and a
+reviewer could not have said which was right. (1) is the whole substance of the task —
+task 016's Notes make "if in doubt, refuse and explain" the design rule, and a guard set
+that lives only in a match arm is one a later task widens without noticing that the
+override it adds is the one that had no override on purpose. (2) and (3) are about
+*authority*: who is deciding, and how much less a machine gets than a person. (4) is a rule
+about files that no query can find, which is the definition of something that has to be
+written down rather than discovered. (5) is ADR-0022 reaching a module it does not name.
+(6) is a deliberate hole in a parity rule, and ADR-0021 is explicit that the way to have
+one is to argue it, not to leave it.
+
+See also [ADR-0005](adr/0005-git-worktree-per-task.md) (where worktrees live, and that the
+branch is left alone), [ADR-0021](adr/0021-mcp-first-tool-surface.md) points 4 and 5 (the
+scope decision and the destructiveness exception), and
+[ADR-0022](adr/0022-what-a-run-is-remembered-by.md) part 2 (rows survive pruning).
+
+**Binds.** 016, 024.
 
 ---
 
@@ -1573,11 +1720,11 @@ An implementation task reads the entries its number appears in, before writing c
 | [013](../tasks/013-run-scheduling.md) | D4 · D6 · D15 · D21 · D22 · D23 · D24 |
 | [014](../tasks/014-usage-limit-resilience.md) | D3 · D4 · D5 · D8 · D9 · D12 · D14 · D15 · D19 · D21 · D22 · D23 |
 | [015](../tasks/015-run-history-and-log-viewer.md) | D14 · D18 · D23 |
-| [016](../tasks/016-worktree-lifecycle-and-cleanup.md) | D17 · D18 |
+| [016](../tasks/016-worktree-lifecycle-and-cleanup.md) | D17 · D18 · D20 |
 | [018](../tasks/018-preflight-doctor-and-packaging.md) | D11 · D16 · D22 |
 | [020](../tasks/020-per-task-execution-strategy.md) | D2 · D3 · D4 · D5 · D8 · D10 · D12 · D16 · D17 · D19 |
 | [021](../tasks/021-review-and-fix-loop.md) | D17 |
-| [024](../tasks/024-analytics.md) | D4 · D5 · D12 · D18 |
+| [024](../tasks/024-analytics.md) | D4 · D5 · D12 · D18 · D20 |
 | every task | D4 and D6 as prohibitions |
 
 A reviewer treats any decision visible in a diff that is neither in an ADR nor here as a

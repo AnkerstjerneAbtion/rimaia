@@ -37,13 +37,14 @@ use crate::mcp::requests::{
     ScheduleConfigRequest, ScheduleRequest, SetMaxConcurrencyRequest,
     SetRepositoryMaxConcurrencyRequest, SetScheduleEnabledRequest, SetScheduleModeRequest,
     SetStrategyApprovalRequest, SetStrategyCatalogueRequest, SetStrategyDefaultsRequest,
-    SetTaskDependenciesRequest, SetTaskStrategyRequest, TaskStrategyRequest, UpdateScheduleRequest,
-    UpdateTaskRequest,
+    SetTaskDependenciesRequest, SetTaskStrategyRequest, SetWorktreeAutoCleanupRequest,
+    TaskStrategyRequest, UpdateScheduleRequest, UpdateTaskRequest,
 };
 use crate::mcp::responses::{
     BaseInstructionsView, DoctorReportView, OnboardingView, PreflightView, RepositoryListView,
     RepositoryView, RunCapacityView, ScheduleDeletedView, ScheduleListView, ScheduleView,
     StrategyApprovalView, TaskListItem, TaskListView, TaskView, TimezoneListView,
+    WorktreeAutoCleanupView, WorktreeListView, WorktreeView,
 };
 use crate::mcp::scope::{RunScope, Tool};
 use crate::runner::prompt::TEMPLATE_VARIABLES;
@@ -51,7 +52,7 @@ use crate::schedule;
 use crate::scheduler::{self, capacity};
 use crate::strategy::{self, Catalogue, StrategyDefaults};
 use crate::tasks::{NewTask, NewTaskLink, Patch, TaskFilter, TaskPatch};
-use crate::{db, repo, tasks, Result};
+use crate::{db, repo, tasks, worktree, Result};
 
 /// What Claude Code is told this server is for, before it has read a single
 /// tool description.
@@ -597,6 +598,68 @@ run that is still in flight."
         self.task_view(&request.task_id).await
     }
 
+    // Task 016's read surface. The three commands that *delete* a worktree
+    // have no tool here, and that is not an oversight — see this module's own
+    // note and seam-contract D20. What an agent can do is find out what is on
+    // the disk and say so, which is the half of the problem it can help with
+    // without being able to make it irreversible.
+
+    #[tool(
+        description = "List every git worktree Rimaia has created, with the task it belongs to, \
+its branch, its size on disk, when anything last wrote in it, and whether its branch is already \
+merged into the repository's default branch. Call this when the user asks what is taking up \
+space, or before suggesting a cleanup: `uncommitted_changes` and `unpushed_commits` are work that \
+exists nowhere else, and a worktree with either is one to leave alone. Removing a worktree is \
+deliberately not available here — it is irreversible, so it lives only in Settings → Storage, \
+where a human confirms it."
+    )]
+    pub async fn list_worktrees(&self) -> Result<Json<WorktreeListView>, ToolError> {
+        self.scope.authorize(Tool::ListWorktrees, None)?;
+
+        let inventory = worktree::inventory(&self.ctx).await?;
+        Ok(Json(WorktreeListView {
+            worktrees: inventory
+                .entries
+                .into_iter()
+                .map(WorktreeView::from)
+                .collect(),
+            total_bytes: inventory.total_bytes,
+        }))
+    }
+
+    #[tool(
+        description = "Read whether a task reaching the `done` column automatically has its git \
+worktree removed. Call this before advising on disk usage: when it is `off`, which is the \
+default, every finished task keeps a full checkout until somebody clears it by hand, and that is \
+usually the explanation for a large `worktrees` directory."
+    )]
+    pub async fn get_worktree_auto_cleanup(
+        &self,
+    ) -> Result<Json<WorktreeAutoCleanupView>, ToolError> {
+        self.scope.authorize(Tool::GetWorktreeAutoCleanup, None)?;
+        Ok(Json(WorktreeAutoCleanupView {
+            setting: worktree::auto_cleanup(&self.ctx.pool).await?,
+        }))
+    }
+
+    #[tool(
+        description = "Turn automatic worktree removal on or off. Call it with \
+`on_done_acknowledged` only after telling the user what it deletes: every task they move to \
+`done` will lose its checkout, including any uncommitted file in it that a run left behind. It \
+never forces and never deletes a branch, so work that was committed survives — but work that was \
+not is gone. `off` restores the default."
+    )]
+    pub async fn set_worktree_auto_cleanup(
+        &self,
+        Parameters(request): Parameters<SetWorktreeAutoCleanupRequest>,
+    ) -> Result<Json<WorktreeAutoCleanupView>, ToolError> {
+        self.scope.authorize(Tool::SetWorktreeAutoCleanup, None)?;
+        worktree::set_auto_cleanup(&self.ctx, request.setting).await?;
+        Ok(Json(WorktreeAutoCleanupView {
+            setting: request.setting,
+        }))
+    }
+
     #[tool(
         description = "Accept a planner's proposal on behalf of the user, marking the strategy as \
 theirs rather than the planner's. A later planner run will then leave it alone. Call this when a human has \
@@ -910,7 +973,7 @@ mod tests {
     /// capability parity a rule. What replaces a count is the property that
     /// actually matters — a registered tool with no run-scope decision cannot
     /// reach the wire.
-    const REGISTERED_TOOLS: [&str; 33] = [
+    const REGISTERED_TOOLS: [&str; 36] = [
         "accept_task_strategy",
         "add_task_link",
         "clear_task_strategy",
@@ -924,11 +987,13 @@ mod tests {
         "get_strategy_catalogue",
         "get_strategy_defaults",
         "get_task",
+        "get_worktree_auto_cleanup",
         "give_up_on_task",
         "list_repositories",
         "list_schedules",
         "list_tasks",
         "list_timezones",
+        "list_worktrees",
         "move_task",
         "preview_schedule_preflight",
         "remove_task_link",
@@ -942,6 +1007,7 @@ mod tests {
         "set_strategy_defaults",
         "set_task_dependencies",
         "set_task_strategy",
+        "set_worktree_auto_cleanup",
         "update_schedule",
         "update_task",
     ];

@@ -137,6 +137,12 @@ pub enum Tool {
     DeleteSchedule,
     PreviewSchedulePreflight,
     ListTimezones,
+    // Task 016. The *reads* and the policy setting only — the three cleanup
+    // commands that actually delete a worktree have no tool at all, on
+    // ADR-0021 point 5's `delete_task` reasoning. Seam-contract D20 records it.
+    ListWorktrees,
+    GetWorktreeAutoCleanup,
+    SetWorktreeAutoCleanup,
 }
 
 /// What a [`RunScope::Run`] may do with one tool — ADR-0006's amendment table,
@@ -153,7 +159,7 @@ pub enum RunAccess {
 
 impl Tool {
     /// Every tool with a recorded decision, so a test can walk the table.
-    pub const ALL: [Tool; 33] = [
+    pub const ALL: [Tool; 36] = [
         Tool::AddTaskLink,
         Tool::CreateTask,
         Tool::GetBaseInstructions,
@@ -187,6 +193,9 @@ impl Tool {
         Tool::DeleteSchedule,
         Tool::PreviewSchedulePreflight,
         Tool::ListTimezones,
+        Tool::ListWorktrees,
+        Tool::GetWorktreeAutoCleanup,
+        Tool::SetWorktreeAutoCleanup,
     ];
 
     /// The wired name — what `tools/list` advertises and what the ADR table
@@ -226,6 +235,9 @@ impl Tool {
             Tool::DeleteSchedule => "delete_schedule",
             Tool::PreviewSchedulePreflight => "preview_schedule_preflight",
             Tool::ListTimezones => "list_timezones",
+            Tool::ListWorktrees => "list_worktrees",
+            Tool::GetWorktreeAutoCleanup => "get_worktree_auto_cleanup",
+            Tool::SetWorktreeAutoCleanup => "set_worktree_auto_cleanup",
         }
     }
 
@@ -328,6 +340,20 @@ impl Tool {
             | Tool::DeleteSchedule
             | Tool::PreviewSchedulePreflight
             | Tool::ListTimezones => RunAccess::Refused,
+
+            // Task 016, and the same ADR-0021 point 4 clause: worktrees are
+            // installation state. `set_worktree_auto_cleanup` reconfigures what
+            // every *later* task's directory is worth, which is the loop that
+            // clause names. `list_worktrees` and `get_worktree_auto_cleanup`
+            // are refused for a narrower reason of their own — a run's
+            // entitlement is its own task, and an inventory is by construction
+            // an enumeration of everybody else's, exactly `list_tasks`'s
+            // objection. A run has no business knowing what else is on the
+            // disk, still less that its own directory is the one due to be
+            // reclaimed.
+            Tool::ListWorktrees | Tool::GetWorktreeAutoCleanup | Tool::SetWorktreeAutoCleanup => {
+                RunAccess::Refused
+            }
         }
     }
 }

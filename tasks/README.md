@@ -29,7 +29,7 @@ reviewable in the app afterwards.
 | 16 | [013](013-run-scheduling.md) | Run scheduling and windows | v0.2 | 009 | [#20](https://github.com/AnkerstjerneAbtion/rimaia/pull/20) |
 | 17 | [014](014-usage-limit-resilience.md) | Usage-limit resilience and resume | v0.2 | 009, 019 | [#18](https://github.com/AnkerstjerneAbtion/rimaia/pull/18) |
 | 18 | [015](015-run-history-and-log-viewer.md) | Run history and log viewer | v0.3 | 009 | #10 |
-| 19 | [016](016-worktree-lifecycle-and-cleanup.md) | Worktree lifecycle and cleanup | v0.3 | 007, 009 | — |
+| 19 | [016](016-worktree-lifecycle-and-cleanup.md) | Worktree lifecycle and cleanup | v0.3 | 007, 009 | #14 |
 | 20 | [017](017-morning-review-flow.md) | Morning review flow | v0.3 | 015 | — |
 | 21 | [018](018-preflight-doctor-and-packaging.md) | Preflight doctor and packaging | v0.3 | 008 | #17 |
 | 22 | [022](022-per-repository-git-credentials.md) | Per-repository git credentials | v0.3 | 003, 008 | — |

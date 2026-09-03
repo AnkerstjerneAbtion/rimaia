@@ -1763,6 +1763,10 @@ async fn a_launch_offers_a_crashed_run_for_resume_and_starts_nothing_until_the_q
             task_id: crashed.clone(),
             session_id: SESSION.to_string(),
             prompt: "implement the plan".to_string(),
+            // Task 011's column. These runs stand in for attempts a crash
+            // caught, so the base they were built on is not what this test
+            // is about.
+            base_ref: None,
         },
     )
     .await
@@ -2955,6 +2959,10 @@ async fn a_schedule_firing_tonight_does_not_resume_a_run_last_night_crashed_on()
             task_id: crashed.clone(),
             session_id: SESSION.to_string(),
             prompt: "implement the plan".to_string(),
+            // Task 011's column. These runs stand in for attempts a crash
+            // caught, so the base they were built on is not what this test
+            // is about.
+            base_ref: None,
         },
     )
     .await
@@ -3039,6 +3047,10 @@ async fn a_schedule_that_does_open_a_window_resumes_exactly_what_start_would() {
             task_id: crashed.clone(),
             session_id: SESSION.to_string(),
             prompt: "implement the plan".to_string(),
+            // Task 011's column. These runs stand in for attempts a crash
+            // caught, so the base they were built on is not what this test
+            // is about.
+            base_ref: None,
         },
     )
     .await
