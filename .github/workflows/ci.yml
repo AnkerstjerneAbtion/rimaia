@@ -44,6 +44,13 @@ jobs:
       - name: Test
         run: npm run test
 
+      # The only job that compiles the CSS. `typecheck` is `tsc --noEmit` and
+      # vitest's jsdom never runs PostCSS, so before this step a stylesheet that
+      # could not parse still went green — three PRs shipped one that broke the
+      # app at launch, on a comment whose text contained `*/`.
+      - name: Build
+        run: npm run build
+
   core:
     name: Core (logic)
     runs-on: ubuntu-latest

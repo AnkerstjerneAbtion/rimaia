@@ -4,29 +4,43 @@
 
    One leaf rather than three because these are one component family used from
    three places — splitting them per view would mean three copies of the
-   status colours, which is exactly the drift a shared row is meant to stop. */
+   status colours, which is exactly the drift a shared row is meant to stop.
+
+   Distinguishability without hue (task C's Scope): every severity already
+   carries its own word — "FAIL"/"WARN"/"PASS" on the badge, a sentence in the
+   banner heading — so colour is never the only signal. The banner and the
+   status chip additionally differ in *border weight and style* (fail: solid
+   2px; warn: solid 1px; pass: dashed 1px), which survives greyscale and
+   colour-blindness the same way the board's cancelled badge does
+   (board.css's own comment on `.run-badge-cancelled`). */
 
 .doctor-banner {
-  margin-bottom: 1.25rem;
-  padding: 0.85rem 1rem;
+  margin-bottom: var(--space-5);
+  padding: var(--space-4) var(--space-5);
   border: 1px solid;
-  border-radius: 8px;
+  border-left-width: 4px;
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-sm);
 }
 
 .doctor-banner h3 {
-  margin: 0 0 0.5rem;
-  font-size: 0.95rem;
+  margin: 0 0 var(--space-2);
+  font-size: var(--font-size-md);
+  font-weight: var(--font-weight-semibold);
 }
 
 .doctor-banner-fail {
   background: var(--danger-bg);
   border-color: var(--danger-border);
+  border-left-color: var(--danger-text);
   color: var(--danger-text);
 }
 
 .doctor-banner-warn {
   background: var(--warn-bg);
   border-color: var(--warn-border);
+  border-left-color: var(--warn-text);
+  border-style: dashed;
   color: var(--warn-text);
 }
 
@@ -36,45 +50,55 @@
   padding: 0;
   display: flex;
   flex-direction: column;
-  gap: 0.6rem;
+  gap: var(--space-3);
 }
 
 .doctor-result {
   display: flex;
-  gap: 0.65rem;
+  gap: var(--space-3);
   align-items: baseline;
 }
 
 .doctor-result-body h4 {
   margin: 0;
-  font-size: 0.9rem;
+  font-size: var(--font-size-sm);
+  font-weight: var(--font-weight-semibold);
 }
 
 .doctor-result-body p {
   margin: 0.15rem 0 0;
-  font-size: 0.85rem;
+  font-size: var(--font-size-sm);
+  color: var(--text-2);
 }
 
 .doctor-scope {
-  font-weight: 400;
-  opacity: 0.85;
+  font-weight: var(--font-weight-regular);
+  color: var(--text-2);
 }
 
-/* The remediation is the line the user acts on, so it is set apart from the
-   detail rather than reading as a second sentence of it. */
+/* The remediation is the line the user acts on — instructions, not decoration
+   — so it is set apart with its own background rather than reading as a
+   second sentence of `detail`, and stays monospace so a pasted command is
+   legible as one. */
 .doctor-remediation {
+  display: inline-block;
+  margin-top: var(--space-2) !important;
+  padding: var(--space-1) var(--space-2);
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-  font-size: 0.8rem !important;
-  opacity: 0.9;
+  font-size: var(--font-size-xs) !important;
+  color: var(--text-1);
+  overflow-wrap: anywhere;
 }
 
 .doctor-status {
   flex: 0 0 auto;
   min-width: 4.5rem;
-  padding: 0.1rem 0.4rem;
-  border-radius: 4px;
-  font-size: 0.7rem;
-  font-weight: 600;
+  padding: 0.1rem var(--space-2);
+  border-radius: var(--radius-sm);
+  font-size: var(--font-size-xs);
+  font-weight: var(--font-weight-semibold);
   text-align: center;
   text-transform: uppercase;
   letter-spacing: 0.04em;
@@ -82,7 +106,7 @@
 
 .doctor-status-pass {
   color: var(--ok-text);
-  border: 1px solid currentcolor;
+  border: 1px dashed currentcolor;
 }
 
 .doctor-status-warn {
@@ -93,21 +117,21 @@
 
 .doctor-status-fail {
   background: var(--danger-bg);
-  border: 1px solid var(--danger-border);
+  border: 2px solid var(--danger-border);
   color: var(--danger-text);
 }
 
 .doctor-blocked {
-  margin: 0 0 0.75rem;
+  margin: 0 0 var(--space-3);
   color: var(--danger-text);
-  font-weight: 600;
+  font-weight: var(--font-weight-semibold);
 }
 
 .doctor-actions {
   display: flex;
   align-items: center;
-  gap: 0.75rem;
-  margin-top: 0.9rem;
+  gap: var(--space-3);
+  margin-top: var(--space-4);
 }
 
 /* --- The first-run walkthrough ------------------------------------------ */
@@ -117,40 +141,47 @@
   margin: 0;
   padding: 0;
   counter-reset: welcome-step;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
 }
 
 .welcome-step h3 {
   display: flex;
   align-items: center;
-  gap: 0.6rem;
+  gap: var(--space-3);
+  margin: 0 0 var(--space-2);
+  font-size: var(--font-size-lg);
 }
 
 .welcome-step-number {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 1.6rem;
-  height: 1.6rem;
-  border-radius: 50%;
+  flex-shrink: 0;
+  width: 1.75rem;
+  height: 1.75rem;
+  border-radius: var(--radius-full);
   background: var(--accent);
   color: var(--accent-contrast);
-  font-size: 0.8rem;
+  font-size: var(--font-size-sm);
+  font-weight: var(--font-weight-semibold);
 }
 
 .welcome-step-badge {
   margin-left: auto;
-  padding: 0.15rem 0.5rem;
-  border: 1px solid var(--border);
-  border-radius: 999px;
-  color: var(--text-muted);
-  font-size: 0.7rem;
-  font-weight: 600;
+  padding: 0.15rem var(--space-2);
+  border: 1px solid var(--border-1);
+  border-radius: var(--radius-full);
+  color: var(--text-2);
+  font-size: var(--font-size-xs);
+  font-weight: var(--font-weight-semibold);
   text-transform: uppercase;
   letter-spacing: 0.04em;
 }
 
 .welcome-step-badge-pass {
-  border-color: currentcolor;
+  border: 1px dashed currentcolor;
   color: var(--ok-text);
 }
 
@@ -160,12 +191,13 @@
 }
 
 .welcome-step-badge-fail {
+  border-width: 2px;
   border-color: var(--danger-border);
   color: var(--danger-text);
 }
 
 .welcome-actions {
   display: flex;
-  gap: 0.75rem;
-  margin-top: 1rem;
+  gap: var(--space-3);
+  margin-top: var(--space-5);
 }

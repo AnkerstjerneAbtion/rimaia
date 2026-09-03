@@ -63,6 +63,7 @@ which is the run queue.
 npm run tauri dev                     # run the app
 npm run typecheck                     # tsc --noEmit
 npm run test                          # vitest run
+npm run build                         # tsc && vite build — the only thing that compiles the CSS
 cargo test -p rimaia-core             # logic tests, no system deps needed
 cargo fmt --all --check
 cargo clippy -p rimaia-core --all-targets -- -D warnings
