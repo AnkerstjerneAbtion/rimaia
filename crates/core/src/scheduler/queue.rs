@@ -212,11 +212,11 @@ use crate::doctor;
 use crate::error::{Error, Result};
 use crate::events::ChangeEvent;
 use crate::paths::AppPaths;
-use crate::schedule::window::{self, RunWindow};
-use crate::schedule::{self, fire, preflight, Due};
 use crate::runner::{
     probe_cli, run_task, CancelSignal, ResumeSession, RunRequest, RunTrigger, RunnerConfig,
 };
+use crate::schedule::window::{self, RunWindow};
+use crate::schedule::{self, fire, preflight, Due};
 use crate::scheduler::claim::{self, ClaimOutcome};
 use crate::scheduler::inflight::{Capacity, InFlight, Lease, LeaseOwner};
 use crate::scheduler::selection::{self, QueueEntry};
@@ -452,6 +452,17 @@ impl QueueHandle {
             usage_limit_pause_until: pause::active_until(&ctx.pool, ctx.clock.now()).await?,
             window: window::active(&ctx.pool).await?,
         })
+    }
+
+    /// Why the loop's last pass could not be completed, if it couldn't.
+    ///
+    /// The same value [`status`](Self::status) carries, reachable without the
+    /// four database reads that go with it. That is the whole reason it exists:
+    /// the shell's notifier looks at this on every settings change, and reading
+    /// the entire board to find out whether one string moved would be a board
+    /// read per keystroke of the base-instructions textarea.
+    pub fn last_step_error(&self) -> Option<String> {
+        self.shared.step_error()
     }
 
     /// Every task this process has a `claude` child for right now.
@@ -697,7 +708,9 @@ impl QueueTask {
                         schedule::record_fire(ctx, &schedule.id, now).await?;
                         return Ok(Step::Worked);
                     }
-                    return self.open_window(&schedule, occurrence, closes_at, now).await;
+                    return self
+                        .open_window(&schedule, occurrence, closes_at, now)
+                        .await;
                 }
 
                 // Due, and too late to matter. Nothing is written — see

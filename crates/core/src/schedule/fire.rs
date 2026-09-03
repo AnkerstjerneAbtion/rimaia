@@ -269,9 +269,7 @@ pub fn next_wake_at(schedule: &Schedule, now: DateTime<Utc>) -> Result<Option<Da
     let zone = zone(schedule)?;
 
     match trigger(schedule)? {
-        Trigger::Once(at) => {
-            Ok((schedule.last_fired_at.is_none() && at > now).then_some(at))
-        }
+        Trigger::Once(at) => Ok((schedule.last_fired_at.is_none() && at > now).then_some(at)),
         Trigger::Recurring(expression) => cron::next_after(&expression, zone, now).map(Some),
     }
 }
@@ -554,7 +552,10 @@ mod tests {
             ..nightly()
         };
 
-        assert_eq!(due(&off, at("2026-01-15T21:00:00Z")).expect("read"), Due::NotDue);
+        assert_eq!(
+            due(&off, at("2026-01-15T21:00:00Z")).expect("read"),
+            Due::NotDue
+        );
     }
 
     // -----------------------------------------------------------------------

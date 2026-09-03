@@ -1,5 +1,6 @@
 mod commands;
 mod logging;
+mod notify;
 // Public because `AppState`'s context is the shell's whole contract with the
 // tasks that follow — 002 onward read it from commands in this crate.
 pub mod state;
@@ -35,6 +36,7 @@ pub fn run() {
     let builder = tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_notification::init())
         .setup(|app| {
             // Order matters: the directories have to exist before the log
             // appender opens a file in one of them, and before SQLite is asked
@@ -203,6 +205,19 @@ pub fn run() {
                 in_flight.clone(),
             );
             tauri::async_runtime::spawn(queue_task.run());
+
+            // Task 013's notification watcher. Subscribed here, after the queue
+            // exists and before anything can publish — the same "subscribe
+            // first, then let writers start" order every other listener in this
+            // hook keeps. It is a third subscriber to ADR-0018's channel, which
+            // that ADR's Consequences already anticipated costing nothing but a
+            // `subscribe()`.
+            tauri::async_runtime::spawn(notify::announce_run_windows(
+                app.handle().clone(),
+                context.clone(),
+                queue.clone(),
+                context.subscribe(),
+            ));
 
             // Task 010's MCP server (ADR-0006). Last of the startup steps on
             // purpose: this is the first thing in this hook that a process

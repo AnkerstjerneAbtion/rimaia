@@ -84,3 +84,30 @@ export function subscribeToRunsChanged(
 export function subscribeToRunsTail(onTail: (tail: RunTail) => void): Promise<UnlistenFn> {
   return listen<RunTail>("runs:tail", (event) => onTail(event.payload));
 }
+
+/**
+ * `schedules:changed` (task 013) — a row in `schedules` was created, edited,
+ * enabled, disabled, deleted, or fired.
+ *
+ * **A channel of its own rather than riding `settings:changed`**, and the
+ * distinction is the one `ChangeEvent` is built on. `settings` is a key/value
+ * table whose every consumer re-reads all of it, which is why that event
+ * carries no ids. `schedules` is a table of *entities* the user creates, names
+ * and deletes — the same kind of thing `tasks` and `repositories` are — so it
+ * carries ids for the same reason they do, and a panel listing thirty schedules
+ * is not obliged to re-read them because a base-instructions textarea was
+ * saved. Seam-contract D24.
+ *
+ * The *window* a schedule opens is a settings key and announces itself on
+ * `settings:changed`, not here. That is not an inconsistency: a window is one
+ * singleton fact about the installation, and the Runs view reading it re-reads
+ * the whole queue status anyway.
+ *
+ * See {@link subscribeToTasksChanged} for the empty-array contract; the same
+ * rule applies here.
+ */
+export function subscribeToSchedulesChanged(
+  onChanged: (scheduleIds: string[]) => void,
+): Promise<UnlistenFn> {
+  return listen<string[]>("schedules:changed", (event) => onChanged(event.payload));
+}

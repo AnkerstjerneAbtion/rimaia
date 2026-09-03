@@ -135,8 +135,8 @@ async fn interrupted_after(ctx: &ServiceContext, task_id: &str, run_id: &str) ->
             // is none: quitting closes the window, and a launch starts paused.
             // Passing the window that will be open at 22:00 tonight would cap a
             // decision about last night against a night that has not happened.
-            outcome.resume_after = retry::decide(&history, ctx.clock.now(), run_id, None)
-                .resume_after();
+            outcome.resume_after =
+                retry::decide(&history, ctx.clock.now(), run_id, None).resume_after();
         }
         Ok(None) => {}
         Err(error) => tracing::error!(

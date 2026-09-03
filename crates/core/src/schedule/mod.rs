@@ -380,8 +380,14 @@ fn validate(mut input: ScheduleInput) -> Result<ScheduleInput> {
     input.timezone = input.timezone.trim().to_string();
     cron::zone(&input.timezone)?;
 
-    input.cron = input.cron.map(|value| value.trim().to_string()).filter(|value| !value.is_empty());
-    input.stop_at = input.stop_at.map(|value| value.trim().to_string()).filter(|value| !value.is_empty());
+    input.cron = input
+        .cron
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+    input.stop_at = input
+        .stop_at
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
 
     match (input.cron.as_deref(), input.start_at) {
         (Some(expression), None) => cron::check(expression)?,
@@ -464,7 +470,10 @@ mod tests {
         );
         assert_eq!(created.last_fired_at, None);
 
-        assert_eq!(get(&harness.context, &created.id).await.expect("read back"), created);
+        assert_eq!(
+            get(&harness.context, &created.id).await.expect("read back"),
+            created
+        );
     }
 
     #[tokio::test]
@@ -546,10 +555,7 @@ mod tests {
             )
             .await
             .expect_err("a schedule without a real zone is not a schedule");
-            assert!(
-                error.to_string().contains("IANA"),
-                "{timezone:?}: {error}",
-            );
+            assert!(error.to_string().contains("IANA"), "{timezone:?}: {error}",);
         }
     }
 
@@ -710,8 +716,15 @@ mod tests {
             .await
             .expect("turn it off");
         assert!(!disabled.enabled);
-        assert_eq!(disabled.cron.as_deref(), Some(NIGHTLY), "the configuration stays");
-        assert_eq!(disabled.armed_at, created.armed_at, "turning it off arms nothing");
+        assert_eq!(
+            disabled.cron.as_deref(),
+            Some(NIGHTLY),
+            "the configuration stays"
+        );
+        assert_eq!(
+            disabled.armed_at, created.armed_at,
+            "turning it off arms nothing"
+        );
         assert_eq!(
             enabled(&harness.context.pool).await.expect("read").len(),
             0,

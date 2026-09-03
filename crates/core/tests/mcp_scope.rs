@@ -14,8 +14,8 @@
 
 use rimaia_core::db::{BoardColumn, MutationSource, ScheduleMode};
 use rimaia_core::mcp::requests::{
-    CreateTaskRequest, GetStrategyDefaultsRequest, GetTaskRequest, ListTasksRequest, MoveTaskRequest,
-    ScheduleConfigRequest, ScheduleRequest, SetMaxConcurrencyRequest,
+    CreateTaskRequest, GetStrategyDefaultsRequest, GetTaskRequest, ListTasksRequest,
+    MoveTaskRequest, ScheduleConfigRequest, ScheduleRequest, SetMaxConcurrencyRequest,
     SetRepositoryMaxConcurrencyRequest, SetScheduleEnabledRequest, SetScheduleModeRequest,
     SetStrategyApprovalRequest, SetStrategyCatalogueRequest, SetStrategyDefaultsRequest,
     SetTaskDependenciesRequest, SetTaskStrategyRequest, TaskStrategyRequest, UpdateScheduleRequest,

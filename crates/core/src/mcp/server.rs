@@ -32,21 +32,22 @@ use crate::db::{BoardColumn, StrategySource};
 use crate::doctor;
 use crate::mcp::error::ToolError;
 use crate::mcp::requests::{
-    ScheduleConfigRequest, ScheduleRequest, SetScheduleEnabledRequest, UpdateScheduleRequest,
     AddTaskLinkRequest, ClearableField, CreateTaskRequest, GetStrategyDefaultsRequest,
     GetTaskRequest, ListTasksRequest, MoveTaskRequest, RemoveTaskLinkRequest,
-    SetMaxConcurrencyRequest, SetRepositoryMaxConcurrencyRequest, SetScheduleModeRequest,
+    ScheduleConfigRequest, ScheduleRequest, SetMaxConcurrencyRequest,
+    SetRepositoryMaxConcurrencyRequest, SetScheduleEnabledRequest, SetScheduleModeRequest,
     SetStrategyApprovalRequest, SetStrategyCatalogueRequest, SetStrategyDefaultsRequest,
-    SetTaskDependenciesRequest, SetTaskStrategyRequest, TaskStrategyRequest, UpdateTaskRequest,
+    SetTaskDependenciesRequest, SetTaskStrategyRequest, TaskStrategyRequest, UpdateScheduleRequest,
+    UpdateTaskRequest,
 };
 use crate::mcp::responses::{
-    PreflightView, ScheduleDeletedView, ScheduleListView, ScheduleView, TimezoneListView,
-    BaseInstructionsView, DoctorReportView, OnboardingView, RepositoryListView, RepositoryView,
-    RunCapacityView, StrategyApprovalView, TaskListItem, TaskListView, TaskView,
+    BaseInstructionsView, DoctorReportView, OnboardingView, PreflightView, RepositoryListView,
+    RepositoryView, RunCapacityView, ScheduleDeletedView, ScheduleListView, ScheduleView,
+    StrategyApprovalView, TaskListItem, TaskListView, TaskView, TimezoneListView,
 };
 use crate::mcp::scope::{RunScope, Tool};
-use crate::schedule;
 use crate::runner::prompt::TEMPLATE_VARIABLES;
+use crate::schedule;
 use crate::scheduler::{self, capacity};
 use crate::strategy::{self, Catalogue, StrategyDefaults};
 use crate::tasks::{NewTask, NewTaskLink, Patch, TaskFilter, TaskPatch};
@@ -794,7 +795,9 @@ there in the morning unless somebody acts. A run cannot call it."
     ) -> Result<Json<PreflightView>, ToolError> {
         self.scope.authorize(Tool::PreviewSchedulePreflight, None)?;
         Ok(Json(
-            schedule::preview(&self.ctx, &request.schedule_id).await?.into(),
+            schedule::preview(&self.ctx, &request.schedule_id)
+                .await?
+                .into(),
         ))
     }
 
@@ -867,7 +870,6 @@ fn patch_field(value: Option<String>, cleared: bool) -> Patch<String> {
         (None, true) => Patch::Clear,
         (None, false) => Patch::Unset,
     }
-
 }
 
 #[tool_handler]

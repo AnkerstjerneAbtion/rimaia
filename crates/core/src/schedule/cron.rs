@@ -353,7 +353,11 @@ mod tests {
         let first = next_after(expression, CPH, at("2026-10-25T00:00:00Z")).expect("the 25th");
         let next = next_after(expression, CPH, first).expect("the day after");
 
-        assert_eq!(first, at("2026-10-25T00:30:00Z"), "the earlier 02:30, UTC+2");
+        assert_eq!(
+            first,
+            at("2026-10-25T00:30:00Z"),
+            "the earlier 02:30, UTC+2"
+        );
         assert!(
             next >= at("2026-10-26T00:00:00Z"),
             "{next} is the second half of the repeated hour, not the next day",

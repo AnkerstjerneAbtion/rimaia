@@ -377,7 +377,8 @@ mod tests {
         let mut history = first(ExitClass::UsageLimit);
         history.usage_limit_resets_at = Some(at("2026-08-20T01:00:00Z"));
 
-        let RetryDecision::ResumeAt { at: resume, .. } = decide(&history, at(NOW), SEED, None) else {
+        let RetryDecision::ResumeAt { at: resume, .. } = decide(&history, at(NOW), SEED, None)
+        else {
             panic!("a usage limit is always retried");
         };
 
@@ -395,12 +396,7 @@ mod tests {
         let mut history = first(ExitClass::UsageLimit);
         history.usage_limit_resets_at = Some(at("2026-08-20T06:00:00Z"));
 
-        let decision = decide(
-            &history,
-            at(NOW),
-            SEED,
-            Some(at("2026-08-20T09:00:00Z")),
-        );
+        let decision = decide(&history, at(NOW), SEED, Some(at("2026-08-20T09:00:00Z")));
 
         assert!(matches!(
             decision,
@@ -419,12 +415,7 @@ mod tests {
         let mut history = first(ExitClass::UsageLimit);
         history.usage_limit_resets_at = Some(at("2026-08-20T07:00:00Z"));
 
-        let decision = decide(
-            &history,
-            at(NOW),
-            SEED,
-            Some(at("2026-08-20T06:00:00Z")),
-        );
+        let decision = decide(&history, at(NOW), SEED, Some(at("2026-08-20T06:00:00Z")));
 
         assert_eq!(
             decision,
@@ -475,7 +466,12 @@ mod tests {
             let decided = decide(&first(class), at(NOW), SEED, None);
             assert_eq!(
                 decided,
-                decide(&first(class), at(NOW), SEED, Some(at("2036-01-01T00:00:00Z"))),
+                decide(
+                    &first(class),
+                    at(NOW),
+                    SEED,
+                    Some(at("2036-01-01T00:00:00Z"))
+                ),
                 "{class:?} must not depend on a window it finishes long before",
             );
         }

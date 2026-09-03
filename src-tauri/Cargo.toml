@@ -24,6 +24,12 @@ tauri = { version = "2", features = [] }
 tauri-plugin-opener = "2"
 # Native folder picker for task 003's "Settings → Repositories → add" (ADR-0002).
 tauri-plugin-dialog = "2"
+# Task 013's optional OS notification: the queue starting at 22:00 and the run
+# window closing at 06:00 both happen with nobody at the machine, and a desktop
+# notification is the only surface that reaches somebody who is not looking at
+# the window. Seam-contract D6's list is closed, so this is an amendment to it,
+# not an addition nobody wrote down.
+tauri-plugin-notification = "2"
 
 # Only for the date-range filter `commands::runs::list_runs` deserializes — the
 # workspace pin, so the shell and core can never decode a `DateTime<Utc>` two

@@ -28,10 +28,7 @@ pub async fn list_schedules(state: State<'_, AppState>) -> Result<Vec<ScheduleVi
 
 /// Creates a schedule, armed from now.
 #[tauri::command]
-pub async fn create_schedule(
-    state: State<'_, AppState>,
-    input: ScheduleInput,
-) -> Result<Schedule> {
+pub async fn create_schedule(state: State<'_, AppState>, input: ScheduleInput) -> Result<Schedule> {
     schedule::create(&state.context, input).await
 }
 

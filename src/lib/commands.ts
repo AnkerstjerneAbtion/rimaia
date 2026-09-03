@@ -9,6 +9,7 @@ import type {
   McpStatus,
   NewTaskInput,
   NewTaskLinkInput,
+  PreflightSummary,
   PruneCriterionInput,
   PruneResult,
   QueueStatus,
@@ -25,7 +26,10 @@ import type {
   RunListEntry,
   RunState,
   RunTail,
+  Schedule,
+  ScheduleInput,
   ScheduleMode,
+  ScheduleView,
   SearchHit,
   StrategyApproval,
   StrategyCatalogueView,
@@ -543,6 +547,66 @@ export function getRunLogSize(): Promise<number> {
  */
 export function pruneRunLogs(criterion: PruneCriterionInput): Promise<PruneResult> {
   return call<PruneResult>("prune_run_logs", { criterion });
+}
+
+// ---------------------------------------------------------------------------
+// Schedules (task 013) — see `src-tauri/src/commands/schedules.rs`.
+// ---------------------------------------------------------------------------
+
+/**
+ * Every schedule, each with the time it will next fire.
+ *
+ * The next fire time is the reason this is not a plain table read: task 013's
+ * point is that a wrong cron expression is caught **in the evening** rather
+ * than discovered in the morning, and a list without it is a list nobody can
+ * check. A row whose expression cannot be read reports `nextFireError` instead
+ * of a time rather than failing the whole call — the list is where it gets
+ * fixed.
+ *
+ * Re-read on {@link subscribeToSchedulesChanged}.
+ */
+export function listSchedules(): Promise<ScheduleView[]> {
+  return call<ScheduleView[]>("list_schedules");
+}
+
+/** Creates a schedule, armed from now — so one created at 23:00 for "every
+ *  night at 22:00" means tomorrow, not one minute ago. */
+export function createSchedule(input: ScheduleInput): Promise<Schedule> {
+  return call<Schedule>("create_schedule", { input });
+}
+
+/** Replaces a schedule's configuration, leaving its fire history alone: editing
+ *  tonight's stop time does not make tonight's start happen again. */
+export function updateSchedule(id: string, input: ScheduleInput): Promise<Schedule> {
+  return call<Schedule>("update_schedule", { id, input });
+}
+
+/**
+ * Turns a schedule on or off without deleting what it is set to.
+ *
+ * Turning one back on **re-arms** it, so a schedule that spent a month disabled
+ * does not immediately fire for the last of thirty nights it missed.
+ */
+export function setScheduleEnabled(id: string, enabled: boolean): Promise<Schedule> {
+  return call<Schedule>("set_schedule_enabled", { id, enabled });
+}
+
+export function deleteSchedule(id: string): Promise<void> {
+  return call<void>("delete_schedule", { id });
+}
+
+/** What this schedule would do if it fired now: which tasks run, in what order,
+ *  and which are blocked and why. Computed from the same function the queue
+ *  loop itself calls, so it cannot drift from what actually happens. */
+export function previewSchedulePreflight(id: string): Promise<PreflightSummary> {
+  return call<PreflightSummary>("preview_schedule_preflight", { id });
+}
+
+/** Every IANA zone name a schedule may use. The list the picker offers and the
+ *  list the service accepts come from one `chrono-tz` table, which is what
+ *  keeps a timezone package out of `package.json`. */
+export function listTimezones(): Promise<string[]> {
+  return call<string[]>("list_timezones");
 }
 
 // ---------------------------------------------------------------------------

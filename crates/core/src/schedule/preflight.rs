@@ -82,7 +82,10 @@ impl PreflightSummary {
     /// startable tasks in a repository capped at one is still three tasks this
     /// window will get through, one after another.
     pub fn startable(&self) -> usize {
-        self.plan.iter().filter(|entry| entry.skip.is_none()).count()
+        self.plan
+            .iter()
+            .filter(|entry| entry.skip.is_none())
+            .count()
     }
 
     /// How many it will pass over, and therefore how many will still be sitting

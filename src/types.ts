@@ -718,6 +718,135 @@ export interface QueueStatus {
    *  {@link lastStepError} is, because a hold the operator cannot see is one
    *  they will debug as a bug. */
   usageLimitPauseUntil: string | null;
+  /** The run window a schedule opened, or `null` when the queue is running
+   *  because somebody pressed Start (task 013).
+   *
+   *  Here rather than on a schedules read of its own, because it answers a
+   *  question about *the queue*: "Running until 06:00 — Nightly" while it is
+   *  open and, once the stop time has passed and {@link state} has gone back to
+   *  `"paused"`, the one thing that explains a queue which stopped by itself at
+   *  06:00 with work still on the board. Without it that reads exactly like the
+   *  queue having failed. */
+  window: RunWindow | null;
+}
+
+// ---------------------------------------------------------------------------
+// Schedules (task 013) — mirrors `rimaia_core::schedule` (ADR-0010).
+// ---------------------------------------------------------------------------
+
+/**
+ * Mirrors `rimaia_core::db::Schedule` — a named run configuration, and when it
+ * fires.
+ *
+ * Four of these fields are nullable in the schema and are not all equally
+ * optional in practice: `timezone` is **required by the service for every row
+ * it writes**, and a row without one is refused rather than read as UTC, since
+ * a nightly queue in the wrong zone runs an hour out for half the year with
+ * nothing to say so.
+ */
+export interface Schedule {
+  id: string;
+  name: string;
+  /** Overrides the installation default **while this schedule's window is
+   *  open**, and only then — see {@link QueueStatus.window}. */
+  mode: ScheduleMode;
+  /** A cron expression read in {@link timezone}. Exclusive with
+   *  {@link startAt}. */
+  cron: string | null;
+  /** A one-off instant. Fires once. Exclusive with {@link cron}. */
+  startAt: string | null;
+  maxConcurrency: number;
+  enabled: boolean;
+  /** An IANA name — `"Europe/Copenhagen"`, never an offset or an
+   *  abbreviation. */
+  timezone: string | null;
+  /** A **local time of day**, `"HH:MM"`, at which the window stops starting new
+   *  tasks. Not an instant: "stop at 06:00" is the sentence the user says, and
+   *  a window crossing spring-forward is seven real hours and still ends at
+   *  06:00 local. */
+  stopAt: string | null;
+  /** When it **actually** fired, never when it was due. */
+  lastFiredAt: string | null;
+  /** The instant from which missed occurrences count — set on create, re-set on
+   *  every enable, so a schedule that spent a month off does not fire the
+   *  second it comes back. */
+  armedAt: string | null;
+}
+
+/**
+ * Mirrors `rimaia_core::schedule::ScheduleView` — a schedule plus the one thing
+ * about it that is computed rather than stored.
+ *
+ * The Rust type flattens the row, so every {@link Schedule} field is present on
+ * this object directly.
+ */
+export interface ScheduleView extends Schedule {
+  /** When this schedule next fires. **In the past when it is overdue**, which
+   *  is the one case worth seeing — showing tomorrow's 22:00 for a schedule
+   *  that should have started an hour ago would hide it. `null` for a one-off
+   *  that already fired, and for a row whose configuration cannot be read at
+   *  all, in which case {@link nextFireError} says why. */
+  nextFireAt: string | null;
+  /** Why there is no next fire time, when a broken row is the reason. A field
+   *  rather than a failed read, so one unparseable cron expression does not
+   *  make the whole list — the list the user would use to fix it —
+   *  unreadable. */
+  nextFireError: string | null;
+}
+
+/** What {@link createSchedule} and {@link updateSchedule} send. A whole row
+ *  rather than a patch: the fields constrain each other, so "clear the cron and
+ *  set a one-off time" has to be one write or there is an illegal row in the
+ *  middle of it. */
+export interface ScheduleInput {
+  name: string;
+  mode: ScheduleMode;
+  maxConcurrency: number;
+  /** Required, though the column is nullable. */
+  timezone: string;
+  cron?: string | null;
+  startAt?: string | null;
+  stopAt?: string | null;
+  enabled: boolean;
+}
+
+/**
+ * Mirrors `rimaia_core::schedule::window::RunWindow` — the run window that is
+ * open right now.
+ *
+ * Carries the schedule's *name* as well as its id, denormalised on purpose: the
+ * window is a record of what was decided at 22:00, and it does not become
+ * untrue because the schedule was renamed or deleted at midnight.
+ */
+export interface RunWindow {
+  scheduleId: string;
+  scheduleName: string;
+  openedAt: string;
+  /** When new starts stop. `null` for a schedule with no stop time. */
+  closesAt: string | null;
+  mode: ScheduleMode;
+  maxConcurrency: number;
+}
+
+/**
+ * Mirrors `rimaia_core::schedule::PreflightSummary` — what a schedule would do
+ * if it fired now.
+ *
+ * Computed, never stored: it is true of a board at an instant, and a card
+ * dragged at 21:55 changes what runs at 22:00.
+ */
+export interface PreflightSummary {
+  scheduleId: string;
+  scheduleName: string;
+  nextFireAt: string | null;
+  closesAt: string | null;
+  mode: ScheduleMode;
+  maxConcurrency: number;
+  /** Every `ready` task in board order, **including** the ones the queue will
+   *  pass over, each carrying its reason. Filtering the skipped ones out would
+   *  answer "which tasks will run" and silently drop "and which are blocked and
+   *  why", which is the half that costs a night. */
+  plan: QueueEntry[];
 }
 
 /**

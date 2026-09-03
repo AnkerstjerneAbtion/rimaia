@@ -74,6 +74,7 @@ function queueStatus(overrides: Partial<QueueStatus> = {}): QueueStatus {
     plan: [],
     lastStepError: null,
     usageLimitPauseUntil: null,
+    window: null,
     ...overrides,
   };
 }

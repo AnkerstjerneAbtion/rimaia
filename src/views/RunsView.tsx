@@ -366,6 +366,20 @@ export function RunsView() {
           )}
         </div>
 
+        {/* What the badge above cannot say by itself: *why* it reads what it
+            reads. A queue that a schedule started at 22:00 stops by itself at
+            06:00, and without this that reads exactly like a queue that failed
+            with work still on the board (task 013). */}
+        {queueStatus?.window && (
+          <p className="queue-window muted">
+            {queueStatus.state === "running"
+              ? queueStatus.window.closesAt
+                ? `Running until ${windowTime(queueStatus.window.closesAt)} — ${queueStatus.window.scheduleName}`
+                : `Running — ${queueStatus.window.scheduleName}, with no stop time`
+              : `${queueStatus.window.scheduleName}'s run window is open, but the queue is paused`}
+          </p>
+        )}
+
         {/* The one failure `SkipReason` cannot name: a missing `claude` fails
             `probe_cli` before any task is even chosen, so nothing on the
             board explains it and the state badge above would otherwise read
@@ -539,4 +553,11 @@ export function RunsView() {
       )}
     </div>
   );
+}
+
+/** The hour a run window closes, for the caption beside the queue's state
+ *  badge. Local and to the minute: "06:00" is what the user typed, and a date
+ *  beside it would be noise on a line that is about tonight. */
+function windowTime(iso: string): string {
+  return new Date(iso).toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" });
 }
