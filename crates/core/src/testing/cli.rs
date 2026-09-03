@@ -377,6 +377,31 @@ impl FakeCli {
     /// subcommand somebody adds must fail in this file with its own name in
     /// the message, not somewhere else as a run nobody asked for.
     ///
+    /// `auth` is answered rather than refused, and it is the one exception to
+    /// the paragraph above. Task 018's doctor gates `QueueHandle::start` on
+    /// `claude auth status --json`, so a stand-in that refused it would refuse
+    /// every queue in every test — the same failure in the other direction.
+    /// It answers `{"loggedIn": true}` because a signed-in CLI is the state a
+    /// scheduler test is about; the doctor's *unauthenticated* paths are task
+    /// 018's own tests, against `testing::doctor`'s stand-in, which can say
+    /// otherwise.
+    ///
+    /// # Why the `--version` hold also waits on `auth-seen`
+    ///
+    /// [`hold_version_probe`](Self::hold_version_probe) exists to widen the
+    /// window between the queue claiming a task and spawning its process, so a
+    /// test can press Stop inside it. Task 018's doctor probes `--version` too,
+    /// from inside `QueueHandle::start` — and a hold can only be armed *before*
+    /// `start()`, because after it the loop races the next statement. So a hold
+    /// with no second condition blocks the very call meant to get the queue
+    /// running, and the suite hangs rather than fails: `cargo test` spins on a
+    /// `sleep 0.02` loop until something kills it.
+    ///
+    /// The doctor asks `--version` and then `auth`; the loop asks `--version`
+    /// after both. "`auth` has been asked at least once" is therefore exactly
+    /// the line between the preflight and the loop, which is what keeps the
+    /// hold aimed at the probe it was written for.
+    ///
     /// `pwd -P` rather than the `pwd` builtin's default, because `PWD` is
     /// inherited from the parent and `Command::current_dir` does not update it.
     ///
@@ -387,10 +412,14 @@ impl FakeCli {
         let script = format!(
             "#!/bin/sh\n\
              if [ \"$1\" = '--version' ]; then\n\
-             if [ -f '{dir}/version-hold' ]; then\n\
+             if [ -f '{dir}/version-hold' ] && [ -f '{dir}/auth-seen' ]; then\n\
              while [ ! -f '{dir}/version-go' ]; do sleep 0.02; done\n\
              fi\n\
              echo '2.1.234 (Claude Code)'; exit 0\n\
+             fi\n\
+             if [ \"$1\" = 'auth' ]; then\n\
+             : > '{dir}/auth-seen'\n\
+             echo '{{\"loggedIn\": true}}'; exit 0\n\
              fi\n\
              if [ \"$1\" != '-p' ]; then\n\
              printf 'unhandled %s\\n' \"$1\" >> '{dir}/unhandled'\n\

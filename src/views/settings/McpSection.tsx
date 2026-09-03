@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 import type { FormEvent } from "react";
 
 import { ErrorBanner } from "../../components/ErrorBanner";
+import { mcpAddCommand } from "../../components/McpAddCommand";
 import {
   getMcpStatus,
   setMcpPort,
@@ -78,7 +79,10 @@ export function McpSection() {
 
   const listening = status?.state === "listening";
   const url = status?.boundAddress ? `http://${status.boundAddress}/mcp` : null;
-  const addCommand = url ? `claude mcp add --transport http rimaia ${url}` : null;
+  // Shared with the welcome flow's last step rather than spelled twice: the
+  // rule that the command is built from `boundAddress` is the whole point of
+  // the note above, and two copies of it are two chances to regress it.
+  const addCommand = mcpAddCommand(status);
   const parsedPort = Number(port);
   const portIsLegal =
     Number.isInteger(parsedPort) && parsedPort >= LOWEST_PORT && parsedPort <= HIGHEST_PORT;

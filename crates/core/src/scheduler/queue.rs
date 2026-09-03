@@ -107,6 +107,23 @@
 //! function and sits behind no `?`, so there is no path out of the loop that
 //! skips it.
 //!
+//! # The preflight is on the handle, not in the loop
+//!
+//! [`QueueHandle::start`] runs task 018's [`doctor`] and refuses, without
+//! writing `queue_state`, when anything is failing. Two consequences worth
+//! stating where the loop can see them.
+//!
+//! It is on the **handle** so that every door — the Tauri command, any future
+//! MCP queue tool, task 013's scheduled start — inherits the same refusal
+//! without each remembering to ask. ADR-0006's "a rule enforced in only one
+//! adapter is a bug", made structural.
+//!
+//! It is **not** in [`QueueTask::try_step`], deliberately, and that is not an
+//! oversight to correct later: `try_step` runs on every change event, so a
+//! doctor there would spawn eight subprocesses per card drag. The queue is a
+//! preflight case, not a watchdog case. The single check that genuinely must be
+//! per-step is `probe_cli`, and it is already there. Seam-contract D22.
+//!
 //! # Nothing here decides anything twice
 //!
 //! Eligibility is [`selection`]'s, the claim is [`claim`]'s, the switch is
@@ -152,7 +169,8 @@ use tokio::task::JoinSet;
 
 use crate::context::ServiceContext;
 use crate::db::MutationSource;
-use crate::error::Result;
+use crate::doctor;
+use crate::error::{Error, Result};
 use crate::events::ChangeEvent;
 use crate::paths::AppPaths;
 use crate::runner::{
@@ -222,8 +240,6 @@ pub struct QueueHandle {
 /// The queue itself. Spawn [`run`](QueueTask::run) once, and only once.
 pub struct QueueTask {
     shared: Arc<Shared>,
-    paths: AppPaths,
-    runner: RunnerConfig,
 }
 
 /// Wires a queue: the handle to keep, and the task to spawn.
@@ -256,8 +272,14 @@ pub fn build(
     // `subscribe`, which is what lets `build` be called before anything is
     // spawned.
     let (signals, _) = watch::channel(Signal::default());
+    // `paths` and `runner` live on `Shared` rather than on `QueueTask` because
+    // task 018's preflight needs both, and the preflight belongs to the
+    // *handle* — see [`QueueHandle::start`]. The loop reads them through the
+    // same `Arc` it already holds, so nothing about its own use changed.
     let shared = Arc::new(Shared {
         ctx,
+        paths,
+        runner,
         signals,
         in_flight,
         last_step_error: Mutex::new(None),
@@ -267,18 +289,40 @@ pub fn build(
         QueueHandle {
             shared: Arc::clone(&shared),
         },
-        QueueTask {
-            shared,
-            paths,
-            runner,
-        },
+        QueueTask { shared },
     )
 }
 
 impl QueueHandle {
     /// Starts working the board. Idempotent — starting a running queue writes
     /// the same row and wakes a loop that was not asleep.
+    ///
+    /// # The preflight refusal (task 018)
+    ///
+    /// Runs [`doctor::run`] first and **refuses without writing `queue_state`**
+    /// when anything is failing. Nothing is half-done on the refusal path: the
+    /// switch is untouched, so a user who fixes the environment and presses
+    /// Start again is starting from the same place, and a user who walks away
+    /// has not left a queue that thinks it is running.
+    ///
+    /// It lives here, on the handle, rather than in either command surface, and
+    /// that placement is the point: the Tauri command and any future MCP queue
+    /// tool both call this method, so the refusal is identical on both doors
+    /// *by construction* rather than by two adapters remembering to agree.
+    /// ADR-0006's rule satisfied structurally.
+    ///
+    /// It is deliberately **not** in the loop's own `try_step` — see this
+    /// module's header and `doctor`'s, and seam-contract D22.
     pub async fn start(&self) -> Result<()> {
+        let report = doctor::run(&self.shared.ctx, &self.shared.doctor_environment()).await?;
+        if report.is_blocking() {
+            tracing::warn!(
+                blocking = report.blocking().count(),
+                "refusing to start the run queue: the preflight doctor is reporting failures",
+            );
+            return Err(Error::invalid(report.blocking_summary()));
+        }
+
         self.set(QueueState::Running).await
     }
 
@@ -290,6 +334,10 @@ impl QueueHandle {
     /// of the evening, "resume" is the one after a pause. A queue whose state
     /// is derived from the database has no way to tell those apart, and no
     /// reason to.
+    ///
+    /// It inherits the preflight for free, and should: resuming after a pause
+    /// is the same act of leaving the machine to work unattended, and the
+    /// environment has had every opportunity to change during the pause.
     pub async fn resume(&self) -> Result<()> {
         self.start().await
     }
@@ -588,7 +636,17 @@ impl QueueTask {
         // button, and a queue that claimed first would spend a night walking
         // the board marking every task failed because `claude` is not
         // installed.
-        probe_cli(&self.runner.program).await?;
+        //
+        // **This one probe, and never the whole doctor.** Task 018's preflight
+        // is on `QueueHandle::start`, which the user presses once; this loop
+        // wakes on *every* change event, so a doctor here would be eight
+        // subprocess spawns per card drag — and a transient blip would halt a
+        // queue mid-flight, which is a new failure mode invented to prevent an
+        // old one. What that costs is bounded and stated: an environment that
+        // breaks after the queue started is caught for `claude` by this line,
+        // and for everything else by the run itself. Seam-contract D22 records
+        // it so it is not later "improved".
+        probe_cli(&self.shared.runner.program).await?;
 
         let mut worked = false;
         for (entry, lease) in leased {
@@ -658,8 +716,8 @@ impl QueueTask {
 
             runs.spawn(supervise(
                 ctx.clone(),
-                self.paths.clone(),
-                self.runner.clone(),
+                self.shared.paths.clone(),
+                self.shared.runner.clone(),
                 lease,
                 RunRequest {
                     task_id,
@@ -767,6 +825,15 @@ impl Step {
 /// What the control surface and the loop share.
 struct Shared {
     ctx: ServiceContext,
+    /// Where state lives. Read by the loop when it starts a run, and by
+    /// [`QueueHandle::start`]'s preflight, which asks whether it is writable
+    /// and how much room is left on it.
+    paths: AppPaths,
+    /// The one runner configuration every run this queue starts is spawned
+    /// from. The preflight reads two things off it that must not be guessed:
+    /// `program`, so the doctor probes the same `claude` the loop will spawn,
+    /// and `run_handles`, for the endpoint the MCP server actually bound.
+    runner: RunnerConfig,
     signals: watch::Sender<Signal>,
     /// Not the queue's own map any more — the shell holds a clone of the same
     /// registry, and both doors read it. See this module's header.
@@ -777,6 +844,13 @@ struct Shared {
 }
 
 impl Shared {
+    /// The preflight's view of this installation, built from what the queue was
+    /// wired with rather than from defaults — so the doctor answers about the
+    /// binary and the endpoint this queue would actually use.
+    fn doctor_environment(&self) -> doctor::Environment {
+        doctor::Environment::for_runner(self.paths.clone(), &self.runner)
+    }
+
     fn wake(&self) {
         self.signals.send_modify(|signal| signal.generation += 1);
     }
@@ -842,20 +916,31 @@ mod tests {
     use super::*;
     use crate::testing::TestContext;
     use pretty_assertions::assert_eq;
+    use tempfile::TempDir;
 
-    fn queue(harness: &TestContext) -> (QueueHandle, QueueTask) {
-        build(
-            harness.context.clone(),
-            AppPaths::new("/tmp/rimaia-queue-unit-test"),
-            RunnerConfig::default(),
-            InFlight::new(),
-        )
+    /// A queue whose preflight can actually pass.
+    ///
+    /// The [`TempDir`] is returned rather than dropped on the way out, and every
+    /// caller binds it: it owns both the app directory `data_directory` reports
+    /// on and the stand-in binary the two `claude` checks spawn, so letting it
+    /// drop here would delete the environment the gate is about to inspect.
+    ///
+    /// This used to be `AppPaths::new("/tmp/…")` and `RunnerConfig::default()`,
+    /// which was fine until task 018 put the doctor on `start()`. A bare
+    /// `RunnerConfig::default()` resolves `claude` on `PATH`, and `claude` is a
+    /// prerequisite the project deliberately never bundles (ADR-0004) — so that
+    /// version of this helper passed on a developer's machine and failed on CI,
+    /// where no CLI is installed. See `testing::doctor::passing_queue_environment`.
+    fn queue(harness: &TestContext) -> (TempDir, QueueHandle, QueueTask) {
+        let (root, paths, runner) = crate::testing::doctor::passing_queue_environment();
+        let (handle, task) = build(harness.context.clone(), paths, runner, InFlight::new());
+        (root, handle, task)
     }
 
     #[tokio::test]
     async fn the_control_verbs_write_the_switch_the_next_launch_reads() {
         let harness = TestContext::new().await;
-        let (handle, _task) = queue(&harness);
+        let (_root, handle, _task) = queue(&harness);
 
         handle.start().await.expect("start the queue");
         assert_eq!(
@@ -896,7 +981,7 @@ mod tests {
         // The Stop button is pressed by a human who cannot see whether the
         // current run finished half a second ago.
         let harness = TestContext::new().await;
-        let (handle, _task) = queue(&harness);
+        let (_root, handle, _task) = queue(&harness);
 
         handle.stop().await.expect("stop an idle queue");
 
@@ -908,7 +993,7 @@ mod tests {
         // `send_modify` always marks the value changed, which is what makes a
         // wake that lands between two polls survive to the next one.
         let harness = TestContext::new().await;
-        let (handle, task) = queue(&harness);
+        let (_root, handle, task) = queue(&harness);
         let signals = task.shared.signals.subscribe();
 
         handle.shared.wake();
@@ -919,7 +1004,7 @@ mod tests {
     #[tokio::test]
     async fn shutdown_is_visible_to_the_loop_without_awaiting_anything() {
         let harness = TestContext::new().await;
-        let (handle, task) = queue(&harness);
+        let (_root, handle, task) = queue(&harness);
         assert!(!task.shared.is_shutting_down());
 
         handle.shutdown();

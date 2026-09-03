@@ -9,6 +9,12 @@ members = ["crates/core", "src-tauri"]
 anyhow = "1"
 axum = "0.8"
 chrono = { version = "0.4", features = ["serde"] }
+# Task 018's one doctor check that std cannot answer: free space on the volume
+# the app data directory lives on. Cross-platform, which is the point — ADR-0002
+# keeps Windows and Linux viable, and a hand-rolled `statvfs` here would be three
+# implementations. The import is confined to `doctor::checks::disk_space`, and
+# seam-contract D19 records both the dependency and that constraint.
+fs4 = { version = "0.13", default-features = false }
 # Task 010's MCP server (ADR-0006, seam-contract D16). `reqwest` is here for
 # `mcp::probe` — rmcp's own client transport, so the Test connection round trip
 # cannot disagree with the server about the wire format — with no TLS features:

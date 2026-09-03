@@ -64,6 +64,7 @@ use tokio::sync::watch;
 
 use crate::context::ServiceContext;
 use crate::db::MutationSource;
+use crate::doctor;
 use crate::error::{Error, Result};
 
 pub mod error;
@@ -169,6 +170,13 @@ struct Routes {
 struct RunRoute {
     ctx: ServiceContext,
     handles: RunHandles,
+    /// Carried even though every doctor tool is `Refused` to a run: the scoped
+    /// server is the *same type* as the operator's, so it needs the same
+    /// fields, and the refusal comes from [`RunScope::authorize`] rather than
+    /// from the value being absent. A scope enforced by a missing field would
+    /// be a second mechanism — and the one that fails open the day someone
+    /// gives the field a default.
+    doctor: doctor::Environment,
 }
 
 struct Shared {
@@ -195,7 +203,12 @@ struct Shared {
 /// every bind — including the rebind `set_mcp_port` performs at runtime. That
 /// is what makes a scoped URL truthful and what removes the ordering constraint
 /// between `scheduler::build` and this one (seam-contract D17.4).
-pub async fn build(ctx: ServiceContext, port: u16, handles: RunHandles) -> (McpHandle, McpTask) {
+pub async fn build(
+    ctx: ServiceContext,
+    port: u16,
+    handles: RunHandles,
+    doctor: doctor::Environment,
+) -> (McpHandle, McpTask) {
     // Every write this server makes is an agent's, not the user's (ADR-0019).
     // Re-sourced here, once, so no handler has to remember.
     let ctx = ctx.with_source(MutationSource::Mcp);
@@ -218,7 +231,7 @@ pub async fn build(ctx: ServiceContext, port: u16, handles: RunHandles) -> (McpH
                     message: None,
                 },
                 Some(listener),
-                Some(streamable_service(ctx.clone())),
+                Some(streamable_service(ctx.clone(), doctor.clone())),
             )
         }
         Err(error) if error.kind() == std::io::ErrorKind::AddrInUse => {
@@ -265,7 +278,11 @@ pub async fn build(ctx: ServiceContext, port: u16, handles: RunHandles) -> (McpH
 
     let routes = operator.map(|operator| Routes {
         operator,
-        run: RunRoute { ctx, handles },
+        run: RunRoute {
+            ctx,
+            handles,
+            doctor,
+        },
     });
 
     (
@@ -376,7 +393,7 @@ async fn dispatch(
         return StatusCode::NOT_FOUND.into_response();
     };
 
-    scoped_service(route.ctx.clone(), task_id)
+    scoped_service(route.ctx.clone(), route.doctor.clone(), task_id)
         .handle(request)
         .await
         .into_response()
@@ -389,16 +406,18 @@ async fn dispatch(
 /// configuration than the other.
 pub(crate) fn streamable_service(
     ctx: ServiceContext,
+    doctor: doctor::Environment,
 ) -> StreamableHttpService<RimaiaServer, LocalSessionManager> {
-    service_over(move || RimaiaServer::new(ctx.clone()))
+    service_over(move || RimaiaServer::new(ctx.clone(), doctor.clone()))
 }
 
 /// The same transport, serving one run's scoped view of the same services.
 fn scoped_service(
     ctx: ServiceContext,
+    doctor: doctor::Environment,
     task_id: String,
 ) -> StreamableHttpService<RimaiaServer, LocalSessionManager> {
-    service_over(move || RimaiaServer::scoped(ctx.clone(), task_id.clone()))
+    service_over(move || RimaiaServer::scoped(ctx.clone(), doctor.clone(), task_id.clone()))
 }
 
 /// One transport configuration, so the operator's door and a run's cannot
@@ -506,7 +525,13 @@ mod tests {
 
     /// A bound server on an OS-chosen port, already spawned.
     async fn serving(harness: &TestContext) -> (McpHandle, tokio::task::JoinHandle<()>) {
-        let (handle, task) = build(harness.context.clone(), 0, RunHandles::default()).await;
+        let (handle, task) = build(
+            harness.context.clone(),
+            0,
+            RunHandles::default(),
+            crate::testing::doctor::environment(),
+        )
+        .await;
         assert_eq!(handle.status().state, McpState::Listening);
         (handle, tokio::spawn(task.run()))
     }
@@ -561,7 +586,13 @@ mod tests {
         let taken = squatter.local_addr().expect("its address").port();
 
         let handles = RunHandles::default();
-        let (handle, task) = build(harness.context.clone(), taken, handles.clone()).await;
+        let (handle, task) = build(
+            harness.context.clone(),
+            taken,
+            handles.clone(),
+            crate::testing::doctor::environment(),
+        )
+        .await;
 
         let status = handle.status();
         assert_eq!(status.state, McpState::PortInUse);

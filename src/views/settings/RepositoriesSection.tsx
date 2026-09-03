@@ -1,14 +1,12 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 
-import { open } from "@tauri-apps/plugin-dialog";
-
 import { ErrorBanner } from "../../components/ErrorBanner";
+import { RepositoryAddForm } from "../../components/RepositoryAddForm";
 import {
   getRepositoryRemoteInfo,
   getStrategyCatalogue,
   getStrategyDefaults,
   listRepositories,
-  registerRepository,
   removeRepository,
   setRepositoryMaxConcurrency,
   setRepositoryUnattendedRuns,
@@ -56,8 +54,6 @@ function draftFrom(repository: Repository): EditDraft {
 export function RepositoriesSection() {
   const [repositories, setRepositories] = useState<Repository[] | null>(null);
   const [listError, setListError] = useState<RimaiaError | null>(null);
-  const [addError, setAddError] = useState<RimaiaError | null>(null);
-  const [adding, setAdding] = useState(false);
   const [rowErrors, setRowErrors] = useState<Record<string, RimaiaError | null>>({});
   const [remoteInfos, setRemoteInfos] = useState<Record<string, RemoteInfoState>>({});
   const [editingId, setEditingId] = useState<string | null>(null);
@@ -157,28 +153,6 @@ export function RepositoriesSection() {
       );
     }
   }, [repositories]);
-
-  async function handleAdd() {
-    setAddError(null);
-    let selected: string | string[] | null;
-    try {
-      selected = await open({ directory: true, multiple: false, title: "Choose a repository" });
-    } catch (thrown) {
-      setAddError(toRimaiaError(thrown));
-      return;
-    }
-    if (!selected || Array.isArray(selected)) return; // cancelled
-
-    setAdding(true);
-    try {
-      await registerRepository({ path: selected });
-      refresh();
-    } catch (thrown) {
-      setAddError(toRimaiaError(thrown));
-    } finally {
-      setAdding(false);
-    }
-  }
 
   function beginEdit(repository: Repository) {
     setEditingId(repository.id);
@@ -291,12 +265,7 @@ export function RepositoriesSection() {
         <ErrorBanner error={catalogueError} onDismiss={() => setCatalogueError(null)} />
       )}
 
-      <div className="repo-add">
-        {addError && <ErrorBanner error={addError} onDismiss={() => setAddError(null)} />}
-        <button type="button" onClick={handleAdd} disabled={adding}>
-          {adding ? "Adding…" : "Add repository"}
-        </button>
-      </div>
+      <RepositoryAddForm onRegistered={refresh} />
 
       {repositories === null && !listError && <p className="muted">Reading…</p>}
       {repositories && repositories.length === 0 && (

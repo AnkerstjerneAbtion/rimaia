@@ -13,16 +13,27 @@ pub struct AppInfo {
     pub data_dir: String,
     pub db_file: String,
     pub logs_dir: String,
+    /// Task 018's first-run flag, carried on the read the app already does at
+    /// launch rather than on a command of its own.
+    ///
+    /// It rides along here for one specific reason: the opening view has to be
+    /// decided *before the first frame*, and a second round trip to decide it is
+    /// a frame of the board flashing up before the welcome screen replaces it.
+    /// It is also not worth a command — and, under ADR-0021, not worth the MCP
+    /// tool a command would owe.
+    pub onboarding_dismissed: bool,
 }
 
 #[tauri::command]
-pub fn get_app_info(state: State<'_, AppState>) -> Result<AppInfo> {
+pub async fn get_app_info(state: State<'_, AppState>) -> Result<AppInfo> {
     let paths = &state.paths;
     Ok(AppInfo {
         app_version: env!("CARGO_PKG_VERSION").to_string(),
         data_dir: paths.data_dir().display().to_string(),
         db_file: paths.db_file().display().to_string(),
         logs_dir: paths.logs_dir().display().to_string(),
+        onboarding_dismissed: rimaia_core::db::settings::onboarding_dismissed(&state.context.pool)
+            .await?,
     })
 }
 

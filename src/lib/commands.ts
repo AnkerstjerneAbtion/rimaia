@@ -4,6 +4,7 @@ import type {
   AppInfo,
   BoardColumn,
   DiffSummary,
+  DoctorReport,
   McpProbe,
   McpStatus,
   NewTaskInput,
@@ -636,4 +637,33 @@ export function setMcpPort(port: number): Promise<McpStatus> {
  *  the way a client would — not a "something is listening" check. */
 export function testMcpConnection(): Promise<McpProbe> {
   return call<McpProbe>("test_mcp_connection");
+}
+
+// ---------------------------------------------------------------------------
+// The preflight doctor (task 018) — see `src-tauri/src/commands/doctor.rs`.
+// ---------------------------------------------------------------------------
+
+/**
+ * Every preflight check, passing rows included.
+ *
+ * The passing rows are not padding: {@link WelcomeView} shows each of its four
+ * steps the rows belonging to it, so "done" there is a check passing rather
+ * than a button having been clicked.
+ *
+ * Spawns up to eight subprocesses, and two more per registered repository, so
+ * it is called on mount and on an explicit Re-check — never on an event.
+ */
+export function runDoctor(): Promise<DoctorReport> {
+  return call<DoctorReport>("run_doctor");
+}
+
+/**
+ * Records that the first-run walkthrough is done with, or deliberately skipped.
+ *
+ * There is deliberately no command to un-dismiss it: the welcome screen stays
+ * reachable from Settings, so a second command would exist only to put back a
+ * screen the user can already open.
+ */
+export function dismissOnboarding(): Promise<void> {
+  return call<void>("dismiss_onboarding");
 }

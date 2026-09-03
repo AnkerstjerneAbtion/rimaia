@@ -59,7 +59,7 @@ use rimaia_core::tasks::{
     self, NewTask, Patch, StrategyPlan, StrategyPlanStatus, StrategyWorkflow, TaskDetail, TaskPatch,
 };
 use rimaia_core::testing::fixtures::{fixture_lines, fixture_path};
-use rimaia_core::testing::{TempRepo, TestContext};
+use rimaia_core::testing::{self, TempRepo, TestContext};
 use rimaia_core::{AppPaths, ErrorCode};
 use tempfile::TempDir;
 use tokio::sync::broadcast::Receiver;
@@ -970,7 +970,13 @@ impl StrategyFixture {
         // A real bound server on an OS-chosen port, sharing the handles the
         // runner mints tokens in — the way the shell wires them in `setup()`.
         let handles = RunHandles::default();
-        let (mcp, task_handle) = mcp::build(harness.context.clone(), 0, handles.clone()).await;
+        let (mcp, task_handle) = mcp::build(
+            harness.context.clone(),
+            0,
+            handles.clone(),
+            testing::doctor::environment(),
+        )
+        .await;
         tokio::spawn(task_handle.run());
         assert!(
             handles.endpoint().is_some(),

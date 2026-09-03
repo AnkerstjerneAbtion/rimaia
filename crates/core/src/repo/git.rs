@@ -13,12 +13,20 @@ use std::process::Output;
 
 use crate::error::{Error, Result};
 
+/// Resolved through `PATH`, like `claude` and for the same reason (ADR-0004):
+/// Rimaia drives the tools the operator already has rather than bundling its
+/// own. Named constants because task 018's doctor probes the same two binaries
+/// this module runs, and a doctor that checked a *different* `git` from the one
+/// worktree creation uses would be reassuring about the wrong thing.
+pub const GIT_CLI: &str = "git";
+pub const GH_CLI: &str = "gh";
+
 /// Runs `git` with `args` in `dir`. A spawn failure — `git` itself missing —
 /// is `Error::internal`: unlike every other outcome in this module, no input
 /// the user supplies through repository registration can fix a missing `git`
 /// binary.
 async fn run(dir: &Path, args: &[&str]) -> Result<Output> {
-    tokio::process::Command::new("git")
+    tokio::process::Command::new(GIT_CLI)
         .current_dir(dir)
         .args(args)
         .output()
@@ -154,6 +162,50 @@ pub(super) fn host_from_remote_url(url: &str) -> Option<String> {
     (!host.is_empty()).then(|| host.to_string())
 }
 
+/// The three answers `gh auth status --hostname <host>` can give, kept apart.
+///
+/// [`gh_authenticated`] deliberately collapses the first two into `false`,
+/// which is all task 003's warning needs. Task 018's doctor needs them apart:
+/// "install the GitHub CLI" and "run `gh auth login`" are different
+/// remediations, and a doctor row that offers the wrong one is worse than no
+/// row at all.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum GhProbe {
+    /// No `gh` on `PATH` — the spawn itself failed with `NotFound`.
+    NotInstalled,
+    /// `gh` ran and said no: no credentials for this host.
+    NotAuthenticated,
+    Ready,
+}
+
+/// Whether `gh` is installed and authenticated for `host`, told apart.
+///
+/// Never a hard failure, for the reason [`gh_authenticated`] gives. The
+/// distinction rests on `Command::output` returning `Err(NotFound)` when the
+/// binary is not on `PATH` versus `Ok` with a non-zero status when it ran and
+/// refused — a difference the operating system makes for us, not one inferred
+/// from parsing `gh`'s prose. Any *other* spawn error (a permission problem on
+/// the binary, say) is reported as `NotInstalled` too: from the caller's side
+/// the effect is identical, and inventing a fourth state for it would buy no
+/// remediation the user could act on differently.
+///
+/// `program` is a path rather than a bare name so a test can point at a
+/// stand-in that exits non-zero — the same injection
+/// [`RunnerConfig::program`](crate::runner::RunnerConfig::program) already
+/// allows for `claude`, and the only way to test the unauthenticated branch
+/// without depending on the developer's own `gh` login state.
+pub(super) async fn gh_probe(program: &Path, host: &str) -> GhProbe {
+    match tokio::process::Command::new(program)
+        .args(["auth", "status", "--hostname", host])
+        .output()
+        .await
+    {
+        Ok(output) if output.status.success() => GhProbe::Ready,
+        Ok(_) => GhProbe::NotAuthenticated,
+        Err(_) => GhProbe::NotInstalled,
+    }
+}
+
 /// Whether `gh` is installed and authenticated for `host`. Never a hard
 /// failure: task 003 treats a missing or unauthenticated `gh` as a warning on
 /// the repository, not an error, so even "the binary is not on `PATH`"
@@ -161,12 +213,7 @@ pub(super) fn host_from_remote_url(url: &str) -> Option<String> {
 /// does in [`run`] — the two tools have different blast radii, since `gh` is
 /// optional infrastructure and `git` is not.
 pub(super) async fn gh_authenticated(host: &str) -> bool {
-    tokio::process::Command::new("gh")
-        .args(["auth", "status", "--hostname", host])
-        .output()
-        .await
-        .map(|output| output.status.success())
-        .unwrap_or(false)
+    gh_probe(Path::new(GH_CLI), host).await == GhProbe::Ready
 }
 
 #[cfg(test)]

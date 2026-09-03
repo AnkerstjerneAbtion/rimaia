@@ -29,6 +29,7 @@ use rmcp::{tool, tool_handler, tool_router, ServerHandler};
 
 use crate::context::ServiceContext;
 use crate::db::{BoardColumn, StrategySource};
+use crate::doctor;
 use crate::mcp::error::ToolError;
 use crate::mcp::requests::{
     AddTaskLinkRequest, ClearableField, CreateTaskRequest, GetStrategyDefaultsRequest,
@@ -38,8 +39,8 @@ use crate::mcp::requests::{
     SetTaskDependenciesRequest, SetTaskStrategyRequest, TaskStrategyRequest, UpdateTaskRequest,
 };
 use crate::mcp::responses::{
-    BaseInstructionsView, RepositoryListView, RepositoryView, RunCapacityView,
-    StrategyApprovalView, TaskListItem, TaskListView, TaskView,
+    BaseInstructionsView, DoctorReportView, OnboardingView, RepositoryListView, RepositoryView,
+    RunCapacityView, StrategyApprovalView, TaskListItem, TaskListView, TaskView,
 };
 use crate::mcp::scope::{RunScope, Tool};
 use crate::runner::prompt::TEMPLATE_VARIABLES;
@@ -70,6 +71,17 @@ pub struct RimaiaServer {
     /// Carried on the *value*, not on the request, which is the whole argument
     /// for putting the token in the path — see [`RunScope`].
     scope: RunScope,
+    /// What `run_doctor` reports about (task 018).
+    ///
+    /// An explicit constructor parameter rather than a default, because the two
+    /// things it carries cannot be guessed from here and a wrong guess would be
+    /// a doctor that reassures about the wrong installation: the app data
+    /// directory is a platform lookup only the shell can do (see
+    /// [`AppPaths`](crate::AppPaths)), and `programs.claude` must be the very
+    /// binary the runner would spawn. This is also the gap ADR-0021 names for
+    /// `plan_task_strategy` — the MCP server not knowing the shell's `AppPaths`
+    /// — closed for the one tool that only *reads* it.
+    doctor: doctor::Environment,
 }
 
 /// `vis = "pub"` so `tests/mcp_scope.rs`, which lives outside this crate, can
@@ -83,13 +95,12 @@ impl RimaiaServer {
     /// has to remember that its writes are `mcp` (ADR-0019).
     ///
     /// [`RunScope::Operator`], because `/mcp` is what this constructor serves
-    /// and task 020 takes nothing away from it. Keeping the operator surface on
-    /// the unchanged constructor is also what lets every direct-call handler
-    /// test in `tests/mcp_tools.rs` stay exactly as it was.
-    pub fn new(ctx: ServiceContext) -> Self {
+    /// and task 020 takes nothing away from it.
+    pub fn new(ctx: ServiceContext, doctor: doctor::Environment) -> Self {
         Self {
             ctx,
             scope: RunScope::Operator,
+            doctor,
         }
     }
 
@@ -98,13 +109,49 @@ impl RimaiaServer {
     /// A second constructor rather than a parameter on [`new`](Self::new),
     /// because a scope is not something the operator path should be able to get
     /// wrong by passing the wrong argument.
-    pub fn scoped(ctx: ServiceContext, task_id: impl Into<String>) -> Self {
+    pub fn scoped(
+        ctx: ServiceContext,
+        doctor: doctor::Environment,
+        task_id: impl Into<String>,
+    ) -> Self {
         Self {
             ctx,
             scope: RunScope::Run {
                 task_id: task_id.into(),
             },
+            doctor,
         }
+    }
+
+    #[tool(
+        description = "Check this Rimaia installation for the environment problems that make an \
+overnight queue fail: a missing or signed-out Claude Code CLI, a git too old for worktrees, a \
+GitHub CLI that cannot open a pull request, an unwritable or full data directory, a registered \
+repository whose directory has moved, and an MCP port nothing is listening on. Call this when the \
+user reports that runs are failing, before telling them to start the queue, or when \
+`start_queue` has refused — every result carries the specific command that fixes it, and \
+`is_blocking` says whether the queue would refuse to start right now."
+    )]
+    pub async fn run_doctor(&self) -> Result<Json<DoctorReportView>, ToolError> {
+        self.scope.authorize(Tool::RunDoctor, None)?;
+
+        let report = doctor::run(&self.ctx, &self.doctor).await?;
+        Ok(Json(DoctorReportView::from(&report)))
+    }
+
+    #[tool(
+        description = "Record that the first-run walkthrough has been seen, so Rimaia opens on \
+the board instead of the welcome screen. Call it only when the user says they are done with \
+setup, or want to skip it — it changes nothing about how runs work, and un-dismissing it is not \
+something this surface offers."
+    )]
+    pub async fn dismiss_onboarding(&self) -> Result<Json<OnboardingView>, ToolError> {
+        self.scope.authorize(Tool::DismissOnboarding, None)?;
+
+        db::settings::set_onboarding_dismissed(&self.ctx, true).await?;
+        Ok(Json(OnboardingView {
+            onboarding_dismissed: true,
+        }))
     }
 
     #[tool(
@@ -737,11 +784,12 @@ mod tests {
     /// capability parity a rule. What replaces a count is the property that
     /// actually matters — a registered tool with no run-scope decision cannot
     /// reach the wire.
-    const REGISTERED_TOOLS: [&str; 24] = [
+    const REGISTERED_TOOLS: [&str; 26] = [
         "accept_task_strategy",
         "add_task_link",
         "clear_task_strategy",
         "create_task",
+        "dismiss_onboarding",
         "get_base_instructions",
         "get_run_capacity",
         "get_strategy_approval",
@@ -753,6 +801,7 @@ mod tests {
         "list_tasks",
         "move_task",
         "remove_task_link",
+        "run_doctor",
         "set_max_concurrency",
         "set_repository_max_concurrency",
         "set_schedule_mode",
@@ -882,7 +931,8 @@ mod tests {
     #[tokio::test]
     async fn the_server_introduces_itself_as_rimaia_with_instructions() {
         let harness = crate::testing::TestContext::new().await;
-        let info = RimaiaServer::new(harness.context).get_info();
+        let info =
+            RimaiaServer::new(harness.context, crate::testing::doctor::environment()).get_info();
 
         assert_eq!(info.server_info.name, "rimaia");
         assert_eq!(info.server_info.version, env!("CARGO_PKG_VERSION"));

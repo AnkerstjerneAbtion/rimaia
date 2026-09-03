@@ -27,6 +27,10 @@ pub const BASE_INSTRUCTIONS: &str = "base_instructions";
 /// (ADR-0004's amendment). Deliberately unseeded — see [`RunEnvironment`].
 pub const RUN_ENVIRONMENT: &str = "run_environment";
 
+/// Task 018's first-run walkthrough, seen or skipped. See
+/// [`onboarding_dismissed`] for why this is a key rather than only a derivation.
+pub const ONBOARDING_DISMISSED: &str = "onboarding_dismissed";
+
 /// What the migration writes into [`BASE_INSTRUCTIONS`] on first launch.
 ///
 /// Exported so a future "restore the default" action in Settings has a value
@@ -176,6 +180,33 @@ pub async fn run_environment(pool: &SqlitePool) -> Result<RunEnvironment> {
 
 pub async fn set_run_environment(ctx: &ServiceContext, value: RunEnvironment) -> Result<()> {
     set(ctx, RUN_ENVIRONMENT, value.as_str()).await
+}
+
+/// Whether the user has already been through, or deliberately skipped, task
+/// 018's first-run walkthrough.
+///
+/// Absent means "not yet", which is why the frontend's opening view is
+/// *derived* — no registered repositories **and** this key absent — rather than
+/// read off a flag alone. Derived self-heals: a user who registers a repository
+/// some other way is not sent back to a welcome screen that has nothing left to
+/// teach them. The key is what stops someone who deliberately skipped from
+/// meeting the screen again on every launch, which the derivation alone cannot
+/// express.
+///
+/// Anything other than the string this module writes reads as `false`, the same
+/// tolerance every other key here applies: a hand-edited row is a reason to show
+/// one extra screen, never a reason to fail a launch.
+pub async fn onboarding_dismissed(pool: &SqlitePool) -> Result<bool> {
+    Ok(get(pool, ONBOARDING_DISMISSED).await?.as_deref() == Some("true"))
+}
+
+pub async fn set_onboarding_dismissed(ctx: &ServiceContext, value: bool) -> Result<()> {
+    set(
+        ctx,
+        ONBOARDING_DISMISSED,
+        if value { "true" } else { "false" },
+    )
+    .await
 }
 
 #[cfg(test)]

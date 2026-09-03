@@ -30,7 +30,7 @@ use rimaia_core::strategy::{
     self, Catalogue, CatalogueEntry, StrategyApproval, StrategyDefaults, DEFAULT_CATALOGUE_JSON,
 };
 use rimaia_core::tasks::{self, NewTask};
-use rimaia_core::testing::TestContext;
+use rimaia_core::testing::{self, TestContext};
 use rimaia_core::Error;
 
 use pretty_assertions::assert_eq;
@@ -142,7 +142,15 @@ fn the_operator_endpoint_keeps_every_tool_it_had_before_task_020() {
             // statement about whether the work will be attempted at all, and a
             // run abandoning the task it was started for would be marking its
             // own homework in the other direction.
-            | Tool::GiveUpOnTask => RunAccess::Refused,
+            | Tool::GiveUpOnTask
+            // Task 018. The same clause read one step wider: these describe or
+            // configure the *installation*, not any task. `run_doctor` in
+            // particular is a reconnaissance surface — which binaries are on
+            // the operator's PATH, whether they are signed in, where every
+            // registered repository sits on disk — and every remediation it
+            // returns is something only a human at the machine can do.
+            | Tool::RunDoctor
+            | Tool::DismissOnboarding => RunAccess::Refused,
         };
         assert_eq!(tool.run_access(), expected, "{}", tool.as_str());
     }
@@ -588,7 +596,7 @@ async fn the_operator_reads_and_writes_the_run_capacity_over_mcp() {
     // setter that stored nothing would pass a smoke test.
     let h = TestContext::new().await;
     let repository_id = seed_repository(&h.context.pool, "rimaia", "/tmp/rimaia").await;
-    let operator = RimaiaServer::new(h.context.clone());
+    let operator = RimaiaServer::new(h.context.clone(), testing::doctor::environment());
 
     let after_mode = operator
         .set_schedule_mode(Parameters(request::<SetScheduleModeRequest>(
@@ -663,7 +671,7 @@ async fn the_operator_reads_and_writes_the_strategy_configuration_over_mcp() {
     // — set, then read back through the *other* tool — rather than merely
     // called, because a setter that stored nothing would pass a smoke test.
     let h = TestContext::new().await;
-    let operator = RimaiaServer::new(h.context.clone());
+    let operator = RimaiaServer::new(h.context.clone(), testing::doctor::environment());
 
     let stored: StrategyApprovalView = json_of(
         operator
@@ -710,7 +718,7 @@ async fn strategy_defaults_are_read_and_written_per_repository_or_globally_by_on
     // large and badly described), so both spellings are exercised — and the
     // repository's own row must not answer for the global one or the reverse.
     let h = TestContext::new().await;
-    let operator = RimaiaServer::new(h.context.clone());
+    let operator = RimaiaServer::new(h.context.clone(), testing::doctor::environment());
     let repository_id = seed_repository(&h.context.pool, "rimaia", "/tmp/rimaia").await;
 
     json_of::<StrategyDefaults>(
@@ -805,7 +813,7 @@ async fn a_proposal_is_accepted_and_cleared_over_mcp_exactly_as_the_panel_does_i
     .await
     .expect("a planner's proposal");
 
-    let operator = RimaiaServer::new(h.context.clone());
+    let operator = RimaiaServer::new(h.context.clone(), testing::doctor::environment());
 
     let accepted = ok(operator
         .accept_task_strategy(Parameters(request::<TaskStrategyRequest>(
@@ -968,7 +976,11 @@ const NOW: &str = "2026-08-20T02:00:00+00:00";
 /// A server reached the way a run reaches it, on a context re-sourced the way
 /// `mcp::build` does it.
 fn scoped(h: &TestContext, task_id: &str) -> RimaiaServer {
-    RimaiaServer::scoped(h.context.with_source(MutationSource::Mcp), task_id)
+    RimaiaServer::scoped(
+        h.context.with_source(MutationSource::Mcp),
+        testing::doctor::environment(),
+        task_id,
+    )
 }
 
 /// A bound server on an OS-chosen port, already spawned, sharing `handles` with
@@ -977,7 +989,13 @@ async fn serving(
     h: &TestContext,
     handles: &RunHandles,
 ) -> (McpHandle, tokio::task::JoinHandle<()>) {
-    let (handle, task) = mcp::build(h.context.clone(), 0, handles.clone()).await;
+    let (handle, task) = mcp::build(
+        h.context.clone(),
+        0,
+        handles.clone(),
+        testing::doctor::environment(),
+    )
+    .await;
     (handle, tokio::spawn(task.run()))
 }
 
@@ -1130,15 +1148,16 @@ async fn create_task(h: &TestContext, repository_id: &str, title: &str) -> rimai
 /// Read through the *operator's* door, so a test about what a run cannot see
 /// does not depend on the thing it is asserting about.
 async fn board(h: &TestContext, repository_id: &str) -> Vec<String> {
-    let listed: TaskListView = match RimaiaServer::new(h.context.clone())
-        .list_tasks(Parameters(request::<ListTasksRequest>(
-            json!({ "repository_id": repository_id }),
-        )))
-        .await
-    {
-        Ok(Json(listed)) => listed,
-        Err(error) => panic!("the operator may always list: {:?}", error.0),
-    };
+    let listed: TaskListView =
+        match RimaiaServer::new(h.context.clone(), testing::doctor::environment())
+            .list_tasks(Parameters(request::<ListTasksRequest>(
+                json!({ "repository_id": repository_id }),
+            )))
+            .await
+        {
+            Ok(Json(listed)) => listed,
+            Err(error) => panic!("the operator may always list: {:?}", error.0),
+        };
 
     listed.tasks.into_iter().map(|task| task.id).collect()
 }
