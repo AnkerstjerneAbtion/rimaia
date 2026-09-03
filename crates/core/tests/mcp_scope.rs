@@ -14,17 +14,22 @@
 
 use rimaia_core::db::{BoardColumn, MutationSource, ScheduleMode};
 use rimaia_core::mcp::requests::{
-    CreateTaskRequest, GetStrategyDefaultsRequest, GetTaskRequest, ListTasksRequest,
-    MoveTaskRequest, SetMaxConcurrencyRequest, SetRepositoryMaxConcurrencyRequest,
-    SetScheduleModeRequest, SetStrategyApprovalRequest, SetStrategyCatalogueRequest,
-    SetStrategyDefaultsRequest, SetTaskDependenciesRequest, SetTaskStrategyRequest,
-    TaskStrategyRequest, UpdateTaskRequest,
+    CreateTaskRequest, GetStrategyDefaultsRequest, GetTaskRequest, ListTasksRequest, MoveTaskRequest,
+    ScheduleConfigRequest, ScheduleRequest, SetMaxConcurrencyRequest,
+    SetRepositoryMaxConcurrencyRequest, SetScheduleEnabledRequest, SetScheduleModeRequest,
+    SetStrategyApprovalRequest, SetStrategyCatalogueRequest, SetStrategyDefaultsRequest,
+    SetTaskDependenciesRequest, SetTaskStrategyRequest, TaskStrategyRequest, UpdateScheduleRequest,
+    UpdateTaskRequest,
 };
-use rimaia_core::mcp::responses::{StrategyApprovalView, TaskListView, TaskView};
+use rimaia_core::mcp::responses::{
+    PreflightView, ScheduleDeletedView, ScheduleListView, ScheduleView, StrategyApprovalView,
+    TaskListView, TaskView, TimezoneListView,
+};
 use rimaia_core::mcp::{
     self, McpHandle, RimaiaServer, RunAccess, RunGrant, RunHandles, RunScope, Tool,
 };
 use rimaia_core::repo;
+use rimaia_core::schedule::{self, ScheduleInput};
 use rimaia_core::scheduler::{capacity, CONCURRENCY_CEILING, DEFAULT_MAX_CONCURRENCY};
 use rimaia_core::strategy::{
     self, Catalogue, CatalogueEntry, StrategyApproval, StrategyDefaults, DEFAULT_CATALOGUE_JSON,
@@ -150,7 +155,22 @@ fn the_operator_endpoint_keeps_every_tool_it_had_before_task_020() {
             // registered repository sits on disk — and every remediation it
             // returns is something only a human at the machine can do.
             | Tool::RunDoctor
-            | Tool::DismissOnboarding => RunAccess::Refused,
+            | Tool::DismissOnboarding
+            // Task 013's seven, and these are *both* of ADR-0021 point 4's
+            // permanent refusals at once rather than one of them: a schedule
+            // spawns runs — it is the thing that starts the queue at 22:00 —
+            // and it reconfigures the installation, because an open window
+            // overrides the mode and concurrency the whole queue runs under.
+            // `list_timezones` reads nothing and is refused anyway: it exists
+            // only to fill in a field of the tools above it, so a run that may
+            // not use those has no use for it.
+            | Tool::ListSchedules
+            | Tool::CreateSchedule
+            | Tool::UpdateSchedule
+            | Tool::SetScheduleEnabled
+            | Tool::DeleteSchedule
+            | Tool::PreviewSchedulePreflight
+            | Tool::ListTimezones => RunAccess::Refused,
         };
         assert_eq!(tool.run_access(), expected, "{}", tool.as_str());
     }
@@ -587,6 +607,237 @@ async fn nothing_task_012_added_is_reachable_from_a_run_either() {
             .max_concurrency,
         1,
     );
+}
+
+#[tokio::test]
+async fn nothing_task_013_added_is_reachable_from_a_run_either() {
+    // Both of ADR-0021 point 4's permanent refusals at once. A schedule spawns
+    // runs — it is the thing that starts the queue at 22:00 — *and* it
+    // reconfigures the installation, because an open window overrides the mode
+    // and concurrency the whole queue runs under. A run that could write one
+    // could arrange to be run again, on its own terms, tomorrow night.
+    //
+    // Called through the handlers rather than only checked against the table,
+    // because a tool that forgot its `authorize` line would satisfy the table
+    // and still be callable by a run.
+    let h = TestContext::new().await;
+    let repository_id = seed_repository(&h.context.pool, "rimaia", "/tmp/rimaia").await;
+    let mine = create_task(&h, &repository_id, "Mine").await;
+    let existing = schedule::create(&h.context, nightly())
+        .await
+        .expect("a schedule the operator made");
+    let run = scoped(&h, &mine.id);
+
+    let config = json!({
+        "name": "Mine, nightly",
+        "mode": "parallel",
+        "max_concurrency": 4,
+        "timezone": "Europe/Copenhagen",
+        "cron": "0 22 * * *",
+        "stop_at": "06:00",
+        "enabled": true,
+    });
+
+    assert_refusal(
+        &as_result(run.list_schedules().await),
+        &not_available("list_schedules", &mine.id),
+    );
+    assert_refusal(
+        &as_result(run.list_timezones().await),
+        &not_available("list_timezones", &mine.id),
+    );
+    assert_refusal(
+        &as_result(
+            run.create_schedule(Parameters(request::<ScheduleConfigRequest>(config.clone())))
+                .await,
+        ),
+        &not_available("create_schedule", &mine.id),
+    );
+    let mut update = config.clone();
+    update["schedule_id"] = json!(existing.id);
+    assert_refusal(
+        &as_result(
+            run.update_schedule(Parameters(request::<UpdateScheduleRequest>(update)))
+                .await,
+        ),
+        &not_available("update_schedule", &mine.id),
+    );
+    assert_refusal(
+        &as_result(
+            run.set_schedule_enabled(Parameters(request::<SetScheduleEnabledRequest>(
+                json!({ "schedule_id": existing.id, "enabled": false }),
+            )))
+            .await,
+        ),
+        &not_available("set_schedule_enabled", &mine.id),
+    );
+    assert_refusal(
+        &as_result(
+            run.delete_schedule(Parameters(request::<ScheduleRequest>(
+                json!({ "schedule_id": existing.id }),
+            )))
+            .await,
+        ),
+        &not_available("delete_schedule", &mine.id),
+    );
+    assert_refusal(
+        &as_result(
+            run.preview_schedule_preflight(Parameters(request::<ScheduleRequest>(
+                json!({ "schedule_id": existing.id }),
+            )))
+            .await,
+        ),
+        &not_available("preview_schedule_preflight", &mine.id),
+    );
+
+    // And none of them wrote anything on the way to being refused: the one
+    // schedule that existed is still there, still enabled, still unedited.
+    let after = schedule::list(&h.context).await.expect("read them back");
+    assert_eq!(after.len(), 1);
+    assert_eq!(after[0].schedule.id, existing.id);
+    assert_eq!(after[0].schedule.name, "Nightly");
+    assert!(after[0].schedule.enabled);
+    assert_eq!(after[0].schedule.mode, ScheduleMode::Sequential);
+}
+
+#[tokio::test]
+async fn the_operator_reads_and_writes_schedules_over_mcp() {
+    // Each write round-tripped through the reader rather than merely called: a
+    // setter that stored nothing would pass a smoke test.
+    let h = TestContext::new().await;
+    let operator = RimaiaServer::new(h.context.clone(), testing::doctor::environment());
+
+    let created = json_of::<ScheduleView>(
+        operator
+            .create_schedule(Parameters(request::<ScheduleConfigRequest>(json!({
+                "name": "Nightly",
+                "mode": "parallel",
+                "max_concurrency": 3,
+                "timezone": "Europe/Copenhagen",
+                "cron": "0 22 * * *",
+                "stop_at": "06:00",
+                "enabled": true,
+            }))))
+            .await,
+    );
+    assert_eq!(created.name, "Nightly");
+    assert_eq!(created.timezone.as_deref(), Some("Europe/Copenhagen"));
+
+    let listed = json_of::<ScheduleListView>(operator.list_schedules().await);
+    assert_eq!(listed.schedules.len(), 1);
+    assert_eq!(
+        listed.schedules[0].next_fire_at,
+        Some(
+            "2026-08-20T20:00:00Z"
+                .parse::<chrono::DateTime<chrono::Utc>>()
+                .expect("a literal timestamp"),
+        ),
+        "the list is the one place the next fire time is computed",
+    );
+
+    let disabled = json_of::<ScheduleView>(
+        operator
+            .set_schedule_enabled(Parameters(request::<SetScheduleEnabledRequest>(json!({
+                "schedule_id": created.id,
+                "enabled": false,
+            }))))
+            .await,
+    );
+    assert!(!disabled.enabled);
+    assert!(
+        disabled.cron.is_some(),
+        "disabling keeps the configuration — that is the whole difference from deleting",
+    );
+
+    let renamed = json_of::<ScheduleView>(
+        operator
+            .update_schedule(Parameters(request::<UpdateScheduleRequest>(json!({
+                "schedule_id": created.id,
+                "name": "Weeknights",
+                "mode": "sequential",
+                "max_concurrency": 2,
+                "timezone": "Europe/Copenhagen",
+                "cron": "0 22 * * 1-5",
+                "stop_at": "06:00",
+                "enabled": true,
+            }))))
+            .await,
+    );
+    assert_eq!(renamed.name, "Weeknights");
+    assert_eq!(renamed.cron.as_deref(), Some("0 22 * * 1-5"));
+
+    let preview = json_of::<PreflightView>(
+        operator
+            .preview_schedule_preflight(Parameters(request::<ScheduleRequest>(json!({
+                "schedule_id": created.id,
+            }))))
+            .await,
+    );
+    assert_eq!(preview.schedule_name, "Weeknights");
+    assert_eq!(preview.will_start, 0, "an empty board starts nothing");
+
+    let timezones = json_of::<TimezoneListView>(operator.list_timezones().await);
+    assert!(timezones
+        .timezones
+        .iter()
+        .any(|name| name == "Europe/Copenhagen"));
+
+    let deleted = json_of::<ScheduleDeletedView>(
+        operator
+            .delete_schedule(Parameters(request::<ScheduleRequest>(json!({
+                "schedule_id": created.id,
+            }))))
+            .await,
+    );
+    assert!(deleted.deleted);
+    assert_eq!(
+        json_of::<ScheduleListView>(operator.list_schedules().await)
+            .schedules
+            .len(),
+        0,
+    );
+}
+
+#[tokio::test]
+async fn a_schedule_the_operator_configures_badly_is_refused_with_the_reason() {
+    // The refusals are the service's, not the adapter's (ADR-0006), so the
+    // sentence a tool caller reads is the sentence the panel reads.
+    let h = TestContext::new().await;
+    let operator = RimaiaServer::new(h.context.clone(), testing::doctor::environment());
+
+    let refused = as_result(
+        operator
+            .create_schedule(Parameters(request::<ScheduleConfigRequest>(json!({
+                "name": "Nightly",
+                "mode": "sequential",
+                "max_concurrency": 2,
+                "timezone": "CEST",
+                "cron": "0 22 * * *",
+                "enabled": true,
+            }))))
+            .await,
+    );
+
+    assert_eq!(refused.is_error, Some(true));
+    assert!(
+        message(&refused).contains("IANA"),
+        "an abbreviation is not a zone: {}",
+        message(&refused),
+    );
+}
+
+/// The schedule every refusal test above leaves untouched.
+fn nightly() -> ScheduleInput {
+    ScheduleInput {
+        name: "Nightly".to_string(),
+        mode: ScheduleMode::Sequential,
+        max_concurrency: 2,
+        timezone: "Europe/Copenhagen".to_string(),
+        cron: Some("0 22 * * *".to_string()),
+        start_at: None,
+        stop_at: Some("06:00".to_string()),
+        enabled: true,
+    }
 }
 
 #[tokio::test]

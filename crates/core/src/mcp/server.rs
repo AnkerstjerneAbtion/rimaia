@@ -32,6 +32,7 @@ use crate::db::{BoardColumn, StrategySource};
 use crate::doctor;
 use crate::mcp::error::ToolError;
 use crate::mcp::requests::{
+    ScheduleConfigRequest, ScheduleRequest, SetScheduleEnabledRequest, UpdateScheduleRequest,
     AddTaskLinkRequest, ClearableField, CreateTaskRequest, GetStrategyDefaultsRequest,
     GetTaskRequest, ListTasksRequest, MoveTaskRequest, RemoveTaskLinkRequest,
     SetMaxConcurrencyRequest, SetRepositoryMaxConcurrencyRequest, SetScheduleModeRequest,
@@ -39,10 +40,12 @@ use crate::mcp::requests::{
     SetTaskDependenciesRequest, SetTaskStrategyRequest, TaskStrategyRequest, UpdateTaskRequest,
 };
 use crate::mcp::responses::{
+    PreflightView, ScheduleDeletedView, ScheduleListView, ScheduleView, TimezoneListView,
     BaseInstructionsView, DoctorReportView, OnboardingView, RepositoryListView, RepositoryView,
     RunCapacityView, StrategyApprovalView, TaskListItem, TaskListView, TaskView,
 };
 use crate::mcp::scope::{RunScope, Tool};
+use crate::schedule;
 use crate::runner::prompt::TEMPLATE_VARIABLES;
 use crate::scheduler::{self, capacity};
 use crate::strategy::{self, Catalogue, StrategyDefaults};
@@ -687,6 +690,126 @@ safe kind and needs nothing here."
                 .await?;
         Ok(Json(RepositoryView::from(repository)))
     }
+    // -----------------------------------------------------------------------
+    // Schedules (task 013, ADR-0010). Operator-only, every one.
+    // -----------------------------------------------------------------------
+
+    #[tool(
+        description = "List the schedules that start Rimaia's run queue by themselves, each with \
+the time it will next fire. Call this whenever the user asks when work will run, or says a \
+nightly queue did not happen — an overdue schedule reports the occurrence it *owes*, which is in \
+the past, and a schedule whose cron expression cannot be read reports why instead of a time. \
+Schedules are the operator's own standing instructions, so a run cannot read or change them."
+    )]
+    pub async fn list_schedules(&self) -> Result<Json<ScheduleListView>, ToolError> {
+        self.scope.authorize(Tool::ListSchedules, None)?;
+        Ok(Json(ScheduleListView {
+            schedules: schedule::list(&self.ctx)
+                .await?
+                .into_iter()
+                .map(ScheduleView::from)
+                .collect(),
+        }))
+    }
+
+    #[tool(
+        description = "Create a schedule that starts the run queue at a chosen time — once, or \
+every night. Call this when the user says something like \"run the queue at 22:00 and stop at \
+06:00\": give it `cron` (\"0 22 * * *\") or `start_at`, never both, plus the IANA `timezone` the \
+times are read in, which `list_timezones` supplies. `stop_at` is a local time of day at which the \
+queue stops starting new tasks and lets the ones in flight finish. It spawns runs unattended, so \
+a run cannot call it."
+    )]
+    pub async fn create_schedule(
+        &self,
+        Parameters(request): Parameters<ScheduleConfigRequest>,
+    ) -> Result<Json<ScheduleView>, ToolError> {
+        self.scope.authorize(Tool::CreateSchedule, None)?;
+        let created = schedule::create(&self.ctx, request.into()).await?;
+        Ok(Json(created.into()))
+    }
+
+    #[tool(
+        description = "Replace a schedule's whole configuration — its name, times, timezone, stop \
+time, mode and concurrency. Call this to change when or how a scheduled queue runs; send every \
+field, because this replaces rather than patches, and the fields constrain each other. It leaves \
+the schedule's fire history alone, so editing tonight's stop time does not make tonight's start \
+happen again. Reconfiguring an unattended queue is the operator's, so a run cannot call it."
+    )]
+    pub async fn update_schedule(
+        &self,
+        Parameters(request): Parameters<UpdateScheduleRequest>,
+    ) -> Result<Json<ScheduleView>, ToolError> {
+        self.scope.authorize(Tool::UpdateSchedule, None)?;
+        let updated =
+            schedule::update(&self.ctx, &request.schedule_id, request.config.into()).await?;
+        Ok(Json(updated.into()))
+    }
+
+    #[tool(
+        description = "Turn a schedule on or off without deleting what it is set to. Call this \
+when the user wants to skip the automatic runs for a while — it is the reversible answer, and \
+`delete_schedule` is not. Turning one back on re-arms it from that moment, so a schedule that \
+spent a month off does not immediately fire for the last of thirty nights it missed. A run cannot \
+call it."
+    )]
+    pub async fn set_schedule_enabled(
+        &self,
+        Parameters(request): Parameters<SetScheduleEnabledRequest>,
+    ) -> Result<Json<ScheduleView>, ToolError> {
+        self.scope.authorize(Tool::SetScheduleEnabled, None)?;
+        let updated =
+            schedule::set_enabled(&self.ctx, &request.schedule_id, request.enabled).await?;
+        Ok(Json(updated.into()))
+    }
+
+    #[tool(
+        description = "Delete a schedule outright. Call it only when the user wants the schedule \
+gone rather than paused — `set_schedule_enabled` is the reversible option and is almost always \
+what they mean. A window this schedule already opened keeps running; deleting the instruction is \
+not the same act as stopping tonight. A run cannot call it."
+    )]
+    pub async fn delete_schedule(
+        &self,
+        Parameters(request): Parameters<ScheduleRequest>,
+    ) -> Result<Json<ScheduleDeletedView>, ToolError> {
+        self.scope.authorize(Tool::DeleteSchedule, None)?;
+        schedule::delete(&self.ctx, &request.schedule_id).await?;
+        Ok(Json(ScheduleDeletedView {
+            schedule_id: request.schedule_id,
+            deleted: true,
+        }))
+    }
+
+    #[tool(
+        description = "Preview what a schedule would do: which tasks it will run, in what order, \
+and which it will pass over and why. Call this in the evening, before the user leaves — it is the \
+answer to \"what will happen tonight\", and it is computed from the board as it is right now, so \
+it changes when a card is dragged. A task listed with a `skipped_because` will still be sitting \
+there in the morning unless somebody acts. A run cannot call it."
+    )]
+    pub async fn preview_schedule_preflight(
+        &self,
+        Parameters(request): Parameters<ScheduleRequest>,
+    ) -> Result<Json<PreflightView>, ToolError> {
+        self.scope.authorize(Tool::PreviewSchedulePreflight, None)?;
+        Ok(Json(
+            schedule::preview(&self.ctx, &request.schedule_id).await?.into(),
+        ))
+    }
+
+    #[tool(
+        description = "List every IANA timezone name a schedule may be configured with. Call it \
+before `create_schedule` or `update_schedule` to get the exact spelling — a schedule needs a real \
+zone name such as \"Europe/Copenhagen\", never an offset or an abbreviation, because a nightly \
+queue configured with one of those runs an hour out for half the year and nothing says so."
+    )]
+    pub async fn list_timezones(&self) -> Result<Json<TimezoneListView>, ToolError> {
+        self.scope.authorize(Tool::ListTimezones, None)?;
+        Ok(Json(TimezoneListView {
+            timezones: schedule::timezones(),
+        }))
+    }
 }
 
 impl RimaiaServer {
@@ -744,6 +867,7 @@ fn patch_field(value: Option<String>, cleared: bool) -> Patch<String> {
         (None, true) => Patch::Clear,
         (None, false) => Patch::Unset,
     }
+
 }
 
 #[tool_handler]
@@ -784,11 +908,13 @@ mod tests {
     /// capability parity a rule. What replaces a count is the property that
     /// actually matters — a registered tool with no run-scope decision cannot
     /// reach the wire.
-    const REGISTERED_TOOLS: [&str; 26] = [
+    const REGISTERED_TOOLS: [&str; 33] = [
         "accept_task_strategy",
         "add_task_link",
         "clear_task_strategy",
+        "create_schedule",
         "create_task",
+        "delete_schedule",
         "dismiss_onboarding",
         "get_base_instructions",
         "get_run_capacity",
@@ -798,18 +924,23 @@ mod tests {
         "get_task",
         "give_up_on_task",
         "list_repositories",
+        "list_schedules",
         "list_tasks",
+        "list_timezones",
         "move_task",
+        "preview_schedule_preflight",
         "remove_task_link",
         "run_doctor",
         "set_max_concurrency",
         "set_repository_max_concurrency",
+        "set_schedule_enabled",
         "set_schedule_mode",
         "set_strategy_approval",
         "set_strategy_catalogue",
         "set_strategy_defaults",
         "set_task_dependencies",
         "set_task_strategy",
+        "update_schedule",
         "update_task",
     ];
 

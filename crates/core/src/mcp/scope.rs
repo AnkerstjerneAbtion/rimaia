@@ -120,6 +120,23 @@ pub enum Tool {
     // task, which is ADR-0021 point 4's second permanent refusal.
     RunDoctor,
     DismissOnboarding,
+
+    // Task 013's seven. Every one is *both* of ADR-0021 point 4's permanent
+    // refusals at once: a schedule spawns runs — it is the thing that starts
+    // the queue at 22:00 — and it reconfigures the installation, since an open
+    // window overrides the mode and concurrency the whole queue runs under.
+    // `list_timezones` rides with them rather than being `Unscoped` on the
+    // grounds that it reads nothing: it exists only to fill in a field of the
+    // four tools above it, so a run that may not use those has no use for it,
+    // and a surface is easier to reason about when a feature is in or out
+    // whole.
+    ListSchedules,
+    CreateSchedule,
+    UpdateSchedule,
+    SetScheduleEnabled,
+    DeleteSchedule,
+    PreviewSchedulePreflight,
+    ListTimezones,
 }
 
 /// What a [`RunScope::Run`] may do with one tool — ADR-0006's amendment table,
@@ -136,7 +153,7 @@ pub enum RunAccess {
 
 impl Tool {
     /// Every tool with a recorded decision, so a test can walk the table.
-    pub const ALL: [Tool; 26] = [
+    pub const ALL: [Tool; 33] = [
         Tool::AddTaskLink,
         Tool::CreateTask,
         Tool::GetBaseInstructions,
@@ -163,6 +180,13 @@ impl Tool {
         Tool::GiveUpOnTask,
         Tool::RunDoctor,
         Tool::DismissOnboarding,
+        Tool::ListSchedules,
+        Tool::CreateSchedule,
+        Tool::UpdateSchedule,
+        Tool::SetScheduleEnabled,
+        Tool::DeleteSchedule,
+        Tool::PreviewSchedulePreflight,
+        Tool::ListTimezones,
     ];
 
     /// The wired name — what `tools/list` advertises and what the ADR table
@@ -195,6 +219,13 @@ impl Tool {
             Tool::GiveUpOnTask => "give_up_on_task",
             Tool::RunDoctor => "run_doctor",
             Tool::DismissOnboarding => "dismiss_onboarding",
+            Tool::ListSchedules => "list_schedules",
+            Tool::CreateSchedule => "create_schedule",
+            Tool::UpdateSchedule => "update_schedule",
+            Tool::SetScheduleEnabled => "set_schedule_enabled",
+            Tool::DeleteSchedule => "delete_schedule",
+            Tool::PreviewSchedulePreflight => "preview_schedule_preflight",
+            Tool::ListTimezones => "list_timezones",
         }
     }
 
@@ -287,6 +318,16 @@ impl Tool {
             // writes a preference about the operator's own window, which is
             // nothing a run inside a worktree has an opinion about.
             Tool::RunDoctor | Tool::DismissOnboarding => RunAccess::Refused,
+
+            // Task 013's seven. See the enum for why every one of them is
+            // refused rather than only the four that write.
+            Tool::ListSchedules
+            | Tool::CreateSchedule
+            | Tool::UpdateSchedule
+            | Tool::SetScheduleEnabled
+            | Tool::DeleteSchedule
+            | Tool::PreviewSchedulePreflight
+            | Tool::ListTimezones => RunAccess::Refused,
         }
     }
 }

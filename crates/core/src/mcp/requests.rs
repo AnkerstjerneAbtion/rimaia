@@ -17,8 +17,11 @@
 use schemars::JsonSchema;
 use serde::Deserialize;
 
+use chrono::{DateTime, Utc};
+
 use crate::db::{BoardColumn, RunState, ScheduleMode, StrategyMode};
 use crate::error::{Error, Result};
+use crate::schedule::ScheduleInput;
 use crate::strategy::StrategyApproval;
 use crate::tasks::{StrategyPhase, StrategyPlan, StrategyWorkflow};
 
@@ -400,6 +403,89 @@ pub struct SetRepositoryMaxConcurrencyRequest {
     /// same repository, which git tolerates and ports, test databases and
     /// lockfiles do not.
     pub max_concurrency: i64,
+}
+
+// ---------------------------------------------------------------------------
+// Schedules (task 013, ADR-0010). Operator-only, every one of them.
+// ---------------------------------------------------------------------------
+
+/// The whole configuration of a schedule, which is what both `create_schedule`
+/// and `update_schedule` take.
+///
+/// A whole row rather than a patch, matching
+/// [`ScheduleInput`](crate::schedule::ScheduleInput) — the fields constrain each
+/// other (`cron` and `start_at` are exclusive; `stop_at` is meaningless without
+/// a `timezone` to resolve it through), so "clear the cron and set a one-off
+/// time" has to be one write or there is an illegal row in the middle of it.
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct ScheduleConfigRequest {
+    /// What the user calls this schedule — it is what the Runs view says while
+    /// the window is open ("Running until 06:00 — Nightly").
+    pub name: String,
+    /// `sequential` or `parallel`. Overrides the installation default **while
+    /// this schedule's window is open**, and only then.
+    pub mode: ScheduleMode,
+    /// How many runs at once, in `parallel`. Between 1 and the ceiling
+    /// `get_run_capacity` reports.
+    pub max_concurrency: i64,
+    /// An IANA name, such as `"Europe/Copenhagen"`. **Required** — `list_timezones`
+    /// is where the value comes from. Not an offset and not an abbreviation:
+    /// a nightly queue configured with one runs an hour out for half the year.
+    pub timezone: String,
+    /// A cron expression, read in `timezone`. `"0 22 * * *"` is every night at
+    /// 22:00. Exclusive with `start_at`.
+    #[serde(default)]
+    pub cron: Option<String>,
+    /// A one-off instant, RFC 3339. Fires once. Exclusive with `cron`.
+    #[serde(default)]
+    pub start_at: Option<DateTime<Utc>>,
+    /// A local time of day, `"HH:MM"`, at which the window stops starting new
+    /// tasks. Runs already in flight are allowed to finish. Omit for a window
+    /// that runs until something pauses it.
+    #[serde(default)]
+    pub stop_at: Option<String>,
+    pub enabled: bool,
+}
+
+impl From<ScheduleConfigRequest> for ScheduleInput {
+    fn from(request: ScheduleConfigRequest) -> Self {
+        Self {
+            name: request.name,
+            mode: request.mode,
+            max_concurrency: request.max_concurrency,
+            timezone: request.timezone,
+            cron: request.cron,
+            start_at: request.start_at,
+            stop_at: request.stop_at,
+            enabled: request.enabled,
+        }
+    }
+}
+
+/// `update_schedule`: which schedule, and its whole new configuration.
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct UpdateScheduleRequest {
+    pub schedule_id: String,
+    #[serde(flatten)]
+    pub config: ScheduleConfigRequest,
+}
+
+/// A schedule id and nothing else — the shape `delete_schedule` and
+/// `preview_schedule_preflight` share.
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct ScheduleRequest {
+    pub schedule_id: String,
+}
+
+/// `set_schedule_enabled`: turning one on or off without deleting it.
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct SetScheduleEnabledRequest {
+    pub schedule_id: String,
+    pub enabled: bool,
 }
 
 #[cfg(test)]

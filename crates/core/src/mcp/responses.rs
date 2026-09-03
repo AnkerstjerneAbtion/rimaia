@@ -17,10 +17,11 @@ use schemars::JsonSchema;
 use serde::Serialize;
 
 use crate::db::{
-    BoardColumn, ExitClass, MutationSource, Repository, Run, RunState, RunStatus, ScheduleMode,
-    StrategyMode, StrategySource, TaskLink,
+    BoardColumn, ExitClass, MutationSource, Repository, Run, RunState, RunStatus, Schedule,
+    ScheduleMode, StrategyMode, StrategySource, TaskLink,
 };
 use crate::doctor::{CheckResult, DoctorReport};
+use crate::schedule::{PreflightSummary, ScheduleView as CoreScheduleView};
 use crate::scheduler::RunCapacity;
 use crate::strategy::StrategyApproval;
 use crate::tasks::{TaskDetail, TaskSummary};
@@ -395,6 +396,168 @@ impl From<RunCapacity> for RunCapacityView {
 #[serde(rename_all = "snake_case")]
 pub struct StrategyApprovalView {
     pub approval: StrategyApproval,
+}
+
+// ---------------------------------------------------------------------------
+// Schedules (task 013, ADR-0010)
+// ---------------------------------------------------------------------------
+
+/// One schedule, with the one thing about it that is computed rather than
+/// stored.
+#[derive(Debug, Clone, PartialEq, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub struct ScheduleView {
+    pub id: String,
+    pub name: String,
+    pub mode: ScheduleMode,
+    pub max_concurrency: i64,
+    /// The IANA name every local time on this row is read in.
+    pub timezone: Option<String>,
+    pub cron: Option<String>,
+    pub start_at: Option<DateTime<Utc>>,
+    /// A local time of day, `"HH:MM"`.
+    pub stop_at: Option<String>,
+    pub enabled: bool,
+    /// When it **actually** last fired, never when it was due.
+    pub last_fired_at: Option<DateTime<Utc>>,
+    /// The instant from which missed occurrences count.
+    pub armed_at: Option<DateTime<Utc>>,
+    /// When it fires next. **In the past when the schedule is overdue**, which
+    /// is the one case worth seeing — reporting tomorrow's time for a schedule
+    /// that should have started an hour ago would hide it.
+    pub next_fire_at: Option<DateTime<Utc>>,
+    /// Why there is no next fire time, when a broken row is the reason. A field
+    /// rather than a failed read, so one unparseable cron expression does not
+    /// make the whole list — the list the caller would use to *fix* it —
+    /// unreadable.
+    pub next_fire_error: Option<String>,
+}
+
+impl From<CoreScheduleView> for ScheduleView {
+    fn from(view: CoreScheduleView) -> Self {
+        Self {
+            id: view.schedule.id,
+            name: view.schedule.name,
+            mode: view.schedule.mode,
+            max_concurrency: view.schedule.max_concurrency,
+            timezone: view.schedule.timezone,
+            cron: view.schedule.cron,
+            start_at: view.schedule.start_at,
+            stop_at: view.schedule.stop_at,
+            enabled: view.schedule.enabled,
+            last_fired_at: view.schedule.last_fired_at,
+            armed_at: view.schedule.armed_at,
+            next_fire_at: view.next_fire_at,
+            next_fire_error: view.next_fire_error,
+        }
+    }
+}
+
+impl From<Schedule> for ScheduleView {
+    /// A row a write just returned, with no next fire time computed.
+    ///
+    /// `next_fire_at` is deliberately `None` here rather than calculated: this
+    /// conversion has no clock, and inventing one would put a second answer to
+    /// "when does this fire" beside `list_schedules`'. A caller that wants the
+    /// time asks the list, which is the one place it is computed.
+    fn from(schedule: Schedule) -> Self {
+        Self::from(CoreScheduleView {
+            schedule,
+            next_fire_at: None,
+            next_fire_error: None,
+        })
+    }
+}
+
+/// What `list_schedules` answers with.
+///
+/// An object wrapping the array, for the reason [`RepositoryListView`] gives:
+/// MCP requires an object `outputSchema`, and a bare array makes Claude Code
+/// drop the entire `tools/list` response — every other tool with it.
+#[derive(Debug, Clone, PartialEq, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub struct ScheduleListView {
+    pub schedules: Vec<ScheduleView>,
+}
+
+/// What `delete_schedule` answers with.
+///
+/// An echo object rather than nothing at all, on [`OnboardingView`]'s
+/// precedent: a tool that answers with no content gives a caller no way to tell
+/// "it worked" from "the schema was wrong".
+#[derive(Debug, Clone, PartialEq, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub struct ScheduleDeletedView {
+    pub schedule_id: String,
+    pub deleted: bool,
+}
+
+/// What `list_timezones` answers with — every IANA name the service accepts.
+#[derive(Debug, Clone, PartialEq, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub struct TimezoneListView {
+    pub timezones: Vec<String>,
+}
+
+/// What `preview_schedule_preflight` answers with: which tasks a schedule would
+/// run, in what order, and which are blocked and why.
+#[derive(Debug, Clone, PartialEq, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub struct PreflightView {
+    pub schedule_id: String,
+    pub schedule_name: String,
+    pub next_fire_at: Option<DateTime<Utc>>,
+    pub closes_at: Option<DateTime<Utc>>,
+    pub mode: ScheduleMode,
+    pub max_concurrency: i64,
+    /// How many tasks the window will get through.
+    pub will_start: usize,
+    /// How many it will pass over — and therefore how many will still be
+    /// sitting there in the morning.
+    pub blocked: usize,
+    /// Every `ready` task in board order, including the ones the queue will
+    /// pass over, each carrying its reason. Filtering the skipped ones out
+    /// would answer "which tasks will run" and silently drop "and which are
+    /// blocked and why", which is the half that costs a night.
+    pub plan: Vec<PreflightEntryView>,
+}
+
+/// One task in a [`PreflightView`].
+#[derive(Debug, Clone, PartialEq, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub struct PreflightEntryView {
+    pub task_id: String,
+    pub title: String,
+    /// `1` is next up. `null` for a task the queue will pass over.
+    pub queue_position: Option<i64>,
+    /// `null` when the queue would start this task. Otherwise the reason, in
+    /// the same words the board's own badge uses.
+    pub skipped_because: Option<String>,
+}
+
+impl From<PreflightSummary> for PreflightView {
+    fn from(summary: PreflightSummary) -> Self {
+        Self {
+            schedule_id: summary.schedule_id.clone(),
+            schedule_name: summary.schedule_name.clone(),
+            next_fire_at: summary.next_fire_at,
+            closes_at: summary.closes_at,
+            mode: summary.mode,
+            max_concurrency: summary.max_concurrency,
+            will_start: summary.startable(),
+            blocked: summary.blocked(),
+            plan: summary
+                .plan
+                .into_iter()
+                .map(|entry| PreflightEntryView {
+                    task_id: entry.task_id,
+                    title: entry.title,
+                    queue_position: entry.queue_position,
+                    skipped_because: entry.skip.map(|skip| skip.explanation().to_string()),
+                })
+                .collect(),
+        }
+    }
 }
 
 #[cfg(test)]
