@@ -1,12 +1,63 @@
-/* Baseline only. Both colour schemes have to be legible; there is no design
-   system yet and adding one is not task 001's job.
+/* Design tokens + the app shell.
 
    This file holds the :root custom properties, the dark-scheme override, the
-   base element rules (*, body, code, button) and the app shell layout (.app,
-   .sidebar*, .content) - things every view shares - plus the handful of
-   components used by more than one view (.panel, .detail-list, .empty-state,
-   .error-banner). A view's own rules belong in its leaf under
-   `src/styles/*.css`, imported below; do not move them back in here. */
+   base element rules (*, body, code, button, input) and the app shell layout
+   (.app, .sidebar*, .content) - things every view shares - plus the handful
+   of components used by more than one view (.panel, .detail-list,
+   .empty-state, .error-banner). A view's own rules belong in its leaf under
+   `src/styles/*.css`, imported below; do not move them back in here.
+
+   TOKEN SYSTEM - read this before adding a rule anywhere in the app.
+
+   Colour
+     --surface-0..3   Layering, low to high. 0 is the page background, 1 is
+                      a resting card/panel, 2 is a hover/pressed state or a
+                      raised row, 3 is a popover/drawer/modal. Pick the
+                      lowest number that still reads as "above" its parent.
+     --text-1..3      1 is primary body copy, 2 is secondary/muted text
+                      (labels, captions, helper text), 3 is faint/disabled
+                      text. Never pair same-numbered text and surface tokens.
+     --border-1..2    1 is the default hairline (panel edges, dividers), 2
+                      is a stronger border for hover/active states on
+                      otherwise-bare controls.
+     --accent, --accent-contrast, --accent-soft
+                      The one brand accent, the text colour that sits on
+                      top of it, and a translucent wash of it for hover/
+                      selected backgrounds that shouldn't compete with real
+                      surfaces.
+     --status-running / -queued / -blocked / -waiting-retry / -failed /
+     -success         One accent per run-state family, for icons, dots and
+                      text - not full bg/text badge pairs. Leaves that need
+                      a badge (board.css, runs.css) keep their own
+                      --badge-*/--exit-* pairs; these are the vocabulary a
+                      future badge should be built from, not a replacement
+                      for the existing ones.
+     --danger-bg/-border/-text, --warn-bg/-border/-text, --ok-text
+                      Existing triads for banners and inline status text.
+                      Kept as-is: doctor.css and .error-banner depend on
+                      the exact names.
+   Spacing   --space-1..8, a 4px base (4/8/12/16/24/32/48/64). Use the
+             smallest step that still reads as intentional rather than a
+             one-off px value.
+   Radius    --radius-sm/md/lg/full. sm for inputs/badges/small chips, md
+             for cards and panels, lg for drawers and modals, full for
+             pills and dots.
+   Shadow    --shadow-sm/md/lg. sm for a resting card that wants to lift
+             off the page a little, md for popovers and dropdowns, lg for
+             drawers/modals. Values already differ per colour scheme -
+             dark surfaces need more opacity to read as elevated.
+   Type      --font-size-xs/sm/md/lg/xl paired with --line-height-tight/
+             normal/relaxed and --font-weight-regular/medium/semibold.
+             --font-size-md/--line-height-normal is body text; reach for
+             the others rather than a bespoke rem value.
+   Motion    --duration-fast/base/slow and --ease-standard/-emphasized.
+             Always wrap any transition/animation that uses these in
+             `@media (prefers-reduced-motion: reduce)`.
+
+   Every token above has a dark-scheme value in the media query below it -
+   there is no "we'll get to dark mode later". Contrast for --text-1/-text-2
+   against --surface-0/-surface-1 is checked to WCAG AA (4.5:1) in both
+   schemes; keep new colour tokens at or above that bar. */
 
 @import "./styles/board.css";
 @import "./styles/doctor.css";
@@ -14,50 +65,141 @@
 @import "./styles/settings.css";
 
 :root {
-  --bg: #f7f7f8;
-  --surface: #ffffff;
-  --border: #dededf;
-  --text: #17171a;
-  --text-muted: #62626b;
+  /* Surfaces */
+  --surface-0: #f6f6f8;
+  --surface-1: #ffffff;
+  --surface-2: #ececef;
+  --surface-3: #ffffff;
+
+  /* Text */
+  --text-1: #16161a;
+  --text-2: #55555f;
+  --text-3: #86868f;
+
+  /* Borders */
+  --border-1: #dcdce1;
+  --border-2: #c7c7cf;
+
+  /* Accent */
   --accent: #2f5fd0;
   --accent-contrast: #ffffff;
+  --accent-soft: color-mix(in srgb, var(--accent) 12%, transparent);
+
+  /* Status accents (icons/text/dots, not badge bg+text pairs) */
+  --status-running: #2f5fd0;
+  --status-queued: #5b5b66;
+  --status-blocked: #7c3aed;
+  --status-waiting-retry: #a15b06;
+  --status-failed: #b3261e;
+  --status-success: #1f7a4d;
+
+  /* Existing triads - names load-bearing, see comment above */
   --danger-bg: #fdeceb;
   --danger-border: #e5a9a4;
   --danger-text: #8c2b22;
   /* Task 018 needs a third weight: the doctor's warnings are not errors -
      they do not block the queue - so rendering them in --danger-* would
-     overstate them, and in --text-muted would hide them. */
+     overstate them, and in --text-2 would hide them. */
   --warn-bg: #fdf4e3;
   --warn-border: #e0c184;
   --warn-text: #7a5410;
-  --ok-text: #1f7a4d;
+  --ok-text: var(--status-success);
+
+  /* Legacy aliases - still the names board.css/doctor.css/settings.css/
+     runs.css reference directly. Keep pointing at the scale above rather
+     than deleting; retire only once nothing imports them. */
+  --bg: var(--surface-0);
+  --surface: var(--surface-1);
+  --border: var(--border-1);
+  --text: var(--text-1);
+  --text-muted: var(--text-2);
+
+  /* Spacing (4px base) */
+  --space-1: 0.25rem;
+  --space-2: 0.5rem;
+  --space-3: 0.75rem;
+  --space-4: 1rem;
+  --space-5: 1.5rem;
+  --space-6: 2rem;
+  --space-7: 3rem;
+  --space-8: 4rem;
+
+  /* Radius */
+  --radius-sm: 6px;
+  --radius-md: 10px;
+  --radius-lg: 16px;
+  --radius-full: 999px;
+
+  /* Shadow / elevation */
+  --shadow-sm: 0 1px 2px rgb(0 0 0 / 0.06), 0 1px 1px rgb(0 0 0 / 0.04);
+  --shadow-md: 0 4px 12px rgb(0 0 0 / 0.08), 0 2px 4px rgb(0 0 0 / 0.06);
+  --shadow-lg: 0 12px 32px rgb(0 0 0 / 0.14), 0 4px 8px rgb(0 0 0 / 0.06);
+
+  /* Type scale */
+  --font-size-xs: 0.75rem;
+  --font-size-sm: 0.85rem;
+  --font-size-md: 0.95rem;
+  --font-size-lg: 1.1rem;
+  --font-size-xl: 1.4rem;
+  --line-height-tight: 1.25;
+  --line-height-normal: 1.5;
+  --line-height-relaxed: 1.65;
+  --font-weight-regular: 400;
+  --font-weight-medium: 500;
+  --font-weight-semibold: 600;
+
+  /* Motion */
+  --duration-fast: 100ms;
+  --duration-base: 160ms;
+  --duration-slow: 240ms;
+  --ease-standard: cubic-bezier(0.2, 0, 0, 1);
+  --ease-emphasized: cubic-bezier(0.3, 0, 0, 1.3);
 
   color-scheme: light dark;
   font-family: Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica,
     Arial, sans-serif;
-  font-size: 15px;
-  line-height: 1.5;
-  color: var(--text);
-  background-color: var(--bg);
+  font-size: var(--font-size-md);
+  line-height: var(--line-height-normal);
+  color: var(--text-1);
+  background-color: var(--surface-0);
   -webkit-font-smoothing: antialiased;
 }
 
 @media (prefers-color-scheme: dark) {
   :root {
-    --bg: #17171a;
-    --surface: #1f1f23;
-    --border: #33333a;
-    --text: #ececf0;
-    --text-muted: #9a9aa4;
+    --surface-0: #17171a;
+    --surface-1: #1f1f23;
+    --surface-2: #28282e;
+    --surface-3: #2f2f36;
+
+    --text-1: #ececf0;
+    --text-2: #a6a6b0;
+    --text-3: #75757f;
+
+    --border-1: #33333a;
+    --border-2: #45454f;
+
     --accent: #7a9dee;
     --accent-contrast: #10101a;
+    --accent-soft: color-mix(in srgb, var(--accent) 16%, transparent);
+
+    --status-running: #7a9dee;
+    --status-queued: #a6a6b0;
+    --status-blocked: #c4a4f5;
+    --status-waiting-retry: #f0c473;
+    --status-failed: #f3b5ae;
+    --status-success: #6bc79b;
+
     --danger-bg: #3a1f1d;
     --danger-border: #6d3730;
     --danger-text: #f3b5ae;
     --warn-bg: #352b18;
     --warn-border: #6b552b;
     --warn-text: #f0d199;
-    --ok-text: #6bc79b;
+
+    --shadow-sm: 0 1px 2px rgb(0 0 0 / 0.3), 0 1px 1px rgb(0 0 0 / 0.24);
+    --shadow-md: 0 4px 12px rgb(0 0 0 / 0.36), 0 2px 4px rgb(0 0 0 / 0.28);
+    --shadow-lg: 0 12px 32px rgb(0 0 0 / 0.48), 0 4px 8px rgb(0 0 0 / 0.32);
   }
 }
 
@@ -80,8 +222,8 @@ body {
 .sidebar {
   display: flex;
   flex-direction: column;
-  gap: 1.5rem;
-  padding: 1.25rem 1rem;
+  gap: var(--space-5);
+  padding: var(--space-5) var(--space-4);
   background: var(--surface);
   border-right: 1px solid var(--border);
 }
@@ -89,16 +231,17 @@ body {
 .sidebar-brand {
   display: flex;
   flex-direction: column;
-  gap: 0.25rem;
+  gap: var(--space-1);
 }
 
 .sidebar-title {
-  font-size: 1.1rem;
-  font-weight: 600;
+  font-size: var(--font-size-lg);
+  font-weight: var(--font-weight-semibold);
+  line-height: var(--line-height-tight);
 }
 
 .sidebar-tagline {
-  font-size: 0.75rem;
+  font-size: var(--font-size-xs);
   color: var(--text-muted);
 }
 
@@ -108,23 +251,30 @@ body {
   padding: 0;
   display: flex;
   flex-direction: column;
-  gap: 0.125rem;
+  gap: var(--space-1);
 }
 
 .sidebar-link {
   width: 100%;
   text-align: left;
-  padding: 0.45rem 0.6rem;
+  padding: var(--space-2) var(--space-3);
   border: 0;
-  border-radius: 6px;
+  border-radius: var(--radius-sm);
   background: transparent;
   color: var(--text);
   font: inherit;
   cursor: pointer;
+  transition: background-color var(--duration-fast) var(--ease-standard);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .sidebar-link {
+    transition: none;
+  }
 }
 
 .sidebar-link:hover {
-  background: color-mix(in srgb, var(--accent) 12%, transparent);
+  background: var(--accent-soft);
 }
 
 .sidebar-link[aria-current="page"] {
@@ -135,27 +285,29 @@ body {
 /* Content */
 
 .content {
-  padding: 2rem;
+  padding: var(--space-6);
   overflow-y: auto;
 }
 
 .panel {
   background: var(--surface);
   border: 1px solid var(--border);
-  border-radius: 8px;
-  padding: 1rem 1.25rem;
+  border-radius: var(--radius-md);
+  padding: var(--space-4) var(--space-5);
+  box-shadow: var(--shadow-sm);
 }
 
 .panel h3 {
-  margin: 0 0 0.75rem;
-  font-size: 0.95rem;
+  margin: 0 0 var(--space-3);
+  font-size: var(--font-size-md);
+  font-weight: var(--font-weight-semibold);
 }
 
 .detail-list {
   display: grid;
   grid-template-columns: 9rem 1fr;
-  gap: 0.35rem 1rem;
-  margin: 0 0 1rem;
+  gap: var(--space-2) var(--space-4);
+  margin: 0 0 var(--space-4);
 }
 
 .detail-list dt {
@@ -173,17 +325,47 @@ code {
 }
 
 button {
-  padding: 0.4rem 0.8rem;
+  padding: var(--space-2) var(--space-4);
   border: 1px solid var(--border);
-  border-radius: 6px;
+  border-radius: var(--radius-sm);
   background: var(--surface);
   color: var(--text);
   font: inherit;
+  font-weight: var(--font-weight-medium);
   cursor: pointer;
+  transition: border-color var(--duration-fast) var(--ease-standard),
+    background-color var(--duration-fast) var(--ease-standard);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  button {
+    transition: none;
+  }
 }
 
 button:hover {
   border-color: var(--accent);
+}
+
+button:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+input,
+select,
+textarea {
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+  color: var(--text);
+  font: inherit;
+}
+
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
 }
 
 /* Empty states */
@@ -195,16 +377,17 @@ button:hover {
 }
 
 .empty-state h2 {
-  margin: 0 0 0.5rem;
+  margin: 0 0 var(--space-2);
+  font-size: var(--font-size-xl);
 }
 
 .empty-state p {
-  margin: 0 0 0.5rem;
+  margin: 0 0 var(--space-2);
   color: var(--text-muted);
 }
 
 .empty-state-note {
-  font-size: 0.85rem;
+  font-size: var(--font-size-sm);
   opacity: 0.75;
 }
 
@@ -213,19 +396,19 @@ button:hover {
 .error-banner {
   display: flex;
   align-items: baseline;
-  gap: 0.75rem;
-  padding: 0.65rem 0.9rem;
+  gap: var(--space-3);
+  padding: var(--space-3) var(--space-4);
   border: 1px solid var(--danger-border);
-  border-radius: 8px;
+  border-radius: var(--radius-md);
   background: var(--danger-bg);
   color: var(--danger-text);
 }
 
 .error-code {
   text-transform: uppercase;
-  font-size: 0.7rem;
+  font-size: var(--font-size-xs);
   letter-spacing: 0.06em;
-  font-weight: 600;
+  font-weight: var(--font-weight-semibold);
   white-space: nowrap;
 }
 
