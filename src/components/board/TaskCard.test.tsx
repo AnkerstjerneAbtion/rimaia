@@ -851,6 +851,9 @@ describe("TaskCard", () => {
       // Not a disabled one: "no worktree yet" is the normal state of most of
       // the board, not a failure to report.
       expect(screen.queryByRole("button", { name: "Open in" })).toBeNull();
+      // Deterministic without waiting for anything: a card with no worktree
+      // never mounts the menu at all, so detection is never even asked.
+      expect(mockInvoke).not.toHaveBeenCalledWith("list_open_in_targets", undefined);
     });
 
     it("lists exactly what the machine reported, and nothing else", async () => {
@@ -924,10 +927,14 @@ describe("TaskCard", () => {
     it("renders no control when the machine can open nothing", async () => {
       // Cannot happen in practice — the file manager always exists — but the
       // fallback has to be "no menu", never a menu of entries that open
-      // nothing.
+      // nothing. Awaited on the probe rather than on "Run now": before
+      // detection answers there is nothing to assert about, and asserting
+      // anyway is what made this pass locally and fail on CI.
       mockBackend({ openInTargets: [] });
       renderCard({ task: task(WITH_WORKTREE) });
-      await screen.findByRole("button", { name: "Run now" });
+      await waitFor(() =>
+        expect(mockInvoke).toHaveBeenCalledWith("list_open_in_targets", undefined),
+      );
 
       expect(screen.queryByRole("button", { name: "Open in" })).toBeNull();
     });

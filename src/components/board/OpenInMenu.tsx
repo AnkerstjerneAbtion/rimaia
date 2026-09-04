@@ -31,25 +31,41 @@ import type { DetectedOpenInTarget, RimaiaError } from "../../types";
 
 let targetCache: DetectedOpenInTarget[] | null = null;
 let targetFetch: Promise<void> | null = null;
+// Bumped whenever the cache is deliberately thrown away — the last menu
+// unmounting, or a Re-check. A fetch that was already in flight when that
+// happened resolves into a world that no longer wants its answer, and writing
+// it would put a *stale* probe back into a cache the teardown had just cleared.
+// The same hazard `TaskCard`'s queue lookup answers with `queueDirty`, in the
+// form that suits a cache with no invalidation event to race against.
+let targetGeneration = 0;
 const targetSubscribers = new Set<(targets: DetectedOpenInTarget[] | null) => void>();
 
 function notifyTargetSubscribers() {
   for (const subscriber of targetSubscribers) subscriber(targetCache);
 }
 
+/** Throws the cache away and abandons whatever was already in flight. */
+function invalidateTargets() {
+  targetGeneration += 1;
+  targetCache = null;
+  targetFetch = null;
+}
+
 function loadTargets() {
   if (targetCache || targetFetch) return;
+  const generation = targetGeneration;
   targetFetch = listOpenInTargets()
     .then((targets) => {
-      targetCache = targets;
+      if (generation === targetGeneration) targetCache = targets;
     })
     .catch(() => {
       // No backend (a non-Tauri preview, or a test that never mocks the
       // command): an empty list means no control, which is the honest answer
       // — never a menu of entries that open nothing.
-      targetCache = [];
+      if (generation === targetGeneration) targetCache = [];
     })
     .finally(() => {
+      if (generation !== targetGeneration) return;
       targetFetch = null;
       notifyTargetSubscribers();
     });
@@ -66,16 +82,12 @@ function useOpenInTargets(): {
     loadTargets();
     return () => {
       targetSubscribers.delete(setTargets);
-      if (targetSubscribers.size === 0) {
-        targetCache = null;
-        targetFetch = null;
-      }
+      if (targetSubscribers.size === 0) invalidateTargets();
     };
   }, []);
 
   const recheck = useCallback(() => {
-    targetCache = null;
-    targetFetch = null;
+    invalidateTargets();
     notifyTargetSubscribers();
     loadTargets();
   }, []);
@@ -106,7 +118,12 @@ export function OpenInMenu({
     return () => document.removeEventListener("pointerdown", onDocumentPointerDown);
   }, [open]);
 
-  if (targets !== null && targets.length === 0) return null;
+  // **Nothing until detection has answered.** `null` is "not probed yet", and
+  // rendering the control on it would put an "Open in" button on the card that
+  // may turn out to have nothing behind it — the same failure this task exists
+  // to prevent, in miniature. Detection is one shared call per board mount, so
+  // the control appears a moment later rather than flickering per card.
+  if (targets === null || targets.length === 0) return null;
 
   function choose(target: DetectedOpenInTarget) {
     setOpen(false);
