@@ -309,7 +309,7 @@ pub async fn analytics(pool: &SqlitePool, period: Period) -> Result<Analytics> {
     // Most-used first: the mix is read as a ranking, and the point is that the
     // two orderings disagree.
     by_model.sort_by(|a, b| b.runs.cmp(&a.runs).then(a.model.cmp(&b.model)));
-    by_strategy.sort_by(|a, b| b.runs.cmp(&a.runs));
+    by_strategy.sort_by_key(|entry| std::cmp::Reverse(entry.runs));
     durations.sort_unstable();
 
     let unattended_hours = durations.iter().sum::<i64>() as f64 / 3600.0;

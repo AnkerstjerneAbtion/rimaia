@@ -1,3 +1,20 @@
+//! **Unix only.** Every fixture in this file is a `/bin/sh` shebang script
+//! standing in for `claude`, `git` or `gh` — the technique `spike/FINDINGS.md`
+//! settled on and the only way to test "signed out", "too old" or "never called
+//! the tool" without depending on what is installed on the machine running the
+//! suite. Windows has no shebang, so the whole file is gated rather than each
+//! test: a file that compiled and silently ran nothing would report a green
+//! Windows job that had checked none of this.
+//!
+//! **What still runs on Windows is the part that matters most there**, and it is
+//! deliberately not here: `credentials::inject` and `openers` both assert their
+//! Windows tables from unit tests over injected inputs, on every platform,
+//! because `Platform` and the parent environment are values rather than `cfg!`.
+//! Task 022's CI matrix exists to compile the keychain backends and the
+//! environment-building code on all three — not to pretend a POSIX shell is
+//! available on a runner that has none.
+#![cfg(unix)]
+
 //! Task 018's preflight doctor, from the outside.
 //!
 //! Every check here runs against something real: a `TempDir` that is genuinely
