@@ -6,6 +6,7 @@ status: ready
 depends_on: ["018"]
 adrs: ["0006", "0021"]
 size: S
+landed: "#28"
 ---
 
 # A doctor warning the user can put down
