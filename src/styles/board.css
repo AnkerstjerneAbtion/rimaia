@@ -796,7 +796,8 @@
   color: var(--text-2);
 }
 
-.task-card-run-button {
+.task-card-run-button,
+.task-card-open-in-button {
   padding: 0.05rem var(--space-2);
   border-color: var(--border-1);
   background: transparent;
@@ -804,6 +805,68 @@
   color: var(--text-2);
   font-size: var(--font-size-xs);
   font-weight: var(--font-weight-semibold);
+}
+
+/* Task 026's Open-in control. Same quiet weight as "Run now" beside it: both
+   are things the user reaches for deliberately, and neither is what the card
+   is *for*. */
+.task-card-open-in {
+  position: relative;
+}
+
+.task-card-open-in-button:hover {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+/* Anchored to its own button rather than to the card, so a menu near the
+   bottom of a column is not clipped by the card's own bounds — and `right: 0`
+   because the action row is right-aligned and a left-anchored menu would hang
+   off the column on the narrowest board. */
+.task-card-open-in-menu {
+  position: absolute;
+  right: 0;
+  top: calc(100% + var(--space-1));
+  z-index: 3;
+  list-style: none;
+  margin: 0;
+  padding: var(--space-1);
+  min-width: 11rem;
+  border-radius: var(--radius-sm);
+  background: var(--surface-1);
+  box-shadow: inset 0 0 0 1px var(--border-1), var(--shadow-md);
+}
+
+.task-card-open-in-menu button {
+  display: block;
+  width: 100%;
+  padding: var(--space-1) var(--space-2);
+  border: none;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  box-shadow: none;
+  color: var(--text-1);
+  font-size: var(--font-size-xs);
+  text-align: left;
+}
+
+.task-card-open-in-menu button:hover,
+.task-card-open-in-menu button:focus-visible {
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+/* A maintenance action, not a target: separated so the eye does not read it
+   as a sixth place to open the worktree. */
+.task-card-open-in-recheck {
+  margin-top: var(--space-1);
+  padding-top: var(--space-1);
+  box-shadow: inset 0 1px 0 var(--border-1);
+}
+
+.task-card-open-in-recheck button {
+  color: var(--text-2);
 }
 
 .task-card-run-button:hover:not(:disabled) {

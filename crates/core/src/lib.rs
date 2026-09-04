@@ -17,6 +17,7 @@ pub mod doctor;
 pub mod error;
 pub mod events;
 pub mod mcp;
+pub mod openers;
 pub mod paths;
 pub mod repo;
 pub mod runner;

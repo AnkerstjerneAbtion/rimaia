@@ -1789,6 +1789,28 @@ scope decision and the destructiveness exception), and
 
 **Binds.** 016, 024.
 
+### Amendment, 2026-09-04 — two more commands with no tool, on different ground (task 026)
+
+Point 6 above records a hole in ADR-0021's parity rule and argues it from *destructiveness*.
+Task 026 adds two commands to the no-tool list — `list_open_in_targets` and
+`open_task_worktree_in` — and neither is destructive at all. They belong here because point 6
+is where this repository keeps the list, but the argument is a different one, and it is the
+one `reveal_task_worktree` has stated in `src-tauri/src/commands/worktree.rs` since task 007:
+
+**An MCP client is a protocol, not a desktop.** "Open this directory in VS Code" has no
+referent for a caller that has no screen, no window server and no user sitting in front of
+one. This is not a capability being withheld from agents on grounds of trust — it is a
+capability an agent has nothing to do with. `reveal_task_worktree` was never given a tool for
+exactly this reason and was never recorded as an exception; it is recorded now, with these
+two, so ADR-0021 point 1 ("a Tauri command without an MCP tool is a defect") stays literally
+true rather than true-with-an-unwritten-asterisk.
+
+Nothing else about the parity rule moves. The *detection* these commands sit on top of is
+`rimaia_core::openers`, a function over injected inputs like `doctor::checks`, so the rule is
+in core even though only one door reaches it.
+
+**Binds.** 016, 024, 026.
+
 ---
 
 ## How to use this

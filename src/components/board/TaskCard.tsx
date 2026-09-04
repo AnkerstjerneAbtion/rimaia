@@ -30,6 +30,7 @@ import {
   strategyBadgeText,
 } from "../panel/StrategySection";
 import { QUEUE_SKIP_LABELS } from "../runs/QueuePlanList";
+import { OpenInMenu } from "./OpenInMenu";
 import { RunStateBadge } from "./RunStateBadge";
 
 type KeyDownHandler = (event: ReactKeyboardEvent<HTMLElement>) => void;
@@ -597,6 +598,14 @@ export function TaskCard({
           <span className="task-card-indicator task-card-queue-position tabular-nums">
             Queued #{queueEntry.queuePosition}
           </span>
+        )}
+        {/* Task 026. Rendered off the card's own row — `worktree_path` is
+            already on every card (seam-contract D12), so no board read
+            changes and nothing here asks the disk. A task that has never run
+            has no worktree and shows no control at all, which is the normal
+            state of most of the board rather than something to report. */}
+        {task.worktreePath !== null && (
+          <OpenInMenu taskId={task.id} onError={setRunError} />
         )}
         {/* Task 008's "Run now", isolated from the drag/select machinery
             `{...attributes}`/`{...listeners}` and `onClick`/`onKeyDown` above

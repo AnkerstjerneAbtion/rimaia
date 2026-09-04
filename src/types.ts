@@ -104,6 +104,28 @@ export interface DoctorReport {
 }
 
 // ---------------------------------------------------------------------------
+// Open in… (task 026) — mirrors `rimaia_core::openers`.
+// ---------------------------------------------------------------------------
+
+/** Mirrors `rimaia_core::openers::Target`. */
+export type OpenInTarget = "vs_code" | "cursor" | "zed" | "terminal" | "file_manager";
+
+/**
+ * One entry of a card's Open-in menu.
+ *
+ * The list holds **only what is installed on this machine** — an uninstalled
+ * editor is absent, never present-and-disabled. A menu that lists Cursor and
+ * does nothing when clicked is worse than one that never mentions Cursor.
+ *
+ * `label` is sent rather than re-spelled here, for the reason
+ * {@link DoctorCheckResult.label} is.
+ */
+export interface DetectedOpenInTarget {
+  target: OpenInTarget;
+  label: string;
+}
+
+// ---------------------------------------------------------------------------
 // Repositories (task 003) — mirrors `rimaia_core::db::{Repository, ...}` and
 // `rimaia_core::repo::RemoteInfo`.
 // ---------------------------------------------------------------------------

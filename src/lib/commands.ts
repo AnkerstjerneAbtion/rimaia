@@ -5,6 +5,7 @@ import type {
   AutoCleanup,
   BoardColumn,
   CleanupReport,
+  DetectedOpenInTarget,
   DiffSummary,
   DoctorDismissal,
   DoctorReport,
@@ -12,6 +13,7 @@ import type {
   McpStatus,
   NewTaskInput,
   NewTaskLinkInput,
+  OpenInTarget,
   PreflightSummary,
   PruneCriterionInput,
   PruneResult,
@@ -418,6 +420,30 @@ export function getDiffSummary(taskId: string): Promise<DiffSummary> {
  */
 export function revealTaskWorktree(taskId: string): Promise<void> {
   return call<void>("reveal_task_worktree", { taskId });
+}
+
+/**
+ * Which editors, terminal and file manager this machine can open a worktree in
+ * (task 026).
+ *
+ * Probes `PATH` and a handful of install locations, so it is called when the
+ * window opens and when the user asks for a re-check — **never per card and
+ * never per render.** A board of forty cards re-probing on every drag is a
+ * different feature from the one asked for.
+ */
+export function listOpenInTargets(): Promise<DetectedOpenInTarget[]> {
+  return call<DetectedOpenInTarget[]>("list_open_in_targets");
+}
+
+/**
+ * Opens one task's worktree in one of them.
+ *
+ * Detection is redone in Rust on the way through, so an editor uninstalled
+ * since the menu was built fails with the service's own message rather than
+ * silently doing nothing.
+ */
+export function openTaskWorktreeIn(taskId: string, target: OpenInTarget): Promise<void> {
+  return call<void>("open_task_worktree_in", { taskId, target });
 }
 
 // ---------------------------------------------------------------------------

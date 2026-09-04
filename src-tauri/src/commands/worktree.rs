@@ -16,10 +16,16 @@
 //! decision about destructiveness, not about which client is privileged."
 //! [`remove_task_worktree`], [`cleanup_done_worktrees`] and
 //! [`cleanup_merged_worktrees`] join it, and seam-contract D20 records why.
+//!
+//! Task 026's [`list_open_in_targets`] and [`open_task_worktree_in`] join them
+//! too, on [`reveal_task_worktree`]'s ground rather than on destructiveness:
+//! this is not a capability withheld from agents, it is one an agent has no
+//! referent for. Seam-contract D20 point 6 records that as well.
 //! The inventory and the policy setting *do* get tools, operator-only — the
 //! read is how an agent finds out what is on disk, and refusing the read while
 //! refusing the write would leave it unable even to explain the problem.
 
+use rimaia_core::openers::{self, DetectedTarget, Launch, Machine, SystemProbe, Target};
 use rimaia_core::worktree::{
     self, AutoCleanup, CleanupReport, DiffSummary, RemovalAuthorization, RemovedWorktree,
     WorktreeInventory, WorktreeStatus,
@@ -75,6 +81,74 @@ pub async fn reveal_task_worktree(
     app.opener()
         .open_path(path, None::<&str>)
         .map_err(|e| Error::internal(format!("could not open the worktree directory: {e}")))
+}
+
+// ---------------------------------------------------------------------------
+// Open in… (task 026) — see `rimaia_core::openers`.
+// ---------------------------------------------------------------------------
+
+/// Which of the five targets this machine can actually open a worktree in.
+///
+/// Spawns a handful of `PATH` scans and `stat` calls, so the frontend calls it
+/// when the window opens and when the user asks for a re-check — never per card
+/// and never per render. Five subprocess-free probes are cheap; forty cards
+/// re-probing on every drag would be a different feature from the one asked for.
+#[tauri::command]
+pub async fn list_open_in_targets() -> Result<Vec<DetectedTarget>> {
+    Ok(openers::detect(&Machine::host(), &SystemProbe))
+}
+
+/// Opens one task's worktree in one of them.
+///
+/// Which targets exist and what each is launched with is
+/// [`rimaia_core::openers`]'s; this spawns what it answers with. The detection
+/// is redone here rather than trusting the target the window sent, so an editor
+/// uninstalled since the menu was built fails with the service's own message on
+/// the card instead of silently doing nothing.
+#[tauri::command]
+pub async fn open_task_worktree_in(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    task_id: String,
+    target: Target,
+) -> Result<()> {
+    let launch = openers::launch_for_task(
+        &state.context,
+        &Machine::host(),
+        &SystemProbe,
+        target,
+        &task_id,
+    )
+    .await?;
+
+    match launch {
+        Launch::DefaultHandler(path) => app
+            .opener()
+            .open_path(path.to_string_lossy(), None::<&str>)
+            .map_err(|error| {
+                Error::internal(format!("could not open the worktree directory: {error}"))
+            }),
+        // An argument vector, never a shell string: `TempRepo` puts a space in
+        // a repository path on purpose, and every worktree under it inherits
+        // one. Spawned and let go — Rimaia does not supervise the editor it
+        // opened, and waiting on one would block this command for as long as
+        // the user keeps it open.
+        Launch::Command(argv) => {
+            let (program, arguments) = argv
+                .split_first()
+                .ok_or_else(|| Error::internal("an empty launch command"))?;
+            std::process::Command::new(program)
+                .args(arguments)
+                .spawn()
+                .map(|_| ())
+                .map_err(|error| {
+                    Error::internal(format!(
+                        "could not open the worktree in {}: {error}",
+                        target.label()
+                    ))
+                })
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
