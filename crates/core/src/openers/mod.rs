@@ -634,7 +634,8 @@ mod tests {
         // after the user runs "Install 'code' command in PATH", and an app
         // that is plainly installed must not vanish from the menu because of
         // a step nobody took.
-        let probe = FakeProbe::default().and_installed(&[&native("/Applications/Visual Studio Code.app")]);
+        let probe =
+            FakeProbe::default().and_installed(&[&native("/Applications/Visual Studio Code.app")]);
 
         let detected = detect(&mac(), &probe);
 
@@ -712,8 +713,8 @@ mod tests {
         );
 
         // And falls back to the one macOS always has.
-        let plain =
-            FakeProbe::default().and_installed(&[&native("/System/Applications/Utilities/Terminal.app")]);
+        let plain = FakeProbe::default()
+            .and_installed(&[&native("/System/Applications/Utilities/Terminal.app")]);
         let detected = detect(&mac(), &plain);
         assert_eq!(
             argv(entry(&detected, Target::Terminal), "/wt"),
