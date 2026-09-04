@@ -260,7 +260,7 @@
 /* A zero readout is not the same news as a non-zero one, and four bright
    zeroes on an idle queue would be four things to read that say nothing. */
 .queue-metric[data-zero="true"] dd {
-  color: var(--text-3);
+  color: var(--text-2);
 }
 
 .queue-metric-live dd {
@@ -360,7 +360,7 @@
 }
 
 .runs-section-count[data-zero="true"] {
-  color: var(--text-3);
+  color: var(--text-2);
 }
 
 /* The rule from the head to the edge of the view, so a band reads as a band.
@@ -570,7 +570,7 @@
 }
 
 .active-run-tool-idle {
-  color: var(--text-3);
+  color: var(--text-2);
 }
 
 .active-run-assistant-text {
@@ -609,7 +609,7 @@
 }
 
 .active-run-assistant-text p.muted {
-  color: var(--text-3);
+  color: var(--text-2);
 }
 
 /* Cancel is an override of a decision the scheduler already made, so it is the
@@ -735,7 +735,7 @@
   grid-column: 2;
   font-size: var(--font-size-xs);
   line-height: var(--line-height-tight);
-  color: var(--text-3);
+  color: var(--text-2);
   overflow-wrap: anywhere;
 }
 
@@ -786,7 +786,7 @@
   gap: var(--space-2);
   min-width: 0;
   font-size: var(--font-size-xs);
-  color: var(--text-3);
+  color: var(--text-2);
 }
 
 .session-outcome-repo {
@@ -921,7 +921,7 @@
 }
 
 .runs-history-table .runs-history-when {
-  color: var(--text-3);
+  color: var(--text-2);
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
 }
@@ -1249,7 +1249,7 @@
 .transcript-snippet {
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
   font-size: var(--font-size-xs);
-  color: var(--text-3);
+  color: var(--text-2);
   overflow-wrap: anywhere;
 }
 
@@ -1287,7 +1287,7 @@
   letter-spacing: var(--letter-spacing-wide);
   line-height: var(--line-height-relaxed);
   text-transform: uppercase;
-  color: var(--text-3);
+  color: var(--text-2);
   white-space: nowrap;
 }
 
@@ -1404,7 +1404,7 @@
   margin: 0;
   padding: 0 var(--space-3);
   font-size: var(--font-size-xs);
-  color: var(--text-3);
+  color: var(--text-2);
 }
 
 /* Same treatment as a tool payload: a line that would not parse is usually a

@@ -97,12 +97,12 @@
   font-weight: var(--font-weight-semibold);
   letter-spacing: var(--letter-spacing-wide);
   text-transform: uppercase;
-  color: var(--text-3);
+  color: var(--text-2);
   text-decoration: none;
 }
 
 .settings-index-label:hover {
-  color: var(--text-2);
+  color: var(--text-1);
 }
 
 .settings-index ul {
@@ -177,7 +177,7 @@
 .settings-band-blurb {
   margin: 0;
   font-size: var(--font-size-sm);
-  color: var(--text-3);
+  color: var(--text-2);
 }
 
 /* The anchor each index entry jumps to. The margin keeps a jumped-to panel
@@ -290,7 +290,7 @@
   font-weight: var(--font-weight-semibold);
   letter-spacing: var(--letter-spacing-wide);
   text-transform: uppercase;
-  color: var(--text-3);
+  color: var(--text-2);
   white-space: nowrap;
 }
 
@@ -648,7 +648,7 @@
   grid-column: 1 / -1;
   margin: 0;
   font-size: var(--font-size-xs);
-  color: var(--text-3);
+  color: var(--text-2);
 }
 
 /* The per-repository default strategy (task 020), beside the opt-in it answers
@@ -665,7 +665,7 @@
   font-weight: var(--font-weight-semibold);
   letter-spacing: var(--letter-spacing-wide);
   text-transform: uppercase;
-  color: var(--text-3);
+  color: var(--text-2);
 }
 
 /* Settings → Schedules (task 013, ADR-0010).
@@ -711,7 +711,7 @@
   font-weight: var(--font-weight-semibold);
   letter-spacing: var(--letter-spacing-wide);
   text-transform: uppercase;
-  color: var(--text-3);
+  color: var(--text-2);
 }
 
 .schedule-row p {
@@ -726,7 +726,7 @@
    rows is what made twenty schedules unscannable. */
 .schedule-captions {
   font-size: var(--font-size-xs);
-  color: var(--text-3);
+  color: var(--text-2);
 }
 
 .schedule-kind::after {
