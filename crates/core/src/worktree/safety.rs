@@ -181,13 +181,21 @@ mod tests {
 
     #[tokio::test]
     async fn a_path_containing_a_parent_segment_is_refused() {
-        let error = resolve(Path::new("/tmp/repo/../elsewhere"))
+        // Built from a real temp directory rather than from a `/tmp/...`
+        // literal: the absoluteness guard runs first, and on Windows a
+        // POSIX-looking path is not absolute at all — so the literal version of
+        // this test asserted the `..` rule while actually exercising the one
+        // before it.
+        let temp = tempfile::tempdir().expect("temp dir");
+        let path = temp.path().join("repo").join("..").join("elsewhere");
+
+        let error = resolve(&path)
             .await
             .expect_err("`..` cannot be resolved without guessing");
 
         assert_eq!(
             error.to_string(),
-            "/tmp/repo/../elsewhere must not contain \"..\""
+            format!("{} must not contain \"..\"", path.display())
         );
     }
 

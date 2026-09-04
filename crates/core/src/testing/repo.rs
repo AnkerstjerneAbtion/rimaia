@@ -27,6 +27,28 @@ const WORK_TREE_DIR: &str = "work tree";
 
 const REMOTE_DIR: &str = "origin.git";
 
+/// A canonical path git will accept.
+///
+/// `fs::canonicalize` returns a Windows *extended-length* path — the `\\?\`
+/// prefix — and git for Windows cannot open one: it reports
+/// `could not open '\\?\C:\...\origin.git/HEAD' for writing: No such file
+/// or directory`, which reads as a missing directory rather than as a path it
+/// declined to parse. Stripping the prefix costs the >260-character support
+/// canonicalization was buying, and a temp directory is nowhere near that.
+///
+/// A no-op everywhere else. Found by task 022's CI matrix, which is the first
+/// time this harness ran on Windows.
+fn plain(path: PathBuf) -> PathBuf {
+    #[cfg(windows)]
+    {
+        let text = path.to_string_lossy();
+        if let Some(stripped) = text.strip_prefix(r"\\?\") {
+            return PathBuf::from(stripped);
+        }
+    }
+    path
+}
+
 pub struct TempRepo {
     /// Held only for its `Drop`; the paths below point inside it.
     _root: TempDir,
@@ -45,7 +67,7 @@ impl TempRepo {
         // macOS hands out `/var/folders/...`, a symlink to `/private/var/...`,
         // and git reports the resolved form. Resolving once here keeps `path()`
         // comparable with anything git prints back.
-        let resolved = fs::canonicalize(root.path()).expect("temp dir must be resolvable");
+        let resolved = plain(fs::canonicalize(root.path()).expect("temp dir must be resolvable"));
 
         let work_tree = resolved.join(WORK_TREE_DIR);
         fs::create_dir(&work_tree).expect("work tree directory");

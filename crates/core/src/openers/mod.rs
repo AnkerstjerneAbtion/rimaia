@@ -566,31 +566,32 @@ mod tests {
         detected.iter().map(|entry| entry.target).collect()
     }
 
-    /// A path spelled with the *host's* separator, so a test that names a
-    /// macOS or Linux location still describes the same file on Windows.
+    /// Separators normalized to `/`, so an expectation written once describes
+    /// the same file on every runner.
     ///
-    /// `PathBuf::join` uses the host's separator, and `detect` builds its
-    /// candidates with it — so a literal `"/Applications/Cursor.app"` compared
-    /// against a joined path is a comparison of two different strings on
-    /// Windows and the same string everywhere else. The `Platform` parameter
-    /// exists so these tables are asserted from *any* runner; this is the other
-    /// half of making that true.
-    fn native(path: &str) -> String {
-        let mut parts = path.split('/');
-        let root = parts.next().unwrap_or_default();
-        let mut built = PathBuf::from(if root.is_empty() { "/" } else { root });
-        for part in parts.filter(|part| !part.is_empty()) {
-            built.push(part);
-        }
-        built.to_string_lossy().into_owned()
+    /// `PathBuf::join` uses the *host's* separator, so the candidate list this
+    /// module builds for macOS spells `/Applications\Cursor.app` on Windows
+    /// and `/Applications/Cursor.app` everywhere else — the same path, two
+    /// strings. Making [`Platform`] a value is what lets these tables be
+    /// asserted from any runner; comparing them separator-insensitively is the
+    /// other half of making that true. **Both sides go through it**, including
+    /// the two tests whose subject *is* Windows: what those assert is the shape
+    /// of the argument vector — an executable run directly rather than through
+    /// `open -a`, and `wt -d` rather than a shell string — not which byte the
+    /// host happens to separate components with.
+    fn forward(parts: impl IntoIterator<Item = String>) -> Vec<String> {
+        parts
+            .into_iter()
+            .map(|part| part.replace('\\', "/"))
+            .collect()
     }
 
     fn argv(entry: &DetectedTarget, worktree: &str) -> Vec<String> {
         match entry.launch(Path::new(worktree)) {
-            Launch::Command(argv) => argv
-                .into_iter()
-                .map(|part| part.to_string_lossy().into_owned())
-                .collect(),
+            Launch::Command(argv) => forward(
+                argv.into_iter()
+                    .map(|part| part.to_string_lossy().into_owned()),
+            ),
             Launch::DefaultHandler(path) => {
                 panic!("expected a command, got the default handler for {path:?}")
             }
@@ -634,8 +635,7 @@ mod tests {
         // after the user runs "Install 'code' command in PATH", and an app
         // that is plainly installed must not vanish from the menu because of
         // a step nobody took.
-        let probe =
-            FakeProbe::default().and_installed(&[&native("/Applications/Visual Studio Code.app")]);
+        let probe = FakeProbe::default().and_installed(&["/Applications/Visual Studio Code.app"]);
 
         let detected = detect(&mac(), &probe);
 
@@ -643,10 +643,10 @@ mod tests {
         assert_eq!(
             argv(entry(&detected, Target::VsCode), "/src/my repo/wt"),
             vec![
-                MACOS_OPEN.to_string(),
-                "-a".to_string(),
-                native("/Applications/Visual Studio Code.app"),
-                "/src/my repo/wt".to_string()
+                MACOS_OPEN,
+                "-a",
+                "/Applications/Visual Studio Code.app",
+                "/src/my repo/wt"
             ],
         );
     }
@@ -656,20 +656,15 @@ mod tests {
         // Both installed is a real machine, and the per-user copy is the one
         // being kept up to date.
         let probe = FakeProbe::default().and_installed(&[
-            &native("/Users/ea/Applications/Cursor.app"),
-            &native("/Applications/Cursor.app"),
+            "/Users/ea/Applications/Cursor.app",
+            "/Applications/Cursor.app",
         ]);
 
         let detected = detect(&mac(), &probe);
 
         assert_eq!(
             argv(entry(&detected, Target::Cursor), "/wt"),
-            vec![
-                MACOS_OPEN.to_string(),
-                "-a".to_string(),
-                native("/Users/ea/Applications/Cursor.app"),
-                "/wt".to_string()
-            ],
+            vec![MACOS_OPEN, "-a", "/Users/ea/Applications/Cursor.app", "/wt"],
         );
     }
 
@@ -700,29 +695,24 @@ mod tests {
 
     #[test]
     fn a_mac_terminal_prefers_iterm_when_it_is_installed() {
-        let with_iterm = FakeProbe::default().and_installed(&[&native("/Applications/iTerm.app")]);
+        let with_iterm = FakeProbe::default().and_installed(&["/Applications/iTerm.app"]);
         let detected = detect(&mac(), &with_iterm);
         assert_eq!(
             argv(entry(&detected, Target::Terminal), "/wt"),
-            vec![
-                MACOS_OPEN.to_string(),
-                "-a".to_string(),
-                native("/Applications/iTerm.app"),
-                "/wt".to_string()
-            ],
+            vec![MACOS_OPEN, "-a", "/Applications/iTerm.app", "/wt"],
         );
 
         // And falls back to the one macOS always has.
-        let plain = FakeProbe::default()
-            .and_installed(&[&native("/System/Applications/Utilities/Terminal.app")]);
+        let plain =
+            FakeProbe::default().and_installed(&["/System/Applications/Utilities/Terminal.app"]);
         let detected = detect(&mac(), &plain);
         assert_eq!(
             argv(entry(&detected, Target::Terminal), "/wt"),
             vec![
-                MACOS_OPEN.to_string(),
-                "-a".to_string(),
-                native("/System/Applications/Utilities/Terminal.app"),
-                "/wt".to_string()
+                MACOS_OPEN,
+                "-a",
+                "/System/Applications/Utilities/Terminal.app",
+                "/wt"
             ],
         );
     }
@@ -750,15 +740,15 @@ mod tests {
 
         assert_eq!(
             argv(entry(&detected, Target::VsCode), r"C:\src\my repo\wt"),
-            vec![
+            forward([
                 installed.to_string_lossy().into_owned(),
-                r"C:\src\my repo\wt".to_string()
-            ],
+                r"C:\src\my repo\wt".to_string(),
+            ]),
             "an executable is run directly; `open -a` is a macOS idea",
         );
         assert_eq!(
             argv(entry(&detected, Target::Terminal), r"C:\src\my repo\wt"),
-            vec!["wt", "-d", r"C:\src\my repo\wt"],
+            forward(["wt", "-d", r"C:\src\my repo\wt"].map(str::to_string)),
         );
     }
 
@@ -768,16 +758,19 @@ mod tests {
 
         assert_eq!(
             argv(entry(&detected, Target::Terminal), r"C:\src\my repo\wt"),
-            vec![
-                "cmd.exe",
-                "/C",
-                "start",
-                "cmd.exe",
-                "/K",
-                "cd",
-                "/D",
-                r"C:\src\my repo\wt"
-            ],
+            forward(
+                [
+                    "cmd.exe",
+                    "/C",
+                    "start",
+                    "cmd.exe",
+                    "/K",
+                    "cd",
+                    "/D",
+                    r"C:\src\my repo\wt",
+                ]
+                .map(str::to_string),
+            ),
             "every part is its own argument — a path with a space is the normal case here",
         );
     }
@@ -822,13 +815,13 @@ mod tests {
             home: Some(PathBuf::from("/home/ea")),
             ..Machine::bare(Platform::Linux)
         };
-        let probe = FakeProbe::default().and_installed(&[&native("/snap/bin/zed")]);
+        let probe = FakeProbe::default().and_installed(&["/snap/bin/zed"]);
 
         let detected = detect(&machine, &probe);
 
         assert_eq!(
             argv(entry(&detected, Target::Zed), "/src/my repo/wt"),
-            vec![native("/snap/bin/zed"), "/src/my repo/wt".to_string()],
+            vec!["/snap/bin/zed", "/src/my repo/wt"],
         );
     }
 
@@ -837,7 +830,7 @@ mod tests {
         // A menu that reshuffles between two probes is a menu the user has to
         // read every time instead of aiming at.
         let everything = FakeProbe::with_shims(&["zed", "cursor", "code"])
-            .and_installed(&[&native("/Applications/iTerm.app")]);
+            .and_installed(&["/Applications/iTerm.app"]);
 
         assert_eq!(
             targets_of(&detect(&mac(), &everything)),
