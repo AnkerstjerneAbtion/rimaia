@@ -32,12 +32,13 @@ reviewable in the app afterwards.
 | 19 | [016](016-worktree-lifecycle-and-cleanup.md) | Worktree lifecycle and cleanup | v0.3 | 007, 009 | #14 |
 | 20 | [017](017-morning-review-flow.md) | Morning review flow | v0.3 | 015 | — |
 | 21 | [026](026-open-worktree-in-editor.md) | Open a task's worktree in the tool the user actually works in | v0.3 | 005, 007 | — |
-| 22 | [018](018-preflight-doctor-and-packaging.md) | Preflight doctor and packaging | v0.3 | 008 | #17 |
-| 23 | [025](025-startup-failure-dialog.md) | A startup failure a double-clicked bundle can see | v0.3 | 018 | — |
-| 24 | [027](027-dismissable-doctor-warnings.md) | A doctor warning the user can put down | v0.3 | 018 | — |
-| 25 | [022](022-per-repository-git-credentials.md) | Per-repository git credentials | v0.3 | 003, 008 | — |
-| 26 | [021](021-review-and-fix-loop.md) | Review-and-fix loop | v0.4 | 015, 017, 020 | — |
-| 27 | [024](024-analytics.md) | Analytics — what the queue has actually done | v0.4 | 015 | — |
+| 22 | [028](028-let-a-run-see-the-ui-it-changed.md) | Let a run see the UI it changed | v0.3 | 005 | — |
+| 23 | [018](018-preflight-doctor-and-packaging.md) | Preflight doctor and packaging | v0.3 | 008 | #17 |
+| 24 | [025](025-startup-failure-dialog.md) | A startup failure a double-clicked bundle can see | v0.3 | 018 | — |
+| 25 | [027](027-dismissable-doctor-warnings.md) | A doctor warning the user can put down | v0.3 | 018 | — |
+| 26 | [022](022-per-repository-git-credentials.md) | Per-repository git credentials | v0.3 | 003, 008 | — |
+| 27 | [021](021-review-and-fix-loop.md) | Review-and-fix loop | v0.4 | 015, 017, 020 | — |
+| 28 | [024](024-analytics.md) | Analytics — what the queue has actually done | v0.4 | 015 | — |
 
 ## Before task 001
 
