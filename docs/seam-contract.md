@@ -465,6 +465,59 @@ What task 018 therefore does and does not close:
   on the launch path is a worse failure than the silence it replaces. Recorded rather than
   guessed at; it wants its own task and a human at a real bundle.
 
+### Amendment, 2026-09-04 — the dialog, and what was actually measured (task 025)
+
+The case above is closed. **`src-tauri/src/lib.rs`'s setup hook now shows a native error
+dialog on every fatal path, before the process exits** — the failing step, the reason, and
+the directory holding the log files. Everything else about this entry stands unchanged: the
+window still never opens, the exit is still non-zero, and every step still writes its stderr
+line and its log line *before* the dialog, so a bundle that cannot draw one loses nothing it
+had.
+
+**`blocking_show()` on the setup hook's own thread is safe, and here is why.** Three facts,
+each read out of a dependency rather than assumed:
+
+1. The setup hook runs on the main thread **inside the already-running event loop** —
+   `RuntimeRunEvent::Ready`, `tauri-2.11.5/src/app.rs:1424`.
+2. `blocking_show()` posts through `AppHandle::run_on_main_thread` and then blocks the caller
+   on a channel. That is a deadlock only if the post has to wait for this thread to return,
+   and it does not: `tauri-runtime-wry`'s `send_user_message` (2.11.4, `src/lib.rs:239`)
+   executes the closure **inline** when the caller is already the main thread.
+3. The dialog never touches the run loop at all. `rfd`'s macOS `AsyncMessageDialogImpl`
+   (0.16.0, `src/backend/macos/message_dialog.rs:172`) branches on whether a **parent window**
+   was set; `tauri-plugin-dialog` sets one only if the caller asks, and this one does not.
+   With no parent it takes `utils::async_pop_dialog` — a `CFUserNotificationDisplayAlert` on
+   a thread of its own.
+
+Point 3 is the one worth carrying forward, because it is not the mechanism this entry
+predicted. The obvious hazard — a *sheet* attached to the window `tauri.conf.json` declares
+`"visible": false`, which nobody could see and nothing would answer — lives in rfd's
+`ModalFuture`, and `ModalFuture` is reached **only** on the explicit-parent branch. An
+implementation that passes `.parent(&window)` would meet exactly the deadlock this entry
+feared. Do not add one.
+
+**Verified against a real bundle, 2026-09-04, macOS 15 (aarch64).** `npm run tauri build`
+with a deliberately failing migration added to `src-tauri/migrations/`, launched from the
+built `Rimaia.app`:
+
+- `sample` on the live process shows the main thread parked in `report_startup_failure` →
+  `blocking_show` → `mpmc::Receiver::recv`, and a second thread in
+  `rfd::backend::macos::utils::user_alert::UserAlert::run` → `CFUserNotificationDisplayAlert`
+  → `CFUserNotificationReceiveResponse`. A real alert, on screen, waiting for a person.
+- The process resumed the instant the alert was answered and ended **non-zero** — 134, the
+  `SIGABRT` of this entry's own panic-at-`Ready`, which is pre-existing and unchanged (the
+  panic crosses an `extern "C"` frame, so it aborts rather than unwinds).
+- The log file held the `ERROR startup failed; the window will not open` line naming the step
+  and the sqlx error, exactly as before.
+- Rebuilt without the broken migration: startup succeeds, the window opens, and `sample`
+  finds no `CFUserNotification` frame anywhere in the process. **A successful launch is
+  byte-identical to before this task.**
+
+Not claimed: Windows and Linux. The code is one call and is platform-neutral, but the reading
+above is macOS's, and this entry does not assert what nobody ran.
+
+**Binds.** 002, 018, 025.
+
 ## D12 — What the board's bulk read returns
 
 **Question.** Task 005's card must show a link count, a dependency indicator, and — per [D9](#d9)
