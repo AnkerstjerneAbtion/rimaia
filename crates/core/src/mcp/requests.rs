@@ -19,7 +19,9 @@ use serde::Deserialize;
 
 use chrono::{DateTime, Utc};
 
+use crate::db::settings::Dismissal;
 use crate::db::{BoardColumn, RunState, ScheduleMode, StrategyMode};
+use crate::doctor::Check;
 use crate::error::{Error, Result};
 use crate::schedule::ScheduleInput;
 use crate::strategy::StrategyApproval;
@@ -499,6 +501,36 @@ pub struct SetScheduleEnabledRequest {
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub struct SetWorktreeAutoCleanupRequest {
     pub setting: AutoCleanup,
+}
+
+/// One doctor row to put down, or pick back up (task 027).
+///
+/// All three fields, because a dismissal is keyed on the row's *content*: the
+/// same check about a different repository is a different warning, and a
+/// changed `detail` is a sentence the user has not read yet. A tool that took
+/// only `check` would be the mute button task 027's Notes argue against.
+///
+/// Copy the three values out of `run_doctor`'s own output rather than composing
+/// them — a `detail` that differs by a character matches nothing.
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct DoctorDismissalRequest {
+    pub check: Check,
+    /// The repository the row was about, for the two per-repository checks.
+    /// Omit it for the six that describe the installation as a whole.
+    #[serde(default)]
+    pub repository: Option<String>,
+    pub detail: String,
+}
+
+impl From<DoctorDismissalRequest> for Dismissal {
+    fn from(request: DoctorDismissalRequest) -> Self {
+        Dismissal {
+            check: request.check,
+            repository: request.repository,
+            detail: request.detail,
+        }
+    }
 }
 
 #[cfg(test)]

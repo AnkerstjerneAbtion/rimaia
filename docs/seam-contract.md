@@ -1244,6 +1244,44 @@ preflight is real is the entire point of this entry.
 
 **Binds.** 012, 013, 018.
 
+### Amendment, 2026-09-04 — a warning can be put down, and the refusal never reads it (task 027)
+
+Point 3 above draws the `warn`/`fail` line and stops at "only `fail` blocks". Task 027 adds the
+thing that line implies and this entry did not say: **a `warn` can be dismissed, and a `fail`
+cannot.**
+
+- **Dismissal is per row, keyed on `check` + `repository` + `detail`** — not on the check. The
+  same check about a different repository is a different warning, and a changed `detail` is a
+  sentence the user has not read. Stored as JSON in the `doctor_dismissals` settings key
+  (D3, D4 — no migration), read through a typed accessor beside `onboarding_dismissed` and
+  tolerant of a hand-edited row the way `run_environment` is.
+- **`DoctorReport` marks; it never drops.** `CheckResult::dismissed` is set by
+  `DoctorReport::new`, and `CheckResult::answered_by` only ever marks a `CheckStatus::Warn` — so
+  the "a `fail` is not dismissible" rule is enforced on every *read* rather than at the two
+  write paths, and a row that was a warning yesterday and is a failure today is not silently
+  silenced by yesterday's answer. `DoctorReport` also carries the whole stored set, including
+  dismissals that match no current row, so nothing stored is invisible.
+- **`is_blocking`, `blocking` and `blocking_summary` do not read `dismissed`, now or ever.**
+  Point 1's refusal on `QueueHandle::start`/`resume` is unchanged, byte for byte, and
+  `crates/core/tests/doctor.rs::dismissing_every_row_still_refuses_to_start_the_queue_and_writes_no_queue_state`
+  dismisses every row of a blocking report and asserts the same error and the same absent
+  `queue_state`. That test is the point of this amendment: it fails loudly if a later change
+  ever wires the dismissal set into the gate.
+- **The banner collapses a `fail` instead of dismissing it.** The rows fold away, the headline
+  and the blocking count stay. Collapsing is component state and does not outlive the window.
+- **Both tools are `RunAccess::Refused`** (ADR-0021 point 4), with the sharpest edge on that
+  clause: a run that could dismiss a doctor warning could silence the report on the environment
+  it is itself running in.
+
+**One correction this task forced.** `Check`'s `rename_all = "snake_case"` produced
+`git_hub_cli` for `GitHubCli`, where `Check::as_str()`, `CheckResultView` and `src/types.ts` all
+say `github_cli`. It cost nothing while a check was only ever *written* to the wire; it became a
+defect the moment a check became the key half of a stored value that has to compare equal across
+both spellings. The variant now carries an explicit `#[serde(rename = "github_cli")]`, and
+`every_check_serializes_with_the_spelling_its_accessor_returns` pins the agreement for all eight.
+
+**Binds.** 018, 027.
+
 ---
 
 ## D23 — Task 014's cross-cutting choices

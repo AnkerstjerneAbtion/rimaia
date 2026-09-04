@@ -12,7 +12,20 @@ import type { DoctorCheckResult } from "../types";
  * second one being present and specific, so it gets its own element rather
  * than being concatenated into a sentence.
  */
-export function DoctorResultList({ results }: { results: readonly DoctorCheckResult[] }) {
+export function DoctorResultList({
+  results,
+  onDismiss,
+  onRestore,
+}: {
+  results: readonly DoctorCheckResult[];
+  /**
+   * Offered on `warn` rows only (task 027). A `fail` collapses instead — see
+   * {@link DoctorBanner} — and a `pass` is not in the banner to begin with.
+   */
+  onDismiss?: (result: DoctorCheckResult) => void;
+  /** Offered on rows already dismissed, which only Settings → Environment shows. */
+  onRestore?: (result: DoctorCheckResult) => void;
+}) {
   if (results.length === 0) return null;
 
   return (
@@ -20,7 +33,9 @@ export function DoctorResultList({ results }: { results: readonly DoctorCheckRes
       {results.map((result) => (
         <li
           key={result.repository ? `${result.check}:${result.repository}` : result.check}
-          className={`doctor-result doctor-result-${result.status}`}
+          className={`doctor-result doctor-result-${result.status}${
+            result.dismissed ? " doctor-result-dismissed" : ""
+          }`}
         >
           <span className={`doctor-status doctor-status-${result.status}`}>
             {statusLabel(result.status)}
@@ -36,6 +51,24 @@ export function DoctorResultList({ results }: { results: readonly DoctorCheckRes
             <p>{result.detail}</p>
             {result.remediation && <p className="doctor-remediation">{result.remediation}</p>}
           </div>
+          {onDismiss && result.status === "warn" && !result.dismissed && (
+            <button
+              type="button"
+              className="doctor-result-action"
+              onClick={() => onDismiss(result)}
+            >
+              Dismiss
+            </button>
+          )}
+          {onRestore && result.dismissed && (
+            <button
+              type="button"
+              className="doctor-result-action"
+              onClick={() => onRestore(result)}
+            >
+              Restore
+            </button>
+          )}
         </li>
       ))}
     </ul>

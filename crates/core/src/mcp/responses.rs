@@ -16,6 +16,7 @@ use chrono::{DateTime, Utc};
 use schemars::JsonSchema;
 use serde::Serialize;
 
+use crate::db::settings::Dismissal;
 use crate::db::{
     BoardColumn, ExitClass, MutationSource, Repository, Run, RunState, RunStatus, Schedule,
     ScheduleMode, StrategyMode, StrategySource, TaskLink,
@@ -203,6 +204,10 @@ pub struct CheckResultView {
     pub repository: Option<String>,
     pub detail: String,
     pub remediation: Option<String>,
+    /// Whether the user has already read this exact row and put it down (task
+    /// 027). Only ever true of a `warn`, and it changes nothing about
+    /// `is_blocking` — see [`DoctorReportView`].
+    pub dismissed: bool,
 }
 
 impl From<&CheckResult> for CheckResultView {
@@ -214,8 +219,41 @@ impl From<&CheckResult> for CheckResultView {
             repository: result.repository.clone(),
             detail: result.detail.clone(),
             remediation: result.remediation.clone(),
+            dismissed: result.dismissed,
         }
     }
+}
+
+/// One stored dismissal, as `run_doctor` and the two dismissal tools report it
+/// (task 027).
+///
+/// The three fields are the whole key, and they are exactly what
+/// `restore_doctor_warning` takes back — so an agent clearing one copies a
+/// value it was given rather than composing it.
+#[derive(Debug, Clone, PartialEq, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub struct DismissalView {
+    pub check: String,
+    pub repository: Option<String>,
+    pub detail: String,
+}
+
+impl From<&Dismissal> for DismissalView {
+    fn from(dismissal: &Dismissal) -> Self {
+        Self {
+            check: dismissal.check.as_str().to_string(),
+            repository: dismissal.repository.clone(),
+            detail: dismissal.detail.clone(),
+        }
+    }
+}
+
+/// What `dismiss_doctor_warning` and `restore_doctor_warning` answer with: the
+/// whole set after the write, for [`OnboardingView`]'s reason.
+#[derive(Debug, Clone, PartialEq, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub struct DoctorDismissalsView {
+    pub dismissals: Vec<DismissalView>,
 }
 
 /// What `run_doctor` answers with. Wrapped for the reason
@@ -225,11 +263,18 @@ impl From<&CheckResult> for CheckResultView {
 pub struct DoctorReportView {
     pub results: Vec<CheckResultView>,
     /// Whether the queue would refuse to start right now.
+    ///
+    /// Blind to `dismissed`, as the report itself is: a user who put every
+    /// warning down has changed what the banner shows and nothing about what
+    /// the queue will do (task 027, D22 point 1).
     pub is_blocking: bool,
     /// The exact sentence `start_queue` would refuse with, or `null` when it
     /// would not refuse. Carried so an agent reporting the problem to a human
     /// quotes the same words the window does.
     pub blocking_summary: Option<String>,
+    /// Every dismissal on record, including any that no longer match a row
+    /// above — the environment was fixed, or the sentence changed.
+    pub dismissals: Vec<DismissalView>,
 }
 
 impl From<&DoctorReport> for DoctorReportView {
@@ -238,6 +283,7 @@ impl From<&DoctorReport> for DoctorReportView {
             results: report.results.iter().map(CheckResultView::from).collect(),
             is_blocking: report.is_blocking(),
             blocking_summary: report.is_blocking().then(|| report.blocking_summary()),
+            dismissals: report.dismissals.iter().map(DismissalView::from).collect(),
         }
     }
 }

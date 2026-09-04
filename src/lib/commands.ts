@@ -6,6 +6,7 @@ import type {
   BoardColumn,
   CleanupReport,
   DiffSummary,
+  DoctorDismissal,
   DoctorReport,
   McpProbe,
   McpStatus,
@@ -805,4 +806,20 @@ export function runDoctor(): Promise<DoctorReport> {
  */
 export function dismissOnboarding(): Promise<void> {
   return call<void>("dismiss_onboarding");
+}
+
+/**
+ * Puts one warning down, and answers with the whole stored set (task 027).
+ *
+ * The set, not the report: hiding one line is not worth eight subprocesses, so
+ * the window updates from the write and the next real `runDoctor` arrives
+ * already marked by `DoctorReport::new`.
+ */
+export function dismissDoctorWarning(dismissal: DoctorDismissal): Promise<DoctorDismissal[]> {
+  return call<DoctorDismissal[]>("dismiss_doctor_warning", { dismissal });
+}
+
+/** Brings one back — including a dismissal that no longer matches any row. */
+export function restoreDoctorWarning(dismissal: DoctorDismissal): Promise<DoctorDismissal[]> {
+  return call<DoctorDismissal[]>("restore_doctor_warning", { dismissal });
 }

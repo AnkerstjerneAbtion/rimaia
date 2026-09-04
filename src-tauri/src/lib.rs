@@ -384,6 +384,8 @@ pub fn run() {
         commands::mcp::test_mcp_connection,
         commands::doctor::run_doctor,
         commands::doctor::dismiss_onboarding,
+        commands::doctor::dismiss_doctor_warning,
+        commands::doctor::restore_doctor_warning,
     ]);
     #[cfg(not(debug_assertions))]
     let builder = builder.invoke_handler(tauri::generate_handler![
@@ -467,6 +469,8 @@ pub fn run() {
         commands::mcp::test_mcp_connection,
         commands::doctor::run_doctor,
         commands::doctor::dismiss_onboarding,
+        commands::doctor::dismiss_doctor_warning,
+        commands::doctor::restore_doctor_warning,
     ]);
 
     // `Builder::run(context)` is exactly `build(context)?.run(|_, _| {})`

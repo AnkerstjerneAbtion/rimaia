@@ -14,16 +14,16 @@
 
 use rimaia_core::db::{BoardColumn, MutationSource, ScheduleMode};
 use rimaia_core::mcp::requests::{
-    CreateTaskRequest, GetStrategyDefaultsRequest, GetTaskRequest, ListTasksRequest,
-    MoveTaskRequest, ScheduleConfigRequest, ScheduleRequest, SetMaxConcurrencyRequest,
-    SetRepositoryMaxConcurrencyRequest, SetScheduleEnabledRequest, SetScheduleModeRequest,
-    SetStrategyApprovalRequest, SetStrategyCatalogueRequest, SetStrategyDefaultsRequest,
-    SetTaskDependenciesRequest, SetTaskStrategyRequest, TaskStrategyRequest, UpdateScheduleRequest,
-    UpdateTaskRequest,
+    CreateTaskRequest, DoctorDismissalRequest, GetStrategyDefaultsRequest, GetTaskRequest,
+    ListTasksRequest, MoveTaskRequest, ScheduleConfigRequest, ScheduleRequest,
+    SetMaxConcurrencyRequest, SetRepositoryMaxConcurrencyRequest, SetScheduleEnabledRequest,
+    SetScheduleModeRequest, SetStrategyApprovalRequest, SetStrategyCatalogueRequest,
+    SetStrategyDefaultsRequest, SetTaskDependenciesRequest, SetTaskStrategyRequest,
+    TaskStrategyRequest, UpdateScheduleRequest, UpdateTaskRequest,
 };
 use rimaia_core::mcp::responses::{
-    PreflightView, ScheduleDeletedView, ScheduleListView, ScheduleView, StrategyApprovalView,
-    TaskListView, TaskView, TimezoneListView,
+    DoctorDismissalsView, DoctorReportView, PreflightView, ScheduleDeletedView, ScheduleListView,
+    ScheduleView, StrategyApprovalView, TaskListView, TaskView, TimezoneListView,
 };
 use rimaia_core::mcp::{
     self, McpHandle, RimaiaServer, RunAccess, RunGrant, RunHandles, RunScope, Tool,
@@ -156,6 +156,14 @@ fn the_operator_endpoint_keeps_every_tool_it_had_before_task_020() {
             // returns is something only a human at the machine can do.
             | Tool::RunDoctor
             | Tool::DismissOnboarding
+            // Task 027's two, and the edge is sharper than the rest of that
+            // clause: a run that could dismiss a doctor warning could silence
+            // the report on the environment it is itself running in, and the
+            // operator would read a clean panel about a machine that is not.
+            // Restoring is refused with dismissing because the pair is one
+            // feature.
+            | Tool::DismissDoctorWarning
+            | Tool::RestoreDoctorWarning
             // Task 013's seven, and these are *both* of ADR-0021 point 4's
             // permanent refusals at once rather than one of them: a schedule
             // spawns runs — it is the thing that starts the queue at 22:00 —
@@ -705,6 +713,92 @@ async fn nothing_task_013_added_is_reachable_from_a_run_either() {
     assert_eq!(after[0].schedule.name, "Nightly");
     assert!(after[0].schedule.enabled);
     assert_eq!(after[0].schedule.mode, ScheduleMode::Sequential);
+}
+
+#[tokio::test]
+async fn a_run_cannot_silence_the_doctor_about_the_machine_it_is_running_on() {
+    // Task 027, and the sharpest edge on ADR-0021 point 4's second refusal: a
+    // run that could dismiss a warning could dismiss the one describing its own
+    // environment, and the operator would read a clean panel about a machine
+    // that is not. Called through the handlers, not only checked against the
+    // table, because a tool that forgot its `authorize` line satisfies the
+    // table and is still callable.
+    let h = TestContext::new().await;
+    let repository_id = seed_repository(&h.context.pool, "rimaia", "/tmp/rimaia").await;
+    let mine = create_task(&h, &repository_id, "Mine").await;
+    let run = scoped(&h, &mine.id);
+
+    let warning = json!({
+        "check": "mcp_port",
+        "repository": null,
+        "detail": "nothing is listening on 4517.",
+    });
+
+    assert_refusal(
+        &as_result(
+            run.dismiss_doctor_warning(Parameters(request::<DoctorDismissalRequest>(
+                warning.clone(),
+            )))
+            .await,
+        ),
+        &not_available("dismiss_doctor_warning", &mine.id),
+    );
+    assert_refusal(
+        &as_result(
+            run.restore_doctor_warning(Parameters(request::<DoctorDismissalRequest>(warning)))
+                .await,
+        ),
+        &not_available("restore_doctor_warning", &mine.id),
+    );
+
+    // And neither wrote on the way to being refused.
+    assert_eq!(
+        rimaia_core::db::settings::doctor_dismissals(&h.context.pool)
+            .await
+            .expect("read the key"),
+        Vec::new()
+    );
+}
+
+#[tokio::test]
+async fn the_operator_dismisses_and_restores_a_doctor_warning_over_mcp() {
+    // Both writes round-tripped through the reader, and through the same
+    // `run_doctor` view the window reads — a setter that stored nothing would
+    // pass a smoke test.
+    let h = TestContext::new().await;
+    let operator = RimaiaServer::new(h.context.clone(), testing::doctor::environment());
+
+    let warning = json!({
+        "check": "github_cli",
+        "repository": "rimaia",
+        "detail": "gh is not authenticated for github.com, used by rimaia.",
+    });
+
+    let after_dismiss = json_of::<DoctorDismissalsView>(
+        operator
+            .dismiss_doctor_warning(Parameters(request::<DoctorDismissalRequest>(
+                warning.clone(),
+            )))
+            .await,
+    );
+    assert_eq!(after_dismiss.dismissals.len(), 1);
+    assert_eq!(after_dismiss.dismissals[0].check, "github_cli");
+    assert_eq!(
+        after_dismiss.dismissals[0].repository.as_deref(),
+        Some("rimaia")
+    );
+
+    // The report carries the same set, so an agent that only ran the doctor can
+    // still see what has been put down and hand it back.
+    let report = json_of::<DoctorReportView>(operator.run_doctor().await);
+    assert_eq!(report.dismissals, after_dismiss.dismissals);
+
+    let after_restore = json_of::<DoctorDismissalsView>(
+        operator
+            .restore_doctor_warning(Parameters(request::<DoctorDismissalRequest>(warning)))
+            .await,
+    );
+    assert!(after_restore.dismissals.is_empty());
 }
 
 #[tokio::test]

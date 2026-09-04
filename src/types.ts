@@ -71,11 +71,36 @@ export interface DoctorCheckResult {
   detail: string;
   /** `null` only on a passing row. */
   remediation: string | null;
+  /**
+   * Whether the user has read this exact row and put it down (task 027).
+   *
+   * Only ever true of a `warn` — a `fail` is not dismissible — and it changes
+   * nothing about whether the queue will start. The row is *marked*, never
+   * dropped, so Settings → Environment can list it and give it back.
+   */
+  dismissed: boolean;
+}
+
+/**
+ * Mirrors `rimaia_core::db::settings::Dismissal` — the three fields that
+ * identify one warning the user has answered.
+ */
+export interface DoctorDismissal {
+  check: DoctorCheck;
+  repository: string | null;
+  detail: string;
 }
 
 /** Mirrors `rimaia_core::doctor::DoctorReport`, in `Check::ALL` order. */
 export interface DoctorReport {
   results: DoctorCheckResult[];
+  /**
+   * Every dismissal on record, matched to a row above or not. A dismissal
+   * outlives the row it answered — the environment was fixed, or the sentence
+   * changed — and one with nothing to mark would otherwise be invisible and
+   * permanent.
+   */
+  dismissals: DoctorDismissal[];
 }
 
 // ---------------------------------------------------------------------------

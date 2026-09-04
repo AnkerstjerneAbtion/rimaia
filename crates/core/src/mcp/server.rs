@@ -32,19 +32,19 @@ use crate::db::{BoardColumn, StrategySource};
 use crate::doctor;
 use crate::mcp::error::ToolError;
 use crate::mcp::requests::{
-    AddTaskLinkRequest, ClearableField, CreateTaskRequest, GetStrategyDefaultsRequest,
-    GetTaskRequest, ListTasksRequest, MoveTaskRequest, RemoveTaskLinkRequest,
-    ScheduleConfigRequest, ScheduleRequest, SetMaxConcurrencyRequest,
+    AddTaskLinkRequest, ClearableField, CreateTaskRequest, DoctorDismissalRequest,
+    GetStrategyDefaultsRequest, GetTaskRequest, ListTasksRequest, MoveTaskRequest,
+    RemoveTaskLinkRequest, ScheduleConfigRequest, ScheduleRequest, SetMaxConcurrencyRequest,
     SetRepositoryMaxConcurrencyRequest, SetScheduleEnabledRequest, SetScheduleModeRequest,
     SetStrategyApprovalRequest, SetStrategyCatalogueRequest, SetStrategyDefaultsRequest,
     SetTaskDependenciesRequest, SetTaskStrategyRequest, SetWorktreeAutoCleanupRequest,
     TaskStrategyRequest, UpdateScheduleRequest, UpdateTaskRequest,
 };
 use crate::mcp::responses::{
-    BaseInstructionsView, DoctorReportView, OnboardingView, PreflightView, RepositoryListView,
-    RepositoryView, RunCapacityView, ScheduleDeletedView, ScheduleListView, ScheduleView,
-    StrategyApprovalView, TaskListItem, TaskListView, TaskView, TimezoneListView,
-    WorktreeAutoCleanupView, WorktreeListView, WorktreeView,
+    BaseInstructionsView, DismissalView, DoctorDismissalsView, DoctorReportView, OnboardingView,
+    PreflightView, RepositoryListView, RepositoryView, RunCapacityView, ScheduleDeletedView,
+    ScheduleListView, ScheduleView, StrategyApprovalView, TaskListItem, TaskListView, TaskView,
+    TimezoneListView, WorktreeAutoCleanupView, WorktreeListView, WorktreeView,
 };
 use crate::mcp::scope::{RunScope, Tool};
 use crate::runner::prompt::TEMPLATE_VARIABLES;
@@ -156,6 +156,47 @@ something this surface offers."
         db::settings::set_onboarding_dismissed(&self.ctx, true).await?;
         Ok(Json(OnboardingView {
             onboarding_dismissed: true,
+        }))
+    }
+
+    #[tool(
+        description = "Put down one doctor warning the user has read and decided about, so it \
+stops appearing in the banner above every screen. Take `check`, `repository` and `detail` \
+verbatim from a `run_doctor` row — all three are the key, so the same check about a different \
+repository stays visible, and the warning comes back by itself if its `detail` ever changes. \
+This is presentation only: it never changes whether the queue will start, and a `fail` row \
+cannot be dismissed at all. Call it when the user says they know about a warning and want it \
+out of the way, never to tidy up a report on their behalf."
+    )]
+    pub async fn dismiss_doctor_warning(
+        &self,
+        Parameters(request): Parameters<DoctorDismissalRequest>,
+    ) -> Result<Json<DoctorDismissalsView>, ToolError> {
+        self.scope.authorize(Tool::DismissDoctorWarning, None)?;
+
+        let dismissals = doctor::dismiss(&self.ctx, request.into()).await?;
+        Ok(Json(DoctorDismissalsView {
+            dismissals: dismissals.iter().map(DismissalView::from).collect(),
+        }))
+    }
+
+    #[tool(
+        description = "Bring a dismissed doctor warning back, so it appears in the banner again. \
+Call this when the user asks to see a warning they previously put down, or wants to tidy up \
+dismissals that no longer apply. Take the three fields from `run_doctor`'s `dismissals` list, \
+which holds every dismissal on record — including ones that match no current row, because the \
+environment was fixed or the warning's wording changed. Removing one of those is how they are \
+cleared."
+    )]
+    pub async fn restore_doctor_warning(
+        &self,
+        Parameters(request): Parameters<DoctorDismissalRequest>,
+    ) -> Result<Json<DoctorDismissalsView>, ToolError> {
+        self.scope.authorize(Tool::RestoreDoctorWarning, None)?;
+
+        let dismissals = doctor::restore(&self.ctx, &request.into()).await?;
+        Ok(Json(DoctorDismissalsView {
+            dismissals: dismissals.iter().map(DismissalView::from).collect(),
         }))
     }
 
@@ -973,13 +1014,14 @@ mod tests {
     /// capability parity a rule. What replaces a count is the property that
     /// actually matters — a registered tool with no run-scope decision cannot
     /// reach the wire.
-    const REGISTERED_TOOLS: [&str; 36] = [
+    const REGISTERED_TOOLS: [&str; 38] = [
         "accept_task_strategy",
         "add_task_link",
         "clear_task_strategy",
         "create_schedule",
         "create_task",
         "delete_schedule",
+        "dismiss_doctor_warning",
         "dismiss_onboarding",
         "get_base_instructions",
         "get_run_capacity",
@@ -997,6 +1039,7 @@ mod tests {
         "move_task",
         "preview_schedule_preflight",
         "remove_task_link",
+        "restore_doctor_warning",
         "run_doctor",
         "set_max_concurrency",
         "set_repository_max_concurrency",

@@ -20,7 +20,7 @@ function App() {
   // the welcome screen replaced it on a first run (seam-contract D22).
   const [view, setView] = useState<View | null>(null);
   const [appVersion, setAppVersion] = useState<string | null>(null);
-  const { report } = useDoctor();
+  const { report, dismiss } = useDoctor();
 
   useEffect(() => {
     getAppInfo().then(
@@ -45,7 +45,11 @@ function App() {
             tonight is worth interrupting the board for now. Suppressed on the
             welcome screen, which reports the same checks per step. */}
         {view !== "welcome" && (
-          <DoctorBanner report={report} onOpenSettings={() => setView("settings")} />
+          <DoctorBanner
+            report={report}
+            onOpenSettings={() => setView("settings")}
+            onDismiss={(result) => void dismiss(result)}
+          />
         )}
         {view === "board" && <BoardView />}
         {view === "runs" && <RunsView />}
