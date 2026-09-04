@@ -1,6 +1,7 @@
 import { useDroppable } from "@dnd-kit/core";
 import { SortableContext, verticalListSortingStrategy } from "@dnd-kit/sortable";
 
+import { cardBadge } from "../../lib/board";
 import type { BoardColumn as BoardColumnId, EffectiveStrategyFields, Task, TaskSummary } from "../../types";
 import { TaskCard } from "./TaskCard";
 
@@ -42,6 +43,93 @@ type ColumnCard = Task &
   > &
   Partial<EffectiveStrategyFields>;
 
+/** One line of a column's pulse: how many of its cards are in one state that
+ *  is not "nothing is happening". */
+export interface ColumnStat {
+  readonly tone: "running" | "queued" | "blocked" | "waiting" | "failed";
+  readonly count: number;
+  readonly label: string;
+}
+
+/**
+ * Most urgent first, and the order the header renders them in. `failed` leads
+ * for the same reason ADR-0007 keeps a failure visible rather than letting a
+ * later state paper over it: at 08:00 it is the only one of the five that
+ * definitely needs a human.
+ */
+const STAT_ORDER: readonly ColumnStat["tone"][] = [
+  "failed",
+  "waiting",
+  "blocked",
+  "running",
+  "queued",
+];
+
+const STAT_LABELS: Record<ColumnStat["tone"], string> = {
+  failed: "failed",
+  waiting: "waiting",
+  blocked: "blocked",
+  running: "running",
+  queued: "queued",
+};
+
+/**
+ * What a column header says about its cards beyond how many there are.
+ *
+ * Derived through `cardBadge`, not off `runState` directly, so the header and
+ * the badges underneath it can never disagree — a `failed` run that D9 renders
+ * as `interrupted`, or an `idle` task ADR-0008 derives `blocked` for, is
+ * counted as what the card actually shows.
+ *
+ * **At most three kinds**, most urgent first. The whole point of an aggregate
+ * on a 160px-wide header is that a healthy board renders nothing here; five
+ * coloured chips on every column would be the noise this is meant to replace.
+ * Nothing is silently dropped that a user could act on: the fourth and fifth
+ * kinds are always the two calmest ones (`running`, `queued`), and every card
+ * still carries its own badge in the tray below.
+ *
+ * Deliberately **not** a cost total, which would be the other obvious readout:
+ * `TaskSummary.lastRun` (seam-contract D12) carries a status and an exit class
+ * and no `costUsd` at all, so a per-column spend would have to be invented on
+ * the frontend or fetched per card.
+ */
+export function columnStats(cards: readonly ColumnCard[]): readonly ColumnStat[] {
+  const counts: Record<ColumnStat["tone"], number> = {
+    failed: 0,
+    waiting: 0,
+    blocked: 0,
+    running: 0,
+    queued: 0,
+  };
+
+  for (const card of cards) {
+    switch (cardBadge(card.runState, card.lastRun ?? null, card.blockedByIncomplete ?? false)) {
+      case "running":
+        counts.running += 1;
+        break;
+      case "queued":
+        counts.queued += 1;
+        break;
+      case "blocked":
+        counts.blocked += 1;
+        break;
+      case "waiting_retry":
+        counts.waiting += 1;
+        break;
+      case "failed":
+      case "interrupted":
+        counts.failed += 1;
+        break;
+      // `cancelled` and `null` (idle) are both "nothing is happening", which
+      // is what an absent chip already says.
+    }
+  }
+
+  return STAT_ORDER.filter((tone) => counts[tone] > 0)
+    .slice(0, 3)
+    .map((tone) => ({ tone, count: counts[tone], label: STAT_LABELS[tone] }));
+}
+
 interface ColumnProps {
   readonly column: BoardColumnId;
   readonly cards: readonly ColumnCard[];
@@ -74,12 +162,36 @@ export function Column({
   // card in it for `SortableContext`'s own item rects to catch a drop on.
   const { setNodeRef, isOver } = useDroppable({ id: column, disabled: dragDisabled });
   const ids = cards.map((card) => card.id);
+  const stats = columnStats(cards);
 
   return (
-    <section className="board-column" aria-label={COLUMN_TITLES[column]}>
+    <section className={`board-column board-column-${column}`} aria-label={COLUMN_TITLES[column]}>
+      {/* An instrument readout rather than a title with a pill beside it: the
+          name is furniture (uppercase eyebrow), the count is the measurement
+          (`--font-size-lg`, tabular so four columns compare at a glance), and
+          the pulse underneath is what changed overnight. */}
       <header className="board-column-header">
-        <h3>{COLUMN_TITLES[column]}</h3>
-        <span className="board-column-count">{cards.length}</span>
+        <div className="board-column-heading">
+          <h3>{COLUMN_TITLES[column]}</h3>
+          <span className="board-column-count tabular-nums">{cards.length}</span>
+        </div>
+        {/* ADR-0007's "board order *is* execution order", said once where the
+            queue actually reads from, instead of being a fact you have to know
+            already. */}
+        {column === "ready" && <p className="board-column-note">The run queue, top to bottom</p>}
+        {stats.length > 0 && (
+          <p className="board-column-stats">
+            {stats.map((stat) => (
+              <span key={stat.tone} className={`board-column-stat board-column-stat-${stat.tone}`}>
+                <span
+                  className={stat.tone === "running" ? "status-dot status-dot-live" : "status-dot"}
+                  aria-hidden="true"
+                />
+                <span className="tabular-nums">{stat.count}</span> {stat.label}
+              </span>
+            ))}
+          </p>
+        )}
       </header>
       <div
         ref={setNodeRef}

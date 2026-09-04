@@ -1,62 +1,260 @@
-/* Settings view. `.panel`, `.detail-list` and `.error-banner` are shared
-   components and live in styles.css instead (see the comment there) - what's
-   left here is the view's own header layout plus the bits still unique to
-   it: the dashed dev panel and the generic muted-caption style. */
+/* Settings — a control panel, not nine forms in a scroll.
+
+   `.panel`, `.detail-list` and `.error-banner` are shared components and live
+   in styles.css; what is here is this view's own structure and the nine
+   sections' own parts (Repositories, Concurrency, Schedules, Instructions,
+   Strategy, MCP, Storage, Doctor, Developer).
+
+   Written against THE DIRECTION at the top of `src/styles.css` and against
+   board.css as task E left it. Four things follow from that and shape
+   everything below:
+
+   **Structure, not scroll.**  `SettingsView` now groups the nine sections into
+     four bands and puts a sticky index above them — see that file for why the
+     groups are exactly those and why the order inside them is unchanged. The
+     bands are drawn the way the task drawer's own bands are (`.task-detail-
+     band-label` in board.css): an uppercase eyebrow with a rule running from
+     it to the edge of the column. Same device, same meaning, so the two most
+     section-dense surfaces in the app read alike.
+
+   **Typography carries the hierarchy.**  Three steps, not one: the band is a
+     `--font-size-xs` uppercase eyebrow, a panel's title is `--font-size-lg`,
+     and its body is `--font-size-md`. Before this a band label would have had
+     nowhere to sit — every panel title was `--font-size-md` semibold, one
+     `font-weight` away from the paragraph under it.
+
+   **Depth, not outlines.**  Every bordered row this file used to draw
+     (`.repo-item`, `.schedule-row`, `.worktree-entry`, the radio cards) is now
+     a `--surface-0` tray inside the panel's `--surface-1`, with no border at
+     all — the same recede-a-level the board's card tray uses under its column
+     header. A row that needs an edge gets an inset ring, not a `border`.
+
+   **Twenty rows have to stay readable.**  Storage's worktree inventory and the
+     schedule list are this page's dense surfaces. Both are compacted here:
+     tighter padding, a `max-content` first column, and — for the worktree
+     inventory — a four-column `.detail-list` so two label/value pairs share a
+     line instead of each taking one. Twenty worktrees was about 140 lines of
+     page before; it is roughly half that now, without moving a word.
+
+   No new token was needed. Everything here is `styles.css`'s scale plus the
+   badge pairs board.css declares (a second `:root` in an imported stylesheet
+   adds properties to the same element, so those are simply in scope). */
 
 .view {
   display: flex;
   flex-direction: column;
-  gap: 1.25rem;
+  gap: var(--space-5);
   max-width: 46rem;
 }
 
+/* Wider than the shared `.view`: this page carries a worktree inventory, a
+   schedule list and a prompt preview, none of which are prose. 64rem never
+   binds at either supported window width (972px = 64.8rem of content), so in
+   practice this reads as "spend the window" — while `.view` stays 46rem for
+   the welcome screen, which *is* prose. */
+.settings-view {
+  max-width: min(64rem, 100%);
+  gap: var(--space-6);
+}
+
 .view-header h2 {
-  margin: 0 0 0.25rem;
+  margin: 0 0 var(--space-1);
+  font-size: var(--font-size-xl);
+  line-height: var(--line-height-tight);
 }
 
 .view-header p {
   margin: 0;
-  color: var(--text-muted);
+  max-width: 46rem;
+  color: var(--text-2);
 }
 
-/* `.panel-dev` alone would tie `.panel` on specificity, and lose to it on
-   source order now that this rule lives in a leaf imported before styles.css's
-   own `.panel` — pair the classes so this rule always wins regardless of
-   import order. */
-.panel.panel-dev {
-  border: 1px dashed var(--border);
+/* The index. Sticky against `.content`'s scrollport — the negative `top` and
+   the matching `padding-top` are what let it come to rest flush with the top
+   edge rather than leaving a gap for the page to scroll through. It is opaque
+   for the same reason. */
+.settings-index {
+  position: sticky;
+  top: calc(-1 * var(--space-5));
+  z-index: 3;
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-3) var(--space-6);
+  margin-bottom: calc(-1 * var(--space-3));
+  padding: var(--space-5) 0 var(--space-3);
+  background: var(--surface-0);
 }
 
-.muted {
-  color: var(--text-muted);
-  margin: 0 0 0.75rem;
+.settings-index-group {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  min-width: 0;
 }
 
-/* Repositories (task 003). No root-level warning colour exists yet (only
-   --danger-* and --accent*) - defined locally rather than added to
-   styles.css's :root, since "gh missing" is deliberately not the same
-   severity as a real error (task 003's scope: "a warning on the repository,
-   not an error"). */
-:root {
-  --warning-bg: #fdf3e2;
-  --warning-border: #e4bb6a;
-  --warning-text: #7a5410;
+.settings-index-label {
+  font-size: var(--font-size-xs);
+  font-weight: var(--font-weight-semibold);
+  letter-spacing: var(--letter-spacing-wide);
+  text-transform: uppercase;
+  color: var(--text-2);
+  text-decoration: none;
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --warning-bg: #3a2f16;
-    --warning-border: #8a6a2c;
-    --warning-text: #f0c876;
+.settings-index-label:hover {
+  color: var(--text-1);
+}
+
+.settings-index ul {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-1);
+}
+
+.settings-index a:not(.settings-index-label) {
+  display: inline-block;
+  padding: 0.05rem var(--space-2);
+  border-radius: var(--radius-sm);
+  background: var(--surface-1);
+  box-shadow: inset 0 0 0 1px var(--border-1);
+  color: var(--text-2);
+  font-size: var(--font-size-sm);
+  font-weight: var(--font-weight-medium);
+  text-decoration: none;
+  transition: background-color var(--duration-fast) var(--ease-standard),
+    color var(--duration-fast) var(--ease-standard);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .settings-index a:not(.settings-index-label) {
+    transition: none;
   }
 }
 
-.repo-add {
+.settings-index a:not(.settings-index-label):hover {
+  background: var(--accent-soft);
+  box-shadow: inset 0 0 0 1px var(--accent);
+  color: var(--accent);
+}
+
+/* The four bands. Same shape as the task drawer's own three (board.css's
+   `.task-detail-band`), because they are the same kind of thing: a run of
+   sections that answer one question, labelled by an eyebrow with a rule. */
+.settings-band {
   display: flex;
   flex-direction: column;
-  align-items: flex-start;
-  gap: 0.5rem;
-  margin-bottom: 1rem;
+  gap: var(--space-4);
+}
+
+.settings-band-head {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+
+.settings-band-label {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  margin: 0;
+  font-size: var(--font-size-xs);
+  font-weight: var(--font-weight-semibold);
+  letter-spacing: var(--letter-spacing-wide);
+  text-transform: uppercase;
+  color: var(--text-2);
+}
+
+.settings-band-label::after {
+  content: "";
+  flex: 1;
+  height: 1px;
+  background: var(--border-1);
+}
+
+.settings-band-blurb {
+  margin: 0;
+  font-size: var(--font-size-sm);
+  color: var(--text-2);
+}
+
+/* The anchor each index entry jumps to. The margin keeps a jumped-to panel
+   clear of the sticky index rather than under it. */
+.settings-slot {
+  scroll-margin-top: 7rem;
+}
+
+/* A panel's own title. `--font-size-lg` rather than the `--font-size-md`
+   `styles.css` gives every `.panel h3`: inside a band, a panel is the level
+   *below* the eyebrow and above the body, and the scale has a real jump there
+   precisely so that middle level exists. */
+.settings-view .panel h3 {
+  margin: 0 0 var(--space-1);
+  font-size: var(--font-size-lg);
+  font-weight: var(--font-weight-semibold);
+  line-height: var(--line-height-tight);
+}
+
+/* The sentence under a panel title, and the same class used for captions
+   throughout. The first one in a panel is the panel's own subtitle, so it
+   keeps a wider measure and a little more room under it. */
+.settings-view .panel > h3 + .muted {
+  max-width: 44rem;
+  margin-bottom: var(--space-4);
+}
+
+/* A sub-heading inside a panel — "Worktrees" under Storage. An eyebrow, so a
+   panel's own internal structure never competes with the panel title. */
+.settings-view .panel > h4 {
+  margin: var(--space-5) 0 var(--space-2);
+  padding-top: var(--space-3);
+  box-shadow: inset 0 1px 0 var(--border-1);
+  font-size: var(--font-size-xs);
+  font-weight: var(--font-weight-semibold);
+  letter-spacing: var(--letter-spacing-wide);
+  text-transform: uppercase;
+  color: var(--text-2);
+}
+
+/* `.panel` has no border to restyle (THE DIRECTION: it separates with a
+   surface step and a shadow), so the dev panel's "this is not shipped" edge is
+   a dashed inset ring rather than `border-style`, which drew nothing. */
+.panel.panel-dev {
+  box-shadow: inset 0 0 0 1px var(--border-2), var(--shadow-sm);
+  border-style: dashed;
+}
+
+.muted {
+  color: var(--text-2);
+  margin: 0 0 var(--space-3);
+}
+
+/* Every dense row on this page — a repository, a schedule, a worktree, a radio
+   card — is the same object: a `--surface-0` tray inside the panel's
+   `--surface-1`, no border, radius `sm`. Declared once here so the four cannot
+   drift apart, the way they had. */
+.repo-item,
+.schedule-row,
+.worktree-entry,
+.run-environment-option,
+.schedule-mode-option {
+  padding: var(--space-2) var(--space-3);
+  border-radius: var(--radius-sm);
+  background: var(--surface-0);
+}
+
+/* Repositories (task 003). Reuses styles.css's `--warn-*` triad (task 018) —
+   "gh missing" is deliberately not the same severity as a real error (task
+   003's scope: "a warning on the repository, not an error"). */
+
+.repo-add {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+  margin-bottom: var(--space-4);
 }
 
 .repo-list {
@@ -65,97 +263,170 @@
   padding: 0;
   display: flex;
   flex-direction: column;
-  gap: 0.85rem;
-}
-
-.repo-item {
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  padding: 0.85rem 1rem;
+  gap: var(--space-2);
 }
 
 .repo-item h4 {
-  margin: 0 0 0.5rem;
+  margin: 0 0 var(--space-1);
+  font-size: var(--font-size-md);
+  font-weight: var(--font-weight-semibold);
+  line-height: var(--line-height-tight);
 }
 
-.repo-item .detail-list {
-  margin-bottom: 0.5rem;
+/* Two label/value pairs to a line instead of one, which is what turns a
+   repository from six lines into three. `max-content` on the label columns so
+   "Default branch" and "Path" do not each reserve 9rem of a row. */
+.repo-item .detail-list,
+.worktree-entry .detail-list {
+  grid-template-columns: max-content minmax(0, 1fr) max-content minmax(0, 1fr);
+  gap: var(--space-1) var(--space-3);
+  margin: 0 0 var(--space-2);
+  font-size: var(--font-size-sm);
 }
 
-.repo-actions {
+.repo-item .detail-list dt,
+.worktree-entry .detail-list dt {
+  font-size: var(--font-size-xs);
+  font-weight: var(--font-weight-semibold);
+  letter-spacing: var(--letter-spacing-wide);
+  text-transform: uppercase;
+  color: var(--text-2);
+  white-space: nowrap;
+}
+
+.repo-actions,
+.repo-edit-form,
+.schedule-row-actions,
+.schedule-form-actions,
+.mcp-actions,
+.storage-prune-actions,
+.worktree-bulk-actions,
+.strategy-catalogue-actions {
   display: flex;
-  gap: 0.5rem;
-  margin-top: 0.5rem;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
+
+.repo-actions,
+.mcp-actions,
+.schedule-row-actions,
+.schedule-form-actions {
+  margin-top: var(--space-2);
+}
+
+/* Row-level actions are quiet: they override or undo something the row already
+   states, and a repeated row of solid buttons down twenty rows is the loudest
+   thing on the page saying the least. */
+.repo-actions button,
+.schedule-row-actions button,
+.worktree-entry > button,
+.storage-prune-actions button,
+.worktree-bulk-actions button {
+  padding: 0.05rem var(--space-2);
+  border-color: var(--border-1);
+  background: transparent;
+  box-shadow: none;
+  color: var(--text-2);
+  font-size: var(--font-size-xs);
+  font-weight: var(--font-weight-semibold);
+}
+
+.repo-actions button:hover:not(:disabled),
+.schedule-row-actions button:hover:not(:disabled),
+.worktree-entry > button:hover:not(:disabled),
+.storage-prune-actions button:hover:not(:disabled),
+.worktree-bulk-actions button:hover:not(:disabled) {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+  color: var(--accent);
 }
 
 .repo-edit-form {
-  display: flex;
   flex-direction: column;
-  gap: 0.5rem;
-  margin: 0.25rem 0 0.5rem;
+  align-items: stretch;
+  margin: var(--space-1) 0 var(--space-2);
 }
 
 .repo-edit-form label {
   display: flex;
   flex-direction: column;
-  gap: 0.2rem;
-  font-size: 0.85rem;
-  color: var(--text-muted);
+  gap: var(--space-1);
+  font-size: var(--font-size-xs);
+  font-weight: var(--font-weight-semibold);
+  letter-spacing: var(--letter-spacing-wide);
+  text-transform: uppercase;
+  color: var(--text-2);
 }
 
 .repo-edit-form input {
   font: inherit;
-  padding: 0.35rem 0.5rem;
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  background: var(--surface);
-  color: var(--text);
+  font-size: var(--font-size-sm);
+  letter-spacing: normal;
+  text-transform: none;
+  padding: var(--space-1) var(--space-2);
+  border: 1px solid var(--border-1);
+  border-radius: var(--radius-sm);
+  background: var(--surface-1);
+  color: var(--text-1);
+  box-shadow: none;
 }
 
-.repo-warning {
-  display: inline-block;
-  margin: 0.4rem 0 0;
-  padding: 0.3rem 0.55rem;
-  border-radius: 6px;
-  font-size: 0.8rem;
-  background: var(--warning-bg);
-  border: 1px solid var(--warning-border);
-  color: var(--warning-text);
+.repo-warning,
+.mcp-warning,
+.worktree-warning {
+  display: block;
+  margin: var(--space-2) 0 0;
+  padding: var(--space-1) var(--space-2);
+  border-radius: var(--radius-sm);
+  background: var(--warn-bg);
+  box-shadow: inset 0 0 0 1px var(--warn-border);
+  color: var(--warn-text);
+  font-size: var(--font-size-sm);
 }
+
+.mcp-warning {
+  margin: 0 0 var(--space-3);
+}
+
+/* ADR-0012's grant. The toggle is a normal row; the confirmation is not, and
+   is deliberately the loudest thing this page ever draws. */
 
 .unattended-toggle {
-  margin-top: 0.6rem;
-  font-size: 0.9rem;
+  margin-top: var(--space-2);
+  font-size: var(--font-size-sm);
 }
 
 .unattended-toggle label {
   display: inline-flex;
   align-items: center;
-  gap: 0.45rem;
+  gap: var(--space-2);
 }
 
-.unattended-confirm {
-  margin-top: 0.6rem;
-  padding: 0.75rem 0.9rem;
-  border: 1px solid var(--danger-border);
-  border-radius: 8px;
+.unattended-confirm,
+.worktree-confirm {
+  margin-top: var(--space-2);
+  padding: var(--space-3) var(--space-4);
+  border-radius: var(--radius-md);
   background: var(--danger-bg);
+  box-shadow: inset 0 0 0 1px var(--danger-border);
 }
 
-.unattended-confirm p {
-  margin: 0 0 0.6rem;
+.unattended-confirm p,
+.worktree-confirm p {
+  margin: 0 0 var(--space-3);
   color: var(--danger-text);
-  font-weight: 500;
+  font-weight: var(--font-weight-medium);
 }
 
 .unattended-confirm-actions {
   display: flex;
-  gap: 0.5rem;
+  gap: var(--space-2);
 }
 
-/* The confirm action is deliberately the harder-to-reach visual choice -
-   danger-coloured, and second rather than first - never the friendly
-   default. ADR-0012: the dialog does not soften what enabling this grants. */
+/* The confirm action is deliberately the harder-to-reach visual choice —
+   danger-coloured, and second rather than first — never the friendly default.
+   ADR-0012: the dialog does not soften what enabling this grants. */
 .btn-danger {
   background: var(--danger-bg);
   border-color: var(--danger-border);
@@ -163,164 +434,197 @@
 }
 
 .btn-danger:hover {
+  background: var(--danger-bg);
   border-color: var(--danger-text);
 }
 
-/* Instructions (task 006) — base instructions, the run-environment toggle
-   and the composed-prompt preview. `.instructions-subsection` only spaces
-   the three apart; it borrows `.task-detail-section`'s divider look rather
-   than duplicating it, since both are "one section of a panel, several
-   labelled parts". */
+/* Instructions (task 006) — base instructions, the run-environment toggle and
+   the composed-prompt preview. `.instructions-subsection` borrows the drawer's
+   own divider rather than duplicating it, since both are "one section of a
+   panel, several labelled parts". Also used by `StrategySection`'s four
+   subsections for the same reason. */
 
 .instructions-subsection {
-  margin-top: 1.1rem;
-  padding-top: 1.1rem;
-  border-top: 1px solid var(--border);
+  margin-top: var(--space-5);
+  padding-top: var(--space-4);
+  box-shadow: inset 0 1px 0 var(--border-1);
 }
 
 .instructions-subsection:first-of-type {
   margin-top: 0;
   padding-top: 0;
-  border-top: none;
+  box-shadow: none;
 }
 
 .instructions-subsection h4 {
-  margin: 0 0 0.4rem;
-  font-size: 0.8rem;
-  color: var(--text-muted);
+  margin: 0 0 var(--space-2);
+  font-size: var(--font-size-xs);
+  font-weight: var(--font-weight-semibold);
+  letter-spacing: var(--letter-spacing-wide);
   text-transform: uppercase;
-  letter-spacing: 0.03em;
+  color: var(--text-2);
 }
 
+/* The one textarea on this page somebody writes prose in. Monospace so the
+   Markdown they are writing stays aligned, and recessed onto `--surface-0` the
+   way the plan editor is in the drawer. */
 .instructions-editor-textarea {
   width: 100%;
   min-height: 14rem;
   resize: vertical;
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-  font-size: 0.85rem;
-  line-height: 1.5;
-  padding: 0.5rem 0.6rem;
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  background: var(--bg);
-  color: var(--text);
+  font-size: var(--font-size-sm);
+  line-height: var(--line-height-relaxed);
+  padding: var(--space-3) var(--space-4);
+  border: 1px solid var(--border-1);
+  border-radius: var(--radius-sm);
+  background: var(--surface-0);
+  color: var(--text-1);
+  box-shadow: none;
 }
 
-.run-environment-options {
+/* Pick-one-of-a-short-list-of-policies, three times over (the run environment,
+   a schedule's mode, the strategy approval policy). A card rather than a bare
+   radio, because each option carries a sentence that is the actual decision. */
+.run-environment-options,
+.schedule-mode-options,
+.strategy-approval {
   display: flex;
   flex-direction: column;
-  gap: 0.6rem;
+  gap: var(--space-2);
 }
 
-.run-environment-option {
+.run-environment-option,
+.schedule-mode-option {
   display: flex;
   align-items: flex-start;
-  gap: 0.6rem;
-  padding: 0.6rem 0.75rem;
-  border: 1px solid var(--border);
-  border-radius: 8px;
+  gap: var(--space-3);
+  padding: var(--space-3);
+  transition: box-shadow var(--duration-fast) var(--ease-standard);
 }
 
-.run-environment-option input {
-  margin-top: 0.2rem;
+@media (prefers-reduced-motion: reduce) {
+  .run-environment-option,
+  .schedule-mode-option {
+    transition: none;
+  }
 }
 
-.run-environment-option-body {
+/* The chosen policy, marked on the card and not only in the radio: at a glance
+   the answer to "what is this set to" should not require finding an 11px dot. */
+.run-environment-option:has(input:checked),
+.schedule-mode-option:has(input:checked) {
+  background: var(--accent-soft);
+  box-shadow: inset 2px 0 0 var(--accent);
+}
+
+.run-environment-option input,
+.schedule-mode-option input {
+  margin-top: 0.25rem;
+}
+
+.run-environment-option-body,
+.schedule-mode-option-body {
   display: flex;
   flex-direction: column;
-  gap: 0.2rem;
-  font-size: 0.9rem;
+  gap: 0.15rem;
+  font-size: var(--font-size-md);
+  font-weight: var(--font-weight-medium);
 }
 
-.run-environment-option-body .muted {
+.run-environment-option-body .muted,
+.schedule-mode-option-body .muted {
   margin: 0;
-  font-size: 0.85rem;
+  font-size: var(--font-size-sm);
+  font-weight: var(--font-weight-regular);
 }
 
-/* The cost note is a caption under the toggle, not a paragraph in the flow
-   above it — `.muted` alone carries the bottom margin meant for stacked
-   paragraphs, which reads wrong directly under a control. */
+/* A caption under a control, not a paragraph in the flow above it. */
 .run-environment-cost-note {
-  margin: 0.6rem 0 0;
+  margin: var(--space-3) 0 0;
+  font-size: var(--font-size-sm);
 }
 
 .instructions-preview-picker {
   display: flex;
   flex-direction: column;
   align-items: flex-start;
-  gap: 0.25rem;
-  font-size: 0.85rem;
-  color: var(--text-muted);
-  margin-bottom: 0.6rem;
+  gap: var(--space-1);
+  margin-bottom: var(--space-3);
+  font-size: var(--font-size-xs);
+  font-weight: var(--font-weight-semibold);
+  letter-spacing: var(--letter-spacing-wide);
+  text-transform: uppercase;
+  color: var(--text-2);
 }
 
+.instructions-preview-picker select {
+  font: inherit;
+  font-size: var(--font-size-sm);
+  letter-spacing: normal;
+  text-transform: none;
+  padding: var(--space-1) var(--space-2);
+  border: 1px solid var(--border-1);
+  border-radius: var(--radius-sm);
+  background: var(--surface-1);
+  color: var(--text-1);
+  box-shadow: none;
+}
+
+/* The exact bytes a run will be given. A document, so it is set as one:
+   monospace, relaxed, recessed, and bounded so it cannot own the page. */
 .instructions-preview-output {
   max-height: 28rem;
   overflow: auto;
   margin: 0;
-  padding: 0.75rem 0.9rem;
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  background: var(--bg);
-  color: var(--text);
+  padding: var(--space-3) var(--space-4);
+  border-radius: var(--radius-sm);
+  background: var(--surface-0);
+  color: var(--text-1);
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-  font-size: 0.8rem;
-  line-height: 1.5;
+  font-size: var(--font-size-xs);
+  line-height: var(--line-height-relaxed);
   white-space: pre-wrap;
   overflow-wrap: anywhere;
 }
 
 /* The MCP server (task 010, ADR-0006). */
 
-.mcp-warning {
-  margin: 0 0 0.75rem;
-  padding: 0.5rem 0.7rem;
-  border-radius: 6px;
-  font-size: 0.85rem;
-  background: var(--warning-bg);
-  border: 1px solid var(--warning-border);
-  color: var(--warning-text);
-}
-
 /* Selectable and wrapping, so a clipboard refusal is never a dead end: the
    user can always drag over the line and copy it by hand. */
 .mcp-command {
   display: block;
-  margin: 0 0 0.75rem;
-  padding: 0.5rem 0.7rem;
-  border: 1px solid var(--border);
-  border-radius: 6px;
+  margin: 0 0 var(--space-3);
+  padding: var(--space-2) var(--space-3);
+  border-radius: var(--radius-sm);
+  background: var(--surface-0);
+  box-shadow: inset 0 0 0 1px var(--border-1);
+  color: var(--text-1);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: var(--font-size-sm);
   overflow-wrap: anywhere;
   user-select: all;
 }
 
-.mcp-actions {
-  display: flex;
-  gap: 0.5rem;
-  margin-bottom: 0.5rem;
-}
-
 .mcp-locked {
-  font-size: 0.85rem;
+  font-size: var(--font-size-sm);
 }
 
-.mcp-port-form {
+.mcp-port-form,
+.concurrency-limit-form {
   display: flex;
   align-items: center;
-  gap: 0.5rem;
-  margin-top: 0.75rem;
+  gap: var(--space-2);
+  margin-top: var(--space-3);
+  font-size: var(--font-size-sm);
 }
 
 .mcp-port-form input {
   width: 7rem;
 }
 
-/* Task 015's storage housekeeping — the prune-by-age presets beside the
-   total run-log size. */
-.storage-prune-actions {
-  display: flex;
-  gap: 0.5rem;
-  margin: 0.5rem 0;
+.concurrency-limit-form input {
+  width: 5rem;
 }
 
 /* Task 012's per-repository cap (ADR-0010), on each repository row. The
@@ -331,137 +635,278 @@
   display: grid;
   grid-template-columns: auto 5rem;
   align-items: center;
-  gap: 0.5rem;
-  margin-top: 0.6rem;
-  font-size: 0.9rem;
+  gap: var(--space-1) var(--space-2);
+  margin-top: var(--space-2);
+  font-size: var(--font-size-sm);
+}
+
+.repo-concurrency input {
+  padding: var(--space-1) var(--space-2);
 }
 
 .repo-concurrency p {
   grid-column: 1 / -1;
   margin: 0;
-  font-size: 0.85rem;
+  font-size: var(--font-size-xs);
+  color: var(--text-2);
 }
 
-/* Settings → Concurrency (task 012). The mode options borrow
-   `.run-environment-option`'s shape rather than its class, because the two are
-   unrelated settings that happen to render the same way and one changing is not
-   a reason for the other to. */
-.schedule-mode-options {
-  display: flex;
-  flex-direction: column;
-  gap: 0.6rem;
+/* The per-repository default strategy (task 020), beside the opt-in it answers
+   the same question as. */
+.repo-strategy {
+  margin-top: var(--space-3);
+  padding-top: var(--space-2);
+  box-shadow: inset 0 1px 0 var(--border-1);
 }
 
-.schedule-mode-option {
-  display: flex;
-  align-items: flex-start;
-  gap: 0.6rem;
-  padding: 0.6rem 0.75rem;
-  border: 1px solid var(--border);
-  border-radius: 8px;
+.repo-strategy h5 {
+  margin: 0 0 var(--space-2);
+  font-size: var(--font-size-xs);
+  font-weight: var(--font-weight-semibold);
+  letter-spacing: var(--letter-spacing-wide);
+  text-transform: uppercase;
+  color: var(--text-2);
 }
 
-.schedule-mode-option input {
-  margin-top: 0.2rem;
-}
+/* Settings → Schedules (task 013, ADR-0010).
 
-.schedule-mode-option-body {
-  display: flex;
-  flex-direction: column;
-  gap: 0.2rem;
-  font-size: 0.9rem;
-}
-
-.schedule-mode-option-body .muted {
-  margin: 0;
-  font-size: 0.85rem;
-}
-
-.concurrency-limit-form {
-  display: flex;
-  align-items: center;
-  gap: 0.5rem;
-  margin-top: 0.75rem;
-}
-
-.concurrency-limit-form input {
-  width: 5rem;
-}
-
-/* Settings → Schedules (task 013, ADR-0010). The row's own layout is a stack
-   rather than a table: the next-fire line is the thing the user came to read,
-   and a table would give it a column the same width as the name. */
-.schedule-list {
+   Still a stack rather than a table, and for the reason the previous pass gave
+   — the next-fire line is what the user came to read, and a table would give
+   it a column the same width as the name. What changed is the density: name
+   and switch on the first line, the configuration as one dim caption, the
+   next-fire line as the row's own readout, and the actions in a column of
+   their own instead of a fourth line. Twenty rows fit on a screen now. */
+.schedule-list,
+.worktree-list {
   list-style: none;
-  margin: 0.75rem 0;
+  margin: var(--space-3) 0;
   padding: 0;
   display: flex;
   flex-direction: column;
-  gap: 0.5rem;
+  gap: var(--space-2);
 }
 
 .schedule-row {
-  padding: 0.6rem 0.75rem;
-  border: 1px solid var(--border);
-  border-radius: 8px;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: start;
+  gap: var(--space-1) var(--space-3);
 }
 
 .schedule-row-heading {
+  grid-column: 1;
   display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 0.5rem;
+  align-items: baseline;
+  gap: var(--space-3);
+  min-width: 0;
+  font-size: var(--font-size-md);
 }
 
 .schedule-enabled {
-  display: flex;
+  display: inline-flex;
   align-items: center;
-  gap: 0.35rem;
-  font-size: 0.85rem;
-  color: var(--text-muted);
+  gap: var(--space-1);
+  flex: none;
+  font-size: var(--font-size-xs);
+  font-weight: var(--font-weight-semibold);
+  letter-spacing: var(--letter-spacing-wide);
+  text-transform: uppercase;
+  color: var(--text-2);
 }
 
 .schedule-row p {
-  margin: 0.2rem 0 0;
-  font-size: 0.85rem;
+  grid-column: 1;
+  margin: 0;
+  font-size: var(--font-size-sm);
+  color: var(--text-2);
 }
 
-/* The one line this panel exists for, so it is not muted like the two above
-   it: a wrong cron expression has to be visible in the evening. */
+/* One dim caption rather than two paragraphs: "repeats at 22:00" and "stops at
+   06:00, one at a time" are one fact about a schedule, and reading them as two
+   rows is what made twenty schedules unscannable. */
+.schedule-captions {
+  font-size: var(--font-size-xs);
+  color: var(--text-2);
+}
+
+.schedule-kind::after {
+  content: " · ";
+}
+
+/* The line this panel exists for, so it is not muted like the two above it: a
+   wrong cron expression has to be visible in the evening. */
 .schedule-next-fire {
-  color: var(--text);
+  color: var(--text-1);
+  font-variant-numeric: tabular-nums;
 }
 
 .schedule-broken {
-  color: var(--danger-text, var(--text));
+  color: var(--danger-text);
+  font-weight: var(--font-weight-medium);
 }
 
-.schedule-row-actions,
-.schedule-form-actions {
-  display: flex;
-  align-items: center;
-  gap: 0.5rem;
-  margin-top: 0.5rem;
+.schedule-row-actions {
+  grid-column: 2;
+  grid-row: 1 / -1;
+  align-self: center;
+  margin-top: 0;
+  justify-content: flex-end;
 }
 
 .schedule-form {
   display: grid;
-  grid-template-columns: auto 1fr;
+  grid-template-columns: max-content minmax(0, 1fr);
   align-items: center;
-  gap: 0.5rem 0.75rem;
-  margin-top: 0.75rem;
-  padding: 0.75rem;
-  border: 1px solid var(--border);
-  border-radius: 8px;
+  gap: var(--space-2) var(--space-3);
+  margin-top: var(--space-3);
+  padding: var(--space-3) var(--space-4);
+  border-radius: var(--radius-md);
+  background: var(--surface-0);
+  box-shadow: inset 0 0 0 1px var(--border-1);
+}
+
+.schedule-form > label {
+  font-size: var(--font-size-xs);
+  font-weight: var(--font-weight-semibold);
+  letter-spacing: var(--letter-spacing-wide);
+  text-transform: uppercase;
+  color: var(--text-2);
+}
+
+.schedule-form input,
+.schedule-form select {
+  padding: var(--space-1) var(--space-2);
+  border: 1px solid var(--border-1);
+  border-radius: var(--radius-sm);
+  background: var(--surface-1);
+  color: var(--text-1);
+  font: inherit;
+  font-size: var(--font-size-sm);
+  box-shadow: none;
 }
 
 .schedule-form [role="radiogroup"],
 .schedule-form-actions {
   grid-column: 1 / -1;
   display: flex;
-  gap: 1rem;
+  gap: var(--space-4);
+}
+
+.schedule-form [role="radiogroup"] label {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  font-size: var(--font-size-sm);
 }
 
 .schedule-form input[type="number"] {
   width: 5rem;
+}
+
+/* Settings → Storage (task 015/016) — the worktree inventory, the same
+   bordered-row shape the schedule list uses above, for the same reason: this
+   is the panel's own dense list and twenty entries have to read as a list, not
+   as twenty independent panels. */
+
+.worktree-entry-header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--space-3);
+  margin-bottom: var(--space-1);
+  font-size: var(--font-size-md);
+}
+
+.worktree-entry-header .muted {
+  margin: 0;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: var(--font-size-xs);
+}
+
+.worktree-entry > p.muted {
+  margin: var(--space-1) 0 0;
+  font-size: var(--font-size-sm);
+}
+
+.worktree-confirm fieldset {
+  margin: 0 0 var(--space-2);
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--danger-border);
+  border-radius: var(--radius-sm);
+}
+
+.worktree-confirm legend {
+  padding: 0 var(--space-1);
+  font-size: var(--font-size-xs);
+  font-weight: var(--font-weight-semibold);
+  letter-spacing: var(--letter-spacing-wide);
+  text-transform: uppercase;
+  color: var(--danger-text);
+}
+
+.worktree-confirm label {
+  display: block;
+  margin: 0.2rem 0;
+  font-size: var(--font-size-sm);
+}
+
+.worktree-bulk-actions,
+.storage-prune-actions {
+  margin: var(--space-3) 0 0;
+}
+
+.worktree-auto-cleanup {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-2);
+  margin-top: var(--space-4);
+  padding-top: var(--space-3);
+  box-shadow: inset 0 1px 0 var(--border-1);
+  font-size: var(--font-size-sm);
+}
+
+/* One level of the strategy precedence chain (task 020) — mode/model/effort,
+   the same row shape board.css's `.model-effort-row` uses for a task's own
+   strategy fields, since both are three dropdowns describing one decision. */
+.strategy-defaults,
+.strategy-planner {
+  display: flex;
+  align-items: flex-start;
+  flex-wrap: wrap;
+  gap: var(--space-4);
+}
+
+.strategy-planner {
+  align-items: flex-end;
+}
+
+.strategy-defaults label,
+.strategy-planner label {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  font-size: var(--font-size-xs);
+  font-weight: var(--font-weight-semibold);
+  letter-spacing: var(--letter-spacing-wide);
+  text-transform: uppercase;
+  color: var(--text-2);
+}
+
+.strategy-defaults select,
+.strategy-planner select,
+.strategy-planner input {
+  font: inherit;
+  font-size: var(--font-size-sm);
+  letter-spacing: normal;
+  text-transform: none;
+  padding: var(--space-1) var(--space-2);
+  border: 1px solid var(--border-1);
+  border-radius: var(--radius-sm);
+  background: var(--surface-1);
+  color: var(--text-1);
+  box-shadow: none;
+}
+
+.strategy-catalogue-actions {
+  margin-top: var(--space-2);
 }

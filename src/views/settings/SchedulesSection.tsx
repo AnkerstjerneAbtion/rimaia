@@ -209,12 +209,19 @@ export function SchedulesSection() {
                 </label>
               </div>
 
-              <p className="muted schedule-kind">{describe(schedule)}</p>
-              <p className="muted schedule-configuration">
-                {schedule.stopAt ? `Stops at ${schedule.stopAt}` : "No stop time"} ·{" "}
-                {schedule.mode === "parallel"
-                  ? `${schedule.maxConcurrency} at once`
-                  : "One at a time"}
+              {/* One caption, not two paragraphs: when it repeats, when it
+                  stops and how much it runs at once are one fact about a
+                  schedule, and reading them as two rows is what made twenty
+                  schedules unscannable. Each half keeps its own element so it
+                  is still addressable on its own. */}
+              <p className="schedule-captions">
+                <span className="schedule-kind">{describe(schedule)}</span>
+                <span className="schedule-configuration">
+                  {schedule.stopAt ? `Stops at ${schedule.stopAt}` : "No stop time"} ·{" "}
+                  {schedule.mode === "parallel"
+                    ? `${schedule.maxConcurrency} at once`
+                    : "One at a time"}
+                </span>
               </p>
 
               {/* The reason this panel exists. Absolute and relative together:

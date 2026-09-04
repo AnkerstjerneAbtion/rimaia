@@ -133,13 +133,37 @@ export function WelcomeView({ onFinish }: { onFinish: () => void }) {
         </p>
       </header>
 
+      {/* How far in you are, countable rather than estimated: there are exactly
+          four things and each is either true or not. It reads live state like
+          every heading below it, so somebody who set two of these up before
+          ever opening this screen arrives two segments in. */}
+      <div className="welcome-progress">
+        <span className="welcome-progress-meter" aria-hidden="true">
+          {steps.map((step) => (
+            <span
+              key={step.title}
+              className="welcome-progress-segment"
+              data-done={step.satisfied}
+            />
+          ))}
+        </span>
+        <span className="welcome-progress-count">
+          {steps.filter((step) => step.satisfied).length} of {steps.length} set up
+        </span>
+      </div>
+
       {error && <ErrorBanner error={error} onDismiss={() => setError(null)} />}
 
       <ol className="welcome-steps">
         {steps.map((step, index) => {
           const rows = resultsFor(report, step.checks);
           return (
-            <li key={step.title} className="welcome-step panel">
+            <li
+              key={step.title}
+              className={
+                step.satisfied ? "welcome-step welcome-step-done panel" : "welcome-step panel"
+              }
+            >
               <h3>
                 <span className="welcome-step-number">{index + 1}</span>
                 {step.title}

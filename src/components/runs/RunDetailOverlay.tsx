@@ -121,32 +121,52 @@ export function RunDetailOverlay({ runId, onClose }: RunDetailOverlayProps) {
       {!detail && !error && <p className="muted">Loading run detail…</p>}
 
       {detail && (
-        <>
+        <div className="run-detail-body">
           <section className="run-detail-section">
             <h4>Outcome</h4>
+            {/* The four facts that identify a finished run, as labelled
+                readouts rather than as a two-column `<dl>` that spent a third
+                of the rail on the words "Duration" and "Turns" — the same
+                shape the board drawer's own `.task-detail-readout` uses. The
+                `<dl>` underneath is kept for the fields that are sentences
+                rather than figures, and that only sometimes exist. */}
+            <div className="run-detail-readout">
+              <div className="run-detail-readout-field">
+                <span className="run-detail-readout-label">Status</span>
+                <span className="run-detail-readout-value">
+                  {detail.exitClass ? (
+                    <span className={`exit-class-badge exit-class-${detail.exitClass}`}>
+                      {EXIT_CLASS_LABELS[detail.exitClass]}
+                    </span>
+                  ) : (
+                    <span className="muted">Still running.</span>
+                  )}
+                </span>
+              </div>
+              <div className="run-detail-readout-field">
+                <span className="run-detail-readout-label">Duration</span>
+                <span className="run-detail-readout-value">
+                  {formatDuration(detail.startedAt, detail.endedAt)}
+                </span>
+              </div>
+              <div className="run-detail-readout-field">
+                <span className="run-detail-readout-label">Turns</span>
+                <span className="run-detail-readout-value">
+                  {detail.numTurns ?? <span className="muted">—</span>}
+                </span>
+              </div>
+              <div className="run-detail-readout-field">
+                <span className="run-detail-readout-label">Cost</span>
+                <span className="run-detail-readout-value">
+                  {detail.costUsd != null ? (
+                    formatCostUsd(detail.costUsd)
+                  ) : (
+                    <span className="muted">Not available yet.</span>
+                  )}
+                </span>
+              </div>
+            </div>
             <dl className="detail-list">
-              <dt>Status</dt>
-              <dd>
-                {detail.exitClass ? (
-                  <span className={`exit-class-badge exit-class-${detail.exitClass}`}>
-                    {EXIT_CLASS_LABELS[detail.exitClass]}
-                  </span>
-                ) : (
-                  <span className="muted">Still running.</span>
-                )}
-              </dd>
-              <dt>Duration</dt>
-              <dd>{formatDuration(detail.startedAt, detail.endedAt)}</dd>
-              <dt>Turns</dt>
-              <dd>{detail.numTurns ?? <span className="muted">—</span>}</dd>
-              <dt>Cost</dt>
-              <dd>
-                {detail.costUsd != null ? (
-                  formatCostUsd(detail.costUsd)
-                ) : (
-                  <span className="muted">Not available yet.</span>
-                )}
-              </dd>
               {detail.errorMessage && (
                 <>
                   <dt>Error</dt>
@@ -200,11 +220,11 @@ export function RunDetailOverlay({ runId, onClose }: RunDetailOverlayProps) {
               <ul className="run-detail-file-list">
                 {detail.diff.files.map((file) => (
                   <li key={file.path}>
-                    <code>{file.path}</code>{" "}
+                    <code>{file.path}</code>
                     {file.insertions == null ? (
                       <span className="muted">binary</span>
                     ) : (
-                      <span>
+                      <span className="run-detail-diffstat">
                         +{file.insertions} / -{file.deletions}
                       </span>
                     )}
@@ -222,8 +242,14 @@ export function RunDetailOverlay({ runId, onClose }: RunDetailOverlayProps) {
               <ul className="run-detail-commit-list">
                 {detail.diff.commits.map((commit) => (
                   <li key={commit.sha}>
-                    <code>{commit.shortSha}</code> {commit.subject}{" "}
-                    <span className="muted">— {commit.author}</span>
+                    {/* One flex item per column, not a text node between two
+                        elements: an anonymous flex item cannot be aligned or
+                        truncated, and the author has to sit against the right
+                        edge however long the subject is. */}
+                    <span>
+                      <code>{commit.shortSha}</code> {commit.subject}
+                    </span>
+                    <span className="run-detail-diffstat">{commit.author}</span>
                   </li>
                 ))}
               </ul>
@@ -275,7 +301,7 @@ export function RunDetailOverlay({ runId, onClose }: RunDetailOverlayProps) {
               </p>
             )}
           </section>
-        </>
+        </div>
       )}
     </div>,
     document.body,

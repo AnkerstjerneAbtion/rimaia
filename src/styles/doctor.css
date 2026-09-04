@@ -1,34 +1,90 @@
 /* The preflight doctor (task 018): the banner above every view, the result
-   rows shared by the banner, Settings → Environment and each welcome step,
-   and the welcome screen itself.
+   rows shared by the banner, Settings → Environment and each welcome step, and
+   the first-run walkthrough itself.
 
    One leaf rather than three because these are one component family used from
-   three places — splitting them per view would mean three copies of the
-   status colours, which is exactly the drift a shared row is meant to stop. */
+   three places — splitting them per view would mean three copies of the status
+   colours, which is exactly the drift a shared row is meant to stop.
+
+   ## Severity without hue
+
+   Task C's scope, and the thing this file is most responsible for. A doctor
+   row is the only place in the app where getting the severity wrong costs a
+   whole night, so it carries **four** independent channels and colour is only
+   one of them:
+
+     the word     "OK" / "Warning" / "Blocked" on every chip, always rendered
+                  (`statusLabel` in `src/lib/doctor.ts`), plus a sentence in
+                  the banner heading. This is the one that survives everything.
+     fill         fail is filled and outlined, warn is filled, pass is bare
+                  with a dashed edge — the same three-tier grading board.css
+                  applies to its run-state badges, and it survives greyscale.
+     weight       the chip's border is 2px solid on fail, 1px solid on warn,
+                  1px dashed on pass; the row's own rail is 3px, 2px, none.
+     shape        a mark on the chip — ✕ / ! / ✓ — written with the
+                  `content: "…" / ""` alt-text syntax so assistive technology
+                  is not read a glyph that duplicates the word beside it. On an
+                  engine without that syntax the whole declaration is invalid
+                  and no mark renders, which is a safe degradation rather than
+                  a broken one.
+
+   ## The remediation is the point
+
+   `detail` says what is wrong; `remediation` says what to type, and task 018's
+   acceptance criteria turn on the second being present and specific. It is
+   therefore not a second sentence of the detail: it is an instruction block —
+   its own recessed surface, its own accent rail, monospace so a pasted command
+   is legible as one, and full width rather than an inline chip, because a
+   command that wraps mid-token is a command somebody mistypes at 1am.
+
+   It out-specifies `.doctor-result-body p` on selector weight
+   (`.doctor-result-body p.doctor-remediation`) rather than with `!important`,
+   which is what it used before. */
+
+/* --- The standing banner ------------------------------------------------ */
 
 .doctor-banner {
-  margin-bottom: 1.25rem;
-  padding: 0.85rem 1rem;
-  border: 1px solid;
-  border-radius: 8px;
+  margin-bottom: var(--space-5);
+  padding: var(--space-4) var(--space-5);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-sm);
 }
 
 .doctor-banner h3 {
-  margin: 0 0 0.5rem;
-  font-size: 0.95rem;
+  margin: 0 0 var(--space-3);
+  font-size: var(--font-size-md);
+  font-weight: var(--font-weight-semibold);
+  line-height: var(--line-height-tight);
 }
 
+/* Fill, rail weight and edge style all differ between the two, on top of the
+   heading sentence that already says which is which. */
 .doctor-banner-fail {
   background: var(--danger-bg);
-  border-color: var(--danger-border);
+  box-shadow: inset 4px 0 0 var(--danger-text), inset 0 0 0 1px var(--danger-border),
+    var(--shadow-sm);
   color: var(--danger-text);
 }
 
 .doctor-banner-warn {
   background: var(--warn-bg);
-  border-color: var(--warn-border);
+  box-shadow: inset 2px 0 0 var(--warn-text), inset 0 0 0 1px var(--warn-border),
+    var(--shadow-sm);
   color: var(--warn-text);
 }
+
+.doctor-banner button {
+  margin-top: var(--space-3);
+  padding: 0.05rem var(--space-3);
+  border-color: currentcolor;
+  background: transparent;
+  box-shadow: none;
+  color: inherit;
+  font-size: var(--font-size-xs);
+  font-weight: var(--font-weight-semibold);
+}
+
+/* --- The rows ----------------------------------------------------------- */
 
 .doctor-results {
   list-style: none;
@@ -36,53 +92,124 @@
   padding: 0;
   display: flex;
   flex-direction: column;
-  gap: 0.6rem;
+  gap: var(--space-2);
 }
 
+/* A row is a tray, like every other dense row in the app, with the severity
+   spelt into its own rail and wash rather than left to the chip alone. A
+   passing row is deliberately the plainest thing on the screen: eight of them
+   are the normal state of a healthy machine. */
 .doctor-result {
-  display: flex;
-  gap: 0.65rem;
-  align-items: baseline;
+  display: grid;
+  grid-template-columns: 5rem minmax(0, 1fr);
+  align-items: start;
+  gap: var(--space-3);
+  padding: var(--space-2) var(--space-3);
+  border-radius: var(--radius-sm);
+  background: var(--surface-0);
+}
+
+.doctor-result-fail {
+  background: var(--danger-bg);
+  box-shadow: inset 3px 0 0 var(--danger-text);
+}
+
+.doctor-result-warn {
+  background: var(--warn-bg);
+  box-shadow: inset 2px 0 0 var(--warn-text);
 }
 
 .doctor-result-body h4 {
   margin: 0;
-  font-size: 0.9rem;
+  font-size: var(--font-size-sm);
+  font-weight: var(--font-weight-semibold);
+  line-height: var(--line-height-tight);
+  color: var(--text-1);
 }
 
 .doctor-result-body p {
   margin: 0.15rem 0 0;
-  font-size: 0.85rem;
+  font-size: var(--font-size-sm);
+  line-height: var(--line-height-normal);
+  color: var(--text-2);
 }
 
+.doctor-result-fail .doctor-result-body h4,
+.doctor-result-warn .doctor-result-body h4 {
+  color: inherit;
+}
+
+.doctor-result-fail .doctor-result-body p {
+  color: var(--danger-text);
+}
+
+.doctor-result-warn .doctor-result-body p {
+  color: var(--warn-text);
+}
+
+/* The repository this row is about — part of the heading, not only of the
+   detail: eight rows that all say "GitHub CLI" are unreadable on a machine
+   with four repositories registered. */
 .doctor-scope {
-  font-weight: 400;
-  opacity: 0.85;
+  font-weight: var(--font-weight-regular);
+  opacity: 0.75;
 }
 
-/* The remediation is the line the user acts on, so it is set apart from the
-   detail rather than reading as a second sentence of it. */
-.doctor-remediation {
+/* The instruction. See this file's own header for why it is a block rather
+   than a second sentence. */
+.doctor-result-body p.doctor-remediation {
+  display: block;
+  margin-top: var(--space-2);
+  padding: var(--space-2) var(--space-3);
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
+  box-shadow: inset 2px 0 0 var(--accent);
+  color: var(--text-1);
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-  font-size: 0.8rem !important;
-  opacity: 0.9;
+  font-size: var(--font-size-xs);
+  line-height: var(--line-height-relaxed);
+  overflow-wrap: anywhere;
 }
 
+/* The chip. Fixed width so eight of them make a column the eye can run down
+   rather than a ragged left edge. */
 .doctor-status {
-  flex: 0 0 auto;
-  min-width: 4.5rem;
-  padding: 0.1rem 0.4rem;
-  border-radius: 4px;
-  font-size: 0.7rem;
-  font-weight: 600;
-  text-align: center;
-  text-transform: uppercase;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-1);
+  padding: 0.05rem var(--space-2);
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  font-size: var(--font-size-xs);
+  font-weight: var(--font-weight-semibold);
   letter-spacing: 0.04em;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+/* The fourth channel: a shape. Empty alt text, so nothing reads "check mark
+   OK" — the word is already there and is the channel that matters. */
+.doctor-status::before {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-weight: var(--font-weight-semibold);
+}
+
+.doctor-status-pass::before {
+  content: "✓" / "";
+}
+
+.doctor-status-warn::before {
+  content: "!" / "";
+}
+
+.doctor-status-fail::before {
+  content: "✕" / "";
 }
 
 .doctor-status-pass {
+  border: 1px dashed currentcolor;
   color: var(--ok-text);
-  border: 1px solid currentcolor;
 }
 
 .doctor-status-warn {
@@ -93,64 +220,171 @@
 
 .doctor-status-fail {
   background: var(--danger-bg);
-  border: 1px solid var(--danger-border);
+  border: 2px solid var(--danger-border);
   color: var(--danger-text);
 }
 
+/* Inside a banner the chip already sits on the severity's own wash, so it
+   drops the second fill and keeps only its edge and its word. */
+.doctor-banner .doctor-status-warn,
+.doctor-banner .doctor-status-fail {
+  background: transparent;
+}
+
 .doctor-blocked {
-  margin: 0 0 0.75rem;
+  margin: 0 0 var(--space-3);
+  padding: var(--space-2) var(--space-3);
+  border-radius: var(--radius-sm);
+  background: var(--danger-bg);
+  box-shadow: inset 3px 0 0 var(--danger-text);
   color: var(--danger-text);
-  font-weight: 600;
+  font-size: var(--font-size-sm);
+  font-weight: var(--font-weight-semibold);
 }
 
 .doctor-actions {
   display: flex;
   align-items: center;
-  gap: 0.75rem;
-  margin-top: 0.9rem;
+  gap: var(--space-3);
+  margin-top: var(--space-4);
+  font-size: var(--font-size-sm);
+}
+
+.doctor-actions button {
+  padding: 0.05rem var(--space-3);
+  font-size: var(--font-size-xs);
+  font-weight: var(--font-weight-semibold);
+  box-shadow: none;
 }
 
 /* --- The first-run walkthrough ------------------------------------------ */
+
+/* The least considered surface in the app, and the first one a new user sees.
+   It is a stepper now rather than four stacked cards: a progress meter under
+   the header that says how far in you are, a number in a gutter every step's
+   own body is indented against, and a visible difference between a step that
+   is done and one that is not — because the only question this screen answers
+   is "what is left". */
+
+.view.welcome-view {
+  max-width: 52rem;
+}
+
+.welcome-progress {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  font-size: var(--font-size-sm);
+  color: var(--text-2);
+}
+
+/* Four segments, one per step, filled as each becomes true. Not a percentage
+   bar: there are exactly four things and each is either done or not, so the
+   meter should be able to be counted rather than estimated. */
+.welcome-progress-meter {
+  display: flex;
+  gap: var(--space-1);
+  flex: none;
+}
+
+.welcome-progress-segment {
+  width: 2.5rem;
+  height: 0.3rem;
+  border-radius: var(--radius-full);
+  background: var(--surface-2);
+  box-shadow: inset 0 0 0 1px var(--border-1);
+}
+
+.welcome-progress-segment[data-done="true"] {
+  background: var(--accent);
+  box-shadow: none;
+}
+
+.welcome-progress-count {
+  font-variant-numeric: tabular-nums;
+}
 
 .welcome-steps {
   list-style: none;
   margin: 0;
   padding: 0;
-  counter-reset: welcome-step;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
 }
 
-.welcome-step h3 {
+.panel.welcome-step {
+  /* Set per state below: the rail is the "is this one still on you" channel,
+     read before any badge is. */
+  --step-rail: var(--accent);
+
+  box-shadow: inset 3px 0 0 var(--step-rail), var(--shadow-sm);
+}
+
+/* A finished step recedes. Nothing is hidden — the real control stays on
+   screen and stays usable — but the four steps stop competing as soon as some
+   of them are answered. */
+.panel.welcome-step-done {
+  --step-rail: var(--status-success);
+}
+
+.welcome-step > h3 {
   display: flex;
   align-items: center;
-  gap: 0.6rem;
+  gap: var(--space-3);
+  margin: 0 0 var(--space-2);
+  font-size: var(--font-size-lg);
+  font-weight: var(--font-weight-semibold);
+  line-height: var(--line-height-tight);
+}
+
+/* Everything under the heading is indented past the number, so the four
+   numbers make a column and each step's content reads as belonging to one.
+   `2.75rem` is the chip (1.75rem) plus the heading's own `--space-3` gap. */
+.welcome-step > :not(h3) {
+  margin-left: 2.75rem;
 }
 
 .welcome-step-number {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 1.6rem;
-  height: 1.6rem;
-  border-radius: 50%;
+  flex-shrink: 0;
+  width: 1.75rem;
+  height: 1.75rem;
+  border-radius: var(--radius-full);
   background: var(--accent);
   color: var(--accent-contrast);
-  font-size: 0.8rem;
+  font-size: var(--font-size-sm);
+  font-weight: var(--font-weight-semibold);
+  font-variant-numeric: tabular-nums;
+}
+
+/* A done step keeps its number — "step 3" is how somebody refers to it — and
+   changes fill instead, so the column of four is still countable. */
+.welcome-step-done .welcome-step-number {
+  background: transparent;
+  box-shadow: inset 0 0 0 2px var(--status-success);
+  color: var(--status-success);
 }
 
 .welcome-step-badge {
   margin-left: auto;
-  padding: 0.15rem 0.5rem;
-  border: 1px solid var(--border);
-  border-radius: 999px;
-  color: var(--text-muted);
-  font-size: 0.7rem;
-  font-weight: 600;
-  text-transform: uppercase;
+  padding: 0.05rem var(--space-2);
+  border: 1px solid var(--border-2);
+  border-radius: var(--radius-full);
+  color: var(--text-2);
+  font-size: var(--font-size-xs);
+  font-weight: var(--font-weight-semibold);
   letter-spacing: 0.04em;
+  text-transform: uppercase;
+  white-space: nowrap;
 }
 
+/* Same three-tier grading the status chips above use: outlined-and-dashed for
+   the settled good case, solid for a warning, heavier for a failure. */
 .welcome-step-badge-pass {
-  border-color: currentcolor;
+  border: 1px dashed currentcolor;
   color: var(--ok-text);
 }
 
@@ -160,12 +394,35 @@
 }
 
 .welcome-step-badge-fail {
+  border-width: 2px;
   border-color: var(--danger-border);
   color: var(--danger-text);
 }
 
+.welcome-step .doctor-results {
+  margin-top: var(--space-3);
+}
+
+/* Step three embeds the real Instructions section, which is a `.panel` of its
+   own — a card floating inside a card. Inside a step it is a nested tray
+   instead, so the step stays the object and the control stays inside it. */
+.welcome-step .panel {
+  padding: var(--space-3) var(--space-4);
+  background: var(--surface-0);
+  box-shadow: none;
+}
+
+.welcome-step .panel > h3 {
+  font-size: var(--font-size-xs);
+  font-weight: var(--font-weight-semibold);
+  letter-spacing: var(--letter-spacing-wide);
+  text-transform: uppercase;
+  color: var(--text-2);
+}
+
 .welcome-actions {
   display: flex;
-  gap: 0.75rem;
-  margin-top: 1rem;
+  align-items: center;
+  gap: var(--space-3);
+  margin-top: var(--space-2);
 }

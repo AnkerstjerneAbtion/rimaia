@@ -40,7 +40,13 @@ export function SessionOutcomesList({ outcomes }: SessionOutcomesListProps) {
       {outcomes.map((outcome) => (
         <li key={`${outcome.taskId}-${outcome.endedAt}`} className="session-outcome-entry">
           <span className="session-outcome-title">{outcome.title}</span>
-          <span className="session-outcome-repo">{outcome.repositoryName}</span>
+          <span className="session-outcome-meta">
+            <span className="session-outcome-repo">{outcome.repositoryName}</span>
+            {/* When, to the minute and local. This list is "tonight", so the
+                clock time is the useful half of the instant and the date
+                beside it would be noise. */}
+            <span className="session-outcome-time">{finishedAt(outcome.endedAt)}</span>
+          </span>
           <span
             className={`exit-class-badge exit-class-${outcome.exitClass ?? "fatal"}`}
           >
@@ -50,4 +56,8 @@ export function SessionOutcomesList({ outcomes }: SessionOutcomesListProps) {
       ))}
     </ul>
   );
+}
+
+function finishedAt(iso: string): string {
+  return new Date(iso).toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" });
 }

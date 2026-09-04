@@ -19,11 +19,15 @@ function App() {
   // `onboardingDismissed`, and defaulting to the board would flash it before
   // the welcome screen replaced it on a first run (seam-contract D22).
   const [view, setView] = useState<View | null>(null);
+  const [appVersion, setAppVersion] = useState<string | null>(null);
   const { report } = useDoctor();
 
   useEffect(() => {
     getAppInfo().then(
-      (info) => setView(info.onboardingDismissed ? "board" : "welcome"),
+      (info) => {
+        setView(info.onboardingDismissed ? "board" : "welcome");
+        setAppVersion(info.appVersion);
+      },
       // A failed read is not a reason to withhold the app. The board is the
       // safe answer: the welcome screen is skippable, and showing it to a
       // returning user would be worse than not showing it to a new one.
@@ -35,7 +39,7 @@ function App() {
 
   return (
     <div className="app">
-      <Sidebar current={view} onNavigate={setView} />
+      <Sidebar current={view} onNavigate={setView} version={appVersion} />
       <main className="content">
         {/* Above every view, not only Settings: a queue that will not start
             tonight is worth interrupting the board for now. Suppressed on the

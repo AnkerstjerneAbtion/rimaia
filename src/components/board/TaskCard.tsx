@@ -8,7 +8,7 @@ import { useEffect, useState } from "react";
 import { useSortable } from "@dnd-kit/sortable";
 import { CSS } from "@dnd-kit/utilities";
 
-import { relativeTime } from "../../lib/board";
+import { cardBadge, relativeTime } from "../../lib/board";
 import { getQueueStatus, listRepositories, startRun, toRimaiaError } from "../../lib/commands";
 import {
   subscribeToRepositoriesChanged,
@@ -305,6 +305,22 @@ interface CardFace {
 }
 
 /**
+ * What `board.css` paints the card's left rail and background wash from —
+ * exactly the badge the face is about to render, or `"idle"` for the card that
+ * renders none.
+ *
+ * The same `cardBadge` call the badge itself makes, rather than `task.runState`
+ * verbatim, so the rail can never disagree with the word beside it: D9's
+ * `interrupted` and ADR-0008's derived `blocked` are both renderings that
+ * `runState` alone does not spell.
+ */
+function cardRunState(task: CardTask): string {
+  return (
+    cardBadge(task.runState, task.lastRun ?? null, task.blockedByIncomplete ?? false) ?? "idle"
+  );
+}
+
+/**
  * The visual content shared by the real, draggable card and the
  * `DragOverlay` clone — factored out so the overlay never calls
  * `useSortable` a second time for an id already registered by the card it is
@@ -347,15 +363,36 @@ function CardFace({ task, repositoryName, now }: CardFace) {
 
   return (
     <>
-      <h4 className="task-card-title">{task.title}</h4>
-      <div className="task-card-meta">
-        <span className="task-card-repo">{repositoryName}</span>
+      {/* State leads. The badge sits in an eyebrow row *above* the title
+          rather than beside the repository below it, because the first
+          question at 08:00 is "did anything happen to this" and the second is
+          "which task is it" — and because a badge is the widest, most
+          coloured thing on the card, so putting it anywhere else makes the eye
+          land on it second and jump back. The repository takes the quiet half
+          of the row as a monospace tag: it is an identifier, not prose. */}
+      <div className="task-card-head">
+        <span className="task-card-repo" title={repositoryName}>
+          {repositoryName}
+        </span>
         <RunStateBadge
           runState={task.runState}
           lastRun={task.lastRun ?? null}
           blockedByIncomplete={blocked}
         />
       </div>
+      <h4 className="task-card-title" title={task.title}>
+        {task.title}
+      </h4>
+      {/* ADR-0008's "the card shows which task is blocking it", and task 011's
+          acceptance criterion "each showing A as the reason" — a visible line
+          on the card face, not a `title=` attribute. A blocked card without a
+          name on it makes the user open every card in the chain to find the
+          one that stalled, which is the opposite of the one-glance morning
+          review the ADR is written for. Directly under the title, which is the
+          thing it qualifies. */}
+      {blocked && task.blockingTitle && (
+        <p className="task-card-blocked-by">Blocked by {task.blockingTitle}</p>
+      )}
       {(strategy || proposalWaiting) && (
         <div className="task-card-strategy">
           {origin && strategy && (
@@ -379,7 +416,7 @@ function CardFace({ task, repositoryName, now }: CardFace) {
         </div>
       )}
       <div className="task-card-footer">
-        <span className="task-card-time">{relativeTime(task.updatedAt, now)}</span>
+        <span className="task-card-time tabular-nums">{relativeTime(task.updatedAt, now)}</span>
         <span className="task-card-indicators">
           {linkCount > 0 && (
             <span
@@ -399,24 +436,17 @@ function CardFace({ task, repositoryName, now }: CardFace) {
           )}
         </span>
       </div>
-      {/* ADR-0008's "the card shows which task is blocking it", and task 011's
-          acceptance criterion "each showing A as the reason" — a visible line
-          on the card face, not a `title=` attribute. A blocked card without a
-          name on it makes the user open every card in the chain to find the
-          one that stalled, which is the opposite of the one-glance morning
-          review the ADR is written for. */}
-      {blocked && task.blockingTitle && (
-        <p className="task-card-blocked-by">Blocked by {task.blockingTitle}</p>
-      )}
     </>
   );
 }
 
 /** The floating clone `Board` renders inside `DragOverlay` while a card is
- *  being dragged — static, no drag machinery of its own. */
+ *  being dragged — static, no drag machinery of its own. It carries the same
+ *  `data-run-state` as the card it is floating above, because a dragged card
+ *  that lost its rail would read as a different card. */
 export function TaskCardPreview(props: CardFace) {
   return (
-    <article className="task-card task-card-overlay">
+    <article className="task-card task-card-overlay" data-run-state={cardRunState(props.task)}>
       <CardFace {...props} />
     </article>
   );
@@ -535,6 +565,9 @@ export function TaskCard({
         .filter(Boolean)
         .join(" ")}
       data-task-id={task.id}
+      // What `board.css` colours the left rail and the background wash from —
+      // the card's own state, made visible without having to read the badge.
+      data-run-state={cardRunState(task)}
       // Not `aria-selected` — that is only defined for `option`/`row`/`tab`/
       // `treeitem`/`gridcell`/`columnheader`/`rowheader` roles, and dnd-kit's
       // own `attributes` (spread below) set `role="button"`, which is not
@@ -549,47 +582,48 @@ export function TaskCard({
     >
       <CardFace task={task} repositoryName={repositoryName} now={now} />
 
-      {/* Queued position (task 009's Scope: "Board cards show `queued`
-          position"). ADR-0012's whole security posture depends on a skipped
-          reason being visible rather than silent, so a task the queue is
-          passing over reads why here, not just on the disabled "Run now"
-          button below. */}
-      {queueEntry && (
-        <div className="task-card-queue">
-          {queueEntry.skip === null ? (
-            <span className="task-card-indicator task-card-queue-position">
-              Queued #{queueEntry.queuePosition}
-            </span>
-          ) : (
-            <span className="task-card-queue-skip muted">
-              Not queued — {QUEUE_SKIP_LABELS[queueEntry.skip]}
-            </span>
-          )}
-        </div>
-      )}
-
-      {/* Task 008's "Run now": a plain nested `<button>`, isolated from the
-          drag/select machinery `{...attributes}`/`{...listeners}` and
-          `onClick`/`onKeyDown` above bind to the whole article — a click or a
-          keypress here must start a run, never lift the card or open the
-          panel underneath it. */}
-      <div
-        className="task-card-run"
-        onPointerDown={(event) => event.stopPropagation()}
-        onKeyDown={(event) => event.stopPropagation()}
-      >
+      {/* One action row: task 009's queue position on the left, task 008's
+          "Run now" on the right. They used to be two stacked blocks, the
+          second of which was a full-width accent button on every card in four
+          columns — the loudest thing on the board, for the verb that overrides
+          a decision the scheduler is already making correctly. Quiet control,
+          filled in on hover; the queue position beside it is the readout that
+          earns the row. */}
+      <div className="task-card-actions">
+        {/* ADR-0012's whole security posture depends on a skipped reason being
+            visible rather than silent — the skip line below is why this is not
+            simply hidden when the queue passes a task over. */}
+        {queueEntry && queueEntry.skip === null && (
+          <span className="task-card-indicator task-card-queue-position tabular-nums">
+            Queued #{queueEntry.queuePosition}
+          </span>
+        )}
+        {/* Task 008's "Run now", isolated from the drag/select machinery
+            `{...attributes}`/`{...listeners}` and `onClick`/`onKeyDown` above
+            bind to the whole article — a click or a keypress here must start a
+            run, never lift the card or open the panel underneath it. The two
+            stoppers sit on the button itself rather than on a wrapper, so the
+            explanations below stay part of the card's drag surface. */}
         <button
           type="button"
           className="task-card-run-button"
           disabled={runNow.kind !== "ready" || starting}
           title={runNow.kind === "blocked" ? runNow.reason : undefined}
+          onPointerDown={(event) => event.stopPropagation()}
+          onKeyDown={(event) => event.stopPropagation()}
           onClick={handleRunNow}
         >
           {starting ? "Starting…" : runNow.kind === "running" ? "Running…" : "Run now"}
         </button>
-        {runNow.kind === "blocked" && <p className="task-card-run-locked muted">{runNow.reason}</p>}
-        {runError && <p className="task-card-run-error">{runError.message}</p>}
       </div>
+
+      {queueEntry && queueEntry.skip !== null && (
+        <p className="task-card-queue-skip muted">
+          Not queued — {QUEUE_SKIP_LABELS[queueEntry.skip]}
+        </p>
+      )}
+      {runNow.kind === "blocked" && <p className="task-card-run-locked muted">{runNow.reason}</p>}
+      {runError && <p className="task-card-run-error">{runError.message}</p>}
     </article>
   );
 }

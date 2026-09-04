@@ -1,36 +1,82 @@
-/* Board view (task 005): four-column Kanban layout, cards, drag state and
-   the task detail panel.
+/* Board view — the control surface. Four columns, cards, drag state and the
+   task detail drawer.
 
-   Badge colours are new tokens, declared in this file's own `:root` block
-   rather than in `src/styles.css` (this leaf does not touch that file - see
-   the board agent's file-ownership note). A second `:root { ... }` rule in
-   an imported stylesheet is not a second root: it adds properties to the
-   same element, same as `styles.css`'s own block does, as long as no name
-   collides - none of the ones below exist there. */
+   Written against THE DIRECTION at the top of `src/styles.css`, and the four
+   sentences there are load-bearing here rather than decorative:
+
+   Dark-first.   The token blocks below now declare **dark** in `:root` and
+     override for light in `@media (prefers-color-scheme: light)`, the same
+     way `styles.css` does. They used to be the other way round, which meant
+     the scheme this app is designed for was the one expressed as a patch.
+     Every value is the one it already was; only which block holds it moved.
+   Depth, not outlines.  `.board-column`, `.task-card` and `.task-detail-panel`
+     carry no `border`. A column is a `--surface-1` header over a `--surface-0`
+     tray; a card is `--surface-1` again, so it reads as sitting *in* the
+     tray; the drawer is `--surface-1` + `--shadow-lg` over the columns.
+   Typography carries the hierarchy.  A card is title-first: `--font-size-md`
+     semibold `--text-1`, with repository, time and counts a size and a text
+     step down. A column header is an instrument readout — an uppercase
+     `--font-size-xs` eyebrow beside a `--font-size-lg` tabular count — not a
+     row of body text.
+   State is the product.  Every run-state badge is `.status-dot` + a word, and
+     the card behind it carries a `--card-rail` in the matching `--status-*`
+     colour plus a wash of it, so a running card is legible as running from
+     the far side of the column without reading the badge at all.
+
+   ## Badges without hue
+
+   Eight states is a lot of colour in one column, so the badges are graded by
+   **emphasis** rather than by hue, in three tiers that survive greyscale:
+
+     filled + outlined   `failed` / `interrupted` — the only badges with a
+                         border. ADR-0007's failure rule wants these to
+                         interrupt a morning review.
+     washed              `running`, `blocked`, `waiting_retry` — a tinted
+                         background, no border. Something is in motion or
+                         will be.
+     bare                `queued`, `cancelled` — no background at all;
+                         `cancelled` adds a dashed outline and a hollow dot,
+                         because it is the one settled/inactive state.
+
+   Two more non-hue channels ride along: every state keeps its own **word**,
+   always rendered and never replaced by a bare dot (D9 — `failed` and
+   `interrupted` share a colour, and the word is what tells them apart), and
+   only `running` **moves** (`.status-dot-live`).
+
+   Badge colours stay in this file's own `:root` blocks rather than in
+   `src/styles.css` — a second `:root` in an imported stylesheet is not a
+   second root, it adds properties to the same element, and `runs.css` already
+   reads `--badge-running-*`/`--badge-queued-*` from here. No new token was
+   needed in `styles.css` for any of the above. */
 
 :root {
-  --badge-running-bg: #dbe7ff;
-  --badge-running-text: #1d4ed8;
-  --badge-queued-bg: #ececf0;
-  --badge-queued-text: #45454f;
-  --badge-blocked-bg: #ece4fb;
-  --badge-blocked-text: #5b21b6;
-  --badge-waiting-retry-bg: #fdf1da;
-  --badge-waiting-retry-text: #92600a;
-  --badge-cancelled-bg: #ececf0;
-  --badge-cancelled-text: #62626b;
+  /* Run-state badge pairs (dark, primary). The bg is a wash the matching
+     `--status-*` accent sits on; the text is a lightened form of it. */
+  --badge-running-bg: #1e2c4d;
+  --badge-running-text: #9db8f7;
+  --badge-queued-bg: #2c2c33;
+  --badge-queued-text: #b4b4bd;
+  --badge-blocked-bg: #2e2340;
+  --badge-blocked-text: #c4a4f5;
+  --badge-waiting-retry-bg: #3a2f16;
+  --badge-waiting-retry-text: #f0c473;
+  --badge-cancelled-bg: #2c2c33;
+  --badge-cancelled-text: #9a9aa4;
+
+  --exit-success-bg: #163b25;
+  --exit-success-text: #7fd99b;
 
   /* The detail drawer is painted over the columns, so its edge has to read
      as depth rather than as a border between two panels. A token because the
      shadow that does that on white is invisible on the dark surface. */
-  --drawer-shadow: -0.5rem 0 1.5rem rgb(0 0 0 / 0.16);
+  --drawer-shadow: -0.5rem 0 1.5rem rgb(0 0 0 / 0.55);
 
   /* The board's width arithmetic. Nothing in the test suite can ever check
-     it - jsdom has no layout engine - so this comment is the record.
+     it - jsdom has no layout engine, so this comment is the record.
 
      `1rem` is **15px**, not 16: `styles.css`'s `:root` sets
-     `font-size: 15px`. Every rem below is converted at that rate; an earlier
-     version of this comment used 16 and was wrong by ~6% throughout.
+     `font-size: var(--font-size-md)`, which is `0.9375rem` of a 16px browser
+     default. Every rem below is converted at that rate.
 
      The two widths that matter are the two `src-tauri/tauri.conf.json`
      declares: `width: 1280` (task 005's acceptance criterion, "usable at
@@ -38,41 +84,34 @@
      to - not named by the criterion, but the layout still has to hold
      there).
 
-     Available to `.board-view`: `.app` is `232px 1fr` and `.content` adds
-     2rem = 30px of padding each side, so `window - 232 - 60`:
-       1280px window -> 988px
-       1024px window -> 732px
+     Available to `.board-view`: `.app` is `248px 1fr` and `.content` adds
+     `--space-6` = 2rem = 30px of padding each side, so `window - 248 - 60`:
+       1280px window -> 972px
+       1024px window -> 716px
+
+     (The sidebar was 232px before the shell rebuild; these two numbers moved
+     by 16px with it, and the conclusions below are recomputed, not copied.)
 
      `.board-columns` is `repeat(4, minmax(--board-column-min, 1fr))` with a
-     0.75rem = 11.25px gap, so its hard minimum is `4 * 160 + 3 * 11.25` =
-     673.75px:
-       1280px: 674 <= 988  (314px spare; the tracks grow past their floor
-         to fill it)
-       1024px: 674 <= 732  (58px spare, kept as a buffer for a non-overlay
+     `--space-2` = 0.5rem = 7.5px gap, so its hard minimum is
+     `4 * 160 + 3 * 7.5` = 662.5px:
+       1280px: 663 <= 972  (309px spare; the tracks grow past their floor to
+         fill it)
+       1024px: 663 <= 716  (53px spare, kept as a buffer for a non-overlay
          scrollbar `.content`'s `overflow-y: auto` can draw)
 
      **The panel open changes none of that.** `.task-detail-panel` is an
      overlay drawer - `position: absolute` inside `.board-layout`, out of
      flow - so it subtracts nothing from the columns at any width. That is
-     the whole reason for the overlay. As a flex sibling at `0 0 20rem` it
-     took 300px plus `.board-layout`'s 1rem = 15px gap off the top, leaving
-     the columns:
-       1280px, panel open: 988 - 315 = 673px  (673.75 needed - short)
-       1024px, panel open: 732 - 315 = 417px  (673.75 needed - 257px short,
-         roughly 1.5 of the 4 columns clipped into a horizontal scroll)
-     Out of flow, the four numbers above are the only four, and they hold
-     with the panel open or closed - no breakpoint, no second case.
-     `.board-columns` keeps its own `overflow-x: auto` as a safety valve, but
-     at both declared widths it is now slack, not scroll.
+     the whole reason for the overlay.
 
      What the drawer covers, rather than displaces:
        width = min(46rem, calc(100% - 12rem)) = min(690px, board - 180px)
-       1280px: min(690, 808) = 690px drawer, 298px of columns uncovered
-       1024px: min(690, 552) = 552px drawer, 180px of columns uncovered
-     180px is one whole column (160px) plus its gap (11.25px), so a column
-     stays visible and droppable at the narrowest supported window, and the
-     writing surface is 690px - not the 300px box a 400-line plan used to
-     get - whenever the window is 1280px or wider.
+       1280px: min(690, 792) = 690px drawer, 282px of columns uncovered
+       1024px: min(690, 536) = 536px drawer, 180px of columns uncovered
+     180px is one whole column (160px) plus its gap, so a column stays visible
+     and droppable at the narrowest supported window, and the writing surface
+     is 690px whenever the window is 1280px or wider.
 
      `100%` rather than `100vw` in that `min()`: the drawer's containing
      block is `.board-layout`, which is already the content area, so a
@@ -82,64 +121,142 @@
   --board-column-min: 160px;
   /* Approximates the toolbar, banners and page padding above the columns so
      each column scrolls its own cards instead of the whole page scrolling -
-     a human should check this against the real window chrome at 1280x832
-     (see the board agent's return value). */
+     a human should check this against the real window chrome at 1280x832. */
   --board-column-max-height: calc(100vh - 220px);
 }
 
-@media (prefers-color-scheme: dark) {
+@media (prefers-color-scheme: light) {
   :root {
-    --badge-running-bg: #1e2c4d;
-    --badge-running-text: #9db8f7;
-    --badge-queued-bg: #2c2c33;
-    --badge-queued-text: #b4b4bd;
-    --badge-blocked-bg: #2e2340;
-    --badge-blocked-text: #c4a4f5;
-    --badge-waiting-retry-bg: #3a2f16;
-    --badge-waiting-retry-text: #f0c473;
-    --badge-cancelled-bg: #2c2c33;
-    --badge-cancelled-text: #9a9aa4;
-    --drawer-shadow: -0.5rem 0 1.5rem rgb(0 0 0 / 0.55);
+    --badge-running-bg: #dbe7ff;
+    --badge-running-text: #1d4ed8;
+    --badge-queued-bg: #ececf0;
+    --badge-queued-text: #45454f;
+    --badge-blocked-bg: #ece4fb;
+    --badge-blocked-text: #5b21b6;
+    --badge-waiting-retry-bg: #fdf1da;
+    --badge-waiting-retry-text: #92600a;
+    --badge-cancelled-bg: #ececf0;
+    --badge-cancelled-text: #62626b;
+
+    --exit-success-bg: #dcf5e3;
+    --exit-success-text: #157a3d;
+
+    --drawer-shadow: -0.5rem 0 1.5rem rgb(0 0 0 / 0.16);
   }
 }
 
 .board-view {
   display: flex;
   flex-direction: column;
-  gap: 0.75rem;
+  gap: var(--space-3);
   height: 100%;
 }
 
-/* Toolbar */
+/* Toolbar — one instrument bar rather than three loose controls on the page
+   background. It gets a resting surface and a shadow (not a border) so the
+   chrome above the columns reads as chrome. */
 
 .board-toolbar {
   display: flex;
   align-items: center;
-  gap: 0.75rem;
+  gap: var(--space-3);
   flex-wrap: wrap;
+  padding: var(--space-2) var(--space-3);
+  border-radius: var(--radius-md);
+  background: var(--surface-1);
+  box-shadow: var(--shadow-sm);
 }
 
 .board-repo-filter {
   display: flex;
   align-items: center;
-  gap: 0.4rem;
-  font-size: 0.85rem;
-  color: var(--text-muted);
+  gap: var(--space-2);
+}
+
+/* Uppercase eyebrows on the two filter controls: the labels are permanent
+   furniture, not content, and shrinking them is what buys the row its
+   density back. */
+.board-toolbar-label {
+  font-size: var(--font-size-xs);
+  font-weight: var(--font-weight-semibold);
+  letter-spacing: var(--letter-spacing-wide);
+  text-transform: uppercase;
+  color: var(--text-2);
 }
 
 .board-toolbar select,
 .board-toolbar input[type="search"] {
-  padding: 0.4rem 0.6rem;
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  background: var(--surface);
-  color: var(--text);
+  padding: var(--space-1) var(--space-2);
+  border: 1px solid var(--border-1);
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
+  color: var(--text-1);
   font: inherit;
+  font-size: var(--font-size-sm);
+  box-shadow: none;
+  transition: border-color var(--duration-fast) var(--ease-standard);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .board-toolbar select,
+  .board-toolbar input[type="search"] {
+    transition: none;
+  }
+}
+
+.board-toolbar select:hover,
+.board-toolbar input[type="search"]:hover {
+  border-color: var(--border-2);
+}
+
+/* The search field and its `/` hint share one box, so the hint reads as part
+   of the control rather than as a word floating beside it. */
+.board-search-field {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex: 1 1 16rem;
+  min-width: 12rem;
 }
 
 .board-search {
-  flex: 1 1 16rem;
-  min-width: 12rem;
+  flex: 1;
+  min-width: 0;
+}
+
+/* Keyboard hints. `Board` binds `/` and `n` at the window; before this they
+   lived in a placeholder and a `title=`, which is to say nowhere. */
+.board-kbd {
+  flex: none;
+  padding: 0.05rem var(--space-1);
+  min-width: 1.15rem;
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
+  box-shadow: inset 0 0 0 1px var(--border-1);
+  color: var(--text-2);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: var(--font-size-xs);
+  line-height: 1.4;
+  text-align: center;
+}
+
+.board-new-task {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  margin-left: auto;
+  padding: var(--space-1) var(--space-3);
+  font-size: var(--font-size-sm);
+}
+
+/* On the accent fill the chip is an outline, not a second surface: a tinted
+   ground here would put `--accent-contrast` on something that is neither the
+   accent nor the page, and the `.btn-primary` token pair is only guaranteed
+   to clear AA against the accent itself. */
+.board-new-task .board-kbd {
+  background: transparent;
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, currentColor 40%, transparent);
+  color: inherit;
 }
 
 /* Layout: the four columns, with the detail panel drawn over them. */
@@ -147,7 +264,7 @@
 .board-layout {
   display: flex;
   align-items: flex-start;
-  gap: 1rem;
+  gap: var(--space-4);
   flex: 1;
   min-height: 0;
   /* The containing block for `.task-detail-panel`'s `position: absolute` —
@@ -160,88 +277,249 @@
 .board-columns {
   display: grid;
   grid-template-columns: repeat(4, minmax(var(--board-column-min), 1fr));
-  gap: 0.75rem;
+  gap: var(--space-2);
   flex: 1;
   min-width: 0;
   /* A safety valve, not a working part: the arithmetic above leaves the grid
-     58px of slack at the narrowest supported window with the drawer open or
+     53px of slack at the narrowest supported window with the drawer open or
      closed. It stays because a scrollbar is a better answer than a clipped
      fourth column if a future row of chrome eats that slack. */
   overflow-x: auto;
 }
 
-/* Columns */
+/* Columns — a `--surface-1` header sitting over a `--surface-0` tray, with no
+   border on either. The card is `--surface-1` again, so it reads as lying
+   *in* the tray rather than flush with the column. */
 
 .board-column {
   display: flex;
   flex-direction: column;
   min-width: 0;
   max-height: var(--board-column-max-height);
-  background: var(--surface);
-  border: 1px solid var(--border);
-  border-radius: 8px;
+  border-radius: var(--radius-md);
+  background: var(--surface-0);
+  box-shadow: var(--shadow-sm);
   overflow: hidden;
+  transition: box-shadow var(--duration-base) var(--ease-standard);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .board-column {
+    transition: none;
+  }
+}
+
+/* The whole column lifts while it is the drop target, not only the tray
+   inside it — at 160px wide a wash on the tray alone is easy to miss when
+   the pointer is over a card near the top of it. */
+.board-column:has(.board-column-body-over) {
+  box-shadow: var(--shadow-md), 0 0 0 1px var(--accent);
 }
 
 .board-column-header {
   display: flex;
-  align-items: center;
+  flex-direction: column;
+  gap: var(--space-1);
+  padding: var(--space-2) var(--space-3) var(--space-3);
+  background: var(--surface-1);
+  box-shadow: inset 0 -1px 0 var(--border-1);
+}
+
+/* The one column the run queue actually consumes (ADR-0007: board order *is*
+   execution order) gets the accent edge, so "where work leaves from" is
+   visible before any card is read. */
+.board-column-ready .board-column-header {
+  box-shadow: inset 0 2px 0 var(--accent), inset 0 -1px 0 var(--border-1);
+}
+
+.board-column-heading {
+  display: flex;
+  align-items: baseline;
   justify-content: space-between;
-  gap: 0.5rem;
-  padding: 0.65rem 0.85rem;
-  border-bottom: 1px solid var(--border);
+  gap: var(--space-2);
 }
 
 .board-column-header h3 {
   margin: 0;
-  font-size: 0.85rem;
+  font-size: var(--font-size-xs);
+  font-weight: var(--font-weight-semibold);
+  letter-spacing: var(--letter-spacing-wide);
+  line-height: var(--line-height-tight);
+  text-transform: uppercase;
+  color: var(--text-2);
 }
 
+/* The count is the column's readout, so it gets `--font-size-lg` and tabular
+   figures — four of these in a row are meant to be comparable at a glance. */
 .board-column-count {
-  font-size: 0.75rem;
-  color: var(--text-muted);
-  background: var(--bg);
-  border-radius: 999px;
-  padding: 0.05rem 0.5rem;
+  flex: none;
+  font-size: var(--font-size-lg);
+  font-weight: var(--font-weight-semibold);
+  line-height: 1;
+  color: var(--text-1);
+}
+
+.board-column-note {
+  margin: 0;
+  font-size: var(--font-size-xs);
+  line-height: var(--line-height-tight);
+  color: var(--text-2);
+}
+
+/* The column's pulse: how many of its cards are in each state that is not
+   "nothing happening". Quiet by construction — it renders at most the three
+   most urgent kinds present (see `columnStats` in `Column.tsx`), so a healthy
+   board shows an empty line here rather than five chips of colour. */
+.board-column-stats {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--space-1) var(--space-3);
+  margin: 0;
+  font-size: var(--font-size-xs);
+  line-height: var(--line-height-tight);
+}
+
+.board-column-stat {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  white-space: nowrap;
+}
+
+.board-column-stat-running {
+  color: var(--status-running);
+}
+
+.board-column-stat-queued {
+  color: var(--text-2);
+}
+
+.board-column-stat-blocked {
+  color: var(--status-blocked);
+}
+
+.board-column-stat-waiting {
+  color: var(--status-waiting-retry);
+}
+
+.board-column-stat-failed {
+  color: var(--status-failed);
 }
 
 .board-column-body {
   display: flex;
   flex-direction: column;
-  gap: 0.5rem;
-  padding: 0.65rem;
+  gap: var(--space-2);
+  padding: var(--space-2);
   overflow-y: auto;
   flex: 1;
   min-height: 4rem;
-  transition: background-color 120ms ease;
+  transition: background-color var(--duration-base) var(--ease-standard),
+    box-shadow var(--duration-base) var(--ease-standard);
 }
 
+@media (prefers-reduced-motion: reduce) {
+  .board-column-body {
+    transition: none;
+  }
+}
+
+/* The drop target, made unmistakable: an accent wash *and* an inset ring the
+   full height of the tray, so the answer to "will it land here" does not
+   depend on noticing a 4% background shift. */
 .board-column-body-over {
-  background: color-mix(in srgb, var(--accent) 8%, transparent);
+  background: var(--accent-soft);
+  box-shadow: inset 0 0 0 2px var(--accent);
 }
 
 .board-column-empty {
-  margin: 0.5rem 0;
-  padding: 0.75rem;
-  color: var(--text-muted);
-  font-size: 0.85rem;
+  margin: 0;
+  padding: var(--space-4) var(--space-3);
+  color: var(--text-2);
+  font-size: var(--font-size-xs);
+  line-height: var(--line-height-relaxed);
   text-align: center;
-  border: 1px dashed var(--border);
-  border-radius: 6px;
+  border: 1px dashed var(--border-2);
+  border-radius: var(--radius-sm);
 }
 
-/* Cards */
+.board-column-body-over .board-column-empty {
+  border-color: var(--accent);
+  color: var(--text-1);
+}
+
+/* Cards — the densest surface in the app, and the one most looked at.
+   Reading order top to bottom: state (badge, plus the rail down the left
+   edge), title, why it is stuck, what it would run as, when it last moved,
+   what it would do next. */
 
 .task-card {
-  display: block;
+  /* Set per run state below; `transparent` is the resting/idle card. */
+  --card-rail: transparent;
+
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
   width: 100%;
-  padding: 0.6rem 0.75rem;
-  background: var(--bg);
-  border: 1px solid var(--border);
-  border-radius: 6px;
+  padding: var(--space-2) var(--space-3);
+  background: var(--surface-1);
+  border-radius: var(--radius-sm);
+  /* The rail is an inset shadow rather than a border-left so it follows the
+     radius and costs the content no width. */
+  box-shadow: inset 3px 0 0 var(--card-rail), var(--shadow-sm);
   cursor: grab;
   text-align: left;
   touch-action: none; /* dnd-kit's pointer sensor owns touch gestures here */
+  transition: background-color var(--duration-fast) var(--ease-standard),
+    box-shadow var(--duration-fast) var(--ease-standard),
+    transform var(--duration-fast) var(--ease-standard);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .task-card {
+    transition: none;
+  }
+}
+
+/* A card the eye should land on: running and failed get the rail *and* a wash
+   of the same accent, so they are separable from a resting card without
+   reading anything. The other states carry the rail alone — eight washed
+   states in one column would be noise, which is the failure mode the badge
+   tiers above are also written against. */
+.task-card[data-run-state="running"] {
+  --card-rail: var(--status-running);
+  background: color-mix(in srgb, var(--status-running) 7%, var(--surface-1));
+}
+
+.task-card[data-run-state="queued"] {
+  --card-rail: var(--status-queued);
+}
+
+.task-card[data-run-state="blocked"] {
+  --card-rail: var(--status-blocked);
+}
+
+.task-card[data-run-state="waiting_retry"] {
+  --card-rail: var(--status-waiting-retry);
+}
+
+.task-card[data-run-state="cancelled"] {
+  --card-rail: var(--text-3);
+}
+
+.task-card[data-run-state="failed"],
+.task-card[data-run-state="interrupted"] {
+  --card-rail: var(--status-failed);
+  background: color-mix(in srgb, var(--status-failed) 7%, var(--surface-1));
+}
+
+/* Declared after the run-state variants above, and at the same specificity, so
+   a hovered or selected running card actually changes surface rather than
+   losing the cascade to its own state tint. */
+.task-card:hover {
+  background: var(--surface-2);
+  box-shadow: inset 3px 0 0 var(--card-rail), var(--shadow-md);
 }
 
 .task-card:focus-visible {
@@ -250,48 +528,119 @@
 }
 
 .task-card-dragging {
-  opacity: 0.5;
+  opacity: 0.4;
 }
 
-.task-card-selected {
-  border-color: var(--accent);
-  box-shadow: 0 0 0 1px var(--accent);
+.task-card.task-card-selected {
+  background: var(--accent-soft);
+  box-shadow: inset 3px 0 0 var(--card-rail), 0 0 0 1px var(--accent),
+    var(--shadow-md);
 }
 
-.task-card-overlay {
+/* The floating clone. It must not read differently from the card it left
+   behind — same face, same rail, same state attribute — so all it adds is
+   the elevation that says it is off the page. */
+.task-card.task-card-overlay {
   cursor: grabbing;
-  box-shadow: 0 8px 20px rgb(0 0 0 / 0.18);
+  box-shadow: inset 3px 0 0 var(--card-rail), var(--shadow-lg);
+  transform: rotate(-0.6deg);
 }
 
-.task-card-title {
-  margin: 0 0 0.35rem;
-  font-size: 0.9rem;
-  font-weight: 600;
+@media (prefers-reduced-motion: reduce) {
+  .task-card-overlay {
+    transform: none;
+  }
 }
 
-.task-card-meta {
+/* The eyebrow: state on the right, where the badge is the widest and most
+   colourful thing on the card, and the repository on the left as a quiet
+   monospace tag. */
+.task-card-head {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 0.5rem;
+  gap: var(--space-2);
+  min-height: 1.1rem;
 }
 
 .task-card-repo {
-  font-size: 0.75rem;
-  color: var(--text-muted);
+  min-width: 0;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: var(--font-size-xs);
+  color: var(--text-2);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.task-card-title {
+  margin: 0;
+  font-size: var(--font-size-md);
+  font-weight: var(--font-weight-semibold);
+  line-height: var(--line-height-tight);
+  color: var(--text-1);
+  overflow-wrap: anywhere;
+  /* Three lines, then an ellipsis: a card whose title is a paragraph must not
+     push the rest of the column off the screen. The whole title is still
+     readable in the drawer, and in the `title=` attribute. */
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+  line-clamp: 3;
+  overflow: hidden;
+}
+
+/* Strategy chips (task 020) — what a run would actually spawn with, and
+   whether a planner proposal is waiting on the user. */
+
+.task-card-strategy {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--space-1);
+}
+
+.task-card-strategy-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 0 var(--space-1);
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
+  box-shadow: inset 0 0 0 1px var(--border-1);
+  color: var(--text-2);
+  font-size: var(--font-size-xs);
+  font-weight: var(--font-weight-medium);
+}
+
+/* An inherited value is still what runs, but it is not a decision anybody
+   made about *this* card, so it drops the box and reads as plain text. */
+.task-card-strategy-badge.muted {
+  margin: 0;
+  background: transparent;
+  box-shadow: none;
+  color: var(--text-2);
+  font-weight: var(--font-weight-regular);
+}
+
+.task-card-strategy-proposal {
+  display: inline-flex;
+  align-items: center;
+  padding: 0 var(--space-1);
+  border-radius: var(--radius-sm);
+  background: var(--accent-soft);
+  box-shadow: inset 0 0 0 1px var(--accent);
+  color: var(--accent);
+  font-size: var(--font-size-xs);
+  font-weight: var(--font-weight-semibold);
 }
 
 .task-card-footer {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 0.5rem;
-  margin-top: 0.4rem;
-  font-size: 0.75rem;
-  color: var(--text-muted);
+  gap: var(--space-2);
+  font-size: var(--font-size-xs);
+  color: var(--text-2);
 }
 
 .task-card-time {
@@ -310,7 +659,7 @@
 .task-card-indicators {
   display: flex;
   align-items: center;
-  gap: 0.5rem;
+  gap: var(--space-2);
   flex-shrink: 0;
 }
 
@@ -318,94 +667,178 @@
   white-space: nowrap;
 }
 
-/* Run-state badges — each state its own colour so the set stays
-   distinguishable at a glance; `running` additionally pulses (task 005:
-   "running (animated)"). Failed and interrupted deliberately reuse the
-   shared danger tokens from styles.css rather than a badge-specific one:
-   both are the same severity, and the word (not the colour) is what tells
-   them apart per D9. */
+/* Run-state badges — `.status-dot` plus a word, per THE DIRECTION, graded by
+   emphasis rather than by hue (see this file's own header for the three tiers
+   and why greyscale still separates them).
+
+   `--badge-tone` is the dot's colour; `color` is the word's. They differ on
+   the bare tier, where the word has to clear AA against the card surface and
+   the dot only has to be findable. */
 
 .run-badge {
+  --badge-tone: var(--status-queued);
+
   display: inline-flex;
   align-items: center;
-  padding: 0.1rem 0.5rem;
-  border-radius: 999px;
-  font-size: 0.7rem;
-  font-weight: 600;
+  gap: var(--space-1);
+  flex: none;
+  padding: 0.05rem var(--space-2) 0.05rem var(--space-1);
+  border: 1px solid transparent;
+  border-radius: var(--radius-full);
+  color: var(--text-2);
+  font-size: var(--font-size-xs);
+  font-weight: var(--font-weight-semibold);
+  letter-spacing: 0.04em;
   text-transform: uppercase;
-  letter-spacing: 0.02em;
   white-space: nowrap;
 }
 
+/* Smaller than the 0.5rem `.status-dot` default: inside a pill this size a
+   half-rem dot reads as a bullet rather than as an indicator. */
+.run-badge .status-dot {
+  width: 0.4375rem;
+  height: 0.4375rem;
+  color: var(--badge-tone);
+}
+
 .run-badge-running {
+  --badge-tone: var(--status-running);
   background: var(--badge-running-bg);
   color: var(--badge-running-text);
 }
 
 .run-badge-queued {
-  background: var(--badge-queued-bg);
-  color: var(--badge-queued-text);
+  --badge-tone: var(--status-queued);
+  color: var(--text-2);
 }
 
 .run-badge-blocked {
+  --badge-tone: var(--status-blocked);
   background: var(--badge-blocked-bg);
   color: var(--badge-blocked-text);
 }
 
 .run-badge-waiting_retry {
+  --badge-tone: var(--status-waiting-retry);
   background: var(--badge-waiting-retry-bg);
   color: var(--badge-waiting-retry-text);
 }
 
+/* The only badges with a border, and the only ones on a fully saturated
+   ground: ADR-0007's failure rule is that a failure interrupts the review.
+   `failed` and `interrupted` share the treatment deliberately — same
+   severity, and per D9 the word is what tells them apart. */
+.run-badge-failed,
+.run-badge-interrupted {
+  --badge-tone: var(--status-failed);
+  background: var(--danger-bg);
+  border-color: var(--danger-border);
+  color: var(--danger-text);
+}
+
+/* The settled state: no fill, a dashed edge and a hollow dot. Its colours are
+   otherwise near-identical to `queued`'s, and "outlined, not filled" reads as
+   inactive in greyscale the same way it does in colour. */
 .run-badge-cancelled {
-  background: var(--badge-cancelled-bg);
-  color: var(--badge-cancelled-text);
+  --badge-tone: var(--text-2);
+  border-color: var(--border-2);
+  border-style: dashed;
+  color: var(--text-2);
+}
+
+.run-badge-cancelled .status-dot {
+  background: transparent;
+  box-shadow: inset 0 0 0 1px currentColor;
 }
 
 /* The resume time on a `waiting_retry` badge (task 014). Lighter than the
    label it follows, because the badge answers "what state" first and "when"
    second — and the two have to stay one pill so they wrap together. */
 .run-badge-detail {
-  font-weight: 500;
+  font-weight: var(--font-weight-medium);
+  letter-spacing: 0;
+  text-transform: none;
   opacity: 0.85;
 }
 
-.run-badge-failed,
-.run-badge-interrupted {
-  background: var(--danger-bg);
+/* "Blocked by" (ADR-0008, task 011) — a sentence about why a card is not
+   moving, in the blocked badge's own colour so it and the badge a few pixels
+   above read as one statement. `anywhere` because a task title is arbitrary
+   text and a long one must wrap rather than widen the column. */
+.task-card-blocked-by {
+  margin: 0;
+  font-size: var(--font-size-xs);
+  line-height: var(--line-height-tight);
+  color: var(--badge-blocked-text);
+  overflow-wrap: anywhere;
+}
+
+/* The action row (task 008's "Run now", task 009's queue position). "Run now"
+   overrides a decision the scheduler is already making, so it is a *quiet*
+   control that fills in on hover — a full-width accent button repeated down
+   every card in four columns was the single loudest thing on the board and
+   said nothing about the task it sat on. */
+
+.task-card-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: var(--space-2);
+}
+
+/* ADR-0012's whole posture depends on the queue's reasoning being visible
+   rather than silent, so the position is a readout, not a caption: tabular
+   figures, and the same weight as the button beside it. */
+.task-card-queue-position {
+  margin-right: auto;
+  font-size: var(--font-size-xs);
+  font-weight: var(--font-weight-medium);
+  color: var(--text-2);
+}
+
+.task-card-run-button {
+  padding: 0.05rem var(--space-2);
+  border-color: var(--border-1);
+  background: transparent;
+  box-shadow: none;
+  color: var(--text-2);
+  font-size: var(--font-size-xs);
+  font-weight: var(--font-weight-semibold);
+}
+
+.task-card-run-button:hover:not(:disabled) {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+/* Why it is disabled, or the error a click came back with — a courtesy
+   explanation directly under the control it describes, not a paragraph in
+   the flow. */
+/* Scoped to `.task-card` only to out-specify `.muted`'s own stacked-paragraph
+   bottom margin (settings.css, which `styles.css` imports after this file) —
+   these sit directly under the control they explain, not in a flow. */
+.task-card .task-card-run-locked,
+.task-card .task-card-run-error,
+.task-card .task-card-queue-skip {
+  margin: 0;
+  font-size: var(--font-size-xs);
+  line-height: var(--line-height-tight);
+  overflow-wrap: anywhere;
+}
+
+.task-card-run-error {
   color: var(--danger-text);
-}
-
-.run-badge-running::before {
-  content: "";
-  display: inline-block;
-  width: 6px;
-  height: 6px;
-  margin-right: 0.35em;
-  border-radius: 50%;
-  background: currentColor;
-  animation: run-badge-pulse 1.4s ease-in-out infinite;
-}
-
-@keyframes run-badge-pulse {
-  0%,
-  100% {
-    opacity: 1;
-  }
-  50% {
-    opacity: 0.25;
-  }
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .run-badge-running::before {
-    animation: none;
-  }
 }
 
 /* Task detail panel — an overlay drawer over the board's top-right corner,
    not a column of its own. See the width arithmetic in `:root` above for
-   why, and `TaskDetailPanel.tsx` for why it is deliberately not a modal. */
+   why, and `TaskDetailPanel.tsx` for why it is deliberately not a modal.
+
+   Two regions, not one scroll: a sticky header carrying the title and the
+   three facts that identify the task, and a scrolling body underneath. Ten
+   sections in a flat stack gave no answer to "where am I" once the plan
+   textarea had scrolled the title away. */
 
 .task-detail-panel {
   position: absolute;
@@ -414,14 +847,12 @@
   width: min(46rem, calc(100% - 12rem));
   max-height: var(--board-column-max-height);
   overflow-y: auto;
-  background: var(--surface);
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  padding: 1rem 1.25rem;
+  background: var(--surface-1);
+  border-radius: var(--radius-lg);
   /* Opaque surface plus a shadow: the columns are still painted underneath,
      and the drawer has to read as being in front of them rather than as a
      panel that has swallowed them. */
-  box-shadow: var(--drawer-shadow);
+  box-shadow: var(--drawer-shadow), var(--shadow-lg);
 }
 
 .task-detail-panel:focus {
@@ -433,25 +864,96 @@
 }
 
 .task-detail-header {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  padding: var(--space-3) var(--space-5);
+  /* A raised row over the panel's own `--surface-1`, and opaque so the body
+     scrolls underneath it rather than through it. */
+  background: var(--surface-2);
+  box-shadow: inset 0 -1px 0 var(--border-1);
+}
+
+.task-detail-title-row {
   display: flex;
   align-items: flex-start;
   justify-content: space-between;
-  gap: 0.75rem;
-  margin-bottom: 0.75rem;
+  gap: var(--space-3);
 }
 
-.task-detail-header h3 {
-  margin: 0;
+/* The "Esc" affordance beside the title — a courtesy label for the same key
+   `Board`'s own handler already closes the panel on, not the only way to
+   close it, so it stays small and quiet rather than reading as the primary
+   action on the panel. */
+.task-detail-close {
+  flex-shrink: 0;
+  padding: 0 var(--space-2);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: var(--font-size-xs);
+  font-weight: var(--font-weight-medium);
+  color: var(--text-2);
+  background: var(--surface-3);
+  border-color: var(--border-1);
+  box-shadow: none;
+}
+
+.task-detail-close:hover {
+  border-color: var(--accent);
+  color: var(--text-1);
+}
+
+/* The identity readout: repository, column, run state, side by side as
+   labelled fields rather than a two-column `<dl>` that spent a third of the
+   drawer's width on the words "Repository" and "Run state". */
+.task-detail-readout {
+  display: flex;
+  align-items: flex-start;
+  flex-wrap: wrap;
+  gap: var(--space-2) var(--space-5);
+}
+
+.task-detail-readout-field {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  min-width: 0;
+}
+
+.task-detail-readout-label {
+  font-size: var(--font-size-xs);
+  font-weight: var(--font-weight-semibold);
+  letter-spacing: var(--letter-spacing-wide);
+  text-transform: uppercase;
+  color: var(--text-2);
+}
+
+.task-detail-readout-value {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  font-size: var(--font-size-sm);
+  color: var(--text-1);
+}
+
+/* A refused reassignment (seam-contract D13) is a whole sentence, and the
+   banner under it is a whole block — neither belongs on the same line as the
+   control, so both take a row of their own inside the wrapping field. */
+.task-detail-readout-value > .error-banner,
+.task-detail-readout-value > .repository-locked {
+  flex-basis: 100%;
+}
+
+.task-detail-body {
+  padding: 0 var(--space-5) var(--space-5);
 }
 
 .task-detail-note {
-  font-size: 0.85rem;
+  font-size: var(--font-size-sm);
 }
-
-/* Task detail panel, stage 3's build-out. Everything below extends stage
-   2's panel shell above rather than replacing it — `.task-detail-panel`,
-   `.task-detail-header` and `.task-detail-note` stay exactly as written
-   there. */
 
 .task-detail-title {
   flex: 1;
@@ -461,19 +963,29 @@
 .task-detail-title-input {
   width: 100%;
   font: inherit;
-  font-size: 1.05rem;
-  font-weight: 600;
-  padding: 0.2rem 0.3rem;
+  font-size: var(--font-size-lg);
+  font-weight: var(--font-weight-semibold);
+  line-height: var(--line-height-tight);
+  padding: var(--space-1) var(--space-2);
   border: 1px solid transparent;
-  border-radius: 6px;
+  border-radius: var(--radius-sm);
   background: transparent;
-  color: var(--text);
+  color: var(--text-1);
+  box-shadow: none;
+  transition: border-color var(--duration-fast) var(--ease-standard),
+    background-color var(--duration-fast) var(--ease-standard);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .task-detail-title-input {
+    transition: none;
+  }
 }
 
 .task-detail-title-input:hover,
 .task-detail-title-input:focus {
-  border-color: var(--border);
-  background: var(--bg);
+  border-color: var(--border-1);
+  background: var(--surface-1);
 }
 
 /* Repository selector (seam-contract D13) — its own class rather than
@@ -483,70 +995,139 @@
 .repository-select {
   max-width: 100%;
   font: inherit;
-  padding: 0.3rem 0.45rem;
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  background: var(--surface);
-  color: var(--text);
+  font-size: var(--font-size-sm);
+  padding: var(--space-1) var(--space-2);
+  border: 1px solid var(--border-1);
+  border-radius: var(--radius-sm);
+  background: var(--surface-1);
+  color: var(--text-1);
+  box-shadow: none;
 }
 
 .repository-select:disabled {
-  color: var(--text-muted);
+  color: var(--text-2);
   cursor: not-allowed;
 }
 
-.repository-saving {
-  margin-left: 0.5rem;
-  font-size: 0.8rem;
+/* Same `.muted` out-specifying as the card's own explanation lines above. */
+.task-detail-panel .repository-saving {
+  margin: 0;
+  font-size: var(--font-size-sm);
 }
 
 /* Why it is disabled. `.muted` (settings.css) carries a bottom margin meant
    for paragraphs stacked in a panel; this one sits directly under its own
    control. */
-.repository-locked {
-  margin: 0.35rem 0 0;
-  font-size: 0.8rem;
+.task-detail-panel .repository-locked {
+  margin: 0;
+  font-size: var(--font-size-xs);
   overflow-wrap: anywhere;
 }
 
+/* The ten sections, in three bands.
+
+   A flat stack of ten identically-weighted sections made every one of them
+   look equally likely to be the thing you opened the drawer for. They are
+   not: at 18:30 the user is writing a plan and its dependencies, at 08:00
+   they are reading what a run did, and the worktree and the delete button are
+   neither. Grouping them under three eyebrow rules is the smallest change
+   that says so — nothing is hidden, nothing needs a click to reach, and the
+   scroll position now means something.
+
+   Collapsing was the alternative and was rejected: a `<details>` that
+   remembers nothing reopens closed every time the panel remounts (it remounts
+   on every task switch, by `key`), so the user would pay a click per visit
+   for sections they read every morning. */
+
+.task-detail-band {
+  margin-top: var(--space-5);
+}
+
+.task-detail-band-label {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  margin: 0 0 var(--space-3);
+  font-size: var(--font-size-xs);
+  font-weight: var(--font-weight-semibold);
+  letter-spacing: var(--letter-spacing-wide);
+  text-transform: uppercase;
+  color: var(--text-2);
+}
+
+/* The rule runs from the label to the panel edge, which is what makes three
+   bands read as three groups rather than as three more headings. */
+.task-detail-band-label::after {
+  content: "";
+  flex: 1;
+  height: 1px;
+  background: var(--border-1);
+}
+
+/* The shared shell every section renders `<section className=
+   "task-detail-section">` into (`PlanEditor`, `LinksEditor`,
+   `DependenciesEditor`, `StrategySection`, `RunInfoSection`,
+   `RunOutcomeSection`, `RetrySection`, `RunHistorySection`,
+   `WorktreeSection`, `DeleteTaskSection`). Styled once here so every section
+   inherits it rather than each redeclaring the same rule. */
+
 .task-detail-section {
-  margin-top: 1.1rem;
-  padding-top: 1.1rem;
-  border-top: 1px solid var(--border);
+  margin-top: var(--space-4);
+  padding-top: var(--space-4);
+  box-shadow: inset 0 1px 0 var(--border-1);
+}
+
+/* The band label is already the divider above the first section in each
+   band; a second rule 12px under it reads as an empty row. */
+.task-detail-band > .task-detail-section:first-of-type {
+  margin-top: 0;
+  padding-top: 0;
+  box-shadow: none;
 }
 
 .task-detail-section h4 {
-  margin: 0 0 0.5rem;
-  font-size: 0.8rem;
-  color: var(--text-muted);
-  text-transform: uppercase;
-  letter-spacing: 0.03em;
+  margin: 0 0 var(--space-2);
+  font-size: var(--font-size-sm);
+  font-weight: var(--font-weight-semibold);
+  color: var(--text-1);
 }
 
 .task-detail-panel textarea,
 .task-detail-panel input[type="text"] {
   width: 100%;
   font: inherit;
-  padding: 0.5rem 0.6rem;
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  background: var(--bg);
-  color: var(--text);
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--border-1);
+  border-radius: var(--radius-sm);
+  background: var(--surface-0);
+  color: var(--text-1);
+  transition: border-color var(--duration-fast) var(--ease-standard);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .task-detail-panel textarea,
+  .task-detail-panel input[type="text"] {
+    transition: none;
+  }
+}
+
+.task-detail-panel textarea:hover,
+.task-detail-panel input[type="text"]:hover {
+  border-color: var(--border-2);
 }
 
 /* The plan editor: the tallest control on the board by design — task 005
    requires a 400-line plan to be "comfortable to write and read" here, not
    a one-line input. Monospace so Markdown syntax (headings, lists, fences)
    stays visually aligned while writing it; a human should judge the actual
-   comfort of this against a real 400-line plan (see the panel agent's
-   return value) — jsdom cannot. */
+   comfort of this against a real 400-line plan — jsdom cannot. */
 
 .plan-editor-header {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 0.5rem;
-  margin-bottom: 0.5rem;
+  gap: var(--space-2);
+  margin-bottom: var(--space-2);
 }
 
 .plan-editor-header h4 {
@@ -556,25 +1137,25 @@
 .plan-editor-toolbar {
   display: flex;
   align-items: center;
-  gap: 0.6rem;
+  gap: var(--space-3);
 }
 
 .plan-editor-textarea {
   min-height: 22rem;
   resize: vertical;
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-  font-size: 0.85rem;
-  line-height: 1.5;
+  font-size: var(--font-size-sm);
+  line-height: var(--line-height-relaxed);
 }
 
 .plan-preview {
   min-height: 22rem;
   max-height: 34rem;
   overflow-y: auto;
-  padding: 0.75rem 0.9rem;
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  background: var(--bg);
+  padding: var(--space-3) var(--space-4);
+  border-radius: var(--radius-sm);
+  background: var(--surface-0);
+  line-height: var(--line-height-relaxed);
 }
 
 .plan-preview :first-child {
@@ -594,21 +1175,21 @@
 
 .links-list {
   list-style: none;
-  margin: 0 0 0.75rem;
+  margin: 0 0 var(--space-3);
   padding: 0;
   display: flex;
   flex-direction: column;
-  gap: 0.5rem;
+  gap: var(--space-1);
 }
 
 .link-item {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 0.5rem;
-  padding: 0.4rem 0.55rem;
-  border: 1px solid var(--border);
-  border-radius: 6px;
+  gap: var(--space-2);
+  padding: var(--space-1) var(--space-3);
+  border-radius: var(--radius-sm);
+  background: var(--surface-0);
   flex-wrap: wrap;
 }
 
@@ -619,18 +1200,19 @@
 
 .link-item-actions {
   display: flex;
-  gap: 0.3rem;
+  gap: var(--space-1);
   flex-shrink: 0;
 }
 
 .link-item-actions button {
-  padding: 0.2rem 0.5rem;
-  font-size: 0.8rem;
+  padding: 0.05rem var(--space-2);
+  font-size: var(--font-size-xs);
+  box-shadow: none;
 }
 
 .link-add-form {
   display: flex;
-  gap: 0.4rem;
+  gap: var(--space-2);
   flex-wrap: wrap;
 }
 
@@ -641,26 +1223,25 @@
 /* Dependencies (ADR-0008, task 011) — deliberately the same shell as the links
    list above, because they are the same kind of thing: a short list of rows,
    each with its own remove button, plus one add form underneath. The one
-   addition is a resolved-status word per edge, which is what task 011's Scope
-   asks this list to show and what the links list has no equivalent of. */
+   addition is a resolved-status word per edge. */
 
 .dependency-list {
   list-style: none;
-  margin: 0 0 0.75rem;
+  margin: 0 0 var(--space-3);
   padding: 0;
   display: flex;
   flex-direction: column;
-  gap: 0.5rem;
+  gap: var(--space-1);
 }
 
 .dependency-item {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 0.5rem;
-  padding: 0.4rem 0.55rem;
-  border: 1px solid var(--border);
-  border-radius: 6px;
+  gap: var(--space-2);
+  padding: var(--space-1) var(--space-3);
+  border-radius: var(--radius-sm);
+  background: var(--surface-0);
   flex-wrap: wrap;
 }
 
@@ -670,7 +1251,10 @@
 }
 
 .dependency-status {
-  font-size: 0.75rem;
+  font-size: var(--font-size-xs);
+  font-weight: var(--font-weight-semibold);
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
   flex-shrink: 0;
 }
 
@@ -688,18 +1272,19 @@
 
 .dependency-item-actions {
   display: flex;
-  gap: 0.3rem;
+  gap: var(--space-1);
   flex-shrink: 0;
 }
 
 .dependency-item-actions button {
-  padding: 0.2rem 0.5rem;
-  font-size: 0.8rem;
+  padding: 0.05rem var(--space-2);
+  font-size: var(--font-size-xs);
+  box-shadow: none;
 }
 
 .dependency-add-form {
   display: flex;
-  gap: 0.4rem;
+  gap: var(--space-2);
   flex-wrap: wrap;
 }
 
@@ -707,31 +1292,114 @@
   flex: 1 1 10rem;
 }
 
-/* Model & effort — plain dropdowns until task 020 (ADR-0016); see
-   `ModelEffortOverrides`'s own doc comment. */
+/* Execution strategy (ADR-0016, task 020) — mode/model/effort dropdowns, the
+   planner's own proposal underneath them, and what to do about it. */
 
 .model-effort-row {
   display: flex;
   align-items: center;
-  gap: 1rem;
+  gap: var(--space-4);
   flex-wrap: wrap;
 }
 
 .model-effort-row label {
   display: flex;
   flex-direction: column;
-  gap: 0.2rem;
-  font-size: 0.8rem;
-  color: var(--text-muted);
+  gap: var(--space-1);
+  font-size: var(--font-size-xs);
+  font-weight: var(--font-weight-semibold);
+  letter-spacing: var(--letter-spacing-wide);
+  text-transform: uppercase;
+  color: var(--text-2);
 }
 
 .model-effort-row select {
   font: inherit;
-  padding: 0.35rem 0.5rem;
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  background: var(--surface);
-  color: var(--text);
+  font-size: var(--font-size-sm);
+  letter-spacing: normal;
+  text-transform: none;
+  padding: var(--space-1) var(--space-2);
+  border: 1px solid var(--border-1);
+  border-radius: var(--radius-sm);
+  background: var(--surface-1);
+  color: var(--text-1);
+  box-shadow: none;
+}
+
+.strategy-effective {
+  font-size: var(--font-size-sm);
+}
+
+.strategy-field {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+
+.strategy-hint {
+  margin: var(--space-2) 0 0;
+  font-size: var(--font-size-sm);
+  overflow-wrap: anywhere;
+}
+
+.strategy-failure {
+  margin-top: var(--space-3);
+  padding: var(--space-3);
+  border-radius: var(--radius-sm);
+  background: var(--warn-bg);
+  box-shadow: inset 0 0 0 1px var(--warn-border);
+}
+
+.strategy-failure-message {
+  margin: 0 0 var(--space-2);
+  color: var(--warn-text);
+}
+
+.strategy-proposal {
+  margin-top: var(--space-3);
+  padding: var(--space-3) var(--space-4);
+  border-radius: var(--radius-sm);
+  background: var(--surface-0);
+}
+
+.strategy-proposal-status {
+  margin: 0 0 var(--space-2);
+  font-size: var(--font-size-sm);
+  font-weight: var(--font-weight-medium);
+}
+
+.strategy-rationale {
+  margin: 0 0 var(--space-3);
+  color: var(--text-2);
+}
+
+.strategy-phases {
+  width: 100%;
+  margin: var(--space-3) 0;
+  border-collapse: collapse;
+  font-size: var(--font-size-sm);
+}
+
+.strategy-phases th,
+.strategy-phases td {
+  padding: var(--space-1) var(--space-2);
+  text-align: left;
+  box-shadow: inset 0 -1px 0 var(--border-1);
+}
+
+.strategy-phases th {
+  color: var(--text-2);
+  font-size: var(--font-size-xs);
+  font-weight: var(--font-weight-semibold);
+  letter-spacing: var(--letter-spacing-wide);
+  text-transform: uppercase;
+}
+
+.strategy-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  margin-top: var(--space-3);
 }
 
 /* Delete — the confirm step reuses `.btn-danger` from settings.css (global,
@@ -744,115 +1412,45 @@
 
 .task-detail-delete-confirm {
   width: 100%;
-  padding: 0.75rem 0.9rem;
-  border: 1px solid var(--danger-border);
-  border-radius: 8px;
+  padding: var(--space-3) var(--space-4);
+  border-radius: var(--radius-md);
   background: var(--danger-bg);
+  box-shadow: inset 0 0 0 1px var(--danger-border);
 }
 
 .task-detail-delete-confirm p {
-  margin: 0 0 0.6rem;
+  margin: 0 0 var(--space-3);
   color: var(--danger-text);
-  font-weight: 500;
+  font-weight: var(--font-weight-medium);
 }
 
 .task-detail-delete-actions {
   display: flex;
   justify-content: flex-end;
-  gap: 0.5rem;
+  gap: var(--space-2);
 }
 
-/* "Run now" (task 008) — a nested control inside `.task-card`, isolated from
-   the card's own drag/select handling (see `TaskCard.tsx`'s own comment on
-   why every listener here calls `stopPropagation`). */
+/* Run outcome (task 008) — the six ADR-0011 exit classes. `success` has its
+   own token pair (declared with the badge tokens at the top of this file);
+   the rest reuse the severities the run-state badges already assigned, and
+   the same three-tier grading: a dead end is filled and outlined, a
+   still-recoverable state is washed, a cancelled one is a dashed outline.
 
-.task-card-run {
-  margin-top: 0.5rem;
-}
-
-.task-card-run-button {
-  font-size: 0.8rem;
-  padding: 0.3rem 0.6rem;
-}
-
-/* Why it is disabled, or the error a click came back with — same shape as
-   `.repository-locked`/`.worktree-locked` above: a courtesy explanation
-   directly under the control it describes, not a paragraph in the flow. */
-.task-card-run-locked,
-.task-card-run-error {
-  margin: 0.35rem 0 0;
-  font-size: 0.75rem;
-  overflow-wrap: anywhere;
-}
-
-.task-card-run-error {
-  color: var(--danger-text);
-}
-
-/* Queued position (task 009) — sits between the card face and "Run now",
-   same shape as `.task-card-run-locked`/`.task-card-run-error` above: a
-   short line of text, not a second badge system. `.task-card-indicator`
-   (already defined above, in the footer's flex row) is reused standalone
-   here rather than duplicated - it is already just padding-free text with
-   no wrapping, which reads fine outside that row too. */
-
-.task-card-queue {
-  margin-top: 0.35rem;
-}
-
-.task-card-queue-position {
-  color: var(--text-muted);
-  font-size: 0.75rem;
-}
-
-.task-card-queue-skip {
-  margin: 0;
-  font-size: 0.75rem;
-  overflow-wrap: anywhere;
-}
-
-/* Blocked by (ADR-0008, task 011) — the same short-line treatment as
-   `.task-card-queue-skip` above, deliberately: this is a sentence about why a
-   card is not moving, which is the same kind of thing. It takes the blocked
-   badge's own colour rather than the muted grey, because unlike a skip reason
-   the user usually has to act on it - and because the `Blocked` badge is
-   already drawn a few lines above in that colour, so the two read as one
-   statement. `anywhere` for the same reason: a task title is arbitrary text and
-   a long one must wrap rather than widen the column. */
-.task-card-blocked-by {
-  margin: 0.35rem 0 0;
-  font-size: 0.75rem;
-  color: var(--badge-blocked-text);
-  overflow-wrap: anywhere;
-}
-
-/* Run outcome (task 008) — extends `.task-detail-section`'s shell above.
-   New tokens for the six ADR-0011 exit classes: `success` gets its own
-   (nothing in the app has needed a positive/green token before this); the
-   rest reuse the severities `.run-badge-*` above already assigned — a
-   "still recoverable" state reuses the waiting-retry amber, and the two
-   dead-end states reuse the shared danger tokens from styles.css, same as
-   `.run-badge-failed`/`.run-badge-interrupted` do for the same reason (D9:
-   the word carries the distinction, not the colour). */
-:root {
-  --exit-success-bg: #dcf5e3;
-  --exit-success-text: #157a3d;
-}
-
-@media (prefers-color-scheme: dark) {
-  :root {
-    --exit-success-bg: #163b25;
-    --exit-success-text: #7fd99b;
-  }
-}
+   Also read by `runs.css`'s views (`RunDetailOverlay`, `SessionOutcomesList`,
+   `RunsView`), which is why the class names and their token pairs are
+   unchanged here — task F owns how those views arrange them. */
 
 .exit-class-badge {
   display: inline-flex;
   align-items: center;
-  padding: 0.1rem 0.5rem;
-  border-radius: 999px;
-  font-size: 0.75rem;
-  font-weight: 600;
+  padding: 0.05rem var(--space-2);
+  border: 1px solid transparent;
+  border-radius: var(--radius-full);
+  font-size: var(--font-size-xs);
+  font-weight: var(--font-weight-semibold);
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  white-space: nowrap;
 }
 
 .exit-class-success {
@@ -869,12 +1467,14 @@
 .exit-class-interrupted,
 .exit-class-fatal {
   background: var(--danger-bg);
+  border-color: var(--danger-border);
   color: var(--danger-text);
 }
 
 .exit-class-cancelled {
-  background: var(--badge-cancelled-bg);
-  color: var(--badge-cancelled-text);
+  background: transparent;
+  border: 1px dashed var(--border-2);
+  color: var(--text-2);
 }
 
 .run-outcome-error {
@@ -883,16 +1483,15 @@
 
 .run-outcome-actions {
   display: flex;
-  margin-top: 0.5rem;
+  margin-top: var(--space-3);
 }
 
-/* Worktree (task 007) — extends `.task-detail-section`'s shell above rather
-   than replacing it. */
+/* Worktree (task 007) */
 
 .worktree-actions {
   display: flex;
-  gap: 0.5rem;
-  margin-top: 0.5rem;
+  gap: var(--space-2);
+  margin-top: var(--space-3);
 }
 
 /* ADR-0008's multi-dependency warning. The waiting-retry amber rather than the
@@ -901,8 +1500,8 @@
    the same "still recoverable, act on it" severity `.run-badge-waiting_retry`
    already carries. */
 .worktree-dependency-warning {
-  margin: 0 0 0.5rem;
-  font-size: 0.8rem;
+  margin: 0 0 var(--space-2);
+  font-size: var(--font-size-sm);
   color: var(--badge-waiting-retry-text);
   overflow-wrap: anywhere;
 }
@@ -911,8 +1510,8 @@
    D13): a courtesy explanation sitting directly under the control it
    describes, not a paragraph in the flow above it. */
 .worktree-locked {
-  margin: 0.35rem 0 0;
-  font-size: 0.8rem;
+  margin: var(--space-2) 0 0;
+  font-size: var(--font-size-sm);
   overflow-wrap: anywhere;
 }
 
@@ -921,17 +1520,55 @@
    is the obvious thing to press. */
 .retry-section-actions {
   display: flex;
-  gap: 0.5rem;
-  margin-top: 0.5rem;
+  gap: var(--space-2);
+  margin-top: var(--space-3);
 }
 
 .retry-section-error {
-  margin-top: 0.5rem;
-  font-size: 0.85rem;
+  margin-top: var(--space-2);
+  font-size: var(--font-size-sm);
   color: var(--danger-text);
+}
+
+/* Run history (task 015) — every attempt, newest first, each opening the
+   overlay `RunHistorySection` composes over. */
+
+.run-history-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.run-history-list button {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  padding: var(--space-1) var(--space-3);
+  border-color: transparent;
+  border-radius: var(--radius-sm);
+  font-size: var(--font-size-sm);
+  background: var(--surface-0);
+  box-shadow: none;
+}
+
+.run-history-list button:hover {
+  background: var(--surface-2);
+  border-color: var(--border-1);
+}
+
+.run-history-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  margin-top: var(--space-3);
 }
 
 /* The wait an attempt sat out, in the history list. */
 .run-history-wait {
-  font-size: 0.75rem;
+  font-size: var(--font-size-xs);
 }

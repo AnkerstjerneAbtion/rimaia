@@ -59,6 +59,10 @@ export function QueueControls({ state, hasRunBefore, hasRunInFlight }: QueueCont
         {state === "paused" && (
           <button
             type="button"
+            /* The one emphasised action on the Runs view. Everything else here
+               interrupts work that is already happening; this is the only
+               control that makes the queue do anything. */
+            className="btn-primary"
             disabled={pending !== null}
             onClick={() => trigger("start", hasRunBefore ? resumeQueue : startQueue)}
           >
@@ -85,7 +89,12 @@ export function QueueControls({ state, hasRunBefore, hasRunInFlight }: QueueCont
           </button>
         )}
       </div>
-      <p className="queue-controls-caption muted">
+      {/* Not `.muted`: that class carries the bottom margin meant for stacked
+          paragraphs and, being declared in settings.css (imported after this
+          view's stylesheet), it wins the cascade over the rule that sets this
+          caption's own spacing. It is a caption under a control, not a
+          paragraph in a flow. */}
+      <p className="queue-controls-caption">
         Pause lets the current run finish and starts nothing new. Stop also cancels the run in
         flight.
       </p>

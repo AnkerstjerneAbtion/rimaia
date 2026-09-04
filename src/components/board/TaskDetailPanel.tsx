@@ -160,112 +160,155 @@ function TaskDetailPanelBody({
       aria-label={`Task: ${task.title}`}
       tabIndex={-1}
     >
-      <div className="task-detail-header">
-        <TitleField taskId={task.id} initialTitle={task.title} />
-        <button type="button" className="task-detail-close" onClick={onClose} aria-label="Close">
-          Esc
-        </button>
-      </div>
+      {/* Sticky, so the title and the three facts that identify the task stay
+          on screen once a 400-line plan has scrolled past them. It is a
+          `--surface-2` row over the drawer's own `--surface-1`, which is what
+          makes the drawer read as two regions rather than one long scroll. */}
+      <header className="task-detail-header">
+        <div className="task-detail-title-row">
+          <TitleField taskId={task.id} initialTitle={task.title} />
+          <button type="button" className="task-detail-close" onClick={onClose} aria-label="Close">
+            Esc
+          </button>
+        </div>
 
-      <dl className="detail-list">
-        <dt>Repository</dt>
-        <dd>
-          <RepositorySelector
+        {/* Was a two-column `<dl>` that spent a third of the drawer's width on
+            the words "Repository" and "Run state". Three labelled fields side
+            by side instead: same three facts, one row, and the labels shrink
+            to eyebrows because they are furniture. */}
+        <div className="task-detail-readout">
+          <div className="task-detail-readout-field">
+            <span className="task-detail-readout-label">Repository</span>
+            <span className="task-detail-readout-value">
+              <RepositorySelector
+                taskId={task.id}
+                repositoryId={task.repositoryId}
+                repositories={repositories}
+                repositoryName={repositoryName}
+                worktreePath={task.worktreePath}
+                hasRuns={detail?.lastRun != null}
+                detailLoading={detailLoading}
+              />
+            </span>
+          </div>
+          <div className="task-detail-readout-field">
+            <span className="task-detail-readout-label">Column</span>
+            <span className="task-detail-readout-value">{COLUMN_TITLES[task.column]}</span>
+          </div>
+          <div className="task-detail-readout-field">
+            <span className="task-detail-readout-label">Run state</span>
+            <span className="task-detail-readout-value">
+              <RunStateBadge runState={task.runState} lastRun={detail?.lastRun ?? null} />
+              {task.runState === "idle" && <span className="muted">Idle</span>}
+            </span>
+          </div>
+        </div>
+      </header>
+
+      {/* Ten sections in three bands, in the order a day uses them: what the
+          agent is told, what it did, and the two destructive things underneath
+          both. A flat stack weighted all ten equally, which is false — at
+          18:30 this drawer is a plan editor and at 08:00 it is a run report.
+          Nothing is hidden or collapsed; see `board.css` for why not. */}
+      <div className="task-detail-body">
+        {detailError && (
+          <ErrorBanner error={detailError} onDismiss={() => setDetailError(null)} />
+        )}
+
+        <section className="task-detail-band" aria-labelledby="task-detail-band-brief">
+          <h3 className="task-detail-band-label" id="task-detail-band-brief">
+            Brief
+          </h3>
+
+          <PlanEditor taskId={task.id} initialValue={task.plan ?? ""} />
+
+          <ExtraInstructionsEditor taskId={task.id} initialValue={task.extraInstructions ?? ""} />
+
+          <LinksEditor
+            taskId={task.id}
+            links={detail?.links ?? []}
+            loading={detailLoading}
+            onChanged={refreshDetail}
+          />
+
+          {/* ADR-0008's dependency editor. `dependsOn` is on the detail rather
+              than on `Task`, so it waits for the same fetch `LinksEditor` does;
+              the repository comes off the board's own row, because a dependency
+              must be in the same one and that is also what the picker filters
+              by. */}
+          <DependenciesEditor
             taskId={task.id}
             repositoryId={task.repositoryId}
-            repositories={repositories}
-            repositoryName={repositoryName}
-            worktreePath={task.worktreePath}
-            hasRuns={detail?.lastRun != null}
-            detailLoading={detailLoading}
+            dependsOn={detail?.dependsOn ?? []}
+            loading={detailLoading}
+            onChanged={refreshDetail}
           />
-        </dd>
-        <dt>Column</dt>
-        <dd>{COLUMN_TITLES[task.column]}</dd>
-        <dt>Run state</dt>
-        <dd>
-          <RunStateBadge runState={task.runState} lastRun={detail?.lastRun ?? null} />
-          {task.runState === "idle" && <span className="muted">Idle</span>}
-        </dd>
-      </dl>
+        </section>
 
-      {detailError && (
-        <ErrorBanner error={detailError} onDismiss={() => setDetailError(null)} />
-      )}
+        <section className="task-detail-band" aria-labelledby="task-detail-band-execution">
+          <h3 className="task-detail-band-label" id="task-detail-band-execution">
+            Execution
+          </h3>
 
-      <PlanEditor taskId={task.id} initialValue={task.plan ?? ""} />
+          {/* Task 020's execution-strategy control, where task 005's plain
+              model/effort dropdowns used to sit. The mode, the two choices and
+              the plan envelope come off the board's own `Task` (they are
+              columns, and the board re-reads them on `tasks:changed`); the
+              effective triple comes off `detail`, because it is resolved per
+              read and is not on a `Task` at all (seam-contract D12's
+              amendment). */}
+          <StrategySection
+            taskId={task.id}
+            strategyMode={task.strategyMode}
+            model={task.model}
+            effort={task.effort}
+            strategyPlan={task.strategyPlan}
+            strategySource={task.strategySource}
+            effective={detail}
+            loading={detailLoading}
+            onChanged={refreshDetail}
+          />
 
-      <ExtraInstructionsEditor taskId={task.id} initialValue={task.extraInstructions ?? ""} />
+          <RunInfoSection
+            branch={task.branch}
+            worktreePath={task.worktreePath}
+            lastRun={detail?.lastRun ?? null}
+            loading={detailLoading}
+          />
 
-      <LinksEditor
-        taskId={task.id}
-        links={detail?.links ?? []}
-        loading={detailLoading}
-        onChanged={refreshDetail}
-      />
+          {/* Task 008's own section: the last run's outcome (exit class, cost,
+              error text, PR link) and its log path — additive to
+              `RunInfoSection` above, not a replacement for it. */}
+          <RunOutcomeSection lastRun={detail?.lastRun ?? null} loading={detailLoading} />
 
-      {/* ADR-0008's dependency editor. `dependsOn` is on the detail rather than
-          on `Task`, so it waits for the same fetch `LinksEditor` does; the
-          repository comes off the board's own row, because a dependency must be
-          in the same one and that is also what the picker filters by. */}
-      <DependenciesEditor
-        taskId={task.id}
-        repositoryId={task.repositoryId}
-        dependsOn={detail?.dependsOn ?? []}
-        loading={detailLoading}
-        onChanged={refreshDetail}
-      />
+          {/* Task 014's manual pair, immediately under the outcome that caused
+              the wait — "give up" is only a decision if the error is on screen
+              with it. Renders nothing at all unless this task is
+              `waiting_retry`. */}
+          <RetrySection
+            taskId={task.id}
+            runState={task.runState}
+            lastRun={detail?.lastRun ?? null}
+            loading={detailLoading}
+            onChanged={refreshDetail}
+          />
 
-      {/* Task 020's execution-strategy control, where task 005's plain
-          model/effort dropdowns used to sit. The mode, the two choices and
-          the plan envelope come off the board's own `Task` (they are columns,
-          and the board re-reads them on `tasks:changed`); the effective
-          triple comes off `detail`, because it is resolved per read and is
-          not on a `Task` at all (seam-contract D12's amendment). */}
-      <StrategySection
-        taskId={task.id}
-        strategyMode={task.strategyMode}
-        model={task.model}
-        effort={task.effort}
-        strategyPlan={task.strategyPlan}
-        strategySource={task.strategySource}
-        effective={detail}
-        loading={detailLoading}
-        onChanged={refreshDetail}
-      />
+          {/* Task 015's full history — every attempt, not only the last one —
+              each opening the run detail overlay (outcome, diff, commits, PR,
+              prompt, transcript, in ADR-0013's order). */}
+          <RunHistorySection taskId={task.id} />
+        </section>
 
-      <RunInfoSection
-        branch={task.branch}
-        worktreePath={task.worktreePath}
-        lastRun={detail?.lastRun ?? null}
-        loading={detailLoading}
-      />
+        <section className="task-detail-band" aria-labelledby="task-detail-band-workspace">
+          <h3 className="task-detail-band-label" id="task-detail-band-workspace">
+            Workspace
+          </h3>
 
-      {/* Task 008's own section: the last run's outcome (exit class, cost,
-          error text, PR link) and its log path — additive to `RunInfoSection`
-          above, not a replacement for it (see this stage's file-ownership
-          note in `RunOutcomeSection.tsx`'s own doc comment). */}
-      <RunOutcomeSection lastRun={detail?.lastRun ?? null} loading={detailLoading} />
+          <WorktreeSection taskId={task.id} />
 
-      {/* Task 014's manual pair, immediately under the outcome that caused the
-          wait — "give up" is only a decision if the error is on screen with it.
-          Renders nothing at all unless this task is `waiting_retry`. */}
-      <RetrySection
-        taskId={task.id}
-        runState={task.runState}
-        lastRun={detail?.lastRun ?? null}
-        loading={detailLoading}
-        onChanged={refreshDetail}
-      />
-
-      {/* Task 015's full history — every attempt, not only the last one —
-          each opening the run detail overlay (outcome, diff, commits, PR,
-          prompt, transcript, in ADR-0013's order). */}
-      <RunHistorySection taskId={task.id} />
-
-      <WorktreeSection taskId={task.id} />
-
-      <DeleteTaskSection taskId={task.id} title={task.title} onDeleted={onClose} />
+          <DeleteTaskSection taskId={task.id} title={task.title} onDeleted={onClose} />
+        </section>
+      </div>
     </aside>
   );
 }

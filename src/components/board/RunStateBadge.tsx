@@ -45,6 +45,20 @@ export function RunStateBadge({ runState, lastRun, blockedByIncomplete }: RunSta
 
   return (
     <span className={`run-badge run-badge-${badge}`}>
+      {/* THE DIRECTION's `.status-dot` vocabulary rather than a badge-specific
+          glyph: one dot, coloured through `--badge-tone`, and only the running
+          one moves. `aria-hidden` because the word beside it already says
+          everything the dot does — the dot is the fast channel, never the
+          only one (which is also what keeps the set readable in greyscale and
+          to a colour-blind reader).
+
+          The label stays a direct text child of this element rather than being
+          wrapped: `.run-badge` is what carries the state class, and the tests
+          find the badge by its own text. */}
+      <span
+        className={badge === "running" ? "status-dot status-dot-live" : "status-dot"}
+        aria-hidden="true"
+      />
       {LABELS[badge]}
       {resumeAt && <span className="run-badge-detail"> · {resumeAt}</span>}
     </span>
