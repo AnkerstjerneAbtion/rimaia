@@ -131,6 +131,10 @@ pub enum Tool {
     PlanTaskStrategy,
     PlanTasksStrategy,
 
+    /// Task 022's one. The *write* pair has no tool at all — see `run_access`
+    /// and seam-contract D25.
+    GetRepositoryCredentialStatus,
+
     // Task 024's three. Reads and reconfigures the installation.
     GetAnalytics,
     GetSubscriptionCost,
@@ -174,7 +178,7 @@ pub enum RunAccess {
 
 impl Tool {
     /// Every tool with a recorded decision, so a test can walk the table.
-    pub const ALL: [Tool; 43] = [
+    pub const ALL: [Tool; 44] = [
         Tool::AddTaskLink,
         Tool::CreateTask,
         Tool::GetBaseInstructions,
@@ -205,6 +209,7 @@ impl Tool {
         Tool::RestoreDoctorWarning,
         Tool::PlanTaskStrategy,
         Tool::PlanTasksStrategy,
+        Tool::GetRepositoryCredentialStatus,
         Tool::GetAnalytics,
         Tool::GetSubscriptionCost,
         Tool::SetSubscriptionCost,
@@ -254,6 +259,7 @@ impl Tool {
             Tool::RestoreDoctorWarning => "restore_doctor_warning",
             Tool::PlanTaskStrategy => "plan_task_strategy",
             Tool::PlanTasksStrategy => "plan_tasks_strategy",
+            Tool::GetRepositoryCredentialStatus => "get_repository_credential_status",
             Tool::GetAnalytics => "get_analytics",
             Tool::GetSubscriptionCost => "get_subscription_cost",
             Tool::SetSubscriptionCost => "set_subscription_cost",
@@ -417,6 +423,15 @@ impl Tool {
             Tool::GetAnalytics | Tool::GetSubscriptionCost | Tool::SetSubscriptionCost => {
                 RunAccess::Refused
             }
+
+            // Task 022's one, and the same clause again: whether a repository
+            // has its own forge token, and whose it is, is a fact about the
+            // *installation's* access, not about any task. It carries the
+            // login, the label and the date and never the secret — but a run
+            // that could enumerate which repositories carry credentials and
+            // which account they belong to has been handed a map of the
+            // operator's access for no use it has.
+            Tool::GetRepositoryCredentialStatus => RunAccess::Refused,
         }
     }
 }

@@ -13,6 +13,7 @@
 pub mod analytics;
 pub mod clock;
 pub mod context;
+pub mod credentials;
 pub mod db;
 pub mod doctor;
 pub mod error;

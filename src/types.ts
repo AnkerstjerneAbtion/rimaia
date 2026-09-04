@@ -174,6 +174,35 @@ export interface Analytics {
 }
 
 // ---------------------------------------------------------------------------
+// Per-repository forge credentials (task 022) — mirrors
+// `rimaia_core::repo::CredentialStatus` and `rimaia_core::credentials`.
+// ---------------------------------------------------------------------------
+
+/** Mirrors `rimaia_core::credentials::StoreStatus`. */
+export type CredentialStoreStatus =
+  | { state: "stored" }
+  | { state: "absent" }
+  | { state: "unavailable"; reason: string };
+
+/**
+ * What a repository's credential pane may know — **never the token**.
+ *
+ * `configured` true with a `store` that is not `stored` is the state that
+ * refuses runs: the row says this repository has a token and the keychain does
+ * not have it, and Rimaia will not fall back to the operator's own login.
+ */
+export interface CredentialStatus {
+  configured: boolean;
+  /** `null` for a save `gh` could not verify at the time. */
+  login: string | null;
+  label: string | null;
+  addedAt: string | null;
+  store: CredentialStoreStatus;
+  /** ADR-0020 point 6: a push over SSH uses the machine's own key regardless. */
+  sshRemote: boolean;
+}
+
+// ---------------------------------------------------------------------------
 // Batch strategy planning (task 023) — mirrors
 // `rimaia_core::runner::strategy` and `commands::strategy`'s views.
 // ---------------------------------------------------------------------------

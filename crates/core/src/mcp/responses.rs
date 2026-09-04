@@ -17,6 +17,7 @@ use schemars::JsonSchema;
 use serde::Serialize;
 
 use crate::analytics::Analytics;
+use crate::credentials::StoreStatus;
 use crate::db::settings::Dismissal;
 use crate::db::{
     BoardColumn, ExitClass, MutationSource, Repository, Run, RunState, RunStatus, Schedule,
@@ -222,6 +223,50 @@ impl From<&CheckResult> for CheckResultView {
             detail: result.detail.clone(),
             remediation: result.remediation.clone(),
             dismissed: result.dismissed,
+        }
+    }
+}
+
+/// Whether a repository has a forge token of its own, and whose (task 022).
+///
+/// **Carries the login, the label and the date — never the secret.** There is
+/// no field here that could be widened into one, and the two tools that would
+/// have to take a token do not exist (seam-contract D25).
+#[derive(Debug, Clone, PartialEq, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub struct CredentialStatusView {
+    pub repository_id: String,
+    pub repository: String,
+    pub configured: bool,
+    /// The forge login the token resolved to, or `null` for a save `gh` could
+    /// not verify at the time.
+    pub login: Option<String>,
+    pub label: Option<String>,
+    pub added_at: Option<DateTime<Utc>>,
+    /// `stored`, `absent` or `unavailable`. **`absent` with `configured` true
+    /// is the state that refuses a run**: the row says this repository has a
+    /// token and the keychain does not have it, and Rimaia will not fall back
+    /// to the operator's own login.
+    pub keychain: String,
+    pub keychain_detail: Option<String>,
+}
+
+impl CredentialStatusView {
+    pub fn new(repository: &Repository, store: StoreStatus) -> Self {
+        let (keychain, keychain_detail) = match &store {
+            StoreStatus::Stored => ("stored", None),
+            StoreStatus::Absent => ("absent", None),
+            StoreStatus::Unavailable { reason } => ("unavailable", Some(reason.clone())),
+        };
+        Self {
+            repository_id: repository.id.clone(),
+            repository: repository.name.clone(),
+            configured: repository.credential_added_at.is_some(),
+            login: repository.credential_login.clone(),
+            label: repository.credential_label.clone(),
+            added_at: repository.credential_added_at,
+            keychain: keychain.to_string(),
+            keychain_detail,
         }
     }
 }

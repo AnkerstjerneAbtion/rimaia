@@ -50,6 +50,7 @@ use serde_json::Value;
 
 use crate::clock::Clock;
 use crate::context::ServiceContext;
+use crate::credentials::redact::Redactor;
 use crate::error::Result;
 use crate::events::RunId;
 use crate::paths::AppPaths;
@@ -918,6 +919,10 @@ pub struct EventStream {
     result: Option<ResultEvent>,
     malformed_lines: u64,
     denied_tool_calls: u64,
+    /// Task 022: what must not appear in the transcript, the stderr log or the
+    /// live tail. Empty for every repository without a credential, which is the
+    /// common case and costs one `is_empty` per line.
+    redactor: Redactor,
 }
 
 impl EventStream {
@@ -940,6 +945,7 @@ impl EventStream {
             init: None,
             rate_limit: None,
             result: None,
+            redactor: Redactor::none(),
             malformed_lines: 0,
             denied_tool_calls: 0,
         })
@@ -953,10 +959,28 @@ impl EventStream {
     /// failing to write — surfaced rather than swallowed, because whether a run
     /// that can no longer record what it is doing should continue is the
     /// spawning code's decision, not this module's.
+    /// Everything this run writes down goes through `redactor` first (task
+    /// 022).
+    ///
+    /// A builder rather than a fifth constructor parameter, because a
+    /// repository with no credential is the common case and every existing
+    /// caller means [`Redactor::none`] — which is what `create` already gives.
+    pub fn redacting(mut self, redactor: Redactor) -> Self {
+        self.redactor = redactor;
+        self
+    }
+
     pub fn observe(&mut self, raw_line: &str) -> Result<Option<RunEvent>> {
         if raw_line.trim().is_empty() {
             return Ok(None);
         }
+
+        // Task 022, and it is the *first* statement for a reason: everything
+        // below this line — the transcript on disk, the parsed event, the tail
+        // published to the window — is derived from `raw_line`, so redacting
+        // here is the only place that covers all three at once.
+        let redacted = self.redactor.apply(raw_line);
+        let raw_line = redacted.as_ref();
 
         // Before parsing, so a line we cannot read is still evidence.
         self.transcript.append(raw_line)?;
@@ -1000,7 +1024,7 @@ impl EventStream {
 
     /// Captures one line of the child's stderr.
     pub fn observe_stderr(&mut self, raw_line: &str) -> Result<()> {
-        self.stderr.append(raw_line)
+        self.stderr.append(&self.redactor.apply(raw_line))
     }
 
     /// The applied configuration, once `init` has arrived. Task 008 compares

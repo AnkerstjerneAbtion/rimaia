@@ -25,6 +25,7 @@
 pub mod cli;
 pub mod clock;
 pub mod context;
+pub mod credentials;
 pub mod db;
 pub mod doctor;
 pub mod fixtures;

@@ -95,6 +95,9 @@ fn row_for(path: &Path, name: &str) -> Repository {
         allow_unattended_runs: true,
         max_concurrency: 1,
         created_at: rimaia_core::testing::test_epoch(),
+        credential_login: None,
+        credential_label: None,
+        credential_added_at: None,
     }
 }
 

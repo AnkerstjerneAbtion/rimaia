@@ -504,6 +504,14 @@ pub struct SetWorktreeAutoCleanupRequest {
     pub setting: AutoCleanup,
 }
 
+/// One repository, by id (task 022).
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct RepositoryRequest {
+    /// From `list_repositories` — a UUID, not derivable from a name or a path.
+    pub repository_id: String,
+}
+
 /// The window `get_analytics` reports on (task 024).
 ///
 /// Both bounds optional: omitting them is all time, which is the answer for

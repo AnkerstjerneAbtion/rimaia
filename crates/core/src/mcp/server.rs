@@ -35,18 +35,18 @@ use crate::mcp::error::ToolError;
 use crate::mcp::requests::{
     AddTaskLinkRequest, AnalyticsRequest, ClearableField, CreateTaskRequest,
     DoctorDismissalRequest, GetStrategyDefaultsRequest, GetTaskRequest, ListTasksRequest,
-    MoveTaskRequest, PlanSelectionRequest, RemoveTaskLinkRequest, ScheduleConfigRequest,
-    ScheduleRequest, SetMaxConcurrencyRequest, SetRepositoryMaxConcurrencyRequest,
-    SetScheduleEnabledRequest, SetScheduleModeRequest, SetStrategyApprovalRequest,
-    SetStrategyCatalogueRequest, SetStrategyDefaultsRequest, SetTaskDependenciesRequest,
-    SetTaskStrategyRequest, SetWorktreeAutoCleanupRequest, SubscriptionCostRequest,
-    TaskStrategyRequest, UpdateScheduleRequest, UpdateTaskRequest,
+    MoveTaskRequest, PlanSelectionRequest, RemoveTaskLinkRequest, RepositoryRequest,
+    ScheduleConfigRequest, ScheduleRequest, SetMaxConcurrencyRequest,
+    SetRepositoryMaxConcurrencyRequest, SetScheduleEnabledRequest, SetScheduleModeRequest,
+    SetStrategyApprovalRequest, SetStrategyCatalogueRequest, SetStrategyDefaultsRequest,
+    SetTaskDependenciesRequest, SetTaskStrategyRequest, SetWorktreeAutoCleanupRequest,
+    SubscriptionCostRequest, TaskStrategyRequest, UpdateScheduleRequest, UpdateTaskRequest,
 };
 use crate::mcp::responses::{
-    AnalyticsView, BaseInstructionsView, DismissalView, DoctorDismissalsView, DoctorReportView,
-    OnboardingView, PlanPassView, PlanResultView, PreflightView, RepositoryListView,
-    RepositoryView, RunCapacityView, ScheduleDeletedView, ScheduleListView, ScheduleView,
-    StrategyApprovalView, SubscriptionCostView, TaskListItem, TaskListView, TaskView,
+    AnalyticsView, BaseInstructionsView, CredentialStatusView, DismissalView, DoctorDismissalsView,
+    DoctorReportView, OnboardingView, PlanPassView, PlanResultView, PreflightView,
+    RepositoryListView, RepositoryView, RunCapacityView, ScheduleDeletedView, ScheduleListView,
+    ScheduleView, StrategyApprovalView, SubscriptionCostView, TaskListItem, TaskListView, TaskView,
     TimezoneListView, WorktreeAutoCleanupView, WorktreeListView, WorktreeView,
 };
 use crate::mcp::scope::{RunScope, Tool};
@@ -261,6 +261,28 @@ deliberately."
         .await?;
 
         Ok(Json(PlanPassView::from(&pass)))
+    }
+
+    #[tool(
+        description = "Report whether one repository carries a forge token of its own, whose \
+account it belongs to, what the user called it, and whether this machine's keychain still holds \
+it. Call this when a run failed to push or to open a pull request, or before telling the user \
+their token is fine — a repository whose credential is configured and whose keychain item has \
+gone refuses to run rather than falling back to the operator's own login, and this is what says \
+so. **The token itself is never returned by anything**, and there is no tool that sets or \
+removes one: a live forge token has no business travelling over this protocol."
+    )]
+    pub async fn get_repository_credential_status(
+        &self,
+        Parameters(request): Parameters<RepositoryRequest>,
+    ) -> Result<Json<CredentialStatusView>, ToolError> {
+        self.scope
+            .authorize(Tool::GetRepositoryCredentialStatus, None)?;
+
+        let repository = repo::get(&self.ctx, &request.repository_id).await?;
+        let store = self.planner.runner.credentials.status(&repository.id).await;
+
+        Ok(Json(CredentialStatusView::new(&repository, store)))
     }
 
     #[tool(
@@ -1176,7 +1198,7 @@ mod tests {
     /// capability parity a rule. What replaces a count is the property that
     /// actually matters — a registered tool with no run-scope decision cannot
     /// reach the wire.
-    const REGISTERED_TOOLS: [&str; 43] = [
+    const REGISTERED_TOOLS: [&str; 44] = [
         "accept_task_strategy",
         "add_task_link",
         "clear_task_strategy",
@@ -1187,6 +1209,7 @@ mod tests {
         "dismiss_onboarding",
         "get_analytics",
         "get_base_instructions",
+        "get_repository_credential_status",
         "get_run_capacity",
         "get_strategy_approval",
         "get_strategy_catalogue",

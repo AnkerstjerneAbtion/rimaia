@@ -6,6 +6,7 @@ import type {
   AutoCleanup,
   BoardColumn,
   CleanupReport,
+  CredentialStatus,
   DetectedOpenInTarget,
   DiffSummary,
   DoctorDismissal,
@@ -161,6 +162,36 @@ export function removeRepository(id: string): Promise<void> {
 
 export function getRepositoryRemoteInfo(id: string): Promise<RemoteInfo> {
   return call<RemoteInfo>("get_repository_remote_info", { id });
+}
+
+/**
+ * Whether a repository carries a forge token of its own, and whose (task 022).
+ *
+ * **Never the token.** There is no command, and no MCP tool, that reads a
+ * stored secret back — the only paths out of the keychain are the spawn and
+ * the delete.
+ */
+export function getRepositoryCredentialStatus(id: string): Promise<CredentialStatus> {
+  return call<CredentialStatus>("get_repository_credential_status", { id });
+}
+
+/**
+ * Verifies a pasted token against the forge and stores it in the keychain.
+ *
+ * Rejects when the forge rejects it — ADR-0020's "refused at paste time" —
+ * and saves it *unverified* when `gh` is not installed, because a missing
+ * local tool says nothing about the token.
+ */
+export function setRepositoryCredential(
+  id: string,
+  token: string,
+  label: string | null,
+): Promise<CredentialStatus> {
+  return call<CredentialStatus>("set_repository_credential", { id, token, label });
+}
+
+export function removeRepositoryCredential(id: string): Promise<CredentialStatus> {
+  return call<CredentialStatus>("remove_repository_credential", { id });
 }
 
 // ---------------------------------------------------------------------------

@@ -248,6 +248,7 @@ async fn plan(
         ));
     };
 
+    let credentials = super::process::repository_credentials(config, repository).await?;
     let prompt = compose_strategy_prompt(detail, repository, catalogue);
     let invocation = planner_invocation(ctx, catalogue, task_id, mcp_config).await?;
 
@@ -274,6 +275,13 @@ async fn plan(
             prompt: &prompt,
             invocation: &invocation,
             cancel,
+            // The planner reads the repository and writes one MCP call; it
+            // pushes nothing. It still gets the same credential the
+            // implementation run would, and the same refusal when the keychain
+            // item is missing — a planner that ran with the operator's ambient
+            // login while the run after it refused would be two answers to one
+            // question about the same repository.
+            credentials: &credentials,
         },
     )
     .await;

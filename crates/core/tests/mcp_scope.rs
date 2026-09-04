@@ -178,6 +178,10 @@ fn the_operator_endpoint_keeps_every_tool_it_had_before_task_020() {
             | Tool::GetAnalytics
             | Tool::GetSubscriptionCost
             | Tool::SetSubscriptionCost
+            // Task 022's one. The two that *write* have no tool at all — the
+            // argument is a live forge token, and a loopback protocol into a
+            // process's argv is not where one belongs (seam-contract D25).
+            | Tool::GetRepositoryCredentialStatus
             // Task 013's seven, and these are *both* of ADR-0021 point 4's
             // permanent refusals at once rather than one of them: a schedule
             // spawns runs — it is the thing that starts the queue at 22:00 —
