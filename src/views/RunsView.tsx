@@ -10,7 +10,7 @@ import type { SessionOutcome } from "../components/runs/SessionOutcomesList";
 import { EmptyState } from "../components/EmptyState";
 import { environmentOverheadNote } from "../lib/runEnvironment";
 import { ErrorBanner } from "../components/ErrorBanner";
-import { EXIT_CLASS_LABELS } from "../components/panel/RunOutcomeSection";
+import { EXIT_CLASS_LABELS, formatCostUsd } from "../components/panel/RunOutcomeSection";
 import {
   getQueueStatus,
   getRunCostSummary,
@@ -350,104 +350,170 @@ export function RunsView() {
   }, [historyFilter]);
 
   const overheadNote = environmentOverheadNote(runCosts);
+  const queueConsole = queueConsoleState(queueStatus);
+  const claimable = queueStatus?.plan.filter((entry) => entry.skip === null).length ?? 0;
+  const passedOver = (queueStatus?.plan.length ?? 0) - claimable;
 
   return (
     <div className="runs-view">
       {readError && <ErrorBanner error={readError} onDismiss={() => setReadError(null)} />}
       {queueError && <ErrorBanner error={queueError} onDismiss={() => setQueueError(null)} />}
 
-      <section className="queue-section">
-        <div className="queue-section-header">
-          <h2>Run queue</h2>
-          {queueStatus && (
-            <span className={`queue-state-badge queue-state-${queueStatus.state}`}>
-              {queueStatus.state === "running" ? "Running" : "Paused"}
-            </span>
+      {/* The console: the queue's state, its four readouts and the transport,
+          in one bar. Everything below it is detail on one of those numbers. */}
+      <section className="queue-console" data-tone={queueConsole?.tone ?? "paused"}>
+        <div className="queue-console-state">
+          <div className="queue-console-heading">
+            <h2>Run queue</h2>
+            {queueConsole && (
+              <span className={`queue-state-badge queue-state-${queueConsole.tone}`}>
+                <span
+                  className={
+                    queueConsole.tone === "running" ? "status-dot status-dot-live" : "status-dot"
+                  }
+                  aria-hidden="true"
+                />
+                {queueConsole.label}
+              </span>
+            )}
+          </div>
+
+          {/* What the badge cannot say by itself: *why* it reads what it reads.
+              A queue a schedule started at 22:00 stops by itself at 06:00, and
+              without this that reads exactly like a queue that failed with work
+              still on the board (task 013) — or, on a usage-limit hold, like a
+              queue that says "Running" and starts nothing (ADR-0011). */}
+          {queueConsole && <p className="queue-console-detail">{queueConsole.detail}</p>}
+
+          {queueStatus === null && !queueError && <p className="muted">Reading queue status…</p>}
+
+          {/* The one failure `SkipReason` cannot name: a missing `claude` fails
+              `probe_cli` before any task is even chosen, so nothing on the
+              board explains it and the state badge above would otherwise read
+              "Running" over a full plan while nothing happens all night. */}
+          {queueStatus?.lastStepError && (
+            <p className="queue-step-error" role="alert">
+              The queue could not complete its last pass: {queueStatus.lastStepError}
+            </p>
           )}
         </div>
 
-        {/* What the badge above cannot say by itself: *why* it reads what it
-            reads. A queue that a schedule started at 22:00 stops by itself at
-            06:00, and without this that reads exactly like a queue that failed
-            with work still on the board (task 013). */}
-        {queueStatus?.window && (
-          <p className="queue-window muted">
-            {queueStatus.state === "running"
-              ? queueStatus.window.closesAt
-                ? `Running until ${windowTime(queueStatus.window.closesAt)} — ${queueStatus.window.scheduleName}`
-                : `Running — ${queueStatus.window.scheduleName}, with no stop time`
-              : `${queueStatus.window.scheduleName}'s run window is open, but the queue is paused`}
-          </p>
+        {queueStatus && (
+          <dl className="queue-console-metrics">
+            <div
+              className="queue-metric queue-metric-live"
+              data-zero={queueStatus.runningTaskIds.length === 0}
+            >
+              <dt>In flight</dt>
+              <dd>{queueStatus.runningTaskIds.length}</dd>
+            </div>
+            <div className="queue-metric" data-zero={claimable === 0}>
+              <dt>Up next</dt>
+              <dd>{claimable}</dd>
+            </div>
+            <div className="queue-metric" data-zero={passedOver === 0}>
+              <dt>Passed over</dt>
+              <dd>{passedOver}</dd>
+            </div>
+            <div className="queue-metric" data-zero={sessionOutcomes.length === 0}>
+              <dt>Finished</dt>
+              <dd>{sessionOutcomes.length}</dd>
+            </div>
+          </dl>
         )}
-
-        {/* The one failure `SkipReason` cannot name: a missing `claude` fails
-            `probe_cli` before any task is even chosen, so nothing on the
-            board explains it and the state badge above would otherwise read
-            "Running" over a full plan while nothing happens all night. */}
-        {queueStatus?.lastStepError && (
-          <p className="queue-step-error" role="alert">
-            The queue could not complete its last pass: {queueStatus.lastStepError}
-          </p>
-        )}
-
-        {queueStatus === null && !queueError && <p className="muted">Reading queue status…</p>}
 
         {queueStatus && (
-          <>
-            <QueueControls
-              state={queueStatus.state}
-              hasRunBefore={hasRunBefore}
-              hasRunInFlight={queueStatus.runningTaskIds.length > 0}
-            />
+          <QueueControls
+            state={queueStatus.state}
+            hasRunBefore={hasRunBefore}
+            hasRunInFlight={queueStatus.runningTaskIds.length > 0}
+          />
+        )}
 
-            <h3>Up next</h3>
-            <QueuePlanList plan={queueStatus.plan} />
-
-            <h3>Completed this session</h3>
-            <SessionOutcomesList outcomes={sessionOutcomes} />
-          </>
+        {runEnvironment && (
+          <p className="runs-environment-note">
+            Environment: {runEnvironment === "inherit" ? "Inherit (default)" : "Strict / local"}.{" "}
+            {runEnvironment === "inherit"
+              ? overheadNote ??
+                "Inheriting your Claude Code environment adds a fixed setup cost to every run."
+              : "Only each repository's own CLAUDE.md and project settings reach a run."}{" "}
+            Change this in Settings → Instructions; a finished run's own cost shows on its task's
+            detail panel.
+          </p>
         )}
       </section>
 
-      {runEnvironment && (
-        <p className="muted runs-environment-note">
-          Environment: {runEnvironment === "inherit" ? "Inherit (default)" : "Strict / local"}.{" "}
-          {runEnvironment === "inherit"
-            ? overheadNote ??
-              "Inheriting your Claude Code environment adds a fixed setup cost to every run."
-            : "Only each repository's own CLAUDE.md and project settings reach a run."}{" "}
-          Change this in Settings → Instructions; a finished run's own cost shows on its task's
-          detail panel.
-        </p>
-      )}
+      <section className="runs-live">
+        <div className="runs-section-head">
+          <h2>Active runs</h2>
+          <span className="runs-section-count" data-zero={(runningTasks?.length ?? 0) === 0}>
+            {runningTasks?.length ?? 0}
+          </span>
+        </div>
 
-      {runningTasks === null && !readError && <p className="muted">Reading…</p>}
+        {runningTasks === null && !readError && <p className="muted">Reading…</p>}
 
-      {runningTasks && runningTasks.length === 0 && (
-        <EmptyState
-          title="Nothing running right now"
-          body="Each run lands here with its elapsed time, turn count, current tool call, recent assistant text, and a Cancel button, for as long as it is in progress."
-          arrivesIn="See History below for every past run, its diff and commits, and its transcript."
-        />
-      )}
+        {runningTasks && runningTasks.length === 0 && (
+          <EmptyState
+            title="Nothing running right now"
+            body="Each run lands here with its elapsed time, turn count, current tool call, recent assistant text, and a Cancel button, for as long as it is in progress."
+            arrivesIn="See History below for every past run, its diff and commits, and its transcript."
+          />
+        )}
 
-      {runningTasks && runningTasks.length > 0 && (
-        <div className="active-runs-list">
-          {runningTasks.map((task) => (
-            <ActiveRunCard
-              key={task.id}
-              task={task}
-              repositoryName={repositoryNames.get(task.repositoryId) ?? task.repositoryId}
-            />
-          ))}
+        {runningTasks && runningTasks.length > 0 && (
+          <div className="active-runs-list">
+            {runningTasks.map((task) => (
+              <ActiveRunCard
+                key={task.id}
+                task={task}
+                repositoryName={repositoryNames.get(task.repositoryId) ?? task.repositoryId}
+              />
+            ))}
+          </div>
+        )}
+      </section>
+
+      {/* What runs next and what has already finished, side by side: they are
+          two halves of one list — the same queue, before and after — and
+          reading one against the other is how an operator answers "is it
+          getting through the board" at a glance. */}
+      {queueStatus && (
+        <div className="queue-lanes">
+          <section className="queue-lane">
+            <div className="runs-section-head">
+              <h2>Up next</h2>
+              <span className="runs-section-count" data-zero={claimable === 0}>
+                {claimable}
+              </span>
+            </div>
+            <QueuePlanList plan={queueStatus.plan} />
+          </section>
+
+          <section className="queue-lane">
+            <div className="runs-section-head">
+              <h2>Completed this session</h2>
+              <span className="runs-section-count" data-zero={sessionOutcomes.length === 0}>
+                {sessionOutcomes.length}
+              </span>
+            </div>
+            <SessionOutcomesList outcomes={sessionOutcomes} />
+          </section>
         </div>
       )}
 
       {/* Task 015's global history — every run across every repository,
           filterable by repository, outcome and date range, each opening the
-          same run detail overlay a task's own history list does. */}
+          same run detail overlay a task's own history list does. A table,
+          because seven fields across twenty runs are read by scanning a
+          column, not by reading rows. */}
       <section className="runs-history-section">
-        <h2>History</h2>
+        <div className="runs-section-head">
+          <h2>History</h2>
+          <span className="runs-section-count" data-zero={(historyEntries?.length ?? 0) === 0}>
+            {historyEntries?.length ?? 0}
+          </span>
+        </div>
 
         <div className="runs-history-filters">
           <label>
@@ -510,7 +576,11 @@ export function RunsView() {
           </label>
 
           {Object.values(historyFilter).some((value) => value !== "") && (
-            <button type="button" onClick={() => setHistoryFilter(EMPTY_HISTORY_FILTER)}>
+            <button
+              type="button"
+              className="runs-history-clear"
+              onClick={() => setHistoryFilter(EMPTY_HISTORY_FILTER)}
+            >
               Clear filters
             </button>
           )}
@@ -521,30 +591,72 @@ export function RunsView() {
         )}
         {historyEntries === null && !historyError && <p className="muted">Reading history…</p>}
         {historyEntries && historyEntries.length === 0 && (
-          <p className="muted">No runs match these filters.</p>
+          <p className="runs-history-empty">No runs match these filters.</p>
         )}
 
         {historyEntries && historyEntries.length > 0 && (
-          <ul className="runs-history-list">
-            {historyEntries.map((entry) => (
-              <li key={entry.id}>
-                <button type="button" onClick={() => setSelectedRunId(entry.id)}>
-                  <span className="session-outcome-title">{entry.taskTitle}</span>
-                  <span className="session-outcome-repo">{entry.repositoryName}</span>
-                  <span
-                    className={
-                      entry.exitClass
-                        ? `exit-class-badge exit-class-${entry.exitClass}`
-                        : "muted"
-                    }
-                  >
-                    {entry.exitClass ? EXIT_CLASS_LABELS[entry.exitClass] : "Running"}
-                  </span>
-                  <span className="muted">{new Date(entry.startedAt).toLocaleString()}</span>
-                </button>
-              </li>
-            ))}
-          </ul>
+          <table className="runs-history-table">
+            <thead>
+              <tr>
+                <th scope="col">Task</th>
+                <th scope="col">Repository</th>
+                <th scope="col">Outcome</th>
+                <th scope="col">Started</th>
+                {/* The three columns that are only comparable if their digits
+                    line up — the direction's own example of what
+                    `.tabular-nums` exists for. */}
+                <th scope="col" className="numeric">
+                  Duration
+                </th>
+                <th scope="col" className="numeric">
+                  Turns
+                </th>
+                <th scope="col" className="numeric">
+                  Cost
+                </th>
+              </tr>
+            </thead>
+            <tbody>
+              {historyEntries.map((entry) => (
+                <tr key={entry.id}>
+                  <td>
+                    {/* The row's control is its title. Twenty bordered buttons
+                        down a first column read as a stack of controls; a
+                        title that happens to be clickable reads as a list of
+                        runs, which is what this is. */}
+                    <button
+                      type="button"
+                      className="runs-history-open"
+                      onClick={() => setSelectedRunId(entry.id)}
+                    >
+                      {entry.taskTitle}
+                    </button>
+                  </td>
+                  <td className="runs-history-repo">{entry.repositoryName}</td>
+                  <td>
+                    <span
+                      className={
+                        entry.exitClass
+                          ? `exit-class-badge exit-class-${entry.exitClass}`
+                          : "muted"
+                      }
+                    >
+                      {/* Not "Running": the queue's own state badge above uses
+                          that word for something else, and a run without an
+                          exit class is one still in flight. */}
+                      {entry.exitClass ? EXIT_CLASS_LABELS[entry.exitClass] : "In flight"}
+                    </span>
+                  </td>
+                  <td className="runs-history-when">{historyDate(entry.startedAt)}</td>
+                  <td className="numeric">{runDuration(entry.startedAt, entry.endedAt)}</td>
+                  <td className="numeric">{entry.numTurns ?? "—"}</td>
+                  <td className="numeric">
+                    {entry.costUsd != null ? formatCostUsd(entry.costUsd) : "—"}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
         )}
       </section>
 
@@ -555,9 +667,84 @@ export function RunsView() {
   );
 }
 
-/** The hour a run window closes, for the caption beside the queue's state
- *  badge. Local and to the minute: "06:00" is what the user typed, and a date
- *  beside it would be noise on a line that is about tonight. */
+/** The hour a run window closes, or a usage-limit hold lifts, for the caption
+ *  under the queue's state badge. Local and to the minute: "06:00" is what the
+ *  user typed, and a date beside it would be noise on a line about tonight. */
 function windowTime(iso: string): string {
   return new Date(iso).toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" });
+}
+
+/**
+ * What the console says the queue is doing, and why.
+ *
+ * `QueueState` is a two-value switch, but a queue that is starting nothing has
+ * four different reasons for it and telling them apart at 08:00 is the whole
+ * job of this screen. The extra tone is `held` — ADR-0011's global usage-limit
+ * hold, which nothing in this app rendered before this pass: `state` stays
+ * `"running"` through it, so the single most misdiagnosable condition in the
+ * product ("it says Running and it started nothing all night") had no words on
+ * any screen. It has its own tone, its own word and its own resume time here.
+ *
+ * The `window` caption is task 013's, unchanged in wording: a queue a schedule
+ * started at 22:00 stops by itself at 06:00, and without the sentence that
+ * reads exactly like a queue that failed with work still on the board.
+ */
+function queueConsoleState(
+  status: QueueStatus | null,
+): { tone: "running" | "paused" | "held"; label: string; detail: string } | null {
+  if (!status) return null;
+
+  const hold = status.usageLimitPauseUntil;
+  if (hold !== null && new Date(hold).getTime() > Date.now()) {
+    return {
+      tone: "held",
+      label: "On hold",
+      detail: `Every run is held until ${windowTime(hold)} — Claude Code reported a usage limit. The queue picks up by itself; nothing here needs pressing.`,
+    };
+  }
+
+  if (status.state === "running") {
+    return {
+      tone: "running",
+      label: "Running",
+      detail: status.window
+        ? status.window.closesAt
+          ? `Running until ${windowTime(status.window.closesAt)} — ${status.window.scheduleName}`
+          : `Running — ${status.window.scheduleName}, with no stop time`
+        : "Started by hand. It keeps claiming ready tasks until you pause or stop it.",
+    };
+  }
+
+  return {
+    tone: "paused",
+    label: "Paused",
+    detail: status.window
+      ? `${status.window.scheduleName}'s run window is open, but the queue is paused`
+      : "Nothing starts until you press Start.",
+  };
+}
+
+/** `"12m 34s"`, `"3s"`, or an em dash while the run has not ended — the
+ *  history table's Duration column, which has to stay one short token wide so
+ *  twenty rows of it are scannable. */
+function runDuration(startedAt: string, endedAt: string | null): string {
+  if (!endedAt) return "—";
+  const totalSeconds = Math.max(
+    0,
+    Math.round((new Date(endedAt).getTime() - new Date(startedAt).getTime()) / 1000),
+  );
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  return minutes > 0 ? `${minutes}m ${seconds.toString().padStart(2, "0")}s` : `${seconds}s`;
+}
+
+/** When a run started, in the history table. Short and fixed-width — a full
+ *  `toLocaleString()` was the widest column in the table and the least often
+ *  read word in it. */
+function historyDate(iso: string): string {
+  const started = new Date(iso);
+  return `${started.toLocaleDateString(undefined, {
+    month: "short",
+    day: "numeric",
+  })} ${started.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" })}`;
 }

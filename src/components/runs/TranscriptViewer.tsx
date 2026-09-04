@@ -152,12 +152,21 @@ export function TranscriptViewer({ runId }: TranscriptViewerProps) {
   );
 }
 
+/** The speaker, in a gutter of its own rather than woven into the text.
+ *  Reading a transcript is mostly *skipping* — five rems of uppercase eyebrow
+ *  down the left edge is what lets somebody skip every tool result in a
+ *  thousand-entry file without reading one. */
+function TranscriptRole({ children }: { readonly children: string }) {
+  return <span className="transcript-role">{children}</span>;
+}
+
 function TranscriptEntryView({ entry }: { readonly entry: TranscriptEntry }) {
   const kind = entry.kind;
   switch (kind.type) {
     case "assistant":
       return (
         <div className="transcript-entry transcript-assistant">
+          <TranscriptRole>Agent</TranscriptRole>
           {kind.blocks.map((block, index) => (
             <TranscriptBlockView key={index} block={block} />
           ))}
@@ -166,6 +175,7 @@ function TranscriptEntryView({ entry }: { readonly entry: TranscriptEntry }) {
     case "user":
       return (
         <div className="transcript-entry transcript-user">
+          <TranscriptRole>Input</TranscriptRole>
           {kind.blocks.map((block, index) => (
             <TranscriptBlockView key={index} block={block} />
           ))}
@@ -180,7 +190,8 @@ function TranscriptEntryView({ entry }: { readonly entry: TranscriptEntry }) {
               : "transcript-entry transcript-result"
           }
         >
-          {kind.summary && <p>{kind.summary}</p>}
+          <TranscriptRole>Result</TranscriptRole>
+          {kind.summary && <p className="transcript-text">{kind.summary}</p>}
           {kind.errors.map((text, index) => (
             <p key={index} className="transcript-error-text">
               {text}
@@ -205,6 +216,7 @@ function TranscriptEntryView({ entry }: { readonly entry: TranscriptEntry }) {
       // ended without saying why.
       return (
         <div className="transcript-entry transcript-malformed">
+          <TranscriptRole>Raw</TranscriptRole>
           <p className="transcript-error-text">
             Line {entry.line}: not valid JSON — shown as written.
           </p>

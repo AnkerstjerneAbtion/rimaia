@@ -40,19 +40,45 @@ export function QueuePlanList({ plan }: QueuePlanListProps) {
   return (
     <ol className="queue-plan-list">
       {plan.map((entry) => (
-        <li
-          key={entry.taskId}
-          className={entry.skip ? "queue-plan-entry queue-plan-entry-skipped" : "queue-plan-entry"}
-        >
-          <span className="queue-plan-title">{entry.title}</span>
-          {entry.queuePosition !== null && (
+        <li key={entry.taskId} className={entryClassName(entry)}>
+          {/* The ordinal sits in a gutter of its own so the titles line up
+              whether or not a row has one. A skipped row gets a mark rather
+              than a blank, because an empty gutter reads as a missing number
+              instead of as "this one is not in the count". */}
+          {entry.queuePosition !== null ? (
             <span className="queue-plan-position">#{entry.queuePosition}</span>
+          ) : (
+            <span className="queue-plan-skipmark" aria-hidden="true">
+              ·
+            </span>
           )}
+          <span className="queue-plan-title">{entry.title}</span>
           {entry.skip !== null && (
             <span className="queue-plan-skip">Not queued — {QUEUE_SKIP_LABELS[entry.skip]}</span>
+          )}
+          {/* Only ever populated for a task in `waiting_retry` (D22), so this
+              is "when it comes back", never a stale deadline on a task
+              somebody has since started by hand. */}
+          {entry.resumeAfter !== null && (
+            <span className="queue-plan-resume">Resumes {resumeTime(entry.resumeAfter)}</span>
           )}
         </li>
       ))}
     </ol>
   );
+}
+
+/** The row's own classes. `-next` is the one task the queue will actually
+ *  claim next: ADR-0007 makes board order execution order, so that is a fact
+ *  the user set by dragging, and worth saying out loud. */
+function entryClassName(entry: QueueEntry): string {
+  if (entry.skip !== null) return "queue-plan-entry queue-plan-entry-skipped";
+  if (entry.queuePosition === 1) return "queue-plan-entry queue-plan-entry-next";
+  return "queue-plan-entry";
+}
+
+/** Local, to the minute. A resume time is about tonight; the date beside it
+ *  would be noise. */
+function resumeTime(iso: string): string {
+  return new Date(iso).toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" });
 }

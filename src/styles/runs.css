@@ -1,158 +1,161 @@
-/* Runs view (task 008): the live tail of whatever task is currently running,
-   plus its Cancel button. Task 015 extends this file with full history and
-   the transcript viewer; task C (this pass) retokens every rule onto B's
-   board.css vocabulary — a section shell here is styled exactly like
-   `.queue-section`/`.active-run-card`/`.run-detail-section` below all share
-   one look, the same `--surface-1`/`--border-1`/`--radius-md`/`--shadow-sm`
-   quartet the board uses for `.board-column`/`.task-card`, rather than each
-   growing its own. */
+/* Runs view — the live console.
+
+   Written against THE DIRECTION at the top of `src/styles.css` and against the
+   board as task E left it (`src/styles/board.css`), which is the worked
+   example: where something here is the same *kind* of thing as something
+   there, it is built the same way rather than reinvented.
+
+   This is the screen somebody leaves open while a queue works, so it is laid
+   out as an instrument panel with four bands, top to bottom:
+
+     1. **The console.**  One bar carrying the queue's state, four readouts and
+        the transport. It is the only thing on the screen that has to be
+        readable from across a room, so it gets the rail-and-wash treatment
+        `.task-card` uses for a running card, a `.status-dot` in the state's
+        own colour, and `--font-size-xl` tabular figures for the counts.
+     2. **Active runs.**  N cards side by side, each a live tail.
+     3. **The two lanes.**  What runs next, and what has finished this session.
+     4. **History.**  A real table, filtered, with tabular numerals.
+
+   ## What the console has to be able to say
+
+   Four states, not two. `QueueStatus.state` is a two-value switch, but a queue
+   that is starting nothing has four different reasons for it, and telling them
+   apart at 08:00 is the whole job:
+
+     running   the loop is claiming tasks
+     paused    nothing starts until somebody presses Start
+     held      ADR-0011's global usage-limit hold — `usageLimitPauseUntil`,
+               which nothing rendered before this pass, so the one state an
+               operator would most reliably misdiagnose as a bug was invisible
+     window    a schedule opened the window (or the window is open and the
+               queue is paused inside it), which `.queue-console-detail` says
+               in words underneath either badge
+
+   Every state carries its own **word** as well as its own colour, and only
+   `running` **moves** — the same three non-hue channels board.css grades its
+   badges on.
+
+   ## Widths
+
+   `1rem` is **15px** (`styles.css`'s `:root` sets `font-size:
+   var(--font-size-md)`), and the two window widths `src-tauri/tauri.conf.json`
+   declares leave `.content` with 972px (at `width: 1280`) and 716px (at
+   `minWidth: 1024`) — board.css's own `:root` derives both.
+
+   `.active-runs-list` is `repeat(auto-fit, minmax(19rem, 1fr))` with a
+   `--space-3` gap, so a card floors at 285px and a gap is 11.25px:
+     three cards: 3*285 + 2*11.25 = 877.5 <= 972   -> three fit at 1280
+     two cards:   2*285 + 1*11.25 = 581.25 <= 716  -> two fit at 1024
+   Which is the acceptance criterion ("holds at one, two and three") expressed
+   as arithmetic, because jsdom has no layout engine and no test can check it.
+   One card fills the row, three sit side by side at ~316px each, and a fourth
+   wraps rather than shrinking every card past readable.
+
+   `min(19rem, 100%)` rather than a bare `19rem`: at 716px the track floor is
+   below the container, but a future narrower container must wrap rather than
+   overflow.
+
+   ## Tokens
+
+   No new token was needed. The badge pairs this file reads
+   (`--badge-running-*`, `--badge-queued-*`, `--badge-waiting-retry-*`,
+   `--exit-*`) are declared in board.css's own `:root` — a second `:root` in an
+   imported stylesheet adds properties to the same element, so they are simply
+   in scope here, and reusing them is what keeps "running" one colour across
+   the board and this view instead of two.
+
+   `.run-history-list` is **not** styled here any more. It is the board
+   drawer's list (`RunHistorySection`), board.css styles it, and because
+   `styles.css` imports runs.css *after* board.css a rule here silently won
+   the cascade over the one E wrote for it. The Runs view's own history is a
+   table with its own class names. */
 
 .runs-view {
   display: flex;
   flex-direction: column;
   gap: var(--space-4);
-  /* Wider than the 46rem the single-run view used: task 012 puts N live runs
-     side by side, and two columns of readable transcript do not fit in one
-     column's width. Everything else in the view is still text and stays
-     comfortable, because the grid below is the only thing that spends it. */
-  max-width: 76rem;
+  /* Wider than the 46rem the single-run view used, and wider than the 76rem
+     that replaced it: the history table below spends seven columns, and the
+     card grid spends whatever it is given. Never binding at either supported
+     window width (972px = 64.8rem) — it exists so a maximised window does not
+     stretch a table to 2000px. */
+  max-width: 84rem;
 }
 
-.runs-environment-note {
-  margin: 0;
-}
+/* ---------------------------------------------------------------------------
+   1. The console
+   --------------------------------------------------------------------------- */
 
-/* Side by side, not stacked, and not a tab bar (task 012).
-   The acceptance criterion is "switching between them is one click and does not
-   lose scroll position". A grid answers it more directly than tabs do: nothing
-   is hidden, so switching costs no clicks at all, and — the part that matters —
-   **no card ever unmounts**, so each keeps its own scroll offset by
-   construction rather than by saving and restoring one. A tab bar would mount
-   and unmount `ActiveRunCard`, which is where a scroll position goes to die.
-   `auto-fit` rather than a fixed column count, so one run still fills the row
-   and eight wrap instead of shrinking to unreadable slivers. */
-.active-runs-list {
+.queue-console {
+  /* Set per tone below; the rail down the left edge is what makes the state
+     legible before any word on the bar is read — same device, and the same
+     inset-shadow implementation, as `.task-card`'s `--card-rail`. */
+  --console-rail: var(--status-queued);
+
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(22rem, 1fr));
+  grid-template-columns: minmax(0, 1fr) auto;
   align-items: start;
-  gap: var(--space-4);
+  gap: var(--space-3) var(--space-5);
+  padding: var(--space-4) var(--space-5);
+  border-radius: var(--radius-md);
+  background: var(--surface-1);
+  box-shadow: inset 4px 0 0 var(--console-rail), var(--shadow-sm);
 }
 
-.active-run-card {
-  border: 1px solid var(--border-1);
-  border-radius: var(--radius-md);
-  box-shadow: var(--shadow-sm);
-  padding: var(--space-4) var(--space-5);
-  background: var(--surface-1);
-  /* A grid item's default `min-width: auto` is its content's minimum, so one
-     unbroken token in a transcript would push a column past its track and skew
-     the whole row. */
+/* Running and held get the wash as well as the rail, for the reason a running
+   card does: those are the two states where something is happening (or is
+   about to) and the bar should catch the eye on a screen nobody is watching.
+   A paused queue is the resting state and stays a plain panel. */
+.queue-console[data-tone="running"] {
+  --console-rail: var(--status-running);
+  background: color-mix(in srgb, var(--status-running) 7%, var(--surface-1));
+}
+
+.queue-console[data-tone="held"] {
+  --console-rail: var(--status-waiting-retry);
+  background: color-mix(in srgb, var(--status-waiting-retry) 8%, var(--surface-1));
+}
+
+.queue-console-state {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
   min-width: 0;
 }
 
-.active-run-header {
-  display: flex;
-  align-items: baseline;
-  justify-content: space-between;
-  gap: var(--space-3);
-  margin-bottom: var(--space-2);
-}
-
-.active-run-header h3 {
-  margin: 0;
-  font-size: var(--font-size-md);
-  font-weight: var(--font-weight-semibold);
-}
-
-.active-run-repo {
-  font-size: var(--font-size-xs);
-  color: var(--text-3);
-}
-
-.active-run-assistant-text {
-  margin-top: var(--space-3);
-}
-
-.active-run-assistant-text h4 {
-  margin: 0 0 var(--space-2);
-  font-size: var(--font-size-xs);
-  font-weight: var(--font-weight-semibold);
-  color: var(--text-2);
-  text-transform: uppercase;
-  letter-spacing: 0.03em;
-}
-
-/* Bounded and scrollable, which is what makes "does not lose scroll position"
-   a claim about something rather than vacuous: before task 012 this grew
-   without limit and the only scrollbar was the window's, so there was no
-   per-run offset to keep. Now each run has its own, and because the grid never
-   unmounts a card, reading one while the other is talking does not move it. */
-.active-run-assistant-text p {
-  margin: 0;
-  padding: var(--space-2) var(--space-3);
-  border-radius: var(--radius-sm);
-  background: var(--surface-0);
-  white-space: pre-wrap;
-  overflow-wrap: anywhere;
-  max-height: 18rem;
-  overflow-y: auto;
-}
-
-.active-run-actions {
-  display: flex;
-  justify-content: flex-end;
-  margin-top: var(--space-3);
-}
-
-/* The run queue (task 009) — Start/Pause/Resume/Stop, what is next, and what
-   has finished this session. Its own section above the live-run list stage
-   008 built, rather than folded into it: the queue can be running or paused
-   with nothing currently active, which `.active-runs-list` alone cannot
-   express. */
-
-.queue-section {
-  border: 1px solid var(--border-1);
-  border-radius: var(--radius-md);
-  box-shadow: var(--shadow-sm);
-  padding: var(--space-4) var(--space-5);
-  background: var(--surface-1);
-}
-
-.queue-section-header {
+.queue-console-heading {
   display: flex;
   align-items: center;
-  justify-content: space-between;
   gap: var(--space-3);
-  margin-bottom: var(--space-2);
+  flex-wrap: wrap;
 }
 
-.queue-section-header h2 {
+.queue-console-heading h2 {
   margin: 0;
-  font-size: var(--font-size-md);
-  font-weight: var(--font-weight-semibold);
-}
-
-.queue-section h3 {
-  margin: var(--space-4) 0 var(--space-2);
   font-size: var(--font-size-xs);
   font-weight: var(--font-weight-semibold);
-  color: var(--text-2);
+  letter-spacing: var(--letter-spacing-wide);
+  line-height: var(--line-height-tight);
   text-transform: uppercase;
-  letter-spacing: 0.03em;
+  color: var(--text-2);
 }
 
-/* Reuses the run-state badge tokens declared in board.css's `:root` —
-   "running"/"paused" are two of the same visual language as `.run-badge-*`,
-   not a third badge system. */
+/* The state badge, built from `.status-dot` + a word like every run-state
+   badge on the board. Larger than a card's badge — this one is the headline of
+   the screen, not a chip in a column. */
 .queue-state-badge {
   display: inline-flex;
   align-items: center;
-  padding: 0.1rem var(--space-2);
+  gap: var(--space-2);
+  flex: none;
+  padding: 0.1rem var(--space-3) 0.1rem var(--space-2);
+  border: 1px solid transparent;
   border-radius: var(--radius-full);
-  font-size: var(--font-size-xs);
+  font-size: var(--font-size-sm);
   font-weight: var(--font-weight-semibold);
+  letter-spacing: 0.04em;
   text-transform: uppercase;
-  letter-spacing: 0.02em;
   white-space: nowrap;
 }
 
@@ -161,21 +164,118 @@
   color: var(--badge-running-text);
 }
 
+.queue-state-running .status-dot {
+  color: var(--status-running);
+}
+
 .queue-state-paused {
   background: var(--badge-queued-bg);
   color: var(--badge-queued-text);
 }
 
-/* The last pass's own failure (task 009's own verification report, finding
-   5) — a missing `claude` or similar fails before any task is even chosen,
-   so no `SkipReason` badge below can say why nothing is happening. */
-.queue-step-error {
-  margin: var(--space-2) 0 0;
-  color: var(--danger-text);
+.queue-state-paused .status-dot {
+  /* Hollow, like `.run-badge-cancelled`'s: a paused queue is the one settled
+     state here, and "outlined, not filled" reads as inactive in greyscale. */
+  background: transparent;
+  box-shadow: inset 0 0 0 1px currentColor;
 }
 
+.queue-state-held {
+  background: var(--badge-waiting-retry-bg);
+  border-color: var(--badge-waiting-retry-text);
+  color: var(--badge-waiting-retry-text);
+}
+
+.queue-state-held .status-dot {
+  color: var(--status-waiting-retry);
+}
+
+/* Why the badge reads what it reads. A queue a schedule started at 22:00 stops
+   by itself at 06:00, and without this that reads exactly like a queue that
+   failed with work still on the board (task 013). */
+.queue-console-detail {
+  margin: 0;
+  font-size: var(--font-size-sm);
+  line-height: var(--line-height-normal);
+  color: var(--text-2);
+  overflow-wrap: anywhere;
+}
+
+.queue-console[data-tone="held"] .queue-console-detail {
+  color: var(--badge-waiting-retry-text);
+}
+
+/* The one failure `SkipReason` cannot name: a missing `claude` fails
+   `probe_cli` before any task is even chosen, so nothing on the board explains
+   it. Loud, on the danger triad, because it is the difference between "nothing
+   to do" and "nothing worked all night". */
+.queue-step-error {
+  margin: 0;
+  padding: var(--space-2) var(--space-3);
+  border-radius: var(--radius-sm);
+  background: var(--danger-bg);
+  box-shadow: inset 0 0 0 1px var(--danger-border);
+  color: var(--danger-text);
+  font-size: var(--font-size-sm);
+  overflow-wrap: anywhere;
+}
+
+/* The readouts. Four numbers that answer "is anything happening" without
+   reading a single row below — `--font-size-xl` and tabular so they are
+   comparable to each other at a glance, which is the whole reason the type
+   scale has a real jump at that step. */
+.queue-console-metrics {
+  display: flex;
+  align-items: flex-start;
+  flex-wrap: wrap;
+  gap: var(--space-2) var(--space-5);
+  margin: 0;
+}
+
+.queue-metric {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  min-width: 3.5rem;
+}
+
+.queue-metric dt {
+  font-size: var(--font-size-xs);
+  font-weight: var(--font-weight-semibold);
+  letter-spacing: var(--letter-spacing-wide);
+  text-transform: uppercase;
+  color: var(--text-2);
+  white-space: nowrap;
+}
+
+.queue-metric dd {
+  margin: 0;
+  font-size: var(--font-size-xl);
+  font-weight: var(--font-weight-semibold);
+  line-height: 1.1;
+  color: var(--text-1);
+  font-variant-numeric: tabular-nums;
+}
+
+/* A zero readout is not the same news as a non-zero one, and four bright
+   zeroes on an idle queue would be four things to read that say nothing. */
+.queue-metric[data-zero="true"] dd {
+  color: var(--text-3);
+}
+
+.queue-metric-live dd {
+  color: var(--status-running);
+}
+
+/* The transport. Its own column on the console, right-aligned, so the four
+   verbs sit together as controls rather than in the flow of the readouts. */
 .queue-controls {
-  margin-top: var(--space-2);
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: var(--space-2);
+  grid-column: 2;
+  grid-row: 1 / span 2;
 }
 
 .queue-controls-buttons {
@@ -183,142 +283,692 @@
   gap: var(--space-2);
 }
 
+.queue-controls-buttons button {
+  padding: var(--space-2) var(--space-4);
+  font-size: var(--font-size-sm);
+  font-weight: var(--font-weight-semibold);
+  letter-spacing: 0.02em;
+}
+
 /* The distinction task 009 asks to make legible: Pause finishes the current
-   run and starts nothing new, Stop also cancels it. Always shown, not just
-   when Stop is visible, so it is read before either button is ever pressed. */
+   run and starts nothing new, Stop also cancels it. Always shown, so it is
+   read before either button is ever pressed. */
 .queue-controls-caption {
-  margin: var(--space-2) 0 0;
+  margin: 0;
+  max-width: 22rem;
+  font-size: var(--font-size-xs);
+  line-height: var(--line-height-tight);
+  color: var(--text-2);
+  text-align: right;
 }
 
 .queue-stop-button {
-  color: var(--danger-text);
+  background: var(--danger-bg);
   border-color: var(--danger-border);
+  color: var(--danger-text);
 }
 
-.queue-plan-list {
+.queue-stop-button:hover:not(:disabled) {
+  background: var(--danger-bg);
+  border-color: var(--danger-text);
+}
+
+/* The environment line: what every run on this screen inherits, and roughly
+   what that costs. A footer on the console rather than a paragraph floating
+   between two sections. */
+.runs-environment-note {
+  grid-column: 1 / -1;
   margin: 0;
-  padding-left: var(--space-5);
+  padding-top: var(--space-2);
+  box-shadow: inset 0 1px 0 var(--border-1);
+  font-size: var(--font-size-xs);
+  line-height: var(--line-height-normal);
+  color: var(--text-2);
+}
+
+/* ---------------------------------------------------------------------------
+   2. Active runs
+   --------------------------------------------------------------------------- */
+
+/* Every band below the console gets the same head: an uppercase eyebrow and a
+   tabular count, the instrument readout `.board-column-header` already uses.
+   Three of these down the page is what makes the view scan as bands rather
+   than as a stack of panels. */
+.runs-section-head {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-3);
+  margin-bottom: var(--space-3);
+}
+
+.runs-section-head h2 {
+  margin: 0;
+  font-size: var(--font-size-xs);
+  font-weight: var(--font-weight-semibold);
+  letter-spacing: var(--letter-spacing-wide);
+  line-height: var(--line-height-tight);
+  text-transform: uppercase;
+  color: var(--text-2);
+}
+
+.runs-section-count {
+  font-size: var(--font-size-lg);
+  font-weight: var(--font-weight-semibold);
+  line-height: 1;
+  color: var(--text-1);
+  font-variant-numeric: tabular-nums;
+}
+
+.runs-section-count[data-zero="true"] {
+  color: var(--text-3);
+}
+
+/* The rule from the head to the edge of the view, so a band reads as a band.
+   Same device as the drawer's `.task-detail-band-label::after`. */
+.runs-section-head::after {
+  content: "";
+  flex: 1;
+  height: 1px;
+  background: var(--border-1);
+}
+
+/* Side by side, not stacked, and not a tab bar (task 012). The acceptance
+   criterion is "switching between them is one click and does not lose scroll
+   position"; a grid answers it more directly than tabs do — nothing is hidden,
+   so switching costs no clicks, and no card ever unmounts, so each keeps its
+   own scroll offset by construction. See this file's own width arithmetic. */
+.active-runs-list {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(19rem, 100%), 1fr));
+  align-items: start;
+  gap: var(--space-3);
+}
+
+.active-run-card {
   display: flex;
   flex-direction: column;
-  gap: var(--space-2);
+  gap: var(--space-3);
+  padding: var(--space-3) var(--space-4) var(--space-3);
+  border-radius: var(--radius-md);
+  /* A running card, exactly as the board paints one: the `--status-running`
+     rail and a 7% wash of the same accent, so this view and the board agree
+     about what "running" looks like. */
+  background: color-mix(in srgb, var(--status-running) 7%, var(--surface-1));
+  box-shadow: inset 3px 0 0 var(--status-running), var(--shadow-sm);
+  /* A grid item's default `min-width: auto` is its content's minimum, so one
+     unbroken token in a transcript would push a column past its track and skew
+     the whole row. */
+  min-width: 0;
+  /* The containing block for the sweep below. */
+  position: relative;
+  overflow: hidden;
 }
 
-.queue-plan-entry {
+/* The pulse. A 2px highlight travelling the top edge of every live card — the
+   cheapest honest way to say "this is a process, not a screenshot" on a screen
+   whose numbers only move once a second and can sit still for six minutes
+   inside one long tool call. Nothing about it encodes state: it is the same
+   sweep on every active card, and every fact it sits above is written out. */
+.active-run-card::before {
+  content: "";
+  position: absolute;
+  inset: 0 0 auto;
+  height: 2px;
+  background-image: linear-gradient(
+    90deg,
+    transparent,
+    var(--status-running),
+    transparent
+  );
+  background-size: 45% 100%;
+  background-repeat: no-repeat;
+  animation: active-run-sweep 2.6s var(--ease-standard) infinite;
+}
+
+@keyframes active-run-sweep {
+  from {
+    background-position: -45% 0;
+  }
+  to {
+    background-position: 145% 0;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .active-run-card::before {
+    animation: none;
+    background-image: none;
+    background-color: var(--status-running);
+  }
+}
+
+.active-run-header {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  min-width: 0;
+}
+
+.active-run-eyebrow {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+  min-width: 0;
+}
+
+/* "LIVE" plus a pulsing dot, in the running accent. The word is there for the
+   same reason every board badge keeps one: colour and motion are both channels
+   somebody may not have. */
+.active-run-live {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  flex: none;
+  color: var(--status-running);
+  font-size: var(--font-size-xs);
+  font-weight: var(--font-weight-semibold);
+  letter-spacing: var(--letter-spacing-wide);
+  text-transform: uppercase;
+}
+
+.active-run-repo {
+  min-width: 0;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: var(--font-size-xs);
+  color: var(--text-2);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.active-run-header h3 {
+  margin: 0;
+  font-size: var(--font-size-md);
+  font-weight: var(--font-weight-semibold);
+  line-height: var(--line-height-tight);
+  color: var(--text-1);
+  overflow-wrap: anywhere;
+  /* Two lines then an ellipsis: three cards in a row must keep their readouts
+     on the same baseline, and a card whose title is a paragraph would push its
+     own tail off the bottom of the screen. */
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+  overflow: hidden;
+}
+
+/* Elapsed and turns, as readouts rather than as a two-column definition list:
+   at 316px a `<dl>` spent a third of the card on the words "Elapsed" and
+   "Turns". Tabular, because elapsed time is the one number on this screen a
+   reader watches change. */
+.active-run-readout {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-5);
+  margin: 0;
+}
+
+.active-run-metric {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  min-width: 0;
+}
+
+.active-run-metric dt {
+  font-size: var(--font-size-xs);
+  font-weight: var(--font-weight-semibold);
+  letter-spacing: var(--letter-spacing-wide);
+  text-transform: uppercase;
+  color: var(--text-2);
+}
+
+.active-run-metric dd {
+  margin: 0;
+  font-size: var(--font-size-lg);
+  font-weight: var(--font-weight-semibold);
+  line-height: 1.15;
+  color: var(--text-1);
+  font-variant-numeric: tabular-nums;
+}
+
+.active-run-metric dd .muted {
+  font-size: var(--font-size-sm);
+  font-weight: var(--font-weight-regular);
+}
+
+/* The current tool call — the line that tells a six-minute `cargo test` apart
+   from a wedged run, so it gets a row of its own and a terminal's typeface
+   rather than a cell in a table. */
+.active-run-tool {
   display: flex;
   align-items: baseline;
   gap: var(--space-2);
-  flex-wrap: wrap;
+  min-width: 0;
+  padding: var(--space-1) var(--space-2);
+  border-radius: var(--radius-sm);
+  background: var(--surface-0);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: var(--font-size-xs);
+  line-height: var(--line-height-normal);
+}
+
+.active-run-tool-name {
+  flex: none;
+  font-weight: var(--font-weight-semibold);
+  color: var(--status-running);
+}
+
+.active-run-tool-detail {
+  min-width: 0;
+  color: var(--text-2);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.active-run-tool-idle {
+  color: var(--text-3);
+}
+
+.active-run-assistant-text {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  min-width: 0;
+}
+
+.active-run-assistant-text h4 {
+  margin: 0;
+  font-size: var(--font-size-xs);
+  font-weight: var(--font-weight-semibold);
+  letter-spacing: var(--letter-spacing-wide);
+  text-transform: uppercase;
+  color: var(--text-2);
+}
+
+/* Bounded and scrollable, which is what makes "does not lose scroll position"
+   a claim about something rather than vacuous: before task 012 this grew
+   without limit and the only scrollbar was the window's. Recessed onto
+   `--surface-0` and set relaxed, because it is prose somebody actually reads
+   rather than a status line they glance at. */
+.active-run-assistant-text p {
+  margin: 0;
+  padding: var(--space-2) var(--space-3);
+  border-radius: var(--radius-sm);
+  background: var(--surface-0);
+  color: var(--text-1);
+  font-size: var(--font-size-sm);
+  line-height: var(--line-height-relaxed);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  max-height: 14rem;
+  overflow-y: auto;
+}
+
+.active-run-assistant-text p.muted {
+  color: var(--text-3);
+}
+
+/* Cancel is an override of a decision the scheduler already made, so it is the
+   quiet control `.task-card-run-button` is, not a red button under every card. */
+.active-run-actions {
+  display: flex;
+  justify-content: flex-end;
+}
+
+.active-run-actions button {
+  padding: 0.05rem var(--space-3);
+  border-color: var(--border-1);
+  background: transparent;
+  box-shadow: none;
+  color: var(--text-2);
+  font-size: var(--font-size-xs);
+  font-weight: var(--font-weight-semibold);
+}
+
+.active-run-actions button:hover:not(:disabled) {
+  border-color: var(--danger-border);
+  background: var(--danger-bg);
+  color: var(--danger-text);
+}
+
+/* ---------------------------------------------------------------------------
+   3. The two lanes — what runs next, and what has finished
+   --------------------------------------------------------------------------- */
+
+.queue-lanes {
+  display: grid;
+  /* 22rem = 330px floors the pair: 2*330 + 15 = 675 <= 716, so both lanes sit
+     side by side even at the narrowest supported window, and stack on anything
+     narrower rather than crushing the skip reasons. */
+  grid-template-columns: repeat(auto-fit, minmax(min(22rem, 100%), 1fr));
+  align-items: start;
+  gap: var(--space-4);
+}
+
+.queue-lane {
+  min-width: 0;
+  padding: var(--space-3) var(--space-4) var(--space-4);
+  border-radius: var(--radius-md);
+  background: var(--surface-1);
+  box-shadow: var(--shadow-sm);
+}
+
+.queue-lane .muted {
+  margin: 0;
+  font-size: var(--font-size-sm);
+}
+
+/* The plan. A queue, so it looks like one: an ordinal in a fixed-width gutter,
+   the title, and — for a task the queue is passing over — the reason, on its
+   own line under it rather than trailing off the end of the title. */
+.queue-plan-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.queue-plan-entry {
+  display: grid;
+  grid-template-columns: 2.25rem minmax(0, 1fr);
+  align-items: baseline;
+  gap: var(--space-1) var(--space-2);
+  padding: var(--space-1) var(--space-2);
+  border-radius: var(--radius-sm);
+  background: var(--surface-0);
+  font-size: var(--font-size-sm);
+}
+
+/* The next task the queue will actually start. ADR-0007 makes board order
+   execution order, so "what runs next" is a fact the user set — worth the
+   accent that says the queue agrees with them. */
+.queue-plan-entry-next {
+  background: var(--accent-soft);
+  box-shadow: inset 2px 0 0 var(--accent);
 }
 
 .queue-plan-entry-skipped {
-  color: var(--text-3);
-}
-
-.queue-plan-title {
-  font-weight: var(--font-weight-medium);
+  background: transparent;
 }
 
 .queue-plan-position {
+  grid-column: 1;
   font-size: var(--font-size-xs);
-  color: var(--text-3);
+  font-weight: var(--font-weight-semibold);
+  color: var(--text-2);
+  font-variant-numeric: tabular-nums;
+  text-align: right;
 }
 
-.queue-plan-skip {
-  font-size: var(--font-size-sm);
-  color: var(--text-2);
+.queue-plan-entry-next .queue-plan-position {
+  color: var(--accent);
+}
+
+/* A skipped entry has no position, and a blank gutter beside it would read as
+   a missing number rather than as "this one is not in the count". */
+.queue-plan-skipmark {
+  grid-column: 1;
+  color: var(--text-3);
+  text-align: right;
+}
+
+.queue-plan-title {
+  grid-column: 2;
+  min-width: 0;
+  font-weight: var(--font-weight-medium);
+  color: var(--text-1);
   overflow-wrap: anywhere;
 }
 
+.queue-plan-entry-skipped .queue-plan-title {
+  font-weight: var(--font-weight-regular);
+  color: var(--text-2);
+}
+
+.queue-plan-skip {
+  grid-column: 2;
+  font-size: var(--font-size-xs);
+  line-height: var(--line-height-tight);
+  color: var(--text-3);
+  overflow-wrap: anywhere;
+}
+
+/* When a `waiting_retry` task comes back (seam-contract D22). Amber, the
+   still-recoverable severity the board's own waiting badge carries. */
+.queue-plan-resume {
+  grid-column: 2;
+  font-size: var(--font-size-xs);
+  line-height: var(--line-height-tight);
+  color: var(--badge-waiting-retry-text);
+  font-variant-numeric: tabular-nums;
+}
+
+/* What finished this session. Same row shape as the plan beside it — they are
+   two halves of one list, one before and one after — with the exit-class badge
+   board.css already defines carrying the outcome. */
 .session-outcomes-list {
+  list-style: none;
   margin: 0;
   padding: 0;
-  list-style: none;
   display: flex;
   flex-direction: column;
-  gap: var(--space-2);
+  gap: 1px;
 }
 
 .session-outcome-entry {
-  display: flex;
-  align-items: center;
-  gap: var(--space-3);
-  flex-wrap: wrap;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: baseline;
+  gap: var(--space-1) var(--space-2);
+  padding: var(--space-1) var(--space-2);
+  border-radius: var(--radius-sm);
+  background: var(--surface-0);
+  font-size: var(--font-size-sm);
 }
 
 .session-outcome-title {
+  min-width: 0;
   font-weight: var(--font-weight-medium);
+  color: var(--text-1);
+  overflow-wrap: anywhere;
 }
 
-.session-outcome-repo {
+.session-outcome-meta {
+  grid-column: 1;
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-2);
+  min-width: 0;
   font-size: var(--font-size-xs);
   color: var(--text-3);
 }
 
-/* Task 015: run history, filters, and the run detail overlay. */
-
-.runs-history-section {
-  border: 1px solid var(--border-1);
-  border-radius: var(--radius-md);
-  box-shadow: var(--shadow-sm);
-  padding: var(--space-4) var(--space-5);
-  background: var(--surface-1);
+.session-outcome-repo {
+  min-width: 0;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
+.session-outcome-time {
+  flex: none;
+  font-variant-numeric: tabular-nums;
+}
+
+.session-outcome-entry .exit-class-badge {
+  grid-column: 2;
+  grid-row: 1 / span 2;
+  align-self: center;
+}
+
+/* ---------------------------------------------------------------------------
+   4. History
+   --------------------------------------------------------------------------- */
+
+.runs-history-section {
+  padding: var(--space-3) var(--space-4) var(--space-4);
+  border-radius: var(--radius-md);
+  background: var(--surface-1);
+  box-shadow: var(--shadow-sm);
+}
+
+/* The filter bar, built like `.board-toolbar`: uppercase eyebrows on controls
+   that are permanent furniture rather than content, which is what buys the row
+   its density back. */
 .runs-history-filters {
   display: flex;
-  gap: var(--space-3);
+  align-items: flex-end;
   flex-wrap: wrap;
+  gap: var(--space-2) var(--space-4);
   margin-bottom: var(--space-3);
+  padding: var(--space-2) var(--space-3);
+  border-radius: var(--radius-sm);
+  background: var(--surface-0);
 }
 
 .runs-history-filters label {
   display: flex;
   flex-direction: column;
   gap: var(--space-1);
-  font-size: var(--font-size-sm);
+  font-size: var(--font-size-xs);
+  font-weight: var(--font-weight-semibold);
+  letter-spacing: var(--letter-spacing-wide);
+  text-transform: uppercase;
   color: var(--text-2);
 }
 
-.run-history-list,
-.runs-history-list {
-  margin: 0;
-  padding: 0;
-  list-style: none;
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-2);
-}
-
-/* Each row is the same shape as the board's own list rows (task 011's
-   `.dependency-item`, `.link-item`): a bordered strip on `--surface-0`, not a
-   bare button — a table row wearing a button's semantics, so twenty of them
-   read as a list rather than a stack of unrelated controls. */
-.run-history-list button,
-.runs-history-list button {
-  width: 100%;
-  display: flex;
-  gap: var(--space-3);
-  align-items: baseline;
-  flex-wrap: wrap;
-  text-align: left;
-  padding: var(--space-2) var(--space-3);
+.runs-history-filters select,
+.runs-history-filters input {
+  padding: var(--space-1) var(--space-2);
   border: 1px solid var(--border-1);
   border-radius: var(--radius-sm);
-  background: var(--surface-0);
+  background: var(--surface-1);
+  color: var(--text-1);
+  font: inherit;
   font-size: var(--font-size-sm);
+  letter-spacing: normal;
+  text-transform: none;
+  box-shadow: none;
 }
 
-.run-history-list button:hover,
-.runs-history-list button:hover {
+.runs-history-filters select:hover,
+.runs-history-filters input:hover {
   border-color: var(--border-2);
 }
 
-.run-history-actions {
-  display: flex;
-  align-items: center;
-  gap: var(--space-3);
-  margin-top: var(--space-3);
+.runs-history-clear {
+  padding: var(--space-1) var(--space-3);
+  font-size: var(--font-size-xs);
+  font-weight: var(--font-weight-semibold);
+  box-shadow: none;
 }
+
+/* A table, because this is tabular: seven fields per run, twenty runs, read by
+   scanning one column at a time. Depth rather than rules — every cell edge is
+   an inset shadow, the same way `.strategy-phases` draws its rows. */
+.runs-history-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: var(--font-size-sm);
+}
+
+.runs-history-table th {
+  padding: var(--space-1) var(--space-2);
+  box-shadow: inset 0 -1px 0 var(--border-2);
+  color: var(--text-2);
+  font-size: var(--font-size-xs);
+  font-weight: var(--font-weight-semibold);
+  letter-spacing: var(--letter-spacing-wide);
+  text-transform: uppercase;
+  text-align: left;
+  white-space: nowrap;
+}
+
+.runs-history-table td {
+  padding: var(--space-1) var(--space-2);
+  box-shadow: inset 0 -1px 0 var(--border-1);
+  color: var(--text-2);
+  vertical-align: baseline;
+  transition: background-color var(--duration-fast) var(--ease-standard);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .runs-history-table td {
+    transition: none;
+  }
+}
+
+/* The whole row lights, not the cell under the pointer: the reader's eye is on
+   the cost column and the thing they are about to click is in the first one. */
+.runs-history-table tbody tr:hover td,
+.runs-history-table tbody tr:focus-within td {
+  background: var(--surface-2);
+}
+
+/* Costs, turns, durations. The direction's own example of what `.tabular-nums`
+   is for — three columns that are only comparable if the digits line up. */
+.runs-history-table .numeric {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.runs-history-table .runs-history-when {
+  color: var(--text-3);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.runs-history-repo {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: var(--font-size-xs);
+  color: var(--text-2);
+}
+
+/* The row's control is the title, styled as a link rather than as a button:
+   twenty bordered buttons down a table's first column is a stack of controls,
+   not a list of runs. */
+.runs-history-open {
+  padding: 0;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  box-shadow: none;
+  color: var(--text-1);
+  font: inherit;
+  font-size: var(--font-size-sm);
+  font-weight: var(--font-weight-medium);
+  text-align: left;
+  cursor: pointer;
+  overflow-wrap: anywhere;
+}
+
+.runs-history-open:hover {
+  background: transparent;
+  color: var(--accent);
+  text-decoration: underline;
+}
+
+.runs-history-empty {
+  margin: 0;
+  padding: var(--space-4) var(--space-3);
+  border: 1px dashed var(--border-2);
+  border-radius: var(--radius-sm);
+  color: var(--text-2);
+  font-size: var(--font-size-sm);
+  text-align: center;
+}
+
+/* ---------------------------------------------------------------------------
+   The run detail overlay
+   --------------------------------------------------------------------------- */
 
 /* `position: fixed` rather than the board's `.task-detail-panel` (`absolute`
    inside `.board-layout`'s containing block) because this overlay is opened
@@ -330,36 +980,44 @@
   z-index: 50;
   overflow-y: auto;
   background: var(--surface-0);
-  padding: var(--space-6);
+  padding: 0 var(--space-6) var(--space-6);
   display: flex;
   flex-direction: column;
   gap: var(--space-4);
 }
 
 .run-detail-overlay-header {
+  position: sticky;
+  top: 0;
+  z-index: 1;
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: var(--space-3);
-  position: sticky;
-  top: calc(-1 * var(--space-6));
-  background: var(--surface-0);
-  padding-bottom: var(--space-3);
-  border-bottom: 1px solid var(--border-1);
+  /* Full-bleed against the overlay's own horizontal padding, so the header
+     reads as a bar across the top rather than as the first block of the page. */
+  margin: 0 calc(-1 * var(--space-6));
+  padding: var(--space-3) var(--space-6);
+  background: var(--surface-1);
+  box-shadow: inset 0 -1px 0 var(--border-1), var(--shadow-sm);
 }
 
 .run-detail-overlay-header h3 {
   margin: 0;
+  font-size: var(--font-size-md);
+  font-weight: var(--font-weight-semibold);
 }
 
 .run-detail-close {
   flex-shrink: 0;
-  padding: var(--space-1) var(--space-2);
+  padding: 0 var(--space-2);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
   font-size: var(--font-size-xs);
   font-weight: var(--font-weight-medium);
   color: var(--text-2);
-  background: var(--surface-2);
-  border: 1px solid var(--border-1);
+  background: var(--surface-3);
+  border-color: var(--border-1);
+  box-shadow: none;
 }
 
 .run-detail-close:hover {
@@ -367,42 +1025,155 @@
   color: var(--text-1);
 }
 
+/* Two columns above 1100px: the review facts (outcome, diff, commits, PR) in a
+   fixed rail on the left, and the long read (the prompt and the transcript) in
+   the wide column beside it.
+   ADR-0013 is the reason the *document* order is outcome → diff → commits → PR
+   → prompt → transcript, and this layout keeps it: the grid places the first
+   four in column one and the last two in column two, so reading order and DOM
+   order still agree. What it buys is that the transcript no longer starts
+   three screens below the diff — the two things somebody switches between
+   while reviewing a run are side by side. */
+.run-detail-body {
+  display: grid;
+  gap: var(--space-4);
+  align-items: start;
+  align-content: start;
+  padding-bottom: var(--space-6);
+}
+
+@media (min-width: 1100px) {
+  .run-detail-body {
+    grid-template-columns: minmax(0, 24rem) minmax(0, 1fr);
+  }
+
+  .run-detail-body > .run-detail-section:nth-child(-n + 4) {
+    grid-column: 1;
+  }
+
+  .run-detail-body > .run-detail-section:nth-child(n + 5) {
+    grid-column: 2;
+  }
+}
+
 .run-detail-section {
-  border: 1px solid var(--border-1);
+  min-width: 0;
+  padding: var(--space-3) var(--space-4);
   border-radius: var(--radius-md);
-  box-shadow: var(--shadow-sm);
-  padding: var(--space-4) var(--space-5);
   background: var(--surface-1);
+  box-shadow: var(--shadow-sm);
 }
 
 .run-detail-section h4 {
-  margin: 0 0 var(--space-2);
+  margin: 0 0 var(--space-3);
   font-size: var(--font-size-xs);
   font-weight: var(--font-weight-semibold);
-  color: var(--text-2);
+  letter-spacing: var(--letter-spacing-wide);
   text-transform: uppercase;
-  letter-spacing: 0.04em;
+  color: var(--text-2);
+}
+
+.run-detail-section > p {
+  margin: 0;
+}
+
+/* The outcome readout — status, duration, turns, cost as labelled fields
+   rather than a `<dl>` that spent a third of the rail on the word "Duration".
+   Same shape as the board drawer's `.task-detail-readout`. */
+.run-detail-readout {
+  display: flex;
+  align-items: flex-start;
+  flex-wrap: wrap;
+  gap: var(--space-3) var(--space-5);
+  margin-bottom: var(--space-3);
+}
+
+.run-detail-readout-field {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  min-width: 0;
+}
+
+.run-detail-readout-label {
+  font-size: var(--font-size-xs);
+  font-weight: var(--font-weight-semibold);
+  letter-spacing: var(--letter-spacing-wide);
+  text-transform: uppercase;
+  color: var(--text-2);
+}
+
+.run-detail-readout-value {
+  font-size: var(--font-size-lg);
+  font-weight: var(--font-weight-semibold);
+  line-height: 1.15;
+  color: var(--text-1);
+  font-variant-numeric: tabular-nums;
+}
+
+/* The badge is already sized; it must not inherit the hero number's size. */
+.run-detail-readout-value .exit-class-badge {
+  font-size: var(--font-size-xs);
+  vertical-align: 0.1em;
+}
+
+.run-detail-readout-value .muted {
+  font-size: var(--font-size-sm);
+  font-weight: var(--font-weight-regular);
+}
+
+.run-detail-section .detail-list {
+  margin: 0;
+  font-size: var(--font-size-sm);
 }
 
 .run-detail-file-list,
 .run-detail-commit-list {
   margin: var(--space-2) 0 0;
-  padding-left: var(--space-5);
+  padding: 0;
+  list-style: none;
   display: flex;
   flex-direction: column;
-  gap: var(--space-1);
+  gap: 1px;
   font-size: var(--font-size-sm);
 }
 
-.run-detail-prompt {
-  white-space: pre-wrap;
-  overflow-wrap: anywhere;
-  max-height: 20rem;
-  overflow-y: auto;
-  padding: var(--space-2) var(--space-3);
+.run-detail-file-list li,
+.run-detail-commit-list li {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--space-3);
+  padding: 0.1rem var(--space-2);
   border-radius: var(--radius-sm);
   background: var(--surface-0);
-  font-size: var(--font-size-sm);
+  overflow-wrap: anywhere;
+}
+
+.run-detail-diffstat {
+  flex: none;
+  font-size: var(--font-size-xs);
+  color: var(--text-2);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+/* The prompt this run was actually given. Monospace and recessed, at the
+   reading width the transcript uses — it is the other document on this screen,
+   not a field. */
+.run-detail-prompt {
+  margin: 0;
+  padding: var(--space-3) var(--space-4);
+  border-radius: var(--radius-sm);
+  background: var(--surface-0);
+  color: var(--text-1);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: var(--font-size-xs);
+  line-height: var(--line-height-relaxed);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  max-height: 24rem;
+  overflow-y: auto;
 }
 
 .run-detail-actions {
@@ -411,9 +1182,21 @@
   margin-bottom: var(--space-3);
 }
 
-/* The transcript viewer itself: search, one bounded page of entries, and
-   pagination — never the whole file at once (see
-   `rimaia_core::runs::transcript`'s own doc for why). */
+.run-detail-actions button {
+  padding: 0.05rem var(--space-3);
+  font-size: var(--font-size-xs);
+  font-weight: var(--font-weight-semibold);
+  box-shadow: none;
+}
+
+/* ---------------------------------------------------------------------------
+   The transcript viewer
+   --------------------------------------------------------------------------- */
+
+/* Somebody reads this for a long time, so every decision below is a reading
+   decision: a speaker in a fixed gutter so the eye can skip a whole role, one
+   measure rather than full-bleed lines, relaxed leading, and the tool payloads
+   collapsed out of the way of the prose. */
 
 .transcript-viewer {
   display: flex;
@@ -428,91 +1211,182 @@
 
 .transcript-search input {
   flex: 1;
+  min-width: 0;
+  font-size: var(--font-size-sm);
 }
 
 .transcript-search-results {
   margin: 0;
-  padding: 0;
+  padding: var(--space-1);
   list-style: none;
   display: flex;
   flex-direction: column;
-  gap: var(--space-1);
+  gap: 1px;
   max-height: 12rem;
   overflow-y: auto;
+  border-radius: var(--radius-sm);
+  background: var(--surface-0);
 }
 
 .transcript-search-results button {
   width: 100%;
   text-align: left;
-  padding: var(--space-1) var(--space-2);
+  padding: 0.1rem var(--space-2);
+  border-color: transparent;
   border-radius: var(--radius-sm);
+  background: transparent;
+  box-shadow: none;
+  font-size: var(--font-size-sm);
+  font-weight: var(--font-weight-regular);
+  color: var(--text-2);
 }
 
 .transcript-search-results button:hover {
   background: var(--surface-2);
+  color: var(--text-1);
 }
 
 .transcript-snippet {
-  color: var(--text-2);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: var(--font-size-xs);
+  color: var(--text-3);
   overflow-wrap: anywhere;
 }
 
 .transcript-entries {
   display: flex;
   flex-direction: column;
-  gap: var(--space-2);
-  max-height: 40rem;
+  gap: var(--space-1);
+  /* Viewport-relative rather than a fixed 40rem: this is the tallest thing on
+     the screen and the one somebody scrolls for minutes, so it should use the
+     window it is given. */
+  max-height: min(64vh, 52rem);
   overflow-y: auto;
+  padding: var(--space-2);
+  border-radius: var(--radius-sm);
+  background: var(--surface-0);
 }
 
 .transcript-entry {
-  border: 1px solid var(--border-1);
-  border-radius: var(--radius-sm);
+  display: grid;
+  grid-template-columns: 5rem minmax(0, 1fr);
+  gap: var(--space-1) var(--space-3);
   padding: var(--space-2) var(--space-3);
+  border-radius: var(--radius-sm);
   font-size: var(--font-size-sm);
+  line-height: var(--line-height-relaxed);
 }
 
+/* The speaker, in its own gutter and never repeated inside the text: five rems
+   of uppercase eyebrow is what lets a reader skip every tool result in a
+   thousand-entry transcript without reading one. */
+.transcript-role {
+  grid-column: 1;
+  font-size: var(--font-size-xs);
+  font-weight: var(--font-weight-semibold);
+  letter-spacing: var(--letter-spacing-wide);
+  line-height: var(--line-height-relaxed);
+  text-transform: uppercase;
+  color: var(--text-3);
+  white-space: nowrap;
+}
+
+.transcript-entry > :not(.transcript-role) {
+  grid-column: 2;
+  min-width: 0;
+}
+
+/* The agent's own words are the thing being read; everything else is context
+   around them, so only this one gets a surface and the primary text colour. */
 .transcript-assistant {
   background: var(--surface-1);
+}
+
+.transcript-assistant .transcript-role {
+  color: var(--status-running);
 }
 
 .transcript-user {
   background: transparent;
 }
 
+.transcript-result {
+  background: var(--surface-1);
+  box-shadow: inset 2px 0 0 var(--status-success);
+}
+
+.transcript-result.transcript-error {
+  box-shadow: inset 2px 0 0 var(--status-failed);
+}
+
 .transcript-malformed {
-  border-style: dashed;
-  border-color: var(--warn-border);
+  background: var(--warn-bg);
+  box-shadow: inset 2px 0 0 var(--warn-border);
+}
+
+.transcript-malformed .transcript-role {
+  color: var(--warn-text);
 }
 
 .transcript-text {
   margin: 0;
+  color: var(--text-1);
+  /* A measure. Prose set the full width of a 1400px overlay is unreadable, and
+     this is the one block on the screen that is prose. */
+  max-width: 46rem;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
 }
 
-.transcript-tool-use {
+.transcript-text + .transcript-text {
   margin-top: var(--space-2);
 }
 
+.transcript-tool-use {
+  margin-top: var(--space-1);
+}
+
 .transcript-tool-name {
+  display: inline-block;
+  margin-bottom: var(--space-1);
+  padding: 0 var(--space-1);
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
+  color: var(--text-1);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: var(--font-size-xs);
   font-weight: var(--font-weight-semibold);
 }
 
 .transcript-tool-input,
 .transcript-tool-result pre {
-  margin: var(--space-1) 0 0;
+  margin: 0;
   padding: var(--space-2) var(--space-3);
   border-radius: var(--radius-sm);
   background: var(--surface-0);
+  color: var(--text-2);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: var(--font-size-xs);
+  line-height: var(--line-height-normal);
   white-space: pre-wrap;
   overflow-wrap: anywhere;
   max-height: 16rem;
   overflow-y: auto;
 }
 
+/* Collapsed by default and quiet when shut: a tool result is the bulk of a
+   transcript by volume and almost never the thing being looked for. */
 .transcript-tool-result summary {
   cursor: pointer;
+  font-size: var(--font-size-xs);
+  font-weight: var(--font-weight-semibold);
+  letter-spacing: 0.02em;
+  color: var(--text-2);
+}
+
+.transcript-tool-result[open] summary {
+  margin-bottom: var(--space-1);
+  color: var(--text-1);
 }
 
 .transcript-error,
@@ -520,8 +1394,17 @@
   color: var(--danger-text);
 }
 
+.transcript-tool-result.transcript-error summary {
+  color: var(--danger-text);
+}
+
+/* An event nothing renders. Deliberately the faintest line in the file: a real
+   transcript is mostly these, and they exist to be skipped. */
 .transcript-other {
   margin: 0;
+  padding: 0 var(--space-3);
+  font-size: var(--font-size-xs);
+  color: var(--text-3);
 }
 
 /* Same treatment as a tool payload: a line that would not parse is usually a
@@ -531,6 +1414,8 @@
   padding: var(--space-2) var(--space-3);
   border-radius: var(--radius-sm);
   background: var(--surface-0);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: var(--font-size-xs);
   white-space: pre-wrap;
   overflow-wrap: anywhere;
   max-height: 16rem;
@@ -542,12 +1427,13 @@
   align-items: center;
   justify-content: space-between;
   gap: var(--space-3);
+  font-size: var(--font-size-sm);
+  font-variant-numeric: tabular-nums;
 }
 
-/* The caption beside the queue's state badge (task 013). Without it, a queue
-   that stopped by itself at 06:00 with work still on the board reads exactly
-   like a queue that failed. */
-.queue-window {
-  margin: var(--space-1) 0 0;
-  font-size: var(--font-size-sm);
+.transcript-pagination button {
+  padding: 0.05rem var(--space-3);
+  font-size: var(--font-size-xs);
+  font-weight: var(--font-weight-semibold);
+  box-shadow: none;
 }

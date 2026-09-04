@@ -221,29 +221,48 @@ export function ActiveRunCard({ task, repositoryName }: ActiveRunCardProps) {
   return (
     <article className="active-run-card">
       <header className="active-run-header">
+        <div className="active-run-eyebrow">
+          {/* A word and a pulsing dot, not a dot alone: colour and motion are
+              both channels a reader may not have, and "LIVE" is the fact. */}
+          <span className="active-run-live">
+            <span className="status-dot status-dot-live" aria-hidden="true" />
+            Live
+          </span>
+          <span className="active-run-repo">{repositoryName}</span>
+        </div>
         <h3>{task.title}</h3>
-        <span className="active-run-repo">{repositoryName}</span>
       </header>
 
-      <dl className="detail-list">
-        <dt>Elapsed</dt>
-        <dd>{startedAt ? formatElapsed(elapsedMs()) : <span className="muted">Starting…</span>}</dd>
-        <dt>Turns</dt>
-        <dd>{tail ? tail.turns : <span className="muted">—</span>}</dd>
-        <dt>Current tool</dt>
-        <dd>
-          {tail?.currentTool ? (
-            <>
-              <code>{tail.currentTool.name}</code>
-              {tail.currentTool.detail && (
-                <span className="muted"> — {tail.currentTool.detail}</span>
-              )}
-            </>
-          ) : (
-            <span className="muted">—</span>
-          )}
-        </dd>
+      {/* Elapsed and turns as readouts rather than as `<dl class="detail-list">`
+          rows: three cards sit side by side at ~316px each, where a two-column
+          definition list spends a third of the card on the labels. */}
+      <dl className="active-run-readout">
+        <div className="active-run-metric">
+          <dt>Elapsed</dt>
+          <dd>
+            {startedAt ? formatElapsed(elapsedMs()) : <span className="muted">Starting…</span>}
+          </dd>
+        </div>
+        <div className="active-run-metric">
+          <dt>Turns</dt>
+          <dd>{tail ? tail.turns : <span className="muted">—</span>}</dd>
+        </div>
       </dl>
+
+      {/* The line that tells a six-minute `cargo test` apart from a wedged run,
+          so it gets a row of its own rather than a cell in a table. */}
+      <p className="active-run-tool">
+        {tail?.currentTool ? (
+          <>
+            <span className="active-run-tool-name">{tail.currentTool.name}</span>
+            {tail.currentTool.detail && (
+              <span className="active-run-tool-detail">{tail.currentTool.detail}</span>
+            )}
+          </>
+        ) : (
+          <span className="active-run-tool-idle">No tool call in flight</span>
+        )}
+      </p>
 
       <div className="active-run-assistant-text">
         <h4>Recent assistant text</h4>
