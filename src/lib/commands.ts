@@ -1,6 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 
 import type {
+  Analytics,
   AppInfo,
   AutoCleanup,
   BoardColumn,
@@ -831,6 +832,35 @@ export function setMcpPort(port: number): Promise<McpStatus> {
  *  the way a client would — not a "something is listening" check. */
 export function testMcpConnection(): Promise<McpProbe> {
   return call<McpProbe>("test_mcp_connection");
+}
+
+// ---------------------------------------------------------------------------
+// Analytics (task 024) — see `src-tauri/src/commands/analytics.rs`.
+// ---------------------------------------------------------------------------
+
+/**
+ * Every figure the analytics page renders, for one period.
+ *
+ * The bounds are resolved *here*, not in Rust: "this week" is a question about
+ * the user's own calendar and timezone, and the window is the only thing that
+ * knows either. Omitting both is all time. `from` is inclusive and `to` is
+ * exclusive, so two adjacent periods never both claim a run.
+ */
+export function getAnalytics(from: Date | null, to: Date | null): Promise<Analytics> {
+  return call<Analytics>("get_analytics", {
+    from: from?.toISOString() ?? null,
+    to: to?.toISOString() ?? null,
+  });
+}
+
+/** What the user says they pay per month, or `null` when they have not said. */
+export function getSubscriptionCost(): Promise<number | null> {
+  return call<number | null>("get_subscription_cost");
+}
+
+/** Stores it, or clears it with `null`. A negative figure is refused. */
+export function setSubscriptionCost(value: number | null): Promise<void> {
+  return call<void>("set_subscription_cost", { value });
 }
 
 // ---------------------------------------------------------------------------

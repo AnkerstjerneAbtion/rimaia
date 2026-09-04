@@ -34,7 +34,7 @@ export interface AppInfo {
  * permanent nav item. Task 001's no-router decision still holds — four views,
  * no URLs, no nesting, nothing to deep-link.
  */
-export type View = "board" | "runs" | "settings" | "welcome";
+export type View = "board" | "runs" | "analytics" | "settings" | "welcome";
 
 // ---------------------------------------------------------------------------
 // The preflight doctor (task 018) — mirrors `rimaia_core::doctor`.
@@ -101,6 +101,76 @@ export interface DoctorReport {
    * permanent.
    */
   dismissals: DoctorDismissal[];
+}
+
+/** Mirrors `rimaia_core::analytics::RunOutcomes`. */
+export interface RunOutcomes {
+  succeeded: number;
+  failed: number;
+  cancelled: number;
+  interrupted: number;
+  running: number;
+}
+
+/** Mirrors `rimaia_core::analytics::DaySpend`. `day` is `YYYY-MM-DD`, UTC. */
+export interface DaySpend {
+  day: string;
+  spendUsd: number;
+  runs: number;
+}
+
+/** Mirrors `rimaia_core::analytics::ModelUse`. */
+export interface ModelUse {
+  model: string;
+  runs: number;
+  spendUsd: number;
+}
+
+/** Mirrors `rimaia_core::analytics::StrategyUse`. */
+export interface StrategyUse {
+  mode: StrategyMode;
+  runs: number;
+  spendUsd: number;
+}
+
+/** Mirrors `rimaia_core::analytics::LongestRun`. */
+export interface LongestRun {
+  runId: string;
+  taskId: string;
+  title: string;
+  seconds: number;
+}
+
+/**
+ * Mirrors `rimaia_core::analytics::Analytics` (task 024, ADR-0022).
+ *
+ * Every figure is computed from `runs` at read time; nothing here is stored.
+ * `runsWithoutCost` and `runsWithoutModel` are what make seam-contract D18
+ * renderable: a period predating the capture columns is *partly unrecorded*,
+ * not cheaper, and the page has to say so rather than quote a smaller total.
+ */
+export interface Analytics {
+  period: { from: string | null; to: string | null };
+  outcomes: RunOutcomes;
+  spendUsd: number;
+  spendByDay: DaySpend[];
+  runsWithoutCost: number;
+  runsWithoutModel: number;
+  tasksAttempted: number;
+  tasksCompleted: number;
+  /** Total spend over completed tasks — failed attempts included. */
+  costPerCompletedTaskUsd: number | null;
+  medianDurationSeconds: number | null;
+  longestRun: LongestRun | null;
+  /** Summed run duration, not wall-clock: parallel runs each contribute. */
+  unattendedHours: number;
+  models: ModelUse[];
+  strategies: StrategyUse[];
+  plannerSpendUsd: number;
+  implementationSpendUsd: number;
+  /** The user's own figure. `null` means the comparison is not drawn — never
+   *  that the subscription is free. */
+  subscriptionMonthlyUsd: number | null;
 }
 
 // ---------------------------------------------------------------------------

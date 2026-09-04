@@ -910,3 +910,161 @@
 .strategy-catalogue-actions {
   margin-top: var(--space-2);
 }
+
+/* --- Analytics (task 024) ------------------------------------------------ */
+
+/* A page of figures, and the figures are the page: six tiles the eye can land
+   on, then the tables that explain them. Nothing here is a chart library —
+   "a bar chart is not worth a bundle" is task 024's own Out of scope. */
+
+.analytics-periods {
+  display: flex;
+  gap: var(--space-2);
+}
+
+.analytics-periods button {
+  padding: 0.05rem var(--space-3);
+  border-color: var(--border-1);
+  background: transparent;
+  box-shadow: none;
+  color: var(--text-2);
+  font-size: var(--font-size-xs);
+  font-weight: var(--font-weight-semibold);
+}
+
+.analytics-periods button[aria-pressed="true"] {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+/* The D18 line. Loud enough to be read before the total under it, because a
+   total quoted without it is a claim about history that is false. */
+.analytics-unrecorded {
+  margin: 0;
+  padding: var(--space-2) var(--space-3);
+  border-radius: var(--radius-sm);
+  background: var(--warn-bg);
+  box-shadow: inset 2px 0 0 var(--warn-text);
+  color: var(--warn-text);
+  font-size: var(--font-size-sm);
+}
+
+.analytics-figures {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(12rem, 1fr));
+  gap: var(--space-3);
+}
+
+.analytics-figure {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  padding: var(--space-3) var(--space-4);
+  border-radius: var(--radius-md);
+  background: var(--surface-1);
+  box-shadow: inset 0 0 0 1px var(--border-1), var(--shadow-sm);
+}
+
+.analytics-figure-label {
+  font-size: var(--font-size-xs);
+  font-weight: var(--font-weight-semibold);
+  letter-spacing: var(--letter-spacing-wide);
+  text-transform: uppercase;
+  color: var(--text-2);
+}
+
+.analytics-figure-value {
+  font-size: var(--font-size-xl);
+  font-weight: var(--font-weight-semibold);
+  line-height: var(--line-height-tight);
+  color: var(--text-1);
+}
+
+.analytics-figure-note {
+  font-size: var(--font-size-xs);
+  color: var(--text-2);
+}
+
+/* Layout, not a dependency: each bar is a `<span>` with a percentage height
+   inside a fixed-height row. */
+.analytics-bars {
+  list-style: none;
+  margin: var(--space-3) 0 0;
+  padding: 0;
+  display: flex;
+  align-items: flex-end;
+  gap: var(--space-1);
+  height: 7rem;
+}
+
+.analytics-bars li {
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-end;
+  align-items: center;
+  flex: 1;
+  min-width: 0;
+  height: 100%;
+  gap: var(--space-1);
+}
+
+.analytics-bar {
+  width: 100%;
+  border-radius: var(--radius-sm) var(--radius-sm) 0 0;
+  background: var(--accent);
+}
+
+.analytics-bar-label {
+  font-size: var(--font-size-xs);
+  color: var(--text-2);
+  white-space: nowrap;
+}
+
+.analytics-table {
+  width: 100%;
+  margin-top: var(--space-3);
+  border-collapse: collapse;
+  font-size: var(--font-size-sm);
+}
+
+.analytics-table th,
+.analytics-table td {
+  padding: var(--space-1) var(--space-2);
+  text-align: left;
+}
+
+.analytics-table th {
+  font-size: var(--font-size-xs);
+  font-weight: var(--font-weight-semibold);
+  letter-spacing: var(--letter-spacing-wide);
+  text-transform: uppercase;
+  color: var(--text-2);
+}
+
+.analytics-table td {
+  box-shadow: inset 0 1px 0 var(--border-1);
+}
+
+.analytics-subscription {
+  display: flex;
+  align-items: flex-end;
+  gap: var(--space-3);
+  margin-top: var(--space-3);
+}
+
+.analytics-subscription label {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+
+.analytics-subscription-label {
+  font-size: var(--font-size-xs);
+  font-weight: var(--font-weight-semibold);
+  color: var(--text-2);
+}
+
+.analytics-subscription input {
+  width: 8rem;
+}

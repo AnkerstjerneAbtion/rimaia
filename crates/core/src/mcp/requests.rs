@@ -504,6 +504,26 @@ pub struct SetWorktreeAutoCleanupRequest {
     pub setting: AutoCleanup,
 }
 
+/// The window `get_analytics` reports on (task 024).
+///
+/// Both bounds optional: omitting them is all time, which is the answer for
+/// "what has this thing cost me". `from` is inclusive and `to` is exclusive, so
+/// two adjacent periods cannot both claim a run.
+#[derive(Debug, Clone, Default, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case", default, deny_unknown_fields)]
+pub struct AnalyticsRequest {
+    /// RFC 3339, e.g. `2026-09-01T00:00:00Z`.
+    pub from: Option<DateTime<Utc>>,
+    pub to: Option<DateTime<Utc>>,
+}
+
+/// What the user pays per month, or `null` to clear it (task 024).
+#[derive(Debug, Clone, Default, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case", default, deny_unknown_fields)]
+pub struct SubscriptionCostRequest {
+    pub monthly_usd: Option<f64>,
+}
+
 /// Which cards `plan_tasks_strategy` plans (task 023).
 ///
 /// Every stated field narrows the set, and stating none of them is refused

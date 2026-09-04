@@ -16,6 +16,7 @@ use chrono::{DateTime, Utc};
 use schemars::JsonSchema;
 use serde::Serialize;
 
+use crate::analytics::Analytics;
 use crate::db::settings::Dismissal;
 use crate::db::{
     BoardColumn, ExitClass, MutationSource, Repository, Run, RunState, RunStatus, Schedule,
@@ -223,6 +224,98 @@ impl From<&CheckResult> for CheckResultView {
             dismissed: result.dismissed,
         }
     }
+}
+
+/// What `get_analytics` answers with (task 024).
+///
+/// A **narrower** projection than the page renders, and deliberately so: the
+/// per-day chart and the longest-run link are shapes for an eye, and an agent
+/// asked "is this worth it" needs the numbers that answer it. Everything here
+/// is computed at read time over `runs` — no aggregate is stored (ADR-0022
+/// part 3).
+#[derive(Debug, Clone, PartialEq, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub struct AnalyticsView {
+    pub from: Option<DateTime<Utc>>,
+    pub to: Option<DateTime<Utc>>,
+    pub runs_total: usize,
+    pub runs_succeeded: usize,
+    pub runs_failed: usize,
+    pub runs_cancelled: usize,
+    pub runs_interrupted: usize,
+    pub runs_running: usize,
+    /// Of the runs that *ended*, `null` when none has.
+    pub failure_rate: Option<f64>,
+    /// Summed over the rows that have a cost. Read `runs_without_cost` before
+    /// quoting it: a period predating ADR-0022's capture columns is partly
+    /// unrecorded rather than cheaper (seam-contract D18).
+    pub spend_usd: f64,
+    pub runs_without_cost: usize,
+    pub tasks_attempted: usize,
+    pub tasks_completed: usize,
+    /// Total spend over completed tasks — every failed attempt included, which
+    /// is the only honest way to say what a finished task cost.
+    pub cost_per_completed_task_usd: Option<f64>,
+    pub median_duration_seconds: Option<i64>,
+    /// Summed run duration, not wall-clock: parallel runs each contribute.
+    pub unattended_hours: f64,
+    pub models: Vec<ModelUseView>,
+    pub planner_spend_usd: f64,
+    pub implementation_spend_usd: f64,
+    /// The user's own figure, and `null` until they give one. Absent means the
+    /// comparison must not be drawn, never that the subscription is free.
+    pub subscription_monthly_usd: Option<f64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub struct ModelUseView {
+    pub model: String,
+    pub runs: usize,
+    pub spend_usd: f64,
+}
+
+impl From<&Analytics> for AnalyticsView {
+    fn from(report: &Analytics) -> Self {
+        Self {
+            from: report.period.from,
+            to: report.period.to,
+            runs_total: report.outcomes.total(),
+            runs_succeeded: report.outcomes.succeeded,
+            runs_failed: report.outcomes.failed,
+            runs_cancelled: report.outcomes.cancelled,
+            runs_interrupted: report.outcomes.interrupted,
+            runs_running: report.outcomes.running,
+            failure_rate: report.outcomes.failure_rate(),
+            spend_usd: report.spend_usd,
+            runs_without_cost: report.runs_without_cost,
+            tasks_attempted: report.tasks_attempted,
+            tasks_completed: report.tasks_completed,
+            cost_per_completed_task_usd: report.cost_per_completed_task_usd,
+            median_duration_seconds: report.median_duration_seconds,
+            unattended_hours: report.unattended_hours,
+            models: report
+                .models
+                .iter()
+                .map(|use_| ModelUseView {
+                    model: use_.model.clone(),
+                    runs: use_.runs,
+                    spend_usd: use_.spend_usd,
+                })
+                .collect(),
+            planner_spend_usd: report.planner_spend_usd,
+            implementation_spend_usd: report.implementation_spend_usd,
+            subscription_monthly_usd: report.subscription_monthly_usd,
+        }
+    }
+}
+
+/// What the two subscription tools answer with — the stored figure, echoed back
+/// after a write for [`OnboardingView`]'s reason.
+#[derive(Debug, Clone, PartialEq, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub struct SubscriptionCostView {
+    pub monthly_usd: Option<f64>,
 }
 
 /// What one card's planning came to (task 023).

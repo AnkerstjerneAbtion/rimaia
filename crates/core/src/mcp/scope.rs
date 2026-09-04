@@ -131,6 +131,11 @@ pub enum Tool {
     PlanTaskStrategy,
     PlanTasksStrategy,
 
+    // Task 024's three. Reads and reconfigures the installation.
+    GetAnalytics,
+    GetSubscriptionCost,
+    SetSubscriptionCost,
+
     // Task 013's seven. Every one is *both* of ADR-0021 point 4's permanent
     // refusals at once: a schedule spawns runs — it is the thing that starts
     // the queue at 22:00 — and it reconfigures the installation, since an open
@@ -169,7 +174,7 @@ pub enum RunAccess {
 
 impl Tool {
     /// Every tool with a recorded decision, so a test can walk the table.
-    pub const ALL: [Tool; 40] = [
+    pub const ALL: [Tool; 43] = [
         Tool::AddTaskLink,
         Tool::CreateTask,
         Tool::GetBaseInstructions,
@@ -200,6 +205,9 @@ impl Tool {
         Tool::RestoreDoctorWarning,
         Tool::PlanTaskStrategy,
         Tool::PlanTasksStrategy,
+        Tool::GetAnalytics,
+        Tool::GetSubscriptionCost,
+        Tool::SetSubscriptionCost,
         Tool::ListSchedules,
         Tool::CreateSchedule,
         Tool::UpdateSchedule,
@@ -246,6 +254,9 @@ impl Tool {
             Tool::RestoreDoctorWarning => "restore_doctor_warning",
             Tool::PlanTaskStrategy => "plan_task_strategy",
             Tool::PlanTasksStrategy => "plan_tasks_strategy",
+            Tool::GetAnalytics => "get_analytics",
+            Tool::GetSubscriptionCost => "get_subscription_cost",
+            Tool::SetSubscriptionCost => "set_subscription_cost",
             Tool::ListSchedules => "list_schedules",
             Tool::CreateSchedule => "create_schedule",
             Tool::UpdateSchedule => "update_schedule",
@@ -395,6 +406,17 @@ impl Tool {
             // planners could spend the night's budget on deciding rather than
             // doing, and `plan_tasks_strategy` could do it N times in one call.
             Tool::PlanTaskStrategy | Tool::PlanTasksStrategy => RunAccess::Refused,
+
+            // Task 024's three, and it is ADR-0021 point 4's second permanent
+            // refusal read the way `run_doctor` reads it: these describe and
+            // configure the *installation*. `get_analytics` in particular is
+            // an inventory of every task this machine has ever attempted and
+            // what each one cost — `list_tasks`'s objection, with a price list
+            // attached — and the subscription figure is a fact about the
+            // operator's own billing that no run has a use for.
+            Tool::GetAnalytics | Tool::GetSubscriptionCost | Tool::SetSubscriptionCost => {
+                RunAccess::Refused
+            }
         }
     }
 }

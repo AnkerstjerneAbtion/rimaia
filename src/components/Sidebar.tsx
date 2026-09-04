@@ -3,6 +3,7 @@ import type { View } from "../types";
 const VIEWS: { id: View; label: string; hint: string }[] = [
   { id: "board", label: "Board", hint: "Tasks waiting, running and done" },
   { id: "runs", label: "Runs", hint: "What the agent did overnight" },
+  { id: "analytics", label: "Analytics", hint: "What it has cost, and what it did" },
   { id: "settings", label: "Settings", hint: "Repositories, instructions, storage" },
 ];
 

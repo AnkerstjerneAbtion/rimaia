@@ -32,6 +32,12 @@ pub const RUN_ENVIRONMENT: &str = "run_environment";
 /// [`onboarding_dismissed`] for why this is a key rather than only a derivation.
 pub const ONBOARDING_DISMISSED: &str = "onboarding_dismissed";
 
+/// Task 024's subscription figure — what the user says they pay per month.
+///
+/// **Absent is not zero.** Absent means the comparison is not rendered at all;
+/// a zero would be a claim that the subscription is free.
+pub const SUBSCRIPTION_MONTHLY_USD: &str = "subscription_monthly_usd";
+
 /// Task 027's dismissed doctor warnings — a JSON array of [`Dismissal`].
 ///
 /// A settings key rather than a table for seam-contract D4's reason: the
@@ -215,6 +221,49 @@ pub async fn set_onboarding_dismissed(ctx: &ServiceContext, value: bool) -> Resu
         if value { "true" } else { "false" },
     )
     .await
+}
+
+/// What the user pays for their Claude subscription each month, or `None`.
+///
+/// **`None` is the answer the page needs**, not `0.0`: task 024 renders the
+/// comparison only once there is a figure to compare against, and presents it
+/// as *the user's own* because Rimaia cannot verify it.
+///
+/// A stored value that is not a number, or is negative, reads as absent — the
+/// `run_environment` tolerance applied to a figure: a hand-edited row costs a
+/// warning and a missing panel, never a page that will not open.
+pub async fn subscription_monthly_usd(pool: &SqlitePool) -> Result<Option<f64>> {
+    let Some(raw) = get(pool, SUBSCRIPTION_MONTHLY_USD).await? else {
+        return Ok(None);
+    };
+
+    match raw.trim().parse::<f64>() {
+        Ok(value) if value.is_finite() && value >= 0.0 => Ok(Some(value)),
+        _ => {
+            tracing::warn!(
+                value = raw,
+                "unreadable subscription_monthly_usd; treating it as not set"
+            );
+            Ok(None)
+        }
+    }
+}
+
+/// Stores it, or clears it.
+///
+/// Refuses a negative or non-finite figure rather than storing one the reader
+/// would then have to ignore: this arrives from a form, and the place to say
+/// "that is not a monthly cost" is at the field.
+pub async fn set_subscription_monthly_usd(ctx: &ServiceContext, value: Option<f64>) -> Result<()> {
+    match value {
+        Some(value) if !value.is_finite() || value < 0.0 => Err(Error::invalid(
+            "a monthly subscription cost has to be zero or more",
+        )),
+        Some(value) => set(ctx, SUBSCRIPTION_MONTHLY_USD, &value.to_string()).await,
+        // Cleared rather than deleted: the key/value table has no delete, and
+        // an empty string reads as absent through the parser above.
+        None => set(ctx, SUBSCRIPTION_MONTHLY_USD, "").await,
+    }
 }
 
 /// One doctor warning the user has read and decided about (task 027).

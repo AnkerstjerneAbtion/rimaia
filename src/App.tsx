@@ -5,6 +5,7 @@ import { Sidebar } from "./components/Sidebar";
 import { useDoctor } from "./hooks/useDoctor";
 import { getAppInfo } from "./lib/commands";
 import { BoardView } from "./views/BoardView";
+import { AnalyticsView } from "./views/AnalyticsView";
 import { RunsView } from "./views/RunsView";
 import { SettingsView } from "./views/SettingsView";
 import { WelcomeView } from "./views/WelcomeView";
@@ -53,6 +54,7 @@ function App() {
         )}
         {view === "board" && <BoardView />}
         {view === "runs" && <RunsView />}
+        {view === "analytics" && <AnalyticsView />}
         {view === "settings" && <SettingsView />}
         {view === "welcome" && <WelcomeView onFinish={() => setView("board")} />}
       </main>

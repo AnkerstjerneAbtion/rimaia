@@ -27,25 +27,27 @@ use rmcp::handler::server::wrapper::{Json, Parameters};
 use rmcp::model::{Implementation, ServerCapabilities, ServerInfo};
 use rmcp::{tool, tool_handler, tool_router, ServerHandler};
 
+use crate::analytics::{self, Period};
 use crate::context::ServiceContext;
 use crate::db::{BoardColumn, StrategySource};
 use crate::doctor;
 use crate::mcp::error::ToolError;
 use crate::mcp::requests::{
-    AddTaskLinkRequest, ClearableField, CreateTaskRequest, DoctorDismissalRequest,
-    GetStrategyDefaultsRequest, GetTaskRequest, ListTasksRequest, MoveTaskRequest,
-    PlanSelectionRequest, RemoveTaskLinkRequest, ScheduleConfigRequest, ScheduleRequest,
-    SetMaxConcurrencyRequest, SetRepositoryMaxConcurrencyRequest, SetScheduleEnabledRequest,
-    SetScheduleModeRequest, SetStrategyApprovalRequest, SetStrategyCatalogueRequest,
-    SetStrategyDefaultsRequest, SetTaskDependenciesRequest, SetTaskStrategyRequest,
-    SetWorktreeAutoCleanupRequest, TaskStrategyRequest, UpdateScheduleRequest, UpdateTaskRequest,
+    AddTaskLinkRequest, AnalyticsRequest, ClearableField, CreateTaskRequest,
+    DoctorDismissalRequest, GetStrategyDefaultsRequest, GetTaskRequest, ListTasksRequest,
+    MoveTaskRequest, PlanSelectionRequest, RemoveTaskLinkRequest, ScheduleConfigRequest,
+    ScheduleRequest, SetMaxConcurrencyRequest, SetRepositoryMaxConcurrencyRequest,
+    SetScheduleEnabledRequest, SetScheduleModeRequest, SetStrategyApprovalRequest,
+    SetStrategyCatalogueRequest, SetStrategyDefaultsRequest, SetTaskDependenciesRequest,
+    SetTaskStrategyRequest, SetWorktreeAutoCleanupRequest, SubscriptionCostRequest,
+    TaskStrategyRequest, UpdateScheduleRequest, UpdateTaskRequest,
 };
 use crate::mcp::responses::{
-    BaseInstructionsView, DismissalView, DoctorDismissalsView, DoctorReportView, OnboardingView,
-    PlanPassView, PlanResultView, PreflightView, RepositoryListView, RepositoryView,
-    RunCapacityView, ScheduleDeletedView, ScheduleListView, ScheduleView, StrategyApprovalView,
-    TaskListItem, TaskListView, TaskView, TimezoneListView, WorktreeAutoCleanupView,
-    WorktreeListView, WorktreeView,
+    AnalyticsView, BaseInstructionsView, DismissalView, DoctorDismissalsView, DoctorReportView,
+    OnboardingView, PlanPassView, PlanResultView, PreflightView, RepositoryListView,
+    RepositoryView, RunCapacityView, ScheduleDeletedView, ScheduleListView, ScheduleView,
+    StrategyApprovalView, SubscriptionCostView, TaskListItem, TaskListView, TaskView,
+    TimezoneListView, WorktreeAutoCleanupView, WorktreeListView, WorktreeView,
 };
 use crate::mcp::scope::{RunScope, Tool};
 use crate::runner::prompt::TEMPLATE_VARIABLES;
@@ -259,6 +261,64 @@ deliberately."
         .await?;
 
         Ok(Json(PlanPassView::from(&pass)))
+    }
+
+    #[tool(
+        description = "Report what this Rimaia installation has actually done over a period: what \
+it spent, how many runs succeeded or failed, how many tasks reached review, how long runs take, \
+which models were used, and what a completed task costs once its failed attempts are counted. \
+Call this when the user asks whether Rimaia is worth what it costs, why their bill looks the way \
+it does, or whether runs have started failing more often. Omit both bounds for all time; pass \
+`from` and `to` as RFC 3339 instants otherwise. Read `runs_without_cost` before quoting a total \
+— it is how many runs in the period recorded no cost at all, and a period that predates the \
+capture columns is partly unrecorded rather than cheaper."
+    )]
+    pub async fn get_analytics(
+        &self,
+        Parameters(request): Parameters<AnalyticsRequest>,
+    ) -> Result<Json<AnalyticsView>, ToolError> {
+        self.scope.authorize(Tool::GetAnalytics, None)?;
+
+        let report = analytics::analytics(
+            &self.ctx.pool,
+            Period {
+                from: request.from,
+                to: request.to,
+            },
+        )
+        .await?;
+        Ok(Json(AnalyticsView::from(&report)))
+    }
+
+    #[tool(
+        description = "Read what the user has told Rimaia their Claude subscription costs per \
+month, or `null` when they have not said. Call this before comparing spend against a \
+subscription — the figure is the *user's own* and Rimaia cannot verify it, so an absent one means \
+the comparison must not be drawn rather than that it is free."
+    )]
+    pub async fn get_subscription_cost(&self) -> Result<Json<SubscriptionCostView>, ToolError> {
+        self.scope.authorize(Tool::GetSubscriptionCost, None)?;
+
+        Ok(Json(SubscriptionCostView {
+            monthly_usd: db::settings::subscription_monthly_usd(&self.ctx.pool).await?,
+        }))
+    }
+
+    #[tool(
+        description = "Record what the user pays for their Claude subscription each month, so the \
+analytics page can show spend as a share of it. Call it only when the user states a figure; pass \
+`null` to clear one. A negative figure is refused."
+    )]
+    pub async fn set_subscription_cost(
+        &self,
+        Parameters(request): Parameters<SubscriptionCostRequest>,
+    ) -> Result<Json<SubscriptionCostView>, ToolError> {
+        self.scope.authorize(Tool::SetSubscriptionCost, None)?;
+
+        db::settings::set_subscription_monthly_usd(&self.ctx, request.monthly_usd).await?;
+        Ok(Json(SubscriptionCostView {
+            monthly_usd: db::settings::subscription_monthly_usd(&self.ctx.pool).await?,
+        }))
     }
 
     #[tool(
@@ -1116,7 +1176,7 @@ mod tests {
     /// capability parity a rule. What replaces a count is the property that
     /// actually matters — a registered tool with no run-scope decision cannot
     /// reach the wire.
-    const REGISTERED_TOOLS: [&str; 40] = [
+    const REGISTERED_TOOLS: [&str; 43] = [
         "accept_task_strategy",
         "add_task_link",
         "clear_task_strategy",
@@ -1125,11 +1185,13 @@ mod tests {
         "delete_schedule",
         "dismiss_doctor_warning",
         "dismiss_onboarding",
+        "get_analytics",
         "get_base_instructions",
         "get_run_capacity",
         "get_strategy_approval",
         "get_strategy_catalogue",
         "get_strategy_defaults",
+        "get_subscription_cost",
         "get_task",
         "get_worktree_auto_cleanup",
         "give_up_on_task",
@@ -1152,6 +1214,7 @@ mod tests {
         "set_strategy_approval",
         "set_strategy_catalogue",
         "set_strategy_defaults",
+        "set_subscription_cost",
         "set_task_dependencies",
         "set_task_strategy",
         "set_worktree_auto_cleanup",

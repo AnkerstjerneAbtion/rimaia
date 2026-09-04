@@ -5,6 +5,7 @@
 //! same services without passing through here — a rule enforced in only one of
 //! the two paths is a bug.
 
+pub mod analytics;
 pub mod app;
 pub mod doctor;
 pub mod mcp;

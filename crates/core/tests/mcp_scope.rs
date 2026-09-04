@@ -171,6 +171,13 @@ fn the_operator_endpoint_keeps_every_tool_it_had_before_task_020() {
             // never in doubt, only the wiring.
             | Tool::PlanTaskStrategy
             | Tool::PlanTasksStrategy
+            // Task 024's three, and it is the same clause `run_doctor` is
+            // refused under: an inventory of every task this machine has
+            // attempted, with a price list attached, plus a fact about the
+            // operator's own billing.
+            | Tool::GetAnalytics
+            | Tool::GetSubscriptionCost
+            | Tool::SetSubscriptionCost
             // Task 013's seven, and these are *both* of ADR-0021 point 4's
             // permanent refusals at once rather than one of them: a schedule
             // spawns runs — it is the thing that starts the queue at 22:00 —
