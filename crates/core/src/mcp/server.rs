@@ -34,20 +34,22 @@ use crate::mcp::error::ToolError;
 use crate::mcp::requests::{
     AddTaskLinkRequest, ClearableField, CreateTaskRequest, DoctorDismissalRequest,
     GetStrategyDefaultsRequest, GetTaskRequest, ListTasksRequest, MoveTaskRequest,
-    RemoveTaskLinkRequest, ScheduleConfigRequest, ScheduleRequest, SetMaxConcurrencyRequest,
-    SetRepositoryMaxConcurrencyRequest, SetScheduleEnabledRequest, SetScheduleModeRequest,
-    SetStrategyApprovalRequest, SetStrategyCatalogueRequest, SetStrategyDefaultsRequest,
-    SetTaskDependenciesRequest, SetTaskStrategyRequest, SetWorktreeAutoCleanupRequest,
-    TaskStrategyRequest, UpdateScheduleRequest, UpdateTaskRequest,
+    PlanSelectionRequest, RemoveTaskLinkRequest, ScheduleConfigRequest, ScheduleRequest,
+    SetMaxConcurrencyRequest, SetRepositoryMaxConcurrencyRequest, SetScheduleEnabledRequest,
+    SetScheduleModeRequest, SetStrategyApprovalRequest, SetStrategyCatalogueRequest,
+    SetStrategyDefaultsRequest, SetTaskDependenciesRequest, SetTaskStrategyRequest,
+    SetWorktreeAutoCleanupRequest, TaskStrategyRequest, UpdateScheduleRequest, UpdateTaskRequest,
 };
 use crate::mcp::responses::{
     BaseInstructionsView, DismissalView, DoctorDismissalsView, DoctorReportView, OnboardingView,
-    PreflightView, RepositoryListView, RepositoryView, RunCapacityView, ScheduleDeletedView,
-    ScheduleListView, ScheduleView, StrategyApprovalView, TaskListItem, TaskListView, TaskView,
-    TimezoneListView, WorktreeAutoCleanupView, WorktreeListView, WorktreeView,
+    PlanPassView, PlanResultView, PreflightView, RepositoryListView, RepositoryView,
+    RunCapacityView, ScheduleDeletedView, ScheduleListView, ScheduleView, StrategyApprovalView,
+    TaskListItem, TaskListView, TaskView, TimezoneListView, WorktreeAutoCleanupView,
+    WorktreeListView, WorktreeView,
 };
 use crate::mcp::scope::{RunScope, Tool};
 use crate::runner::prompt::TEMPLATE_VARIABLES;
+use crate::runner::strategy::{self as runner_strategy, PlanOutcome, PlanSelection, PlannerAccess};
 use crate::schedule;
 use crate::scheduler::{self, capacity};
 use crate::strategy::{self, Catalogue, StrategyDefaults};
@@ -87,6 +89,16 @@ pub struct RimaiaServer {
     /// `plan_task_strategy` — the MCP server not knowing the shell's `AppPaths`
     /// — closed for the one tool that only *reads* it.
     doctor: doctor::Environment,
+    /// What `plan_task_strategy` and `plan_tasks_strategy` spawn through (task
+    /// 023). An explicit constructor parameter for exactly the reason `doctor`
+    /// is one: the data directory, the `claude` the runner would spawn and the
+    /// shared in-flight registry are all things only the shell knows, and a
+    /// wrong guess would be a planner running against the wrong installation.
+    ///
+    /// **This is the other half of ADR-0021's named gap.** The tool was left off
+    /// the surface because the ownership of "is this task already in flight"
+    /// lived in `src-tauri`; seam-contract D19 moved it, and this carries it in.
+    planner: PlannerAccess,
 }
 
 /// `vis = "pub"` so `tests/mcp_scope.rs`, which lives outside this crate, can
@@ -101,11 +113,12 @@ impl RimaiaServer {
     ///
     /// [`RunScope::Operator`], because `/mcp` is what this constructor serves
     /// and task 020 takes nothing away from it.
-    pub fn new(ctx: ServiceContext, doctor: doctor::Environment) -> Self {
+    pub fn new(ctx: ServiceContext, doctor: doctor::Environment, planner: PlannerAccess) -> Self {
         Self {
             ctx,
             scope: RunScope::Operator,
             doctor,
+            planner,
         }
     }
 
@@ -117,6 +130,7 @@ impl RimaiaServer {
     pub fn scoped(
         ctx: ServiceContext,
         doctor: doctor::Environment,
+        planner: PlannerAccess,
         task_id: impl Into<String>,
     ) -> Self {
         Self {
@@ -125,6 +139,7 @@ impl RimaiaServer {
                 task_id: task_id.into(),
             },
             doctor,
+            planner,
         }
     }
 
@@ -157,6 +172,93 @@ something this surface offers."
         Ok(Json(OnboardingView {
             onboarding_dismissed: true,
         }))
+    }
+
+    #[tool(
+        description = "Run the strategy planner for one task now and wait for it to finish, then \
+report the model, effort and rationale it proposed. Call this when the user wants to see how a \
+task will be modelled before committing to the expensive implementation run — a planner costs a \
+few cents and a handful of turns, where the run it is checking costs on the order of a dollar. \
+The task must resolve to `planned` mode and its repository must have opted into unattended runs; \
+a task that already carries a proposal is re-planned, which is what this tool means that \
+`plan_tasks_strategy` deliberately does not."
+    )]
+    pub async fn plan_task_strategy(
+        &self,
+        Parameters(request): Parameters<TaskStrategyRequest>,
+    ) -> Result<Json<PlanResultView>, ToolError> {
+        self.scope
+            .authorize(Tool::PlanTaskStrategy, Some(&request.task_id))?;
+
+        let claim = runner_strategy::claim_for_planning(
+            &self.ctx,
+            &self.planner.in_flight,
+            &request.task_id,
+            scheduler::LeaseOwner::Manual,
+        )
+        .await?;
+
+        let (title, outcome) = match claim {
+            Ok(claim) => {
+                let title = claim.title().to_string();
+                let outcome = runner_strategy::plan_claimed(
+                    &self.ctx,
+                    &self.planner.paths,
+                    &self.planner.runner,
+                    claim,
+                )
+                .await?;
+                (title, outcome)
+            }
+            Err(skip) => {
+                let detail = tasks::get_task(&self.ctx, &request.task_id).await?;
+                (detail.task.title, PlanOutcome::Skipped(skip))
+            }
+        };
+
+        Ok(Json(PlanResultView::new(
+            &request.task_id,
+            &title,
+            &outcome,
+        )))
+    }
+
+    #[tool(
+        description = "Plan a whole column, a whole repository or a hand-picked set of tasks in \
+one pass, one planner at a time, and report what each one was modelled as. This is the preflight \
+the user runs before leaving for the evening: spending forty cents to see how ten cards are \
+modelled, before committing forty dollars of implementation, is the cheapest check this product \
+offers. Call it when the user asks to check how a set of tasks will run, or before starting the \
+queue on a column they have not reviewed. State at least one of `column`, `repository_id` or \
+`task_ids`; each one narrows the set, and a selection that states none of them is refused rather \
+than taken to mean the whole board. A card that already carries a proposal is skipped with that \
+named as the reason and its proposal left untouched — use `plan_task_strategy` to re-plan one \
+deliberately."
+    )]
+    pub async fn plan_tasks_strategy(
+        &self,
+        Parameters(request): Parameters<PlanSelectionRequest>,
+    ) -> Result<Json<PlanPassView>, ToolError> {
+        self.scope.authorize(Tool::PlanTasksStrategy, None)?;
+
+        let selection: PlanSelection = request.into();
+        // A pass reached over MCP has no Cancel button to trip, so the signal
+        // is one nothing holds. It is still passed rather than made optional:
+        // one loop, one cancellation story, and the surface that *does* have a
+        // button hands in a real one.
+        let cancel = crate::runner::CancelSignal::new();
+        let pass = runner_strategy::plan_all(
+            &self.ctx,
+            &self.planner.paths,
+            &self.planner.runner,
+            &self.planner.in_flight,
+            &selection,
+            &cancel,
+            &|_progress| {},
+        )
+        .await?;
+
+        Ok(Json(PlanPassView::from(&pass)))
     }
 
     #[tool(
@@ -1014,7 +1116,7 @@ mod tests {
     /// capability parity a rule. What replaces a count is the property that
     /// actually matters — a registered tool with no run-scope decision cannot
     /// reach the wire.
-    const REGISTERED_TOOLS: [&str; 38] = [
+    const REGISTERED_TOOLS: [&str; 40] = [
         "accept_task_strategy",
         "add_task_link",
         "clear_task_strategy",
@@ -1037,6 +1139,8 @@ mod tests {
         "list_timezones",
         "list_worktrees",
         "move_task",
+        "plan_task_strategy",
+        "plan_tasks_strategy",
         "preview_schedule_preflight",
         "remove_task_link",
         "restore_doctor_warning",
@@ -1173,8 +1277,12 @@ mod tests {
     #[tokio::test]
     async fn the_server_introduces_itself_as_rimaia_with_instructions() {
         let harness = crate::testing::TestContext::new().await;
-        let info =
-            RimaiaServer::new(harness.context, crate::testing::doctor::environment()).get_info();
+        let info = RimaiaServer::new(
+            harness.context,
+            crate::testing::doctor::environment(),
+            crate::testing::doctor::planner_access(),
+        )
+        .get_info();
 
         assert_eq!(info.server_info.name, "rimaia");
         assert_eq!(info.server_info.version, env!("CARGO_PKG_VERSION"));

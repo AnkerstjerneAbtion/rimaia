@@ -460,6 +460,10 @@ interface TaskCardProps extends CardFace {
   /** Only for the arrow keys dnd-kit's own `KeyboardSensor` did not consume
    *  itself — see the combined handler below. */
   readonly onArrowNavigate: (id: string, key: string) => void;
+  /** Task 023's hand-picked set. Absent on `TaskCardPreview` and in the drag
+   *  overlay, where there is nothing to pick. */
+  readonly picked?: boolean;
+  readonly onPick?: (id: string, picked: boolean) => void;
 }
 
 /**
@@ -480,6 +484,8 @@ export function TaskCard({
   onSelect,
   registerCardRef,
   onArrowNavigate,
+  picked,
+  onPick,
 }: TaskCardProps) {
   const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({
     id: task.id,
@@ -591,6 +597,25 @@ export function TaskCard({
           filled in on hover; the queue position beside it is the readout that
           earns the row. */}
       <div className="task-card-actions">
+        {/* Task 023's hand-picked set. A checkbox rather than a click-modifier,
+            because the modifier would be invisible and the card already claims
+            click, Enter, Space and the arrows. Isolated from the drag surface
+            the same way "Run now" is. */}
+        {onPick && (
+          <label
+            className="task-card-pick"
+            onPointerDown={(event) => event.stopPropagation()}
+            onKeyDown={(event) => event.stopPropagation()}
+            onClick={(event) => event.stopPropagation()}
+          >
+            <input
+              type="checkbox"
+              checked={picked ?? false}
+              onChange={(event) => onPick(task.id, event.target.checked)}
+              aria-label={`Select "${task.title}" for planning`}
+            />
+          </label>
+        )}
         {/* ADR-0012's whole security posture depends on a skipped reason being
             visible rather than silent — the skip line below is why this is not
             simply hidden when the queue passes a task over. */}

@@ -23,6 +23,7 @@ use crate::db::settings::Dismissal;
 use crate::db::{BoardColumn, RunState, ScheduleMode, StrategyMode};
 use crate::doctor::Check;
 use crate::error::{Error, Result};
+use crate::runner::strategy::PlanSelection;
 use crate::schedule::ScheduleInput;
 use crate::strategy::StrategyApproval;
 use crate::tasks::{StrategyPhase, StrategyPlan, StrategyWorkflow};
@@ -501,6 +502,34 @@ pub struct SetScheduleEnabledRequest {
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub struct SetWorktreeAutoCleanupRequest {
     pub setting: AutoCleanup,
+}
+
+/// Which cards `plan_tasks_strategy` plans (task 023).
+///
+/// Every stated field narrows the set, and stating none of them is refused
+/// rather than taken to mean the whole board — `PlanSelection` is a core type
+/// precisely so this surface and the board's "Plan all" cannot disagree about
+/// what "the ready column" is.
+#[derive(Debug, Clone, Default, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case", default, deny_unknown_fields)]
+pub struct PlanSelectionRequest {
+    /// `not_ready`, `ready`, `in_review` or `done`. `ready` is the run queue and
+    /// is what a preflight is normally about.
+    pub column: Option<BoardColumn>,
+    pub repository_id: Option<String>,
+    /// A hand-picked set. An id that is not in the rest of the selection is
+    /// refused naming it, never silently dropped.
+    pub task_ids: Vec<String>,
+}
+
+impl From<PlanSelectionRequest> for PlanSelection {
+    fn from(request: PlanSelectionRequest) -> Self {
+        PlanSelection {
+            column: request.column,
+            repository_id: request.repository_id,
+            task_ids: request.task_ids,
+        }
+    }
 }
 
 /// One doctor row to put down, or pick back up (task 027).

@@ -22,6 +22,7 @@ use crate::db::{
     ScheduleMode, StrategyMode, StrategySource, TaskLink,
 };
 use crate::doctor::{CheckResult, DoctorReport};
+use crate::runner::strategy::{PlanOutcome, PlanPass, PlanResult};
 use crate::schedule::{PreflightSummary, ScheduleView as CoreScheduleView};
 use crate::scheduler::RunCapacity;
 use crate::strategy::StrategyApproval;
@@ -220,6 +221,106 @@ impl From<&CheckResult> for CheckResultView {
             detail: result.detail.clone(),
             remediation: result.remediation.clone(),
             dismissed: result.dismissed,
+        }
+    }
+}
+
+/// What one card's planning came to (task 023).
+///
+/// Flat rather than an enum-shaped union, because a tool result is read by a
+/// model and a discriminated union of four shapes is harder to act on than four
+/// nullable fields plus an `outcome` word. `outcome` is the thing to branch on:
+/// `planned`, `skipped`, `failed` or `cancelled`.
+#[derive(Debug, Clone, PartialEq, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub struct PlanResultView {
+    pub task_id: String,
+    pub title: String,
+    pub outcome: String,
+    /// Set on `planned`.
+    pub model: Option<String>,
+    pub effort: Option<String>,
+    /// One line saying why the planner chose what it chose. The thing actually
+    /// worth reading before going home.
+    pub rationale: Option<String>,
+    /// What this planner cost, off the proposal it wrote.
+    pub cost_usd: Option<f64>,
+    /// Set on `skipped` — a stable tag (`already_proposed`, `not_planned`,
+    /// `in_flight`, `repository_not_opted_in`) and the sentence that goes with
+    /// it. Set on `failed` too, where only `reason` is filled.
+    pub skip: Option<String>,
+    pub reason: Option<String>,
+}
+
+impl PlanResultView {
+    pub fn new(task_id: &str, title: &str, outcome: &PlanOutcome) -> Self {
+        let mut view = Self {
+            task_id: task_id.to_string(),
+            title: title.to_string(),
+            outcome: "cancelled".to_string(),
+            model: None,
+            effort: None,
+            rationale: None,
+            cost_usd: None,
+            skip: None,
+            reason: None,
+        };
+        match outcome {
+            PlanOutcome::Planned {
+                model,
+                effort,
+                rationale,
+                cost_usd,
+            } => {
+                view.outcome = "planned".to_string();
+                view.model = model.clone();
+                view.effort = effort.clone();
+                view.rationale = rationale.clone();
+                view.cost_usd = *cost_usd;
+            }
+            PlanOutcome::Skipped(skip) => {
+                view.outcome = "skipped".to_string();
+                view.skip = Some(skip.as_str().to_string());
+                view.reason = Some(skip.message());
+            }
+            PlanOutcome::Failed(reason) => {
+                view.outcome = "failed".to_string();
+                view.reason = Some(reason.clone());
+            }
+            PlanOutcome::Cancelled => {}
+        }
+        view
+    }
+}
+
+impl From<&PlanResult> for PlanResultView {
+    fn from(result: &PlanResult) -> Self {
+        Self::new(&result.task_id, &result.title, &result.outcome)
+    }
+}
+
+/// What a whole pass came to. Wrapped for the reason [`RepositoryListView`]
+/// gives, and carrying the two totals the summary is read for.
+#[derive(Debug, Clone, PartialEq, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub struct PlanPassView {
+    pub results: Vec<PlanResultView>,
+    pub planned: usize,
+    pub skipped: usize,
+    /// What the pass spent, summed off the proposals it wrote.
+    pub spent_usd: f64,
+    /// Whether it stopped early. Proposals already written stay written.
+    pub cancelled: bool,
+}
+
+impl From<&PlanPass> for PlanPassView {
+    fn from(pass: &PlanPass) -> Self {
+        Self {
+            results: pass.results.iter().map(PlanResultView::from).collect(),
+            planned: pass.planned(),
+            skipped: pass.skipped(),
+            spent_usd: pass.spent_usd,
+            cancelled: pass.cancelled,
         }
     }
 }

@@ -15,6 +15,7 @@ use rimaia_core::doctor;
 use rimaia_core::mcp::{self, McpState, RunHandles};
 use rimaia_core::runner::events::RunTail;
 use rimaia_core::runner::process::DEFAULT_GRACE_PERIOD;
+use rimaia_core::runner::strategy::PlannerAccess;
 use rimaia_core::runner::RunnerConfig;
 use rimaia_core::scheduler::{self, InFlight};
 use rimaia_core::{
@@ -298,6 +299,16 @@ pub fn run() {
                 // parity is only worth having if both surfaces answer about the
                 // same installation.
                 doctor::Environment::for_runner(paths.clone(), &runner),
+                // Task 023, and ADR-0021's named gap closed: the MCP server can
+                // now start a planner, because everything it needs to — the data
+                // directory, the `claude` the runner would spawn, and the one
+                // in-flight registry every other door takes leases from — is
+                // reachable from `rimaia-core` and handed in here.
+                PlannerAccess {
+                    paths: paths.clone(),
+                    runner: runner.clone(),
+                    in_flight: in_flight.clone(),
+                },
             ));
             let mcp_status = mcp_handle.status();
             match mcp_status.state {
@@ -330,6 +341,7 @@ pub fn run() {
                 runner,
                 run_handles,
                 mcp: std::sync::Mutex::new(mcp_handle),
+                plan_pass: std::sync::Mutex::new(None),
             });
 
             // The window is declared `"visible": false` in `tauri.conf.json` and
@@ -401,6 +413,8 @@ pub fn run() {
         commands::strategy::accept_task_strategy,
         commands::strategy::clear_task_strategy,
         commands::strategy::plan_task_strategy,
+        commands::strategy::plan_tasks_strategy,
+        commands::strategy::cancel_plan_pass,
         commands::worktree::get_worktree_status,
         commands::worktree::get_diff_summary,
         commands::worktree::reveal_task_worktree,
@@ -488,6 +502,8 @@ pub fn run() {
         commands::strategy::accept_task_strategy,
         commands::strategy::clear_task_strategy,
         commands::strategy::plan_task_strategy,
+        commands::strategy::plan_tasks_strategy,
+        commands::strategy::cancel_plan_pass,
         commands::worktree::get_worktree_status,
         commands::worktree::get_diff_summary,
         commands::worktree::reveal_task_worktree,

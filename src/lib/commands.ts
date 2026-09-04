@@ -14,6 +14,8 @@ import type {
   NewTaskInput,
   NewTaskLinkInput,
   OpenInTarget,
+  PlanPass,
+  PlanSelectionInput,
   PreflightSummary,
   PruneCriterionInput,
   PruneResult,
@@ -391,6 +393,32 @@ export function clearTaskStrategy(taskId: string): Promise<Task> {
  */
 export function planTaskStrategy(taskId: string): Promise<void> {
   return call<void>("plan_task_strategy", { taskId });
+}
+
+/**
+ * Plans a whole selection — a column, a repository, or a hand-picked set — one
+ * planner at a time, and resolves with the end-of-pass summary (task 023).
+ *
+ * **Resolves when the pass is over**, unlike {@link planTaskStrategy}: a pass
+ * is the thing the user stays to watch, and the summary is the reason they ran
+ * it. Live progress arrives on `plan-pass:progress` while this is outstanding —
+ * see {@link subscribeToPlanPassProgress}.
+ *
+ * Sequential by design. Ten cards at fifteen seconds is two and a half minutes,
+ * once; fanning out would make the preflight the thing that trips the usage
+ * limit the evening's real work needed.
+ */
+export function planTasksStrategy(selection: PlanSelectionInput): Promise<PlanPass> {
+  return call<PlanPass>("plan_tasks_strategy", { selection });
+}
+
+/**
+ * Stops the pass before its next planner. Every proposal already written stays
+ * written — there is nothing to roll back, because each one is a committed
+ * write to its own card.
+ */
+export function cancelPlanPass(): Promise<void> {
+  return call<void>("cancel_plan_pass");
 }
 
 // ---------------------------------------------------------------------------

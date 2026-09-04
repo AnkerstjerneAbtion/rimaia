@@ -126,6 +126,11 @@ pub enum Tool {
     DismissDoctorWarning,
     RestoreDoctorWarning,
 
+    // Task 023's two, and they are what closes ADR-0021's *named* gap rather
+    // than another instance of its rule — see `run_access`.
+    PlanTaskStrategy,
+    PlanTasksStrategy,
+
     // Task 013's seven. Every one is *both* of ADR-0021 point 4's permanent
     // refusals at once: a schedule spawns runs — it is the thing that starts
     // the queue at 22:00 — and it reconfigures the installation, since an open
@@ -164,7 +169,7 @@ pub enum RunAccess {
 
 impl Tool {
     /// Every tool with a recorded decision, so a test can walk the table.
-    pub const ALL: [Tool; 38] = [
+    pub const ALL: [Tool; 40] = [
         Tool::AddTaskLink,
         Tool::CreateTask,
         Tool::GetBaseInstructions,
@@ -193,6 +198,8 @@ impl Tool {
         Tool::DismissOnboarding,
         Tool::DismissDoctorWarning,
         Tool::RestoreDoctorWarning,
+        Tool::PlanTaskStrategy,
+        Tool::PlanTasksStrategy,
         Tool::ListSchedules,
         Tool::CreateSchedule,
         Tool::UpdateSchedule,
@@ -237,6 +244,8 @@ impl Tool {
             Tool::DismissOnboarding => "dismiss_onboarding",
             Tool::DismissDoctorWarning => "dismiss_doctor_warning",
             Tool::RestoreDoctorWarning => "restore_doctor_warning",
+            Tool::PlanTaskStrategy => "plan_task_strategy",
+            Tool::PlanTasksStrategy => "plan_tasks_strategy",
             Tool::ListSchedules => "list_schedules",
             Tool::CreateSchedule => "create_schedule",
             Tool::UpdateSchedule => "update_schedule",
@@ -375,6 +384,17 @@ impl Tool {
             Tool::ListWorktrees | Tool::GetWorktreeAutoCleanup | Tool::SetWorktreeAutoCleanup => {
                 RunAccess::Refused
             }
+
+            // Task 023's two, and this is the arm ADR-0021 point 4's *first*
+            // permanent refusal was written for: both spawn a `claude`
+            // process. `plan_task_strategy` was left off the tool surface
+            // entirely until now — not because the decision was hard, but
+            // because "is this task already in flight" lived in `src-tauri`
+            // and the server could not reach it (seam-contract D19 moved it).
+            // The decision itself was never in doubt: a run that could spawn
+            // planners could spend the night's budget on deciding rather than
+            // doing, and `plan_tasks_strategy` could do it N times in one call.
+            Tool::PlanTaskStrategy | Tool::PlanTasksStrategy => RunAccess::Refused,
         }
     }
 }

@@ -104,6 +104,61 @@ export interface DoctorReport {
 }
 
 // ---------------------------------------------------------------------------
+// Batch strategy planning (task 023) — mirrors
+// `rimaia_core::runner::strategy` and `commands::strategy`'s views.
+// ---------------------------------------------------------------------------
+
+/**
+ * Which cards a pass plans. Every stated field narrows; stating none of them is
+ * refused in Rust rather than taken to mean the whole board.
+ *
+ * Mirrors `PlanSelectionInput`, which converts to core's `PlanSelection` — the
+ * same value the MCP tool's own request converts to, so the board and an agent
+ * cannot disagree about what "the ready column" means.
+ */
+export interface PlanSelectionInput {
+  column?: BoardColumn;
+  repositoryId?: string;
+  taskIds?: string[];
+}
+
+/** What one card came to. Branch on `outcome`. */
+export interface PlanResult {
+  taskId: string;
+  title: string;
+  outcome: "planned" | "skipped" | "failed" | "cancelled";
+  model: string | null;
+  effort: string | null;
+  /** One line saying why the planner chose what it chose. */
+  rationale: string | null;
+  costUsd: number | null;
+  /** `already_proposed`, `not_planned`, `in_flight` or
+   *  `repository_not_opted_in` — set only on a skip. */
+  skip: string | null;
+  /** The sentence that goes with a skip, or a failure's own reason. */
+  reason: string | null;
+}
+
+/** The end-of-pass summary — what is worth reading before going home. */
+export interface PlanPass {
+  results: PlanResult[];
+  planned: number;
+  skipped: number;
+  spentUsd: number;
+  /** Stopped early. Every proposal already written stays written. */
+  cancelled: boolean;
+}
+
+/** One `plan-pass:progress` event: the card that just finished, and the totals. */
+export interface PlanProgress {
+  /** 1-based, because it is rendered as "3 of 10". */
+  completed: number;
+  total: number;
+  spentUsd: number;
+  result: PlanResult;
+}
+
+// ---------------------------------------------------------------------------
 // Open in… (task 026) — mirrors `rimaia_core::openers`.
 // ---------------------------------------------------------------------------
 

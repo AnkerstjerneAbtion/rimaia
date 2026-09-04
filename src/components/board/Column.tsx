@@ -136,6 +136,12 @@ interface ColumnProps {
   readonly repositoriesById: ReadonlyMap<string, string>;
   readonly selectedTaskId: string | null;
   readonly onSelect: (id: string) => void;
+  /** Task 023's hand-picked set. Separate from `selectedTaskId`, which is the
+   *  one card whose detail panel is open — picking is a multi-selection for a
+   *  planning pass and opening is a navigation, and conflating them would mean
+   *  a user could not read a card without adding it to the pass. */
+  readonly pickedTaskIds: ReadonlySet<string>;
+  readonly onPick: (id: string, picked: boolean) => void;
   readonly registerCardRef: (id: string, element: HTMLElement | null) => void;
   readonly onArrowNavigate: (id: string, key: string) => void;
   /** True while a title search is filtering the board — dragging while some
@@ -152,6 +158,8 @@ export function Column({
   repositoriesById,
   selectedTaskId,
   onSelect,
+  pickedTaskIds,
+  onPick,
   registerCardRef,
   onArrowNavigate,
   dragDisabled,
@@ -209,6 +217,8 @@ export function Column({
                 now={now}
                 selected={card.id === selectedTaskId}
                 onSelect={onSelect}
+                picked={pickedTaskIds.has(card.id)}
+                onPick={onPick}
                 registerCardRef={registerCardRef}
                 onArrowNavigate={onArrowNavigate}
               />

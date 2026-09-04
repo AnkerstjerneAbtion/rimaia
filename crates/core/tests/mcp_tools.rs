@@ -657,6 +657,7 @@ fn server(h: &TestContext) -> RimaiaServer {
     RimaiaServer::new(
         h.context.with_source(MutationSource::Mcp),
         testing::doctor::environment(),
+        testing::doctor::planner_access(),
     )
 }
 

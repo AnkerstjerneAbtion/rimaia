@@ -1635,3 +1635,144 @@
 .run-history-wait {
   font-size: var(--font-size-xs);
 }
+
+/* --- The planning preflight (task 023) ----------------------------------- */
+
+/* A quiet control, not a second primary. A planner costs cents, so the button
+   that starts ten of them should read as cheap — the loud thing on this
+   toolbar is "New task", which is the verb the board is for. */
+.board-plan-all {
+  padding: 0.05rem var(--space-3);
+  border-color: var(--border-1);
+  background: transparent;
+  box-shadow: none;
+  color: var(--text-2);
+  font-size: var(--font-size-xs);
+  font-weight: var(--font-weight-semibold);
+  white-space: nowrap;
+}
+
+.board-plan-all:hover:not(:disabled) {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+/* Under the toolbar and above the columns: this is a thing the user is
+   watching, so it takes the width and pushes the board down rather than
+   floating over it. */
+.plan-pass {
+  margin-bottom: var(--space-4);
+  padding: var(--space-3) var(--space-4);
+  border-radius: var(--radius-md);
+  background: var(--surface-1);
+  box-shadow: inset 0 0 0 1px var(--border-1), var(--shadow-sm);
+}
+
+.plan-pass-progress,
+.plan-pass-summary {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  font-size: var(--font-size-sm);
+  color: var(--text-2);
+}
+
+.plan-pass-heading {
+  font-weight: var(--font-weight-semibold);
+  color: var(--text-1);
+}
+
+/* The card being planned right now — the readout that makes the pass legible
+   as progress rather than as a spinner. */
+.plan-pass-current {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.plan-pass-summary span:nth-of-type(2) {
+  margin-right: auto;
+}
+
+.plan-pass-progress button,
+.plan-pass-summary button {
+  padding: 0.05rem var(--space-2);
+  box-shadow: none;
+  font-size: var(--font-size-xs);
+}
+
+.plan-pass-error {
+  margin: var(--space-2) 0 0;
+  font-size: var(--font-size-sm);
+  color: var(--danger-text);
+}
+
+.plan-pass-results {
+  list-style: none;
+  margin: var(--space-3) 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+
+/* One line per card, so ten of them can be read at a glance before leaving.
+   The rationale is the part worth reading, so it takes the room. */
+.plan-pass-result {
+  display: grid;
+  grid-template-columns: minmax(6rem, 14rem) auto minmax(0, 1fr) auto;
+  align-items: baseline;
+  gap: var(--space-3);
+  padding: var(--space-1) var(--space-2);
+  border-radius: var(--radius-sm);
+  background: var(--surface-0);
+  font-size: var(--font-size-xs);
+  color: var(--text-2);
+}
+
+.plan-pass-result-planned {
+  box-shadow: inset 2px 0 0 var(--accent);
+}
+
+.plan-pass-result-failed {
+  box-shadow: inset 2px 0 0 var(--danger-text);
+}
+
+.plan-pass-result-title {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-1);
+  font-weight: var(--font-weight-medium);
+}
+
+.plan-pass-result-strategy {
+  font-weight: var(--font-weight-semibold);
+}
+
+.plan-pass-result-rationale,
+.plan-pass-result-reason {
+  grid-column: 3 / span 2;
+  overflow-wrap: anywhere;
+}
+
+.plan-pass-result-reason {
+  grid-column: 2 / span 3;
+}
+
+/* The multi-select. Sits at the left of the action row, opposite "Run now",
+   and stays out of the way until the user is picking a set. */
+.task-card-pick {
+  display: inline-flex;
+  align-items: center;
+  margin-right: auto;
+  cursor: pointer;
+}
+
+.task-card-pick input {
+  margin: 0;
+  accent-color: var(--accent);
+}
