@@ -204,9 +204,14 @@ mod tests {
     #[tokio::test]
     async fn resolving_keeps_the_components_that_do_not_exist_yet() {
         let temp = tempfile::tempdir().expect("temp dir");
-        let canonical = tokio::fs::canonicalize(temp.path())
-            .await
-            .expect("a temp dir resolves");
+        // Through `git_safe`, because `resolve` does — the expectation has to
+        // be the path git would be handed, not the extended-length one Windows
+        // canonicalization returns.
+        let canonical = crate::paths::git_safe(
+            tokio::fs::canonicalize(temp.path())
+                .await
+                .expect("a temp dir resolves"),
+        );
 
         let resolved = resolve(&temp.path().join("worktrees/repo/task-1"))
             .await
