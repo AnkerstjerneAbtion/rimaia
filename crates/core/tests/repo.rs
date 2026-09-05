@@ -51,14 +51,17 @@ fn git_worktree_add_succeeds_against_a_temp_repo() {
     );
     assert_eq!(git(&destination, &["rev-parse", "HEAD"]), repo.head_sha());
 
-    // Through `git_path`, because `fs::canonicalize` returns a Windows
-    // extended-length `\\?\` path and `git worktree list` prints the plain
-    // one — the same directory, two strings.
+    // Two normalizations, and both are about Windows printing the same
+    // directory two ways. `fs::canonicalize` returns an extended-length
+    // `\\?\` path, which `git_path` strips; and `git worktree list` prints
+    // forward slashes whatever the platform's own separator is, which
+    // `forward_slashes` matches on both sides. Neither is a difference the
+    // assertion is about.
     let registered =
         testing::git_path(fs::canonicalize(&destination).expect("the worktree must exist on disk"));
     assert!(
-        git(repo.path(), &["worktree", "list", "--porcelain"])
-            .contains(&registered.to_string_lossy().into_owned()),
+        forward_slashes(&git(repo.path(), &["worktree", "list", "--porcelain"]))
+            .contains(&forward_slashes(&registered.to_string_lossy())),
         "the repository should know about the worktree it just created"
     );
 }
@@ -152,7 +155,18 @@ fn a_fresh_clone_of_the_remote_sees_every_pushed_commit() {
     let clone = elsewhere.path().join("clone of origin");
     git(
         elsewhere.path(),
-        &[OsStr::new("clone"), remote.as_os_str(), clone.as_os_str()],
+        &[
+            // `TempRepo` turns this off in its own work tree; a *fresh clone*
+            // has none of that config and inherits the runner's, and Windows
+            // runners default it to true. A checkout that rewrote line endings
+            // would make the content assertion below about the platform rather
+            // than about the push.
+            OsStr::new("-c"),
+            OsStr::new("core.autocrlf=false"),
+            OsStr::new("clone"),
+            remote.as_os_str(),
+            clone.as_os_str(),
+        ],
     );
 
     assert_eq!(git(&clone, &["rev-parse", "HEAD"]), repo.head_sha());
@@ -200,4 +214,13 @@ fn git<S: AsRef<OsStr>>(dir: &Path, args: &[S]) -> String {
     }
 
     String::from_utf8_lossy(&output.stdout).trim().to_owned()
+}
+
+/// A path or a listing with every separator spelled `/`.
+///
+/// Git prints forward slashes on every platform; `PathBuf` uses the host's.
+/// Comparing the two without this asserts which byte Windows separates
+/// components with, which is not what any test here is about.
+fn forward_slashes(text: &str) -> String {
+    text.replace('\\', "/")
 }
