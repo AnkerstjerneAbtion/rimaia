@@ -121,6 +121,25 @@ pub enum Tool {
     RunDoctor,
     DismissOnboarding,
 
+    // Task 027's two, and they are the same refusal with a sharper edge than
+    // most — see `run_access`.
+    DismissDoctorWarning,
+    RestoreDoctorWarning,
+
+    // Task 023's two, and they are what closes ADR-0021's *named* gap rather
+    // than another instance of its rule — see `run_access`.
+    PlanTaskStrategy,
+    PlanTasksStrategy,
+
+    /// Task 022's one. The *write* pair has no tool at all — see `run_access`
+    /// and seam-contract D25.
+    GetRepositoryCredentialStatus,
+
+    // Task 024's three. Reads and reconfigures the installation.
+    GetAnalytics,
+    GetSubscriptionCost,
+    SetSubscriptionCost,
+
     // Task 013's seven. Every one is *both* of ADR-0021 point 4's permanent
     // refusals at once: a schedule spawns runs — it is the thing that starts
     // the queue at 22:00 — and it reconfigures the installation, since an open
@@ -159,7 +178,7 @@ pub enum RunAccess {
 
 impl Tool {
     /// Every tool with a recorded decision, so a test can walk the table.
-    pub const ALL: [Tool; 36] = [
+    pub const ALL: [Tool; 44] = [
         Tool::AddTaskLink,
         Tool::CreateTask,
         Tool::GetBaseInstructions,
@@ -186,6 +205,14 @@ impl Tool {
         Tool::GiveUpOnTask,
         Tool::RunDoctor,
         Tool::DismissOnboarding,
+        Tool::DismissDoctorWarning,
+        Tool::RestoreDoctorWarning,
+        Tool::PlanTaskStrategy,
+        Tool::PlanTasksStrategy,
+        Tool::GetRepositoryCredentialStatus,
+        Tool::GetAnalytics,
+        Tool::GetSubscriptionCost,
+        Tool::SetSubscriptionCost,
         Tool::ListSchedules,
         Tool::CreateSchedule,
         Tool::UpdateSchedule,
@@ -228,6 +255,14 @@ impl Tool {
             Tool::GiveUpOnTask => "give_up_on_task",
             Tool::RunDoctor => "run_doctor",
             Tool::DismissOnboarding => "dismiss_onboarding",
+            Tool::DismissDoctorWarning => "dismiss_doctor_warning",
+            Tool::RestoreDoctorWarning => "restore_doctor_warning",
+            Tool::PlanTaskStrategy => "plan_task_strategy",
+            Tool::PlanTasksStrategy => "plan_tasks_strategy",
+            Tool::GetRepositoryCredentialStatus => "get_repository_credential_status",
+            Tool::GetAnalytics => "get_analytics",
+            Tool::GetSubscriptionCost => "get_subscription_cost",
+            Tool::SetSubscriptionCost => "set_subscription_cost",
             Tool::ListSchedules => "list_schedules",
             Tool::CreateSchedule => "create_schedule",
             Tool::UpdateSchedule => "update_schedule",
@@ -329,7 +364,19 @@ impl Tool {
             // only a human standing at the machine can do. `dismiss_onboarding`
             // writes a preference about the operator's own window, which is
             // nothing a run inside a worktree has an opinion about.
-            Tool::RunDoctor | Tool::DismissOnboarding => RunAccess::Refused,
+            //
+            // Task 027's two are the same clause with the sharpest edge on the
+            // table: a run that could dismiss a doctor warning could silence
+            // the report on the environment it is itself running in, and the
+            // next night's operator would read a clean panel about a machine
+            // that is not. `restore_doctor_warning` is refused with it rather
+            // than allowed as a harmless un-hide, because the pair is one
+            // feature and a surface is easier to reason about when a feature is
+            // in or out whole — the argument task 013's seven already make.
+            Tool::RunDoctor
+            | Tool::DismissOnboarding
+            | Tool::DismissDoctorWarning
+            | Tool::RestoreDoctorWarning => RunAccess::Refused,
 
             // Task 013's seven. See the enum for why every one of them is
             // refused rather than only the four that write.
@@ -354,6 +401,37 @@ impl Tool {
             Tool::ListWorktrees | Tool::GetWorktreeAutoCleanup | Tool::SetWorktreeAutoCleanup => {
                 RunAccess::Refused
             }
+
+            // Task 023's two, and this is the arm ADR-0021 point 4's *first*
+            // permanent refusal was written for: both spawn a `claude`
+            // process. `plan_task_strategy` was left off the tool surface
+            // entirely until now — not because the decision was hard, but
+            // because "is this task already in flight" lived in `src-tauri`
+            // and the server could not reach it (seam-contract D19 moved it).
+            // The decision itself was never in doubt: a run that could spawn
+            // planners could spend the night's budget on deciding rather than
+            // doing, and `plan_tasks_strategy` could do it N times in one call.
+            Tool::PlanTaskStrategy | Tool::PlanTasksStrategy => RunAccess::Refused,
+
+            // Task 024's three, and it is ADR-0021 point 4's second permanent
+            // refusal read the way `run_doctor` reads it: these describe and
+            // configure the *installation*. `get_analytics` in particular is
+            // an inventory of every task this machine has ever attempted and
+            // what each one cost — `list_tasks`'s objection, with a price list
+            // attached — and the subscription figure is a fact about the
+            // operator's own billing that no run has a use for.
+            Tool::GetAnalytics | Tool::GetSubscriptionCost | Tool::SetSubscriptionCost => {
+                RunAccess::Refused
+            }
+
+            // Task 022's one, and the same clause again: whether a repository
+            // has its own forge token, and whose it is, is a fact about the
+            // *installation's* access, not about any task. It carries the
+            // login, the label and the date and never the secret — but a run
+            // that could enumerate which repositories carry credentials and
+            // which account they belong to has been handed a map of the
+            // operator's access for no use it has.
+            Tool::GetRepositoryCredentialStatus => RunAccess::Refused,
         }
     }
 }

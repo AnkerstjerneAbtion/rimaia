@@ -19,7 +19,7 @@ use std::sync::Arc;
 use pretty_assertions::assert_eq;
 use rimaia_core::db::Repository;
 use rimaia_core::repo::{self, NewRepository, RepositoryPatch};
-use rimaia_core::testing::{TempRepo, TestClock, TestContext};
+use rimaia_core::testing::{self, TempRepo, TestClock, TestContext};
 use rimaia_core::{ChangeEvent, ServiceContext};
 
 // ---------------------------------------------------------------------------
@@ -633,9 +633,18 @@ fn scratch_dir(prefix: &str) -> tempfile::TempDir {
 
 /// Resolves symlinks the same way [`TempRepo`] and repository registration
 /// both do, so a test can predict the exact path an error message names.
+/// The canonical path **as the service reports it**.
+///
+/// Through `testing::git_path` — `paths::git_safe` — because `repo::register`
+/// canonicalizes that way: Windows returns an extended-length `\\?\` path
+/// that git cannot open, so the product strips it before storing or naming it.
+/// An expectation built the raw way would assert the path Windows returns
+/// rather than the one a user is shown.
 fn canonicalize(path: &Path) -> PathBuf {
-    std::fs::canonicalize(path)
-        .unwrap_or_else(|error| panic!("canonicalize {}: {error}", path.display()))
+    testing::git_path(
+        std::fs::canonicalize(path)
+            .unwrap_or_else(|error| panic!("canonicalize {}: {error}", path.display())),
+    )
 }
 
 /// A repository this suite builds by hand, for shapes [`TempRepo`] does not

@@ -1,3 +1,20 @@
+//! **Unix only.** Every fixture in this file is a `/bin/sh` shebang script
+//! standing in for `claude`, `git` or `gh` — the technique `spike/FINDINGS.md`
+//! settled on and the only way to test "signed out", "too old" or "never called
+//! the tool" without depending on what is installed on the machine running the
+//! suite. Windows has no shebang, so the whole file is gated rather than each
+//! test: a file that compiled and silently ran nothing would report a green
+//! Windows job that had checked none of this.
+//!
+//! **What still runs on Windows is the part that matters most there**, and it is
+//! deliberately not here: `credentials::inject` and `openers` both assert their
+//! Windows tables from unit tests over injected inputs, on every platform,
+//! because `Platform` and the parent environment are values rather than `cfg!`.
+//! Task 022's CI matrix exists to compile the keychain backends and the
+//! environment-building code on all three — not to pretend a POSIX shell is
+//! available on a runner that has none.
+#![cfg(unix)]
+
 //! The strategy run: a planner that decides, a write-back that lands, and an
 //! implementation run spawned with what it chose (ADR-0016, ADR-0012,
 //! seam-contract D17, task 020).
@@ -43,6 +60,7 @@ use rimaia_core::db::settings;
 use rimaia_core::db::{
     BoardColumn, Repository, Run, RunState, RunStatus, StrategyMode, StrategySource, Task,
 };
+use rimaia_core::mcp::requests::PlanSelectionRequest;
 use rimaia_core::mcp::{self, McpHandle, RunHandles, Tool, MCP_SERVER_NAME};
 use rimaia_core::repo::{self, NewRepository};
 use rimaia_core::runner::events::{transcript_path, RunTail};
@@ -51,9 +69,13 @@ use rimaia_core::runner::prompt::{
     compose_prompt, compose_strategy_prompt, compose_strategy_system_append, compose_system_append,
     StrategyGuidance, SET_TASK_STRATEGY_TOOL,
 };
+use rimaia_core::runner::strategy::{
+    self as runner_strategy, PlanOutcome, PlanPass, PlanSelection,
+};
 use rimaia_core::runner::{
     run_task, CancelSignal, ResumeSession, RunRequest, RunTrigger, RunnerConfig,
 };
+use rimaia_core::scheduler::{InFlight, LeaseOwner};
 use rimaia_core::strategy::{self, StrategyDefaults};
 use rimaia_core::tasks::{
     self, NewTask, Patch, StrategyPlan, StrategyPlanStatus, StrategyWorkflow, TaskDetail, TaskPatch,
@@ -637,6 +659,328 @@ async fn a_planned_task_with_no_mcp_server_listening_falls_back_rather_than_plan
 }
 
 // ---------------------------------------------------------------------------
+// Batch planning as a preflight (task 023)
+// ---------------------------------------------------------------------------
+
+/// The whole selection is resolved by one core function, so the board and the
+/// MCP server cannot disagree about what "the ready column" means.
+///
+/// This is half of task 023's "the same selection through the tool and through
+/// the button produces the same set of tasks": the MCP wire shape is
+/// deserialized through its real schema and converted, and the value it lands
+/// on is compared against the one the shell's own input type produces (pinned
+/// by `src-tauri/src/commands/strategy.rs`'s own unit test, which owns the
+/// other half — that type is not reachable from this crate).
+#[tokio::test]
+async fn the_same_selection_through_the_tool_and_through_the_board_names_the_same_tasks() {
+    let fixture = StrategyFixture::planned().await;
+    let second = fixture
+        .extra_task("Second card", StrategyMode::Planned)
+        .await;
+
+    let over_mcp: PlanSelection =
+        serde_json::from_value::<PlanSelectionRequest>(serde_json::json!({
+            "column": "ready",
+            "repository_id": fixture.repository_id,
+        }))
+        .expect("a well-formed selection deserializes")
+        .into();
+
+    // What the shell builds from the board toolbar's own camelCase payload.
+    let from_the_board = PlanSelection {
+        column: Some(BoardColumn::Ready),
+        repository_id: Some(fixture.repository_id.clone()),
+        task_ids: Vec::new(),
+    };
+    assert_eq!(over_mcp, from_the_board);
+
+    let named: Vec<String> = runner_strategy::selected_tasks(&fixture.harness.context, &over_mcp)
+        .await
+        .expect("the selection resolves")
+        .into_iter()
+        .map(|summary| summary.task.id)
+        .collect();
+
+    assert_eq!(named, vec![fixture.task_id.clone(), second.id]);
+}
+
+#[tokio::test]
+async fn a_selection_that_names_nothing_is_refused_rather_than_meaning_the_whole_board() {
+    let fixture = StrategyFixture::planned().await;
+
+    let refusal =
+        runner_strategy::selected_tasks(&fixture.harness.context, &PlanSelection::default())
+            .await
+            .expect_err("an empty selection must be refused");
+
+    assert_eq!(refusal.code(), ErrorCode::Invalid);
+    assert!(refusal.to_string().contains("column"), "{refusal}");
+}
+
+#[tokio::test]
+async fn a_task_id_the_selection_does_not_contain_is_refused_naming_it() {
+    // A caller that mistyped an id must not read "0 planned" and conclude the
+    // column was empty — the same treatment `set_task_dependencies` gives an
+    // unknown dependency.
+    let fixture = StrategyFixture::planned().await;
+
+    let refusal = runner_strategy::selected_tasks(
+        &fixture.harness.context,
+        &PlanSelection {
+            column: Some(BoardColumn::Ready),
+            repository_id: None,
+            task_ids: vec![fixture.task_id.clone(), "not-a-task".to_string()],
+        },
+    )
+    .await
+    .expect_err("an unknown id must be refused");
+
+    assert!(refusal.to_string().contains("not-a-task"), "{refusal}");
+}
+
+#[tokio::test]
+async fn a_column_with_nothing_eligible_reports_every_card_it_passed_over() {
+    // The failure mode task 023 names: an empty column silently doing nothing.
+    // Not a success, not an error, and never a silent no-op.
+    let fixture = StrategyFixture::planned().await;
+    fixture
+        .patch(TaskPatch {
+            strategy_mode: Some(StrategyMode::Default),
+            ..TaskPatch::default()
+        })
+        .await;
+    let manual = fixture
+        .extra_task("Manual card", StrategyMode::Manual)
+        .await;
+
+    let pass = plan_selection(
+        &fixture,
+        PlanSelection {
+            column: Some(BoardColumn::Ready),
+            ..PlanSelection::default()
+        },
+    )
+    .await;
+
+    assert_eq!(pass.planned(), 0);
+    assert_eq!(pass.skipped(), 2, "{:?}", pass.results);
+    assert_eq!(pass.spent_usd, 0.0);
+    let reasons: Vec<&str> = pass
+        .results
+        .iter()
+        .map(|result| match &result.outcome {
+            PlanOutcome::Skipped(skip) => skip.as_str(),
+            other => panic!("expected a skip, got {other:?}"),
+        })
+        .collect();
+    assert_eq!(reasons, vec!["not_planned", "not_planned"]);
+    assert!(pass
+        .results
+        .iter()
+        .any(|result| result.task_id == manual.id));
+}
+
+#[tokio::test]
+async fn a_card_already_carrying_a_proposal_is_skipped_with_its_proposal_untouched() {
+    // D17.8's re-plan guard, applied by the batch path. "Re-plan" is per-card
+    // and deliberate; a pass that overwrote an accepted proposal would be the
+    // opposite of a review aid.
+    let fixture = StrategyFixture::planned().await;
+    let before = tasks::strategy::set_task_strategy(
+        &fixture.harness.context,
+        &fixture.task_id,
+        StrategyPlan::proposed(Some("opus".to_string()), Some("high".to_string())),
+        StrategySource::User,
+    )
+    .await
+    .expect("a proposal already on the card")
+    .strategy_plan;
+
+    let pass = plan_selection(
+        &fixture,
+        PlanSelection {
+            task_ids: vec![fixture.task_id.clone()],
+            column: Some(BoardColumn::Ready),
+            ..PlanSelection::default()
+        },
+    )
+    .await;
+
+    assert_eq!(pass.results.len(), 1);
+    match &pass.results[0].outcome {
+        PlanOutcome::Skipped(skip) => assert_eq!(skip.as_str(), "already_proposed"),
+        other => panic!("expected a skip, got {other:?}"),
+    }
+    assert_eq!(
+        fixture.detail().await.task.strategy_plan,
+        before,
+        "the existing proposal must be byte-for-byte untouched",
+    );
+}
+
+#[tokio::test]
+async fn a_pass_and_the_queue_cannot_start_two_processes_for_one_task() {
+    // Seam-contract D19's whole point, from the batch side: one registry, not a
+    // second check. The lease below is the one a queued run or a "Run now"
+    // would be holding.
+    let fixture = StrategyFixture::planned().await;
+    let in_flight = InFlight::new();
+    let _held = in_flight
+        .acquire_unbounded(&fixture.task_id, &fixture.repository_id, LeaseOwner::Queue)
+        .expect("the queue takes the task first");
+
+    let pass = runner_strategy::plan_all(
+        &fixture.harness.context,
+        &fixture.paths,
+        &fixture.config(&FakeCli::silent()),
+        &in_flight,
+        &PlanSelection {
+            column: Some(BoardColumn::Ready),
+            ..PlanSelection::default()
+        },
+        &CancelSignal::new(),
+        &|_| {},
+    )
+    .await
+    .expect("a pass reports rather than fails");
+
+    assert_eq!(pass.results.len(), 1);
+    match &pass.results[0].outcome {
+        PlanOutcome::Skipped(skip) => {
+            assert_eq!(skip.as_str(), "in_flight");
+            assert!(
+                skip.message().contains("already in progress"),
+                "{}",
+                skip.message()
+            );
+        }
+        other => panic!("expected a skip, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn a_repository_without_the_unattended_opt_in_is_skipped_with_the_services_own_reason() {
+    let fixture = StrategyFixture::planned().await;
+    repo::set_allow_unattended_runs(&fixture.harness.context, &fixture.repository_id, false)
+        .await
+        .expect("withdraw ADR-0012's opt-in");
+
+    let pass = plan_selection(
+        &fixture,
+        PlanSelection {
+            column: Some(BoardColumn::Ready),
+            ..PlanSelection::default()
+        },
+    )
+    .await;
+
+    match &pass.results[0].outcome {
+        PlanOutcome::Skipped(skip) => assert_eq!(skip.as_str(), "repository_not_opted_in"),
+        other => panic!("expected a skip, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn a_pass_cancelled_before_it_starts_spawns_nothing_and_says_it_was_cancelled() {
+    let fixture = StrategyFixture::planned().await;
+    let cli = FakeCli::silent();
+    let cancel = CancelSignal::new();
+    cancel.cancel();
+
+    let pass = runner_strategy::plan_all(
+        &fixture.harness.context,
+        &fixture.paths,
+        &fixture.config(&cli),
+        &InFlight::new(),
+        &PlanSelection {
+            column: Some(BoardColumn::Ready),
+            ..PlanSelection::default()
+        },
+        &cancel,
+        &|_| {},
+    )
+    .await
+    .expect("a cancelled pass is not an error");
+
+    assert!(pass.cancelled);
+    assert!(pass.results.is_empty());
+    assert_eq!(cli.spawns(), 0, "cancelling stops before the next planner");
+}
+
+#[tokio::test]
+async fn a_pass_plans_an_eligible_card_and_reports_its_model_effort_and_rationale() {
+    // The end-of-pass summary is what the user reads before going home, so the
+    // three things it has to carry are asserted against the proposal actually
+    // on the card rather than against what the planner was asked for.
+    let fixture = StrategyFixture::planned().await;
+    let cli = FakeCli::writing_back(&fixture.task_id);
+
+    // `Fn`, not `FnMut`: the callback is shared with whatever surface is
+    // rendering progress, so it may not need exclusive access to anything.
+    let seen: std::sync::Mutex<Vec<(usize, usize)>> = std::sync::Mutex::new(Vec::new());
+    let pass = runner_strategy::plan_all(
+        &fixture.harness.context,
+        &fixture.paths,
+        &fixture.config(&cli),
+        &InFlight::new(),
+        &PlanSelection {
+            column: Some(BoardColumn::Ready),
+            ..PlanSelection::default()
+        },
+        &CancelSignal::new(),
+        &|progress| {
+            seen.lock()
+                .expect("the progress log is not poisoned")
+                .push((progress.index, progress.total))
+        },
+    )
+    .await
+    .expect("the pass runs");
+
+    cli.assert_the_write_back_was_served();
+    assert_eq!(pass.planned(), 1, "{:?}", pass.results);
+    match &pass.results[0].outcome {
+        PlanOutcome::Planned {
+            model,
+            effort,
+            rationale,
+            ..
+        } => {
+            assert_eq!(model.as_deref(), Some(PROPOSED_MODEL));
+            assert_eq!(effort.as_deref(), Some(PROPOSED_EFFORT));
+            assert_eq!(
+                rationale.as_deref(),
+                Some("The plan names a migration and a command surface."),
+            );
+        }
+        other => panic!("expected a proposal, got {other:?}"),
+    }
+    // Progress is reported per card, not only at the end: "which card is being
+    // planned, how many are left" is the whole reason it streams.
+    assert_eq!(
+        *seen.lock().expect("the progress log is not poisoned"),
+        vec![(0, 1)]
+    );
+}
+
+/// A pass with a stand-in that never calls the tool, so nothing here depends on
+/// a planner succeeding — every test above that uses it is about a *skip*, and
+/// a skip is decided before anything is spawned.
+async fn plan_selection(fixture: &StrategyFixture, selection: PlanSelection) -> PlanPass {
+    runner_strategy::plan_all(
+        &fixture.harness.context,
+        &fixture.paths,
+        &fixture.config(&FakeCli::silent()),
+        &InFlight::new(),
+        &selection,
+        &CancelSignal::new(),
+        &|_| {},
+    )
+    .await
+    .expect("a pass reports rather than fails")
+}
+
+// ---------------------------------------------------------------------------
 // A stand-in for the CLI that can answer
 // ---------------------------------------------------------------------------
 
@@ -975,6 +1319,7 @@ impl StrategyFixture {
             0,
             handles.clone(),
             testing::doctor::environment(),
+            testing::doctor::planner_access(),
         )
         .await;
         tokio::spawn(task_handle.run());
@@ -1053,6 +1398,34 @@ impl StrategyFixture {
             },
         )
         .await
+    }
+
+    /// A second card in this fixture's repository, in `ready`.
+    async fn extra_task(&self, title: &str, mode: StrategyMode) -> Task {
+        let task = tasks::create_task(
+            &self.harness.context,
+            NewTask {
+                repository_id: self.repository_id.clone(),
+                title: title.to_string(),
+                plan: Some(PLAN.to_string()),
+                extra_instructions: None,
+                column: Some(BoardColumn::Ready),
+                links: vec![],
+            },
+        )
+        .await
+        .expect("create a second ready task");
+
+        tasks::update_task(
+            &self.harness.context,
+            &task.id,
+            TaskPatch {
+                strategy_mode: Some(mode),
+                ..TaskPatch::default()
+            },
+        )
+        .await
+        .expect("set the mode")
     }
 
     async fn patch(&self, patch: TaskPatch) -> Task {

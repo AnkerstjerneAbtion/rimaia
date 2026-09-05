@@ -1,7 +1,7 @@
 import { listen } from "@tauri-apps/api/event";
 import type { UnlistenFn } from "@tauri-apps/api/event";
 
-import type { RunTail } from "../types";
+import type { PlanProgress, RunTail } from "../types";
 
 export type { UnlistenFn };
 
@@ -110,4 +110,22 @@ export function subscribeToSchedulesChanged(
   onChanged: (scheduleIds: string[]) => void,
 ): Promise<UnlistenFn> {
   return listen<string[]>("schedules:changed", (event) => onChanged(event.payload));
+}
+
+/**
+ * `plan-pass:progress` (task 023) — one card of a planning pass just finished.
+ *
+ * Its own channel rather than a `ChangeEvent`, and the distinction matters:
+ * ADR-0018's channel says "a row changed, re-read it", and every proposal a
+ * pass writes already announces itself there through `tasks:changed`. This
+ * carries something no row holds — which card the pass is on, how many are
+ * left, and what has been spent so far — which is the progress the user stayed
+ * to watch. The same argument seam-contract D14 makes for the live run tail.
+ *
+ * Only ever emitted while `plan_tasks_strategy` is outstanding.
+ */
+export function subscribeToPlanPassProgress(
+  onProgress: (progress: PlanProgress) => void,
+): Promise<UnlistenFn> {
+  return listen<PlanProgress>("plan-pass:progress", (event) => onProgress(event.payload));
 }

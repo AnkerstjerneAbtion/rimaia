@@ -14,16 +14,19 @@
 //! model or effort arriving as a value flips the mode to `manual`. A command of
 //! its own would have been a second door onto a rule that has to hold at both.
 
-use rimaia_core::db::{settings, Task};
-use rimaia_core::runner::{probe_cli, strategy as runner_strategy};
+use rimaia_core::db::{settings, BoardColumn, Task};
+use rimaia_core::runner::strategy::{
+    PlanOutcome, PlanPass, PlanProgress, PlanResult, PlanSelection,
+};
+use rimaia_core::runner::{probe_cli, strategy as runner_strategy, CancelSignal};
 use rimaia_core::scheduler::LeaseOwner;
 use rimaia_core::strategy::{
     catalogue, settings as strategy_settings, Catalogue, StrategyApproval, StrategyDefaults,
     DEFAULT_CATALOGUE_JSON,
 };
-use rimaia_core::{repo, tasks, Error, Result};
-use serde::Serialize;
-use tauri::State;
+use rimaia_core::{tasks, Error, Result};
+use serde::{Deserialize, Serialize};
+use tauri::{Emitter, State};
 
 use crate::state::AppState;
 
@@ -201,35 +204,36 @@ pub async fn clear_task_strategy(state: State<'_, AppState>, task_id: String) ->
 /// `src-tauri`, and the queue takes its leases from the same value. Before
 /// that, the queue claimed on the database row and the planner claimed in the
 /// shell, so a planner and a queued run genuinely could both start for one task
-/// — the hazard task 023 names in its Notes, closed here as a consequence of
-/// there being one registry rather than two.
+/// — the hazard task 023 names in its Notes, closed as a consequence of there
+/// being one registry rather than two.
+///
+/// Every rule this used to hold — the opt-in, the resolved mode, the lease
+/// itself — is now `runner_strategy::claim_for_planning`'s, so this and the
+/// `plan_task_strategy` MCP tool are two adapters over one function (ADR-0006).
+/// The split into a claim and a run is what lets this one answer as soon as the
+/// slot is taken while the tool awaits the whole planner.
 #[tauri::command]
 pub async fn plan_task_strategy(state: State<'_, AppState>, task_id: String) -> Result<()> {
     let context = state.context.clone();
     let paths = state.paths.clone();
     let config = state.runner.clone();
 
-    // Read before the lease: a lease is taken per repository, and this is the
-    // only thing that knows which one. Both reads are read-only.
-    let detail = tasks::get_task(&context, &task_id).await?;
-    let repository = repo::get(&context, &detail.task.repository_id).await?;
+    // Awaited here so a click that cannot possibly plan anything gets an error
+    // the button can render, rather than one that only reaches `tracing::error!`
+    // inside a detached task nobody is watching.
+    let claim = runner_strategy::claim_for_planning(
+        &context,
+        &state.in_flight,
+        &task_id,
+        LeaseOwner::Manual,
+    )
+    .await?
+    .map_err(|skip| Error::invalid(skip.message()))?;
 
-    // `Manual`, because "Plan now" is a button: a Stop pressed on the queue
-    // must not kill a planner the operator started deliberately.
-    let lease = state
-        .in_flight
-        .acquire_unbounded(&task_id, &repository.id, LeaseOwner::Manual)
-        .map_err(|refused| Error::invalid(refused.message()))?;
-    let cancel = lease.cancel_signal();
-
-    repo::ensure_unattended_runs_allowed(&repository)?;
     probe_cli(&config.program).await?;
 
     tauri::async_runtime::spawn(async move {
-        let _lease = lease;
-        if let Err(error) =
-            runner_strategy::plan_task(&context, &paths, &config, &task_id, cancel).await
-        {
+        if let Err(error) = runner_strategy::plan_claimed(&context, &paths, &config, claim).await {
             tracing::error!(
                 %task_id, %error,
                 "a strategy run could not be started or supervised",
@@ -238,4 +242,285 @@ pub async fn plan_task_strategy(state: State<'_, AppState>, task_id: String) -> 
     });
 
     Ok(())
+}
+
+/// Plans a whole selection — a column, a repository, or a hand-picked set —
+/// one planner at a time, and answers with the summary (task 023).
+///
+/// **Awaited, unlike [`plan_task_strategy`].** A pass is the thing the user
+/// stays to watch: they chose to spend the money and the summary is the reason
+/// they ran it. Live progress arrives as `plan-pass:progress` events while this
+/// is outstanding (seam-contract D7), and the resolved value is the end-of-pass
+/// summary.
+///
+/// One pass at a time. A second call while one is running is refused rather
+/// than queued: two passes would be the fan-out task 023's Notes exist to
+/// refuse, arrived at by a different route.
+#[tauri::command]
+pub async fn plan_tasks_strategy(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    selection: PlanSelectionInput,
+) -> Result<PlanPassView> {
+    let cancel = CancelSignal::new();
+    {
+        let mut current = state
+            .plan_pass
+            .lock()
+            .expect("the plan-pass mutex is poisoned");
+        if current
+            .as_ref()
+            .is_some_and(|signal| !signal.is_cancelled())
+        {
+            return Err(Error::invalid(
+                "a planning pass is already running; wait for it to finish or cancel it",
+            ));
+        }
+        *current = Some(cancel.clone());
+    }
+
+    probe_cli(&state.runner.program).await?;
+
+    let pass = runner_strategy::plan_all(
+        &state.context,
+        &state.paths,
+        &state.runner,
+        &state.in_flight,
+        &selection.into(),
+        &cancel,
+        // The stream half of "streamed or collected". A failure to emit is not
+        // a reason to abandon a pass the user is paying for — the summary still
+        // arrives when it resolves.
+        &move |progress| {
+            if let Err(error) =
+                app.emit(PLAN_PASS_PROGRESS_EVENT, PlanProgressView::from(&progress))
+            {
+                tracing::warn!(%error, "could not emit the planning pass progress");
+            }
+        },
+    )
+    .await;
+
+    state
+        .plan_pass
+        .lock()
+        .expect("the plan-pass mutex is poisoned")
+        .take();
+
+    Ok(PlanPassView::from(&pass?))
+}
+
+/// Stops the pass before its next planner, leaving every proposal already
+/// written in place.
+///
+/// The planner currently running is asked to stop too — the pass's signal is
+/// the one `plan_all` checks between cards, and each card's own lease carries
+/// its own. A pass that has already finished is a no-op rather than an error:
+/// the user pressed Cancel a second too late, which is not a mistake to report.
+#[tauri::command]
+pub async fn cancel_plan_pass(state: State<'_, AppState>) -> Result<()> {
+    if let Some(signal) = state
+        .plan_pass
+        .lock()
+        .expect("the plan-pass mutex is poisoned")
+        .as_ref()
+    {
+        signal.cancel();
+    }
+    Ok(())
+}
+
+/// What the board sends [`plan_tasks_strategy`].
+///
+/// Mirrors [`PlanSelection`] and exists only to case its fields the way this
+/// boundary does — the core type is what both surfaces resolve through, so the
+/// board and the MCP tool cannot disagree about what "the ready column" means.
+/// The same split [`crate::commands::worktree::RemovalAuthorizationInput`]
+/// makes, for the same reason.
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase", default, deny_unknown_fields)]
+pub struct PlanSelectionInput {
+    pub column: Option<BoardColumn>,
+    pub repository_id: Option<String>,
+    pub task_ids: Vec<String>,
+}
+
+impl From<PlanSelectionInput> for PlanSelection {
+    fn from(input: PlanSelectionInput) -> Self {
+        PlanSelection {
+            column: input.column,
+            repository_id: input.repository_id,
+            task_ids: input.task_ids,
+        }
+    }
+}
+
+/// The Tauri event carrying live pass progress (seam-contract D7).
+pub const PLAN_PASS_PROGRESS_EVENT: &str = "plan-pass:progress";
+
+/// One card's line, `camelCase` for this boundary.
+///
+/// A projection rather than [`PlanResult`] re-serialized, for the reason
+/// `mcp::responses` gives: the wire shape is the client's contract, and a core
+/// enum reshaped by serde would make every rename a breaking change to the
+/// window.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PlanResultView {
+    pub task_id: String,
+    pub title: String,
+    /// `planned`, `skipped`, `failed` or `cancelled`.
+    pub outcome: String,
+    pub model: Option<String>,
+    pub effort: Option<String>,
+    pub rationale: Option<String>,
+    pub cost_usd: Option<f64>,
+    pub skip: Option<String>,
+    pub reason: Option<String>,
+}
+
+impl From<&PlanResult> for PlanResultView {
+    fn from(result: &PlanResult) -> Self {
+        let mut view = Self {
+            task_id: result.task_id.clone(),
+            title: result.title.clone(),
+            outcome: "cancelled".to_string(),
+            model: None,
+            effort: None,
+            rationale: None,
+            cost_usd: None,
+            skip: None,
+            reason: None,
+        };
+        match &result.outcome {
+            PlanOutcome::Planned {
+                model,
+                effort,
+                rationale,
+                cost_usd,
+            } => {
+                view.outcome = "planned".to_string();
+                view.model = model.clone();
+                view.effort = effort.clone();
+                view.rationale = rationale.clone();
+                view.cost_usd = *cost_usd;
+            }
+            PlanOutcome::Skipped(skip) => {
+                view.outcome = "skipped".to_string();
+                view.skip = Some(skip.as_str().to_string());
+                view.reason = Some(skip.message());
+            }
+            PlanOutcome::Failed(reason) => {
+                view.outcome = "failed".to_string();
+                view.reason = Some(reason.clone());
+            }
+            PlanOutcome::Cancelled => {}
+        }
+        view
+    }
+}
+
+/// The end-of-pass summary.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PlanPassView {
+    pub results: Vec<PlanResultView>,
+    pub planned: usize,
+    pub skipped: usize,
+    pub spent_usd: f64,
+    pub cancelled: bool,
+}
+
+impl From<&PlanPass> for PlanPassView {
+    fn from(pass: &PlanPass) -> Self {
+        Self {
+            results: pass.results.iter().map(PlanResultView::from).collect(),
+            planned: pass.planned(),
+            skipped: pass.skipped(),
+            spent_usd: pass.spent_usd,
+            cancelled: pass.cancelled,
+        }
+    }
+}
+
+/// What one `plan-pass:progress` event carries: the card that just finished,
+/// how far through the pass it was, and what has been spent so far.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PlanProgressView {
+    /// 1-based, because it is rendered as "3 of 10".
+    pub completed: usize,
+    pub total: usize,
+    pub spent_usd: f64,
+    pub result: PlanResultView,
+}
+
+impl From<&PlanProgress<'_>> for PlanProgressView {
+    fn from(progress: &PlanProgress<'_>) -> Self {
+        Self {
+            completed: progress.index + 1,
+            total: progress.total,
+            spent_usd: progress.spent_usd,
+            result: PlanResultView::from(progress.result),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The board's half of task 023's "the same selection through the MCP tool
+    /// and through the button produces the same set of tasks".
+    ///
+    /// `crates/core/tests/runner_strategy.rs` owns the other half — it drives
+    /// the MCP wire shape through its real schema and resolves the set — and
+    /// the two meet on one [`PlanSelection`], which is the only thing
+    /// `selected_tasks` ever sees. This pins that the toolbar's `camelCase`
+    /// payload lands on exactly that value.
+    #[test]
+    fn the_boards_payload_converts_to_the_same_selection_the_mcp_request_does() {
+        let input: PlanSelectionInput = serde_json::from_value(serde_json::json!({
+            "column": "ready",
+            "repositoryId": "repo-1",
+        }))
+        .expect("the toolbar's payload deserializes");
+
+        assert_eq!(
+            PlanSelection::from(input),
+            PlanSelection {
+                column: Some(BoardColumn::Ready),
+                repository_id: Some("repo-1".to_string()),
+                task_ids: Vec::new(),
+            },
+        );
+    }
+
+    #[test]
+    fn a_hand_picked_set_survives_the_boundary_in_the_order_it_was_sent() {
+        let input: PlanSelectionInput = serde_json::from_value(serde_json::json!({
+            "taskIds": ["b", "a"],
+        }))
+        .expect("a hand-picked selection deserializes");
+
+        assert_eq!(
+            PlanSelection::from(input),
+            PlanSelection {
+                column: None,
+                repository_id: None,
+                task_ids: vec!["b".to_string(), "a".to_string()],
+            },
+        );
+    }
+
+    /// Every field defaults, so an omitted one is not a deserialization error —
+    /// but *all* of them omitted is refused by `selected_tasks`, in core, where
+    /// both surfaces meet it.
+    #[test]
+    fn an_omitted_field_is_absent_rather_than_a_deserialization_error() {
+        let input: PlanSelectionInput =
+            serde_json::from_value(serde_json::json!({})).expect("an empty selection deserializes");
+
+        assert_eq!(PlanSelection::from(input), PlanSelection::default());
+    }
 }

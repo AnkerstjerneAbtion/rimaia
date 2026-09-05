@@ -83,7 +83,9 @@ pub async fn list(ctx: &ServiceContext) -> Result<Vec<Repository>> {
         Repository,
         r#"
         SELECT id, name, path, default_branch, worktree_root, allow_unattended_runs,
-               max_concurrency, created_at AS "created_at: chrono::DateTime<chrono::Utc>"
+               max_concurrency, created_at AS "created_at: chrono::DateTime<chrono::Utc>",
+               credential_login, credential_label,
+               credential_added_at AS "credential_added_at: chrono::DateTime<chrono::Utc>"
         FROM repositories
         ORDER BY name ASC, created_at ASC
         "#
@@ -114,7 +116,9 @@ where
         Repository,
         r#"
         SELECT id, name, path, default_branch, worktree_root, allow_unattended_runs,
-               max_concurrency, created_at AS "created_at: chrono::DateTime<chrono::Utc>"
+               max_concurrency, created_at AS "created_at: chrono::DateTime<chrono::Utc>",
+               credential_login, credential_label,
+               credential_added_at AS "credential_added_at: chrono::DateTime<chrono::Utc>"
         FROM repositories
         WHERE id = ?1
         "#,
@@ -516,9 +520,16 @@ async fn validate_directory(path: &Path) -> Result<PathBuf> {
         )));
     }
 
-    tokio::fs::canonicalize(path).await.map_err(|error| {
-        Error::invalid(format!("{} could not be resolved: {error}", path.display()))
-    })
+    // Through `git_safe`, because this path is *stored* and every later use of
+    // it is a `git` invocation in that directory — a Windows extended-length
+    // path would be written into the row once and fail every clone and every
+    // worktree from then on.
+    tokio::fs::canonicalize(path)
+        .await
+        .map(crate::paths::git_safe)
+        .map_err(|error| {
+            Error::invalid(format!("{} could not be resolved: {error}", path.display()))
+        })
 }
 
 /// The second of task 003's four validations: a git repository, and not a
@@ -573,4 +584,112 @@ fn require_non_empty(value: String, field: &str) -> Result<String> {
     } else {
         Ok(trimmed.to_string())
     }
+}
+
+// ---------------------------------------------------------------------------
+// Per-repository forge credentials (task 022, ADR-0020)
+// ---------------------------------------------------------------------------
+
+/// What a settings pane may know about a repository's credential.
+///
+/// **Never the secret.** The login, the label and the date are metadata; the
+/// token is in the keychain and there is no read path from here to it. That is
+/// also why this is the only shape the MCP surface gets: it is an operator-only
+/// read, and it carries nothing that would be worth stealing.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CredentialStatus {
+    /// `true` once a credential has been configured for this repository — which
+    /// is `credential_login` being set, or the save having been marked
+    /// unverified.
+    pub configured: bool,
+    /// The login the token resolved to, or `None` for a save `gh` could not
+    /// verify.
+    pub login: Option<String>,
+    pub label: Option<String>,
+    pub added_at: Option<chrono::DateTime<chrono::Utc>>,
+    /// Whether the machine's keychain actually holds the item this row claims.
+    ///
+    /// The two can disagree — a keychain restored from a different machine, an
+    /// item deleted in Keychain Access — and that disagreement is exactly what
+    /// makes a run refuse rather than fall back, so the pane has to be able to
+    /// show it before 2am rather than after.
+    pub store: crate::credentials::StoreStatus,
+    /// Whether `origin` is an SSH remote. ADR-0020 point 6: silence here would
+    /// let a user believe Rimaia controls an access path it does not — the
+    /// credential covers `gh` API calls and any HTTPS remote, and an SSH push
+    /// uses the machine's own key regardless.
+    pub ssh_remote: bool,
+}
+
+/// Records that a repository now carries a credential.
+///
+/// **The secret is not this function's business.** The caller stores it in the
+/// keychain first and calls this with what the forge said — which is what keeps
+/// the token out of every path that touches SQLite, including this one's own
+/// error messages.
+///
+/// `credential_login` is `None` for a save `gh` could not verify, and the row
+/// is still a configured credential: `credential_added_at` is what says so, and
+/// it is what the spawn path reads.
+pub async fn set_credential_metadata(
+    ctx: &ServiceContext,
+    id: &str,
+    login: Option<&str>,
+    label: Option<&str>,
+) -> Result<Repository> {
+    let mut repository = get(ctx, id).await?;
+    let added_at = ctx.clock.now();
+
+    sqlx::query!(
+        "UPDATE repositories
+         SET credential_login = ?1, credential_label = ?2, credential_added_at = ?3
+         WHERE id = ?4",
+        login,
+        label,
+        added_at,
+        id,
+    )
+    .execute(&ctx.pool)
+    .await?;
+
+    repository.credential_login = login.map(str::to_string);
+    repository.credential_label = label.map(str::to_string);
+    repository.credential_added_at = Some(added_at);
+    ctx.publish(ChangeEvent::repositories([id.to_string()]));
+    Ok(repository)
+}
+
+/// Clears the metadata. The caller deletes the keychain item.
+///
+/// All three columns together, because a row with a label and no `added_at`
+/// would read as configured to [`has_credential`] and as nothing to the pane.
+pub async fn clear_credential_metadata(ctx: &ServiceContext, id: &str) -> Result<Repository> {
+    let mut repository = get(ctx, id).await?;
+
+    sqlx::query!(
+        "UPDATE repositories
+         SET credential_login = NULL, credential_label = NULL, credential_added_at = NULL
+         WHERE id = ?1",
+        id,
+    )
+    .execute(&ctx.pool)
+    .await?;
+
+    repository.credential_login = None;
+    repository.credential_label = None;
+    repository.credential_added_at = None;
+    ctx.publish(ChangeEvent::repositories([id.to_string()]));
+    Ok(repository)
+}
+
+/// Whether this repository's runs must spawn with a token of their own.
+///
+/// **Read off the row, never off the keychain.** A keychain that cannot be
+/// reached has to be a *refusal* — ADR-0020's fail-closed rule — and a spawn
+/// path that asked the keychain "is anything there" would read a locked one as
+/// "no credential configured" and fall straight back to the operator's ambient
+/// login, which is the exact failure the rule exists to prevent.
+pub fn has_credential(repository: &Repository) -> bool {
+    repository.credential_added_at.is_some()
 }

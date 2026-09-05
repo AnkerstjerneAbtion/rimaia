@@ -101,7 +101,9 @@
    are the normal state of a healthy machine. */
 .doctor-result {
   display: grid;
-  grid-template-columns: 5rem minmax(0, 1fr);
+  /* A third column for task 027's row control. `auto` collapses to nothing on
+     the rows that have none, which is most of them. */
+  grid-template-columns: 5rem minmax(0, 1fr) auto;
   align-items: start;
   gap: var(--space-3);
   padding: var(--space-2) var(--space-3);
@@ -229,6 +231,82 @@
 .doctor-banner .doctor-status-warn,
 .doctor-banner .doctor-status-fail {
   background: transparent;
+}
+
+/* --- Dismissal (task 027) ----------------------------------------------- */
+
+/* A row control, not a call to action: it sits at the end of the row it acts
+   on and is the quietest interactive thing on the banner, because dismissing
+   is not what the user is being asked to do — fixing the environment is. */
+.doctor-result-action {
+  align-self: center;
+  padding: 0.05rem var(--space-2);
+  border-color: currentcolor;
+  background: transparent;
+  box-shadow: none;
+  color: inherit;
+  font-size: var(--font-size-xs);
+  font-weight: var(--font-weight-semibold);
+  opacity: 0.8;
+}
+
+.doctor-result-action:hover {
+  opacity: 1;
+}
+
+/* Inside the banner it would otherwise inherit the banner's own button rule,
+   which pushes a block-level action down away from the rows. */
+.doctor-banner .doctor-result-action {
+  margin-top: 0;
+}
+
+/* Only Settings shows these: the banner filters them out. Recessed rather than
+   hidden, because the point of listing them is that the user can find what
+   they put down. */
+.doctor-result-dismissed {
+  opacity: 0.6;
+}
+
+/* The collapse control. It carries the blocking count, which is the one line
+   that has to survive the rows being folded away. */
+.doctor-banner-collapse {
+  display: block;
+}
+
+.doctor-stale-dismissals {
+  margin-top: var(--space-4);
+}
+
+.doctor-stale-dismissals h4 {
+  margin: 0 0 var(--space-1);
+  font-size: var(--font-size-sm);
+  font-weight: var(--font-weight-semibold);
+}
+
+.doctor-stale-list {
+  list-style: none;
+  margin: var(--space-3) 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.doctor-stale-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: var(--space-3);
+  padding: var(--space-2) var(--space-3);
+  border-radius: var(--radius-sm);
+  background: var(--surface-0);
+  color: var(--text-2);
+}
+
+.doctor-stale-row p {
+  margin: 0;
+  font-size: var(--font-size-sm);
+  line-height: var(--line-height-normal);
 }
 
 .doctor-blocked {

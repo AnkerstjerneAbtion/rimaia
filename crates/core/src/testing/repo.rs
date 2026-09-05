@@ -27,6 +27,10 @@ const WORK_TREE_DIR: &str = "work tree";
 
 const REMOTE_DIR: &str = "origin.git";
 
+/// Re-exported so a test outside this module canonicalizes the way the product
+/// does. One rule, in [`crate::paths::git_safe`], not a second copy here.
+pub use crate::paths::git_safe as git_path;
+
 pub struct TempRepo {
     /// Held only for its `Drop`; the paths below point inside it.
     _root: TempDir,
@@ -45,7 +49,8 @@ impl TempRepo {
         // macOS hands out `/var/folders/...`, a symlink to `/private/var/...`,
         // and git reports the resolved form. Resolving once here keeps `path()`
         // comparable with anything git prints back.
-        let resolved = fs::canonicalize(root.path()).expect("temp dir must be resolvable");
+        let resolved =
+            git_path(fs::canonicalize(root.path()).expect("temp dir must be resolvable"));
 
         let work_tree = resolved.join(WORK_TREE_DIR);
         fs::create_dir(&work_tree).expect("work tree directory");
@@ -54,6 +59,12 @@ impl TempRepo {
         // Local, never global: CI runners have no identity configured, and a
         // test has no business writing to the operator's git config.
         git(&work_tree, &["config", "user.name", "Rimaia Test"]);
+        // Windows runners default `core.autocrlf` to true, which rewrites every
+        // checked-out file's line endings — so a fixture written with `\n` and
+        // read back through a clone comes back with `\r\n` and no assertion
+        // about file *content* can hold. These are fixtures, not a user's
+        // working copy; there is nothing here that wants translating.
+        git(&work_tree, &["config", "core.autocrlf", "false"]);
         git(&work_tree, &["config", "user.email", "test@rimaia.invalid"]);
         // The operator's global config may sign every commit; a CI box has no key.
         git(&work_tree, &["config", "commit.gpgsign", "false"]);

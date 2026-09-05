@@ -15,7 +15,8 @@ use serde::{Deserialize, Serialize};
 use sqlx::SqlitePool;
 
 use crate::context::ServiceContext;
-use crate::error::Result;
+use crate::doctor::Check;
+use crate::error::{Error, Result};
 use crate::events::ChangeEvent;
 
 /// The global instructions prepended to every composed run prompt (ADR-0009).
@@ -30,6 +31,19 @@ pub const RUN_ENVIRONMENT: &str = "run_environment";
 /// Task 018's first-run walkthrough, seen or skipped. See
 /// [`onboarding_dismissed`] for why this is a key rather than only a derivation.
 pub const ONBOARDING_DISMISSED: &str = "onboarding_dismissed";
+
+/// Task 024's subscription figure — what the user says they pay per month.
+///
+/// **Absent is not zero.** Absent means the comparison is not rendered at all;
+/// a zero would be a claim that the subscription is free.
+pub const SUBSCRIPTION_MONTHLY_USD: &str = "subscription_monthly_usd";
+
+/// Task 027's dismissed doctor warnings — a JSON array of [`Dismissal`].
+///
+/// A settings key rather than a table for seam-contract D4's reason: the
+/// migration list is closed, and a set of strings only the doctor reads is what
+/// the key/value table is for.
+pub const DOCTOR_DISMISSALS: &str = "doctor_dismissals";
 
 /// What the migration writes into [`BASE_INSTRUCTIONS`] on first launch.
 ///
@@ -207,6 +221,121 @@ pub async fn set_onboarding_dismissed(ctx: &ServiceContext, value: bool) -> Resu
         if value { "true" } else { "false" },
     )
     .await
+}
+
+/// What the user pays for their Claude subscription each month, or `None`.
+///
+/// **`None` is the answer the page needs**, not `0.0`: task 024 renders the
+/// comparison only once there is a figure to compare against, and presents it
+/// as *the user's own* because Rimaia cannot verify it.
+///
+/// A stored value that is not a number, or is negative, reads as absent — the
+/// `run_environment` tolerance applied to a figure: a hand-edited row costs a
+/// warning and a missing panel, never a page that will not open.
+pub async fn subscription_monthly_usd(pool: &SqlitePool) -> Result<Option<f64>> {
+    let Some(raw) = get(pool, SUBSCRIPTION_MONTHLY_USD).await? else {
+        return Ok(None);
+    };
+
+    match raw.trim().parse::<f64>() {
+        Ok(value) if value.is_finite() && value >= 0.0 => Ok(Some(value)),
+        _ => {
+            tracing::warn!(
+                value = raw,
+                "unreadable subscription_monthly_usd; treating it as not set"
+            );
+            Ok(None)
+        }
+    }
+}
+
+/// Stores it, or clears it.
+///
+/// Refuses a negative or non-finite figure rather than storing one the reader
+/// would then have to ignore: this arrives from a form, and the place to say
+/// "that is not a monthly cost" is at the field.
+pub async fn set_subscription_monthly_usd(ctx: &ServiceContext, value: Option<f64>) -> Result<()> {
+    match value {
+        Some(value) if !value.is_finite() || value < 0.0 => Err(Error::invalid(
+            "a monthly subscription cost has to be zero or more",
+        )),
+        Some(value) => set(ctx, SUBSCRIPTION_MONTHLY_USD, &value.to_string()).await,
+        // Cleared rather than deleted: the key/value table has no delete, and
+        // an empty string reads as absent through the parser above.
+        None => set(ctx, SUBSCRIPTION_MONTHLY_USD, "").await,
+    }
+}
+
+/// One doctor warning the user has read and decided about (task 027).
+///
+/// **Keyed on the row's content, not on its check.** `RepositoryPath` warns
+/// about a *named* repository, so "I know about that one" must not silence the
+/// same check firing about a different one; and `detail` is the sentence that
+/// changes when the underlying condition does, so a `claude` upgraded from one
+/// too-old version to another too-old version is a warning the user has not
+/// seen yet. A dismissal is an answer to a specific sentence rather than a mute
+/// button on a check.
+///
+/// Deliberately carries no status. Whether a row *may* be dismissed is
+/// [`DoctorReport`](crate::doctor::DoctorReport)'s to decide when it marks, and
+/// it only ever marks a `warn` — a stored dismissal naming a row that has since
+/// turned into a `fail` marks nothing.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Dismissal {
+    pub check: Check,
+    /// The repository the row was about, for the two per-repository checks;
+    /// `None` for the six that describe the installation as a whole.
+    pub repository: Option<String>,
+    pub detail: String,
+}
+
+/// Every dismissal the user has recorded, in the order they recorded them.
+///
+/// Tolerant of a hand-edited row for the reason [`RunEnvironment::from_stored`]
+/// is: `settings` has no `CHECK` on `value`, the user is a supported writer of
+/// this file (ADR-0003), and a typo in a *presentation* preference must never
+/// cost a launch. Tolerant twice over, because the two failures are different
+/// sizes — a value that is not an array at all falls back to "nothing
+/// dismissed", and one unparseable element is skipped while the rest stand.
+pub async fn doctor_dismissals(pool: &SqlitePool) -> Result<Vec<Dismissal>> {
+    let Some(raw) = get(pool, DOCTOR_DISMISSALS).await? else {
+        return Ok(Vec::new());
+    };
+
+    let elements: Vec<serde_json::Value> = match serde_json::from_str(&raw) {
+        Ok(elements) => elements,
+        Err(error) => {
+            tracing::warn!(
+                %error,
+                "unreadable doctor_dismissals; treating it as nothing dismissed"
+            );
+            return Ok(Vec::new());
+        }
+    };
+
+    Ok(elements
+        .into_iter()
+        .filter_map(|element| match serde_json::from_value(element) {
+            Ok(dismissal) => Some(dismissal),
+            Err(error) => {
+                tracing::warn!(%error, "skipping an unreadable doctor dismissal");
+                None
+            }
+        })
+        .collect())
+}
+
+pub async fn set_doctor_dismissals(ctx: &ServiceContext, value: &[Dismissal]) -> Result<()> {
+    // Mapped rather than unwrapped, the way `strategy::settings` writes its
+    // own JSON key: seam-contract D8 keeps `ErrorCode` closed, so a failure
+    // that cannot happen for this shape still travels as `Internal` instead of
+    // as a panic in a settings write.
+    let json = serde_json::to_string(value).map_err(|error| {
+        Error::internal(format!("a doctor dismissal did not serialize: {error}"))
+    })?;
+
+    set(ctx, DOCTOR_DISMISSALS, &json).await
 }
 
 #[cfg(test)]

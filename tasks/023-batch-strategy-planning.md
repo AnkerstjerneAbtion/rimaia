@@ -6,6 +6,7 @@ status: ready
 depends_on: ["020", "012"]
 adrs: ["0016", "0021", "0010"]
 size: M
+landed: "#28"
 ---
 
 # Batch strategy planning as a preflight

@@ -1,16 +1,23 @@
 import { invoke } from "@tauri-apps/api/core";
 
 import type {
+  Analytics,
   AppInfo,
   AutoCleanup,
   BoardColumn,
   CleanupReport,
+  CredentialStatus,
+  DetectedOpenInTarget,
   DiffSummary,
+  DoctorDismissal,
   DoctorReport,
   McpProbe,
   McpStatus,
   NewTaskInput,
   NewTaskLinkInput,
+  OpenInTarget,
+  PlanPass,
+  PlanSelectionInput,
   PreflightSummary,
   PruneCriterionInput,
   PruneResult,
@@ -155,6 +162,36 @@ export function removeRepository(id: string): Promise<void> {
 
 export function getRepositoryRemoteInfo(id: string): Promise<RemoteInfo> {
   return call<RemoteInfo>("get_repository_remote_info", { id });
+}
+
+/**
+ * Whether a repository carries a forge token of its own, and whose (task 022).
+ *
+ * **Never the token.** There is no command, and no MCP tool, that reads a
+ * stored secret back — the only paths out of the keychain are the spawn and
+ * the delete.
+ */
+export function getRepositoryCredentialStatus(id: string): Promise<CredentialStatus> {
+  return call<CredentialStatus>("get_repository_credential_status", { id });
+}
+
+/**
+ * Verifies a pasted token against the forge and stores it in the keychain.
+ *
+ * Rejects when the forge rejects it — ADR-0020's "refused at paste time" —
+ * and saves it *unverified* when `gh` is not installed, because a missing
+ * local tool says nothing about the token.
+ */
+export function setRepositoryCredential(
+  id: string,
+  token: string,
+  label: string | null,
+): Promise<CredentialStatus> {
+  return call<CredentialStatus>("set_repository_credential", { id, token, label });
+}
+
+export function removeRepositoryCredential(id: string): Promise<CredentialStatus> {
+  return call<CredentialStatus>("remove_repository_credential", { id });
 }
 
 // ---------------------------------------------------------------------------
@@ -390,6 +427,32 @@ export function planTaskStrategy(taskId: string): Promise<void> {
   return call<void>("plan_task_strategy", { taskId });
 }
 
+/**
+ * Plans a whole selection — a column, a repository, or a hand-picked set — one
+ * planner at a time, and resolves with the end-of-pass summary (task 023).
+ *
+ * **Resolves when the pass is over**, unlike {@link planTaskStrategy}: a pass
+ * is the thing the user stays to watch, and the summary is the reason they ran
+ * it. Live progress arrives on `plan-pass:progress` while this is outstanding —
+ * see {@link subscribeToPlanPassProgress}.
+ *
+ * Sequential by design. Ten cards at fifteen seconds is two and a half minutes,
+ * once; fanning out would make the preflight the thing that trips the usage
+ * limit the evening's real work needed.
+ */
+export function planTasksStrategy(selection: PlanSelectionInput): Promise<PlanPass> {
+  return call<PlanPass>("plan_tasks_strategy", { selection });
+}
+
+/**
+ * Stops the pass before its next planner. Every proposal already written stays
+ * written — there is nothing to roll back, because each one is a committed
+ * write to its own card.
+ */
+export function cancelPlanPass(): Promise<void> {
+  return call<void>("cancel_plan_pass");
+}
+
 // ---------------------------------------------------------------------------
 // Worktrees (task 007) — see `src-tauri/src/commands/worktree.rs`.
 // ---------------------------------------------------------------------------
@@ -417,6 +480,30 @@ export function getDiffSummary(taskId: string): Promise<DiffSummary> {
  */
 export function revealTaskWorktree(taskId: string): Promise<void> {
   return call<void>("reveal_task_worktree", { taskId });
+}
+
+/**
+ * Which editors, terminal and file manager this machine can open a worktree in
+ * (task 026).
+ *
+ * Probes `PATH` and a handful of install locations, so it is called when the
+ * window opens and when the user asks for a re-check — **never per card and
+ * never per render.** A board of forty cards re-probing on every drag is a
+ * different feature from the one asked for.
+ */
+export function listOpenInTargets(): Promise<DetectedOpenInTarget[]> {
+  return call<DetectedOpenInTarget[]>("list_open_in_targets");
+}
+
+/**
+ * Opens one task's worktree in one of them.
+ *
+ * Detection is redone in Rust on the way through, so an editor uninstalled
+ * since the menu was built fails with the service's own message rather than
+ * silently doing nothing.
+ */
+export function openTaskWorktreeIn(taskId: string, target: OpenInTarget): Promise<void> {
+  return call<void>("open_task_worktree_in", { taskId, target });
 }
 
 // ---------------------------------------------------------------------------
@@ -779,6 +866,35 @@ export function testMcpConnection(): Promise<McpProbe> {
 }
 
 // ---------------------------------------------------------------------------
+// Analytics (task 024) — see `src-tauri/src/commands/analytics.rs`.
+// ---------------------------------------------------------------------------
+
+/**
+ * Every figure the analytics page renders, for one period.
+ *
+ * The bounds are resolved *here*, not in Rust: "this week" is a question about
+ * the user's own calendar and timezone, and the window is the only thing that
+ * knows either. Omitting both is all time. `from` is inclusive and `to` is
+ * exclusive, so two adjacent periods never both claim a run.
+ */
+export function getAnalytics(from: Date | null, to: Date | null): Promise<Analytics> {
+  return call<Analytics>("get_analytics", {
+    from: from?.toISOString() ?? null,
+    to: to?.toISOString() ?? null,
+  });
+}
+
+/** What the user says they pay per month, or `null` when they have not said. */
+export function getSubscriptionCost(): Promise<number | null> {
+  return call<number | null>("get_subscription_cost");
+}
+
+/** Stores it, or clears it with `null`. A negative figure is refused. */
+export function setSubscriptionCost(value: number | null): Promise<void> {
+  return call<void>("set_subscription_cost", { value });
+}
+
+// ---------------------------------------------------------------------------
 // The preflight doctor (task 018) — see `src-tauri/src/commands/doctor.rs`.
 // ---------------------------------------------------------------------------
 
@@ -805,4 +921,20 @@ export function runDoctor(): Promise<DoctorReport> {
  */
 export function dismissOnboarding(): Promise<void> {
   return call<void>("dismiss_onboarding");
+}
+
+/**
+ * Puts one warning down, and answers with the whole stored set (task 027).
+ *
+ * The set, not the report: hiding one line is not worth eight subprocesses, so
+ * the window updates from the write and the next real `runDoctor` arrives
+ * already marked by `DoctorReport::new`.
+ */
+export function dismissDoctorWarning(dismissal: DoctorDismissal): Promise<DoctorDismissal[]> {
+  return call<DoctorDismissal[]>("dismiss_doctor_warning", { dismissal });
+}
+
+/** Brings one back — including a dismissal that no longer matches any row. */
+export function restoreDoctorWarning(dismissal: DoctorDismissal): Promise<DoctorDismissal[]> {
+  return call<DoctorDismissal[]>("restore_doctor_warning", { dismissal });
 }

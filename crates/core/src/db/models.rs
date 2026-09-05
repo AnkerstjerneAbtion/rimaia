@@ -451,6 +451,22 @@ pub struct Repository {
     /// [`scheduler::capacity`]: crate::scheduler::capacity
     pub max_concurrency: i64,
     pub created_at: DateTime<Utc>,
+    /// The forge login this repository's own token resolved to (task 022,
+    /// ADR-0020), or `None` when it carries no credential.
+    ///
+    /// **It doubles as the flag.** A repository with a login is one a run must
+    /// spawn with its own token, and one whose keychain item has since
+    /// vanished refuses to start rather than falling back to the operator's
+    /// ambient login — which is why the spawn path reads this column instead of
+    /// asking the keychain whether anything is there. A keychain that cannot be
+    /// reached has to be a refusal, not an absence.
+    ///
+    /// `unverified` when `gh` was not installed at save time: a missing local
+    /// tool says nothing about the token, so the save is allowed and marked.
+    pub credential_login: Option<String>,
+    /// What the user called it — "fine-grained, rimaia only, expires March".
+    pub credential_label: Option<String>,
+    pub credential_added_at: Option<DateTime<Utc>>,
 }
 
 /// One key/value application setting (ADR-0003).
@@ -860,6 +876,9 @@ mod tests {
             allow_unattended_runs: true,
             max_concurrency: 1,
             created_at: timestamp("2026-08-20T12:00:00Z"),
+            credential_login: None,
+            credential_label: None,
+            credential_added_at: None,
         };
 
         assert_eq!(
@@ -874,6 +893,13 @@ mod tests {
                 "maxConcurrency": 1,
                 // RFC 3339 UTC, which is byte-for-byte what the TEXT column holds.
                 "createdAt": "2026-08-20T12:00:00Z",
+                // Task 022's three, and `null` is the shape that matters: a
+                // repository with no credential says so on the wire rather
+                // than omitting the fields, so the pane renders "not
+                // configured" instead of "unknown".
+                "credentialLogin": null,
+                "credentialLabel": null,
+                "credentialAddedAt": null,
             })
         );
     }

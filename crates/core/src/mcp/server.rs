@@ -27,27 +27,31 @@ use rmcp::handler::server::wrapper::{Json, Parameters};
 use rmcp::model::{Implementation, ServerCapabilities, ServerInfo};
 use rmcp::{tool, tool_handler, tool_router, ServerHandler};
 
+use crate::analytics::{self, Period};
 use crate::context::ServiceContext;
 use crate::db::{BoardColumn, StrategySource};
 use crate::doctor;
 use crate::mcp::error::ToolError;
 use crate::mcp::requests::{
-    AddTaskLinkRequest, ClearableField, CreateTaskRequest, GetStrategyDefaultsRequest,
-    GetTaskRequest, ListTasksRequest, MoveTaskRequest, RemoveTaskLinkRequest,
+    AddTaskLinkRequest, AnalyticsRequest, ClearableField, CreateTaskRequest,
+    DoctorDismissalRequest, GetStrategyDefaultsRequest, GetTaskRequest, ListTasksRequest,
+    MoveTaskRequest, PlanSelectionRequest, RemoveTaskLinkRequest, RepositoryRequest,
     ScheduleConfigRequest, ScheduleRequest, SetMaxConcurrencyRequest,
     SetRepositoryMaxConcurrencyRequest, SetScheduleEnabledRequest, SetScheduleModeRequest,
     SetStrategyApprovalRequest, SetStrategyCatalogueRequest, SetStrategyDefaultsRequest,
     SetTaskDependenciesRequest, SetTaskStrategyRequest, SetWorktreeAutoCleanupRequest,
-    TaskStrategyRequest, UpdateScheduleRequest, UpdateTaskRequest,
+    SubscriptionCostRequest, TaskStrategyRequest, UpdateScheduleRequest, UpdateTaskRequest,
 };
 use crate::mcp::responses::{
-    BaseInstructionsView, DoctorReportView, OnboardingView, PreflightView, RepositoryListView,
-    RepositoryView, RunCapacityView, ScheduleDeletedView, ScheduleListView, ScheduleView,
-    StrategyApprovalView, TaskListItem, TaskListView, TaskView, TimezoneListView,
-    WorktreeAutoCleanupView, WorktreeListView, WorktreeView,
+    AnalyticsView, BaseInstructionsView, CredentialStatusView, DismissalView, DoctorDismissalsView,
+    DoctorReportView, OnboardingView, PlanPassView, PlanResultView, PreflightView,
+    RepositoryListView, RepositoryView, RunCapacityView, ScheduleDeletedView, ScheduleListView,
+    ScheduleView, StrategyApprovalView, SubscriptionCostView, TaskListItem, TaskListView, TaskView,
+    TimezoneListView, WorktreeAutoCleanupView, WorktreeListView, WorktreeView,
 };
 use crate::mcp::scope::{RunScope, Tool};
 use crate::runner::prompt::TEMPLATE_VARIABLES;
+use crate::runner::strategy::{self as runner_strategy, PlanOutcome, PlanSelection, PlannerAccess};
 use crate::schedule;
 use crate::scheduler::{self, capacity};
 use crate::strategy::{self, Catalogue, StrategyDefaults};
@@ -87,6 +91,16 @@ pub struct RimaiaServer {
     /// `plan_task_strategy` — the MCP server not knowing the shell's `AppPaths`
     /// — closed for the one tool that only *reads* it.
     doctor: doctor::Environment,
+    /// What `plan_task_strategy` and `plan_tasks_strategy` spawn through (task
+    /// 023). An explicit constructor parameter for exactly the reason `doctor`
+    /// is one: the data directory, the `claude` the runner would spawn and the
+    /// shared in-flight registry are all things only the shell knows, and a
+    /// wrong guess would be a planner running against the wrong installation.
+    ///
+    /// **This is the other half of ADR-0021's named gap.** The tool was left off
+    /// the surface because the ownership of "is this task already in flight"
+    /// lived in `src-tauri`; seam-contract D19 moved it, and this carries it in.
+    planner: PlannerAccess,
 }
 
 /// `vis = "pub"` so `tests/mcp_scope.rs`, which lives outside this crate, can
@@ -101,11 +115,12 @@ impl RimaiaServer {
     ///
     /// [`RunScope::Operator`], because `/mcp` is what this constructor serves
     /// and task 020 takes nothing away from it.
-    pub fn new(ctx: ServiceContext, doctor: doctor::Environment) -> Self {
+    pub fn new(ctx: ServiceContext, doctor: doctor::Environment, planner: PlannerAccess) -> Self {
         Self {
             ctx,
             scope: RunScope::Operator,
             doctor,
+            planner,
         }
     }
 
@@ -117,6 +132,7 @@ impl RimaiaServer {
     pub fn scoped(
         ctx: ServiceContext,
         doctor: doctor::Environment,
+        planner: PlannerAccess,
         task_id: impl Into<String>,
     ) -> Self {
         Self {
@@ -125,6 +141,7 @@ impl RimaiaServer {
                 task_id: task_id.into(),
             },
             doctor,
+            planner,
         }
     }
 
@@ -156,6 +173,214 @@ something this surface offers."
         db::settings::set_onboarding_dismissed(&self.ctx, true).await?;
         Ok(Json(OnboardingView {
             onboarding_dismissed: true,
+        }))
+    }
+
+    #[tool(
+        description = "Run the strategy planner for one task now and wait for it to finish, then \
+report the model, effort and rationale it proposed. Call this when the user wants to see how a \
+task will be modelled before committing to the expensive implementation run — a planner costs a \
+few cents and a handful of turns, where the run it is checking costs on the order of a dollar. \
+The task must resolve to `planned` mode and its repository must have opted into unattended runs; \
+a task that already carries a proposal is re-planned, which is what this tool means that \
+`plan_tasks_strategy` deliberately does not."
+    )]
+    pub async fn plan_task_strategy(
+        &self,
+        Parameters(request): Parameters<TaskStrategyRequest>,
+    ) -> Result<Json<PlanResultView>, ToolError> {
+        self.scope
+            .authorize(Tool::PlanTaskStrategy, Some(&request.task_id))?;
+
+        let claim = runner_strategy::claim_for_planning(
+            &self.ctx,
+            &self.planner.in_flight,
+            &request.task_id,
+            scheduler::LeaseOwner::Manual,
+        )
+        .await?;
+
+        let (title, outcome) = match claim {
+            Ok(claim) => {
+                let title = claim.title().to_string();
+                let outcome = runner_strategy::plan_claimed(
+                    &self.ctx,
+                    &self.planner.paths,
+                    &self.planner.runner,
+                    claim,
+                )
+                .await?;
+                (title, outcome)
+            }
+            Err(skip) => {
+                let detail = tasks::get_task(&self.ctx, &request.task_id).await?;
+                (detail.task.title, PlanOutcome::Skipped(skip))
+            }
+        };
+
+        Ok(Json(PlanResultView::new(
+            &request.task_id,
+            &title,
+            &outcome,
+        )))
+    }
+
+    #[tool(
+        description = "Plan a whole column, a whole repository or a hand-picked set of tasks in \
+one pass, one planner at a time, and report what each one was modelled as. This is the preflight \
+the user runs before leaving for the evening: spending forty cents to see how ten cards are \
+modelled, before committing forty dollars of implementation, is the cheapest check this product \
+offers. Call it when the user asks to check how a set of tasks will run, or before starting the \
+queue on a column they have not reviewed. State at least one of `column`, `repository_id` or \
+`task_ids`; each one narrows the set, and a selection that states none of them is refused rather \
+than taken to mean the whole board. A card that already carries a proposal is skipped with that \
+named as the reason and its proposal left untouched — use `plan_task_strategy` to re-plan one \
+deliberately."
+    )]
+    pub async fn plan_tasks_strategy(
+        &self,
+        Parameters(request): Parameters<PlanSelectionRequest>,
+    ) -> Result<Json<PlanPassView>, ToolError> {
+        self.scope.authorize(Tool::PlanTasksStrategy, None)?;
+
+        let selection: PlanSelection = request.into();
+        // A pass reached over MCP has no Cancel button to trip, so the signal
+        // is one nothing holds. It is still passed rather than made optional:
+        // one loop, one cancellation story, and the surface that *does* have a
+        // button hands in a real one.
+        let cancel = crate::runner::CancelSignal::new();
+        let pass = runner_strategy::plan_all(
+            &self.ctx,
+            &self.planner.paths,
+            &self.planner.runner,
+            &self.planner.in_flight,
+            &selection,
+            &cancel,
+            &|_progress| {},
+        )
+        .await?;
+
+        Ok(Json(PlanPassView::from(&pass)))
+    }
+
+    #[tool(
+        description = "Report whether one repository carries a forge token of its own, whose \
+account it belongs to, what the user called it, and whether this machine's keychain still holds \
+it. Call this when a run failed to push or to open a pull request, or before telling the user \
+their token is fine — a repository whose credential is configured and whose keychain item has \
+gone refuses to run rather than falling back to the operator's own login, and this is what says \
+so. **The token itself is never returned by anything**, and there is no tool that sets or \
+removes one: a live forge token has no business travelling over this protocol."
+    )]
+    pub async fn get_repository_credential_status(
+        &self,
+        Parameters(request): Parameters<RepositoryRequest>,
+    ) -> Result<Json<CredentialStatusView>, ToolError> {
+        self.scope
+            .authorize(Tool::GetRepositoryCredentialStatus, None)?;
+
+        let repository = repo::get(&self.ctx, &request.repository_id).await?;
+        let store = self.planner.runner.credentials.status(&repository.id).await;
+
+        Ok(Json(CredentialStatusView::new(&repository, store)))
+    }
+
+    #[tool(
+        description = "Report what this Rimaia installation has actually done over a period: what \
+it spent, how many runs succeeded or failed, how many tasks reached review, how long runs take, \
+which models were used, and what a completed task costs once its failed attempts are counted. \
+Call this when the user asks whether Rimaia is worth what it costs, why their bill looks the way \
+it does, or whether runs have started failing more often. Omit both bounds for all time; pass \
+`from` and `to` as RFC 3339 instants otherwise. Read `runs_without_cost` before quoting a total \
+— it is how many runs in the period recorded no cost at all, and a period that predates the \
+capture columns is partly unrecorded rather than cheaper."
+    )]
+    pub async fn get_analytics(
+        &self,
+        Parameters(request): Parameters<AnalyticsRequest>,
+    ) -> Result<Json<AnalyticsView>, ToolError> {
+        self.scope.authorize(Tool::GetAnalytics, None)?;
+
+        let report = analytics::analytics(
+            &self.ctx.pool,
+            Period {
+                from: request.from,
+                to: request.to,
+            },
+        )
+        .await?;
+        Ok(Json(AnalyticsView::from(&report)))
+    }
+
+    #[tool(
+        description = "Read what the user has told Rimaia their Claude subscription costs per \
+month, or `null` when they have not said. Call this before comparing spend against a \
+subscription — the figure is the *user's own* and Rimaia cannot verify it, so an absent one means \
+the comparison must not be drawn rather than that it is free."
+    )]
+    pub async fn get_subscription_cost(&self) -> Result<Json<SubscriptionCostView>, ToolError> {
+        self.scope.authorize(Tool::GetSubscriptionCost, None)?;
+
+        Ok(Json(SubscriptionCostView {
+            monthly_usd: db::settings::subscription_monthly_usd(&self.ctx.pool).await?,
+        }))
+    }
+
+    #[tool(
+        description = "Record what the user pays for their Claude subscription each month, so the \
+analytics page can show spend as a share of it. Call it only when the user states a figure; pass \
+`null` to clear one. A negative figure is refused."
+    )]
+    pub async fn set_subscription_cost(
+        &self,
+        Parameters(request): Parameters<SubscriptionCostRequest>,
+    ) -> Result<Json<SubscriptionCostView>, ToolError> {
+        self.scope.authorize(Tool::SetSubscriptionCost, None)?;
+
+        db::settings::set_subscription_monthly_usd(&self.ctx, request.monthly_usd).await?;
+        Ok(Json(SubscriptionCostView {
+            monthly_usd: db::settings::subscription_monthly_usd(&self.ctx.pool).await?,
+        }))
+    }
+
+    #[tool(
+        description = "Put down one doctor warning the user has read and decided about, so it \
+stops appearing in the banner above every screen. Take `check`, `repository` and `detail` \
+verbatim from a `run_doctor` row — all three are the key, so the same check about a different \
+repository stays visible, and the warning comes back by itself if its `detail` ever changes. \
+This is presentation only: it never changes whether the queue will start, and a `fail` row \
+cannot be dismissed at all. Call it when the user says they know about a warning and want it \
+out of the way, never to tidy up a report on their behalf."
+    )]
+    pub async fn dismiss_doctor_warning(
+        &self,
+        Parameters(request): Parameters<DoctorDismissalRequest>,
+    ) -> Result<Json<DoctorDismissalsView>, ToolError> {
+        self.scope.authorize(Tool::DismissDoctorWarning, None)?;
+
+        let dismissals = doctor::dismiss(&self.ctx, request.into()).await?;
+        Ok(Json(DoctorDismissalsView {
+            dismissals: dismissals.iter().map(DismissalView::from).collect(),
+        }))
+    }
+
+    #[tool(
+        description = "Bring a dismissed doctor warning back, so it appears in the banner again. \
+Call this when the user asks to see a warning they previously put down, or wants to tidy up \
+dismissals that no longer apply. Take the three fields from `run_doctor`'s `dismissals` list, \
+which holds every dismissal on record — including ones that match no current row, because the \
+environment was fixed or the warning's wording changed. Removing one of those is how they are \
+cleared."
+    )]
+    pub async fn restore_doctor_warning(
+        &self,
+        Parameters(request): Parameters<DoctorDismissalRequest>,
+    ) -> Result<Json<DoctorDismissalsView>, ToolError> {
+        self.scope.authorize(Tool::RestoreDoctorWarning, None)?;
+
+        let dismissals = doctor::restore(&self.ctx, &request.into()).await?;
+        Ok(Json(DoctorDismissalsView {
+            dismissals: dismissals.iter().map(DismissalView::from).collect(),
         }))
     }
 
@@ -973,19 +1198,23 @@ mod tests {
     /// capability parity a rule. What replaces a count is the property that
     /// actually matters — a registered tool with no run-scope decision cannot
     /// reach the wire.
-    const REGISTERED_TOOLS: [&str; 36] = [
+    const REGISTERED_TOOLS: [&str; 44] = [
         "accept_task_strategy",
         "add_task_link",
         "clear_task_strategy",
         "create_schedule",
         "create_task",
         "delete_schedule",
+        "dismiss_doctor_warning",
         "dismiss_onboarding",
+        "get_analytics",
         "get_base_instructions",
+        "get_repository_credential_status",
         "get_run_capacity",
         "get_strategy_approval",
         "get_strategy_catalogue",
         "get_strategy_defaults",
+        "get_subscription_cost",
         "get_task",
         "get_worktree_auto_cleanup",
         "give_up_on_task",
@@ -995,8 +1224,11 @@ mod tests {
         "list_timezones",
         "list_worktrees",
         "move_task",
+        "plan_task_strategy",
+        "plan_tasks_strategy",
         "preview_schedule_preflight",
         "remove_task_link",
+        "restore_doctor_warning",
         "run_doctor",
         "set_max_concurrency",
         "set_repository_max_concurrency",
@@ -1005,6 +1237,7 @@ mod tests {
         "set_strategy_approval",
         "set_strategy_catalogue",
         "set_strategy_defaults",
+        "set_subscription_cost",
         "set_task_dependencies",
         "set_task_strategy",
         "set_worktree_auto_cleanup",
@@ -1130,8 +1363,12 @@ mod tests {
     #[tokio::test]
     async fn the_server_introduces_itself_as_rimaia_with_instructions() {
         let harness = crate::testing::TestContext::new().await;
-        let info =
-            RimaiaServer::new(harness.context, crate::testing::doctor::environment()).get_info();
+        let info = RimaiaServer::new(
+            harness.context,
+            crate::testing::doctor::environment(),
+            crate::testing::doctor::planner_access(),
+        )
+        .get_info();
 
         assert_eq!(info.server_info.name, "rimaia");
         assert_eq!(info.server_info.version, env!("CARGO_PKG_VERSION"));

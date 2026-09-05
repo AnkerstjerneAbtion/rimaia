@@ -41,6 +41,8 @@ function renderColumn(cards: Task[]) {
         repositoriesById={new Map([["repo-1", "rimaia"]])}
         selectedTaskId={null}
         onSelect={vi.fn()}
+        pickedTaskIds={new Set<string>()}
+        onPick={vi.fn()}
         registerCardRef={vi.fn()}
         onArrowNavigate={vi.fn()}
         dragDisabled={false}

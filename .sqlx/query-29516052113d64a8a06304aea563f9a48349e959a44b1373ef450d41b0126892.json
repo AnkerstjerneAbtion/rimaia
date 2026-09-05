@@ -1,6 +1,6 @@
 {
   "db_name": "SQLite",
-  "query": "\n        SELECT id, name, path, default_branch, worktree_root, allow_unattended_runs,\n               max_concurrency, created_at AS \"created_at: chrono::DateTime<chrono::Utc>\"\n        FROM repositories\n        ORDER BY name ASC, created_at ASC\n        ",
+  "query": "\n        SELECT id, name, path, default_branch, worktree_root, allow_unattended_runs,\n               max_concurrency, created_at AS \"created_at: chrono::DateTime<chrono::Utc>\",\n               credential_login, credential_label,\n               credential_added_at AS \"credential_added_at: chrono::DateTime<chrono::Utc>\"\n        FROM repositories\n        ORDER BY name ASC, created_at ASC\n        ",
   "describe": {
     "columns": [
       {
@@ -42,6 +42,21 @@
         "name": "created_at: chrono::DateTime<chrono::Utc>",
         "ordinal": 7,
         "type_info": "Text"
+      },
+      {
+        "name": "credential_login",
+        "ordinal": 8,
+        "type_info": "Text"
+      },
+      {
+        "name": "credential_label",
+        "ordinal": 9,
+        "type_info": "Text"
+      },
+      {
+        "name": "credential_added_at: chrono::DateTime<chrono::Utc>",
+        "ordinal": 10,
+        "type_info": "Text"
       }
     ],
     "parameters": {
@@ -55,8 +70,11 @@
       false,
       false,
       false,
-      false
+      false,
+      true,
+      true,
+      true
     ]
   },
-  "hash": "eb3c69ecde8a1a08d773402cf642b5c0c2b7c0a889517005559e16a09c345b90"
+  "hash": "29516052113d64a8a06304aea563f9a48349e959a44b1373ef450d41b0126892"
 }

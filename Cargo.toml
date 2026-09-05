@@ -60,6 +60,33 @@ sqlx = { version = "0.8", default-features = false, features = [
   "macros",
   "migrate",
 ] }
+# Task 022, ADR-0020: the forge token goes in the OS keychain, and there is no
+# hand-rollable version of three platform secret stores. All three backends are
+# enabled because "cross-platform is a requirement of this task, not a
+# follow-up" — `apple-native` (macOS Keychain), `windows-native` (Credential
+# Manager) and `sync-secret-service` (libsecret over D-Bus). The sync
+# secret-service backend rather than the async one: `CredentialStore` is called
+# from `spawn_blocking`, and an async backend would drag a second runtime
+# concern into a crate that already has one.
+#
+# It compiles on a headless Linux box and *fails at runtime* without a running
+# secret service, which is a real user state and why `status` reports "no
+# keychain on this machine" as its own answer rather than as a failed save.
+keyring = { version = "3", features = [
+  "apple-native",
+  "windows-native",
+  "sync-secret-service",
+  # Encrypted D-Bus transport for the secret-service backend, in pure Rust
+  # rather than through OpenSSL: `crypto-openssl` would put a system library on
+  # the Linux build's critical path for a feature this app reaches once per
+  # spawn.
+  "crypto-rust",
+] }
+# The `http.https://github.com/.extraheader` value is
+# `Basic base64("x-access-token:" + token)`. Already in `Cargo.lock`
+# transitively through `reqwest`, so promoting it to a direct dependency costs
+# no new tree — see seam-contract D25 for why an encoder was not hand-rolled.
+base64 = "0.22"
 tempfile = "3"
 thiserror = "2"
 tokio = { version = "1", features = ["full"] }

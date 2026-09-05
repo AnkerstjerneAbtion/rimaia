@@ -10,13 +10,16 @@
 //! `cargo test -p rimaia-core` run with no WebKit or GTK installed, and what
 //! stops business rules from drifting into a layer the MCP server cannot reach.
 
+pub mod analytics;
 pub mod clock;
 pub mod context;
+pub mod credentials;
 pub mod db;
 pub mod doctor;
 pub mod error;
 pub mod events;
 pub mod mcp;
+pub mod openers;
 pub mod paths;
 pub mod repo;
 pub mod runner;

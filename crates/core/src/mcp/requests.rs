@@ -19,8 +19,11 @@ use serde::Deserialize;
 
 use chrono::{DateTime, Utc};
 
+use crate::db::settings::Dismissal;
 use crate::db::{BoardColumn, RunState, ScheduleMode, StrategyMode};
+use crate::doctor::Check;
 use crate::error::{Error, Result};
+use crate::runner::strategy::PlanSelection;
 use crate::schedule::ScheduleInput;
 use crate::strategy::StrategyApproval;
 use crate::tasks::{StrategyPhase, StrategyPlan, StrategyWorkflow};
@@ -499,6 +502,92 @@ pub struct SetScheduleEnabledRequest {
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub struct SetWorktreeAutoCleanupRequest {
     pub setting: AutoCleanup,
+}
+
+/// One repository, by id (task 022).
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct RepositoryRequest {
+    /// From `list_repositories` — a UUID, not derivable from a name or a path.
+    pub repository_id: String,
+}
+
+/// The window `get_analytics` reports on (task 024).
+///
+/// Both bounds optional: omitting them is all time, which is the answer for
+/// "what has this thing cost me". `from` is inclusive and `to` is exclusive, so
+/// two adjacent periods cannot both claim a run.
+#[derive(Debug, Clone, Default, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case", default, deny_unknown_fields)]
+pub struct AnalyticsRequest {
+    /// RFC 3339, e.g. `2026-09-01T00:00:00Z`.
+    pub from: Option<DateTime<Utc>>,
+    pub to: Option<DateTime<Utc>>,
+}
+
+/// What the user pays per month, or `null` to clear it (task 024).
+#[derive(Debug, Clone, Default, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case", default, deny_unknown_fields)]
+pub struct SubscriptionCostRequest {
+    pub monthly_usd: Option<f64>,
+}
+
+/// Which cards `plan_tasks_strategy` plans (task 023).
+///
+/// Every stated field narrows the set, and stating none of them is refused
+/// rather than taken to mean the whole board — `PlanSelection` is a core type
+/// precisely so this surface and the board's "Plan all" cannot disagree about
+/// what "the ready column" is.
+#[derive(Debug, Clone, Default, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case", default, deny_unknown_fields)]
+pub struct PlanSelectionRequest {
+    /// `not_ready`, `ready`, `in_review` or `done`. `ready` is the run queue and
+    /// is what a preflight is normally about.
+    pub column: Option<BoardColumn>,
+    pub repository_id: Option<String>,
+    /// A hand-picked set. An id that is not in the rest of the selection is
+    /// refused naming it, never silently dropped.
+    pub task_ids: Vec<String>,
+}
+
+impl From<PlanSelectionRequest> for PlanSelection {
+    fn from(request: PlanSelectionRequest) -> Self {
+        PlanSelection {
+            column: request.column,
+            repository_id: request.repository_id,
+            task_ids: request.task_ids,
+        }
+    }
+}
+
+/// One doctor row to put down, or pick back up (task 027).
+///
+/// All three fields, because a dismissal is keyed on the row's *content*: the
+/// same check about a different repository is a different warning, and a
+/// changed `detail` is a sentence the user has not read yet. A tool that took
+/// only `check` would be the mute button task 027's Notes argue against.
+///
+/// Copy the three values out of `run_doctor`'s own output rather than composing
+/// them — a `detail` that differs by a character matches nothing.
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct DoctorDismissalRequest {
+    pub check: Check,
+    /// The repository the row was about, for the two per-repository checks.
+    /// Omit it for the six that describe the installation as a whole.
+    #[serde(default)]
+    pub repository: Option<String>,
+    pub detail: String,
+}
+
+impl From<DoctorDismissalRequest> for Dismissal {
+    fn from(request: DoctorDismissalRequest) -> Self {
+        Dismissal {
+            check: request.check,
+            repository: request.repository,
+            detail: request.detail,
+        }
+    }
 }
 
 #[cfg(test)]
