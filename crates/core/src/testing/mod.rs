@@ -35,4 +35,4 @@ pub use cli::{open_gate, FakeCli};
 pub use clock::TestClock;
 pub use context::{test_epoch, TestContext};
 pub use db::test_pool;
-pub use repo::TempRepo;
+pub use repo::{git_path, TempRepo};

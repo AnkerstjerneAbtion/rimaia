@@ -15,7 +15,7 @@ use std::path::Path;
 use std::process::Command;
 
 use pretty_assertions::{assert_eq, assert_ne};
-use rimaia_core::testing::TempRepo;
+use rimaia_core::testing::{self, TempRepo};
 
 /// The branch `TempRepo::init` leaves a fresh repository on.
 const DEFAULT_BRANCH: &str = "main";
@@ -51,7 +51,11 @@ fn git_worktree_add_succeeds_against_a_temp_repo() {
     );
     assert_eq!(git(&destination, &["rev-parse", "HEAD"]), repo.head_sha());
 
-    let registered = fs::canonicalize(&destination).expect("the worktree must exist on disk");
+    // Through `git_path`, because `fs::canonicalize` returns a Windows
+    // extended-length `\\?\` path and `git worktree list` prints the plain
+    // one — the same directory, two strings.
+    let registered =
+        testing::git_path(fs::canonicalize(&destination).expect("the worktree must exist on disk"));
     assert!(
         git(repo.path(), &["worktree", "list", "--porcelain"])
             .contains(&registered.to_string_lossy().into_owned()),

@@ -38,7 +38,7 @@ const REMOTE_DIR: &str = "origin.git";
 ///
 /// A no-op everywhere else. Found by task 022's CI matrix, which is the first
 /// time this harness ran on Windows.
-fn plain(path: PathBuf) -> PathBuf {
+pub fn git_path(path: PathBuf) -> PathBuf {
     #[cfg(windows)]
     {
         let text = path.to_string_lossy();
@@ -67,7 +67,8 @@ impl TempRepo {
         // macOS hands out `/var/folders/...`, a symlink to `/private/var/...`,
         // and git reports the resolved form. Resolving once here keeps `path()`
         // comparable with anything git prints back.
-        let resolved = plain(fs::canonicalize(root.path()).expect("temp dir must be resolvable"));
+        let resolved =
+            git_path(fs::canonicalize(root.path()).expect("temp dir must be resolvable"));
 
         let work_tree = resolved.join(WORK_TREE_DIR);
         fs::create_dir(&work_tree).expect("work tree directory");
@@ -76,6 +77,12 @@ impl TempRepo {
         // Local, never global: CI runners have no identity configured, and a
         // test has no business writing to the operator's git config.
         git(&work_tree, &["config", "user.name", "Rimaia Test"]);
+        // Windows runners default `core.autocrlf` to true, which rewrites every
+        // checked-out file's line endings — so a fixture written with `\n` and
+        // read back through a clone comes back with `\r\n` and no assertion
+        // about file *content* can hold. These are fixtures, not a user's
+        // working copy; there is nothing here that wants translating.
+        git(&work_tree, &["config", "core.autocrlf", "false"]);
         git(&work_tree, &["config", "user.email", "test@rimaia.invalid"]);
         // The operator's global config may sign every commit; a CI box has no key.
         git(&work_tree, &["config", "commit.gpgsign", "false"]);
