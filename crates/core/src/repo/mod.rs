@@ -520,9 +520,16 @@ async fn validate_directory(path: &Path) -> Result<PathBuf> {
         )));
     }
 
-    tokio::fs::canonicalize(path).await.map_err(|error| {
-        Error::invalid(format!("{} could not be resolved: {error}", path.display()))
-    })
+    // Through `git_safe`, because this path is *stored* and every later use of
+    // it is a `git` invocation in that directory — a Windows extended-length
+    // path would be written into the row once and fail every clone and every
+    // worktree from then on.
+    tokio::fs::canonicalize(path)
+        .await
+        .map(crate::paths::git_safe)
+        .map_err(|error| {
+            Error::invalid(format!("{} could not be resolved: {error}", path.display()))
+        })
 }
 
 /// The second of task 003's four validations: a git repository, and not a

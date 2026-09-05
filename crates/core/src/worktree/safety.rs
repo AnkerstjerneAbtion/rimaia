@@ -67,7 +67,9 @@ pub(super) async fn resolve(path: &Path) -> Result<PathBuf> {
 
     loop {
         if let Ok(resolved) = tokio::fs::canonicalize(&existing).await {
-            let mut full = resolved;
+            // Same reason `repo::register` does it: what comes back from here
+            // becomes a `git worktree add` argument.
+            let mut full = crate::paths::git_safe(resolved);
             full.extend(missing.iter().rev());
             return Ok(full);
         }

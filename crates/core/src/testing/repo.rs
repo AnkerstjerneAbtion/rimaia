@@ -27,27 +27,9 @@ const WORK_TREE_DIR: &str = "work tree";
 
 const REMOTE_DIR: &str = "origin.git";
 
-/// A canonical path git will accept.
-///
-/// `fs::canonicalize` returns a Windows *extended-length* path — the `\\?\`
-/// prefix — and git for Windows cannot open one: it reports
-/// `could not open '\\?\C:\...\origin.git/HEAD' for writing: No such file
-/// or directory`, which reads as a missing directory rather than as a path it
-/// declined to parse. Stripping the prefix costs the >260-character support
-/// canonicalization was buying, and a temp directory is nowhere near that.
-///
-/// A no-op everywhere else. Found by task 022's CI matrix, which is the first
-/// time this harness ran on Windows.
-pub fn git_path(path: PathBuf) -> PathBuf {
-    #[cfg(windows)]
-    {
-        let text = path.to_string_lossy();
-        if let Some(stripped) = text.strip_prefix(r"\\?\") {
-            return PathBuf::from(stripped);
-        }
-    }
-    path
-}
+/// Re-exported so a test outside this module canonicalizes the way the product
+/// does. One rule, in [`crate::paths::git_safe`], not a second copy here.
+pub use crate::paths::git_safe as git_path;
 
 pub struct TempRepo {
     /// Held only for its `Drop`; the paths below point inside it.
