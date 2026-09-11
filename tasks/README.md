@@ -34,7 +34,7 @@ reviewable in the app afterwards.
 | 21 | [026](026-open-worktree-in-editor.md) | Open a task's worktree in the tool the user actually works in | v0.3 | 005, 007 | — |
 | 22 | [028](028-let-a-run-see-the-ui-it-changed.md) | Let a run see the UI it changed | v0.3 | 005 | — |
 | 23 | [018](018-preflight-doctor-and-packaging.md) | Preflight doctor and packaging | v0.3 | 008 | #17 |
-| 24 | [029](029-a-development-database-that-is-not-the-users.md) | A development database that is not the user's | v0.3 | 018 | — |
+| 24 | [029](029-a-development-database-that-is-not-the-users.md) | A development database that is not the user's | v0.3 | 018 | [#29](https://github.com/AnkerstjerneAbtion/rimaia/pull/29) |
 | 25 | [025](025-startup-failure-dialog.md) | A startup failure a double-clicked bundle can see | v0.3 | 018 | — |
 | 26 | [027](027-dismissable-doctor-warnings.md) | A doctor warning the user can put down | v0.3 | 018 | — |
 | 27 | [022](022-per-repository-git-credentials.md) | Per-repository git credentials | v0.3 | 003, 008 | — |

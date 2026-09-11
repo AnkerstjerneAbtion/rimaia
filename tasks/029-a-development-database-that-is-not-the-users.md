@@ -3,6 +3,7 @@ id: "029"
 title: A development database that is not the user's
 milestone: v0.3
 status: ready
+landed: "#29"
 depends_on: ["018"]
 adrs: ["0003", "0023"]
 size: S
@@ -55,10 +56,17 @@ already resolves `app.path().app_data_dir()?` there; the override is read alongs
 two are handed to the new function. `paths.create_all()` is already idempotent and already
 runs next, so a directory that does not exist yet is not a special case.
 
-**A relative path is a refusal.** So is a value starting with `~`. Both fail at startup through
-the existing `log_startup_failure` path (D11), naming the variable and the value, and nothing
-is created first — a refusal that has already made a directory is worse than the mistake it
-was reporting.
+**A relative path is a refusal.** So is a value starting with `~`. Both fail at startup naming
+the variable and the value, and nothing is created first — a refusal that has already made a
+directory is worse than the mistake it was reporting.
+
+This one failure does **not** go through `log_startup_failure`, which is what this task
+originally assumed. Both of that helper's outputs are unavailable this early: there is no
+`db_file` to name, since it is derived from the directory that just failed to resolve, and
+`logging::init` has not run, so a `tracing` call has no subscriber and is dropped rather than
+written. Propagating the error is the whole of the report — D11's stderr half — which is why
+its text has to name the variable and the value itself. Found by running the binary; a helper
+written for it first looked correct and logged nothing.
 
 **The doctor's `data_directory` row reports the path it probed, and whether the value came
 from the environment.** One line of detail on a check that already exists. This is what keeps
