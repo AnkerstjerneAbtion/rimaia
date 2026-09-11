@@ -1,7 +1,7 @@
 import { DoctorResultList } from "../../components/DoctorResultList";
 import { ErrorBanner } from "../../components/ErrorBanner";
 import { useDoctor } from "../../hooks/useDoctor";
-import { hasBlockingProblem } from "../../lib/doctor";
+import { dismissalFor, hasBlockingProblem, isStale } from "../../lib/doctor";
 
 /**
  * Settings → Environment (task 018): the doctor's full report, passing rows
@@ -13,9 +13,21 @@ import { hasBlockingProblem } from "../../lib/doctor";
  * suspects a problem Rimaia has not reported needs to see that the check ran
  * at all and passed. A banner that rendered the passing rows too would be
  * eight lines of noise above the board every day.
+ *
+ * It is also **where a dismissed warning is found again** (task 027). A
+ * dismissal the user cannot see is a leak rather than a feature, so the list
+ * below carries the dismissed rows with a Restore control — and, separately,
+ * any dismissal that no longer matches a row at all, because those are the ones
+ * nothing else on either surface would ever mention.
  */
 export function DoctorSection() {
-  const { report, running, error, checkedAt, rerun } = useDoctor();
+  const { report, running, error, checkedAt, rerun, restore } = useDoctor();
+
+  // A dismissal outlives the row it answered: the environment was fixed, or the
+  // sentence changed and the warning came back as a new one. Either way the
+  // stored entry is still there, still invisible, and still able to silence the
+  // old sentence if it ever returns.
+  const stale = report?.dismissals.filter((dismissal) => isStale(report, dismissal)) ?? [];
 
   return (
     <section className="panel">
@@ -36,8 +48,43 @@ export function DoctorSection() {
               The queue cannot start until every failing check below is fixed.
             </p>
           )}
-          <DoctorResultList results={report.results} />
+          <DoctorResultList
+            results={report.results}
+            onRestore={(result) => void restore(dismissalFor(result))}
+          />
         </>
+      )}
+
+      {stale.length > 0 && (
+        <div className="doctor-stale-dismissals">
+          <h4>Dismissed warnings that no longer apply</h4>
+          <p className="muted">
+            These were dismissed and the checks have since stopped reporting them. Clearing one
+            means the same sentence will be shown again if it ever comes back.
+          </p>
+          <ul className="doctor-stale-list">
+            {stale.map((dismissal) => (
+              <li
+                key={`${dismissal.check}:${dismissal.repository ?? ""}:${dismissal.detail}`}
+                className="doctor-stale-row"
+              >
+                <p>
+                  {dismissal.detail}
+                  {dismissal.repository && (
+                    <span className="doctor-scope"> — {dismissal.repository}</span>
+                  )}
+                </p>
+                <button
+                  type="button"
+                  className="doctor-result-action"
+                  onClick={() => void restore(dismissal)}
+                >
+                  Clear
+                </button>
+              </li>
+            ))}
+          </ul>
+        </div>
       )}
 
       <div className="doctor-actions">

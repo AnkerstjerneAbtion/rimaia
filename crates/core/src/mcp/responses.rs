@@ -16,11 +16,15 @@ use chrono::{DateTime, Utc};
 use schemars::JsonSchema;
 use serde::Serialize;
 
+use crate::analytics::Analytics;
+use crate::credentials::StoreStatus;
+use crate::db::settings::Dismissal;
 use crate::db::{
     BoardColumn, ExitClass, MutationSource, Repository, Run, RunState, RunStatus, Schedule,
     ScheduleMode, StrategyMode, StrategySource, TaskLink,
 };
 use crate::doctor::{CheckResult, DoctorReport};
+use crate::runner::strategy::{PlanOutcome, PlanPass, PlanResult};
 use crate::schedule::{PreflightSummary, ScheduleView as CoreScheduleView};
 use crate::scheduler::RunCapacity;
 use crate::strategy::StrategyApproval;
@@ -203,6 +207,10 @@ pub struct CheckResultView {
     pub repository: Option<String>,
     pub detail: String,
     pub remediation: Option<String>,
+    /// Whether the user has already read this exact row and put it down (task
+    /// 027). Only ever true of a `warn`, and it changes nothing about
+    /// `is_blocking` — see [`DoctorReportView`].
+    pub dismissed: bool,
 }
 
 impl From<&CheckResult> for CheckResultView {
@@ -214,8 +222,277 @@ impl From<&CheckResult> for CheckResultView {
             repository: result.repository.clone(),
             detail: result.detail.clone(),
             remediation: result.remediation.clone(),
+            dismissed: result.dismissed,
         }
     }
+}
+
+/// Whether a repository has a forge token of its own, and whose (task 022).
+///
+/// **Carries the login, the label and the date — never the secret.** There is
+/// no field here that could be widened into one, and the two tools that would
+/// have to take a token do not exist (seam-contract D25).
+#[derive(Debug, Clone, PartialEq, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub struct CredentialStatusView {
+    pub repository_id: String,
+    pub repository: String,
+    pub configured: bool,
+    /// The forge login the token resolved to, or `null` for a save `gh` could
+    /// not verify at the time.
+    pub login: Option<String>,
+    pub label: Option<String>,
+    pub added_at: Option<DateTime<Utc>>,
+    /// `stored`, `absent` or `unavailable`. **`absent` with `configured` true
+    /// is the state that refuses a run**: the row says this repository has a
+    /// token and the keychain does not have it, and Rimaia will not fall back
+    /// to the operator's own login.
+    pub keychain: String,
+    pub keychain_detail: Option<String>,
+}
+
+impl CredentialStatusView {
+    pub fn new(repository: &Repository, store: StoreStatus) -> Self {
+        let (keychain, keychain_detail) = match &store {
+            StoreStatus::Stored => ("stored", None),
+            StoreStatus::Absent => ("absent", None),
+            StoreStatus::Unavailable { reason } => ("unavailable", Some(reason.clone())),
+        };
+        Self {
+            repository_id: repository.id.clone(),
+            repository: repository.name.clone(),
+            configured: repository.credential_added_at.is_some(),
+            login: repository.credential_login.clone(),
+            label: repository.credential_label.clone(),
+            added_at: repository.credential_added_at,
+            keychain: keychain.to_string(),
+            keychain_detail,
+        }
+    }
+}
+
+/// What `get_analytics` answers with (task 024).
+///
+/// A **narrower** projection than the page renders, and deliberately so: the
+/// per-day chart and the longest-run link are shapes for an eye, and an agent
+/// asked "is this worth it" needs the numbers that answer it. Everything here
+/// is computed at read time over `runs` — no aggregate is stored (ADR-0022
+/// part 3).
+#[derive(Debug, Clone, PartialEq, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub struct AnalyticsView {
+    pub from: Option<DateTime<Utc>>,
+    pub to: Option<DateTime<Utc>>,
+    pub runs_total: usize,
+    pub runs_succeeded: usize,
+    pub runs_failed: usize,
+    pub runs_cancelled: usize,
+    pub runs_interrupted: usize,
+    pub runs_running: usize,
+    /// Of the runs that *ended*, `null` when none has.
+    pub failure_rate: Option<f64>,
+    /// Summed over the rows that have a cost. Read `runs_without_cost` before
+    /// quoting it: a period predating ADR-0022's capture columns is partly
+    /// unrecorded rather than cheaper (seam-contract D18).
+    pub spend_usd: f64,
+    pub runs_without_cost: usize,
+    pub tasks_attempted: usize,
+    pub tasks_completed: usize,
+    /// Total spend over completed tasks — every failed attempt included, which
+    /// is the only honest way to say what a finished task cost.
+    pub cost_per_completed_task_usd: Option<f64>,
+    pub median_duration_seconds: Option<i64>,
+    /// Summed run duration, not wall-clock: parallel runs each contribute.
+    pub unattended_hours: f64,
+    pub models: Vec<ModelUseView>,
+    pub planner_spend_usd: f64,
+    pub implementation_spend_usd: f64,
+    /// The user's own figure, and `null` until they give one. Absent means the
+    /// comparison must not be drawn, never that the subscription is free.
+    pub subscription_monthly_usd: Option<f64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub struct ModelUseView {
+    pub model: String,
+    pub runs: usize,
+    pub spend_usd: f64,
+}
+
+impl From<&Analytics> for AnalyticsView {
+    fn from(report: &Analytics) -> Self {
+        Self {
+            from: report.period.from,
+            to: report.period.to,
+            runs_total: report.outcomes.total(),
+            runs_succeeded: report.outcomes.succeeded,
+            runs_failed: report.outcomes.failed,
+            runs_cancelled: report.outcomes.cancelled,
+            runs_interrupted: report.outcomes.interrupted,
+            runs_running: report.outcomes.running,
+            failure_rate: report.outcomes.failure_rate(),
+            spend_usd: report.spend_usd,
+            runs_without_cost: report.runs_without_cost,
+            tasks_attempted: report.tasks_attempted,
+            tasks_completed: report.tasks_completed,
+            cost_per_completed_task_usd: report.cost_per_completed_task_usd,
+            median_duration_seconds: report.median_duration_seconds,
+            unattended_hours: report.unattended_hours,
+            models: report
+                .models
+                .iter()
+                .map(|use_| ModelUseView {
+                    model: use_.model.clone(),
+                    runs: use_.runs,
+                    spend_usd: use_.spend_usd,
+                })
+                .collect(),
+            planner_spend_usd: report.planner_spend_usd,
+            implementation_spend_usd: report.implementation_spend_usd,
+            subscription_monthly_usd: report.subscription_monthly_usd,
+        }
+    }
+}
+
+/// What the two subscription tools answer with — the stored figure, echoed back
+/// after a write for [`OnboardingView`]'s reason.
+#[derive(Debug, Clone, PartialEq, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub struct SubscriptionCostView {
+    pub monthly_usd: Option<f64>,
+}
+
+/// What one card's planning came to (task 023).
+///
+/// Flat rather than an enum-shaped union, because a tool result is read by a
+/// model and a discriminated union of four shapes is harder to act on than four
+/// nullable fields plus an `outcome` word. `outcome` is the thing to branch on:
+/// `planned`, `skipped`, `failed` or `cancelled`.
+#[derive(Debug, Clone, PartialEq, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub struct PlanResultView {
+    pub task_id: String,
+    pub title: String,
+    pub outcome: String,
+    /// Set on `planned`.
+    pub model: Option<String>,
+    pub effort: Option<String>,
+    /// One line saying why the planner chose what it chose. The thing actually
+    /// worth reading before going home.
+    pub rationale: Option<String>,
+    /// What this planner cost, off the proposal it wrote.
+    pub cost_usd: Option<f64>,
+    /// Set on `skipped` — a stable tag (`already_proposed`, `not_planned`,
+    /// `in_flight`, `repository_not_opted_in`) and the sentence that goes with
+    /// it. Set on `failed` too, where only `reason` is filled.
+    pub skip: Option<String>,
+    pub reason: Option<String>,
+}
+
+impl PlanResultView {
+    pub fn new(task_id: &str, title: &str, outcome: &PlanOutcome) -> Self {
+        let mut view = Self {
+            task_id: task_id.to_string(),
+            title: title.to_string(),
+            outcome: "cancelled".to_string(),
+            model: None,
+            effort: None,
+            rationale: None,
+            cost_usd: None,
+            skip: None,
+            reason: None,
+        };
+        match outcome {
+            PlanOutcome::Planned {
+                model,
+                effort,
+                rationale,
+                cost_usd,
+            } => {
+                view.outcome = "planned".to_string();
+                view.model = model.clone();
+                view.effort = effort.clone();
+                view.rationale = rationale.clone();
+                view.cost_usd = *cost_usd;
+            }
+            PlanOutcome::Skipped(skip) => {
+                view.outcome = "skipped".to_string();
+                view.skip = Some(skip.as_str().to_string());
+                view.reason = Some(skip.message());
+            }
+            PlanOutcome::Failed(reason) => {
+                view.outcome = "failed".to_string();
+                view.reason = Some(reason.clone());
+            }
+            PlanOutcome::Cancelled => {}
+        }
+        view
+    }
+}
+
+impl From<&PlanResult> for PlanResultView {
+    fn from(result: &PlanResult) -> Self {
+        Self::new(&result.task_id, &result.title, &result.outcome)
+    }
+}
+
+/// What a whole pass came to. Wrapped for the reason [`RepositoryListView`]
+/// gives, and carrying the two totals the summary is read for.
+#[derive(Debug, Clone, PartialEq, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub struct PlanPassView {
+    pub results: Vec<PlanResultView>,
+    pub planned: usize,
+    pub skipped: usize,
+    /// What the pass spent, summed off the proposals it wrote.
+    pub spent_usd: f64,
+    /// Whether it stopped early. Proposals already written stay written.
+    pub cancelled: bool,
+}
+
+impl From<&PlanPass> for PlanPassView {
+    fn from(pass: &PlanPass) -> Self {
+        Self {
+            results: pass.results.iter().map(PlanResultView::from).collect(),
+            planned: pass.planned(),
+            skipped: pass.skipped(),
+            spent_usd: pass.spent_usd,
+            cancelled: pass.cancelled,
+        }
+    }
+}
+
+/// One stored dismissal, as `run_doctor` and the two dismissal tools report it
+/// (task 027).
+///
+/// The three fields are the whole key, and they are exactly what
+/// `restore_doctor_warning` takes back — so an agent clearing one copies a
+/// value it was given rather than composing it.
+#[derive(Debug, Clone, PartialEq, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub struct DismissalView {
+    pub check: String,
+    pub repository: Option<String>,
+    pub detail: String,
+}
+
+impl From<&Dismissal> for DismissalView {
+    fn from(dismissal: &Dismissal) -> Self {
+        Self {
+            check: dismissal.check.as_str().to_string(),
+            repository: dismissal.repository.clone(),
+            detail: dismissal.detail.clone(),
+        }
+    }
+}
+
+/// What `dismiss_doctor_warning` and `restore_doctor_warning` answer with: the
+/// whole set after the write, for [`OnboardingView`]'s reason.
+#[derive(Debug, Clone, PartialEq, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub struct DoctorDismissalsView {
+    pub dismissals: Vec<DismissalView>,
 }
 
 /// What `run_doctor` answers with. Wrapped for the reason
@@ -225,11 +502,18 @@ impl From<&CheckResult> for CheckResultView {
 pub struct DoctorReportView {
     pub results: Vec<CheckResultView>,
     /// Whether the queue would refuse to start right now.
+    ///
+    /// Blind to `dismissed`, as the report itself is: a user who put every
+    /// warning down has changed what the banner shows and nothing about what
+    /// the queue will do (task 027, D22 point 1).
     pub is_blocking: bool,
     /// The exact sentence `start_queue` would refuse with, or `null` when it
     /// would not refuse. Carried so an agent reporting the problem to a human
     /// quotes the same words the window does.
     pub blocking_summary: Option<String>,
+    /// Every dismissal on record, including any that no longer match a row
+    /// above — the environment was fixed, or the sentence changed.
+    pub dismissals: Vec<DismissalView>,
 }
 
 impl From<&DoctorReport> for DoctorReportView {
@@ -238,6 +522,7 @@ impl From<&DoctorReport> for DoctorReportView {
             results: report.results.iter().map(CheckResultView::from).collect(),
             is_blocking: report.is_blocking(),
             blocking_summary: report.is_blocking().then(|| report.blocking_summary()),
+            dismissals: report.dismissals.iter().map(DismissalView::from).collect(),
         }
     }
 }

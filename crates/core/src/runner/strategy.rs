@@ -54,16 +54,18 @@
 //! take a claim of its own: it would need `Running → Running`, which is illegal
 //! outright, or `Running → Queued`, which is not in the table at all.
 
+use std::collections::HashSet;
 use std::path::Path;
 
 use crate::context::ServiceContext;
 use crate::db::settings::RunEnvironment;
-use crate::db::{new_id, ExitClass, Repository, StrategyMode, StrategySource};
+use crate::db::{new_id, BoardColumn, ExitClass, Repository, StrategyMode, StrategySource};
 use crate::error::Result;
 use crate::paths::AppPaths;
+use crate::scheduler::{InFlight, Lease, LeaseOwner, LeaseRefused};
 use crate::strategy::{self, Catalogue, EffectiveStrategy};
 use crate::tasks::strategy::{StrategyPlan, StrategyPlanRun, StrategyPlanStatus};
-use crate::tasks::{self, TaskDetail};
+use crate::tasks::{self, TaskDetail, TaskFilter, TaskSummary};
 
 use super::process::{
     disallowed_tools, Attempt, CancelSignal, Invocation, PermissionMode, RunnerConfig,
@@ -246,6 +248,7 @@ async fn plan(
         ));
     };
 
+    let credentials = super::process::repository_credentials(config, repository).await?;
     let prompt = compose_strategy_prompt(detail, repository, catalogue);
     let invocation = planner_invocation(ctx, catalogue, task_id, mcp_config).await?;
 
@@ -272,6 +275,13 @@ async fn plan(
             prompt: &prompt,
             invocation: &invocation,
             cancel,
+            // The planner reads the repository and writes one MCP call; it
+            // pushes nothing. It still gets the same credential the
+            // implementation run would, and the same refusal when the keychain
+            // item is missing — a planner that ran with the operator's ambient
+            // login while the run after it refused would be two answers to one
+            // question about the same repository.
+            credentials: &credentials,
         },
     )
     .await;
@@ -416,55 +426,147 @@ async fn stamp_run_metadata(
     }
 }
 
-/// Plans one task on demand — Settings' "Plan now", and the panel's retry after
-/// a planner failed.
+// ---------------------------------------------------------------------------
+// Planning on demand — one card, or a whole selection (tasks 020 and 023)
+// ---------------------------------------------------------------------------
+
+/// Everything a surface needs to be able to start a planner (task 023).
 ///
-/// The same planner [`resolve`] runs, reached without an implementation run
-/// behind it, which is the whole difference: this ends when the proposal is on
-/// the card, and the user decides what to do with it. It therefore takes **no
-/// claim** and moves no `run_state` — a task being planned is not a task being
-/// run, and treating it as one would put a card into `running` that no `runs`
-/// row will ever close out. The shell's own `RunRegistry` entry is what stops a
-/// second click, and it is also what makes "Plan now" and "Run now" refuse each
-/// other in one worktree.
+/// One value rather than three parameters because the three travel together and
+/// because it is what the MCP server was missing. **This is ADR-0021's named
+/// gap.** `plan_task_strategy` was left off the tool surface on the grounds that
+/// it spawns a process and that "the MCP server does not know the shell's
+/// `AppPaths`"; seam-contract D19 moved the in-flight registry into
+/// `rimaia-core`, and this carries the other two, so both the single and the
+/// batch form become expressible in one move rather than two.
+///
+/// Cheap to clone: an [`AppPaths`] of two `PathBuf`s, a [`RunnerConfig`] the
+/// whole app already shares, and an [`InFlight`] that is an `Arc` inside.
+#[derive(Debug, Clone)]
+pub struct PlannerAccess {
+    pub paths: AppPaths,
+    pub runner: RunnerConfig,
+    /// The one registry every door takes leases from — the queue, "Run now",
+    /// "Plan now" and a pass.
+    pub in_flight: InFlight,
+}
+
+/// A planner slot taken, with every refusal that can be settled before a
+/// process is spawned already settled.
+///
+/// Two functions rather than one, because the two adapters need the split at
+/// different places. `plan_task_strategy` has to know the slot is *taken*
+/// before it answers, or a double-click starts two planners; the MCP tool and
+/// [`plan_all`] simply await the whole thing. Splitting it here means both go
+/// through one set of rules instead of each carrying its own preflight — which
+/// is the ADR-0006 defect this pair exists to avoid, and the reason the body of
+/// this used to live in `src-tauri`.
+pub struct PlannerClaim {
+    lease: Lease,
+    detail: TaskDetail,
+    repository: Repository,
+}
+
+impl PlannerClaim {
+    pub fn task_id(&self) -> &str {
+        &self.detail.task.id
+    }
+
+    pub fn title(&self) -> &str {
+        &self.detail.task.title
+    }
+
+    /// The signal a Cancel or a queue Stop trips. Held by the lease, so it is
+    /// released the moment the claim is dropped.
+    pub fn cancel_signal(&self) -> CancelSignal {
+        self.lease.cancel_signal()
+    }
+}
+
+/// Takes the slot for planning one task, or says why not.
+///
+/// Everything here is read-only apart from the lease, and every refusal is one
+/// a caller can render:
+///
+/// - **Already in flight** — the same registry the queue and "Run now" take
+///   from ([`InFlight`], seam-contract D19). This is what closes the hazard task
+///   023's Notes name: a planner and a queued run genuinely could both start for
+///   one task while the queue claimed on the database row and the planner
+///   claimed in the shell. One registry, not a new check.
+/// - **The repository has not opted into unattended runs** (ADR-0012).
+/// - **The task does not resolve to `planned` mode.** Refused before anything is
+///   spawned because `set_task_strategy` will not accept a planner's write for a
+///   task that is not in planned mode — without this the run happens, costs
+///   money, is refused its one write, and then has its *failure note* refused by
+///   the same guard, leaving no trace on the card and nothing on screen.
 ///
 /// [`needs_planning`](crate::tasks::strategy::needs_planning) is deliberately
-/// **not** consulted: it guards the *automatic* path from replanning a task that
-/// already carries a proposal, and this function is the user saying "plan it
-/// again anyway" — which is exactly what the panel's Re-plan button means after
-/// it has cleared the old envelope.
-pub async fn plan_task(
+/// **not** consulted here: it guards the *automatic* path from replanning a task
+/// that already carries a proposal, and a person pressing Plan now is saying
+/// "plan it again anyway". [`plan_all`] applies it itself, because a batch pass
+/// that quietly overwrote proposals the user had accepted would be the opposite
+/// of a review aid (task 023's Out of scope).
+pub async fn claim_for_planning(
+    ctx: &ServiceContext,
+    in_flight: &InFlight,
+    task_id: &str,
+    owner: LeaseOwner,
+) -> Result<std::result::Result<PlannerClaim, PlanSkip>> {
+    let detail = tasks::get_task(ctx, task_id).await?;
+    let repository = crate::repo::get(ctx, &detail.task.repository_id).await?;
+
+    if let Err(error) = crate::repo::ensure_unattended_runs_allowed(&repository) {
+        return Ok(Err(PlanSkip::RepositoryNotOptedIn {
+            repository: repository.name.clone(),
+            reason: error.to_string(),
+        }));
+    }
+
+    let mode = effective_mode(ctx, &detail, &repository).await?;
+    if mode != StrategyMode::Planned {
+        return Ok(Err(PlanSkip::NotPlanned { mode }));
+    }
+
+    // Taken last, so a refusal the caller could have been told about without
+    // touching the registry does not briefly occupy a slot on its way to being
+    // reported.
+    let lease = match in_flight.acquire_unbounded(task_id, &repository.id, owner) {
+        Ok(lease) => lease,
+        Err(refused) => return Ok(Err(PlanSkip::InFlight(refused))),
+    };
+
+    Ok(Ok(PlannerClaim {
+        lease,
+        detail,
+        repository,
+    }))
+}
+
+/// Runs the planner the claim was taken for, and drops the claim on the way out.
+///
+/// **Never `Err` for a planner that failed** — the same contract [`resolve`]
+/// keeps: a failure is recorded on the card and reported as
+/// [`PlanOutcome::Failed`]. `Err` is for a database or filesystem failure, which
+/// is the caller's problem in the way it already was.
+pub async fn plan_claimed(
     ctx: &ServiceContext,
     paths: &AppPaths,
     config: &RunnerConfig,
-    task_id: &str,
-    cancel: CancelSignal,
-) -> Result<()> {
-    let detail = tasks::get_task(ctx, task_id).await?;
-    let repository = crate::repo::get(ctx, &detail.task.repository_id).await?;
-    crate::repo::ensure_unattended_runs_allowed(&repository)?;
-
-    // Refused before anything is spawned. `set_task_strategy` will not accept a
-    // planner's write for a task that is not in planned mode, so without this
-    // check the run happens, costs money, is refused its one write, and then
-    // has its failure note refused by the same guard — leaving no trace on the
-    // card and nothing on screen. The panel offers "Plan now" whenever a
-    // proposal failed, and the user may well have switched the card to manual
-    // in between.
-    let mode = effective_mode(ctx, &detail, &repository).await?;
-    if mode != StrategyMode::Planned {
-        return Err(crate::error::Error::invalid(format!(
-            "\"{}\" is not set to be planned, so there is no strategy to plan. \
-Set its mode to planned first.",
-            detail.task.title,
-        )));
-    }
+    claim: PlannerClaim,
+) -> Result<PlanOutcome> {
+    let cancel = claim.cancel_signal();
+    let PlannerClaim {
+        lease: _lease,
+        detail,
+        repository,
+    } = claim;
+    let task_id = detail.task.id.clone();
 
     // The planner reads the repository, so it needs a checkout that is not the
     // operator's (ADR-0005). `prepare` is idempotent, so a task that already has
     // one is unchanged and a task that does not gets the same worktree its
     // implementation run would have used.
-    let worktree = crate::worktree::prepare(ctx, task_id).await?;
+    let worktree = crate::worktree::prepare(ctx, &task_id).await?;
     let catalogue = strategy::catalogue::catalogue(&ctx.pool).await?;
 
     match plan(
@@ -479,14 +581,328 @@ Set its mode to planned first.",
     )
     .await?
     {
-        Planned::Wrote => Ok(()),
-        Planned::Cancelled => Ok(()),
+        Planned::Wrote => {
+            // Read back rather than reported from here: `set_task_strategy` is
+            // the single writer, and the summary a user reads before going home
+            // has to be what is actually on the card.
+            let after = tasks::get_task(ctx, &task_id).await?;
+            Ok(PlanOutcome::from_stored(
+                after.task.strategy_plan.as_deref(),
+            ))
+        }
+        Planned::Cancelled => Ok(PlanOutcome::Cancelled),
         Planned::Failed(reason) => {
             tracing::warn!(%task_id, %reason, "the strategy run did not produce a strategy");
-            record_failure(ctx, task_id, &reason).await;
-            Ok(())
+            record_failure(ctx, &task_id, &reason).await;
+            Ok(PlanOutcome::Failed(reason))
         }
     }
+}
+
+/// Why a card was passed over, in the vocabulary a summary shows.
+///
+/// Every variant is a sentence a user can act on. Task 023's failure mode is an
+/// empty column silently doing nothing, so a skip is a *result*, never an
+/// omission.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PlanSkip {
+    /// The card already carries a proposal (D17.8's re-plan guard). Re-planning
+    /// is per-card and deliberate; a pass that overwrote an accepted proposal
+    /// would be the opposite of a review aid.
+    AlreadyProposed,
+    /// The resolved mode is not `planned`, so there is no strategy to plan.
+    NotPlanned { mode: StrategyMode },
+    /// The queue, a manual run, or another planner already holds this task —
+    /// the one registry, not a second check (seam-contract D19).
+    InFlight(LeaseRefused),
+    /// ADR-0012's per-repository opt-in is off.
+    RepositoryNotOptedIn { repository: String, reason: String },
+}
+
+impl PlanSkip {
+    /// The sentence the summary and the tool response both show.
+    pub fn message(&self) -> String {
+        match self {
+            Self::AlreadyProposed => {
+                "already carries a proposal — clear it, or use Re-plan on the card".to_string()
+            }
+            Self::NotPlanned { mode } => format!(
+                "its strategy mode resolves to {}, not planned",
+                match mode {
+                    StrategyMode::Default => "default",
+                    StrategyMode::Manual => "manual",
+                    StrategyMode::Planned => "planned",
+                }
+            ),
+            Self::InFlight(refused) => refused.message(),
+            Self::RepositoryNotOptedIn { reason, .. } => reason.clone(),
+        }
+    }
+
+    /// A stable machine-readable tag, so a client can group skips without
+    /// matching on prose (the argument `doctor::Check` makes for its own).
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            Self::AlreadyProposed => "already_proposed",
+            Self::NotPlanned { .. } => "not_planned",
+            Self::InFlight(_) => "in_flight",
+            Self::RepositoryNotOptedIn { .. } => "repository_not_opted_in",
+        }
+    }
+}
+
+/// How one card ended up.
+#[derive(Debug, Clone, PartialEq)]
+pub enum PlanOutcome {
+    /// A proposal is on the card. Read back off it, never reported from what
+    /// the planner was asked for.
+    Planned {
+        model: Option<String>,
+        effort: Option<String>,
+        rationale: Option<String>,
+        cost_usd: Option<f64>,
+    },
+    Skipped(PlanSkip),
+    /// The planner ran and produced nothing. The card carries the `failed`
+    /// envelope and falls back to the default chain.
+    Failed(String),
+    /// The pass was cancelled while this card's planner was running.
+    Cancelled,
+}
+
+impl PlanOutcome {
+    fn from_stored(stored: Option<&str>) -> Self {
+        match StrategyPlan::from_stored(stored) {
+            Some(plan) if plan.status == StrategyPlanStatus::Proposed => Self::Planned {
+                model: plan.model,
+                effort: plan.effort,
+                rationale: plan.rationale,
+                cost_usd: plan.run.and_then(|run| run.cost_usd),
+            },
+            // The planner wrote, and what it wrote is no longer a proposal —
+            // the only realistic cause is a human editing the card in the
+            // seconds between. Reported as the failure it is for this pass
+            // rather than as a proposal that is not there.
+            _ => Self::Failed(
+                "the proposal was not on the card when the pass read it back".to_string(),
+            ),
+        }
+    }
+
+    fn cost_usd(&self) -> f64 {
+        match self {
+            Self::Planned { cost_usd, .. } => cost_usd.unwrap_or(0.0),
+            _ => 0.0,
+        }
+    }
+}
+
+/// One card's line in the summary.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PlanResult {
+    pub task_id: String,
+    pub title: String,
+    pub outcome: PlanOutcome,
+}
+
+/// What a whole pass did.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct PlanPass {
+    pub results: Vec<PlanResult>,
+    /// What the planners this pass ran actually cost, summed off the proposals
+    /// they wrote. The point of the feature is that the user chose to spend it.
+    pub spent_usd: f64,
+    /// Whether the pass stopped early. Proposals already written stay written.
+    pub cancelled: bool,
+}
+
+impl PlanPass {
+    pub fn planned(&self) -> usize {
+        self.results
+            .iter()
+            .filter(|result| matches!(result.outcome, PlanOutcome::Planned { .. }))
+            .count()
+    }
+
+    pub fn skipped(&self) -> usize {
+        self.results
+            .iter()
+            .filter(|result| matches!(result.outcome, PlanOutcome::Skipped(_)))
+            .count()
+    }
+}
+
+/// What a surface is told as each card finishes.
+pub struct PlanProgress<'a> {
+    /// 0-based index of the card that just finished.
+    pub index: usize,
+    pub total: usize,
+    pub spent_usd: f64,
+    pub result: &'a PlanResult,
+}
+
+/// Which cards a pass plans (task 023).
+///
+/// A **core** type, not a shape each surface builds for itself, so the board and
+/// the MCP server cannot disagree about what "the ready column" means. Every
+/// stated field narrows; a selection that states nothing is refused rather than
+/// silently meaning the whole board, because planning everything is an expensive
+/// thing nobody asked for by omission.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PlanSelection {
+    pub column: Option<BoardColumn>,
+    pub repository_id: Option<String>,
+    pub task_ids: Vec<String>,
+}
+
+impl PlanSelection {
+    fn is_empty(&self) -> bool {
+        self.column.is_none() && self.repository_id.is_none() && self.task_ids.is_empty()
+    }
+}
+
+/// The cards a selection names, in board order.
+///
+/// Board order rather than the order the ids arrived in: the summary is read
+/// against the column the user is looking at, and a pass that walked a
+/// hand-picked set in request order would report them in an order nothing on
+/// screen matches.
+///
+/// A named id that does not exist, or that the other filters exclude, is a
+/// **refusal naming the id** rather than a silent omission — the same treatment
+/// `set_task_dependencies` gives an unknown dependency, and for the same reason:
+/// a caller that mistyped an id should not read "0 planned" and conclude the
+/// column was empty.
+pub async fn selected_tasks(
+    ctx: &ServiceContext,
+    selection: &PlanSelection,
+) -> Result<Vec<TaskSummary>> {
+    if selection.is_empty() {
+        return Err(crate::error::Error::invalid(
+            "a planning pass needs a column, a repository or a list of tasks to work on",
+        ));
+    }
+
+    let matching = tasks::list_tasks(
+        ctx,
+        TaskFilter {
+            repository_id: selection.repository_id.clone(),
+            column: selection.column,
+            run_state: None,
+        },
+    )
+    .await?;
+
+    if selection.task_ids.is_empty() {
+        return Ok(matching);
+    }
+
+    let wanted: HashSet<&str> = selection.task_ids.iter().map(String::as_str).collect();
+    let selected: Vec<TaskSummary> = matching
+        .into_iter()
+        .filter(|summary| wanted.contains(summary.task.id.as_str()))
+        .collect();
+
+    if selected.len() != wanted.len() {
+        let found: HashSet<&str> = selected
+            .iter()
+            .map(|summary| summary.task.id.as_str())
+            .collect();
+        let missing: Vec<&str> = selection
+            .task_ids
+            .iter()
+            .map(String::as_str)
+            .filter(|id| !found.contains(id))
+            .collect();
+        return Err(crate::error::Error::invalid(format!(
+            "these tasks are not in the selection being planned: {}",
+            missing.join(", "),
+        )));
+    }
+
+    Ok(selected)
+}
+
+/// Plans every eligible card in `selection`, one at a time.
+///
+/// # Sequential, and not by accident
+///
+/// Ten cards at fifteen seconds is two and a half minutes, once, while the user
+/// packs up. Fanning out would make the *preflight* the thing that trips the
+/// usage limit the evening's real work needed — task 023's Notes are explicit,
+/// and concurrency here is task 012's `max_concurrency`, not a second knob.
+///
+/// # Every card produces a line
+///
+/// Skipped, planned or failed, each one is in [`PlanPass::results`] with a
+/// reason. "A column with nothing eligible reports that plainly — not a success,
+/// not an error, and never a silent no-op" is the acceptance criterion, and it
+/// is met by there being no path that drops a card without recording why.
+///
+/// # Cancelling stops before the next planner
+///
+/// Checked between cards and honoured by the running planner's own cancel
+/// signal, so a pass stopped mid-way leaves every proposal already written in
+/// place. There is nothing to roll back: each proposal is a committed write to
+/// its own card.
+pub async fn plan_all(
+    ctx: &ServiceContext,
+    paths: &AppPaths,
+    config: &RunnerConfig,
+    in_flight: &InFlight,
+    selection: &PlanSelection,
+    cancel: &CancelSignal,
+    on_progress: &(dyn Fn(PlanProgress<'_>) + Send + Sync),
+) -> Result<PlanPass> {
+    let selected = selected_tasks(ctx, selection).await?;
+    let total = selected.len();
+    let mut pass = PlanPass::default();
+
+    for (index, summary) in selected.into_iter().enumerate() {
+        if cancel.is_cancelled() {
+            pass.cancelled = true;
+            break;
+        }
+
+        let task_id = summary.task.id.clone();
+        let title = summary.task.title.clone();
+
+        // D17.8's re-plan guard, applied by the *batch* path only. A person
+        // pressing Plan now on one card means "again, anyway"; a pass that
+        // overwrote proposals the user had already read would be the opposite
+        // of the review aid this is.
+        let outcome = if summary.task.strategy_plan.is_some() {
+            PlanOutcome::Skipped(PlanSkip::AlreadyProposed)
+        } else {
+            // `Manual`, because a pass is a person at the machine: a Stop
+            // pressed on the queue must not kill a preflight they started
+            // deliberately.
+            match claim_for_planning(ctx, in_flight, &task_id, LeaseOwner::Manual).await? {
+                Ok(claim) => plan_claimed(ctx, paths, config, claim).await?,
+                Err(skip) => PlanOutcome::Skipped(skip),
+            }
+        };
+
+        pass.spent_usd += outcome.cost_usd();
+        if matches!(outcome, PlanOutcome::Cancelled) {
+            pass.cancelled = true;
+        }
+
+        let result = PlanResult {
+            task_id,
+            title,
+            outcome,
+        };
+        on_progress(PlanProgress {
+            index,
+            total,
+            spent_usd: pass.spent_usd,
+            result: &result,
+        });
+        pass.results.push(result);
+    }
+
+    Ok(pass)
 }
 
 /// Whether a task would plan, without spawning anything.

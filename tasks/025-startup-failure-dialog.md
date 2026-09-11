@@ -6,6 +6,7 @@ status: ready
 depends_on: ["018"]
 adrs: ["0002", "0003"]
 size: S
+landed: "#28"
 ---
 
 # A startup failure a double-clicked bundle can see

@@ -57,7 +57,10 @@ use tokio::process::{Child, Command};
 use tokio::sync::watch;
 
 use crate::context::ServiceContext;
+use crate::credentials::inject::ChildEnvironment;
+use crate::credentials::CredentialAccess;
 use crate::db::settings::{self, RunEnvironment};
+use crate::db::Repository;
 use crate::db::{new_id, ExitClass, Run, RunState, RunStatus, Task};
 use crate::error::{Error, Result};
 use crate::mcp::{RunHandles, MCP_SERVER_NAME};
@@ -710,6 +713,15 @@ pub struct RunnerConfig {
     /// answer for every test that never plans anything: no endpoint means no
     /// `--mcp-config` and no planner, not a failure.
     pub run_handles: RunHandles,
+    /// Where a repository's own forge token is read from at spawn (task 022,
+    /// ADR-0020).
+    ///
+    /// On the config for `run_handles`' reason: it is a property of this
+    /// installation, and the shell builds one and hands the same one to every
+    /// starter. [`Default`] is the real OS keychain; the suite substitutes
+    /// `testing::credentials::MemoryStore`, because CI has no unlocked keychain
+    /// and no D-Bus and a test that needed one could not run.
+    pub credentials: CredentialAccess,
 }
 
 impl Default for RunnerConfig {
@@ -719,6 +731,7 @@ impl Default for RunnerConfig {
             grace_period: DEFAULT_GRACE_PERIOD,
             max_turns: None,
             run_handles: RunHandles::default(),
+            credentials: CredentialAccess::default(),
         }
     }
 }
@@ -805,6 +818,16 @@ pub struct Attempt<'a> {
     pub prompt: &'a str,
     pub invocation: &'a Invocation,
     pub cancel: &'a CancelSignal,
+    /// What this repository's credential adds to the child, and what has to be
+    /// scrubbed from everything the run writes down (task 022).
+    ///
+    /// A **third** environment rule, and not the same shape as the two in this
+    /// module's header: rule 1 is the operator's choice and rule 2 is
+    /// unconditional, where this one is conditional on the repository.
+    /// [`ChildEnvironment::ambient`] is a repository with no credential, and it
+    /// changes nothing at all — which is what makes adopting this feature safe
+    /// one repository at a time.
+    pub credentials: &'a ChildEnvironment,
 }
 
 // ---------------------------------------------------------------------------
@@ -1006,6 +1029,19 @@ pub async fn run_task(
         max_turns: config.max_turns.or(Some(turns)),
     };
 
+    // Read *before* the row is opened, because a repository whose credential is
+    // configured and whose keychain item has since vanished must refuse the run
+    // rather than fall back to the operator's ambient login (ADR-0020's
+    // fail-closed rule) — and refusing after `start_run` would leave an attempt
+    // recorded for a process that never started.
+    let credentials = match repository_credentials(config, &repository).await {
+        Ok(credentials) => credentials,
+        Err(error) => {
+            release(ctx, &task_id).await;
+            return Err(error);
+        }
+    };
+
     let run = match start_run(
         ctx,
         paths,
@@ -1038,6 +1074,7 @@ pub async fn run_task(
         prompt: &prompt,
         invocation: &invocation,
         cancel: &request.cancel,
+        credentials: &credentials,
     };
 
     match execute(ctx, paths, config, attempt).await {
@@ -1266,7 +1303,11 @@ pub async fn execute(
     config: &RunnerConfig,
     attempt: Attempt<'_>,
 ) -> Result<RunOutcome> {
-    let mut stream = EventStream::create(ctx, paths, attempt.task_id, attempt.run_id)?;
+    let mut stream = EventStream::create(ctx, paths, attempt.task_id, attempt.run_id)?
+        // Before the first line is read, so nothing unredacted reaches the
+        // transcript on disk or the D14 live tail. Redacting on read would
+        // leave the secret in the file, which is the only copy that matters.
+        .redacting(attempt.credentials.redactor.clone());
     let mut process = spawn(config, &attempt)?;
     let group = process.group;
 
@@ -1553,6 +1594,40 @@ impl Drop for ChildProcess {
     }
 }
 
+/// What this repository's credential contributes to the child, or the refusal
+/// that stops the run (task 022, ADR-0020).
+///
+/// **Fail closed.** A repository with `credential_added_at` set whose keychain
+/// item is missing — deleted in Keychain Access, restored from another machine,
+/// or behind an unlock the user denied — refuses to start, naming the
+/// repository. Never a silent fall back to the ambient login: a run that
+/// quietly used the operator's whole GitHub account instead of the token
+/// granted to one repository is the exact failure ADR-0020 exists to prevent,
+/// and it is invisible in every artefact the run leaves behind.
+pub(crate) async fn repository_credentials(
+    config: &RunnerConfig,
+    repository: &Repository,
+) -> Result<ChildEnvironment> {
+    if !repo::has_credential(repository) {
+        return Ok(ChildEnvironment::ambient());
+    }
+
+    let secret = config.credentials.get(&repository.id).await?;
+    let Some(secret) = secret else {
+        return Err(Error::invalid(format!(
+            "\"{}\" is configured to run with its own forge token, and this machine's keychain \
+             does not have it. Re-add the token in Settings → Repositories, or remove the \
+             credential — Rimaia will not fall back to your own GitHub login.",
+            repository.name,
+        )));
+    };
+
+    Ok(crate::credentials::inject::child_environment(
+        Some(&secret),
+        std::env::vars_os().map(|(name, _)| name.to_string_lossy().into_owned()),
+    ))
+}
+
 /// Builds the command and starts it.
 fn spawn(config: &RunnerConfig, attempt: &Attempt<'_>) -> Result<ChildProcess> {
     let mut command = Command::new(&config.program);
@@ -1565,6 +1640,16 @@ fn spawn(config: &RunnerConfig, attempt: &Attempt<'_>) -> Result<ChildProcess> {
         .kill_on_drop(true);
 
     strip_process_identity(&mut command);
+    // Task 022's rule, applied after rule 2 and before the spawn. Removals
+    // first, then additions, so an operator's own `GIT_CONFIG_COUNT` cannot be
+    // appended to — an off-by-one there silently drops either their
+    // configuration or ours (`credentials::inject`).
+    for name in &attempt.credentials.remove {
+        command.env_remove(name);
+    }
+    for (name, value) in &attempt.credentials.set {
+        command.env(name, value);
+    }
     set_process_group(&mut command);
 
     let child = command.spawn().map_err(|error| {
@@ -1584,6 +1669,10 @@ fn spawn(config: &RunnerConfig, attempt: &Attempt<'_>) -> Result<ChildProcess> {
         worktree = %attempt.worktree.display(),
         environment = attempt.invocation.run_environment.as_str(),
         permission_mode = attempt.invocation.permission_mode.as_str(),
+        // A boolean, never the token and never the login: this line is written
+        // on every spawn, and "which repositories have credentials" is not a
+        // fact a log file needs to accumulate.
+        with_credential = !attempt.credentials.is_ambient(),
         "spawned the Claude Code CLI",
     );
 

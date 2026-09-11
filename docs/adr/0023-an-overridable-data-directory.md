@@ -28,16 +28,21 @@ not a habit we could drop. Branches carrying unmerged migrations are the working
 and the backlog has more than one of them pending at any time. A shared mutable schema under a
 worktree-per-task workflow is a collision waiting for a date.
 
-**The failure mode is the worst one available.** D11 deliberately chose process exit over a
-modal, and task 025 has not landed, so what a developer actually sees is a non-unwinding Rust
-panic and no window — and what a double-clicked bundle shows is nothing at all. The error
-message is accurate and nobody is looking at the stream it is written to.
+**The failure mode was the worst one available.** D11 deliberately chose process exit over a
+modal, and on the day this happened task 025 had not landed, so what a developer saw was a
+non-unwinding Rust panic and no window — and what a double-clicked bundle showed was nothing at
+all. The error message was accurate and nobody was looking at the stream it was written to.
+Task 025 has since landed and puts a dialog in front of exactly this, which is where the
+refusal below reports; it makes the collision legible without making it any less of a
+collision.
 
 **Repair costs real data.** Recovery was: back up the file, drop the three columns the
 migration added, delete the `_sqlx_migrations` row. That was safe only because the columns
 happened to be entirely NULL. A branch whose migration backfills or drops something would push
-a half-finished experiment into every other branch's database, with no honest way back — the
-migration is unmerged, so there is nothing to roll forward to either.
+a half-finished experiment into every other branch's database, with no honest way back — while
+the migration is unmerged there is nothing to roll forward to either. Task 022 has since
+merged, which settles *this* divergence and changes nothing about the next one: the backlog
+still has migrations pending on unmerged branches, and the shared directory is still shared.
 
 There is a milder, constant version of the same problem underneath the dramatic one:
 developing against the database the operator actually queues work in means every test task,

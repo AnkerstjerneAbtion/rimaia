@@ -6,6 +6,7 @@ status: ready
 depends_on: ["005", "007"]
 adrs: ["0005", "0015", "0021"]
 size: M
+landed: "#28"
 ---
 
 # Open a task's worktree in the tool the user actually works in

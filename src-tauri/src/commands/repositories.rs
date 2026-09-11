@@ -3,10 +3,23 @@
 //! Every validation, every git call, and the unattended-runs opt-in itself all
 //! live in `rimaia_core::repo` — this file only reshapes the wire args into
 //! that module's types and calls it, per this crate's own module doc.
+//!
+//! # Two commands here deliberately have no MCP tool (task 022, ADR-0020)
+//!
+//! [`set_repository_credential`] and [`remove_repository_credential`] join
+//! `delete_task` and task 016's three cleanup commands as standing exceptions
+//! to ADR-0021 point 1, and the ground is neither destructiveness nor a desktop
+//! referent: **the argument is a live forge token**, and putting one on a
+//! loopback protocol into a process's argv is a widening nothing asked for. The
+//! read — [`get_repository_credential_status`] — does get a tool, because it
+//! carries the login, the label and the date and never the secret.
+//! Seam-contract D25 records it.
 
+use rimaia_core::credentials::provision::{self, Verification};
+use rimaia_core::credentials::Secret;
 use rimaia_core::db::Repository;
 use rimaia_core::repo::{self, NewRepository, RemoteInfo, RepositoryPatch};
-use rimaia_core::Result;
+use rimaia_core::{Error, Result};
 use serde::Deserialize;
 use tauri::State;
 
@@ -136,4 +149,112 @@ pub async fn get_repository_remote_info(
 ) -> Result<RemoteInfo> {
     let repository = repo::get(&state.context, &id).await?;
     repo::remote_info(&repository).await
+}
+
+// ---------------------------------------------------------------------------
+// Per-repository forge credentials (task 022, ADR-0020)
+// ---------------------------------------------------------------------------
+
+/// What a repository's credential pane shows: whose token it is, what it is
+/// called, when it was added, whether the keychain actually still holds it, and
+/// whether `origin` is an SSH remote.
+///
+/// **Never the token.** After saving, the value is write-only — replace and
+/// remove, never show — and there is no read path from this command to the
+/// keychain's contents.
+#[tauri::command]
+pub async fn get_repository_credential_status(
+    state: State<'_, AppState>,
+    id: String,
+) -> Result<repo::CredentialStatus> {
+    let repository = repo::get(&state.context, &id).await?;
+    credential_status(&state, &repository).await
+}
+
+/// Verifies a pasted token and stores it.
+///
+/// Three outcomes, three different answers, and the middle one is the reason
+/// this is not a plain write: **the forge rejecting a token refuses the save**
+/// (ADR-0020's "refused at paste time"), because a token that cannot open a
+/// pull request is a run that fails at 2am having already done the work.
+///
+/// The order is deliberate — verify, then keychain, then the row. A row that
+/// claimed a credential the keychain does not have would make every later run
+/// of that repository refuse, which is a worse state than the one the user was
+/// trying to leave.
+#[tauri::command]
+pub async fn set_repository_credential(
+    state: State<'_, AppState>,
+    id: String,
+    token: String,
+    label: Option<String>,
+) -> Result<repo::CredentialStatus> {
+    let repository = repo::get(&state.context, &id).await?;
+    let secret = Secret::new(token)?;
+
+    let owner_repo = repo::remote_info(&repository)
+        .await
+        .ok()
+        .and_then(|remote| remote.remote_url)
+        .as_deref()
+        .and_then(provision::owner_repo_from_remote);
+
+    let verification =
+        provision::verify(provision::default_gh(), &secret, owner_repo.as_deref()).await;
+
+    if let Verification::Rejected { reason } = &verification {
+        return Err(Error::invalid(reason.clone()));
+    }
+    if let Verification::Unverifiable { reason } = &verification {
+        // Saved anyway, and the absent login is what marks it: a missing local
+        // tool says nothing about the token, and refusing here would make the
+        // feature unusable on a machine with git but not `gh`.
+        tracing::warn!(repository = %repository.name, %reason, "storing an unverified credential");
+    }
+
+    state.runner.credentials.set(&id, secret).await?;
+    let stored =
+        repo::set_credential_metadata(&state.context, &id, verification.login(), label.as_deref())
+            .await?;
+
+    credential_status(&state, &stored).await
+}
+
+/// Removes it, keychain first.
+///
+/// Keychain before row for the mirror of the save's reason: a row cleared while
+/// the item survived would leave a secret on the machine that nothing in Rimaia
+/// can find again to delete.
+#[tauri::command]
+pub async fn remove_repository_credential(
+    state: State<'_, AppState>,
+    id: String,
+) -> Result<repo::CredentialStatus> {
+    state.runner.credentials.delete(&id).await?;
+    let cleared = repo::clear_credential_metadata(&state.context, &id).await?;
+
+    credential_status(&state, &cleared).await
+}
+
+async fn credential_status(
+    state: &State<'_, AppState>,
+    repository: &rimaia_core::db::Repository,
+) -> Result<repo::CredentialStatus> {
+    // Best-effort: a `git remote` that cannot be read is not a reason a
+    // credential pane cannot open, and the SSH notice is a caveat rather than a
+    // gate.
+    let ssh_remote = repo::remote_info(repository)
+        .await
+        .ok()
+        .and_then(|remote| remote.remote_url)
+        .is_some_and(|url| url.starts_with("git@") || url.starts_with("ssh://"));
+
+    Ok(repo::CredentialStatus {
+        configured: repo::has_credential(repository),
+        login: repository.credential_login.clone(),
+        label: repository.credential_label.clone(),
+        added_at: repository.credential_added_at,
+        store: state.runner.credentials.status(&repository.id).await,
+        ssh_remote,
+    })
 }

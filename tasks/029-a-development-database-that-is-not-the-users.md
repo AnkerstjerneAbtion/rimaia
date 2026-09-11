@@ -25,21 +25,22 @@ On 2026-09-11 every branch of this repository, `main` included, refused to start
 migration 20260904120000 was previously applied but is missing in the resolved migrations
 ```
 
-Task 022's unmerged branch had run the app once, and `sqlx` wrote that migration into the one
-database every worktree shares. Repair meant dropping three columns and deleting a
+Task 022's then-unmerged branch had run the app once, and `sqlx` wrote that migration into the
+one database every worktree shares. Repair meant dropping three columns and deleting a
 `_sqlx_migrations` row out of the operator's real database by hand; it was safe only because
 those columns happened to be NULL.
 
 ADR-0023 has the full argument. The short version is that worktree-per-task is ADR-0005's
 whole design, unmerged migrations are therefore normal, and a single shared schema underneath
-them is a collision with a date on it rather than a risk. It will happen again the next time
-any branch with a pending migration is run — task 022 itself is still unmerged, so the next
-occurrence is already queued.
+them is a collision with a date on it rather than a risk. Task 022 has since merged, which
+settles that particular divergence and changes nothing structural: the backlog still has
+migrations pending on unmerged branches, and the next one to be run lands in the same shared
+directory.
 
 Two nearby tasks make this the moment. Task 018 shipped `checks::data_directory`, which is
 where "which directory am I actually using" belongs and currently does not appear. Task 025
-will put startup failures in front of a user who double-clicked a bundle — and the failure it
-was written for is precisely this one, which is worth fixing at the cause as well as at the
+put startup failures in front of a user who double-clicked a bundle — and the failure it was
+written for is precisely this one, which is worth fixing at the cause as well as at the
 presentation.
 
 ## Scope
@@ -60,13 +61,13 @@ runs next, so a directory that does not exist yet is not a special case.
 the variable and the value, and nothing is created first — a refusal that has already made a
 directory is worse than the mistake it was reporting.
 
-This one failure does **not** go through `log_startup_failure`, which is what this task
-originally assumed. Both of that helper's outputs are unavailable this early: there is no
-`db_file` to name, since it is derived from the directory that just failed to resolve, and
-`logging::init` has not run, so a `tracing` call has no subscriber and is dropped rather than
-written. Propagating the error is the whole of the report — D11's stderr half — which is why
-its text has to name the variable and the value itself. Found by running the binary; a helper
-written for it first looked correct and logged nothing.
+It reports through task 025's `report_startup_failure`, not `log_startup_failure`, joining the
+two steps either side of it as a third pre-logging failure. Both of `log_startup_failure`'s
+outputs are unavailable this early: there is no `db_file` to name, since it is derived from the
+directory that just failed to resolve, and `logging::init` has not run, so a `tracing` call has
+no subscriber and is dropped rather than written. Task 025's dialog is the only channel that
+exists here, which is the case it was built for. The error text still has to name the variable
+and the value itself, because it is what the dialog shows.
 
 **The doctor's `data_directory` row reports the path it probed, and whether the value came
 from the environment.** One line of detail on a check that already exists. This is what keeps

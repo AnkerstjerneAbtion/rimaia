@@ -171,6 +171,9 @@ async fn a_repository_round_trips_every_field_exactly() {
             allow_unattended_runs: true,
             max_concurrency: 1,
             created_at,
+            credential_login: None,
+            credential_label: None,
+            credential_added_at: None,
         }
     );
 }
@@ -1325,7 +1328,9 @@ async fn fetch_repository(pool: &SqlitePool, id: &str) -> Repository {
     sqlx::query_as!(
         Repository,
         r#"SELECT id, name, path, default_branch, worktree_root, allow_unattended_runs,
-            max_concurrency, created_at AS "created_at: DateTime<Utc>"
+            max_concurrency, created_at AS "created_at: DateTime<Utc>",
+            credential_login, credential_label,
+            credential_added_at AS "credential_added_at: DateTime<Utc>"
            FROM repositories WHERE id = ?1"#,
         id,
     )

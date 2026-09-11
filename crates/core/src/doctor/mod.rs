@@ -40,9 +40,10 @@ pub mod checks;
 
 use std::path::PathBuf;
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::context::ServiceContext;
+use crate::db::settings::{self, Dismissal};
 use crate::error::Result;
 use crate::mcp::{self, RunHandles};
 use crate::paths::AppPaths;
@@ -59,12 +60,27 @@ pub use checks::{
 /// An identity, not a label: the frontend groups rows by it and the welcome
 /// flow shows each step only the rows belonging to it, neither of which can be
 /// done by matching on prose. [`Check::label`] is the prose.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
+/// `Deserialize` and `JsonSchema` because task 027 makes a check the key half
+/// of a stored dismissal, which travels back in through both doors — a settings
+/// row this identity is read out of, and an MCP tool that takes one off the
+/// wire (the reason [`BoardColumn`](crate::db::BoardColumn) carries them).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum Check {
     ClaudeCli,
     ClaudeAuthenticated,
     Git,
+    /// Spelled out because `rename_all` disagrees with [`Check::as_str`] on
+    /// this one variant and on no other: serde reads `GitHubCli` as three
+    /// words and produces `git_hub_cli`, where the accessor, `src/types.ts` and
+    /// every string in the codebase say `github_cli`.
+    ///
+    /// It cost nothing until task 027 made a check the key half of a stored
+    /// dismissal — at which point the identity has to survive a round trip
+    /// through serde *and* compare equal to what `CheckResultView` projects
+    /// with `as_str`. One string for the stored value, the wire and the
+    /// accessor, which is the agreement `db::models` pins for every other enum.
+    #[serde(rename = "github_cli")]
     GitHubCli,
     DataDirectory,
     DiskSpace,
@@ -180,6 +196,15 @@ pub struct CheckResult {
     pub status: CheckStatus,
     pub detail: String,
     pub remediation: Option<String>,
+    /// Whether the user has read this exact row and put it down (task 027).
+    ///
+    /// **Marked, never dropped.** Settings → Environment has to be able to list
+    /// a dismissed warning and restore it, and a dismissal the user cannot find
+    /// again is a leak rather than a feature. The banner is where the filtering
+    /// happens, off this flag.
+    ///
+    /// Nothing about blocking reads it — see [`DoctorReport::is_blocking`].
+    pub dismissed: bool,
 }
 
 impl CheckResult {
@@ -191,6 +216,7 @@ impl CheckResult {
             status: CheckStatus::Pass,
             detail: detail.into(),
             remediation: None,
+            dismissed: false,
         }
     }
 
@@ -202,6 +228,7 @@ impl CheckResult {
             status: CheckStatus::Warn,
             detail: detail.into(),
             remediation: Some(remediation.into()),
+            dismissed: false,
         }
     }
 
@@ -213,6 +240,7 @@ impl CheckResult {
             status: CheckStatus::Fail,
             detail: detail.into(),
             remediation: Some(remediation.into()),
+            dismissed: false,
         }
     }
 
@@ -221,6 +249,32 @@ impl CheckResult {
         self.repository = Some(repository.into());
         self
     }
+
+    /// The dismissal that would silence *this sentence* — check, repository and
+    /// detail, which is task 027's whole key.
+    ///
+    /// Built here rather than in the two adapters so the operator's window and
+    /// the MCP tool cannot disagree about what a row's identity is.
+    pub fn dismissal(&self) -> Dismissal {
+        Dismissal {
+            check: self.check,
+            repository: self.repository.clone(),
+            detail: self.detail.clone(),
+        }
+    }
+
+    /// Whether `dismissal` answers this row.
+    ///
+    /// **`warn` only.** A `fail` is not dismissible (task 027), and enforcing it
+    /// here rather than at the two write paths means a dismissal stored while a
+    /// row was a warning silences nothing once the same sentence turns into a
+    /// failure — which is exactly the case a status-blind key would get wrong.
+    fn answered_by(&self, dismissal: &Dismissal) -> bool {
+        self.status == CheckStatus::Warn
+            && self.check == dismissal.check
+            && self.repository == dismissal.repository
+            && self.detail == dismissal.detail
+    }
 }
 
 /// What the doctor found, in [`Check::ALL`] order.
@@ -228,10 +282,20 @@ impl CheckResult {
 #[serde(rename_all = "camelCase")]
 pub struct DoctorReport {
     pub results: Vec<CheckResult>,
+    /// Every dismissal on record, matched to a row above or not (task 027).
+    ///
+    /// Carried whole rather than only reflected in `results[..].dismissed`,
+    /// because the two sets are not the same one. A dismissal survives the row
+    /// it answered — the environment was fixed, or the sentence changed — and a
+    /// dismissal with nothing to mark would otherwise be invisible *and*
+    /// permanent, which is the leak this task's own file names. Settings →
+    /// Environment lists this, so everything stored is something the user can
+    /// find and clear.
+    pub dismissals: Vec<Dismissal>,
 }
 
 impl DoctorReport {
-    pub fn new(mut results: Vec<CheckResult>) -> Self {
+    pub fn new(mut results: Vec<CheckResult>, dismissals: Vec<Dismissal>) -> Self {
         // Stable across runs so the panel does not reshuffle, and stable within
         // a check so two repositories keep the order `repo::list` returned them
         // in (alphabetical). `sort_by_key` is stable, which is what makes the
@@ -242,10 +306,29 @@ impl DoctorReport {
                 .position(|check| *check == result.check)
                 .unwrap_or(usize::MAX)
         });
-        Self { results }
+
+        for result in &mut results {
+            result.dismissed = dismissals
+                .iter()
+                .any(|dismissal| result.answered_by(dismissal));
+        }
+
+        Self {
+            results,
+            dismissals,
+        }
     }
 
     /// Whether anything here refuses to let the queue start.
+    ///
+    /// **Deliberately blind to `dismissed`**, along with [`blocking`](Self::blocking)
+    /// and [`blocking_summary`](Self::blocking_summary). Task 027's dismissal is
+    /// presentation; the refusal on
+    /// [`QueueHandle::start`](crate::scheduler::QueueHandle::start) is the rule
+    /// (D22 point 1, ADR-0006), and a user who dismissed every row still meets
+    /// the same refusal with the same words. `crates/core/tests/doctor.rs` and
+    /// `tests/scheduler.rs` both assert it, because this is the one thing a
+    /// later change could quietly wire together.
     pub fn is_blocking(&self) -> bool {
         self.results
             .iter()
@@ -387,6 +470,7 @@ impl Environment {
 pub async fn run(ctx: &ServiceContext, environment: &Environment) -> Result<DoctorReport> {
     let repositories = repo::list(ctx).await?;
     let configured_port = mcp::configured_port(&ctx.pool).await?;
+    let dismissals = settings::doctor_dismissals(&ctx.pool).await?;
 
     let mut results = vec![
         checks::claude_cli(&environment.programs.claude).await,
@@ -409,5 +493,40 @@ pub async fn run(ctx: &ServiceContext, environment: &Environment) -> Result<Doct
         results.push(checks::github_cli(repository, &environment.programs.gh).await?);
     }
 
-    Ok(DoctorReport::new(results))
+    Ok(DoctorReport::new(results, dismissals))
+}
+
+/// Records that the user has read one warning and is done with it (task 027).
+///
+/// Idempotent: dismissing the same sentence twice stores one entry, so a
+/// double-click cannot grow the key without bound.
+///
+/// It does **not** check that the row is a warning, or that it is on the current
+/// report at all. Both are deliberate. The status is not part of a dismissal's
+/// key, and enforcing "warn only" at the write would mean a row that changes
+/// status later escapes the rule — [`CheckResult::answered_by`] applies it on
+/// every read instead, where it holds for rows written before it and rows
+/// hand-edited into the settings file alike.
+pub async fn dismiss(ctx: &ServiceContext, dismissal: Dismissal) -> Result<Vec<Dismissal>> {
+    let mut stored = settings::doctor_dismissals(&ctx.pool).await?;
+    if !stored.contains(&dismissal) {
+        stored.push(dismissal);
+        settings::set_doctor_dismissals(ctx, &stored).await?;
+    }
+    Ok(stored)
+}
+
+/// Puts a dismissed warning back, whether or not it currently matches a row.
+///
+/// Removing a dismissal nothing matches is the *point* rather than a no-op
+/// worth refusing: a stale entry is exactly what Settings → Environment exists
+/// to let the user clear.
+pub async fn restore(ctx: &ServiceContext, dismissal: &Dismissal) -> Result<Vec<Dismissal>> {
+    let mut stored = settings::doctor_dismissals(&ctx.pool).await?;
+    let before = stored.len();
+    stored.retain(|candidate| candidate != dismissal);
+    if stored.len() != before {
+        settings::set_doctor_dismissals(ctx, &stored).await?;
+    }
+    Ok(stored)
 }

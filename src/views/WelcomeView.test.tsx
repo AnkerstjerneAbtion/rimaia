@@ -27,7 +27,7 @@ function repository(overrides: Partial<Repository> = {}): Repository {
   } as Repository;
 }
 
-const healthy: DoctorReport = { results: [] };
+const healthy: DoctorReport = { results: [], dismissals: [] };
 
 /** Every command the welcome screen and its embedded controls read on mount. */
 function respondWith({
@@ -124,8 +124,10 @@ describe("WelcomeView", () => {
             status: "fail",
             detail: "/src/rimaia no longer exists",
             remediation: "Re-register the repository at its new location.",
+            dismissed: false,
           },
         ],
+        dismissals: [],
       },
     });
     render(<WelcomeView onFinish={vi.fn()} />);

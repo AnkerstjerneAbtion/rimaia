@@ -1297,7 +1297,17 @@ fn drain(changes: &mut broadcast::Receiver<ChangeEvent>) {
     }
 }
 
-#[cfg(test)]
+/// **Unix only**, and it is the preflight that makes it so.
+///
+/// Since task 018 `QueueHandle::start` runs the doctor, which spawns the
+/// `claude` binary — so every test below needs a stand-in, and the stand-in is
+/// a `/bin/sh` shebang script (`testing::doctor::passing_queue_environment`).
+/// Windows has no shebang. Gated whole rather than test by test, because a
+/// module that compiled and ran nothing would report a green Windows job that
+/// had checked none of this; task 022's matrix exists to compile the keychain
+/// backends and the environment-building code everywhere, not to pretend a
+/// POSIX shell is on a runner that has none.
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use crate::testing::TestContext;

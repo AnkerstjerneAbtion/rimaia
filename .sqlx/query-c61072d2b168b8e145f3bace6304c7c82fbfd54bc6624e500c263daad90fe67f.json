@@ -1,6 +1,6 @@
 {
   "db_name": "SQLite",
-  "query": "SELECT id, name, path, default_branch, worktree_root, allow_unattended_runs,\n            max_concurrency, created_at AS \"created_at: DateTime<Utc>\"\n           FROM repositories WHERE id = ?1",
+  "query": "SELECT id, name, path, default_branch, worktree_root, allow_unattended_runs,\n            max_concurrency, created_at AS \"created_at: DateTime<Utc>\",\n            credential_login, credential_label,\n            credential_added_at AS \"credential_added_at: DateTime<Utc>\"\n           FROM repositories WHERE id = ?1",
   "describe": {
     "columns": [
       {
@@ -42,6 +42,21 @@
         "name": "created_at: DateTime<Utc>",
         "ordinal": 7,
         "type_info": "Text"
+      },
+      {
+        "name": "credential_login",
+        "ordinal": 8,
+        "type_info": "Text"
+      },
+      {
+        "name": "credential_label",
+        "ordinal": 9,
+        "type_info": "Text"
+      },
+      {
+        "name": "credential_added_at: DateTime<Utc>",
+        "ordinal": 10,
+        "type_info": "Text"
       }
     ],
     "parameters": {
@@ -55,8 +70,11 @@
       false,
       false,
       false,
-      false
+      false,
+      true,
+      true,
+      true
     ]
   },
-  "hash": "92515466c1144de7bd5b1c1c8c12a42e2c86bb9648aaffd73813e9af13a1d483"
+  "hash": "c61072d2b168b8e145f3bace6304c7c82fbfd54bc6624e500c263daad90fe67f"
 }

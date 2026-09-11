@@ -22,6 +22,7 @@ import type {
   RimaiaError,
   StrategyDefaults,
 } from "../../types";
+import { CredentialSection } from "./CredentialSection";
 import { StrategyDefaultsFields } from "./StrategyDefaultsFields";
 
 /**
@@ -443,6 +444,12 @@ export function RepositoriesSection() {
                     />
                   </div>
                 )}
+
+                {/* Task 022, beside the opt-in and the default strategy for
+                    the same reason both of those are here: the three answer one
+                    question about this repository — what a run here may do,
+                    what it is spawned with, and whose access it acts under. */}
+                <CredentialSection repositoryId={repository.id} />
 
                 {confirming && (
                   <div

@@ -98,3 +98,24 @@ pub fn passing_queue_environment() -> (TempDir, AppPaths, RunnerConfig) {
     };
     (root, paths, runner)
 }
+
+/// A planner access for a test that constructs an MCP server and never plans
+/// anything.
+///
+/// [`RimaiaServer`](crate::mcp::server::RimaiaServer) takes a
+/// [`PlannerAccess`](crate::runner::strategy::PlannerAccess) since task 023, for
+/// the same reason it takes an [`Environment`]: `plan_task_strategy` and
+/// `plan_tasks_strategy` spawn a real planner, and neither the data directory
+/// nor the shared in-flight registry can be guessed from inside the server.
+/// Almost no MCP test cares what is in it.
+///
+/// **A test that actually plans must not use this** — the `claude` here is a
+/// bare name resolved on `PATH`, which is a prerequisite CI does not have
+/// (ADR-0004). Build one from [`passing_queue_environment`] instead.
+pub fn planner_access() -> crate::runner::strategy::PlannerAccess {
+    crate::runner::strategy::PlannerAccess {
+        paths: AppPaths::new(std::env::temp_dir().join("rimaia-placeholder-not-created")),
+        runner: RunnerConfig::default(),
+        in_flight: crate::scheduler::InFlight::new(),
+    }
+}

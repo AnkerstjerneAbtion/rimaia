@@ -203,6 +203,34 @@ stops and asks.
 
 **Binds.** 011, 012, 013, 024, in addition to everything this entry already bound.
 
+### Amendment, 2026-09-04 — a sixth, and it is the ask this entry demands
+
+D4's body says *"a task that believes it needs one stops and asks."* Task 022 believed it, and
+this is the answer:
+
+```
+src-tauri/migrations/20260904120000_repository_credentials.sql   (task 022)
+```
+
+Three nullable columns on `repositories` — `credential_login`, `credential_label`,
+`credential_added_at` — and **no secret**. The token is in the OS keychain
+(`crates/core/src/credentials/`); these are the metadata a settings pane needs to say *that* a
+credential exists, whose it is and when it was added, none of which the keychain has a good way
+to hold. `credential_added_at` doubles as the flag the spawn path reads, which is deliberate:
+asking the *keychain* whether anything is there would read a locked one as "no credential
+configured" and fall straight through to the operator's ambient login, which is the exact
+failure ADR-0020's fail-closed rule exists to prevent.
+
+The timestamp sorts after every migration already on disk, which is this entry's own 2026-09-02
+lesson applied rather than restated.
+
+**The count is now six, and six is the whole list.** Nothing else on task 022's branch adds
+one — task 024's subscription figure and task 027's dismissal set are `settings` keys, on D3's
+own argument, and both say so at their accessor. The prohibition is otherwise unchanged: a task
+that believes it needs a seventh stops and asks.
+
+**Binds.** 022, in addition to everything this entry already bound.
+
 ## D5 — Compile-time checked queries and the `.sqlx` cache
 
 **Question.** `sqlx::query!` or the runtime `sqlx::query()`, and what enforces that the
@@ -286,6 +314,39 @@ Two things task 013 did **not** take, so the absences read as decisions:
   in step with the first.
 - **No date library.** `Intl.RelativeTimeFormat` and `toLocaleString` are the whole of what
   `date-fns` or `luxon` would have been added for, and both ship with the platform.
+
+### Amendment, 2026-09-04 — the rule was never npm-only, and two Cargo entries (task 022)
+
+**This entry's prohibition extends to Cargo dependencies of `crates/core`, explicitly.** It has
+always been read that way — task 018 argued its way *out* of a `semver` dependency in
+`doctor::checks`, and task 026 declined a charting and a terminal-detection crate — but the body
+above only lists npm packages, and the next agent reading it cold could reasonably conclude the
+Cargo side is ungoverned. It is not: the collision argument (two branches editing one lockfile,
+resolved by regenerating it, silently reverting the other) is identical, and the review
+argument is stronger, because a Cargo dependency links into the binary an unattended agent runs.
+
+Two are approved, both for task 022 and both in `crates/core`:
+
+- **`keyring` v3**, features `apple-native`, `windows-native`, `sync-secret-service`,
+  `crypto-rust`. The requirement rather than a convenience: ADR-0020 puts the token in the OS
+  keychain and there is no hand-rollable version of three platform secret stores. All backends
+  are on because "cross-platform is a requirement of this task, not a follow-up" — a build that
+  compiled only the host's would let the other two rot between releases. On Linux it links
+  libdbus, which is the one system package this crate needs anywhere and which `ci.yml` installs
+  on that platform only; ADR-0015's "no display server, WebKit or GTK" is untouched.
+- **`base64` 0.22**, for the `http.https://github.com/.extraheader` value. Already in
+  `Cargo.lock` transitively through `reqwest`, so promoting it to a direct workspace dependency
+  costs **no new tree**. A twenty-line encoder was considered and declined: base64 is a place
+  where a subtle error produces a header the forge rejects with "bad credentials", which is the
+  least diagnosable failure this feature has, and the crate is already being compiled either way.
+
+**No new npm dependency on task 022's branch, or anywhere else on it.** Task 024's charts are
+layout and a span with a height (its own Out of scope: "a bar chart is not worth a bundle"),
+task 026 reuses `tauri-plugin-opener` and task 025 reuses `tauri-plugin-dialog` — both already
+in `package.json`, `Cargo.toml` and `capabilities/default.json`.
+
+**Binds.** 022, 024, 025, 026, and every later task as a prohibition — on both sides of the
+crate boundary.
 
 ## D7 — The event-subscription seam in the frontend
 
@@ -464,6 +525,59 @@ What task 018 therefore does and does not close:
   run a bundled build to prove that does not deadlock on macOS. An unverified blocking call
   on the launch path is a worse failure than the silence it replaces. Recorded rather than
   guessed at; it wants its own task and a human at a real bundle.
+
+### Amendment, 2026-09-04 — the dialog, and what was actually measured (task 025)
+
+The case above is closed. **`src-tauri/src/lib.rs`'s setup hook now shows a native error
+dialog on every fatal path, before the process exits** — the failing step, the reason, and
+the directory holding the log files. Everything else about this entry stands unchanged: the
+window still never opens, the exit is still non-zero, and every step still writes its stderr
+line and its log line *before* the dialog, so a bundle that cannot draw one loses nothing it
+had.
+
+**`blocking_show()` on the setup hook's own thread is safe, and here is why.** Three facts,
+each read out of a dependency rather than assumed:
+
+1. The setup hook runs on the main thread **inside the already-running event loop** —
+   `RuntimeRunEvent::Ready`, `tauri-2.11.5/src/app.rs:1424`.
+2. `blocking_show()` posts through `AppHandle::run_on_main_thread` and then blocks the caller
+   on a channel. That is a deadlock only if the post has to wait for this thread to return,
+   and it does not: `tauri-runtime-wry`'s `send_user_message` (2.11.4, `src/lib.rs:239`)
+   executes the closure **inline** when the caller is already the main thread.
+3. The dialog never touches the run loop at all. `rfd`'s macOS `AsyncMessageDialogImpl`
+   (0.16.0, `src/backend/macos/message_dialog.rs:172`) branches on whether a **parent window**
+   was set; `tauri-plugin-dialog` sets one only if the caller asks, and this one does not.
+   With no parent it takes `utils::async_pop_dialog` — a `CFUserNotificationDisplayAlert` on
+   a thread of its own.
+
+Point 3 is the one worth carrying forward, because it is not the mechanism this entry
+predicted. The obvious hazard — a *sheet* attached to the window `tauri.conf.json` declares
+`"visible": false`, which nobody could see and nothing would answer — lives in rfd's
+`ModalFuture`, and `ModalFuture` is reached **only** on the explicit-parent branch. An
+implementation that passes `.parent(&window)` would meet exactly the deadlock this entry
+feared. Do not add one.
+
+**Verified against a real bundle, 2026-09-04, macOS 15 (aarch64).** `npm run tauri build`
+with a deliberately failing migration added to `src-tauri/migrations/`, launched from the
+built `Rimaia.app`:
+
+- `sample` on the live process shows the main thread parked in `report_startup_failure` →
+  `blocking_show` → `mpmc::Receiver::recv`, and a second thread in
+  `rfd::backend::macos::utils::user_alert::UserAlert::run` → `CFUserNotificationDisplayAlert`
+  → `CFUserNotificationReceiveResponse`. A real alert, on screen, waiting for a person.
+- The process resumed the instant the alert was answered and ended **non-zero** — 134, the
+  `SIGABRT` of this entry's own panic-at-`Ready`, which is pre-existing and unchanged (the
+  panic crosses an `extern "C"` frame, so it aborts rather than unwinds).
+- The log file held the `ERROR startup failed; the window will not open` line naming the step
+  and the sqlx error, exactly as before.
+- Rebuilt without the broken migration: startup succeeds, the window opens, and `sample`
+  finds no `CFUserNotification` frame anywhere in the process. **A successful launch is
+  byte-identical to before this task.**
+
+Not claimed: Windows and Linux. The code is one call and is platform-neutral, but the reading
+above is macOS's, and this entry does not assert what nobody ran.
+
+**Binds.** 002, 018, 025.
 
 ## D12 — What the board's bulk read returns
 
@@ -1244,6 +1358,44 @@ preflight is real is the entire point of this entry.
 
 **Binds.** 012, 013, 018.
 
+### Amendment, 2026-09-04 — a warning can be put down, and the refusal never reads it (task 027)
+
+Point 3 above draws the `warn`/`fail` line and stops at "only `fail` blocks". Task 027 adds the
+thing that line implies and this entry did not say: **a `warn` can be dismissed, and a `fail`
+cannot.**
+
+- **Dismissal is per row, keyed on `check` + `repository` + `detail`** — not on the check. The
+  same check about a different repository is a different warning, and a changed `detail` is a
+  sentence the user has not read. Stored as JSON in the `doctor_dismissals` settings key
+  (D3, D4 — no migration), read through a typed accessor beside `onboarding_dismissed` and
+  tolerant of a hand-edited row the way `run_environment` is.
+- **`DoctorReport` marks; it never drops.** `CheckResult::dismissed` is set by
+  `DoctorReport::new`, and `CheckResult::answered_by` only ever marks a `CheckStatus::Warn` — so
+  the "a `fail` is not dismissible" rule is enforced on every *read* rather than at the two
+  write paths, and a row that was a warning yesterday and is a failure today is not silently
+  silenced by yesterday's answer. `DoctorReport` also carries the whole stored set, including
+  dismissals that match no current row, so nothing stored is invisible.
+- **`is_blocking`, `blocking` and `blocking_summary` do not read `dismissed`, now or ever.**
+  Point 1's refusal on `QueueHandle::start`/`resume` is unchanged, byte for byte, and
+  `crates/core/tests/doctor.rs::dismissing_every_row_still_refuses_to_start_the_queue_and_writes_no_queue_state`
+  dismisses every row of a blocking report and asserts the same error and the same absent
+  `queue_state`. That test is the point of this amendment: it fails loudly if a later change
+  ever wires the dismissal set into the gate.
+- **The banner collapses a `fail` instead of dismissing it.** The rows fold away, the headline
+  and the blocking count stay. Collapsing is component state and does not outlive the window.
+- **Both tools are `RunAccess::Refused`** (ADR-0021 point 4), with the sharpest edge on that
+  clause: a run that could dismiss a doctor warning could silence the report on the environment
+  it is itself running in.
+
+**One correction this task forced.** `Check`'s `rename_all = "snake_case"` produced
+`git_hub_cli` for `GitHubCli`, where `Check::as_str()`, `CheckResultView` and `src/types.ts` all
+say `github_cli`. It cost nothing while a check was only ever *written* to the wire; it became a
+defect the moment a check became the key half of a stored value that has to compare equal across
+both spellings. The variant now carries an explicit `#[serde(rename = "github_cli")]`, and
+`every_check_serializes_with_the_spelling_its_accessor_returns` pins the agreement for all eight.
+
+**Binds.** 018, 027.
+
 ---
 
 ## D23 — Task 014's cross-cutting choices
@@ -1550,6 +1702,96 @@ quitting and for a crashed run's resume, and ADR-0010's, which takes the three r
 large enough to be argued at product scale.
 
 **Binds.** 013, and 023 as the next task to read `PreflightSummary`.
+---
+
+## D25 — Task 022's cross-cutting choices
+
+**Question.** ADR-0020 decides that a repository may carry its own forge token and that the
+token lives in the OS keychain, and stops there. Making an unattended run *use* one needs a
+dozen smaller answers, several of which widen types other tasks share or put a rule in a place
+no ADR reaches.
+
+**Decision.** Seven, taken together by task 022.
+
+1. **The row says whether a credential exists; the keychain says whether it is still there, and
+   the two disagreeing is a refusal.** `repositories.credential_added_at` is what
+   `repo::has_credential` reads, and `runner::process::repository_credentials` refuses the run —
+   naming the repository, and saying it did not fall back — when the row claims a token the
+   keychain does not hold. **Never ask the keychain "is anything there" instead.** A locked or
+   unreachable keychain answers "no", and a spawn path that read that as "this repository has no
+   credential" would run with the operator's whole GitHub account: the exact failure ADR-0020
+   point 5 exists to prevent, and one that is invisible in every artefact the run leaves behind.
+
+2. **Everything is an environment variable at spawn, and `Invocation::args` does not move.**
+   `ps` is world-readable on Unix and the Windows equivalents are no better, so no token is ever
+   an argument; nothing is written to disk, so nothing is left in a worktree the run could stage.
+   Keeping the credential out of `args` also preserves ADR-0012's byte-for-byte argv contract:
+   the flags this product is most dangerous to get wrong stay assertable without a process, and
+   the credential is asserted separately as an environment diff.
+
+3. **HTTPS auth is `GIT_CONFIG_COUNT`/`KEY_0`/`VALUE_0`, never a `credential.helper`.** A helper
+   snippet is `sh -c` by another name and does not exist on Windows. The operator's own
+   `GIT_CONFIG_*` are **removed before** ours is added — appending to their count is an
+   off-by-one that silently drops one side or the other, and which side depends on numbering
+   nobody can see. `GIT_TERMINAL_PROMPT=0` and `GCM_INTERACTIVE=Never` ride along so a bad
+   credential fails immediately rather than blocking on a prompt nobody will answer at 2am.
+
+4. **A repository without a credential is byte-identical to before this feature existed.**
+   `ChildEnvironment::ambient` adds nothing and removes nothing, and a test asserts it. That is
+   what makes adopting this safe one repository at a time, and it is why the ambient-forge strip
+   is conditional where the `CLAUDE_*` strip is not — they are two different rules, and this
+   entry is the third one `runner::process`'s header now names.
+
+5. **Redaction happens before write, over exactly the values that were injected.** The
+   transcript is a file that outlives the process and that task 015 offers to open; redacting on
+   read would leave the secret in the only copy that matters. It is deliberately **not** a secret
+   scanner — no regex over `ghp_[A-Za-z]+`, which would miss a fine-grained token, miss an
+   enterprise one, and eventually redact a legitimate string. The set worth hiding is known
+   exactly: it is what Rimaia itself put in the child's environment, in both the raw and the
+   base64 form, because a run that echoes its environment prints one and a `git config --list`
+   prints the other.
+
+6. **Two commands get no MCP tool, and it is a third kind of exception.** ADR-0021 point 1 makes
+   a Tauri command without a tool a defect; point 5 names `delete_task`'s destructiveness
+   exception, and D20.6's 2026-09-04 amendment names task 026's desktop-referent one.
+   `set_repository_credential` and `remove_repository_credential` are neither: **the argument is
+   a live forge token**, and putting one on a loopback protocol into a process's argv is a
+   widening nobody asked for. `get_repository_credential_status` *does* get a tool,
+   `RunAccess::Refused` — it carries the login, the label and the date and never the secret, and
+   an operator's agent that can see a repository is configured while its keychain item is gone
+   can explain a failed push, which is the half of the problem it can help with.
+
+7. **Verification has three outcomes, and the third is not a failure.** `gh api user` and
+   `gh api repos/{owner}/{repo}`, with only that token in the child's environment. Verified
+   stores the resolved login. Rejected **refuses the save** — ADR-0020's "refused at paste
+   time", because a token that cannot open a pull request is a run that fails at 2am having
+   already done the work. `gh` absent stores it *unverified*: a missing local tool says nothing
+   about the token, and refusing would make the feature unusable on a machine with git but not
+   `gh`, which is a machine that can still clone and push.
+
+**Why.** Every one of these is a place two agents would have answered differently and a reviewer
+could not have said which was right, which is this file's own test for what belongs in it. (1)
+and (4) are the two halves of "fail closed without changing anything for anyone who has not
+opted in", and both are silent failures if got wrong. (2), (3) and (5) are each a place where
+the obvious implementation is the one that works on macOS and needs a rethink on Windows —
+which task 022's own file calls not meeting its contract. (6) is a deliberate hole in a parity
+rule, and ADR-0021 is explicit that the way to have one is to argue it, not to leave it. (7) is
+the difference between a feature people use and one they route around.
+
+**What this does not claim.** ADR-0020 says it and it is worth repeating wherever this is read:
+a `bypassPermissions` run can read its own environment, so all of the above bounds what a stolen
+token is **worth**, not whether it can be stolen. The UI's guidance toward a fine-grained,
+single-repository token is doing as much work as the keychain is.
+
+See also [ADR-0020](adr/0020-per-repository-git-credentials.md), ADR-0012 (the posture this bounds),
+ADR-0002 (why every choice above is the cross-platform one), and
+[D4](#d4--migration-file-numbering)'s and [D6](#d6--pre-approved-npm-dependencies)'s 2026-09-04
+amendments (the migration, and the two Cargo dependencies).
+
+**Binds.** 022, and every later task that touches the spawn environment.
+
+---
+
 ## D20 — Task 016's cleanup: what it refuses, what it may not be forced past, and what it never deletes
 
 **Question.** Task 016 removes worktrees. ADR-0005 fixes where they live, that cleanup is
@@ -1698,6 +1940,28 @@ scope decision and the destructiveness exception), and
 
 **Binds.** 016, 024.
 
+### Amendment, 2026-09-04 — two more commands with no tool, on different ground (task 026)
+
+Point 6 above records a hole in ADR-0021's parity rule and argues it from *destructiveness*.
+Task 026 adds two commands to the no-tool list — `list_open_in_targets` and
+`open_task_worktree_in` — and neither is destructive at all. They belong here because point 6
+is where this repository keeps the list, but the argument is a different one, and it is the
+one `reveal_task_worktree` has stated in `src-tauri/src/commands/worktree.rs` since task 007:
+
+**An MCP client is a protocol, not a desktop.** "Open this directory in VS Code" has no
+referent for a caller that has no screen, no window server and no user sitting in front of
+one. This is not a capability being withheld from agents on grounds of trust — it is a
+capability an agent has nothing to do with. `reveal_task_worktree` was never given a tool for
+exactly this reason and was never recorded as an exception; it is recorded now, with these
+two, so ADR-0021 point 1 ("a Tauri command without an MCP tool is a defect") stays literally
+true rather than true-with-an-unwritten-asterisk.
+
+Nothing else about the parity rule moves. The *detection* these commands sit on top of is
+`rimaia_core::openers`, a function over injected inputs like `doctor::checks`, so the rule is
+in core even though only one door reaches it.
+
+**Binds.** 016, 024, 026.
+
 ---
 
 ## How to use this
@@ -1724,7 +1988,12 @@ An implementation task reads the entries its number appears in, before writing c
 | [018](../tasks/018-preflight-doctor-and-packaging.md) | D11 · D16 · D22 |
 | [020](../tasks/020-per-task-execution-strategy.md) | D2 · D3 · D4 · D5 · D8 · D10 · D12 · D16 · D17 · D19 |
 | [021](../tasks/021-review-and-fix-loop.md) | D17 |
+| [022](../tasks/022-per-repository-git-credentials.md) | D4 · D5 · D6 · D8 · D10 · D14 · D20 · D25 |
+| [023](../tasks/023-batch-strategy-planning.md) | D16 · D17 · D19 · D21 |
 | [024](../tasks/024-analytics.md) | D4 · D5 · D12 · D18 · D20 |
+| [025](../tasks/025-startup-failure-dialog.md) | D6 · D11 |
+| [026](../tasks/026-open-worktree-in-editor.md) | D6 · D12 · D20 |
+| [027](../tasks/027-dismissable-doctor-warnings.md) | D3 · D4 · D8 · D22 |
 | every task | D4 and D6 as prohibitions |
 
 A reviewer treats any decision visible in a diff that is neither in an ADR nor here as a

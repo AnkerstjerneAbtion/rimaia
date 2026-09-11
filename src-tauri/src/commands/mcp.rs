@@ -11,6 +11,7 @@ use std::mem;
 
 use rimaia_core::doctor;
 use rimaia_core::mcp::{self, McpProbe, McpState, McpStatus};
+use rimaia_core::runner::strategy::PlannerAccess;
 use rimaia_core::{Error, Result};
 use tauri::State;
 
@@ -65,6 +66,14 @@ pub async fn set_mcp_port(state: State<'_, AppState>, port: u16) -> Result<McpSt
         // same reason the `RunHandles` above are reused: a rebind must not
         // quietly narrow what `run_doctor` can see.
         doctor::Environment::for_runner(state.paths.clone(), &state.runner),
+        // And the same three planning values, for the third time the same
+        // reason: a rebind must not leave the server unable to plan what it
+        // could plan a moment ago.
+        PlannerAccess {
+            paths: state.paths.clone(),
+            runner: state.runner.clone(),
+            in_flight: state.in_flight.clone(),
+        },
     )
     .await;
     tauri::async_runtime::spawn(task.run());

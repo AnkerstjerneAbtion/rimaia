@@ -16,7 +16,7 @@ import {
 import { SortableContext, sortableKeyboardCoordinates } from "@dnd-kit/sortable";
 
 import { TaskCard } from "./TaskCard";
-import type { QueueEntry, Repository, Task } from "../../types";
+import type { DetectedOpenInTarget, QueueEntry, Repository, Task } from "../../types";
 
 // Mocked at the Tauri seam, not `lib/commands.ts`/`lib/events.ts` — see
 // `StorageSection.test.tsx`'s own comment for why. `TaskCard`'s "Run now"
@@ -102,12 +102,24 @@ function repository(overrides: Partial<Repository> = {}): Repository {
 function mockBackend({
   repositories = [repository()],
   queuePlan = [] as QueueEntry[],
-}: { repositories?: Repository[]; queuePlan?: QueueEntry[] } = {}) {
+  openInTargets = [] as DetectedOpenInTarget[],
+  onOpenIn,
+}: {
+  repositories?: Repository[];
+  queuePlan?: QueueEntry[];
+  openInTargets?: DetectedOpenInTarget[];
+  onOpenIn?: (args: unknown) => void;
+} = {}) {
   mockListen.mockResolvedValue(vi.fn());
-  mockInvoke.mockImplementation(async (command) => {
+  mockInvoke.mockImplementation(async (command, args) => {
     if (command === "list_repositories") return repositories;
     if (command === "get_queue_status") {
       return { state: "paused", runningTaskIds: [], plan: queuePlan };
+    }
+    if (command === "list_open_in_targets") return openInTargets;
+    if (command === "open_task_worktree_in") {
+      onOpenIn?.(args);
+      return undefined;
     }
     throw new Error(`unexpected command: ${command}`);
   });
@@ -821,6 +833,110 @@ describe("TaskCard", () => {
 
       expect(screen.queryByText("Proposal")).toBeNull();
       expect(screen.getByText("Haiku")).toBeInTheDocument();
+    });
+  });
+  describe("Open in… (task 026)", () => {
+    const WITH_WORKTREE = { worktreePath: "/data/worktrees/my repo/task-1" };
+    const DETECTED: DetectedOpenInTarget[] = [
+      { target: "vs_code", label: "VS Code" },
+      { target: "terminal", label: "Terminal" },
+      { target: "file_manager", label: "File manager" },
+    ];
+
+    it("offers no control at all on a card whose task has never run", async () => {
+      mockBackend({ openInTargets: DETECTED });
+      renderCard({ task: task() });
+      await screen.findByRole("button", { name: "Run now" });
+
+      // Not a disabled one: "no worktree yet" is the normal state of most of
+      // the board, not a failure to report.
+      expect(screen.queryByRole("button", { name: "Open in" })).toBeNull();
+      // Deterministic without waiting for anything: a card with no worktree
+      // never mounts the menu at all, so detection is never even asked.
+      expect(mockInvoke).not.toHaveBeenCalledWith("list_open_in_targets", undefined);
+    });
+
+    it("lists exactly what the machine reported, and nothing else", async () => {
+      mockBackend({ openInTargets: DETECTED });
+      renderCard({ task: task(WITH_WORKTREE) });
+
+      fireEvent.click(await screen.findByRole("button", { name: "Open in" }));
+
+      expect(
+        screen.getAllByRole("menuitem").map((item) => item.textContent),
+      ).toEqual(["VS Code", "Terminal", "File manager", "Re-check installed apps"]);
+      // The requirement, not a nicety: an uninstalled editor never appears.
+      expect(screen.queryByRole("menuitem", { name: "Cursor" })).toBeNull();
+    });
+
+    it("opens the worktree of the card it was invoked from", async () => {
+      const opened = vi.fn();
+      mockBackend({ openInTargets: DETECTED, onOpenIn: opened });
+      renderCard({ task: task(WITH_WORKTREE) });
+
+      fireEvent.click(await screen.findByRole("button", { name: "Open in" }));
+      fireEvent.click(screen.getByRole("menuitem", { name: "VS Code" }));
+
+      await waitFor(() =>
+        expect(opened).toHaveBeenCalledWith({ taskId: "task-1", target: "vs_code" }),
+      );
+    });
+
+    it("neither opens the panel nor starts a run, by click or by keyboard", async () => {
+      const opened = vi.fn();
+      mockBackend({ openInTargets: DETECTED, onOpenIn: opened });
+      const props = renderCard({ task: task(WITH_WORKTREE) });
+
+      const toggle = await screen.findByRole("button", { name: "Open in" });
+      fireEvent.click(toggle);
+      const item = screen.getByRole("menuitem", { name: "Terminal" });
+      // Enter is what the card claims for "open the detail panel", and Space
+      // is what dnd-kit claims for "lift". Both are stopped inside the menu.
+      fireEvent.keyDown(item, { key: "Enter", code: "Enter" });
+      fireEvent.keyDown(item, { key: " ", code: "Space" });
+      fireEvent.click(item);
+
+      await waitFor(() => expect(opened).toHaveBeenCalledTimes(1));
+      expect(props.onSelect).not.toHaveBeenCalled();
+      expect(mockInvoke).not.toHaveBeenCalledWith("start_task_run", expect.anything());
+    });
+
+    it("renders a failure to open where the run error is rendered", async () => {
+      mockListen.mockResolvedValue(vi.fn());
+      mockInvoke.mockImplementation(async (command) => {
+        if (command === "list_repositories") return [repository()];
+        if (command === "get_queue_status") {
+          return { state: "paused", runningTaskIds: [], plan: [] };
+        }
+        if (command === "list_open_in_targets") return DETECTED;
+        if (command === "open_task_worktree_in") {
+          throw { code: "invalid", message: "Zed is not installed on this machine any more" };
+        }
+        throw new Error(`unexpected command: ${command}`);
+      });
+      renderCard({ task: task(WITH_WORKTREE) });
+
+      fireEvent.click(await screen.findByRole("button", { name: "Open in" }));
+      fireEvent.click(screen.getByRole("menuitem", { name: "VS Code" }));
+
+      expect(
+        await screen.findByText("Zed is not installed on this machine any more"),
+      ).toBeInTheDocument();
+    });
+
+    it("renders no control when the machine can open nothing", async () => {
+      // Cannot happen in practice — the file manager always exists — but the
+      // fallback has to be "no menu", never a menu of entries that open
+      // nothing. Awaited on the probe rather than on "Run now": before
+      // detection answers there is nothing to assert about, and asserting
+      // anyway is what made this pass locally and fail on CI.
+      mockBackend({ openInTargets: [] });
+      renderCard({ task: task(WITH_WORKTREE) });
+      await waitFor(() =>
+        expect(mockInvoke).toHaveBeenCalledWith("list_open_in_targets", undefined),
+      );
+
+      expect(screen.queryByRole("button", { name: "Open in" })).toBeNull();
     });
   });
 });

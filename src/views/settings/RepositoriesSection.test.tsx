@@ -90,6 +90,19 @@ function mockBackend(handler: (command: string, args?: unknown) => unknown) {
     if (command === "get_strategy_defaults") {
       return { mode: "default" } satisfies StrategyDefaults;
     }
+    // Task 022's per-row credential read, answered here for the same reason
+    // the two above are: every row makes it, and no test in this file is
+    // about it.
+    if (command === "get_repository_credential_status") {
+      return {
+        configured: false,
+        login: null,
+        label: null,
+        addedAt: null,
+        store: { state: "absent" },
+        sshRemote: false,
+      };
+    }
     return handler(command, args);
   });
 }
@@ -403,6 +416,16 @@ describe("RepositoriesSection", () => {
       if (command === "get_repository_remote_info") return { remoteUrl: null, ghReady: null };
       if (command === "get_strategy_catalogue") return catalogueView();
       if (command === "get_strategy_defaults") return { mode: "default" };
+      if (command === "get_repository_credential_status") {
+        return {
+          configured: false,
+          login: null,
+          label: null,
+          addedAt: null,
+          store: { state: "absent" },
+          sshRemote: false,
+        };
+      }
       if (command === "set_strategy_defaults") {
         throw { code: "internal", message: "the settings row could not be written" };
       }
