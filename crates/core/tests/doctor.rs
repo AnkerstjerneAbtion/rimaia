@@ -20,6 +20,7 @@ use rimaia_core::db::Repository;
 use rimaia_core::doctor::{
     checks, Check, CheckResult, CheckStatus, DoctorReport, Environment, Programs,
 };
+use rimaia_core::paths::DATA_DIR_ENV;
 use rimaia_core::runner::RunnerConfig;
 use rimaia_core::scheduler::{self, InFlight, QueueState};
 use rimaia_core::testing::{TempRepo, TestContext};
@@ -285,6 +286,28 @@ async fn a_writable_data_directory_passes_and_leaves_no_probe_file_behind() {
         leftovers.is_empty(),
         "the write probe must clean up after itself: {leftovers:?}"
     );
+}
+
+/// ADR-0023's whole risk is a launch quietly using a database nobody meant to
+/// open, so the row that names the directory has to name where it came from
+/// too. The default stays unannotated: the ordinary case does not need
+/// explaining, and a note on every installation would train the user past it.
+#[tokio::test]
+async fn the_data_directory_row_says_when_the_environment_chose_the_path() {
+    let root = TempDir::new().expect("a temporary directory");
+
+    let overridden = AppPaths::resolve(Some(root.path().as_os_str()), PathBuf::from("/platform"))
+        .expect("an absolute override");
+    let detail = checks::data_directory(&overridden).detail;
+    assert!(detail.contains(DATA_DIR_ENV), "{detail}");
+    assert!(
+        detail.contains(&root.path().display().to_string()),
+        "{detail}"
+    );
+
+    let default = AppPaths::resolve(None, root.path().to_path_buf()).expect("no override");
+    let detail = checks::data_directory(&default).detail;
+    assert!(!detail.contains(DATA_DIR_ENV), "{detail}");
 }
 
 #[tokio::test]

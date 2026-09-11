@@ -41,8 +41,25 @@ pub fn run() {
             // Order matters: the directories have to exist before the log
             // appender opens a file in one of them, and before SQLite is asked
             // to create a database in another.
-            let data_dir = app.path().app_data_dir()?;
-            let paths = AppPaths::new(data_dir);
+            // ADR-0023: `RIMAIA_DATA_DIR` wins when it is set, so a branch
+            // carrying an unmerged migration can be run without writing it into
+            // the database every other worktree reads. Resolved before
+            // `create_all`, because a refused value must not leave a directory
+            // behind for the next launch to find and trust.
+            //
+            // Alone among the startup failures below, this one does not go
+            // through `log_startup_failure`: both of that helper's outputs are
+            // unavailable this early. There is no `db_file` to name — it is
+            // derived from the directory that just failed to resolve — and
+            // `logging::init` has not run, so a `tracing` call here has no
+            // subscriber and would be dropped rather than written. The error
+            // text names the variable and the offending value precisely because
+            // propagating it is the whole of the report (D11's stderr half;
+            // task 025 is what puts it in front of a double-clicked bundle).
+            let paths = AppPaths::resolve(
+                std::env::var_os(rimaia_core::paths::DATA_DIR_ENV).as_deref(),
+                app.path().app_data_dir()?,
+            )?;
             paths.create_all()?;
 
             logging::init(&paths.logs_dir());
