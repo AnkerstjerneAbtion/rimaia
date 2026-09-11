@@ -100,6 +100,12 @@ migration will otherwise write it into the database every other branch reads.
   underneath it, and `create_all` produces them.
 - A relative override, and one beginning with `~`, each fail with a `RimaiaError` naming the
   variable, and neither creates any directory. Both cases are tested.
+- On Windows, a rooted-but-driveless value (`\rimaia`, or a `/tmp/...` path copied from a Unix
+  README) is refused as such rather than called relative. Tested under `cfg(windows)`, since
+  the whole point is that it cannot be reproduced on the other two runners.
+- The tests do not assume Unix path spelling. An absolute override is written for the platform
+  the test runs on — a `/tmp/...` literal is not absolute on Windows, so one would assert the
+  refusal path while claiming to assert the success path.
 - A directory containing spaces survives intact — `paths.rs` already has this test for the
   fallback and it must hold for the override.
 - The doctor's `data_directory` result carries the resolved path and reports whether it was

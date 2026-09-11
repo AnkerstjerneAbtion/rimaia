@@ -72,6 +72,13 @@ Five things settle what that means.
    expanded either — the shell that set the variable is the thing that expands tildes, and a
    literal `~` directory appearing in a home folder is a worse outcome than a refusal.
 
+   Windows has a third state Unix does not, and the refusal names it rather than lumping it
+   in: `\rimaia` — or a `/tmp/...` value copied out of a Unix README — is *rooted* but not
+   absolute, meaning that path on whichever drive the process happens to be on. Same
+   ambiguity, so the same refusal; a different sentence, because telling someone their
+   leading-slash path "is relative" is the kind of message that gets dismissed as a bug in
+   the checker. Task 022's CI matrix is what surfaces this class of difference at all.
+
 4. **The doctor reports the live path and where it came from.** `checks::data_directory`
    already probes the directory for writability; it gains the path it probed and whether the
    value was inherited from the environment. Without this the override is a silent relocation,

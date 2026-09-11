@@ -83,9 +83,22 @@ impl AppPaths {
             )));
         }
         if !candidate.is_absolute() {
+            // Windows has a third state Unix does not: `\rimaia` and `/tmp/x`
+            // are *rooted* but not absolute, meaning that path on whatever the
+            // current drive happens to be. Same ambiguity as a relative path
+            // and a different sentence to the person reading it — "which is
+            // relative" is exactly the sort of message that gets dismissed as
+            // wrong, because to them it plainly starts at a root. On Unix
+            // `has_root` implies absolute, so this branch cannot fire there.
+            let fault = if candidate.has_root() {
+                "which is rooted but not absolute, so it means that path on whatever the current \
+                 drive is"
+            } else {
+                "which is relative"
+            };
             return Err(Error::invalid(format!(
-                "{DATA_DIR_ENV} is {}, which is relative. It must be an absolute path, so that it \
-                 means the same directory however Rimaia was launched.",
+                "{DATA_DIR_ENV} is {}, {fault}. It must be an absolute path, so that it means the \
+                 same directory however Rimaia was launched.",
                 candidate.display()
             )));
         }
@@ -217,30 +230,61 @@ mod tests {
         assert_eq!(paths.origin(), DataDirOrigin::Platform);
     }
 
+    /// An absolute override, spelled for the platform the test runs on.
+    ///
+    /// A Unix literal cannot stand in for one: `/tmp/x` is *rooted* but not
+    /// absolute on Windows, so [`AppPaths::resolve`] refuses it — correctly,
+    /// and that refusal has [`a_rooted_but_driveless_path_is_refused_on_windows`]
+    /// to pin it rather than a test that only fails on one runner.
+    #[cfg(windows)]
+    const ABSOLUTE_OVERRIDE: &str = r"C:\rimaia-scratch";
+    #[cfg(not(windows))]
+    const ABSOLUTE_OVERRIDE: &str = "/tmp/rimaia-scratch";
+
+    #[cfg(windows)]
+    const ABSOLUTE_OVERRIDE_WITH_SPACES: &str = r"C:\Users\someone\Scratch Dir\rimaia";
+    #[cfg(not(windows))]
+    const ABSOLUTE_OVERRIDE_WITH_SPACES: &str = "/Users/someone/Scratch Dir/rimaia";
+
     #[test]
     fn an_absolute_override_replaces_the_platform_directory() {
+        let root = Path::new(ABSOLUTE_OVERRIDE);
         let paths = AppPaths::resolve(
-            Some(OsStr::new("/tmp/rimaia-scratch")),
+            Some(OsStr::new(ABSOLUTE_OVERRIDE)),
             PathBuf::from("/platform"),
         )
         .expect("absolute override");
-        assert_eq!(paths.data_dir(), Path::new("/tmp/rimaia-scratch"));
+        assert_eq!(paths.data_dir(), root);
         assert_eq!(paths.origin(), DataDirOrigin::Environment);
-        assert_eq!(paths.db_file(), Path::new("/tmp/rimaia-scratch/rimaia.db"));
-        assert_eq!(paths.runs_dir(), Path::new("/tmp/rimaia-scratch/runs"));
+        assert_eq!(paths.db_file(), root.join("rimaia.db"));
+        assert_eq!(paths.runs_dir(), root.join("runs"));
     }
 
     #[test]
     fn an_override_containing_spaces_survives_intact() {
         let paths = AppPaths::resolve(
-            Some(OsStr::new("/Users/someone/Scratch Dir/rimaia")),
+            Some(OsStr::new(ABSOLUTE_OVERRIDE_WITH_SPACES)),
             PathBuf::from("/platform"),
         )
         .expect("override with spaces");
         assert_eq!(
             paths.db_file(),
-            Path::new("/Users/someone/Scratch Dir/rimaia/rimaia.db")
+            Path::new(ABSOLUTE_OVERRIDE_WITH_SPACES).join("rimaia.db")
         );
+    }
+
+    /// The state Unix does not have: rooted, but with no drive, so it names a
+    /// different directory depending on where the process happens to be. The
+    /// refusal says that rather than calling it relative, which is what a
+    /// reader looking at a leading slash would reject as simply wrong.
+    #[cfg(windows)]
+    #[test]
+    fn a_rooted_but_driveless_path_is_refused_on_windows() {
+        let error = AppPaths::resolve(Some(OsStr::new(r"\rimaia")), PathBuf::from("/platform"))
+            .expect_err("a driveless root is not absolute on Windows");
+        let message = error.to_string();
+        assert!(message.contains(DATA_DIR_ENV), "{message}");
+        assert!(message.contains("current drive"), "{message}");
     }
 
     #[test]
