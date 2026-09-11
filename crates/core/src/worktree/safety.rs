@@ -67,7 +67,9 @@ pub(super) async fn resolve(path: &Path) -> Result<PathBuf> {
 
     loop {
         if let Ok(resolved) = tokio::fs::canonicalize(&existing).await {
-            let mut full = resolved;
+            // Same reason `repo::register` does it: what comes back from here
+            // becomes a `git worktree add` argument.
+            let mut full = crate::paths::git_safe(resolved);
             full.extend(missing.iter().rev());
             return Ok(full);
         }
@@ -181,22 +183,35 @@ mod tests {
 
     #[tokio::test]
     async fn a_path_containing_a_parent_segment_is_refused() {
-        let error = resolve(Path::new("/tmp/repo/../elsewhere"))
+        // Built from a real temp directory rather than from a `/tmp/...`
+        // literal: the absoluteness guard runs first, and on Windows a
+        // POSIX-looking path is not absolute at all — so the literal version of
+        // this test asserted the `..` rule while actually exercising the one
+        // before it.
+        let temp = tempfile::tempdir().expect("temp dir");
+        let path = temp.path().join("repo").join("..").join("elsewhere");
+
+        let error = resolve(&path)
             .await
             .expect_err("`..` cannot be resolved without guessing");
 
         assert_eq!(
             error.to_string(),
-            "/tmp/repo/../elsewhere must not contain \"..\""
+            format!("{} must not contain \"..\"", path.display())
         );
     }
 
     #[tokio::test]
     async fn resolving_keeps_the_components_that_do_not_exist_yet() {
         let temp = tempfile::tempdir().expect("temp dir");
-        let canonical = tokio::fs::canonicalize(temp.path())
-            .await
-            .expect("a temp dir resolves");
+        // Through `git_safe`, because `resolve` does — the expectation has to
+        // be the path git would be handed, not the extended-length one Windows
+        // canonicalization returns.
+        let canonical = crate::paths::git_safe(
+            tokio::fs::canonicalize(temp.path())
+                .await
+                .expect("a temp dir resolves"),
+        );
 
         let resolved = resolve(&temp.path().join("worktrees/repo/task-1"))
             .await

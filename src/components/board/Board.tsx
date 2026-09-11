@@ -24,6 +24,7 @@ import type { BoardColumn, RimaiaError, Task, TaskSummary } from "../../types";
 import { useRepositories, useTasks } from "../../hooks/useTasks";
 import { ErrorBanner } from "../ErrorBanner";
 import { BoardToolbar } from "./BoardToolbar";
+import { PlanPassPanel, usePlanPass } from "./PlanPassPanel";
 import { Column, COLUMN_TITLES } from "./Column";
 import { TaskCardPreview } from "./TaskCard";
 import { TaskDetailPanel } from "./TaskDetailPanel";
@@ -195,6 +196,10 @@ export function Board() {
     useTasks(repositoryFilter);
 
   const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
+  // Task 023's hand-picked set, kept beside `selectedTaskId` rather than merged
+  // into it: opening a card to read it must not add it to the next pass.
+  const [pickedTaskIds, setPickedTaskIds] = useState<ReadonlySet<string>>(new Set());
+  const planPass = usePlanPass();
   const [searchQuery, setSearchQuery] = useState("");
   const [activeId, setActiveId] = useState<string | null>(null);
   const [createError, setCreateError] = useState<RimaiaError | null>(null);
@@ -392,6 +397,35 @@ export function Board() {
         searchInputRef={searchInputRef}
         onNewTask={handleNewTask}
         newTaskDisabled={repositories.length === 0}
+        pickedCount={pickedTaskIds.size}
+        planDisabled={planPass.running || repositories.length === 0}
+        onPlan={() => {
+          // The repository filter already on the toolbar is the scope, and the
+          // `ready` column is the default because that is the run queue — the
+          // preflight is about what will actually run tonight. A hand-picked
+          // set narrows it further and carries its own column, so a card picked
+          // in `not_ready` is planned as asked.
+          void planPass.start(
+            pickedTaskIds.size > 0
+              ? {
+                  ...(repositoryFilter ? { repositoryId: repositoryFilter } : {}),
+                  taskIds: [...pickedTaskIds],
+                }
+              : {
+                  column: "ready",
+                  ...(repositoryFilter ? { repositoryId: repositoryFilter } : {}),
+                },
+          );
+        }}
+      />
+
+      <PlanPassPanel
+        running={planPass.running}
+        progress={planPass.progress}
+        pass={planPass.pass}
+        error={planPass.error}
+        onCancel={planPass.cancel}
+        onDismiss={planPass.dismiss}
       />
 
       {repositoriesError && <ErrorBanner error={repositoriesError} />}
@@ -424,6 +458,15 @@ export function Board() {
                 repositoriesById={repositoryNamesById}
                 selectedTaskId={selectedTaskId}
                 onSelect={setSelectedTaskId}
+                pickedTaskIds={pickedTaskIds}
+                onPick={(id, isPicked) =>
+                  setPickedTaskIds((current) => {
+                    const next = new Set(current);
+                    if (isPicked) next.add(id);
+                    else next.delete(id);
+                    return next;
+                  })
+                }
                 registerCardRef={registerCardRef}
                 onArrowNavigate={handleArrowNavigate}
                 dragDisabled={dragDisabled}

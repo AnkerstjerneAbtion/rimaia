@@ -6,6 +6,7 @@ status: ready
 depends_on: ["015"]
 adrs: ["0022", "0013"]
 size: M
+landed: "#28"
 ---
 
 # Analytics — what the queue has actually done

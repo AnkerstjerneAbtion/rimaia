@@ -19,10 +19,12 @@ testing = ["dep:tempfile"]
 [dependencies]
 anyhow = { workspace = true }
 axum = { workspace = true }
+base64 = { workspace = true }
 chrono = { workspace = true }
 chrono-tz = { workspace = true }
 croner = { workspace = true }
 fs4 = { workspace = true }
+keyring = { workspace = true }
 reqwest = { workspace = true }
 rmcp = { workspace = true }
 schemars = { workspace = true }
@@ -42,4 +44,7 @@ uuid = { workspace = true }
 [dev-dependencies]
 rimaia-core = { path = ".", features = ["testing"] }
 pretty_assertions = "1"
+# Task 022's integration test recomputes the `extraheader` value the way the
+# production code does, so the two cannot agree by copying a literal.
+base64 = { workspace = true }
 tokio-test = "0.4"

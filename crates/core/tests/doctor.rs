@@ -1,3 +1,20 @@
+//! **Unix only.** Every fixture in this file is a `/bin/sh` shebang script
+//! standing in for `claude`, `git` or `gh` — the technique `spike/FINDINGS.md`
+//! settled on and the only way to test "signed out", "too old" or "never called
+//! the tool" without depending on what is installed on the machine running the
+//! suite. Windows has no shebang, so the whole file is gated rather than each
+//! test: a file that compiled and silently ran nothing would report a green
+//! Windows job that had checked none of this.
+//!
+//! **What still runs on Windows is the part that matters most there**, and it is
+//! deliberately not here: `credentials::inject` and `openers` both assert their
+//! Windows tables from unit tests over injected inputs, on every platform,
+//! because `Platform` and the parent environment are values rather than `cfg!`.
+//! Task 022's CI matrix exists to compile the keychain backends and the
+//! environment-building code on all three — not to pretend a POSIX shell is
+//! available on a runner that has none.
+#![cfg(unix)]
+
 //! Task 018's preflight doctor, from the outside.
 //!
 //! Every check here runs against something real: a `TempDir` that is genuinely
@@ -95,6 +112,9 @@ fn row_for(path: &Path, name: &str) -> Repository {
         allow_unattended_runs: true,
         max_concurrency: 1,
         created_at: rimaia_core::testing::test_epoch(),
+        credential_login: None,
+        credential_label: None,
+        credential_added_at: None,
     }
 }
 
@@ -137,7 +157,7 @@ async fn a_missing_claude_binary_is_a_blocking_failure_with_a_useful_message() {
 
     // And the report built from it refuses the queue rather than merely
     // colouring a row.
-    let report = DoctorReport::new(vec![result]);
+    let report = DoctorReport::new(vec![result], Vec::new());
     assert!(report.is_blocking());
     assert!(report.blocking_summary().contains("Install Claude Code"));
 }
@@ -438,11 +458,14 @@ async fn a_directory_that_is_no_longer_a_git_repository_is_reported_too() {
 fn every_failing_result_carries_a_specific_remediation() {
     // A `Warn` or `Fail` without a remediation would be the "check your setup"
     // this whole module exists to not be.
-    let report = DoctorReport::new(vec![
-        CheckResult::pass(Check::Git, "fine"),
-        CheckResult::warn(Check::McpPort, "detail", "do this"),
-        CheckResult::fail(Check::ClaudeCli, "detail", "do that"),
-    ]);
+    let report = DoctorReport::new(
+        vec![
+            CheckResult::pass(Check::Git, "fine"),
+            CheckResult::warn(Check::McpPort, "detail", "do this"),
+            CheckResult::fail(Check::ClaudeCli, "detail", "do that"),
+        ],
+        Vec::new(),
+    );
 
     for result in &report.results {
         assert_eq!(
@@ -457,16 +480,19 @@ fn every_failing_result_carries_a_specific_remediation() {
 
 #[test]
 fn a_blocking_summary_names_every_failing_check_rather_than_counting_them() {
-    let report = DoctorReport::new(vec![
-        CheckResult::fail(Check::ClaudeCli, "claude is missing.", "Install it."),
-        CheckResult::fail(
-            Check::RepositoryPath,
-            "rimaia has moved.",
-            "Re-register it.",
-        )
-        .about("rimaia"),
-        CheckResult::warn(Check::McpPort, "nothing is listening.", "Pick a free port."),
-    ]);
+    let report = DoctorReport::new(
+        vec![
+            CheckResult::fail(Check::ClaudeCli, "claude is missing.", "Install it."),
+            CheckResult::fail(
+                Check::RepositoryPath,
+                "rimaia has moved.",
+                "Re-register it.",
+            )
+            .about("rimaia"),
+            CheckResult::warn(Check::McpPort, "nothing is listening.", "Pick a free port."),
+        ],
+        Vec::new(),
+    );
 
     let summary = report.blocking_summary();
 
@@ -484,11 +510,15 @@ fn a_blocking_summary_names_every_failing_check_rather_than_counting_them() {
 
 #[test]
 fn a_warning_does_not_block_the_queue() {
-    let report = DoctorReport::new(vec![
-        CheckResult::pass(Check::ClaudeCli, "2.1.258 on PATH."),
-        CheckResult::warn(Check::McpPort, "nothing is listening.", "Pick a free port."),
-        CheckResult::warn(Check::GitHubCli, "gh is not installed.", "Install gh.").about("rimaia"),
-    ]);
+    let report = DoctorReport::new(
+        vec![
+            CheckResult::pass(Check::ClaudeCli, "2.1.258 on PATH."),
+            CheckResult::warn(Check::McpPort, "nothing is listening.", "Pick a free port."),
+            CheckResult::warn(Check::GitHubCli, "gh is not installed.", "Install gh.")
+                .about("rimaia"),
+        ],
+        Vec::new(),
+    );
 
     assert!(!report.is_blocking());
     assert_eq!(report.blocking().count(), 0);
@@ -498,12 +528,15 @@ fn a_warning_does_not_block_the_queue() {
 fn results_are_ordered_by_check_regardless_of_the_order_they_were_collected_in() {
     // The panel must not reshuffle between two presses of Re-check, and `run`
     // collects the per-repository rows last.
-    let report = DoctorReport::new(vec![
-        CheckResult::pass(Check::McpPort, "listening"),
-        CheckResult::pass(Check::GitHubCli, "gh").about("b"),
-        CheckResult::pass(Check::ClaudeCli, "claude"),
-        CheckResult::pass(Check::GitHubCli, "gh").about("a"),
-    ]);
+    let report = DoctorReport::new(
+        vec![
+            CheckResult::pass(Check::McpPort, "listening"),
+            CheckResult::pass(Check::GitHubCli, "gh").about("b"),
+            CheckResult::pass(Check::ClaudeCli, "claude"),
+            CheckResult::pass(Check::GitHubCli, "gh").about("a"),
+        ],
+        Vec::new(),
+    );
 
     let order: Vec<&str> = report
         .results
@@ -555,6 +588,57 @@ async fn a_blocking_report_refuses_to_start_the_queue_and_writes_no_queue_state(
 }
 
 #[tokio::test]
+async fn dismissing_every_row_still_refuses_to_start_the_queue_and_writes_no_queue_state() {
+    // Task 027's load-bearing test, and the reason it is written against
+    // `QueueHandle::start` rather than against the report: dismissal is
+    // presentation, the refusal is the rule (D22 point 1, ADR-0006). If a later
+    // change ever wires the dismissal set into the gate, this is what says so.
+    let harness = TestContext::new().await;
+    let root = TempDir::new().expect("a temporary directory");
+    let paths = AppPaths::new(root.path());
+    paths.create_all().expect("the app directories");
+
+    let runner = RunnerConfig {
+        program: root.path().join("claude-that-is-not-installed"),
+        ..RunnerConfig::default()
+    };
+    let environment = Environment::for_runner(paths.clone(), &runner);
+
+    // Every row on the report, not only the warnings — the point is that even
+    // an unusually determined user cannot dismiss their way past the gate.
+    let report = rimaia_core::doctor::run(&harness.context, &environment)
+        .await
+        .expect("the report must be readable");
+    assert!(
+        report.is_blocking(),
+        "this test needs a blocking environment"
+    );
+    for result in &report.results {
+        rimaia_core::doctor::dismiss(&harness.context, result.dismissal())
+            .await
+            .expect("the dismissal must store");
+    }
+
+    let (queue, _task) = scheduler::build(harness.context.clone(), paths, runner, InFlight::new());
+
+    let refusal = queue
+        .start()
+        .await
+        .expect_err("a blocking report must refuse the start, dismissed or not");
+
+    assert!(
+        refusal.to_string().contains("Install Claude Code"),
+        "the refusal must carry the same remediation it always did: {refusal}"
+    );
+    assert_eq!(
+        scheduler::queue_state(&harness.context.pool)
+            .await
+            .expect("the queue state must be readable"),
+        QueueState::Paused,
+    );
+}
+
+#[tokio::test]
 async fn a_healthy_installation_starts_the_queue_even_with_warnings_outstanding() {
     // The other half of the refusal, and the one that would rot silently: a
     // preflight that blocked on warnings would look identical in the test above.
@@ -597,6 +681,230 @@ async fn a_healthy_installation_starts_the_queue_even_with_warnings_outstanding(
             .expect("the queue state must be readable"),
         QueueState::Running,
     );
+}
+
+// ---------------------------------------------------------------------------
+// Dismissal (task 027)
+// ---------------------------------------------------------------------------
+
+fn warn_about(check: Check, detail: &str) -> CheckResult {
+    CheckResult::warn(check, detail, "do the thing")
+}
+
+#[test]
+fn every_check_serializes_with_the_spelling_its_accessor_returns() {
+    // One string for the stored dismissal, the wire and `Check::as_str` — the
+    // same three-way agreement `db::models` pins for every row enum. It matters
+    // from task 027 onward because a dismissal is *keyed* on the check, so a
+    // value written through serde and compared against `as_str` has to be the
+    // same bytes. `GitHubCli` is the one `rename_all` gets wrong on its own.
+    for check in Check::ALL {
+        assert_eq!(
+            serde_json::to_value(check).expect("a check must serialize"),
+            serde_json::Value::String(check.as_str().to_string()),
+            "{}",
+            check.as_str()
+        );
+        assert_eq!(
+            serde_json::from_value::<Check>(serde_json::Value::String(check.as_str().to_string()))
+                .expect("a check must round-trip"),
+            check
+        );
+    }
+}
+
+#[test]
+fn a_dismissal_marks_the_row_it_names_and_leaves_the_report_otherwise_whole() {
+    let dismissed = warn_about(Check::McpPort, "nothing is listening on 4517.");
+    let report = DoctorReport::new(
+        vec![
+            dismissed.clone(),
+            warn_about(Check::GitHubCli, "gh is not authenticated.").about("rimaia"),
+        ],
+        vec![dismissed.dismissal()],
+    );
+
+    let marked: Vec<(&str, bool)> = report
+        .results
+        .iter()
+        .map(|result| (result.check.as_str(), result.dismissed))
+        .collect();
+    assert_eq!(marked, vec![("github_cli", false), ("mcp_port", true)]);
+    // Marked, never dropped: Settings → Environment has to be able to give it
+    // back, and a row that left the report could not be found again.
+    assert_eq!(report.results.len(), 2);
+}
+
+#[test]
+fn the_same_check_about_a_different_repository_is_a_different_warning() {
+    // Task 027's first acceptance criterion, and the reason the key is the
+    // row's content rather than its check.
+    let first =
+        warn_about(Check::GitHubCli, "gh is not authenticated, used by alpha.").about("alpha");
+    let second =
+        warn_about(Check::GitHubCli, "gh is not authenticated, used by beta.").about("beta");
+
+    let report = DoctorReport::new(vec![first.clone(), second.clone()], vec![first.dismissal()]);
+
+    let marked: Vec<bool> = report
+        .results
+        .iter()
+        .map(|result| result.dismissed)
+        .collect();
+    assert_eq!(marked, vec![true, false]);
+}
+
+#[test]
+fn a_warning_whose_detail_changed_comes_back_without_anything_being_cleared() {
+    // "claude 2.1.200 is older than the pinned minimum" is answered; upgrading
+    // to a version that is *still* too old is a sentence the user has not read.
+    let old = warn_about(Check::ClaudeCli, "claude 2.1.200 is older than 2.1.234.");
+    let new = warn_about(Check::ClaudeCli, "claude 2.1.210 is older than 2.1.234.");
+
+    let report = DoctorReport::new(vec![new], vec![old.dismissal()]);
+
+    assert!(!report.results[0].dismissed);
+    // And the stale dismissal is still on the report, so it is something the
+    // user can find and clear rather than an invisible permanent entry.
+    assert_eq!(report.dismissals, vec![old.dismissal()]);
+}
+
+#[test]
+fn a_failure_is_never_marked_dismissed_however_the_dismissal_was_stored() {
+    // `fail` collapses; it does not disappear. Enforced when the report is
+    // built rather than when the dismissal is written, so a row that was a
+    // warning yesterday and is a failure today is not silently silenced.
+    let row = CheckResult::fail(Check::ClaudeCli, "claude was not found.", "Install it.");
+
+    let report = DoctorReport::new(vec![row.clone()], vec![row.dismissal()]);
+
+    assert!(!report.results[0].dismissed);
+    assert!(report.is_blocking());
+    assert!(report.blocking_summary().contains("Install it."));
+}
+
+#[test]
+fn dismissing_every_row_changes_nothing_about_what_blocks() {
+    // The assertion task 027 calls the one that matters, at the unit level;
+    // `tests/scheduler.rs` carries the same claim against a real queue start.
+    let rows = vec![
+        CheckResult::fail(Check::ClaudeCli, "claude was not found.", "Install it."),
+        warn_about(Check::McpPort, "nothing is listening."),
+    ];
+    let every = rows.iter().map(CheckResult::dismissal).collect();
+
+    let report = DoctorReport::new(rows, every);
+
+    assert!(report.is_blocking());
+    assert_eq!(report.blocking().count(), 1);
+    assert!(report.blocking_summary().contains("Install it."));
+}
+
+#[tokio::test]
+async fn a_dismissal_survives_a_restart_and_a_recheck() {
+    // Stored in `settings`, so "the app was restarted" is just another read.
+    let harness = TestContext::new().await;
+    let row = warn_about(Check::McpPort, "nothing is listening on 4517.");
+
+    let stored = rimaia_core::doctor::dismiss(&harness.context, row.dismissal())
+        .await
+        .expect("the dismissal must store");
+    assert_eq!(stored, vec![row.dismissal()]);
+
+    // A second press of Dismiss is not a second entry.
+    let stored = rimaia_core::doctor::dismiss(&harness.context, row.dismissal())
+        .await
+        .expect("dismissing twice must be idempotent");
+    assert_eq!(stored, vec![row.dismissal()]);
+
+    assert_eq!(
+        rimaia_core::db::settings::doctor_dismissals(&harness.context.pool)
+            .await
+            .expect("a fresh read is what a restart does"),
+        vec![row.dismissal()]
+    );
+
+    let cleared = rimaia_core::doctor::restore(&harness.context, &row.dismissal())
+        .await
+        .expect("the dismissal must clear");
+    assert_eq!(cleared, Vec::new());
+}
+
+#[tokio::test]
+async fn a_hand_edited_dismissals_row_costs_a_warning_rather_than_a_launch() {
+    // ADR-0003 counts hand-editing the file as supported, and `settings` has no
+    // CHECK on `value`. The `run_environment` precedent: warn and fall back.
+    let harness = TestContext::new().await;
+
+    rimaia_core::db::settings::set(&harness.context, "doctor_dismissals", "not json at all")
+        .await
+        .expect("store a typo");
+    assert_eq!(
+        rimaia_core::db::settings::doctor_dismissals(&harness.context.pool)
+            .await
+            .expect("an unreadable value must not fail the read"),
+        Vec::new()
+    );
+
+    // One bad element, the rest intact — the two failures are different sizes.
+    rimaia_core::db::settings::set(
+        &harness.context,
+        "doctor_dismissals",
+        r#"[{"check":"not_a_check","repository":null,"detail":"x"},
+            {"check":"mcp_port","repository":null,"detail":"nothing is listening."}]"#,
+    )
+    .await
+    .expect("store a half-good value");
+
+    let read = rimaia_core::db::settings::doctor_dismissals(&harness.context.pool)
+        .await
+        .expect("one bad element must not lose the rest");
+    assert_eq!(read.len(), 1);
+    assert_eq!(read[0].check, Check::McpPort);
+}
+
+#[tokio::test]
+async fn the_doctor_reads_its_dismissals_from_settings_on_every_run() {
+    let harness = TestContext::new().await;
+    let root = TempDir::new().expect("a temporary directory");
+    let paths = AppPaths::new(root.path());
+    paths.create_all().expect("the app directories");
+    let runner = RunnerConfig {
+        program: healthy_claude(root.path()),
+        ..RunnerConfig::default()
+    };
+    let environment = Environment::for_runner(paths, &runner);
+
+    // The unbound MCP port is a real warning on a report nothing has touched.
+    let before = rimaia_core::doctor::run(&harness.context, &environment)
+        .await
+        .expect("the report must be readable");
+    let mcp_port = before
+        .results
+        .iter()
+        .find(|result| result.check == Check::McpPort)
+        .expect("the MCP port is always checked")
+        .clone();
+    assert_eq!(mcp_port.status, CheckStatus::Warn);
+    assert!(!mcp_port.dismissed);
+
+    rimaia_core::doctor::dismiss(&harness.context, mcp_port.dismissal())
+        .await
+        .expect("the dismissal must store");
+
+    let after = rimaia_core::doctor::run(&harness.context, &environment)
+        .await
+        .expect("the report must be readable");
+    assert!(
+        after
+            .results
+            .iter()
+            .find(|result| result.check == Check::McpPort)
+            .expect("the MCP port is always checked")
+            .dismissed,
+        "a Re-check with the environment unchanged must keep the row dismissed",
+    );
+    assert_eq!(after.dismissals, vec![mcp_port.dismissal()]);
 }
 
 #[tokio::test]

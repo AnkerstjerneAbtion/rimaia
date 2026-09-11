@@ -1,3 +1,17 @@
+//! **Unix only.** The queue's tests drive real runs through
+//! `testing::cli::FakeCli`, which is a `/bin/sh` shebang script — the technique
+//! ADR-0015 and CLAUDE.md both choose over a mocked trait, because what the
+//! runner has to be right about is pipes, argv, stdin and exit codes. Windows
+//! has no shebang, so the file is gated rather than each test: a file that
+//! compiled and ran nothing would report a green Windows job that had checked
+//! none of this.
+//!
+//! Task 022's CI matrix exists to compile the keychain backends and the
+//! environment-building code on all three platforms, and to run the tests that
+//! are honest everywhere — not to pretend a POSIX shell is on a runner that has
+//! none.
+#![cfg(unix)]
+
 //! The sequential run queue, end to end: five tasks worked top-down, a failure
 //! that does not stop the night, a board reordered mid-queue, Pause and Stop,
 //! and what a crash leaves behind (task 009; ADR-0007, ADR-0010, ADR-0011,

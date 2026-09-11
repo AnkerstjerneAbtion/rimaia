@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE repositories\n         SET credential_login = ?1, credential_label = ?2, credential_added_at = ?3\n         WHERE id = ?4",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 4
+    },
+    "nullable": []
+  },
+  "hash": "9cd502d867062847d97e616cf75e9af1f04c86c88bed89873e954d05080d3410"
+}

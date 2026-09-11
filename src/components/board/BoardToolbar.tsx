@@ -11,6 +11,10 @@ interface BoardToolbarProps {
   readonly searchInputRef: RefObject<HTMLInputElement | null>;
   readonly onNewTask: () => void;
   readonly newTaskDisabled: boolean;
+  /** How many cards are hand-picked. `0` means "plan the ready column". */
+  readonly pickedCount: number;
+  readonly onPlan: () => void;
+  readonly planDisabled: boolean;
 }
 
 /**
@@ -33,6 +37,9 @@ export function BoardToolbar({
   searchInputRef,
   onNewTask,
   newTaskDisabled,
+  pickedCount,
+  onPlan,
+  planDisabled,
 }: BoardToolbarProps) {
   return (
     <div className="board-toolbar">
@@ -65,6 +72,24 @@ export function BoardToolbar({
           /
         </kbd>
       </div>
+
+      {/* Task 023's preflight. Scoped by the repository filter already beside
+          it, and by whatever cards are picked — a planner costs cents and the
+          run it checks costs a dollar, so this is the cheapest thing on the
+          toolbar and reads as such: a quiet control, not a second primary. */}
+      <button
+        type="button"
+        className="board-plan-all"
+        onClick={onPlan}
+        disabled={planDisabled}
+        title={
+          pickedCount > 0
+            ? "Plan the selected cards, one at a time"
+            : "Plan every card in the ready column, one at a time"
+        }
+      >
+        {pickedCount > 0 ? `Plan ${pickedCount} selected` : "Plan ready column"}
+      </button>
 
       <button
         type="button"

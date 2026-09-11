@@ -15,12 +15,14 @@ use rimaia_core::doctor;
 use rimaia_core::mcp::{self, McpState, RunHandles};
 use rimaia_core::runner::events::RunTail;
 use rimaia_core::runner::process::DEFAULT_GRACE_PERIOD;
+use rimaia_core::runner::strategy::PlannerAccess;
 use rimaia_core::runner::RunnerConfig;
 use rimaia_core::scheduler::{self, InFlight};
 use rimaia_core::{
     db, startup, worktree, AppPaths, ChangeEvent, Error, ServiceContext, SystemClock,
 };
 use tauri::{Emitter, Manager, RunEvent};
+use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
 use tokio::sync::broadcast;
 use tokio::sync::broadcast::error::RecvError;
 
@@ -41,29 +43,70 @@ pub fn run() {
             // Order matters: the directories have to exist before the log
             // appender opens a file in one of them, and before SQLite is asked
             // to create a database in another.
-            let data_dir = app.path().app_data_dir()?;
+            //
+            // These first two are the only fallible steps in this hook with no
+            // log file to point at — `logging::init` has not run yet, so
+            // `tracing` goes nowhere and there is nothing under `logs/` to
+            // read. That is exactly why they get a dialog: a double-clicked
+            // bundle with no stderr and no log file has no other channel at all.
+            let data_dir = match app.path().app_data_dir() {
+                Ok(dir) => dir,
+                Err(err) => {
+                    report_startup_failure(
+                        app.handle(),
+                        "locate the app data directory",
+                        None,
+                        &err,
+                    );
+                    return Err(err.into());
+                }
+            };
             let paths = AppPaths::new(data_dir);
-            paths.create_all()?;
+            if let Err(err) = paths.create_all() {
+                report_startup_failure(app.handle(), "create the app data directories", None, &err);
+                return Err(err.into());
+            }
 
             logging::init(&paths.logs_dir());
             tracing::info!(data_dir = %paths.data_dir().display(), "rimaia starting");
+            // Captured before `paths` is handed to `AppState` below, because the
+            // last fallible step in this hook — showing the window — comes after
+            // that move and still has to be able to say where to look.
+            let logs_dir = paths.logs_dir();
+            let db_file = paths.db_file();
 
             // Tauri's async runtime is Tokio, so this blocks the setup hook on
             // the runtime that is already there rather than starting a second.
-            let pool = tauri::async_runtime::block_on(db::connect(&paths.db_file()))?;
+            let pool = match tauri::async_runtime::block_on(db::connect(&paths.db_file())) {
+                Ok(pool) => pool,
+                Err(err) => {
+                    log_startup_failure("open the database", &paths.db_file(), &err);
+                    report_startup_failure(
+                        app.handle(),
+                        "open the database",
+                        Some(&logs_dir),
+                        &err,
+                    );
+                    return Err(err.into());
+                }
+            };
 
             // Migrations run before the window is shown, and a failure here
             // aborts startup outright (seam-contract D11): there is no useful UI
-            // to draw over a half-migrated database. "Fails loudly" is
-            // deliberately just process exit + stderr + the rolling log file
-            // `logging::init` already opened above, not a modal — D11 settles
-            // that independently of whether `tauri-plugin-dialog` happens to be
-            // a dependency (it now is, for task 003's folder picker below): a
-            // path that has already failed is not the place to first reach for
-            // it. The double-clicked-`.app`-with-nobody-watching-stderr case is
-            // task 018's preflight doctor, not this hook.
+            // to draw over a half-migrated database. "Fails loudly" is process
+            // exit + stderr + the rolling log file `logging::init` already
+            // opened above — and, since task 025, a native dialog as well, for
+            // the case D11 named and could not solve: a double-clicked `.app`
+            // with nobody reading stderr. See `report_startup_failure` for why
+            // a blocking dialog on this thread does not deadlock.
             if let Err(err) = tauri::async_runtime::block_on(db::migrate(&pool)) {
-                log_startup_failure("migrate", &paths.db_file(), &err);
+                log_startup_failure("apply database migrations", &paths.db_file(), &err);
+                report_startup_failure(
+                    app.handle(),
+                    "apply database migrations",
+                    Some(&logs_dir),
+                    &err,
+                );
                 return Err(err.into());
             }
 
@@ -77,6 +120,12 @@ pub fn run() {
                 Ok(report) => report,
                 Err(err) => {
                     log_startup_failure("startup survey", &paths.db_file(), &err);
+                    report_startup_failure(
+                        app.handle(),
+                        "survey what the last launch left behind",
+                        Some(&logs_dir),
+                        &err,
+                    );
                     return Err(err.into());
                 }
             };
@@ -139,6 +188,12 @@ pub fn run() {
                 Ok(reconciled) => reconciled,
                 Err(err) => {
                     log_startup_failure("reconcile interrupted runs", &paths.db_file(), &err);
+                    report_startup_failure(
+                        app.handle(),
+                        "reconcile runs a previous launch left running",
+                        Some(&logs_dir),
+                        &err,
+                    );
                     return Err(err.into());
                 }
             };
@@ -244,6 +299,16 @@ pub fn run() {
                 // parity is only worth having if both surfaces answer about the
                 // same installation.
                 doctor::Environment::for_runner(paths.clone(), &runner),
+                // Task 023, and ADR-0021's named gap closed: the MCP server can
+                // now start a planner, because everything it needs to — the data
+                // directory, the `claude` the runner would spawn, and the one
+                // in-flight registry every other door takes leases from — is
+                // reachable from `rimaia-core` and handed in here.
+                PlannerAccess {
+                    paths: paths.clone(),
+                    runner: runner.clone(),
+                    in_flight: in_flight.clone(),
+                },
             ));
             let mcp_status = mcp_handle.status();
             match mcp_status.state {
@@ -276,6 +341,7 @@ pub fn run() {
                 runner,
                 run_handles,
                 mcp: std::sync::Mutex::new(mcp_handle),
+                plan_pass: std::sync::Mutex::new(None),
             });
 
             // The window is declared `"visible": false` in `tauri.conf.json` and
@@ -287,14 +353,20 @@ pub fn run() {
             // has to be arranged. Drop the config flag and a failed migration
             // puts the window on screen and then takes it away again; drop this
             // call and a *successful* startup leaves an app with no window.
-            app.get_webview_window(MAIN_WINDOW_LABEL)
-                .ok_or_else(|| {
-                    Error::internal(format!(
-                        "no window labelled `{MAIN_WINDOW_LABEL}` to show — \
-                         tauri.conf.json must declare one"
-                    ))
-                })?
-                .show()?;
+            let shown = match app.get_webview_window(MAIN_WINDOW_LABEL) {
+                Some(window) => window.show().map_err(|error| {
+                    Error::internal(format!("the main window could not be shown: {error}"))
+                }),
+                None => Err(Error::internal(format!(
+                    "no window labelled `{MAIN_WINDOW_LABEL}` to show — \
+                     tauri.conf.json must declare one"
+                ))),
+            };
+            if let Err(err) = shown {
+                log_startup_failure("show the main window", &db_file, &err);
+                report_startup_failure(app.handle(), "show the main window", Some(&logs_dir), &err);
+                return Err(err.into());
+            }
 
             Ok(())
         });
@@ -313,6 +385,9 @@ pub fn run() {
         commands::repositories::set_repository_max_concurrency,
         commands::repositories::remove_repository,
         commands::repositories::get_repository_remote_info,
+        commands::repositories::get_repository_credential_status,
+        commands::repositories::set_repository_credential,
+        commands::repositories::remove_repository_credential,
         commands::tasks::create_task,
         commands::tasks::get_task,
         commands::tasks::list_tasks,
@@ -341,9 +416,13 @@ pub fn run() {
         commands::strategy::accept_task_strategy,
         commands::strategy::clear_task_strategy,
         commands::strategy::plan_task_strategy,
+        commands::strategy::plan_tasks_strategy,
+        commands::strategy::cancel_plan_pass,
         commands::worktree::get_worktree_status,
         commands::worktree::get_diff_summary,
         commands::worktree::reveal_task_worktree,
+        commands::worktree::list_open_in_targets,
+        commands::worktree::open_task_worktree_in,
         commands::worktree::get_worktree_inventory,
         commands::worktree::remove_task_worktree,
         commands::worktree::cleanup_done_worktrees,
@@ -382,8 +461,13 @@ pub fn run() {
         commands::mcp::get_mcp_status,
         commands::mcp::set_mcp_port,
         commands::mcp::test_mcp_connection,
+        commands::analytics::get_analytics,
+        commands::analytics::get_subscription_cost,
+        commands::analytics::set_subscription_cost,
         commands::doctor::run_doctor,
         commands::doctor::dismiss_onboarding,
+        commands::doctor::dismiss_doctor_warning,
+        commands::doctor::restore_doctor_warning,
     ]);
     #[cfg(not(debug_assertions))]
     let builder = builder.invoke_handler(tauri::generate_handler![
@@ -396,6 +480,9 @@ pub fn run() {
         commands::repositories::set_repository_max_concurrency,
         commands::repositories::remove_repository,
         commands::repositories::get_repository_remote_info,
+        commands::repositories::get_repository_credential_status,
+        commands::repositories::set_repository_credential,
+        commands::repositories::remove_repository_credential,
         commands::tasks::create_task,
         commands::tasks::get_task,
         commands::tasks::list_tasks,
@@ -424,9 +511,13 @@ pub fn run() {
         commands::strategy::accept_task_strategy,
         commands::strategy::clear_task_strategy,
         commands::strategy::plan_task_strategy,
+        commands::strategy::plan_tasks_strategy,
+        commands::strategy::cancel_plan_pass,
         commands::worktree::get_worktree_status,
         commands::worktree::get_diff_summary,
         commands::worktree::reveal_task_worktree,
+        commands::worktree::list_open_in_targets,
+        commands::worktree::open_task_worktree_in,
         commands::worktree::get_worktree_inventory,
         commands::worktree::remove_task_worktree,
         commands::worktree::cleanup_done_worktrees,
@@ -465,8 +556,13 @@ pub fn run() {
         commands::mcp::get_mcp_status,
         commands::mcp::set_mcp_port,
         commands::mcp::test_mcp_connection,
+        commands::analytics::get_analytics,
+        commands::analytics::get_subscription_cost,
+        commands::analytics::set_subscription_cost,
         commands::doctor::run_doctor,
         commands::doctor::dismiss_onboarding,
+        commands::doctor::dismiss_doctor_warning,
+        commands::doctor::restore_doctor_warning,
     ]);
 
     // `Builder::run(context)` is exactly `build(context)?.run(|_, _| {})`
@@ -589,6 +685,77 @@ fn log_startup_failure(step: &str, db_file: &Path, error: &impl Display) {
         error = %error,
         "startup failed; the window will not open"
     );
+}
+
+/// Tells the person who double-clicked the bundle why nothing opened (task
+/// 025), then lets the failure propagate exactly as it always has.
+///
+/// Additive. D11's contract is untouched: the window never opens, the process
+/// still exits non-zero through the panic Tauri makes of the returned `Err`,
+/// and the stderr line and the log line are still written before this is
+/// called. What it adds is the one channel a `.app` has — D11 named that case
+/// and could not solve it, and task 018 found the delegation to the doctor was
+/// misplaced, because a doctor is a command inside a *running* app.
+///
+/// # Why `blocking_show()` here does not deadlock
+///
+/// This is the open question D11 left, and the reason task 025 exists rather
+/// than task 018 having guessed. Three facts, and the third is the one that
+/// makes it safe:
+///
+/// 1. **The setup hook runs on the main thread, inside the running event
+///    loop** — `RuntimeRunEvent::Ready`, `tauri-2.11.5/src/app.rs:1424`.
+/// 2. `blocking_show()` hands the dialog to `AppHandle::run_on_main_thread`
+///    and then blocks the calling thread on a channel. That would be a
+///    deadlock if the message had to wait for this thread to return, but
+///    `tauri-runtime-wry`'s `send_user_message` (2.11.4, `src/lib.rs:239`)
+///    runs the closure **inline** when the caller is already the main thread.
+/// 3. The dialog itself never touches this thread or the app's run loop.
+///    `rfd`'s macOS `AsyncMessageDialogImpl` (0.16.0,
+///    `src/backend/macos/message_dialog.rs:172`) branches on whether a *parent
+///    window* was set, and `tauri-plugin-dialog` only sets one if the caller
+///    asks for it — which this does not. With no parent it takes
+///    `utils::async_pop_dialog`, a `CFUserNotificationDisplayAlert` on a
+///    thread of its own. The window Tauri has already built and left hidden is
+///    not involved, which is what makes it visible rather than an invisible
+///    sheet on a window nobody can see.
+///
+/// **Measured, not only reasoned.** Against a `npm run tauri build` bundle on
+/// macOS 15 with a deliberately failing migration: `sample` shows the main
+/// thread parked in `report_startup_failure` → `blocking_show` → `recv`, and a
+/// second thread in `rfd::backend::macos::utils::user_alert::UserAlert::run` →
+/// `CFUserNotificationDisplayAlert` — a real alert on screen, waiting. The
+/// process resumed the moment it was answered and ended non-zero.
+///
+/// Best-effort: a failure to draw a dialog must never replace the failure being
+/// reported, so nothing here propagates and nothing here can panic.
+fn report_startup_failure(
+    app: &tauri::AppHandle,
+    step: &str,
+    logs_dir: Option<&Path>,
+    error: &impl Display,
+) {
+    // Named for a human standing at a machine, not for the log: "apply database
+    // migrations" is the step they will quote when they ask for help.
+    let mut body = format!(
+        "Rimaia could not finish starting up, so it has not opened.\n\n\
+         Failed step: {step}\n\
+         Reason: {error}"
+    );
+    if let Some(logs_dir) = logs_dir {
+        body.push_str(&format!(
+            "\n\nThe full detail is in the log files in:\n{}",
+            logs_dir.display()
+        ));
+    }
+    body.push_str("\n\nRimaia will now quit.");
+
+    app.dialog()
+        .message(body)
+        .title("Rimaia could not start")
+        .kind(MessageDialogKind::Error)
+        .buttons(MessageDialogButtons::Ok)
+        .blocking_show();
 }
 
 /// The ADR-0018 forwarder: the one place a `rimaia-core` `ChangeEvent` becomes

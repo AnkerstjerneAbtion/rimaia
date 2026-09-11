@@ -6,6 +6,7 @@ status: ready
 depends_on: ["003", "008"]
 adrs: ["0020", "0012", "0003"]
 size: L
+landed: "#28"
 ---
 
 # Per-repository git credentials

@@ -818,6 +818,9 @@ fn repository() -> Repository {
         allow_unattended_runs: true,
         max_concurrency: 1,
         created_at: timestamp(),
+        credential_login: None,
+        credential_label: None,
+        credential_added_at: None,
     }
 }
 

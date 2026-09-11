@@ -1,4 +1,25 @@
+# Everything checks out with LF, and the rule is load-bearing rather than
+# cosmetic.
+#
+# `20260820120100_seed_settings.sql` seeds `settings.base_instructions` with a
+# multi-line SQL string literal, and `db::settings::DEFAULT_BASE_INSTRUCTIONS`
+# pins the same four sentences in Rust — asserted **byte for byte**, because
+# "restore the default" in Settings has to produce exactly what a first launch
+# did. A checkout that gave the migration CRLF would seed `\r\n` where the Rust
+# constant has `\n`, and the two would differ in a way nothing but that test can
+# see.
+#
+# Found by task 022's CI matrix, which is the first time this repository's tests
+# ran on Windows at all.
+* text=auto eol=lf
+
 # Recorded CLI fixture streams (crates/core/tests/fixtures/cli/*.jsonl) are byte-for-byte
 # captures of real `claude` CLI output. Line-ending normalization would silently corrupt
 # them, so treat *.jsonl as opaque binary data for git's purposes.
+#
+# **After the wildcard above, not before**: the last matching pattern wins, so a
+# `*` rule placed below this one would take the fixtures back.
 *.jsonl -text
+*.png binary
+*.icns binary
+*.ico binary

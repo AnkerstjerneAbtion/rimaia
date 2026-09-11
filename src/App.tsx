@@ -5,6 +5,7 @@ import { Sidebar } from "./components/Sidebar";
 import { useDoctor } from "./hooks/useDoctor";
 import { getAppInfo } from "./lib/commands";
 import { BoardView } from "./views/BoardView";
+import { AnalyticsView } from "./views/AnalyticsView";
 import { RunsView } from "./views/RunsView";
 import { SettingsView } from "./views/SettingsView";
 import { WelcomeView } from "./views/WelcomeView";
@@ -20,7 +21,7 @@ function App() {
   // the welcome screen replaced it on a first run (seam-contract D22).
   const [view, setView] = useState<View | null>(null);
   const [appVersion, setAppVersion] = useState<string | null>(null);
-  const { report } = useDoctor();
+  const { report, dismiss } = useDoctor();
 
   useEffect(() => {
     getAppInfo().then(
@@ -45,10 +46,15 @@ function App() {
             tonight is worth interrupting the board for now. Suppressed on the
             welcome screen, which reports the same checks per step. */}
         {view !== "welcome" && (
-          <DoctorBanner report={report} onOpenSettings={() => setView("settings")} />
+          <DoctorBanner
+            report={report}
+            onOpenSettings={() => setView("settings")}
+            onDismiss={(result) => void dismiss(result)}
+          />
         )}
         {view === "board" && <BoardView />}
         {view === "runs" && <RunsView />}
+        {view === "analytics" && <AnalyticsView />}
         {view === "settings" && <SettingsView />}
         {view === "welcome" && <WelcomeView onFinish={() => setView("board")} />}
       </main>

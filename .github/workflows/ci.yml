@@ -52,8 +52,20 @@ jobs:
         run: npm run build
 
   core:
-    name: Core (logic)
-    runs-on: ubuntu-latest
+    # Task 022, ADR-0002: "cross-platform is a requirement of this task, not a
+    # follow-up". Compiling the three keychain backends and the environment
+    # building code on all three platforms is the only thing that keeps that
+    # promise true after the next change to it — and `cargo test -p rimaia-core`
+    # has to pass on each of them **with no keychain, no D-Bus and no unlocked
+    # login session**, which is what `testing::credentials::MemoryStore` is for.
+    name: Core (logic) — ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      # One platform failing is a fact worth having about that platform, not a
+      # reason to stop learning about the other two.
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
     steps:
       - uses: actions/checkout@v4
 
@@ -65,14 +77,29 @@ jobs:
       # two places is a version that disagrees with itself.
       - uses: dtolnay/rust-toolchain@stable
 
+      # `keyring`'s `sync-secret-service` backend links libdbus, which is the
+      # one system package this crate needs anywhere — and only on Linux.
+      # ADR-0015's "no display server, WebKit or GTK" is untouched: libdbus is
+      # none of those, and nothing here opens a session bus at build time.
+      - name: Install the D-Bus headers the secret-service backend links
+        if: matrix.os == 'ubuntu-latest'
+        run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev pkg-config
+
       - uses: Swatinem/rust-cache@v2
 
+      # Both are platform-independent, so three copies of the same lint buys
+      # nothing. Linux only, deliberately (task 022's own CI note).
       - name: Format
+        if: matrix.os == 'ubuntu-latest'
         run: cargo fmt --all --check
 
       - name: Clippy
+        if: matrix.os == 'ubuntu-latest'
         run: cargo clippy -p rimaia-core --all-targets -- -D warnings
 
+      # Verbatim what CLAUDE.md documents, on every platform. No feature flag
+      # and no `--no-default-features`: the invocation that diverges from the
+      # documented one is the invocation nobody runs locally.
       - name: Test
         run: cargo test -p rimaia-core
 

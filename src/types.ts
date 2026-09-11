@@ -34,7 +34,7 @@ export interface AppInfo {
  * permanent nav item. Task 001's no-router decision still holds — four views,
  * no URLs, no nesting, nothing to deep-link.
  */
-export type View = "board" | "runs" | "settings" | "welcome";
+export type View = "board" | "runs" | "analytics" | "settings" | "welcome";
 
 // ---------------------------------------------------------------------------
 // The preflight doctor (task 018) — mirrors `rimaia_core::doctor`.
@@ -71,11 +71,212 @@ export interface DoctorCheckResult {
   detail: string;
   /** `null` only on a passing row. */
   remediation: string | null;
+  /**
+   * Whether the user has read this exact row and put it down (task 027).
+   *
+   * Only ever true of a `warn` — a `fail` is not dismissible — and it changes
+   * nothing about whether the queue will start. The row is *marked*, never
+   * dropped, so Settings → Environment can list it and give it back.
+   */
+  dismissed: boolean;
+}
+
+/**
+ * Mirrors `rimaia_core::db::settings::Dismissal` — the three fields that
+ * identify one warning the user has answered.
+ */
+export interface DoctorDismissal {
+  check: DoctorCheck;
+  repository: string | null;
+  detail: string;
 }
 
 /** Mirrors `rimaia_core::doctor::DoctorReport`, in `Check::ALL` order. */
 export interface DoctorReport {
   results: DoctorCheckResult[];
+  /**
+   * Every dismissal on record, matched to a row above or not. A dismissal
+   * outlives the row it answered — the environment was fixed, or the sentence
+   * changed — and one with nothing to mark would otherwise be invisible and
+   * permanent.
+   */
+  dismissals: DoctorDismissal[];
+}
+
+/** Mirrors `rimaia_core::analytics::RunOutcomes`. */
+export interface RunOutcomes {
+  succeeded: number;
+  failed: number;
+  cancelled: number;
+  interrupted: number;
+  running: number;
+}
+
+/** Mirrors `rimaia_core::analytics::DaySpend`. `day` is `YYYY-MM-DD`, UTC. */
+export interface DaySpend {
+  day: string;
+  spendUsd: number;
+  runs: number;
+}
+
+/** Mirrors `rimaia_core::analytics::ModelUse`. */
+export interface ModelUse {
+  model: string;
+  runs: number;
+  spendUsd: number;
+}
+
+/** Mirrors `rimaia_core::analytics::StrategyUse`. */
+export interface StrategyUse {
+  mode: StrategyMode;
+  runs: number;
+  spendUsd: number;
+}
+
+/** Mirrors `rimaia_core::analytics::LongestRun`. */
+export interface LongestRun {
+  runId: string;
+  taskId: string;
+  title: string;
+  seconds: number;
+}
+
+/**
+ * Mirrors `rimaia_core::analytics::Analytics` (task 024, ADR-0022).
+ *
+ * Every figure is computed from `runs` at read time; nothing here is stored.
+ * `runsWithoutCost` and `runsWithoutModel` are what make seam-contract D18
+ * renderable: a period predating the capture columns is *partly unrecorded*,
+ * not cheaper, and the page has to say so rather than quote a smaller total.
+ */
+export interface Analytics {
+  period: { from: string | null; to: string | null };
+  outcomes: RunOutcomes;
+  spendUsd: number;
+  spendByDay: DaySpend[];
+  runsWithoutCost: number;
+  runsWithoutModel: number;
+  tasksAttempted: number;
+  tasksCompleted: number;
+  /** Total spend over completed tasks — failed attempts included. */
+  costPerCompletedTaskUsd: number | null;
+  medianDurationSeconds: number | null;
+  longestRun: LongestRun | null;
+  /** Summed run duration, not wall-clock: parallel runs each contribute. */
+  unattendedHours: number;
+  models: ModelUse[];
+  strategies: StrategyUse[];
+  plannerSpendUsd: number;
+  implementationSpendUsd: number;
+  /** The user's own figure. `null` means the comparison is not drawn — never
+   *  that the subscription is free. */
+  subscriptionMonthlyUsd: number | null;
+}
+
+// ---------------------------------------------------------------------------
+// Per-repository forge credentials (task 022) — mirrors
+// `rimaia_core::repo::CredentialStatus` and `rimaia_core::credentials`.
+// ---------------------------------------------------------------------------
+
+/** Mirrors `rimaia_core::credentials::StoreStatus`. */
+export type CredentialStoreStatus =
+  | { state: "stored" }
+  | { state: "absent" }
+  | { state: "unavailable"; reason: string };
+
+/**
+ * What a repository's credential pane may know — **never the token**.
+ *
+ * `configured` true with a `store` that is not `stored` is the state that
+ * refuses runs: the row says this repository has a token and the keychain does
+ * not have it, and Rimaia will not fall back to the operator's own login.
+ */
+export interface CredentialStatus {
+  configured: boolean;
+  /** `null` for a save `gh` could not verify at the time. */
+  login: string | null;
+  label: string | null;
+  addedAt: string | null;
+  store: CredentialStoreStatus;
+  /** ADR-0020 point 6: a push over SSH uses the machine's own key regardless. */
+  sshRemote: boolean;
+}
+
+// ---------------------------------------------------------------------------
+// Batch strategy planning (task 023) — mirrors
+// `rimaia_core::runner::strategy` and `commands::strategy`'s views.
+// ---------------------------------------------------------------------------
+
+/**
+ * Which cards a pass plans. Every stated field narrows; stating none of them is
+ * refused in Rust rather than taken to mean the whole board.
+ *
+ * Mirrors `PlanSelectionInput`, which converts to core's `PlanSelection` — the
+ * same value the MCP tool's own request converts to, so the board and an agent
+ * cannot disagree about what "the ready column" means.
+ */
+export interface PlanSelectionInput {
+  column?: BoardColumn;
+  repositoryId?: string;
+  taskIds?: string[];
+}
+
+/** What one card came to. Branch on `outcome`. */
+export interface PlanResult {
+  taskId: string;
+  title: string;
+  outcome: "planned" | "skipped" | "failed" | "cancelled";
+  model: string | null;
+  effort: string | null;
+  /** One line saying why the planner chose what it chose. */
+  rationale: string | null;
+  costUsd: number | null;
+  /** `already_proposed`, `not_planned`, `in_flight` or
+   *  `repository_not_opted_in` — set only on a skip. */
+  skip: string | null;
+  /** The sentence that goes with a skip, or a failure's own reason. */
+  reason: string | null;
+}
+
+/** The end-of-pass summary — what is worth reading before going home. */
+export interface PlanPass {
+  results: PlanResult[];
+  planned: number;
+  skipped: number;
+  spentUsd: number;
+  /** Stopped early. Every proposal already written stays written. */
+  cancelled: boolean;
+}
+
+/** One `plan-pass:progress` event: the card that just finished, and the totals. */
+export interface PlanProgress {
+  /** 1-based, because it is rendered as "3 of 10". */
+  completed: number;
+  total: number;
+  spentUsd: number;
+  result: PlanResult;
+}
+
+// ---------------------------------------------------------------------------
+// Open in… (task 026) — mirrors `rimaia_core::openers`.
+// ---------------------------------------------------------------------------
+
+/** Mirrors `rimaia_core::openers::Target`. */
+export type OpenInTarget = "vs_code" | "cursor" | "zed" | "terminal" | "file_manager";
+
+/**
+ * One entry of a card's Open-in menu.
+ *
+ * The list holds **only what is installed on this machine** — an uninstalled
+ * editor is absent, never present-and-disabled. A menu that lists Cursor and
+ * does nothing when clicked is worse than one that never mentions Cursor.
+ *
+ * `label` is sent rather than re-spelled here, for the reason
+ * {@link DoctorCheckResult.label} is.
+ */
+export interface DetectedOpenInTarget {
+  target: OpenInTarget;
+  label: string;
 }
 
 // ---------------------------------------------------------------------------

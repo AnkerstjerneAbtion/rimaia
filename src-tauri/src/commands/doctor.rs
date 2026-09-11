@@ -7,6 +7,7 @@
 //! MCP tool report the same findings while the queue refuses on its own terms —
 //! one rule, one place, both doors (ADR-0006).
 
+use rimaia_core::db::settings::Dismissal;
 use rimaia_core::doctor::{self, DoctorReport};
 use rimaia_core::{db, Result};
 use tauri::State;
@@ -37,4 +38,28 @@ pub async fn run_doctor(state: State<'_, AppState>) -> Result<DoctorReport> {
 #[tauri::command]
 pub async fn dismiss_onboarding(state: State<'_, AppState>) -> Result<()> {
     db::settings::set_onboarding_dismissed(&state.context, true).await
+}
+
+/// Puts one warning down, and answers with the whole set afterwards (task 027).
+///
+/// The set rather than nothing, because the banner has to stop showing that row
+/// *now* and re-running the doctor to find out would be eight subprocesses to
+/// hide one line. Marking is still core's — the next real report arrives
+/// already marked — so the window's own update is an echo of the write rather
+/// than a second opinion about it.
+#[tauri::command]
+pub async fn dismiss_doctor_warning(
+    state: State<'_, AppState>,
+    dismissal: Dismissal,
+) -> Result<Vec<Dismissal>> {
+    doctor::dismiss(&state.context, dismissal).await
+}
+
+/// Brings one back, including a dismissal that no longer matches any row.
+#[tauri::command]
+pub async fn restore_doctor_warning(
+    state: State<'_, AppState>,
+    dismissal: Dismissal,
+) -> Result<Vec<Dismissal>> {
+    doctor::restore(&state.context, &dismissal).await
 }

@@ -3,7 +3,7 @@ use std::sync::{Arc, Mutex};
 
 use rimaia_core::mcp::{McpHandle, RunHandles};
 use rimaia_core::runner::events::RunTail;
-use rimaia_core::runner::RunnerConfig;
+use rimaia_core::runner::{CancelSignal, RunnerConfig};
 use rimaia_core::scheduler::{InFlight, QueueHandle};
 use rimaia_core::{AppPaths, ServiceContext};
 
@@ -95,6 +95,18 @@ pub struct AppState {
     /// the user moves the port, since a listener cannot be rebound. Held only
     /// for the swap and never across an `await`.
     pub mcp: Mutex<McpHandle>,
+    /// The cancel signal of the planning pass currently running, if any (task
+    /// 023).
+    ///
+    /// One at a time, because a pass is sequential by design and two of them
+    /// would be exactly the fan-out task 023's Notes refuse. It lives here
+    /// rather than in `rimaia-core` for the reason `tails` does: it is a
+    /// property of *this window's* button, not of the planning rules, and
+    /// `plan_all` takes the signal as an argument so the MCP surface — which
+    /// has no Cancel button — hands in one nothing holds.
+    ///
+    /// A `Mutex` held only for the swap, never across an `await`.
+    pub plan_pass: Mutex<Option<CancelSignal>>,
 }
 
 /// How many concurrently-tracked runs' tail snapshots [`RunTails`] keeps.

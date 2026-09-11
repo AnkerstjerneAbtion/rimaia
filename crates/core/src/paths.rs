@@ -64,6 +64,35 @@ impl AppPaths {
     }
 }
 
+/// A canonical path the tools this app shells out to will actually accept.
+///
+/// `fs::canonicalize` returns a Windows **extended-length** path — the `\\?\`
+/// prefix — and git for Windows cannot open one. It reports
+/// `could not open '\\?\C:\…\HEAD' for writing: No such file or directory`,
+/// which reads as a missing directory rather than as a path it declined to
+/// parse, so the failure is both fatal and misleading. Every path this app
+/// canonicalizes is eventually handed to `git`, so the prefix is stripped at
+/// the point of canonicalization rather than at each call site.
+///
+/// The prefix buys support for paths longer than 260 characters. Nothing here
+/// needs it: a repository the user picked in a folder dialog and a worktree
+/// under the app data directory are both far short of that, and a path that
+/// genuinely needed it would be one git could not open anyway.
+///
+/// A no-op on every other platform. Found by task 022's CI matrix, which is the
+/// first time this project's tests ran on Windows at all.
+pub fn git_safe(path: PathBuf) -> PathBuf {
+    #[cfg(windows)]
+    {
+        const EXTENDED_LENGTH_PREFIX: &str = r"\\?\";
+        let text = path.to_string_lossy();
+        if let Some(stripped) = text.strip_prefix(EXTENDED_LENGTH_PREFIX) {
+            return PathBuf::from(stripped);
+        }
+    }
+    path
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

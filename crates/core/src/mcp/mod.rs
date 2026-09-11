@@ -66,6 +66,7 @@ use crate::context::ServiceContext;
 use crate::db::MutationSource;
 use crate::doctor;
 use crate::error::{Error, Result};
+use crate::runner::strategy::PlannerAccess;
 
 pub mod error;
 pub mod requests;
@@ -177,6 +178,10 @@ struct RunRoute {
     /// be a second mechanism — and the one that fails open the day someone
     /// gives the field a default.
     doctor: doctor::Environment,
+    /// Carried for the same reason, and with the same refusal (task 023):
+    /// `plan_task_strategy` and `plan_tasks_strategy` are `Refused` to a run,
+    /// and the refusal is `authorize`'s rather than an absent field's.
+    planner: PlannerAccess,
 }
 
 struct Shared {
@@ -208,6 +213,7 @@ pub async fn build(
     port: u16,
     handles: RunHandles,
     doctor: doctor::Environment,
+    planner: PlannerAccess,
 ) -> (McpHandle, McpTask) {
     // Every write this server makes is an agent's, not the user's (ADR-0019).
     // Re-sourced here, once, so no handler has to remember.
@@ -231,7 +237,11 @@ pub async fn build(
                     message: None,
                 },
                 Some(listener),
-                Some(streamable_service(ctx.clone(), doctor.clone())),
+                Some(streamable_service(
+                    ctx.clone(),
+                    doctor.clone(),
+                    planner.clone(),
+                )),
             )
         }
         Err(error) if error.kind() == std::io::ErrorKind::AddrInUse => {
@@ -282,6 +292,7 @@ pub async fn build(
             ctx,
             handles,
             doctor,
+            planner,
         },
     });
 
@@ -393,10 +404,15 @@ async fn dispatch(
         return StatusCode::NOT_FOUND.into_response();
     };
 
-    scoped_service(route.ctx.clone(), route.doctor.clone(), task_id)
-        .handle(request)
-        .await
-        .into_response()
+    scoped_service(
+        route.ctx.clone(),
+        route.doctor.clone(),
+        route.planner.clone(),
+        task_id,
+    )
+    .handle(request)
+    .await
+    .into_response()
 }
 
 /// The tower service [`build`] and the in-process tests mount at [`MCP_PATH`].
@@ -407,17 +423,26 @@ async fn dispatch(
 pub(crate) fn streamable_service(
     ctx: ServiceContext,
     doctor: doctor::Environment,
+    planner: PlannerAccess,
 ) -> StreamableHttpService<RimaiaServer, LocalSessionManager> {
-    service_over(move || RimaiaServer::new(ctx.clone(), doctor.clone()))
+    service_over(move || RimaiaServer::new(ctx.clone(), doctor.clone(), planner.clone()))
 }
 
 /// The same transport, serving one run's scoped view of the same services.
 fn scoped_service(
     ctx: ServiceContext,
     doctor: doctor::Environment,
+    planner: PlannerAccess,
     task_id: String,
 ) -> StreamableHttpService<RimaiaServer, LocalSessionManager> {
-    service_over(move || RimaiaServer::scoped(ctx.clone(), doctor.clone(), task_id.clone()))
+    service_over(move || {
+        RimaiaServer::scoped(
+            ctx.clone(),
+            doctor.clone(),
+            planner.clone(),
+            task_id.clone(),
+        )
+    })
 }
 
 /// One transport configuration, so the operator's door and a run's cannot
@@ -530,6 +555,7 @@ mod tests {
             0,
             RunHandles::default(),
             crate::testing::doctor::environment(),
+            crate::testing::doctor::planner_access(),
         )
         .await;
         assert_eq!(handle.status().state, McpState::Listening);
@@ -591,6 +617,7 @@ mod tests {
             taken,
             handles.clone(),
             crate::testing::doctor::environment(),
+            crate::testing::doctor::planner_access(),
         )
         .await;
 
