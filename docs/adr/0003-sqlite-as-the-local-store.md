@@ -24,8 +24,9 @@ Use **SQLite** as the single source of truth, accessed from Rust via **`sqlx`** 
 async SQLite driver.
 
 - The database file lives in the platform application data directory
-  (`~/Library/Application Support/dev.rimaia.app/rimaia.db` on macOS), not in any user
-  repository.
+  (`~/Library/Application Support/com.rimaia.app/rimaia.db` on macOS), not in any user
+  repository. ADR-0023 lets a development launch point that elsewhere; the default is
+  unchanged.
 - Schema is defined by versioned migration files under `src-tauri/migrations/`, applied at
   startup. Migrations are append-only; never edit a migration that has shipped.
 - Rust owns the schema. The frontend never sees SQL — it calls Tauri commands that return

@@ -18,7 +18,7 @@ use tokio::process::Command;
 
 use crate::db::Repository;
 use crate::error::Result;
-use crate::paths::AppPaths;
+use crate::paths::{AppPaths, DataDirOrigin, DATA_DIR_ENV};
 use crate::repo::{self, GhStatus};
 use crate::runner::probe_cli;
 use crate::runner::process::strip_process_identity;
@@ -312,7 +312,11 @@ pub fn data_directory(paths: &AppPaths) -> CheckResult {
     if let Err(error) = paths.create_all() {
         return CheckResult::fail(
             Check::DataDirectory,
-            format!("{} could not be created: {error}", data_dir.display()),
+            format!(
+                "{} could not be created: {error}{}",
+                data_dir.display(),
+                origin_note(paths)
+            ),
             "Check the directory's permissions, and that its parent exists and Rimaia is allowed \
              to write there, then press Re-check. Nothing — not the database, not a single run \
              log — persists without it.",
@@ -323,7 +327,11 @@ pub fn data_directory(paths: &AppPaths) -> CheckResult {
     if let Err(error) = std::fs::write(&probe, b"rimaia") {
         return CheckResult::fail(
             Check::DataDirectory,
-            format!("{} is not writable: {error}", data_dir.display()),
+            format!(
+                "{} is not writable: {error}{}",
+                data_dir.display(),
+                origin_note(paths)
+            ),
             "Check the directory's permissions, and on macOS that Rimaia has access to the folder \
              it is in, then press Re-check. Nothing — not the database, not a single run log — \
              persists without it.",
@@ -335,8 +343,23 @@ pub fn data_directory(paths: &AppPaths) -> CheckResult {
 
     CheckResult::pass(
         Check::DataDirectory,
-        format!("{} is writable.", data_dir.display()),
+        format!("{} is writable.{}", data_dir.display(), origin_note(paths)),
     )
+}
+
+/// What to append to a data-directory row so an override never reads as the
+/// platform default.
+///
+/// Empty for the platform directory — the path is already in the sentence and
+/// the ordinary case does not need explaining. Present whenever
+/// [`DATA_DIR_ENV`] chose the path, because ADR-0023's whole risk is a launch
+/// quietly using a database nobody meant to open: a developer reading the wrong
+/// board, or an operator whose real one looks empty.
+fn origin_note(paths: &AppPaths) -> String {
+    match paths.origin() {
+        DataDirOrigin::Platform => String::new(),
+        DataDirOrigin::Environment => format!(" Set by {DATA_DIR_ENV}, not the default."),
+    }
 }
 
 /// Room for tonight's worktrees and transcripts.

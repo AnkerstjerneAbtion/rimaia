@@ -44,8 +44,8 @@ pub fn run() {
             // appender opens a file in one of them, and before SQLite is asked
             // to create a database in another.
             //
-            // These first two are the only fallible steps in this hook with no
-            // log file to point at — `logging::init` has not run yet, so
+            // These first three are the only fallible steps in this hook with
+            // no log file to point at — `logging::init` has not run yet, so
             // `tracing` goes nowhere and there is nothing under `logs/` to
             // read. That is exactly why they get a dialog: a double-clicked
             // bundle with no stderr and no log file has no other channel at all.
@@ -61,7 +61,27 @@ pub fn run() {
                     return Err(err.into());
                 }
             };
-            let paths = AppPaths::new(data_dir);
+            // ADR-0023: `RIMAIA_DATA_DIR` wins when it is set, so a branch
+            // carrying an unmerged migration can be run without writing it into
+            // the database every other worktree reads. Between locating the
+            // platform directory and creating anything, because a refused value
+            // must not leave a directory behind for the next launch to find and
+            // trust.
+            let paths = match AppPaths::resolve(
+                std::env::var_os(rimaia_core::paths::DATA_DIR_ENV).as_deref(),
+                data_dir,
+            ) {
+                Ok(paths) => paths,
+                Err(err) => {
+                    report_startup_failure(
+                        app.handle(),
+                        "resolve the app data directory",
+                        None,
+                        &err,
+                    );
+                    return Err(err.into());
+                }
+            };
             if let Err(err) = paths.create_all() {
                 report_startup_failure(app.handle(), "create the app data directories", None, &err);
                 return Err(err.into());

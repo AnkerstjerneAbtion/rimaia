@@ -35,10 +35,11 @@ reviewable in the app afterwards.
 | 22 | [028](028-let-a-run-see-the-ui-it-changed.md) | Let a run see the UI it changed | v0.3 | 005 | — |
 | 23 | [018](018-preflight-doctor-and-packaging.md) | Preflight doctor and packaging | v0.3 | 008 | #17 |
 | 24 | [025](025-startup-failure-dialog.md) | A startup failure a double-clicked bundle can see | v0.3 | 018 | [#28](https://github.com/AnkerstjerneAbtion/rimaia/pull/28) |
-| 25 | [027](027-dismissable-doctor-warnings.md) | A doctor warning the user can put down | v0.3 | 018 | [#28](https://github.com/AnkerstjerneAbtion/rimaia/pull/28) |
-| 26 | [022](022-per-repository-git-credentials.md) | Per-repository git credentials | v0.3 | 003, 008 | [#28](https://github.com/AnkerstjerneAbtion/rimaia/pull/28) |
-| 27 | [021](021-review-and-fix-loop.md) | Review-and-fix loop | v0.4 | 015, 017, 020 | — |
-| 28 | [024](024-analytics.md) | Analytics — what the queue has actually done | v0.4 | 015 | [#28](https://github.com/AnkerstjerneAbtion/rimaia/pull/28) |
+| 25 | [029](029-a-development-database-that-is-not-the-users.md) | A development database that is not the user's | v0.3 | 018 | [#29](https://github.com/AnkerstjerneAbtion/rimaia/pull/29) |
+| 26 | [027](027-dismissable-doctor-warnings.md) | A doctor warning the user can put down | v0.3 | 018 | [#28](https://github.com/AnkerstjerneAbtion/rimaia/pull/28) |
+| 27 | [022](022-per-repository-git-credentials.md) | Per-repository git credentials | v0.3 | 003, 008 | [#28](https://github.com/AnkerstjerneAbtion/rimaia/pull/28) |
+| 28 | [021](021-review-and-fix-loop.md) | Review-and-fix loop | v0.4 | 015, 017, 020 | — |
+| 29 | [024](024-analytics.md) | Analytics — what the queue has actually done | v0.4 | 015 | [#28](https://github.com/AnkerstjerneAbtion/rimaia/pull/28) |
 
 ## Before task 001
 

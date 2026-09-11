@@ -163,6 +163,12 @@ Rules:
 - Unattended runs use `--permission-mode bypassPermissions` behind a per-repository
   opt-in. Do not weaken or widen this without amending ADR-0012.
 - Worktrees live under the app data directory, never inside a repository.
+- **Run the app from a worktree with `RIMAIA_DATA_DIR` set to a scratch directory** —
+  `RIMAIA_DATA_DIR=/tmp/rimaia-<branch> npm run tauri dev`. Every worktree otherwise resolves
+  the *same* data directory, so a branch carrying an unmerged migration writes it into the one
+  database every other branch reads, and every branch without that file then refuses to start
+  (ADR-0023). It must be an absolute path; a relative one or an unexpanded `~` is refused at
+  startup rather than guessed at.
 - Board `position` is a fractional float; ordering is the priority mechanism. There is no
   separate priority field (ADR-0007).
 - A dependency is satisfied when its run **succeeds**, not when a human marks it done
