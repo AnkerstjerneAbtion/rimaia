@@ -135,9 +135,7 @@
   margin: 0;
   font-size: var(--font-size-xs);
   font-weight: var(--font-weight-semibold);
-  letter-spacing: var(--letter-spacing-wide);
   line-height: var(--line-height-tight);
-  text-transform: uppercase;
   color: var(--text-2);
 }
 
@@ -154,8 +152,6 @@
   border-radius: var(--radius-full);
   font-size: var(--font-size-sm);
   font-weight: var(--font-weight-semibold);
-  letter-spacing: 0.04em;
-  text-transform: uppercase;
   white-space: nowrap;
 }
 
@@ -242,8 +238,6 @@
 .queue-metric dt {
   font-size: var(--font-size-xs);
   font-weight: var(--font-weight-semibold);
-  letter-spacing: var(--letter-spacing-wide);
-  text-transform: uppercase;
   color: var(--text-2);
   white-space: nowrap;
 }
@@ -330,10 +324,11 @@
    2. Active runs
    --------------------------------------------------------------------------- */
 
-/* Every band below the console gets the same head: an uppercase eyebrow and a
-   tabular count, the instrument readout `.board-column-header` already uses.
-   Three of these down the page is what makes the view scan as bands rather
-   than as a stack of panels. */
+/* Every band below the console gets the same head: a label and a tabular
+   count, the same shape `.board-column-header` uses. Three of these down the
+   page is what makes the view scan as bands rather than as a stack of panels.
+   Sentence case since ADR-0024 — the eyebrow treatment was the loudest thing
+   on the page and said nothing the words did not. */
 .runs-section-head {
   display: flex;
   align-items: baseline;
@@ -345,9 +340,7 @@
   margin: 0;
   font-size: var(--font-size-xs);
   font-weight: var(--font-weight-semibold);
-  letter-spacing: var(--letter-spacing-wide);
   line-height: var(--line-height-tight);
-  text-transform: uppercase;
   color: var(--text-2);
 }
 
@@ -377,12 +370,6 @@
    position"; a grid answers it more directly than tabs do — nothing is hidden,
    so switching costs no clicks, and no card ever unmounts, so each keeps its
    own scroll offset by construction. See this file's own width arithmetic. */
-/* The shared `.empty-state` centres itself 12vh down the page, which is right
-   for a whole view and wrong inside a band that has a heading above it and two
-   more bands underneath. */
-.runs-live .empty-state {
-  margin: var(--space-5) auto;
-}
 
 .active-runs-list {
   display: grid;
@@ -475,8 +462,6 @@
   color: var(--status-running);
   font-size: var(--font-size-xs);
   font-weight: var(--font-weight-semibold);
-  letter-spacing: var(--letter-spacing-wide);
-  text-transform: uppercase;
 }
 
 .active-run-repo {
@@ -527,8 +512,6 @@
 .active-run-metric dt {
   font-size: var(--font-size-xs);
   font-weight: var(--font-weight-semibold);
-  letter-spacing: var(--letter-spacing-wide);
-  text-transform: uppercase;
   color: var(--text-2);
 }
 
@@ -591,8 +574,6 @@
   margin: 0;
   font-size: var(--font-size-xs);
   font-weight: var(--font-weight-semibold);
-  letter-spacing: var(--letter-spacing-wide);
-  text-transform: uppercase;
   color: var(--text-2);
 }
 
@@ -662,6 +643,15 @@
   border-radius: var(--radius-md);
   background: var(--surface-1);
   box-shadow: var(--shadow-sm);
+}
+
+/* The arithmetic behind the count in the heading — how many of the rows below
+   will actually start. A note, not a headline: it explains the list, so it must
+   not out-shout the list it explains. */
+.queue-lane-note {
+  margin: 0 0 var(--space-3);
+  font-size: var(--font-size-sm);
+  color: var(--text-2);
 }
 
 .queue-lane .muted {
@@ -826,9 +816,9 @@
   box-shadow: var(--shadow-sm);
 }
 
-/* The filter bar, built like `.board-toolbar`: uppercase eyebrows on controls
-   that are permanent furniture rather than content, which is what buys the row
-   its density back. */
+/* The filter bar, built like `.board-toolbar`: quiet labels on controls that
+   are permanent furniture rather than content, so the row recedes behind the
+   history it is filtering. */
 .runs-history-filters {
   display: flex;
   align-items: flex-end;
@@ -846,8 +836,6 @@
   gap: var(--space-1);
   font-size: var(--font-size-xs);
   font-weight: var(--font-weight-semibold);
-  letter-spacing: var(--letter-spacing-wide);
-  text-transform: uppercase;
   color: var(--text-2);
 }
 
@@ -892,8 +880,6 @@
   color: var(--text-2);
   font-size: var(--font-size-xs);
   font-weight: var(--font-weight-semibold);
-  letter-spacing: var(--letter-spacing-wide);
-  text-transform: uppercase;
   text-align: left;
   white-space: nowrap;
 }
@@ -1075,8 +1061,6 @@
   margin: 0 0 var(--space-3);
   font-size: var(--font-size-xs);
   font-weight: var(--font-weight-semibold);
-  letter-spacing: var(--letter-spacing-wide);
-  text-transform: uppercase;
   color: var(--text-2);
 }
 
@@ -1105,8 +1089,6 @@
 .run-detail-readout-label {
   font-size: var(--font-size-xs);
   font-weight: var(--font-weight-semibold);
-  letter-spacing: var(--letter-spacing-wide);
-  text-transform: uppercase;
   color: var(--text-2);
 }
 
@@ -1284,16 +1266,15 @@
   line-height: var(--line-height-relaxed);
 }
 
-/* The speaker, in its own gutter and never repeated inside the text: five rems
-   of uppercase eyebrow is what lets a reader skip every tool result in a
-   thousand-entry transcript without reading one. */
+/* The speaker, in its own gutter and never repeated inside the text: a fixed
+   five-rem column is what lets a reader skip every tool result in a
+   thousand-entry transcript without reading one. The gutter does that work,
+   not the casing — ADR-0024 took the uppercase off. */
 .transcript-role {
   grid-column: 1;
   font-size: var(--font-size-xs);
   font-weight: var(--font-weight-semibold);
-  letter-spacing: var(--letter-spacing-wide);
   line-height: var(--line-height-relaxed);
-  text-transform: uppercase;
   color: var(--text-2);
   white-space: nowrap;
 }

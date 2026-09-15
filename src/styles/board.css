@@ -1,53 +1,37 @@
 /* Board view — the control surface. Four columns, cards, drag state and the
    task detail drawer.
 
-   Written against THE DIRECTION at the top of `src/styles.css`, and the four
-   sentences there are load-bearing here rather than decorative:
+   Written against THE DIRECTION at the top of `src/styles.css`, rewritten with
+   it by ADR-0024. What that changed here:
 
-   Dark-first.   The token blocks below now declare **dark** in `:root` and
-     override for light in `@media (prefers-color-scheme: light)`, the same
-     way `styles.css` does. They used to be the other way round, which meant
-     the scheme this app is designed for was the one expressed as a patch.
-     Every value is the one it already was; only which block holds it moved.
-   Depth, not outlines.  `.board-column`, `.task-card` and `.task-detail-panel`
-     carry no `border`. A column is a `--surface-1` header over a `--surface-0`
-     tray; a card is `--surface-1` again, so it reads as sitting *in* the
-     tray; the drawer is `--surface-1` + `--shadow-lg` over the columns.
-   Typography carries the hierarchy.  A card is title-first: `--font-size-md`
-     semibold `--text-1`, with repository, time and counts a size and a text
-     step down. A column header is an instrument readout — an uppercase
-     `--font-size-xs` eyebrow beside a `--font-size-lg` tabular count — not a
-     row of body text.
-   State is the product.  Every run-state badge is `.status-dot` + a word, and
-     the card behind it carries a `--card-rail` in the matching `--status-*`
-     colour plus a wash of it, so a running card is legible as running from
-     the far side of the column without reading the badge at all.
+   Sentence case.  Column headings and the toolbar label were uppercase
+     `--font-size-xs` eyebrows; the heading is now `--font-size-md` in
+     `--text-1`, at its natural case, beside the same tabular count.
+   State is a dot and a word.  `.run-badge` was a filled pill graded in three
+     emphasis tiers. It is now a dot in the status colour plus the word, with
+     no fill and no border — the emphasis tiers existed to stop four saturated
+     grounds fighting in one column, and with the fills gone there is nothing
+     to grade. `failed`/`interrupted` keep the one emphasis left, the label in
+     `--status-failed`, because ADR-0007 wants a failure to interrupt the
+     review. `cancelled` keeps its hollow dot, which reads as settled in
+     greyscale too.
+   The card lost its rail and its wash.  Both restated what the badge already
+     says in words, and the wash made a column of failures read as an incident.
+     `running` is the exception and keeps a faint accent surface: it is the one
+     state that changes while being looked at, and there are never many.
+   A repository is a name.  `.task-card-repo` was monospace; ADR-0024 point 2
+     reserves that for text you would copy.
+   Depth, not outlines.  Unchanged, and still true: `.board-column`,
+     `.task-card` and `.task-detail-panel` carry no `border`. A column is a
+     `--surface-1` header over a `--surface-0` tray; a card is `--surface-1`
+     again, so it reads as sitting *in* the tray; the drawer is `--surface-1`
+     + `--shadow-lg` over the columns.
 
-   ## Badges without hue
-
-   Eight states is a lot of colour in one column, so the badges are graded by
-   **emphasis** rather than by hue, in three tiers that survive greyscale:
-
-     filled + outlined   `failed` / `interrupted` — the only badges with a
-                         border. ADR-0007's failure rule wants these to
-                         interrupt a morning review.
-     washed              `running`, `blocked`, `waiting_retry` — a tinted
-                         background, no border. Something is in motion or
-                         will be.
-     bare                `queued`, `cancelled` — no background at all;
-                         `cancelled` adds a dashed outline and a hollow dot,
-                         because it is the one settled/inactive state.
-
-   Two more non-hue channels ride along: every state keeps its own **word**,
-   always rendered and never replaced by a bare dot (D9 — `failed` and
-   `interrupted` share a colour, and the word is what tells them apart), and
-   only `running` **moves** (`.status-dot-live`).
-
-   Badge colours stay in this file's own `:root` blocks rather than in
-   `src/styles.css` — a second `:root` in an imported stylesheet is not a
-   second root, it adds properties to the same element, and `runs.css` already
-   reads `--badge-running-*`/`--badge-queued-*` from here. No new token was
-   needed in `styles.css` for any of the above. */
+   The `--badge-*` and `--exit-*` pairs below are no longer what `.run-badge`
+   is built from, and are kept because `runs.css`'s queue chips and this
+   file's own exit summary still read them. They stay in this file's `:root`
+   rather than moving to `src/styles.css` — a second `:root` in an imported
+   stylesheet is not a second root, it adds properties to the same element. */
 
 :root {
   /* Run-state badge pairs (dark, primary). The bg is a wash the matching
@@ -179,8 +163,6 @@
 .board-toolbar-label {
   font-size: var(--font-size-xs);
   font-weight: var(--font-weight-semibold);
-  letter-spacing: var(--letter-spacing-wide);
-  text-transform: uppercase;
   color: var(--text-2);
 }
 
@@ -339,14 +321,14 @@
   gap: var(--space-2);
 }
 
+/* Sentence case at a readable size, so the heading is the heading rather than
+   an eyebrow above the count (ADR-0024 point 1). */
 .board-column-header h3 {
   margin: 0;
-  font-size: var(--font-size-xs);
+  font-size: var(--font-size-md);
   font-weight: var(--font-weight-semibold);
-  letter-spacing: var(--letter-spacing-wide);
   line-height: var(--line-height-tight);
-  text-transform: uppercase;
-  color: var(--text-2);
+  color: var(--text-1);
 }
 
 /* The count is the column's readout, so it gets `--font-size-lg` and tabular
@@ -449,25 +431,23 @@
   color: var(--text-1);
 }
 
-/* Cards — the densest surface in the app, and the one most looked at.
-   Reading order top to bottom: state (badge, plus the rail down the left
-   edge), title, why it is stuck, what it would run as, when it last moved,
-   what it would do next. */
+/* Cards — the surface most looked at, so the one that most repays being
+   quiet. Reading order top to bottom: repository and state, title, why it is
+   stuck, what it would run as, when it last moved, what it would do next.
+
+   No rail and no background wash. Both encoded the same fact the state line
+   already says in words, and the wash in particular made a column of failures
+   read as an incident rather than as a morning's review (ADR-0024 point 3). */
 
 .task-card {
-  /* Set per run state below; `transparent` is the resting/idle card. */
-  --card-rail: transparent;
-
   display: flex;
   flex-direction: column;
   gap: var(--space-2);
   width: 100%;
-  padding: var(--space-2) var(--space-3);
+  padding: var(--space-3) var(--space-4);
   background: var(--surface-1);
-  border-radius: var(--radius-sm);
-  /* The rail is an inset shadow rather than a border-left so it follows the
-     radius and costs the content no width. */
-  box-shadow: inset 3px 0 0 var(--card-rail), var(--shadow-sm);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-sm);
   cursor: grab;
   text-align: left;
   touch-action: none; /* dnd-kit's pointer sensor owns touch gestures here */
@@ -482,49 +462,22 @@
   }
 }
 
-/* A card the eye should land on: running and failed get the rail *and* a wash
-   of the same accent, so they are separable from a resting card without
-   reading anything. The other states carry the rail alone — eight washed
-   states in one column would be noise, which is the failure mode the badge
-   tiers above are also written against. */
+/* The one state that still earns a surface of its own. A run happening *now*
+   is the only thing on the board that changes while being looked at, and it
+   is at most a handful of cards — the argument against washing the other
+   seven states does not apply to it. */
 .task-card[data-run-state="running"] {
-  --card-rail: var(--status-running);
-  background: color-mix(in srgb, var(--status-running) 7%, var(--surface-1));
+  background: color-mix(in srgb, var(--accent) 6%, var(--surface-1));
 }
 
-.task-card[data-run-state="queued"] {
-  --card-rail: var(--status-queued);
-}
-
-.task-card[data-run-state="blocked"] {
-  --card-rail: var(--status-blocked);
-}
-
-.task-card[data-run-state="waiting_retry"] {
-  --card-rail: var(--status-waiting-retry);
-}
-
-.task-card[data-run-state="cancelled"] {
-  --card-rail: var(--text-3);
-}
-
-.task-card[data-run-state="failed"],
-.task-card[data-run-state="interrupted"] {
-  --card-rail: var(--status-failed);
-  background: color-mix(in srgb, var(--status-failed) 7%, var(--surface-1));
-}
-
-/* Declared after the run-state variants above, and at the same specificity, so
-   a hovered or selected running card actually changes surface rather than
-   losing the cascade to its own state tint. */
 .task-card:hover {
   background: var(--surface-2);
-  box-shadow: inset 3px 0 0 var(--card-rail), var(--shadow-md);
+  box-shadow: var(--shadow-md);
 }
 
 .task-card:focus-visible {
   outline: 2px solid var(--accent);
-  outline-offset: 1px;
+  outline-offset: 2px;
 }
 
 .task-card-dragging {
@@ -533,8 +486,7 @@
 
 .task-card.task-card-selected {
   background: var(--accent-soft);
-  box-shadow: inset 3px 0 0 var(--card-rail), 0 0 0 1px var(--accent),
-    var(--shadow-md);
+  box-shadow: 0 0 0 1px var(--accent), var(--shadow-md);
 }
 
 /* The floating clone. It must not read differently from the card it left
@@ -542,7 +494,7 @@
    the elevation that says it is off the page. */
 .task-card.task-card-overlay {
   cursor: grabbing;
-  box-shadow: inset 3px 0 0 var(--card-rail), var(--shadow-lg);
+  box-shadow: var(--shadow-lg);
   transform: rotate(-0.6deg);
 }
 
@@ -552,9 +504,8 @@
   }
 }
 
-/* The eyebrow: state on the right, where the badge is the widest and most
-   colourful thing on the card, and the repository on the left as a quiet
-   monospace tag. */
+/* The eyebrow: repository on the left, state on the right. Both are quiet -
+   the title is what the eye should land on. */
 .task-card-head {
   display: flex;
   align-items: center;
@@ -563,11 +514,11 @@
   min-height: 1.1rem;
 }
 
+/* Not monospace. A repository is a name, not a command (ADR-0024 point 2). */
 .task-card-repo {
   min-width: 0;
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
   font-size: var(--font-size-xs);
-  color: var(--text-2);
+  color: var(--text-3);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -600,16 +551,18 @@
   gap: var(--space-1);
 }
 
+/* What a run would spawn with. A chip rather than a box: the outline it used
+   to carry put a second rectangle inside a card that is already a rectangle,
+   and this is reference information, not a control. */
 .task-card-strategy-badge {
   display: inline-flex;
   align-items: center;
-  padding: 0 var(--space-1);
-  border-radius: var(--radius-sm);
+  padding: 0.0625rem var(--space-2);
+  border-radius: var(--radius-full);
   background: var(--surface-2);
-  box-shadow: inset 0 0 0 1px var(--border-1);
   color: var(--text-2);
   font-size: var(--font-size-xs);
-  font-weight: var(--font-weight-medium);
+  font-weight: var(--font-weight-regular);
 }
 
 /* An inherited value is still what runs, but it is not a decision anybody
@@ -622,16 +575,18 @@
   font-weight: var(--font-weight-regular);
 }
 
+/* A planner proposal waiting on the user — the one chip that is asking for
+   something, so it keeps the accent while losing the outline that made it
+   compete with the title above it. */
 .task-card-strategy-proposal {
   display: inline-flex;
   align-items: center;
-  padding: 0 var(--space-1);
-  border-radius: var(--radius-sm);
+  padding: 0.0625rem var(--space-2);
+  border-radius: var(--radius-full);
   background: var(--accent-soft);
-  box-shadow: inset 0 0 0 1px var(--accent);
   color: var(--accent);
   font-size: var(--font-size-xs);
-  font-weight: var(--font-weight-semibold);
+  font-weight: var(--font-weight-medium);
 }
 
 .task-card-footer {
@@ -675,26 +630,23 @@
    the bare tier, where the word has to clear AA against the card surface and
    the dot only has to be findable. */
 
+/* State on a card: a dot and a word, never a filled pill (ADR-0024 point 3).
+   The fills these used to carry put up to four saturated grounds in a single
+   column; the dot is the fast channel and the word is the reliable one, so
+   dropping the fill costs nothing a reader was using. */
 .run-badge {
   --badge-tone: var(--status-queued);
 
   display: inline-flex;
   align-items: center;
-  gap: var(--space-1);
+  gap: var(--space-2);
   flex: none;
-  padding: 0.05rem var(--space-2) 0.05rem var(--space-1);
-  border: 1px solid transparent;
-  border-radius: var(--radius-full);
   color: var(--text-2);
   font-size: var(--font-size-xs);
-  font-weight: var(--font-weight-semibold);
-  letter-spacing: 0.04em;
-  text-transform: uppercase;
+  font-weight: var(--font-weight-medium);
   white-space: nowrap;
 }
 
-/* Smaller than the 0.5rem `.status-dot` default: inside a pill this size a
-   half-rem dot reads as a bullet rather than as an indicator. */
 .run-badge .status-dot {
   width: 0.4375rem;
   height: 0.4375rem;
@@ -703,47 +655,37 @@
 
 .run-badge-running {
   --badge-tone: var(--status-running);
-  background: var(--badge-running-bg);
-  color: var(--badge-running-text);
+  color: var(--text-1);
 }
 
 .run-badge-queued {
   --badge-tone: var(--status-queued);
-  color: var(--text-2);
 }
 
 .run-badge-blocked {
   --badge-tone: var(--status-blocked);
-  background: var(--badge-blocked-bg);
-  color: var(--badge-blocked-text);
 }
 
 .run-badge-waiting_retry {
   --badge-tone: var(--status-waiting-retry);
-  background: var(--badge-waiting-retry-bg);
-  color: var(--badge-waiting-retry-text);
 }
 
-/* The only badges with a border, and the only ones on a fully saturated
-   ground: ADR-0007's failure rule is that a failure interrupts the review.
-   `failed` and `interrupted` share the treatment deliberately — same
-   severity, and per D9 the word is what tells them apart. */
+/* ADR-0007's failure rule is that a failure interrupts the review, so these
+   two keep the one emphasis still available once the fills are gone: the
+   label in the status colour rather than in `--text-2`. `failed` and
+   `interrupted` share it deliberately — same severity, and per D9 the word is
+   what tells them apart. */
 .run-badge-failed,
 .run-badge-interrupted {
   --badge-tone: var(--status-failed);
-  background: var(--danger-bg);
-  border-color: var(--danger-border);
-  color: var(--danger-text);
+  color: var(--status-failed);
 }
 
-/* The settled state: no fill, a dashed edge and a hollow dot. Its colours are
-   otherwise near-identical to `queued`'s, and "outlined, not filled" reads as
-   inactive in greyscale the same way it does in colour. */
+/* The settled state: a hollow dot, which reads as inactive in greyscale the
+   same way it does in colour. */
 .run-badge-cancelled {
-  --badge-tone: var(--text-2);
-  border-color: var(--border-2);
-  border-style: dashed;
-  color: var(--text-2);
+  --badge-tone: var(--text-3);
+  color: var(--text-3);
 }
 
 .run-badge-cancelled .status-dot {
@@ -751,9 +693,6 @@
   box-shadow: inset 0 0 0 1px currentColor;
 }
 
-/* The resume time on a `waiting_retry` badge (task 014). Lighter than the
-   label it follows, because the badge answers "what state" first and "when"
-   second — and the two have to stay one pill so they wrap together. */
 .run-badge-detail {
   font-weight: var(--font-weight-medium);
   letter-spacing: 0;
@@ -779,18 +718,82 @@
    every card in four columns was the single loudest thing on the board and
    said nothing about the task it sat on. */
 
+/* The action row is collapsed until the card is hovered or focused (ADR-0024
+   point 5). Two permanent buttons under every card is a toolbar pretending to
+   be content, and on a full board it was forty of them.
+
+   Collapsed with `grid-template-rows: 0fr -> 1fr` rather than `display: none`,
+   because the controls have to stay focusable: tabbing into one raises
+   `:focus-within`, which opens the row in the same frame it is painted. A
+   `display: none` row is unreachable by keyboard, and a row left at full
+   height but transparent leaves a dead strip under every card — which is what
+   the first attempt at this did, and it read as a rendering bug.
+
+   `min-height: 0` on the inner track is what lets the grid child actually
+   collapse; without it the row's content sets a floor and nothing moves. */
 .task-card-actions {
+  display: grid;
+  grid-template-rows: 0fr;
+  transition: grid-template-rows var(--duration-fast) var(--ease-standard);
+}
+
+.task-card-actions > * {
   display: flex;
   align-items: center;
   justify-content: flex-end;
   gap: var(--space-2);
+  min-height: 0;
+  overflow: hidden;
+  opacity: 0;
+  transition: opacity var(--duration-fast) var(--ease-standard);
+}
+
+/* A *checked* pick box is state, not an action — collapsing it would hide the
+   hand-picked set task 023 exists to show. `:has()` keeps that in CSS rather
+   than threading another class down from `TaskCard`. */
+.task-card:hover .task-card-actions,
+.task-card:focus-within .task-card-actions,
+.task-card-selected .task-card-actions,
+.task-card-actions:has(input:checked) {
+  grid-template-rows: 1fr;
+}
+
+.task-card:hover .task-card-actions > *,
+.task-card:focus-within .task-card-actions > *,
+.task-card-selected .task-card-actions > *,
+.task-card-actions:has(input:checked) > * {
+  opacity: 1;
+  overflow: visible;
+}
+
+/* A touch device has no hover to reveal with, and a coarse pointer cannot
+   reliably hit a control that only appears mid-gesture. */
+@media (hover: none) {
+  .task-card-actions {
+    grid-template-rows: 1fr;
+  }
+
+  .task-card-actions > * {
+    opacity: 1;
+    overflow: visible;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .task-card-actions,
+  .task-card-actions > * {
+    transition: none;
+  }
 }
 
 /* ADR-0012's whole posture depends on the queue's reasoning being visible
    rather than silent, so the position is a readout, not a caption: tabular
    figures, and the same weight as the button beside it. */
+/* Its own line since ADR-0024 moved it out of the collapsing action row, so
+   it no longer needs the `margin-right: auto` that pushed it away from the
+   buttons it used to share a row with. */
 .task-card-queue-position {
-  margin-right: auto;
+  margin: 0;
   font-size: var(--font-size-xs);
   font-weight: var(--font-weight-medium);
   color: var(--text-2);
@@ -988,8 +991,6 @@
 .task-detail-readout-label {
   font-size: var(--font-size-xs);
   font-weight: var(--font-weight-semibold);
-  letter-spacing: var(--letter-spacing-wide);
-  text-transform: uppercase;
   color: var(--text-2);
 }
 
@@ -1113,8 +1114,6 @@
   margin: 0 0 var(--space-3);
   font-size: var(--font-size-xs);
   font-weight: var(--font-weight-semibold);
-  letter-spacing: var(--letter-spacing-wide);
-  text-transform: uppercase;
   color: var(--text-2);
 }
 
@@ -1316,8 +1315,6 @@
 .dependency-status {
   font-size: var(--font-size-xs);
   font-weight: var(--font-weight-semibold);
-  letter-spacing: 0.04em;
-  text-transform: uppercase;
   flex-shrink: 0;
 }
 
@@ -1371,8 +1368,6 @@
   gap: var(--space-1);
   font-size: var(--font-size-xs);
   font-weight: var(--font-weight-semibold);
-  letter-spacing: var(--letter-spacing-wide);
-  text-transform: uppercase;
   color: var(--text-2);
 }
 
@@ -1454,8 +1449,6 @@
   color: var(--text-2);
   font-size: var(--font-size-xs);
   font-weight: var(--font-weight-semibold);
-  letter-spacing: var(--letter-spacing-wide);
-  text-transform: uppercase;
 }
 
 .strategy-actions {
@@ -1511,8 +1504,6 @@
   border-radius: var(--radius-full);
   font-size: var(--font-size-xs);
   font-weight: var(--font-weight-semibold);
-  letter-spacing: 0.04em;
-  text-transform: uppercase;
   white-space: nowrap;
 }
 

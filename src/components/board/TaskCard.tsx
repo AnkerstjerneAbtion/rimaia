@@ -572,8 +572,9 @@ export function TaskCard({
         .filter(Boolean)
         .join(" ")}
       data-task-id={task.id}
-      // What `board.css` colours the left rail and the background wash from —
-      // the card's own state, made visible without having to read the badge.
+      // The card's own state, for `board.css`. Since ADR-0024 only `running`
+      // reads it — the rail and the wash this used to drive both restated what
+      // the badge says in words.
       data-run-state={cardRunState(task)}
       // Not `aria-selected` — that is only defined for `option`/`row`/`tab`/
       // `treeitem`/`gridcell`/`columnheader`/`rowheader` roles, and dnd-kit's
@@ -589,14 +590,27 @@ export function TaskCard({
     >
       <CardFace task={task} repositoryName={repositoryName} now={now} />
 
-      {/* One action row: task 009's queue position on the left, task 008's
-          "Run now" on the right. They used to be two stacked blocks, the
-          second of which was a full-width accent button on every card in four
-          columns — the loudest thing on the board, for the verb that overrides
-          a decision the scheduler is already making correctly. Quiet control,
-          filled in on hover; the queue position beside it is the readout that
-          earns the row. */}
+      {/* Task 009's queue position. Outside the action row below, because
+          ADR-0024 collapses that row until the card is hovered or focused and
+          this is a readout rather than an action — ADR-0012's posture depends
+          on the queue's reasoning being visible rather than available on
+          request, which is the same argument the skip line further down
+          makes. */}
+      {queueEntry && queueEntry.skip === null && (
+        <p className="task-card-queue-position tabular-nums">
+          Queued #{queueEntry.queuePosition}
+        </p>
+      )}
+
+      {/* The card's actions, collapsed until it is hovered or focused
+          (ADR-0024 point 5): two permanent buttons under every card is a
+          toolbar pretending to be content, and on a full board it was forty of
+          them. Still in the DOM and still focusable, so tabbing raises
+          `:focus-within` and brings the row up with it. */}
       <div className="task-card-actions">
+        {/* One element, because the collapse is a `0fr`/`1fr` grid row and a
+            grid needs a single child to size. */}
+        <div className="task-card-actions-row">
         {/* Task 023's hand-picked set. A checkbox rather than a click-modifier,
             because the modifier would be invisible and the card already claims
             click, Enter, Space and the arrows. Isolated from the drag surface
@@ -615,14 +629,6 @@ export function TaskCard({
               aria-label={`Select "${task.title}" for planning`}
             />
           </label>
-        )}
-        {/* ADR-0012's whole security posture depends on a skipped reason being
-            visible rather than silent — the skip line below is why this is not
-            simply hidden when the queue passes a task over. */}
-        {queueEntry && queueEntry.skip === null && (
-          <span className="task-card-indicator task-card-queue-position tabular-nums">
-            Queued #{queueEntry.queuePosition}
-          </span>
         )}
         {/* Task 026. Rendered off the card's own row — `worktree_path` is
             already on every card (seam-contract D12), so no board read
@@ -649,6 +655,7 @@ export function TaskCard({
         >
           {starting ? "Starting…" : runNow.kind === "running" ? "Running…" : "Run now"}
         </button>
+        </div>
       </div>
 
       {queueEntry && queueEntry.skip !== null && (

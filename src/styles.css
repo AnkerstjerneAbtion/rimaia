@@ -2,35 +2,47 @@
 
    THE DIRECTION - read this before restyling anything, including in the leaf
    files under `src/styles/*.css`. Rimaia is opened at 18:30 to queue work and
-   at 08:00 to read what an unattended agent did overnight. It is a control
-   surface for that, not a marketing page or a CRUD form. Concretely:
+   at 08:00 to read what an unattended agent did overnight. Both are reading
+   moments, and the interface should be calm enough to read. ADR-0024 is the
+   argument; these are the rules it lands on.
 
-   Dark-first.  The tokens below are declared dark in :root and overridden
-     for light in the `@media (prefers-color-scheme: light)` block underneath
-     - the inverse of the usual light-default pattern. Dark is what gets
-     designed; light inherits the same structure and is checked for contrast,
-     but dark is the one to optimise when a value is a judgement call.
-   Dense, instrument-like.  Closer to a terminal or Linear than a form: more
-     information per screen, tighter vertical rhythm. `.content` and
-     `.sidebar` use asymmetric padding (more horizontal than vertical) for
-     exactly this reason - do not round them back to a single uniform value.
-   Depth instead of outlines.  `--border-1/-2` are low-alpha overlays, not
-     solid hairlines, and `.panel` has no border at all - it separates from
-     the page with `--surface-1` + `--shadow-sm` alone. When a leaf file
-     needs to lift something off the page, reach for a surface step or a
-     shadow token before reaching for `border`.
+   Sentence case.  No `text-transform: uppercase`, anywhere. Uppercase with
+     wide tracking is the single loudest "tool built for developers" signal in
+     an interface, and it was on 41 declarations before ADR-0024. A column
+     heading, a badge and a section label are all just words at their natural
+     width. `--letter-spacing-wide` survives for a genuine eyebrow; reaching
+     for it should feel like a decision.
+   Monospace means "literal text you could copy".  A transcript, a shell
+     command, a branch name, a figure in a column that has to align. It does
+     not mean "this is an identifier" - a repository name in monospace is a
+     name wearing a costume. `doctor.css`'s command block and `runs.css`'s
+     transcript keep it because there the glyphs are the point.
+   State is a dot and a word.  `.status-dot` + `.status-dot-live` below are
+     the vocabulary: a dot coloured via `currentColor` (set `color` to a
+     `--status-*` token) beside the state in sentence case. Never a filled
+     pill, and never colour alone - the word is always present, which is also
+     what makes the board legible to anyone who cannot separate the hues.
+   Colour is spent sparingly.  One accent. The `--status-*` set is
+     desaturated to sit *in* a surface rather than shout from it. Before
+     adding a colour, check what is already on screen: five saturated hues at
+     once is how the budget gets spent before anything important happens.
+   Air, and depth instead of outlines.  Generous padding and real radii;
+     `--border-1/-2` are low-alpha overlays rather than hairlines, and
+     `.panel` separates from the page with `--surface-1` + `--shadow-sm`
+     alone. Reach for a surface step or a shadow before reaching for
+     `border`.
    Typography carries the hierarchy.  The scale has real jumps between steps
-     (`--font-size-lg`/`-xl`/`-2xl` are 20/28/36px, not a gentle ramp) so a
-     title and its metadata are never one `font-weight` apart. Anything
-     numeric - durations, costs, token counts, queue positions - should carry
-     the `.tabular-nums` utility below so columns line up; it is not applied
-     automatically because not every number sits in a column.
-   State is the product.  `.status-dot` + `.status-dot-live` below are the
-     vocabulary for it: a coloured dot via `currentColor` (set `color` to one
-     of the `--status-*` tokens) with an optional pulsing ring for whatever is
-     actively running. It replaces "a grey pill with a word in it" as the
-     default way to show run state - board.css and runs.css should build
-     their state indicators from this, not from a fresh badge component.
+     so a title and its metadata are never one `font-weight` apart. Prefer
+     `--font-weight-medium` for emphasis; semibold is for headings that need
+     to win. Anything numeric - durations, costs, token counts, queue
+     positions - should carry the `.tabular-nums` utility so columns line up.
+   Fluid, and light mode is equal.  The design is going to the browser, so
+     nothing may assume one window size: the shell collapses its sidebar
+     below a breakpoint, the board scrolls horizontally against a column
+     *minimum* rather than a fixed count, and text has a max measure. Light
+     is declared in the `@media (prefers-color-scheme: light)` block below and
+     is designed, not derived - contrast for --text-1/-text-2 against
+     --surface-0/-surface-1 is checked to WCAG AA (4.5:1) in both.
 
    TOKEN SYSTEM
 
@@ -54,12 +66,11 @@
                       translucent wash of it for hover/selected backgrounds
                       that shouldn't compete with real surfaces.
      --status-running / -queued / -blocked / -waiting-retry / -failed /
-     -success         One vivid accent per run-state family, for icons, dots
-                      and text - not full bg/text badge pairs, and now bright
-                      enough on dark surfaces to double as `.status-dot`
-                      colours. Leaves that need a badge (board.css, runs.css)
-                      keep their own --badge- and --exit- token pairs; these
-                      are the vocabulary a badge or dot should be built from.
+     -success         One desaturated accent per run-state family, for dots
+                      and text. Never a bg/text pair for a filled pill -
+                      ADR-0024 point 3 replaced those with a dot plus the
+                      state in sentence case, which is what board.css and
+                      runs.css build their indicators from.
      --danger-bg/-border/-text, --warn-bg/-border/-text, --ok-text
                       Existing triads for banners and inline status text.
                       Kept as-is: doctor.css and .error-banner depend on the
@@ -79,11 +90,12 @@
              without a border.
    Type      --font-size-xs/sm/md/lg/xl/2xl paired with --line-height-tight/
              normal/relaxed, --font-weight-regular/medium/semibold and
-             --letter-spacing-wide (uppercase eyebrow labels: nav section
-             headers, `.error-code`). --font-size-md/--line-height-normal is
-             body text. `--font-size-2xl` is not used in the shell - it is
-             here for E/F's hero numbers (a run's duration/cost readout, a
-             queue count).
+             --letter-spacing-wide. --font-size-md/--line-height-normal is
+             body text, --font-size-sm carries most secondary text, and
+             --font-size-2xl is for a hero number (a run's duration or cost,
+             a queue count). --letter-spacing-wide is no longer paired with
+             an uppercase transform and has no default caller; it is there
+             for a deliberate eyebrow, not for labels in general.
    Motion    --duration-fast/base/slow and --ease-standard/-emphasized.
              Always wrap any transition/animation that uses these in
              `@media (prefers-reduced-motion: reduce)` - see `.status-dot-live`
@@ -96,10 +108,8 @@
              above. `:disabled` is shared by all three.
 
    Every colour token above has a light-scheme value in the media query
-   below it - there is no "we will get to light mode later", it is simply
-   not the one being optimised for. Contrast for --text-1/-text-2 against
-   --surface-0/-surface-1 is checked to WCAG AA (4.5:1) in both schemes;
-   keep new colour tokens at or above that bar. */
+   below it. Keep new colour tokens at or above WCAG AA (4.5:1) against the
+   surfaces they sit on, in both schemes. */
 
 @import "./styles/board.css";
 @import "./styles/doctor.css";
@@ -107,33 +117,37 @@
 @import "./styles/settings.css";
 
 :root {
-  /* Surfaces (dark, primary) */
-  --surface-0: #0b0c0f;
-  --surface-1: #131419;
-  --surface-2: #1b1c23;
-  --surface-3: #24252e;
+  /* Surfaces (dark, primary). Lifted off pure black and given a trace of blue:
+     #0b0c0f against #f2f2f6 was a harder edge than anything on screen needed,
+     and the step between resting and raised was too small to read (ADR-0024). */
+  --surface-0: #0f1116;
+  --surface-1: #171a21;
+  --surface-2: #1f232c;
+  --surface-3: #282d38;
 
   /* Text */
-  --text-1: #f2f2f6;
-  --text-2: #a4a4b3;
-  --text-3: #6c6c7a;
+  --text-1: #eef0f4;
+  --text-2: #a2a8b8;
+  --text-3: #6f7686;
 
   /* Borders - low-alpha overlays, see TOKEN SYSTEM above */
-  --border-1: rgb(255 255 255 / 0.08);
-  --border-2: rgb(255 255 255 / 0.16);
+  --border-1: rgb(255 255 255 / 0.07);
+  --border-2: rgb(255 255 255 / 0.14);
 
   /* Accent */
-  --accent: #5b8cff;
-  --accent-contrast: #0a0e1a;
-  --accent-soft: color-mix(in srgb, var(--accent) 16%, transparent);
+  --accent: #7b8cff;
+  --accent-contrast: #0b0d16;
+  --accent-soft: color-mix(in srgb, var(--accent) 14%, transparent);
 
-  /* Status accents (icons/text/dots, not badge bg+text pairs) */
+  /* Status accents (dots and text, never a filled pill - ADR-0024 point 3).
+     Desaturated against the previous set so that a column of failures reads as
+     a morning's review rather than an incident. */
   --status-running: var(--accent);
-  --status-queued: #9a9aac;
-  --status-blocked: #b48af0;
-  --status-waiting-retry: #f2b84c;
-  --status-failed: #f47067;
-  --status-success: #57d38c;
+  --status-queued: #8f95a6;
+  --status-blocked: #a998ee;
+  --status-waiting-retry: #dfb26a;
+  --status-failed: #e98d86;
+  --status-success: #6ec89b;
 
   /* Existing triads - names load-bearing, see comment above */
   --danger-bg: #2c1614;
@@ -166,23 +180,26 @@
   --space-7: 3rem;
   --space-8: 4rem;
 
-  /* Radius */
-  --radius-sm: 6px;
-  --radius-md: 10px;
-  --radius-lg: 16px;
+  /* Radius. Larger across the board: a 6px card in a 10px panel reads as a
+     spreadsheet cell, which is the register ADR-0024 is moving away from. */
+  --radius-sm: 8px;
+  --radius-md: 14px;
+  --radius-lg: 20px;
   --radius-full: 999px;
 
-  /* Shadow / elevation (dark, primary) */
-  --shadow-sm: 0 1px 2px rgb(0 0 0 / 0.4), 0 1px 1px rgb(0 0 0 / 0.3);
-  --shadow-md: 0 8px 20px rgb(0 0 0 / 0.45), 0 2px 6px rgb(0 0 0 / 0.35);
-  --shadow-lg: 0 20px 48px rgb(0 0 0 / 0.55), 0 6px 16px rgb(0 0 0 / 0.4);
-  --shadow-inset: inset 0 1px 3px rgb(0 0 0 / 0.4);
+  /* Shadow / elevation (dark, primary). Softer and wider than the previous
+     set - depth should be felt rather than seen (ADR-0024). */
+  --shadow-sm: 0 1px 2px rgb(0 0 0 / 0.28), 0 1px 3px rgb(0 0 0 / 0.18);
+  --shadow-md: 0 10px 28px rgb(0 0 0 / 0.34), 0 2px 8px rgb(0 0 0 / 0.24);
+  --shadow-lg: 0 28px 64px rgb(0 0 0 / 0.46), 0 8px 20px rgb(0 0 0 / 0.3);
+  --shadow-inset: inset 0 1px 3px rgb(0 0 0 / 0.32);
 
-  /* Type scale */
+  /* Type scale. `--font-size-sm` moved 13px -> 14px: it carries most of the
+     secondary text in the app, and 13px is where "dense" turns into "squint". */
   --font-size-xs: 0.75rem;
-  --font-size-sm: 0.8125rem;
+  --font-size-sm: 0.875rem;
   --font-size-md: 0.9375rem;
-  --font-size-lg: 1.25rem;
+  --font-size-lg: 1.3125rem;
   --font-size-xl: 1.75rem;
   --font-size-2xl: 2.25rem;
   --line-height-tight: 1.25;
@@ -212,40 +229,45 @@
 
 @media (prefers-color-scheme: light) {
   :root {
-    --surface-0: #f5f6f8;
+    /* Warmed very slightly off pure grey, and the page a step down from the
+       cards rather than the other way round, so a board of cards still reads
+       as cards. Designed rather than derived - ADR-0024 point 6. */
+    --surface-0: #f6f7f9;
     --surface-1: #ffffff;
-    --surface-2: #eceef2;
+    --surface-2: #eef0f4;
     --surface-3: #ffffff;
 
-    --text-1: #14151a;
-    --text-2: #53545f;
-    --text-3: #84869a;
+    --text-1: #16181f;
+    --text-2: #585e6d;
+    --text-3: #868c9c;
 
-    --border-1: rgb(15 15 20 / 0.1);
-    --border-2: rgb(15 15 20 / 0.18);
+    --border-1: rgb(16 18 26 / 0.09);
+    --border-2: rgb(16 18 26 / 0.16);
 
-    --accent: #3457d5;
+    --accent: #4257d8;
     --accent-contrast: #ffffff;
-    --accent-soft: color-mix(in srgb, var(--accent) 10%, transparent);
+    --accent-soft: color-mix(in srgb, var(--accent) 9%, transparent);
 
+    /* Darker than their dark-scheme counterparts rather than the same hue:
+       a dot that reads on #171a21 disappears on #ffffff. */
     --status-running: var(--accent);
-    --status-queued: #5c5c68;
-    --status-blocked: #7c3aed;
-    --status-waiting-retry: #a15b06;
-    --status-failed: #b3261e;
-    --status-success: #1f7a4d;
+    --status-queued: #62687a;
+    --status-blocked: #6d4bc7;
+    --status-waiting-retry: #8f5a12;
+    --status-failed: #b0463d;
+    --status-success: #1f7a52;
 
-    --danger-bg: #fdeceb;
-    --danger-border: #e5a9a4;
+    --danger-bg: #fdefee;
+    --danger-border: #eab8b3;
     --danger-text: #8c2b22;
-    --warn-bg: #fdf4e3;
-    --warn-border: #e0c184;
+    --warn-bg: #fdf5e7;
+    --warn-border: #e3c891;
     --warn-text: #7a5410;
 
-    --shadow-sm: 0 1px 2px rgb(15 15 20 / 0.06), 0 1px 1px rgb(15 15 20 / 0.04);
-    --shadow-md: 0 6px 16px rgb(15 15 20 / 0.1), 0 2px 4px rgb(15 15 20 / 0.06);
-    --shadow-lg: 0 16px 40px rgb(15 15 20 / 0.16), 0 4px 10px rgb(15 15 20 / 0.08);
-    --shadow-inset: inset 0 1px 2px rgb(15 15 20 / 0.08);
+    --shadow-sm: 0 1px 2px rgb(16 18 26 / 0.05), 0 1px 3px rgb(16 18 26 / 0.04);
+    --shadow-md: 0 8px 24px rgb(16 18 26 / 0.08), 0 2px 6px rgb(16 18 26 / 0.05);
+    --shadow-lg: 0 24px 56px rgb(16 18 26 / 0.13), 0 6px 16px rgb(16 18 26 / 0.07);
+    --shadow-inset: inset 0 1px 2px rgb(16 18 26 / 0.07);
   }
 }
 
@@ -257,10 +279,29 @@ body {
   margin: 0;
 }
 
+/* The shell. A fixed 248px rail is fine in a window with a 1024px floor and
+   wrong in a browser, which is the move ADR-0024 point 6 is preparing for:
+   below the breakpoint the rail becomes a horizontal strip above the content
+   rather than eating half a narrow viewport.
+
+   `100dvh` rather than `100vh`: on mobile Safari `vh` is the *largest*
+   viewport, so a full-height shell sits partly under the browser chrome until
+   the address bar collapses. The desktop window sees no difference. */
+/* `height`, not `min-height`: with a minimum the shell grows past the viewport
+   on a long Settings page and the *body* scrolls, taking the sidebar up out of
+   view with it. Bounding the shell is what makes `.content`'s own
+   `overflow-y: auto` do the scrolling, so the rail stays put. */
 .app {
   display: grid;
-  grid-template-columns: 248px 1fr;
-  min-height: 100vh;
+  grid-template-columns: 248px minmax(0, 1fr);
+  height: 100dvh;
+}
+
+@media (max-width: 720px) {
+  .app {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: auto minmax(0, 1fr);
+  }
 }
 
 /* Sidebar */
@@ -272,6 +313,42 @@ body {
   padding: var(--space-5) var(--space-3);
   background: var(--surface-0);
   box-shadow: 1px 0 0 var(--border-1);
+}
+
+/* Narrow: the rail lies down. The nav scrolls sideways as a row of labels,
+   the per-item hint and the version go away — there is no room for either,
+   and neither is load-bearing — and the brand keeps its mark as the anchor. */
+@media (max-width: 720px) {
+  .sidebar {
+    flex-direction: row;
+    align-items: center;
+    gap: var(--space-4);
+    padding: var(--space-3) var(--space-4);
+    box-shadow: 0 1px 0 var(--border-1);
+  }
+
+  .sidebar-brand-text,
+  .sidebar-section-label,
+  .sidebar-link-hint,
+  .sidebar-version {
+    display: none;
+  }
+
+  .sidebar-nav {
+    flex-direction: row;
+    gap: var(--space-2);
+    overflow-x: auto;
+    scrollbar-width: none;
+  }
+
+  .sidebar-nav::-webkit-scrollbar {
+    display: none;
+  }
+
+  .sidebar-link {
+    padding: var(--space-2) var(--space-3);
+    white-space: nowrap;
+  }
 }
 
 .sidebar-brand {
@@ -324,8 +401,6 @@ body {
   padding: 0 var(--space-2);
   font-size: var(--font-size-xs);
   font-weight: var(--font-weight-semibold);
-  letter-spacing: var(--letter-spacing-wide);
-  text-transform: uppercase;
   color: var(--text-3);
 }
 
@@ -404,6 +479,13 @@ body {
 .content {
   padding: var(--space-5) var(--space-6);
   overflow-y: auto;
+  min-width: 0;
+}
+
+@media (max-width: 720px) {
+  .content {
+    padding: var(--space-4);
+  }
 }
 
 .panel {
@@ -551,26 +633,6 @@ textarea {
 
 /* Empty states */
 
-.empty-state {
-  max-width: 34rem;
-  margin: 12vh auto 0;
-  text-align: center;
-}
-
-.empty-state h2 {
-  margin: 0 0 var(--space-2);
-  font-size: var(--font-size-xl);
-}
-
-.empty-state p {
-  margin: 0 0 var(--space-2);
-  color: var(--text-muted);
-}
-
-.empty-state-note {
-  font-size: var(--font-size-sm);
-  opacity: 0.75;
-}
 
 /* Errors */
 
@@ -586,9 +648,7 @@ textarea {
 }
 
 .error-code {
-  text-transform: uppercase;
   font-size: var(--font-size-xs);
-  letter-spacing: var(--letter-spacing-wide);
   font-weight: var(--font-weight-semibold);
   white-space: nowrap;
 }

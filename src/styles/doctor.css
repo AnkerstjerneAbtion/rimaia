@@ -175,23 +175,24 @@
 
 /* The chip. Fixed width so eight of them make a column the eye can run down
    rather than a ragged left edge. */
+/* A dot, a glyph and a word — not an outlined pill (ADR-0024 point 3). The
+   dashed border on `pass` and the 2px one on `fail` were doing the work the
+   colour and the glyph already do, and three different border treatments in
+   one list is the sort of detail that reads as a debug view. */
 .doctor-status {
   display: inline-flex;
   align-items: center;
-  justify-content: center;
-  gap: var(--space-1);
-  padding: 0.05rem var(--space-2);
-  border: 1px solid transparent;
-  border-radius: var(--radius-sm);
+  justify-content: flex-start;
+  gap: var(--space-2);
   font-size: var(--font-size-xs);
-  font-weight: var(--font-weight-semibold);
-  letter-spacing: 0.04em;
-  text-transform: uppercase;
+  font-weight: var(--font-weight-medium);
   white-space: nowrap;
 }
 
-/* The fourth channel: a shape. Empty alt text, so nothing reads "check mark
-   OK" — the word is already there and is the channel that matters. */
+/* The fourth channel: a shape, so the three statuses stay separable in
+   greyscale and to a reader who cannot tell the hues apart. Empty alt text, so
+   nothing reads "check mark OK" — the word is already there and is the channel
+   that matters. */
 .doctor-status::before {
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
   font-weight: var(--font-weight-semibold);
@@ -210,19 +211,14 @@
 }
 
 .doctor-status-pass {
-  border: 1px dashed currentcolor;
   color: var(--ok-text);
 }
 
 .doctor-status-warn {
-  background: var(--warn-bg);
-  border: 1px solid var(--warn-border);
   color: var(--warn-text);
 }
 
 .doctor-status-fail {
-  background: var(--danger-bg);
-  border: 2px solid var(--danger-border);
   color: var(--danger-text);
 }
 
@@ -454,8 +450,6 @@
   color: var(--text-2);
   font-size: var(--font-size-xs);
   font-weight: var(--font-weight-semibold);
-  letter-spacing: 0.04em;
-  text-transform: uppercase;
   white-space: nowrap;
 }
 
@@ -493,8 +487,6 @@
 .welcome-step .panel > h3 {
   font-size: var(--font-size-xs);
   font-weight: var(--font-weight-semibold);
-  letter-spacing: var(--letter-spacing-wide);
-  text-transform: uppercase;
   color: var(--text-2);
 }
 

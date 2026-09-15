@@ -13,15 +13,17 @@
      four bands and puts a sticky index above them — see that file for why the
      groups are exactly those and why the order inside them is unchanged. The
      bands are drawn the way the task drawer's own bands are (`.task-detail-
-     band-label` in board.css): an uppercase eyebrow with a rule running from
-     it to the edge of the column. Same device, same meaning, so the two most
-     section-dense surfaces in the app read alike.
+     band-label` in board.css): a label with a rule running from it to the edge
+     of the column. Same device, same meaning, so the two most section-heavy
+     surfaces in the app read alike. Sentence case since ADR-0024.
 
-   **Typography carries the hierarchy.**  Three steps, not one: the band is a
-     `--font-size-xs` uppercase eyebrow, a panel's title is `--font-size-lg`,
-     and its body is `--font-size-md`. Before this a band label would have had
-     nowhere to sit — every panel title was `--font-size-md` semibold, one
-     `font-weight` away from the paragraph under it.
+   **Typography carries the hierarchy.**  Three steps, not one: the band label
+     is `--font-size-xs`, a panel's title is `--font-size-lg`, and its body is
+     `--font-size-md`. Before this a band label would have had nowhere to sit —
+     every panel title was `--font-size-md` semibold, one `font-weight` away
+     from the paragraph under it. With the casing gone (ADR-0024) the size and
+     colour steps are the whole of the separation, which is why they matter
+     more here than they did.
 
    **Depth, not outlines.**  Every bordered row this file used to draw
      (`.repo-item`, `.schedule-row`, `.worktree-entry`, the radio cards) is now
@@ -95,8 +97,6 @@
 .settings-index-label {
   font-size: var(--font-size-xs);
   font-weight: var(--font-weight-semibold);
-  letter-spacing: var(--letter-spacing-wide);
-  text-transform: uppercase;
   color: var(--text-2);
   text-decoration: none;
 }
@@ -162,8 +162,6 @@
   margin: 0;
   font-size: var(--font-size-xs);
   font-weight: var(--font-weight-semibold);
-  letter-spacing: var(--letter-spacing-wide);
-  text-transform: uppercase;
   color: var(--text-2);
 }
 
@@ -213,8 +211,6 @@
   box-shadow: inset 0 1px 0 var(--border-1);
   font-size: var(--font-size-xs);
   font-weight: var(--font-weight-semibold);
-  letter-spacing: var(--letter-spacing-wide);
-  text-transform: uppercase;
   color: var(--text-2);
 }
 
@@ -288,8 +284,6 @@
 .worktree-entry .detail-list dt {
   font-size: var(--font-size-xs);
   font-weight: var(--font-weight-semibold);
-  letter-spacing: var(--letter-spacing-wide);
-  text-transform: uppercase;
   color: var(--text-2);
   white-space: nowrap;
 }
@@ -354,8 +348,6 @@
   gap: var(--space-1);
   font-size: var(--font-size-xs);
   font-weight: var(--font-weight-semibold);
-  letter-spacing: var(--letter-spacing-wide);
-  text-transform: uppercase;
   color: var(--text-2);
 }
 
@@ -460,8 +452,6 @@
   margin: 0 0 var(--space-2);
   font-size: var(--font-size-xs);
   font-weight: var(--font-weight-semibold);
-  letter-spacing: var(--letter-spacing-wide);
-  text-transform: uppercase;
   color: var(--text-2);
 }
 
@@ -553,8 +543,6 @@
   margin-bottom: var(--space-3);
   font-size: var(--font-size-xs);
   font-weight: var(--font-weight-semibold);
-  letter-spacing: var(--letter-spacing-wide);
-  text-transform: uppercase;
   color: var(--text-2);
 }
 
@@ -663,8 +651,6 @@
   margin: 0 0 var(--space-2);
   font-size: var(--font-size-xs);
   font-weight: var(--font-weight-semibold);
-  letter-spacing: var(--letter-spacing-wide);
-  text-transform: uppercase;
   color: var(--text-2);
 }
 
@@ -709,8 +695,6 @@
   flex: none;
   font-size: var(--font-size-xs);
   font-weight: var(--font-weight-semibold);
-  letter-spacing: var(--letter-spacing-wide);
-  text-transform: uppercase;
   color: var(--text-2);
 }
 
@@ -768,8 +752,6 @@
 .schedule-form > label {
   font-size: var(--font-size-xs);
   font-weight: var(--font-weight-semibold);
-  letter-spacing: var(--letter-spacing-wide);
-  text-transform: uppercase;
   color: var(--text-2);
 }
 
@@ -839,8 +821,6 @@
   padding: 0 var(--space-1);
   font-size: var(--font-size-xs);
   font-weight: var(--font-weight-semibold);
-  letter-spacing: var(--letter-spacing-wide);
-  text-transform: uppercase;
   color: var(--danger-text);
 }
 
@@ -887,8 +867,6 @@
   gap: var(--space-1);
   font-size: var(--font-size-xs);
   font-weight: var(--font-weight-semibold);
-  letter-spacing: var(--letter-spacing-wide);
-  text-transform: uppercase;
   color: var(--text-2);
 }
 
@@ -969,8 +947,6 @@
 .analytics-figure-label {
   font-size: var(--font-size-xs);
   font-weight: var(--font-weight-semibold);
-  letter-spacing: var(--letter-spacing-wide);
-  text-transform: uppercase;
   color: var(--text-2);
 }
 
@@ -1037,8 +1013,6 @@
 .analytics-table th {
   font-size: var(--font-size-xs);
   font-weight: var(--font-weight-semibold);
-  letter-spacing: var(--letter-spacing-wide);
-  text-transform: uppercase;
   color: var(--text-2);
 }
 
@@ -1084,8 +1058,6 @@
   margin: 0 0 var(--space-1);
   font-size: var(--font-size-xs);
   font-weight: var(--font-weight-semibold);
-  letter-spacing: var(--letter-spacing-wide);
-  text-transform: uppercase;
   color: var(--text-2);
 }
 
