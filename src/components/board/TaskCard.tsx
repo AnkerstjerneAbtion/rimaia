@@ -614,7 +614,11 @@ export function TaskCard({
         {/* Task 023's hand-picked set. A checkbox rather than a click-modifier,
             because the modifier would be invisible and the card already claims
             click, Enter, Space and the arrows. Isolated from the drag surface
-            the same way "Run now" is. */}
+            the same way "Run now" is.
+
+            The label says "Select", not "Select for planning": since task 030
+            the set drives archiving too, and a checkbox that names one of its
+            two consumers is worse than one that names neither (D26.6). */}
         {onPick && (
           <label
             className="task-card-pick"
@@ -626,7 +630,7 @@ export function TaskCard({
               type="checkbox"
               checked={picked ?? false}
               onChange={(event) => onPick(task.id, event.target.checked)}
-              aria-label={`Select "${task.title}" for planning`}
+              aria-label={`Select "${task.title}"`}
             />
           </label>
         )}

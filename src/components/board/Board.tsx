@@ -17,8 +17,9 @@ import type {
 } from "@dnd-kit/core";
 import { sortableKeyboardCoordinates } from "@dnd-kit/sortable";
 
-import { createTask, toRimaiaError } from "../../lib/commands";
+import { archiveTasks, createTask, toRimaiaError } from "../../lib/commands";
 import { BOARD_COLUMNS, visibleColumns } from "../../lib/board";
+import { describeArchiveReport } from "../../lib/archive";
 import type { BoardCard, BoardColumns } from "../../lib/board";
 import type { BoardColumn, RimaiaError, Task, TaskSummary } from "../../types";
 import { useRepositories, useTasks } from "../../hooks/useTasks";
@@ -26,6 +27,7 @@ import { ErrorBanner } from "../ErrorBanner";
 import { BoardToolbar } from "./BoardToolbar";
 import { PlanPassPanel, usePlanPass } from "./PlanPassPanel";
 import { Column, COLUMN_TITLES } from "./Column";
+import { ArchiveList } from "./ArchiveList";
 import { TaskCardPreview } from "./TaskCard";
 import { TaskDetailPanel } from "./TaskDetailPanel";
 
@@ -191,9 +193,15 @@ export function isEditableTarget(target: EventTarget | null): boolean {
 
 export function Board() {
   const [repositoryFilter, setRepositoryFilter] = useState<string | null>(null);
+  // ADR-0025's archive, as a view of the same read rather than a second one:
+  // `useTasks` flips `list_tasks`' filter and everything downstream — the
+  // projection, the ordering, the `tasks:changed` subscription — is unchanged.
+  const [showArchive, setShowArchive] = useState(false);
   const { repositories, error: repositoriesError } = useRepositories();
-  const { state, loading, readError, refresh, moveCard, dismissRejection } =
-    useTasks(repositoryFilter);
+  const { state, loading, readError, refresh, moveCard, dismissRejection } = useTasks(
+    repositoryFilter,
+    showArchive ? "archived" : "active",
+  );
 
   const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
   // Task 023's hand-picked set, kept beside `selectedTaskId` rather than merged
@@ -203,6 +211,9 @@ export function Board() {
   const [searchQuery, setSearchQuery] = useState("");
   const [activeId, setActiveId] = useState<string | null>(null);
   const [createError, setCreateError] = useState<RimaiaError | null>(null);
+  const [archiving, setArchiving] = useState(false);
+  const [archiveReport, setArchiveReport] = useState<string | null>(null);
+  const [archiveError, setArchiveError] = useState<RimaiaError | null>(null);
 
   // Re-renders every 30s so "relative time of last activity" does not go
   // stale while a card just sits there — a UI refresh tick, not a fake-able
@@ -263,6 +274,19 @@ export function Board() {
     // out by a repository switch — rather than showing stale content.
     if (selectedTaskId && !selectedTask) setSelectedTaskId(null);
   }, [selectedTaskId, selectedTask]);
+
+  // The same rule for the picked set, which has never had it (seam-contract
+  // D26.6). It was harmless while the set only fed a planner that resolves
+  // ids and refuses unknown ones with a sentence; it is not harmless now that
+  // a stale id is a stale *archive* target.
+  useEffect(() => {
+    setPickedTaskIds((current) => {
+      if (current.size === 0) return current;
+      const live = new Set(state.tasks.map((task) => task.id));
+      const next = new Set([...current].filter((id) => live.has(id)));
+      return next.size === current.size ? current : next;
+    });
+  }, [state.tasks]);
 
   // The other half of the detail panel's focus handling: it is an overlay
   // drawer that takes focus when it opens, so closing it has to give focus
@@ -414,6 +438,18 @@ export function Board() {
 
   const activeCard = findCard(columns, activeId);
 
+  // Most recently put down first — the question in the archive is "when did I
+  // stop looking at this", which is not the question `position` answers.
+  // Flattened back out of the columns rather than read separately, so the
+  // search box and the repository filter keep working unchanged.
+  const archivedCards = useMemo(
+    () =>
+      BOARD_COLUMNS.flatMap((column) => filteredColumns[column]).sort((left, right) =>
+        (right.archivedAt ?? "").localeCompare(left.archivedAt ?? ""),
+      ),
+    [filteredColumns],
+  );
+
   return (
     <div className="board-view">
       <BoardToolbar
@@ -427,6 +463,37 @@ export function Board() {
         newTaskDisabled={repositories.length === 0}
         pickedCount={pickedTaskIds.size}
         planDisabled={planPass.running || repositories.length === 0}
+        archiveDisabled={archiving}
+        showArchive={showArchive}
+        onToggleArchive={() => {
+          // The picked set is a set of *board* cards; carrying it across would
+          // leave "Archive 3 selected" pointing at cards this view cannot see.
+          setPickedTaskIds(new Set());
+          setArchiveReport(null);
+          setShowArchive((current) => !current);
+        }}
+        onArchive={() => {
+          setArchiving(true);
+          setArchiveError(null);
+          setArchiveReport(null);
+          archiveTasks([...pickedTaskIds]).then(
+            (report) => {
+              setArchiveReport(describeArchiveReport(report));
+              // Only the ids that actually went: a refused card stays picked,
+              // because the user's next move is to deal with it.
+              const archived = new Set(report.archived.map((entry) => entry.taskId));
+              setPickedTaskIds(
+                (current) => new Set([...current].filter((id) => !archived.has(id))),
+              );
+              setArchiving(false);
+              void refresh();
+            },
+            (thrown) => {
+              setArchiveError(toRimaiaError(thrown));
+              setArchiving(false);
+            },
+          );
+        }}
         onPlan={() => {
           // The repository filter already on the toolbar is the scope, and the
           // `ready` column is the default because that is the run queue — the
@@ -467,9 +534,29 @@ export function Board() {
           onDismiss={dismissRejection}
         />
       )}
+      {archiveError && (
+        <ErrorBanner error={archiveError} onDismiss={() => setArchiveError(null)} />
+      )}
+      {archiveReport && (
+        <p role="status" className="board-archive-report muted">
+          {archiveReport}{" "}
+          <button type="button" className="link" onClick={() => setArchiveReport(null)}>
+            Dismiss
+          </button>
+        </p>
+      )}
       {loading && state.tasks.length === 0 && <p className="muted">Reading tasks…</p>}
 
       <div className="board-layout">
+        {showArchive ? (
+          <ArchiveList
+            cards={archivedCards}
+            repositoriesById={repositoryNamesById}
+            now={now}
+            onSelect={setSelectedTaskId}
+            onUnarchived={() => void refresh()}
+          />
+        ) : (
         <DndContext
           sensors={sensors}
           accessibility={{ announcements }}
@@ -514,6 +601,7 @@ export function Board() {
             ) : null}
           </DragOverlay>
         </DndContext>
+        )}
 
         {selectedTask && (
           <TaskDetailPanel

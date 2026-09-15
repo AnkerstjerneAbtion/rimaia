@@ -174,6 +174,8 @@ async fn a_repository_round_trips_every_field_exactly() {
             credential_login: None,
             credential_label: None,
             credential_added_at: None,
+            on_archive: rimaia_core::db::OnArchive::None,
+            on_archive_script: None,
         }
     );
 }
@@ -291,6 +293,7 @@ async fn a_task_round_trips_every_field_exactly() {
             created_at,
             updated_at,
             source: MutationSource::Mcp,
+            archived_at: None,
         }
     );
 }
@@ -1330,7 +1333,8 @@ async fn fetch_repository(pool: &SqlitePool, id: &str) -> Repository {
         r#"SELECT id, name, path, default_branch, worktree_root, allow_unattended_runs,
             max_concurrency, created_at AS "created_at: DateTime<Utc>",
             credential_login, credential_label,
-            credential_added_at AS "credential_added_at: DateTime<Utc>"
+            credential_added_at AS "credential_added_at: DateTime<Utc>",
+            on_archive AS "on_archive: rimaia_core::db::OnArchive", on_archive_script
            FROM repositories WHERE id = ?1"#,
         id,
     )
@@ -1359,7 +1363,8 @@ async fn fetch_task(pool: &SqlitePool, id: &str) -> Task {
             strategy_plan, strategy_source AS "strategy_source: StrategySource",
             strategy_updated_at AS "strategy_updated_at: DateTime<Utc>",
             created_at AS "created_at: DateTime<Utc>", updated_at AS "updated_at: DateTime<Utc>",
-            source AS "source: MutationSource"
+            source AS "source: MutationSource",
+            archived_at AS "archived_at: DateTime<Utc>"
            FROM tasks WHERE id = ?1"#,
         id,
     )

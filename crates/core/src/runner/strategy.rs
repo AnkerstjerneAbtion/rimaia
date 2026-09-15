@@ -789,6 +789,10 @@ pub async fn selected_tasks(
             repository_id: selection.repository_id.clone(),
             column: selection.column,
             run_state: None,
+            // A planning pass is about what will run, and an archived task will
+            // not (ADR-0025 point 3). Spelled rather than defaulted so that the
+            // one place a *selection* could reach an off-board card says so.
+            ..TaskFilter::default()
         },
     )
     .await?;

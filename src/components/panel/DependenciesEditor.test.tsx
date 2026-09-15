@@ -37,6 +37,7 @@ function summary(id: string, title: string, column: BoardColumn): TaskSummary {
     createdAt: "2026-08-20T12:00:00Z",
     updatedAt: "2026-08-20T12:00:00Z",
     source: "ui",
+    archivedAt: null,
     linkCount: 0,
     dependencyCount: 0,
     blockedByIncomplete: false,

@@ -162,6 +162,13 @@ pub enum Tool {
     ListWorktrees,
     GetWorktreeAutoCleanup,
     SetWorktreeAutoCleanup,
+    // Task 030. ADR-0025 point 8: archiving is *reversible*, which is the
+    // property ADR-0021 point 5's `delete_task` exception is drawn along, so
+    // these do get tools where the three cleanup commands above do not.
+    ArchiveTask,
+    ArchiveTasks,
+    UnarchiveTask,
+    SetRepositoryOnArchive,
 }
 
 /// What a [`RunScope::Run`] may do with one tool — ADR-0006's amendment table,
@@ -178,7 +185,7 @@ pub enum RunAccess {
 
 impl Tool {
     /// Every tool with a recorded decision, so a test can walk the table.
-    pub const ALL: [Tool; 44] = [
+    pub const ALL: [Tool; 48] = [
         Tool::AddTaskLink,
         Tool::CreateTask,
         Tool::GetBaseInstructions,
@@ -223,6 +230,10 @@ impl Tool {
         Tool::ListWorktrees,
         Tool::GetWorktreeAutoCleanup,
         Tool::SetWorktreeAutoCleanup,
+        Tool::ArchiveTask,
+        Tool::ArchiveTasks,
+        Tool::UnarchiveTask,
+        Tool::SetRepositoryOnArchive,
     ];
 
     /// The wired name — what `tools/list` advertises and what the ADR table
@@ -273,6 +284,10 @@ impl Tool {
             Tool::ListWorktrees => "list_worktrees",
             Tool::GetWorktreeAutoCleanup => "get_worktree_auto_cleanup",
             Tool::SetWorktreeAutoCleanup => "set_worktree_auto_cleanup",
+            Tool::ArchiveTask => "archive_task",
+            Tool::ArchiveTasks => "archive_tasks",
+            Tool::UnarchiveTask => "unarchive_task",
+            Tool::SetRepositoryOnArchive => "set_repository_on_archive",
         }
     }
 
@@ -401,6 +416,24 @@ impl Tool {
             Tool::ListWorktrees | Tool::GetWorktreeAutoCleanup | Tool::SetWorktreeAutoCleanup => {
                 RunAccess::Refused
             }
+
+            // Task 030, and refused on both of ADR-0021 point 4's clauses at
+            // once rather than on `delete_task`'s destructiveness ground —
+            // which is why these have tools at all (ADR-0025 point 8) while the
+            // three cleanup commands above have none.
+            //
+            // `set_repository_on_archive` is "reconfigures the installation"
+            // verbatim: it decides what every *later* archive in that
+            // repository deletes, and the `script` mode decides which program
+            // Rimaia will execute. The three archive calls are refused on the
+            // narrower ground that archiving is not a board edit — it fires
+            // whatever the repository configured, and a run-scoped agent can
+            // reach its own card, so `OwnTaskOnly` would be a run able to
+            // delete the worktree it is standing in.
+            Tool::ArchiveTask
+            | Tool::ArchiveTasks
+            | Tool::UnarchiveTask
+            | Tool::SetRepositoryOnArchive => RunAccess::Refused,
 
             // Task 023's two, and this is the arm ADR-0021 point 4's *first*
             // permanent refusal was written for: both spawn a `claude`

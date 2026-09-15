@@ -309,6 +309,7 @@ mod tests {
             created_at: test_epoch(),
             updated_at: test_epoch(),
             source: MutationSource::Ui,
+            archived_at: None,
         }
     }
 }

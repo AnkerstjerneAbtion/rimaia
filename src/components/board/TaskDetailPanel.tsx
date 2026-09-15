@@ -4,6 +4,7 @@ import { getTask, toRimaiaError } from "../../lib/commands";
 import { subscribeToTasksChanged } from "../../lib/events";
 import type { Repository, RimaiaError, Task, TaskDetail } from "../../types";
 import { ErrorBanner } from "../ErrorBanner";
+import { ArchiveTaskSection } from "../panel/ArchiveTaskSection";
 import { DeleteTaskSection } from "../panel/DeleteTaskSection";
 import { DependenciesEditor } from "../panel/DependenciesEditor";
 import { ExtraInstructionsEditor } from "../panel/ExtraInstructionsEditor";
@@ -305,6 +306,15 @@ function TaskDetailPanelBody({
           </h3>
 
           <WorktreeSection taskId={task.id} />
+
+          {/* Archive above delete, and rendered first, because it is the
+              answer to the question most people arrive here with. Deleting is
+              still one click further away and still the harder-to-reach one. */}
+          <ArchiveTaskSection
+            task={task}
+            repository={repositories?.find((candidate) => candidate.id === task.repositoryId)}
+            onArchived={onClose}
+          />
 
           <DeleteTaskSection taskId={task.id} title={task.title} onDeleted={onClose} />
         </section>

@@ -1486,6 +1486,34 @@
   gap: var(--space-2);
 }
 
+/* Archive, above delete in the Workspace band. Not `--danger-*`: archiving is
+   reversible, and dressing it in the same red as the one irreversible thing
+   this app does would teach the user to read both as the same risk. */
+.task-detail-archive {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: var(--space-2);
+}
+
+.task-detail-archive-confirm {
+  width: 100%;
+  padding: var(--space-3) var(--space-4);
+  border-radius: var(--radius-md);
+  background: var(--surface-2);
+  box-shadow: inset 0 0 0 1px var(--border-1);
+}
+
+.task-detail-archive-confirm p {
+  margin: 0 0 var(--space-3);
+}
+
+.task-detail-archive-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--space-2);
+}
+
 /* Run outcome (task 008) — the six ADR-0011 exit classes. `success` has its
    own token pair (declared with the badge tokens at the top of this file);
    the rest reuse the severities the run-state badges already assigned, and
@@ -1647,6 +1675,98 @@
   border-color: var(--accent);
   background: var(--accent-soft);
   color: var(--accent);
+}
+
+/* ADR-0025's two archive controls. Both quiet, and deliberately the same
+   weight as the plan preflight beside them rather than a second primary:
+   "New task" is the only thing on this bar that starts work. */
+.board-archive-picked,
+.board-archive-toggle {
+  padding: 0.05rem var(--space-3);
+  border-color: var(--border-1);
+  background: transparent;
+  box-shadow: none;
+  color: var(--text-2);
+  font-size: var(--font-size-xs);
+  font-weight: var(--font-weight-semibold);
+  white-space: nowrap;
+}
+
+.board-archive-picked:hover:not(:disabled),
+.board-archive-toggle:hover:not(:disabled) {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+/* Pressed, not selected — the toggle swaps the whole surface, so it stays
+   legible as "you are looking at the archive" while you are in it. */
+.board-archive-toggle[aria-pressed="true"] {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+.board-archive-report {
+  margin: 0 0 var(--space-3);
+  font-size: var(--font-size-sm);
+}
+
+/* The archive itself: one flat list, because the question here is "when did I
+   put this down", which is not the question `position` answers. */
+.archive-list {
+  flex: 1;
+  min-width: 0;
+}
+
+.archive-rows {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.archive-row {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  align-items: baseline;
+  gap: var(--space-1) var(--space-3);
+  padding: var(--space-2) var(--space-3);
+  border-radius: var(--radius-md);
+  background: var(--surface-1);
+}
+
+.archive-row-title {
+  padding: 0;
+  border: 0;
+  background: none;
+  box-shadow: none;
+  color: var(--text-1);
+  font-size: var(--font-size-sm);
+  font-weight: var(--font-weight-medium);
+  text-align: left;
+}
+
+.archive-row-title:hover {
+  color: var(--accent);
+}
+
+.archive-row-meta {
+  grid-column: 1;
+  font-size: var(--font-size-xs);
+}
+
+.archive-row-restore {
+  grid-row: 1 / span 2;
+  grid-column: 2;
+  align-self: center;
+  font-size: var(--font-size-xs);
+}
+
+.archive-list-empty {
+  padding: var(--space-5) 0;
 }
 
 /* Under the toolbar and above the columns: this is a thing the user is

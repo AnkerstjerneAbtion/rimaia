@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE repositories SET on_archive = ?1, on_archive_script = ?2 WHERE id = ?3",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": []
+  },
+  "hash": "18b247cb4cacc6fed83afc8965d261c67784286437398b1f7eacd7deb1881b84"
+}

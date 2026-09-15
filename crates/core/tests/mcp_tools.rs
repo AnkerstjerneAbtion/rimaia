@@ -13,8 +13,9 @@
 
 use rimaia_core::db::{settings, BoardColumn, MutationSource, StrategyMode, StrategySource};
 use rimaia_core::mcp::requests::{
-    GetTaskRequest, ListTasksRequest, MoveTaskRequest, RemoveTaskLinkRequest,
-    SetTaskDependenciesRequest, UpdateTaskRequest,
+    ArchiveTaskRequest, ArchiveTasksRequest, GetTaskRequest, ListTasksRequest, MoveTaskRequest,
+    RemoveTaskLinkRequest, SetRepositoryOnArchiveRequest, SetTaskDependenciesRequest,
+    UpdateTaskRequest,
 };
 use rimaia_core::mcp::responses::{TaskListView, TaskView};
 use rimaia_core::mcp::RimaiaServer;
@@ -623,6 +624,128 @@ async fn get_base_instructions_returns_the_template_unexpanded() {
     );
 }
 
+// ---------------------------------------------------------------------------
+// Archiving over MCP (task 030, ADR-0025 point 8)
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn archiving_over_mcp_takes_the_card_off_the_board_and_leaves_it_findable() {
+    // ADR-0021 point 5's `delete_task` exception is argued from
+    // irreversibility, so it does not reach archiving — which is why these
+    // tools exist at all. The round trip is the proof that an agent can tidy a
+    // board without being able to destroy anything.
+    let h = TestContext::new().await;
+    let repository_id = seed_repository(&h.context.pool, "rimaia", "/tmp/rimaia").await;
+    let task = create_ready(&h, &repository_id, "Finished with this").await;
+
+    let archived = match server(&h)
+        .archive_task(Parameters(request::<ArchiveTaskRequest>(
+            json!({ "task_id": task.id }),
+        )))
+        .await
+    {
+        Ok(Json(view)) => view,
+        Err(error) => panic!("the tool must succeed: {:?}", error.0),
+    };
+    assert_eq!(archived.title, "Finished with this");
+    assert_eq!(archived.cleanup.kind, "nothing");
+    assert!(!archived.cleanup.needs_attention);
+
+    // Absent from the default read, present in the archived one — one tool,
+    // one field, the same projection (seam-contract D26.1).
+    let board = ok_list(
+        server(&h)
+            .list_tasks(Parameters(request::<ListTasksRequest>(json!({}))))
+            .await,
+    );
+    assert!(board.tasks.is_empty());
+
+    let archive = ok_list(
+        server(&h)
+            .list_tasks(Parameters(request::<ListTasksRequest>(json!({
+                "archived": "archived",
+            }))))
+            .await,
+    );
+    assert_eq!(archive.tasks.len(), 1);
+    assert_eq!(archive.tasks[0].title, "Finished with this");
+}
+
+#[tokio::test]
+async fn a_bulk_archive_over_mcp_reports_both_halves() {
+    let h = TestContext::new().await;
+    let repository_id = seed_repository(&h.context.pool, "rimaia", "/tmp/rimaia").await;
+    let first = create_ready(&h, &repository_id, "One").await;
+    let running = create_ready(&h, &repository_id, "Two").await;
+    tasks::set_run_state(&h.context, &running.id, rimaia_core::db::RunState::Queued)
+        .await
+        .expect("queue");
+    tasks::set_run_state(&h.context, &running.id, rimaia_core::db::RunState::Running)
+        .await
+        .expect("claim");
+
+    let report = match server(&h)
+        .archive_tasks(Parameters(request::<ArchiveTasksRequest>(json!({
+            "task_ids": [first.id, running.id],
+        }))))
+        .await
+    {
+        Ok(Json(view)) => view,
+        Err(error) => panic!("the tool must succeed: {:?}", error.0),
+    };
+
+    assert_eq!(report.archived.len(), 1);
+    assert_eq!(report.archived[0].title, "One");
+    assert_eq!(report.refused.len(), 1);
+    assert_eq!(report.refused[0].title, "Two");
+    assert!(report.refused[0].reason.contains("Cancel the run first"));
+}
+
+#[tokio::test]
+async fn unarchiving_over_mcp_hands_back_the_whole_card() {
+    let h = TestContext::new().await;
+    let repository_id = seed_repository(&h.context.pool, "rimaia", "/tmp/rimaia").await;
+    let task = create_ready(&h, &repository_id, "Back on the board").await;
+    tasks::archive_task(&h.context, &task.id)
+        .await
+        .expect("archive");
+
+    let view = ok(server(&h)
+        .unarchive_task(Parameters(request::<ArchiveTaskRequest>(
+            json!({ "task_id": task.id }),
+        )))
+        .await);
+
+    assert_eq!(view.title, "Back on the board");
+    assert_eq!(view.column, BoardColumn::Ready);
+}
+
+#[tokio::test]
+async fn setting_a_script_on_archive_without_a_path_is_refused_readably() {
+    // The mode and the path are one decision (ADR-0025 point 4); a row
+    // spelling `script` with nothing to run is not one of the three states.
+    let h = TestContext::new().await;
+    let repository_id = seed_repository(&h.context.pool, "rimaia", "/tmp/rimaia").await;
+
+    let refused = as_result(
+        server(&h)
+            .set_repository_on_archive(Parameters(request::<SetRepositoryOnArchiveRequest>(
+                json!({
+                    "repository_id": repository_id,
+                    "on_archive": "script",
+                }),
+            )))
+            .await,
+    );
+
+    assert_eq!(refused.is_error, Some(true));
+    assert!(
+        message(&refused).contains("needs the path of the script to run"),
+        "{}",
+        message(&refused),
+    );
+}
+
 #[tokio::test]
 async fn an_unknown_task_id_reaches_the_agent_as_readable_content() {
     // Task 010's "a specific, actionable error to the calling agent": not an
@@ -786,6 +909,7 @@ async fn ready_column(h: &TestContext, repository_id: &str) -> Vec<String> {
             repository_id: Some(repository_id.to_string()),
             column: Some(BoardColumn::Ready),
             run_state: None,
+            ..rimaia_core::tasks::TaskFilter::default()
         },
     )
     .await

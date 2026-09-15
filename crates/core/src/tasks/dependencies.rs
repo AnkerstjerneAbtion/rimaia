@@ -169,7 +169,8 @@ pub async fn dependencies_of(ctx: &ServiceContext, task_id: &str) -> Result<Vec<
             dep.strategy_updated_at AS "strategy_updated_at: DateTime<Utc>",
             dep.created_at AS "created_at: DateTime<Utc>",
             dep.updated_at AS "updated_at: DateTime<Utc>",
-            dep.source AS "source: MutationSource"
+            dep.source AS "source: MutationSource",
+            dep.archived_at AS "archived_at: DateTime<Utc>"
            FROM task_dependencies d
            JOIN tasks dep ON dep.id = d.depends_on_task_id
           WHERE d.task_id = ?1"#,

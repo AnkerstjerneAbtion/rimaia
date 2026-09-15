@@ -639,6 +639,72 @@
   color: var(--text-2);
 }
 
+/* ADR-0025's cleanup slot. Three exclusive states, so radios — a checkbox
+   beside a text field would be drawing a row the schema cannot hold. */
+.repo-on-archive {
+  margin-top: var(--space-3);
+  padding-top: var(--space-2);
+  box-shadow: inset 0 1px 0 var(--border-1);
+  font-size: var(--font-size-sm);
+}
+
+.repo-on-archive h5 {
+  margin: 0 0 var(--space-2);
+  font-size: var(--font-size-xs);
+  font-weight: var(--font-weight-semibold);
+  color: var(--text-2);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.repo-on-archive-option {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-1) 0;
+}
+
+.repo-on-archive-confirm {
+  margin-top: var(--space-2);
+  padding: var(--space-3) var(--space-4);
+  border-radius: var(--radius-md);
+  background: var(--danger-bg);
+  box-shadow: inset 0 0 0 1px var(--danger-border);
+}
+
+.repo-on-archive-confirm p {
+  margin: 0 0 var(--space-3);
+  color: var(--danger-text);
+  font-weight: var(--font-weight-medium);
+}
+
+.repo-on-archive-confirm button + button {
+  margin-left: var(--space-2);
+}
+
+.repo-on-archive-script {
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  align-items: center;
+  gap: var(--space-2);
+  margin-top: var(--space-2);
+}
+
+.repo-on-archive-script input {
+  padding: var(--space-1) var(--space-2);
+  /* A filesystem path *is* an identifier, which is ADR-0024 point 2's own test
+     for when monospace earns its place. The literal stack, not a token: this
+     file's one `var(--font-mono)` at `.mcp-command` resolves to nothing. */
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: var(--font-size-xs);
+}
+
+.repo-on-archive-script p {
+  grid-column: 1 / -1;
+  margin: 0;
+  font-size: var(--font-size-xs);
+}
+
 /* The per-repository default strategy (task 020), beside the opt-in it answers
    the same question as. */
 .repo-strategy {

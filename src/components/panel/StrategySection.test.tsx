@@ -93,6 +93,7 @@ function task(overrides: Partial<Task> = {}): Task {
     updatedAt: "2026-08-20T11:55:00Z",
     strategyUpdatedAt: null,
     source: "ui",
+    archivedAt: null,
     ...overrides,
   };
 }

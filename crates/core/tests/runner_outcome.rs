@@ -1532,6 +1532,7 @@ impl RunFixture {
                 repository_id: Some(self.repository_id.clone()),
                 column: Some(BoardColumn::InReview),
                 run_state: None,
+                ..tasks::TaskFilter::default()
             },
         )
         .await

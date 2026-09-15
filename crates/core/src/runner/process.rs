@@ -1685,14 +1685,18 @@ fn spawn(config: &RunnerConfig, attempt: &Attempt<'_>) -> Result<ChildProcess> {
 
 /// Which signal to deliver. Spelled as the CLI's own names, since that is what
 /// crosses to [`KILL`].
+///
+/// `pub(crate)` since task 030: ADR-0025's archive hook stops a script the same
+/// way a run is stopped, and a second copy of `kill -s TERM -- -<pgid>` in
+/// another module is the one place this codebase least wants a near-duplicate.
 #[derive(Debug, Clone, Copy)]
-enum Signal {
+pub(crate) enum Signal {
     Term,
     Kill,
 }
 
 impl Signal {
-    const fn as_str(self) -> &'static str {
+    pub(crate) const fn as_str(self) -> &'static str {
         match self {
             Self::Term => "TERM",
             Self::Kill => "KILL",
@@ -1701,7 +1705,7 @@ impl Signal {
 }
 
 #[cfg(unix)]
-fn set_process_group(command: &mut Command) {
+pub(crate) fn set_process_group(command: &mut Command) {
     // Zero means "a new group whose id is the child's pid". Everything the agent
     // starts inherits it, which is what makes one signal reach the whole tree.
     command.process_group(0);
@@ -1712,10 +1716,10 @@ fn set_process_group(command: &mut Command) {
 /// is no Windows target yet, so this is honestly a gap rather than a stub
 /// pretending to be a port.
 #[cfg(not(unix))]
-fn set_process_group(_command: &mut Command) {}
+pub(crate) fn set_process_group(_command: &mut Command) {}
 
 #[cfg(unix)]
-async fn signal_group(group: Option<u32>, signal: Signal) {
+pub(crate) async fn signal_group(group: Option<u32>, signal: Signal) {
     let Some(group) = group else {
         tracing::error!("the child reported no pid; it cannot be signalled");
         return;
@@ -1751,7 +1755,7 @@ async fn signal_group(group: Option<u32>, signal: Signal) {
 }
 
 #[cfg(not(unix))]
-async fn signal_group(_group: Option<u32>, _signal: Signal) {
+pub(crate) async fn signal_group(_group: Option<u32>, _signal: Signal) {
     tracing::error!("cancelling a run is not implemented on this platform");
 }
 

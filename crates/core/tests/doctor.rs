@@ -116,6 +116,8 @@ fn row_for(path: &Path, name: &str) -> Repository {
         credential_login: None,
         credential_label: None,
         credential_added_at: None,
+        on_archive: rimaia_core::db::OnArchive::None,
+        on_archive_script: None,
     }
 }
 

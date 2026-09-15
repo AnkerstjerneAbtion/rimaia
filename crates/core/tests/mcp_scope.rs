@@ -204,6 +204,19 @@ fn the_operator_endpoint_keeps_every_tool_it_had_before_task_020() {
             | Tool::ListWorktrees
             | Tool::GetWorktreeAutoCleanup
             | Tool::SetWorktreeAutoCleanup => RunAccess::Refused,
+            // Task 030. These have tools at all because archiving is
+            // *reversible*, which is the property ADR-0021 point 5's
+            // `delete_task` exception is drawn along — but they are still
+            // refused for a run. `set_repository_on_archive` is
+            // "reconfigures the installation" verbatim, and it decides which
+            // program Rimaia will execute. The three archive calls are refused
+            // on the narrower ground that archiving is not a board edit: it
+            // fires whatever the repository configured, so `OwnTaskOnly` would
+            // be a run able to delete the worktree it is standing in.
+            Tool::ArchiveTask
+            | Tool::ArchiveTasks
+            | Tool::UnarchiveTask
+            | Tool::SetRepositoryOnArchive => RunAccess::Refused,
         };
         assert_eq!(tool.run_access(), expected, "{}", tool.as_str());
     }

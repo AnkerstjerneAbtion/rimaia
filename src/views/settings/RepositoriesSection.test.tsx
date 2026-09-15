@@ -47,6 +47,8 @@ function repository(overrides: Partial<Repository> = {}): Repository {
     allowUnattendedRuns: false,
     maxConcurrency: 1,
     createdAt: "2026-08-20T12:00:00+00:00",
+    onArchive: "none",
+    onArchiveScript: null,
     ...overrides,
   };
 }

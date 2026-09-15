@@ -15,6 +15,11 @@ interface BoardToolbarProps {
   readonly pickedCount: number;
   readonly onPlan: () => void;
   readonly planDisabled: boolean;
+  /** ADR-0025's bulk archive, over the same picked set. */
+  readonly onArchive: () => void;
+  readonly archiveDisabled: boolean;
+  readonly showArchive: boolean;
+  readonly onToggleArchive: () => void;
 }
 
 /**
@@ -40,6 +45,10 @@ export function BoardToolbar({
   pickedCount,
   onPlan,
   planDisabled,
+  onArchive,
+  archiveDisabled,
+  showArchive,
+  onToggleArchive,
 }: BoardToolbarProps) {
   return (
     <div className="board-toolbar">
@@ -89,6 +98,34 @@ export function BoardToolbar({
         }
       >
         {pickedCount > 0 ? `Plan ${pickedCount} selected` : "Plan ready column"}
+      </button>
+
+      {/* ADR-0025's bulk archive, over task 023's picked set. Only shown when
+          something is picked: an "Archive 0 selected" button permanently
+          greyed out on a board nobody has picked from is furniture, and the
+          per-card control in the detail panel is the one-card answer. */}
+      {pickedCount > 0 && !showArchive && (
+        <button
+          type="button"
+          className="board-archive-picked"
+          onClick={onArchive}
+          disabled={archiveDisabled}
+          title="Archive the selected cards. They keep their run history and can be put back."
+        >
+          Archive {pickedCount} selected
+        </button>
+      )}
+
+      {/* You archive from here, so you unarchive from here — a sidebar entry
+          would put the way back one level further from the action that put it
+          there. */}
+      <button
+        type="button"
+        className="board-archive-toggle"
+        onClick={onToggleArchive}
+        aria-pressed={showArchive}
+      >
+        {showArchive ? "Back to the board" : "Archive"}
       </button>
 
       <button

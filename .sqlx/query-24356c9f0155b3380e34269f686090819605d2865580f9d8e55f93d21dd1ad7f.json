@@ -1,6 +1,6 @@
 {
   "db_name": "SQLite",
-  "query": "\n        SELECT id, name, path, default_branch, worktree_root, allow_unattended_runs,\n               max_concurrency, created_at AS \"created_at: chrono::DateTime<chrono::Utc>\",\n               credential_login, credential_label,\n               credential_added_at AS \"credential_added_at: chrono::DateTime<chrono::Utc>\"\n        FROM repositories\n        WHERE id = ?1\n        ",
+  "query": "\n        SELECT id, name, path, default_branch, worktree_root, allow_unattended_runs,\n               max_concurrency, created_at AS \"created_at: chrono::DateTime<chrono::Utc>\",\n               credential_login, credential_label,\n               credential_added_at AS \"credential_added_at: chrono::DateTime<chrono::Utc>\",\n               on_archive AS \"on_archive: crate::db::OnArchive\", on_archive_script\n        FROM repositories\n        WHERE id = ?1\n        ",
   "describe": {
     "columns": [
       {
@@ -57,6 +57,16 @@
         "name": "credential_added_at: chrono::DateTime<chrono::Utc>",
         "ordinal": 10,
         "type_info": "Text"
+      },
+      {
+        "name": "on_archive: crate::db::OnArchive",
+        "ordinal": 11,
+        "type_info": "Text"
+      },
+      {
+        "name": "on_archive_script",
+        "ordinal": 12,
+        "type_info": "Text"
       }
     ],
     "parameters": {
@@ -73,8 +83,10 @@
       false,
       true,
       true,
+      true,
+      false,
       true
     ]
   },
-  "hash": "fe5e8f818a1da98f805147653c09ebad59019ea75955967307aa7cea55a6c004"
+  "hash": "24356c9f0155b3380e34269f686090819605d2865580f9d8e55f93d21dd1ad7f"
 }

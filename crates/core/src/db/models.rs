@@ -467,6 +467,65 @@ pub struct Repository {
     /// What the user called it — "fine-grained, rimaia only, expires March".
     pub credential_label: Option<String>,
     pub credential_added_at: Option<DateTime<Utc>>,
+    /// What archiving a task in this repository cleans up (ADR-0025 point 4).
+    ///
+    /// One slot, three states, mutually exclusive **by construction** rather
+    /// than by a rule in a service: two live fields would let Rimaia's guarded
+    /// removal run against a directory a script had already deleted, and would
+    /// make "what happens when I archive" a two-field question.
+    pub on_archive: OnArchive,
+    /// The executable [`OnArchive::Script`] names — an absolute path to one
+    /// file, never a command line (ADR-0025 point 5).
+    ///
+    /// Meaningful only when [`on_archive`](Repository::on_archive) is
+    /// [`Script`](OnArchive::Script), and validated when it is *written* rather
+    /// than when an archive fires: a path that is relative, missing, a
+    /// directory or not executable is a form error at 11am, not a surprise at
+    /// 3am.
+    pub on_archive_script: Option<String>,
+}
+
+/// What one archive cleans up, per repository (ADR-0025 point 4).
+///
+/// The two non-default values differ in more than their mechanism, and the
+/// difference is the decision rather than an implementation detail.
+/// [`RemoveWorktree`](OnArchive::RemoveWorktree) is Rimaia's own cleanup,
+/// reached with `RemovalAuthorization::default()` so all four of
+/// seam-contract D20's guards hold. [`Script`](OnArchive::Script) means Rimaia
+/// touches nothing itself — the script owns cleanup, including the worktree,
+/// including the branch, and therefore gives up every one of those guards. The
+/// Settings copy is obliged to say so in those words.
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Default,
+    Serialize,
+    Deserialize,
+    sqlx::Type,
+    schemars::JsonSchema,
+)]
+#[serde(rename_all = "snake_case")]
+#[sqlx(rename_all = "snake_case")]
+pub enum OnArchive {
+    #[default]
+    None,
+    RemoveWorktree,
+    Script,
+}
+
+impl OnArchive {
+    /// The stored spelling, which is also the wire spelling — one word in the
+    /// `sqlite3` CLI, in a log line and in the frontend's union type.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            OnArchive::None => "none",
+            OnArchive::RemoveWorktree => "remove_worktree",
+            OnArchive::Script => "script",
+        }
+    }
 }
 
 /// One key/value application setting (ADR-0003).
@@ -532,6 +591,15 @@ pub struct Task {
     /// leaves a `ui` task saying `ui`. Last, after `updated_at`, matching the
     /// column order the migration produced.
     pub source: MutationSource,
+    /// When the user took this card off the board (ADR-0025). `None` *is* "on
+    /// the board" — one spelling for one state, which is why there is no
+    /// boolean beside it for the two to disagree about.
+    ///
+    /// A third axis, not a fifth [`BoardColumn`]: an archived task still has
+    /// the column it always had, and unarchiving returns it there. It is also
+    /// orthogonal to [`run_state`](Task::run_state), for the same reason
+    /// ADR-0007 gives for keeping those two apart.
+    pub archived_at: Option<DateTime<Utc>>,
 }
 
 /// One external reference on a task — an Asana task, a GitHub issue, a doc
@@ -831,6 +899,7 @@ mod tests {
             created_at: timestamp("2026-08-20T12:00:00Z"),
             updated_at: timestamp("2026-08-20T12:30:00Z"),
             source: MutationSource::Mcp,
+            archived_at: None,
         };
 
         assert_eq!(
@@ -860,6 +929,10 @@ mod tests {
                 // ADR-0019's provenance, `snake_case` on the wire like every
                 // other enum value, because it answers to SQLite's CHECK too.
                 "source": "mcp",
+                // ADR-0025's third axis. `null` is not "unknown" here — it is
+                // the value that means "on the board", which is why the card
+                // can read it directly rather than asking for a flag beside it.
+                "archivedAt": null,
             })
         );
     }
@@ -879,6 +952,8 @@ mod tests {
             credential_login: None,
             credential_label: None,
             credential_added_at: None,
+            on_archive: OnArchive::None,
+            on_archive_script: None,
         };
 
         assert_eq!(
@@ -900,6 +975,11 @@ mod tests {
                 "credentialLogin": null,
                 "credentialLabel": null,
                 "credentialAddedAt": null,
+                // ADR-0025's cleanup slot. `"none"` rather than an omitted
+                // field for the same reason as the three above: the Settings
+                // pane renders a chosen "do nothing", not an unknown.
+                "onArchive": "none",
+                "onArchiveScript": null,
             })
         );
     }

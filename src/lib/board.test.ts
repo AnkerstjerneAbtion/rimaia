@@ -40,6 +40,7 @@ const BASE_TASK: Task = {
   strategySource: null,
   strategyUpdatedAt: null,
   createdAt: "2026-08-20T09:00:00Z",
+  archivedAt: null,
   updatedAt: "2026-08-20T09:00:00Z",
   source: "ui",
 };
