@@ -384,6 +384,34 @@ export function Board() {
     return () => window.removeEventListener("keydown", handleKeyDown);
   }, [selectedTaskId, handleNewTask, activeId]);
 
+  // Clicking away from the drawer closes it, the same way Escape does.
+  //
+  // `pointerdown` rather than `click`: a drag that starts on the board and ends
+  // over the drawer never produces a `click` at all, so a `click` listener
+  // would leave the panel open after exactly the gesture most likely to be an
+  // attempt to dismiss it.
+  //
+  // Two things are deliberately *not* outside clicks. A card, because selecting
+  // a different one should move the drawer rather than close it — its own
+  // `onSelect` already does that, and closing first would flicker the panel
+  // shut and open again. And a drag in progress, for the reason the Escape
+  // branch above gives: dnd-kit owns the gesture, and the pointer landing
+  // somewhere else is how a drop works, not a dismissal.
+  useEffect(() => {
+    if (!selectedTaskId) return;
+
+    function handlePointerDown(event: PointerEvent) {
+      if (activeId) return;
+      const target = event.target;
+      if (!(target instanceof Element)) return;
+      if (target.closest(".task-detail-panel, .task-card")) return;
+      setSelectedTaskId(null);
+    }
+
+    document.addEventListener("pointerdown", handlePointerDown);
+    return () => document.removeEventListener("pointerdown", handlePointerDown);
+  }, [selectedTaskId, activeId]);
+
   const activeCard = findCard(columns, activeId);
 
   return (

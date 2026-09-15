@@ -438,6 +438,61 @@ describe("Board", () => {
     );
   });
 
+  it("closes the detail panel when the pointer goes down outside it", async () => {
+    mockBackend({ tasks: [task({ id: "a", title: "Wire the board" })] });
+    render(<Board />);
+
+    fireEvent.click(await screen.findByText("Wire the board"));
+    await screen.findByRole("complementary", { name: "Task: Wire the board" });
+
+    fireEvent.pointerDown(document.body);
+
+    await waitFor(() =>
+      expect(screen.queryByRole("complementary", { name: "Task: Wire the board" })).toBeNull(),
+    );
+  });
+
+  it("keeps the detail panel open when the pointer goes down inside it", async () => {
+    // The whole point of the drawer is that it can be read and typed into, so
+    // the dismissal must not fire on its own content.
+    mockBackend({ tasks: [task({ id: "a", title: "Wire the board" })] });
+    render(<Board />);
+
+    fireEvent.click(await screen.findByText("Wire the board"));
+    const panel = await screen.findByRole("complementary", { name: "Task: Wire the board" });
+
+    fireEvent.pointerDown(panel);
+
+    expect(
+      screen.getByRole("complementary", { name: "Task: Wire the board" }),
+    ).toBeInTheDocument();
+  });
+
+  it("moves the detail panel to another card rather than closing on it", async () => {
+    // A card is not an outside click: selecting a different one should move the
+    // drawer, not shut it and reopen it.
+    mockBackend({
+      tasks: [
+        task({ id: "a", title: "Wire the board" }),
+        task({ id: "b", title: "Wire the runner" }),
+      ],
+    });
+    render(<Board />);
+
+    fireEvent.click(await screen.findByText("Wire the board"));
+    await screen.findByRole("complementary", { name: "Task: Wire the board" });
+
+    // By id, not by text: the open drawer's dependency picker lists every
+    // other task, so the title matches an `<option>` as well as a card.
+    const other = document.querySelector<HTMLElement>('[data-task-id="b"]')!;
+    fireEvent.pointerDown(other);
+    fireEvent.click(other);
+
+    expect(
+      await screen.findByRole("complementary", { name: "Task: Wire the runner" }),
+    ).toBeInTheDocument();
+  });
+
   it("does not close the panel on Escape while a keyboard drag is in progress", async () => {
     // Fix pass finding 9: dnd-kit's own `KeyboardSensor` also cancels a
     // drag on Escape (its listener is on `document`, ahead of this board's
