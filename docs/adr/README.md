@@ -32,6 +32,7 @@ alternatives.
 | [0022](0022-what-a-run-is-remembered-by.md) | What a run is remembered by, and what survives pruning | Accepted |
 | [0023](0023-an-overridable-data-directory.md) | An overridable data directory, so one branch cannot break every other | Accepted |
 | [0024](0024-a-calm-interface-that-travels-to-the-web.md) | A calm interface, and one that travels to the web | Accepted |
+| [0025](0025-archiving-a-task-and-what-it-may-clean-up.md) | Archiving a task, and what an archive is allowed to clean up | Accepted |
 
 ## Conventions
 

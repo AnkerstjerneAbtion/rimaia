@@ -231,6 +231,37 @@ that believes it needs a seventh stops and asks.
 
 **Binds.** 022, in addition to everything this entry already bound.
 
+### Amendment, 2026-09-15 — a seventh, and it is the ask this entry demands again
+
+Task 030 believed it needed one. It does, and this is the answer:
+
+```
+src-tauri/migrations/20260915120000_archive_and_on_archive.sql   (task 030)
+```
+
+Three columns, no table. `tasks.archived_at` is ADR-0025's third axis — nullable, because
+`NULL` *is* "on the board" and the alternative is a boolean plus a timestamp that can
+disagree. `repositories.on_archive` and `repositories.on_archive_script` are the
+per-repository cleanup slot; `on_archive` is `NOT NULL DEFAULT 'none'` with a `CHECK`
+spelling the whole closed domain, for the reason `20260826120000_task_source.sql`'s header
+gives — SQLite cannot widen a `CHECK` afterwards, so the domain is stated once rather than
+grown.
+
+This one could **not** have ridden along with an earlier file the way task 024's capture
+columns rode with task 013's. Every existing migration is merged and applied on the user's
+own database, and ADR-0003 makes those append-only outright.
+
+The timestamp sorts after every migration already on disk, which is this entry's 2026-09-02
+lesson applied rather than restated.
+
+**The count is now seven, and seven is the whole list.** Nothing else on task 030's branch
+adds one: there is no new `settings` key at all, because ADR-0025 point 4 puts the policy on
+the repository row where the repository's own infrastructure is described, not in the
+key/value table. The prohibition is otherwise unchanged: a task that believes it needs an
+eighth stops and asks.
+
+**Binds.** 030, in addition to everything this entry already bound.
+
 ## D5 — Compile-time checked queries and the `.sqlx` cache
 
 **Question.** `sqlx::query!` or the runtime `sqlx::query()`, and what enforces that the
@@ -1962,6 +1993,150 @@ in core even though only one door reaches it.
 
 **Binds.** 016, 024, 026.
 
+### Amendment, 2026-09-15 — archiving reaches this entry twice (task 030)
+
+ADR-0025 adds a second trigger for worktree removal and a first trigger for running
+something that is not `git`, `claude` or `kill`. Two of this entry's points are touched,
+and neither changes — they are restated because a reader meeting task 030's code would
+otherwise read it as a deviation.
+
+**Point 5 still holds, and now holds of two things.** Archiving deletes no `runs` row, no
+transcript and no link. It is the opposite of `delete_task` in exactly the dimension point 5
+carves out: the cascade is the thing being avoided, not the thing being reached for.
+ADR-0025 point 2 is where that is argued at product scale.
+
+**Point 1's four guards are reached intact by one of the two cleanup modes and bypassed
+entirely by the other**, and that asymmetry is the decision, not an oversight. The
+`remove_worktree` preset calls `remove_worktree` with `RemovalAuthorization::default()` —
+the same posture `auto_remove_on_done` uses, for the same reason given in point 3. A
+configured **script** is not routed through this module at all: it is handed the task's
+paths and may do as it likes with them, including deleting a worktree with uncommitted
+changes that `ensure_committed` would have refused. There is no way to have it both ways.
+A script that Rimaia guarded would be a script that could not do the teardown it was
+written for, and a script Rimaia re-ran cleanup after would be Rimaia removing a directory
+its owner had already removed. The obligation this creates is on the *copy*, not the code:
+the Settings pane must say that a script gives up the guards, in those words.
+
+Point 6's no-tool list does **not** grow. ADR-0025 point 8 argues archiving onto the tool
+surface — it is reversible, which is the property point 6's list is drawn along — while
+keeping it off the run-scoped half. `set_repository_on_archive` is refused for a run on
+ADR-0021 point 4's "reconfigures the installation" clause, which is the same ground
+`set_worktree_auto_cleanup` already stands on.
+
+**Binds.** 030, in addition to 016, 024 and 026.
+
+## D26 — Task 030's cross-cutting choices
+
+**Question.** ADR-0025 fixes what archiving means, what it preserves, what it refuses and
+what a repository may configure. Six things it deliberately leaves at implementation scale
+are still places two agents would answer differently, and four of them are only visible
+from outside the module that owns them.
+
+**Decision.** Six, taken together by task 030:
+
+1. **`TaskFilter` grows a third axis, and its default is `Active`.** A new
+   `ArchiveFilter` enum — `Active` (default) · `Archived` · `All` — appended to
+   `TaskFilter` in `crates/core/src/tasks/types.rs`, and one more predicate on the
+   `WHERE 1 = 1` chain [D12](#d12--what-the-boards-bulk-read-returns)'s projection already
+   ends with.
+
+   The default is the whole point. `tasks::list_tasks` is not only the board's read: it is
+   the **scheduler's** read (`scheduler::selection::plan`), the **plan pass's** read
+   (`runner::strategy::selected_tasks`) and the **MCP tool's**. A `#[derive(Default)]`
+   that means "not archived" gives all four the right answer with no call site edited; a
+   default of `All` would have put archived tasks back in the run queue, and the first
+   place anyone would have learned that is a night run.
+
+   It is a SQL literal appended to the string, never a bind — the value is one of three
+   variants of a Rust enum and there is no user input anywhere near it, which is also
+   [D5](#d5--compile-time-checked-queries-and-the-sqlx-cache)'s reason this query is
+   hand-built rather than a macro in the first place.
+
+2. **`archived_at` rides the summary as a plain column.** `TaskSummary` and `TaskDetail`
+   both carry `archived_at: Option<String>`; no fifth correlated subquery, no aggregate.
+   D12's cost argument — one board read is one query — is untouched, and the archive view
+   needs the timestamp to sort by, which is the same read the board already does with a
+   different filter rather than a second endpoint.
+
+3. **Bulk reports, single errors — and the report carries the action's outcome.**
+   `archive_tasks` returns an `ArchiveReport { archived, refused }` and never aborts on the
+   first refusal; `archive_task` and `unarchive_task` return `Result`. That split is
+   [D20](#d20--task-016s-cleanup-what-it-refuses-what-it-may-not-be-forced-past-and-what-it-never-deletes)
+   point 2 verbatim, and the bulk half is a loop over the single half exactly as
+   `worktree::cleanup::sweep` is.
+
+   What is new is the third field. Each archived entry carries an `OnArchiveOutcome` —
+   `Nothing` · `WorktreeRemoved { bytes_freed }` · `ScriptRan { exit_code, output }` ·
+   `Failed { reason }` — because ADR-0025 point 6 makes the action *reported* rather than
+   silent, and a caller that had to ask a second time what the cleanup did would be asking
+   after the process had exited and the bytes were gone.
+
+4. **The script's spawn contract, in one place.** `crates/core/src/archive/` owns it, not
+   `runner::` and not `worktree::`:
+
+   | | |
+   | --- | --- |
+   | argv | `[script_path]`, no arguments at all (ADR-0025 point 5) |
+   | cwd | the **repository** root, never the worktree — the script may be deleting the worktree |
+   | env added | `RIMAIA_TASK_ID`, `RIMAIA_TASK_TITLE`, `RIMAIA_REPOSITORY_PATH`, `RIMAIA_BRANCH`, `RIMAIA_WORKTREE_PATH` (empty string when the task never ran) |
+   | env removed | every inherited `CLAUDE_*`, through the runner's own `strip_process_identity` |
+   | process group | its own, via `set_process_group(0)`, so one signal reaches the tree |
+   | stop | `TERM` to the group through `runner::process::signal_group`, then the runner's grace period, then `KILL` |
+   | output | stdout and stderr captured, tail capped and carried on the outcome — no new log tree, and **not** redacted |
+
+   `signal_group` is reused rather than reimplemented because it is already an argument
+   vector (`kill -s TERM -- -<pgid>`) rather than a shell string, which is the rule this
+   whole feature is most at risk of breaking.
+
+   **The output is deliberately not redacted**, which is the one place this diverges from
+   the runner and is worth stating because the runner's habit looks like the safe default.
+   `credentials::redact` exists because the runner puts a token into its child's
+   environment and then writes that child's output to a transcript file. Neither half holds
+   here: an on-archive script is handed no credential, and its output goes to the person
+   who wrote it, on their own machine, without touching disk. Redacting anyway would mean
+   reading the keychain on an archive — a new failure mode, and on macOS a possible prompt
+   — to scrub a value Rimaia never supplied. `ServiceContext` has no credential store to
+   reach for either, and ADR-0018 fixes that struct's shape.
+
+5. **The timeout is the first wall-clock one in this codebase, and it is scoped to this.**
+   `ARCHIVE_SCRIPT_TIMEOUT`, two minutes. Nothing else here has one: `worktree::git::run`
+   is bounded by git, and a run is bounded by ADR-0010's window and `MAX_TURNS` *on
+   purpose* — `runner::process`'s grace period says in its own doc that it "is not a
+   timeout on the run itself". An archive hook has neither bound and sits in front of a
+   user waiting for a board to update, so it gets the ordinary answer. **It is injected,
+   not read from a constant at the call site**, because CLAUDE.md forbids `sleep` in tests
+   and "a script that never exits is killed" is one of the behaviours that has to be
+   tested.
+
+6. **The picked set becomes general, and starts being pruned.** Task 023's
+   `pickedTaskIds` in `src/components/board/Board.tsx` now drives two actions, so the
+   card checkbox's `aria-label` loses its `for planning` suffix.
+
+   More importantly it gains the prune effect `selectedTaskId` has had since task 005 and
+   it has never had: an id that disappears from `state` leaves the set. It was harmless
+   while the set only fed a planner that resolves ids through
+   `runner::strategy::selected_tasks` and refuses unknown ones with a sentence. It is not
+   harmless now — a stale id is a stale *archive* target, and "archive the 3 I picked"
+   reporting a refusal for a card the user deleted ten minutes ago is a bug report nobody
+   can reproduce.
+
+**Why.** (1) is the one an agent would get wrong in the direction that costs a night's
+runs, and it is invisible from the module that makes the change — the scheduler never
+mentions archiving anywhere. (2) and (3) are D12 and D20 reaching a module they do not
+name. (4) and (5) are a subprocess contract, which is the kind of thing that ends up
+half-stated across three files unless it is tabulated once; (5) is additionally a
+*precedent* being set, and a precedent set silently is one the next task widens without
+knowing it was scoped. (6) is a latent bug this task promotes to a real one, which is
+exactly the sort of thing a reviewer finds in a diff and cannot tell from a drive-by.
+
+See also [ADR-0025](adr/0025-archiving-a-task-and-what-it-may-clean-up.md) (all of it),
+[D4](#d4--migration-file-numbering)'s 2026-09-15 amendment (the migration),
+[D12](#d12--what-the-boards-bulk-read-returns) (the projection this extends) and
+[D20](#d20--task-016s-cleanup-what-it-refuses-what-it-may-not-be-forced-past-and-what-it-never-deletes)'s
+2026-09-15 amendment (the guards, and which mode reaches them).
+
+**Binds.** 030.
+
 ---
 
 ## How to use this
@@ -1994,6 +2169,7 @@ An implementation task reads the entries its number appears in, before writing c
 | [025](../tasks/025-startup-failure-dialog.md) | D6 · D11 |
 | [026](../tasks/026-open-worktree-in-editor.md) | D6 · D12 · D20 |
 | [027](../tasks/027-dismissable-doctor-warnings.md) | D3 · D4 · D8 · D22 |
+| [030](../tasks/030-archiving-tasks-and-on-archive-cleanup.md) | D4 · D5 · D8 · D12 · D19 · D20 · D26 |
 | every task | D4 and D6 as prohibitions |
 
 A reviewer treats any decision visible in a diff that is neither in an ADR nor here as a
