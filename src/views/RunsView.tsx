@@ -7,7 +7,6 @@ import { RunDetailOverlay } from "../components/runs/RunDetailOverlay";
 import { SessionOutcomesList } from "../components/runs/SessionOutcomesList";
 import type { RunCostSummary } from "../types";
 import type { SessionOutcome } from "../components/runs/SessionOutcomesList";
-import { EmptyState } from "../components/EmptyState";
 import { environmentOverheadNote } from "../lib/runEnvironment";
 import { ErrorBanner } from "../components/ErrorBanner";
 import { EXIT_CLASS_LABELS, formatCostUsd } from "../components/panel/RunOutcomeSection";
@@ -399,30 +398,6 @@ export function RunsView() {
         </div>
 
         {queueStatus && (
-          <dl className="queue-console-metrics">
-            <div
-              className="queue-metric queue-metric-live"
-              data-zero={queueStatus.runningTaskIds.length === 0}
-            >
-              <dt>In flight</dt>
-              <dd>{queueStatus.runningTaskIds.length}</dd>
-            </div>
-            <div className="queue-metric" data-zero={claimable === 0}>
-              <dt>Up next</dt>
-              <dd>{claimable}</dd>
-            </div>
-            <div className="queue-metric" data-zero={passedOver === 0}>
-              <dt>Passed over</dt>
-              <dd>{passedOver}</dd>
-            </div>
-            <div className="queue-metric" data-zero={sessionOutcomes.length === 0}>
-              <dt>Finished</dt>
-              <dd>{sessionOutcomes.length}</dd>
-            </div>
-          </dl>
-        )}
-
-        {queueStatus && (
           <QueueControls
             state={queueStatus.state}
             hasRunBefore={hasRunBefore}
@@ -430,15 +405,15 @@ export function RunsView() {
           />
         )}
 
+        {/* A footnote, not a paragraph in the control band. It is reference —
+            what every run costs before it does anything — and the three
+            sentences it used to spend saying where to change it and where to
+            read a finished run's cost were instructions nobody needs while
+            deciding whether to press Start. */}
         {runEnvironment && (
           <p className="runs-environment-note">
-            Environment: {runEnvironment === "inherit" ? "Inherit (default)" : "Strict / local"}.{" "}
-            {runEnvironment === "inherit"
-              ? overheadNote ??
-                "Inheriting your Claude Code environment adds a fixed setup cost to every run."
-              : "Only each repository's own CLAUDE.md and project settings reach a run."}{" "}
-            Change this in Settings → Instructions; a finished run's own cost shows on its task's
-            detail panel.
+            {runEnvironment === "inherit" ? "Inherit (default)" : "Strict / local"} environment
+            {runEnvironment === "inherit" && overheadNote ? ` · ${overheadNote}` : ". "}
           </p>
         )}
       </section>
@@ -453,12 +428,12 @@ export function RunsView() {
 
         {runningTasks === null && !readError && <p className="muted">Reading…</p>}
 
+        {/* One line, not a hero. Nothing running is the *normal* state of this
+            page — the queue runs overnight and the user opens the app in the
+            morning — and a three-sentence empty state explaining a band that
+            is empty pushed the history they came to read below the fold. */}
         {runningTasks && runningTasks.length === 0 && (
-          <EmptyState
-            title="Nothing running right now"
-            body="Each run lands here with its elapsed time, turn count, current tool call, recent assistant text, and a Cancel button, for as long as it is in progress."
-            arrivesIn="See History below for every past run, its diff and commits, and its transcript."
-          />
+          <p className="muted">Nothing running right now.</p>
         )}
 
         {runningTasks && runningTasks.length > 0 && (
@@ -483,10 +458,26 @@ export function RunsView() {
           <section className="queue-lane">
             <div className="runs-section-head">
               <h2>Up next</h2>
-              <span className="runs-section-count" data-zero={claimable === 0}>
-                {claimable}
+              {/* The number of rows below it, not the claimable subset. The
+                  count used to be `claimable` while the list rendered the whole
+                  plan, so a ready column of nine passed-over tasks read
+                  "Up next 0" above nine visible rows. Which of them will
+                  actually start is what the ordinals and the "Not queued —"
+                  reasons say, per row. */}
+              <span className="runs-section-count" data-zero={queueStatus.plan.length === 0}>
+                {queueStatus.plan.length}
               </span>
             </div>
+            {claimable > 0 && passedOver > 0 && (
+              <p className="queue-lane-note">
+                {claimable} will start, {passedOver} passed over.
+              </p>
+            )}
+            {claimable === 0 && passedOver > 0 && (
+              <p className="queue-lane-note">
+                None will start — each is passed over for the reason beside it.
+              </p>
+            )}
             <QueuePlanList plan={queueStatus.plan} />
           </section>
 

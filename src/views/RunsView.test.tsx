@@ -245,7 +245,7 @@ describe("RunsView", () => {
     mockBackend({ runningTasks: [] });
     render(<RunsView />);
 
-    expect(await screen.findByText("Nothing running right now")).toBeInTheDocument();
+    expect(await screen.findByText("Nothing running right now.")).toBeInTheDocument();
   });
 
   it("renders a card for each task list_tasks reports as running", async () => {
@@ -253,7 +253,7 @@ describe("RunsView", () => {
     render(<RunsView />);
 
     expect(await screen.findByText("Wire up the board")).toBeInTheDocument();
-    expect(screen.queryByText("Nothing running right now")).toBeNull();
+    expect(screen.queryByText("Nothing running right now.")).toBeNull();
   });
 
   it("renders every concurrent run at once, side by side, rather than one at a time", async () => {
@@ -337,7 +337,7 @@ describe("RunsView", () => {
 
     render(<RunsView />);
     await waitFor(() => expect(call).toBe(1));
-    expect(screen.getByText("Nothing running right now")).toBeInTheDocument();
+    expect(screen.getByText("Nothing running right now.")).toBeInTheDocument();
 
     act(() => fire("tasks:changed", ["task-1"]));
 
@@ -422,6 +422,53 @@ describe("RunsView", () => {
 
       expect(await screen.findByText("Paused")).toBeInTheDocument();
       expect(screen.getByRole("button", { name: "Start queue" })).toBeInTheDocument();
+    });
+
+    it("counts Up next by the rows it shows, not by the claimable subset", async () => {
+      // The count used to be `claimable` while the list rendered the whole
+      // plan, so a ready column of tasks the queue passes over read
+      // "Up next 0" above three visible rows. The list is deliberately the
+      // whole plan (task 009: the order is what tells you which skipped task
+      // sits ahead of which claimable one), so the count is what had to move.
+      mockBackend({
+        queue: queueStatus({
+          plan: [
+            {
+              taskId: "a",
+              repositoryId: "repo-1",
+              title: "Waiting on a dependency",
+              queuePosition: null,
+              skip: "dependency_not_satisfied",
+              resumeAfter: null,
+            },
+            {
+              taskId: "b",
+              repositoryId: "repo-1",
+              title: "Last run did not succeed",
+              queuePosition: null,
+              skip: "needs_attention",
+              resumeAfter: null,
+            },
+            {
+              taskId: "c",
+              repositoryId: "repo-1",
+              title: "Also waiting",
+              queuePosition: null,
+              skip: "dependency_not_satisfied",
+              resumeAfter: null,
+            },
+          ],
+        }),
+      });
+      render(<RunsView />);
+
+      const heading = await screen.findByRole("heading", { name: "Up next" });
+      expect(heading.parentElement).toHaveTextContent("3");
+      expect(
+        screen.getByText(
+          "None will start — each is passed over for the reason beside it.",
+        ),
+      ).toBeInTheDocument();
     });
 
     it("shows the last pass's own failure next to the state badge", async () => {

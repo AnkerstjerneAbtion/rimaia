@@ -633,26 +633,6 @@ textarea {
 
 /* Empty states */
 
-.empty-state {
-  max-width: 34rem;
-  margin: 12vh auto 0;
-  text-align: center;
-}
-
-.empty-state h2 {
-  margin: 0 0 var(--space-2);
-  font-size: var(--font-size-xl);
-}
-
-.empty-state p {
-  margin: 0 0 var(--space-2);
-  color: var(--text-muted);
-}
-
-.empty-state-note {
-  font-size: var(--font-size-sm);
-  opacity: 0.75;
-}
 
 /* Errors */
 
