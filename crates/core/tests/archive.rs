@@ -435,12 +435,15 @@ async fn a_script_that_never_exits_is_killed_at_the_timeout() {
     let task = f.task("Hangs forever").await;
 
     let clock = f.harness.clock.clone();
+    // **Unbounded, and aborted below rather than counted out.** A fixed number
+    // of ticks is a race this test lost on CI and hung on: the archive has
+    // database writes and a process spawn to get through before it reaches
+    // `sleep_until`, and if the ticker finishes first then the deadline is
+    // computed from an already-advanced clock that nothing will move again.
+    // Neither arm of the `select!` can then resolve — the script loops forever
+    // by construction — and `cargo test` has no timeout to end it.
     let ticker = tokio::spawn(async move {
-        // Both deadlines, with a yield between: the timeout, and then the grace
-        // period before `KILL`. Advanced repeatedly because the archive has
-        // work to do before it starts waiting, and a single early jump would
-        // resolve nothing.
-        for _ in 0..40 {
+        loop {
             tokio::task::yield_now().await;
             clock.advance(chrono::Duration::minutes(5));
         }
