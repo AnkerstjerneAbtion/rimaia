@@ -40,7 +40,7 @@ reviewable in the app afterwards.
 | 27 | [022](022-per-repository-git-credentials.md) | Per-repository git credentials | v0.3 | 003, 008 | [#28](https://github.com/AnkerstjerneAbtion/rimaia/pull/28) |
 | 28 | [021](021-review-and-fix-loop.md) | Review-and-fix loop | v0.4 | 015, 017, 020 | — |
 | 29 | [024](024-analytics.md) | Analytics — what the queue has actually done | v0.4 | 015 | [#28](https://github.com/AnkerstjerneAbtion/rimaia/pull/28) |
-| 30 | [030](030-archiving-tasks-and-on-archive-cleanup.md) | Archiving tasks, and on-archive cleanup | v0.3 | 005, 016 | — |
+| 30 | [030](030-archiving-tasks-and-on-archive-cleanup.md) | Archiving tasks, and on-archive cleanup | v0.3 | 005, 016 | [#31](https://github.com/AnkerstjerneAbtion/rimaia/pull/31) |
 
 ## Before task 001
 
