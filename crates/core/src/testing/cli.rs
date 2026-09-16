@@ -51,7 +51,51 @@ use std::path::{Path, PathBuf};
 
 use tempfile::TempDir;
 
-use crate::testing::fixtures::{fixture_lines, fixture_path};
+use crate::runner::provider::ProviderId;
+use crate::testing::fixtures::fixture_path;
+
+/// One stand-in binary: what it is called, what `--version` prints, whether it
+/// answers an `auth` probe, and the first argument that means "start a run".
+///
+/// A table rather than a second copy of two hundred lines of shell. This file's
+/// header argues at length against that copy, and the argument survives a second
+/// *vocabulary* unchanged: what varies between two agent CLIs is the words, and
+/// what a stand-in has to be right about — argv, stdin, pipes, exit codes,
+/// process groups — is the same for both.
+struct StandIn {
+    program: &'static str,
+    version: &'static str,
+    /// Task 018's doctor gates `QueueHandle::start` on an auth probe. Only the
+    /// provider the doctor actually probes needs to answer one.
+    answers_auth: bool,
+    /// The argument that distinguishes a run from anything else. Everything that
+    /// is not this exits non-zero with its own name on stderr.
+    run_token: &'static str,
+    /// Every flag this stand-in implements. Anything else starting with `--` is
+    /// logged as unhandled — which is what catches one provider's flag reaching
+    /// the other's child through a code path nobody was looking at.
+    known_flags: &'static str,
+}
+
+const STAND_INS: [StandIn; 2] = [
+    StandIn {
+        program: "claude",
+        version: "2.1.234 (Claude Code)",
+        answers_auth: true,
+        run_token: "-p",
+        known_flags: "--version --output-format --verbose --session-id --resume \
+--permission-mode --strict-mcp-config --setting-sources --append-system-prompt --model \
+--effort --allowedTools --disallowedTools --mcp-config --max-turns",
+    },
+    StandIn {
+        program: "ledger",
+        version: "0.9.4 (ledger)",
+        answers_auth: false,
+        run_token: "run",
+        known_flags: "--version --emit --continue --trust --preamble-file --engine \
+--diligence --step-budget",
+    },
+];
 
 /// One script, dispatching on the task whose worktree it was started in and on
 /// which attempt of that task this is.
@@ -78,13 +122,28 @@ impl FakeCli {
                 .expect("temp dir for the stand-in CLI"),
         };
         cli.write_plan("default", &Self::replay_plan("success", 0));
-        cli.write_script();
+        for stand_in in &STAND_INS {
+            cli.write_script(stand_in);
+        }
         cli
     }
 
     /// What to put in [`RunnerConfig::program`](crate::runner::RunnerConfig).
     pub fn program(&self) -> PathBuf {
-        self.path("claude")
+        self.program_for(ProviderId::ClaudeCode)
+    }
+
+    /// The stand-in for one provider's CLI.
+    ///
+    /// Both are written by every `FakeCli`, because which one a test reaches for
+    /// is a property of the test and not of the temporary directory — and because
+    /// a stand-in that only exists when asked for is one a missed wiring can
+    /// silently avoid.
+    pub fn program_for(&self, provider: ProviderId) -> PathBuf {
+        self.path(match provider {
+            ProviderId::ClaudeCode => "claude",
+            ProviderId::Ledger => "ledger",
+        })
     }
 
     pub fn path(&self, name: &str) -> PathBuf {
@@ -93,7 +152,22 @@ impl FakeCli {
 
     /// Replays `fixture` for every attempt of `task_id`, exiting with `code`.
     pub fn replays(&self, task_id: &str, fixture: &str, code: i32) {
-        self.write_plan(task_id, &Self::replay_plan(fixture, code));
+        self.replays_path(task_id, &fixture_path(fixture), code);
+    }
+
+    /// The same, for a recording that is not in the Claude corpus — a second
+    /// provider's, which lives in a directory of its own (seam-contract D27.6).
+    pub fn replays_path(&self, task_id: &str, recording: &Path, code: i32) {
+        self.write_plan(
+            task_id,
+            &[
+                "replay".to_string(),
+                recording.display().to_string(),
+                code.to_string(),
+                String::new(),
+                String::new(),
+            ],
+        );
     }
 
     /// Replays `fixture` for one specific attempt, leaving the others to
@@ -109,11 +183,12 @@ impl FakeCli {
         );
     }
 
-    fn replay_plan(fixture: &str, code: i32) -> [String; 4] {
+    fn replay_plan(fixture: &str, code: i32) -> [String; 5] {
         [
             "replay".to_string(),
             fixture_path(fixture).display().to_string(),
             code.to_string(),
+            String::new(),
             String::new(),
         ]
     }
@@ -145,6 +220,7 @@ impl FakeCli {
                 fixture_path(fixture).display().to_string(),
                 code.to_string(),
                 message.to_string(),
+                String::new(),
             ],
         );
     }
@@ -156,7 +232,18 @@ impl FakeCli {
     /// a test can act between them, exactly as `tests/runner_process.rs` splits
     /// a recording around a signal.
     pub fn gates(&self, task_id: &str, fixture: &str, head: usize) -> PathBuf {
-        let (head_file, rest_file) = self.split(task_id, fixture, head);
+        self.gates_path(task_id, &fixture_path(fixture), head, 0)
+    }
+
+    /// The same, over an arbitrary recording and with the exit code the run ends
+    /// on.
+    ///
+    /// The code is a parameter because it is one of the axes a second provider
+    /// differs on: a killed Claude Code run exits 143, and nothing in Rimaia may
+    /// be written against that number — which is only checkable against a
+    /// stand-in that exits something else.
+    pub fn gates_path(&self, task_id: &str, recording: &Path, head: usize, code: i32) -> PathBuf {
+        let (head_file, rest_file) = self.split_path(task_id, recording, head);
         let gate = self.path(&format!("gate-{task_id}"));
         self.write_plan(
             task_id,
@@ -165,6 +252,36 @@ impl FakeCli {
                 head_file.display().to_string(),
                 rest_file.display().to_string(),
                 gate.display().to_string(),
+                code.to_string(),
+            ],
+        );
+        gate
+    }
+
+    /// The same, for a child that **ignores SIGTERM** until the gate opens.
+    ///
+    /// Which is what a cancelled run actually looks like: the agent is asked to
+    /// stop, announces how it ended, and *then* exits — `spike/FINDINGS.md` §5.
+    /// A stand-in that died on the signal would prove only that the signal
+    /// arrived, and the interesting assertion is that the ending it reported on
+    /// the way out is the one on disk.
+    pub fn resists_sigterm(
+        &self,
+        task_id: &str,
+        recording: &Path,
+        head: usize,
+        code: i32,
+    ) -> PathBuf {
+        let (head_file, rest_file) = self.split_path(task_id, recording, head);
+        let gate = self.path(&format!("gate-{task_id}"));
+        self.write_plan(
+            task_id,
+            &[
+                "resist".to_string(),
+                head_file.display().to_string(),
+                rest_file.display().to_string(),
+                gate.display().to_string(),
+                code.to_string(),
             ],
         );
         gate
@@ -179,6 +296,7 @@ impl FakeCli {
             &[
                 "hang".to_string(),
                 head_file.display().to_string(),
+                String::new(),
                 String::new(),
                 String::new(),
             ],
@@ -336,8 +454,21 @@ impl FakeCli {
     }
 
     fn split(&self, task_id: &str, fixture: &str, head: usize) -> (PathBuf, PathBuf) {
-        let lines: Vec<String> = fixture_lines(fixture).collect();
-        assert!(head < lines.len(), "{fixture} is shorter than {head} lines");
+        self.split_path(task_id, &fixture_path(fixture), head)
+    }
+
+    fn split_path(&self, task_id: &str, recording: &Path, head: usize) -> (PathBuf, PathBuf) {
+        let lines: Vec<String> = std::fs::read_to_string(recording)
+            .unwrap_or_else(|error| panic!("{} is unreadable: {error}", recording.display()))
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .map(str::to_owned)
+            .collect();
+        assert!(
+            head < lines.len(),
+            "{} is shorter than {head} lines",
+            recording.display()
+        );
 
         let head_file = self.path(&format!("head-{task_id}.jsonl"));
         let rest_file = self.path(&format!("rest-{task_id}.jsonl"));
@@ -349,7 +480,7 @@ impl FakeCli {
     /// One directive, one line per field, so a path containing a space survives
     /// `read` — the same reason the production code builds argument vectors and
     /// never `sh -c`.
-    fn write_plan(&self, key: &str, fields: &[String; 4]) {
+    fn write_plan(&self, key: &str, fields: &[String; 5]) {
         std::fs::write(self.path(&format!("plan-{key}")), fields.join("\n") + "\n")
             .expect("write a stand-in directive");
     }
@@ -408,22 +539,30 @@ impl FakeCli {
     /// The attempt number is counted off the spawn log **before** this process
     /// appends its own line, so the first run of a task is attempt 1. `grep -c`
     /// on a missing file is an error rather than zero, hence the guard.
-    fn write_script(&self) {
+    fn write_script(&self, stand_in: &StandIn) {
         let script = format!(
             "#!/bin/sh\n\
              if [ \"$1\" = '--version' ]; then\n\
              if [ -f '{dir}/version-hold' ] && [ -f '{dir}/auth-seen' ]; then\n\
              while [ ! -f '{dir}/version-go' ]; do sleep 0.02; done\n\
              fi\n\
-             echo '2.1.234 (Claude Code)'; exit 0\n\
+             echo '{version}'; exit 0\n\
              fi\n\
-             if [ \"$1\" = 'auth' ]; then\n\
-             : > '{dir}/auth-seen'\n\
-             echo '{{\"loggedIn\": true}}'; exit 0\n\
-             fi\n\
-             if [ \"$1\" != '-p' ]; then\n\
+             {auth}\
+             known='{known_flags}'\n\
+             for arg in \"$@\"; do\n\
+             case \"$arg\" in\n\
+             --*)\n\
+               case \" $known \" in\n\
+               *\" $arg \"*) ;;\n\
+               *) printf 'unhandled %s\\n' \"$arg\" >> '{dir}/unhandled';;\n\
+               esac\n\
+               ;;\n\
+             esac\n\
+             done\n\
+             if [ \"$1\" != '{run_token}' ]; then\n\
              printf 'unhandled %s\\n' \"$1\" >> '{dir}/unhandled'\n\
-             echo \"the stand-in claude was asked for \\\"$1\\\", which it does not \
+             echo \"the stand-in {program} was asked for \\\"$1\\\", which it does not \
              implement; teach it that subcommand in crates/core/src/testing/cli.rs \
              rather than letting it fall through to a run\" >&2\n\
              exit 64\n\
@@ -441,7 +580,7 @@ impl FakeCli {
              plan=\"$dir/plan-$task-$attempt\"\n\
              if [ ! -f \"$plan\" ]; then plan=\"$dir/plan-$task\"; fi\n\
              if [ ! -f \"$plan\" ]; then plan=\"$dir/plan-default\"; fi\n\
-             {{ read -r mode; read -r one; read -r two; read -r three; }} < \"$plan\"\n\
+             {{ read -r mode; read -r one; read -r two; read -r three; read -r four; }} < \"$plan\"\n\
              case \"$mode\" in\n\
              replay)\n\
                cat \"$one\"\n\
@@ -459,7 +598,15 @@ impl FakeCli {
                while [ ! -f \"$three\" ]; do sleep 0.02; done\n\
                cat \"$two\"\n\
                printf 'end %s\\n' \"$task\" >> \"$dir/spawns\"\n\
-               exit 0\n\
+               exit \"${{four:-0}}\"\n\
+               ;;\n\
+             resist)\n\
+               trap '' TERM\n\
+               cat \"$one\"\n\
+               while [ ! -f \"$three\" ]; do sleep 0.02; done\n\
+               cat \"$two\"\n\
+               printf 'end %s\\n' \"$task\" >> \"$dir/spawns\"\n\
+               exit \"${{four:-0}}\"\n\
                ;;\n\
              hang)\n\
                cat \"$one\"\n\
@@ -467,9 +614,24 @@ impl FakeCli {
                ;;\n\
              esac\n",
             dir = self.dir.path().display(),
+            version = stand_in.version,
+            program = stand_in.program,
+            run_token = stand_in.run_token,
+            known_flags = stand_in.known_flags,
+            auth = if stand_in.answers_auth {
+                format!(
+                    "if [ \"$1\" = 'auth' ]; then\n\
+                     : > '{dir}/auth-seen'\n\
+                     echo '{{\"loggedIn\": true}}'; exit 0\n\
+                     fi\n",
+                    dir = self.dir.path().display(),
+                )
+            } else {
+                String::new()
+            },
         );
 
-        let program = self.program();
+        let program = self.path(stand_in.program);
         std::fs::write(&program, script).expect("write the stand-in CLI");
         make_executable(&program);
     }

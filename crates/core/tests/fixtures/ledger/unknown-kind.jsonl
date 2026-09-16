@@ -1,0 +1,6 @@
+{"kind":"conversation.opened","body":{"conversation":"lgr_88c2fa6d","engine":"ledger-large","version":"0.9.4","cwd":"/workspace"}}
+{"kind":"telemetry.beat","body":{"alive":true}}
+{"kind":"window","body":{"used_pct":3.0,"window":"5h","state":"open"}}
+{"kind":"agent.said","body":{"conversation":"lgr_88c2fa6d","turn":"t1","text":"Doing the work."}}
+{"kind":"compaction.ran","body":{"why":"context"}}
+{"kind":"finished","body":{"why":"ok","turns":1,"ms":3300,"tokens":{"in":14203,"out":2981,"cached":9044},"summary":"Did the work.","window":{"used_pct":4.0,"window":"5h","state":"open"}}}

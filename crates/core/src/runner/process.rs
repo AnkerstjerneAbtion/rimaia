@@ -1208,6 +1208,7 @@ pub async fn execute(
     attempt: Attempt<'_>,
 ) -> Result<RunOutcome> {
     let mut stream = EventStream::create(ctx, paths, attempt.task_id, attempt.run_id)?
+        .driven_by(config.provider.clone())
         // Before the first line is read, so nothing unredacted reaches the
         // transcript on disk or the D14 live tail. Redacting on read would
         // leave the secret in the file, which is the only copy that matters.

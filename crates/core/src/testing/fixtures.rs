@@ -1,4 +1,4 @@
-//! Access to the recorded Claude Code `stream-json` streams.
+//! Access to the recorded agent-CLI streams.
 //!
 //! The CLI is faked by replaying real recorded output, not by mocking a trait
 //! (ADR-0015), so tasks 008 and 014 can exercise parsing and classification
@@ -9,29 +9,72 @@
 //! and the classifier belong to the runner (task 008), and a fixture helper that
 //! also parsed would let a parser bug hide inside its own test harness.
 //!
-//! [`all_fixtures`] globs the directory rather than listing scenarios, which is
-//! what makes adding a fixture a change to the fixtures directory and nowhere
-//! else.
+//! [`all_fixtures`] globs a directory rather than listing scenarios, which is
+//! what makes adding a fixture a change to a fixtures directory and nowhere
+//! else. **That property now holds per corpus** (seam-contract D27.6): each
+//! provider's recordings live under their own directory, because seven tests
+//! iterate the Claude corpus asserting properties every real recording has, and
+//! a foreign file dropped in beside them turns each of those into an exclusion
+//! list.
+//!
+//! The unqualified helpers — [`fixtures_dir`], [`fixture_path`],
+//! [`fixture_lines`], [`all_fixtures`] — **are** the Claude corpus and are
+//! behaviourally unchanged. That is deliberate: the tests that did not have to
+//! change are the evidence that ADR-0026's refactor moved no behaviour.
 
 use std::ffi::OsStr;
 use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 
+use crate::runner::provider::ProviderId;
+
 /// Relative to the crate root, so the lookup is independent of the working
 /// directory a test runner happens to use.
-const FIXTURE_DIR: &str = "tests/fixtures/cli";
+const FIXTURE_DIR: &str = "tests/fixtures";
 
 const FIXTURE_EXTENSION: &str = "jsonl";
 
 pub fn fixtures_dir() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join(FIXTURE_DIR)
+    dir_for(ProviderId::ClaudeCode)
+}
+
+/// Where one provider's corpus lives. A directory per provider, never a prefix
+/// inside one.
+pub fn dir_for(provider: ProviderId) -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join(FIXTURE_DIR)
+        .join(corpus(provider))
+}
+
+/// The directory name for a provider's corpus. `claude-code`'s is `cli` for the
+/// reason nothing else in this file changed: it is the path six test files and a
+/// README already name.
+fn corpus(provider: ProviderId) -> &'static str {
+    match provider {
+        ProviderId::ClaudeCode => "cli",
+        ProviderId::Ledger => "ledger",
+    }
 }
 
 /// Where the `name` scenario is recorded, e.g. `fixture_path("interrupted-sigterm")`.
 /// `name` is the file stem; the extension is implied.
 pub fn fixture_path(name: &str) -> PathBuf {
-    fixtures_dir().join(format!("{name}.{FIXTURE_EXTENSION}"))
+    path_for(ProviderId::ClaudeCode, name)
+}
+
+pub fn path_for(provider: ProviderId, name: &str) -> PathBuf {
+    dir_for(provider).join(format!("{name}.{FIXTURE_EXTENSION}"))
+}
+
+/// One scenario from `provider`'s corpus, one JSON document per item.
+pub fn lines_for(provider: ProviderId, name: &str) -> impl Iterator<Item = String> {
+    read_lines(&path_for(provider, name))
+}
+
+/// Every scenario in `provider`'s corpus, sorted, by stem.
+pub fn all_for(provider: ProviderId) -> Vec<String> {
+    scenario_names(&dir_for(provider))
 }
 
 /// The scenario's stream, one JSON document per item, blank lines skipped.
@@ -102,6 +145,24 @@ mod tests {
             "unexpected fixture layout: {}",
             path.display()
         );
+    }
+
+    #[test]
+    fn each_provider_reads_its_own_corpus_and_only_its_own() {
+        // Seam-contract D27.6. The two directories are siblings, so "adding a
+        // fixture changes only the fixtures directory" holds per corpus rather
+        // than being traded away for one shared list with carve-outs in it.
+        let claude = all_for(ProviderId::ClaudeCode);
+        let ledger = all_for(ProviderId::Ledger);
+
+        assert!(!claude.is_empty());
+        assert!(!ledger.is_empty());
+        assert!(
+            claude.iter().all(|name| !ledger.contains(name)),
+            "the two corpora share a scenario name, so one of them is being read twice",
+        );
+        assert_eq!(fixtures_dir(), dir_for(ProviderId::ClaudeCode));
+        assert!(path_for(ProviderId::Ledger, "finished").is_file());
     }
 
     #[test]

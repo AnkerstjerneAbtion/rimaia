@@ -561,7 +561,10 @@ pub fn identity_prefixes() -> Vec<&'static str> {
 /// compiled conditionally, and a list that silently lost an entry in release
 /// builds is exactly the shape of bug D27.5 exists to prevent.
 fn every_capability() -> Vec<&'static Capabilities> {
-    vec![claude::CAPABILITIES]
+    let mut all = vec![claude::CAPABILITIES];
+    #[cfg(feature = "testing")]
+    all.extend(crate::testing::provider::ALL_CAPABILITIES);
+    all
 }
 
 #[cfg(test)]
@@ -892,5 +895,13 @@ mod tests {
         let prefixes = identity_prefixes();
 
         assert!(prefixes.contains(&"CLAUDE"));
+        #[cfg(feature = "testing")]
+        {
+            assert!(prefixes.contains(&"LEDGER"));
+            assert!(
+                prefixes.contains(&"LGR_"),
+                "a provider with two prefixes must contribute both"
+            );
+        }
     }
 }
