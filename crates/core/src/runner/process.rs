@@ -1170,7 +1170,8 @@ pub async fn execute(
     config: &RunnerConfig,
     attempt: Attempt<'_>,
 ) -> Result<RunOutcome> {
-    let mut stream = EventStream::create(ctx, paths, attempt.task_id, attempt.run_id)?;
+    let mut stream = EventStream::create(ctx, paths, attempt.task_id, attempt.run_id)?
+        .driven_by(config.provider.clone());
 
     // Before the child exists, so the record of what this run was allowed to be
     // is there even if the spawn fails. A warning rather than a refusal is the

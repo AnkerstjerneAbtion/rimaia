@@ -10,9 +10,15 @@
 //! (ADR-0018).
 //!
 //! Note what is *not* faked. Git and the filesystem are real, because a mocked
-//! git only ever proves the mock works. The Claude CLI is replayed from recorded
+//! git only ever proves the mock works. The agent CLI is replayed from recorded
 //! output rather than hidden behind a trait. Only time is synthetic, and only
 //! because a fifteen-minute backoff must not cost fifteen minutes.
+//!
+//! [`provider`] is the exception that proves that rule rather than breaking it.
+//! It is a second *production* implementation of ADR-0026's trait, not a test
+//! double for the first: its child is still a real `#!/bin/sh` stand-in replaying
+//! a real recording over a real pipe, and what it exists to falsify is whether
+//! Rimaia's seam is cut in the right place.
 //!
 //! Everything here panics on failure instead of returning [`crate::Result`].
 //! These are test scaffolding: a broken fixture or an unavailable `git` is a
@@ -28,6 +34,7 @@ pub mod context;
 pub mod db;
 pub mod doctor;
 pub mod fixtures;
+pub mod provider;
 pub mod repo;
 
 pub use cli::{open_gate, FakeCli};

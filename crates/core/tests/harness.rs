@@ -6,6 +6,12 @@
 //! bug in the real one pass unnoticed. Everything below asserts against
 //! [`serde_json::Value`].
 //!
+//! One test reads the *second* corpus — `the_two_corpora_share_no_vocabulary` —
+//! and its only job is to keep the two apart. Everything else here is about the
+//! recordings, and none of it was loosened to accommodate a file that is not one
+//! (seam-contract D27.6); the second corpus has its own structural tests in
+//! `harness_ledger.rs`.
+//!
 //! What these tests defend is the corpus itself. The fixtures are byte-for-byte
 //! recordings that nobody will read again once tasks 008 and 014 are green, so
 //! the properties those tasks silently assume — a terminal `result` on every
@@ -19,7 +25,10 @@ use std::sync::Arc;
 use chrono::{DateTime, Duration, Utc};
 use pretty_assertions::assert_eq;
 use rimaia_core::clock::Clock;
-use rimaia_core::testing::fixtures::{all_fixtures, fixture_lines, fixtures_dir};
+use rimaia_core::runner::provider::ProviderId;
+use rimaia_core::testing::fixtures::{
+    all_fixtures, all_for, fixture_lines, fixtures_dir, lines_for,
+};
 use rimaia_core::testing::TestClock;
 use serde_json::Value;
 
@@ -252,6 +261,79 @@ fn the_usage_limit_fixtures_are_labelled_unobserved_rather_than_recorded() {
                 assert_eq!(status, "allowed", "{name}");
             }
         }
+    }
+}
+
+#[test]
+fn the_two_corpora_share_no_vocabulary() {
+    // Seam-contract D27.6, and the only test in this file that reads the second
+    // corpus at all.
+    //
+    // The instinct when a foreign recording appears is to loosen the two
+    // structural tests above to "`type` or `kind`". **That trades a real
+    // guarantee protecting the Claude corpus for accommodation of files they
+    // will never read.** So the corpora are siblings on disk, those tests were
+    // not touched by a byte, and this is what keeps the separation true: neither
+    // directory may drift into the other's words, because the moment they
+    // overlap, a shared-code path reading one provider's field name would appear
+    // to work against the other.
+    // **A recording's discriminator is `type`, and it always has one** — which
+    // `every_recorded_scenario_is_line_delimited_json` above already pins. Note
+    // what is *not* asserted here: that no recording carries a top-level `kind`
+    // at all. Two do — `system`/`vcs_state_changed` events carry
+    // `"kind":"commit"` — and that is a fact about a real CLI rather than
+    // something to legislate away. It is also harmless, because what dispatches
+    // is the discriminator and not the presence of a word.
+    for name in all_fixtures() {
+        for line in fixture_lines(&name) {
+            let Ok(event) = serde_json::from_str::<Value>(&line) else {
+                continue;
+            };
+            assert!(
+                event.get("type").and_then(Value::as_str).is_some(),
+                "{name}: a recording dispatches on a top-level type",
+            );
+        }
+    }
+
+    for name in all_for(ProviderId::Ledger) {
+        for line in lines_for(ProviderId::Ledger, &name) {
+            let Ok(event) = serde_json::from_str::<Value>(&line) else {
+                continue;
+            };
+            assert!(
+                event.get("type").is_none(),
+                "{name}: the second corpus must not carry a recording's discriminator",
+            );
+            assert!(
+                event.get("kind").and_then(Value::as_str).is_some(),
+                "{name}: every event in the second corpus dispatches on `kind`",
+            );
+        }
+    }
+
+    // And neither contains the other's terminal words, which is the half that
+    // catches a scenario copied across and edited rather than written.
+    let claude_words: BTreeSet<String> = all_fixtures()
+        .iter()
+        .flat_map(|name| fixture_lines(name))
+        .collect();
+    let ledger_words: BTreeSet<String> = all_for(ProviderId::Ledger)
+        .iter()
+        .flat_map(|name| lines_for(ProviderId::Ledger, name))
+        .collect();
+
+    for word in ["terminal_reason", "rate_limit_info", "\"type\":\"result\""] {
+        assert!(
+            !ledger_words.iter().any(|line| line.contains(word)),
+            "the second corpus carries `{word}`, which is a recording's word",
+        );
+    }
+    for word in ["reopens_in_s", "conversation.opened", "step budget"] {
+        assert!(
+            !claude_words.iter().any(|line| line.contains(word)),
+            "a recording carries `{word}`, which is the second corpus's word",
+        );
     }
 }
 
