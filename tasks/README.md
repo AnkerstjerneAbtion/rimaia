@@ -36,7 +36,7 @@ reviewable in the app afterwards.
 | 23 | [022](022-per-repository-git-credentials.md) | Per-repository git credentials | v0.3 | 003, 008 | — |
 | 24 | [021](021-review-and-fix-loop.md) | Review-and-fix loop | v0.4 | 015, 017, 020 | — |
 | 25 | [024](024-analytics.md) | Analytics — what the queue has actually done | v0.4 | 015 | — |
-| 26 | [031](031-a-provider-seam-for-the-agent-cli.md) | A provider seam for the agent CLI | v0.4 | — | — |
+| 26 | [031](031-a-provider-seam-for-the-agent-cli.md) | A provider seam for the agent CLI | v0.4 | — | [#32](https://github.com/AnkerstjerneAbtion/rimaia/pull/32) |
 | 27 | [032](032-provider-vocabulary-outside-the-runner.md) | Provider vocabulary outside the runner | v0.4 | 031 | — |
 
 ## Before task 001

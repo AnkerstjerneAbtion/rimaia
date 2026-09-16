@@ -3,6 +3,7 @@ id: "031"
 title: A provider seam for the agent CLI
 milestone: v0.4
 status: ready
+landed: "#32"
 depends_on: []
 adrs: ["0026", "0004", "0011", "0012", "0015", "0016"]
 size: L
