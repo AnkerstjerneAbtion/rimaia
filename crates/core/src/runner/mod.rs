@@ -21,15 +21,23 @@
 //!
 //! [`run_task`] is the entry point that ties them together: one task in, one
 //! finished `runs` row out.
+//!
+//! [`provider`] is the fourth: which agent CLI those three are driving
+//! (ADR-0026). It owns two things — how an intent becomes a child process, and
+//! what one line of its output means — and the other three own everything else,
+//! which is what keeps a second provider from arriving as a second copy of the
+//! supervision.
 
 pub mod events;
 pub mod outcome;
 pub mod process;
 pub mod prompt;
+pub mod provider;
 pub mod strategy;
 
 pub use process::{
-    execute, max_turns, probe_cli, run_task, Attempt, CancelSignal, Invocation, PermissionMode,
-    ResumeSession, RunRequest, RunTrigger, RunnerConfig, DEFAULT_MAX_TURNS, MAX_TURNS,
+    execute, max_turns, probe_cli, run_task, Attempt, CancelSignal, PermissionMode, ResumeSession,
+    RunRequest, RunTrigger, RunnerConfig, DEFAULT_MAX_TURNS, MAX_TURNS,
 };
+pub use provider::{AgentProvider, ProviderId, RunIntent, SpawnPlan};
 pub use strategy::{Resolution, STRATEGY_TRANSCRIPT_PREFIX};
