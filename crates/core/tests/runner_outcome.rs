@@ -19,18 +19,22 @@
 //! **No fabricated pull-request recording.** No run in the corpus opened one:
 //! the spike worked in a throwaway local repository with no remote, and
 //! `resume-success.jsonl`'s own summary says "No push or PR was made". The rule
-//! is exercised against hand-written probes, built with `parse_line` from the
+//! is exercised against hand-written probes, parsed by the provider from the
 //! same envelope shapes the recordings use, and every one of them is labelled as
 //! a probe rather than left to look like evidence.
 
 use chrono::Duration;
 use pretty_assertions::assert_eq;
 use rimaia_core::db::{settings, BoardColumn, ExitClass, RunState, RunStatus};
-use rimaia_core::runner::events::{parse_line, EventStream, RateLimitEvent, ResultEvent, RunEvent};
+use rimaia_core::runner::events::{
+    EndReason, EventStream, ResultEvent, RunEvent, UsageReport, UsageState, UsageWindow,
+    WindowReopen,
+};
 use rimaia_core::runner::outcome::{
     classify, finish_run, start_run, NewRun, PullRequestWatch, RunOutcome, SpawnedAs, Termination,
 };
 use rimaia_core::runner::prompt::compose_prompt;
+use rimaia_core::runner::provider::{AgentProvider, ClaudeProvider};
 use rimaia_core::tasks::{self, NewTask};
 use rimaia_core::testing::fixtures::{all_fixtures, fixture_lines};
 use rimaia_core::testing::TestContext;
@@ -349,11 +353,8 @@ fn the_rate_limit_event_every_run_emits_is_not_a_usage_limit() {
         let replay = Replay::of(&name);
 
         assert_eq!(
-            replay
-                .rate_limit
-                .as_ref()
-                .and_then(|limit| limit.status.clone()),
-            Some("allowed".to_string()),
+            replay.usage.as_ref().map(|usage| usage.window.state),
+            Some(UsageState::Allowed),
             "{name}: the corpus proves exactly one status value"
         );
         assert_ne!(replay.class(), ExitClass::UsageLimit, "{name}");
@@ -396,55 +397,45 @@ fn a_usage_limit_that_reports_no_reset_still_classifies_as_one() {
 }
 
 #[test]
-fn a_status_the_corpus_never_saw_still_reads_as_a_usage_limit() {
-    // **The test that makes the synthesized fixtures safe to ship.**
-    // `spike/FINDINGS.md` §4 records that nobody has observed the payload when
-    // `status` is not `"allowed"`, so `"rejected"` in those files is a guess.
-    // This is what proves the guess is not load-bearing: the classifier matches
-    // on "not `allowed`" and never on a value, so a real capture carrying any
-    // of these — or a word nobody here has thought of — classifies identically.
+fn an_exhausted_window_outranks_an_interrupted_ending() {
+    // The wall wins over every terminal reason but a spent turn budget:
+    // whatever the CLI reports after hitting it — including the interrupted
+    // ending a real limit plausibly produces — waiting for the reset is the
+    // recovery, and misreading it as `fatal` is the failure mode ADR-0011 calls
+    // out by name.
     //
-    // Failing closed would be the expensive direction: a real limit misread as
-    // `fatal` is a night that ends at 02:00, which is the exact mistake
-    // ADR-0011 names.
-    for status in ["rejected", "limited", "blocked", "throttled", "over_limit"] {
-        let rate_limit = RateLimitEvent {
-            status: Some(status.to_string()),
-            resets_at: Some(1_787_209_200),
-            rate_limit_type: Some("five_hour".to_string()),
-        };
-        let result = ResultEvent {
-            subtype: Some("error_during_execution".to_string()),
-            terminal_reason: Some("aborted_streaming".to_string()),
-            is_error: true,
-            ..ResultEvent::default()
-        };
-        let termination = Termination {
-            result: Some(&result),
-            rate_limit: Some(&rate_limit),
-            ..Termination::default()
-        };
-
-        assert_eq!(classify(&termination), ExitClass::UsageLimit, "{status:?}");
-    }
-
-    // And the other direction, so this is a predicate and not "anything at all
-    // is a limit": the one word the corpus does prove still means "carry on".
-    let allowed = RateLimitEvent {
-        status: Some("allowed".to_string()),
-        resets_at: Some(1_787_209_200),
-        rate_limit_type: Some("five_hour".to_string()),
-    };
+    // *Which words a provider calls a wall* is that provider's, and is asserted
+    // where the wire format is. What this pins is the precedence.
     let result = ResultEvent {
-        subtype: Some("error_during_execution".to_string()),
-        terminal_reason: Some("aborted_streaming".to_string()),
-        is_error: true,
+        end: EndReason::Interrupted,
         ..ResultEvent::default()
     };
+    let exhausted = observed(UsageWindow {
+        state: UsageState::Exhausted,
+        reopens: Some(WindowReopen::At(at("2026-08-20T11:20:00Z"))),
+        label: Some("five_hour".to_string()),
+        used_percent: None,
+    });
+
     assert_eq!(
         classify(&Termination {
             result: Some(&result),
-            rate_limit: Some(&allowed),
+            usage: Some(&exhausted),
+            ..Termination::default()
+        }),
+        ExitClass::UsageLimit,
+    );
+
+    // And the other direction, so this is a predicate and not "any window at
+    // all is a limit".
+    let allowed = observed(UsageWindow {
+        state: UsageState::Allowed,
+        ..exhausted.window.clone()
+    });
+    assert_eq!(
+        classify(&Termination {
+            result: Some(&result),
+            usage: Some(&allowed),
             ..Termination::default()
         }),
         ExitClass::Interrupted,
@@ -452,23 +443,30 @@ fn a_status_the_corpus_never_saw_still_reads_as_a_usage_limit() {
 }
 
 #[test]
-fn a_rate_limit_status_that_is_not_allowed_is_a_usage_limit_whatever_the_word_turns_out_to_be() {
-    // `spike/FINDINGS.md` section 4: the non-`allowed` payload was never
-    // observed. So the rule under test is "not allowed", and the values below
-    // are chosen to be obviously invented — if one of them ever looked like a
-    // real vocabulary, this test would have quietly become a contract.
-    for status in ["limited", "blocked", "a status nobody has observed yet"] {
-        let rate_limit = RateLimitEvent {
-            status: Some(status.to_string()),
-            resets_at: Some(1_787_224_800),
-            rate_limit_type: Some("five_hour".to_string()),
-        };
-        let termination = Termination {
-            rate_limit: Some(&rate_limit),
-            ..Termination::default()
-        };
+fn a_window_a_provider_could_not_describe_is_not_a_wall() {
+    // ADR-0026 point 8. A provider that reports a percentage on every turn must
+    // not have "93% used" read as a limit: that raises ADR-0011's *global*
+    // pause, stopping the whole queue on a heartbeat. Only a provider saying so
+    // is a limit — everything else carries on.
+    for (state, expected) in [
+        (UsageState::Exhausted, ExitClass::UsageLimit),
+        (UsageState::Unknown, ExitClass::Transient),
+        (UsageState::Allowed, ExitClass::Transient),
+    ] {
+        let usage = observed(UsageWindow {
+            state,
+            used_percent: Some(99.9),
+            ..UsageWindow::default()
+        });
 
-        assert_eq!(classify(&termination), ExitClass::UsageLimit, "{status:?}");
+        assert_eq!(
+            classify(&Termination {
+                usage: Some(&usage),
+                ..Termination::default()
+            }),
+            expected,
+            "{state:?}"
+        );
     }
 }
 
@@ -478,14 +476,15 @@ fn a_usage_limit_carries_the_reset_instant_the_scheduler_will_need() {
     // reason ADR-0011's amendment prefers the typed event over grepping a
     // message. Task 014 turns this into `runs.resume_after` — with the jitter
     // ADR-0011 asks for, which is why this module leaves that column NULL.
-    let rate_limit = RateLimitEvent {
-        status: Some("limited".to_string()),
-        resets_at: Some(1_787_224_800),
-        rate_limit_type: Some("five_hour".to_string()),
-    };
+    let usage = observed(UsageWindow {
+        state: UsageState::Exhausted,
+        reopens: Some(WindowReopen::At(at("2026-08-20T11:20:00Z"))),
+        label: Some("five_hour".to_string()),
+        used_percent: None,
+    });
     let outcome = RunOutcome::of(
         &Termination {
-            rate_limit: Some(&rate_limit),
+            usage: Some(&usage),
             ..Termination::default()
         },
         None,
@@ -513,12 +512,12 @@ fn a_run_that_finished_the_work_is_a_success_even_under_a_usage_limit() {
     // that says the work is done. Retrying it would re-spend tokens on a task
     // that is already in `in_review`.
     let replay = Replay::of("success");
-    let rate_limit = RateLimitEvent {
-        status: Some("limited".to_string()),
-        ..RateLimitEvent::default()
-    };
+    let exhausted = observed(UsageWindow {
+        state: UsageState::Exhausted,
+        ..UsageWindow::default()
+    });
     let termination = Termination {
-        rate_limit: Some(&rate_limit),
+        usage: Some(&exhausted),
         ..replay.termination()
     };
 
@@ -534,16 +533,16 @@ fn a_usage_limit_outranks_aborted_streaming_but_not_max_turns() {
     // produce, and the one ADR-0011 names fatal by hand, so an unrecognised or
     // stray `rate_limit_info.status` must not be allowed to turn it into an
     // unbounded retry against a turn limit that will just re-hit immediately.
-    let rate_limit = RateLimitEvent {
-        status: Some("limited".to_string()),
-        ..RateLimitEvent::default()
-    };
+    let exhausted = observed(UsageWindow {
+        state: UsageState::Exhausted,
+        ..UsageWindow::default()
+    });
 
     let aborted = Replay::of("interrupted-sigterm");
     assert_eq!(aborted.class(), ExitClass::Interrupted);
     assert_eq!(
         classify(&Termination {
-            rate_limit: Some(&rate_limit),
+            usage: Some(&exhausted),
             ..aborted.termination()
         }),
         ExitClass::UsageLimit
@@ -553,7 +552,7 @@ fn a_usage_limit_outranks_aborted_streaming_but_not_max_turns() {
     assert_eq!(max_turns.class(), ExitClass::Fatal);
     assert_eq!(
         classify(&Termination {
-            rate_limit: Some(&rate_limit),
+            usage: Some(&exhausted),
             ..max_turns.termination()
         }),
         ExitClass::Fatal,
@@ -1241,6 +1240,25 @@ async fn a_run_that_learned_nothing_leaves_every_capture_column_null() {
 // Replaying a recorded scenario
 // ---------------------------------------------------------------------------
 
+/// A usage window with the instant it was read attached.
+///
+/// A fixed instant, because every window in this file is an **absolute** one: the
+/// stamp exists so a *relative* window can be resolved against the moment it was
+/// reported, and no provider whose corpus lives here reports one. The test that
+/// turns on the stamp injects a clock and lives in `provider_seam.rs`.
+fn observed(window: UsageWindow) -> UsageReport {
+    UsageReport {
+        window,
+        observed_at: at("2026-08-20T02:00:00Z"),
+    }
+}
+
+fn at(rfc3339: &str) -> chrono::DateTime<chrono::Utc> {
+    chrono::DateTime::parse_from_rfc3339(rfc3339)
+        .expect("test timestamp must be valid RFC 3339")
+        .with_timezone(&chrono::Utc)
+}
+
 /// One recorded stream, folded down to the facts an outcome is made of.
 ///
 /// Deliberately not an [`EventStream`]: this is the pure path, so a
@@ -1248,7 +1266,7 @@ async fn a_run_that_learned_nothing_leaves_every_capture_column_null() {
 /// One test above drives the real stream and asserts the two agree.
 struct Replay {
     result: Option<ResultEvent>,
-    rate_limit: Option<RateLimitEvent>,
+    usage: Option<UsageReport>,
     pull_request: PullRequestWatch,
     assistant_events: i64,
     /// The two `init` numbers the `env-leak-*` pair exists to measure.
@@ -1260,7 +1278,7 @@ impl Replay {
     fn of(fixture: &str) -> Self {
         let mut replay = Self {
             result: None,
-            rate_limit: None,
+            usage: None,
             pull_request: PullRequestWatch::default(),
             assistant_events: 0,
             tools: 0,
@@ -1271,7 +1289,7 @@ impl Replay {
             // A line the parser cannot read is skipped and never fatal — the
             // condition `malformed-line.jsonl` and the tail of
             // `truncated-stream.jsonl` record.
-            let Ok(event) = parse_line(&line) else {
+            let Ok(event) = ClaudeProvider.parse_line(&line) else {
                 continue;
             };
             replay.pull_request.observe(&event);
@@ -1281,7 +1299,13 @@ impl Replay {
                     replay.mcp_servers = init.mcp_servers.len();
                 }
                 RunEvent::Assistant(_) => replay.assistant_events += 1,
-                RunEvent::RateLimit(rate_limit) => replay.rate_limit = Some(rate_limit.clone()),
+                // Stamped with a fixed instant rather than a clock: this
+                // provider reports an absolute reset, so the stamp never reaches
+                // an assertion. A relative window is `provider_seam.rs`'s, where
+                // the clock is injected and drives the answer.
+                RunEvent::Usage(window) => {
+                    replay.usage = Some(observed(window.clone()));
+                }
                 RunEvent::Result(result) => replay.result = Some(result.clone()),
                 _ => {}
             }
@@ -1293,7 +1317,7 @@ impl Replay {
     fn termination(&self) -> Termination<'_> {
         Termination {
             result: self.result.as_ref(),
-            rate_limit: self.rate_limit.as_ref(),
+            usage: self.usage.as_ref(),
             ..Termination::default()
         }
     }
@@ -1322,7 +1346,11 @@ impl Replay {
 fn watching<const N: usize>(lines: [String; N]) -> PullRequestWatch {
     let mut watch = PullRequestWatch::default();
     for line in lines {
-        watch.observe(&parse_line(&line).expect("a probe must be valid JSON"));
+        watch.observe(
+            &ClaudeProvider
+                .parse_line(&line)
+                .expect("a probe must be valid JSON"),
+        );
     }
     watch
 }

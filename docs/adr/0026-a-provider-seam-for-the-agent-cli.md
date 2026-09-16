@@ -59,9 +59,9 @@ one line of its output means. Everything else stays Rimaia's.**
 
 ### 1. The seam is `RunIntent → SpawnPlan` and `line → RunEvent`; process supervision is on Rimaia's side of it.
 
-A provider that spawned its own child could leak a process tree, skip redaction, or
-write a transcript Rimaia cannot read, and `spike/FINDINGS.md` §7's process-group
-work would have to be re-proved per provider. The three-way split `runner/` already
+A provider that spawned its own child could leak a process tree, skip the
+transcript, or write one Rimaia cannot read, and `spike/FINDINGS.md` §7's
+process-group work would have to be re-proved per provider. The three-way split `runner/` already
 has — line, ending, process — is the split that generalises.
 
 The rule that keeps this honest: **the trait may not return events, outcomes or
@@ -111,12 +111,14 @@ re-running the planner stays keyed off `request.resume`, because the effective m
 and effort are already on the row and a second planner reading a half-finished
 worktree could change them mid-chain.
 
-### 7. A reset window is `At(instant)` or `After { duration, observed_at }`, with `observed_at` stamped by the clock when the line was read.
+### 7. A reset window is an instant or a duration, and a duration is paired with the moment its line was read.
 
 Resolving a relative window at `finish_run` time is wrong by however long the run
-took to die, in the direction that wastes a night. `retry::decide`,
-`USAGE_LIMIT_FALLBACK_POLL` and the jitter are unchanged, so ADR-0011's table stays
-a pure function over one instant.
+took to die, in the direction that wastes a night. So a provider reports
+`At(instant)` or `After(duration)`, the stream stamps the report with the clock
+when the line arrives, and the two become one instant exactly once.
+`retry::decide`, `USAGE_LIMIT_FALLBACK_POLL` and the jitter are unchanged, so
+ADR-0011's table stays a pure function over one instant.
 
 ### 8. `UsageState::Unknown` is not a wall, and `Exhausted` latches.
 
