@@ -495,10 +495,10 @@ impl FakeCli {
     ///
     /// # Anything that is not a run is refused, loudly
     ///
-    /// A real invocation's first argument is always `-p`
-    /// ([`Invocation::args`](crate::runner::Invocation::args) puts it there),
-    /// so the run branch is gated on exactly that and **everything else exits
-    /// non-zero with a sentence on stderr**.
+    /// A real invocation's first argument is always the stand-in's own run
+    /// token — `-p` for one provider, `run` for the other, both put there by
+    /// that provider's `plan_spawn` — so the run branch is gated on exactly
+    /// that and **everything else exits non-zero with a sentence on stderr**.
     ///
     /// The alternative — falling through to "start a run" — is not a
     /// theoretical hazard. Task 018 added a `claude auth` probe, this stand-in

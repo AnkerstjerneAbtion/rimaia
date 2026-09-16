@@ -246,7 +246,7 @@ pub struct RunOutcome {
     /// policy, which is task 014's.
     pub resume_after: Option<DateTime<Utc>>,
     /// What the attempt was spawned as. Filled by [`crate::runner::execute`],
-    /// which is the only caller holding the [`Invocation`](crate::runner::Invocation)
+    /// which is the only caller holding the [`RunIntent`](crate::runner::RunIntent)
     /// and the `init` event at once; `None` everywhere else, including the
     /// hand-made outcomes reconciliation and a failed spawn produce.
     pub spawned_as: SpawnedAs,
