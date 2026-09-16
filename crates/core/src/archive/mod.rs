@@ -556,6 +556,10 @@ mod tests {
         assert!(error.to_string().contains("not a program"), "{error}");
     }
 
+    // There is no executable bit to be missing on Windows, where
+    // `is_executable` says so rather than pretending to have checked — so this
+    // asserts a refusal that platform does not make.
+    #[cfg(unix)]
     #[tokio::test]
     async fn a_file_without_an_executable_bit_is_refused() {
         let dir = tempfile::tempdir().expect("temp dir");

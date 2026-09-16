@@ -102,7 +102,7 @@ describe("DependenciesEditor", () => {
 
   it("narrows the picker by the search box", async () => {
     renderEditor([]);
-    await screen.findByLabelText("Task to depend on");
+    await screen.findByRole("option", { name: "Add the schema" });
 
     fireEvent.change(screen.getByLabelText("Search for a task to depend on"), {
       target: { value: "schema" },
@@ -163,7 +163,14 @@ describe("DependenciesEditor", () => {
       return Promise.reject({ code: "invalid", message });
     });
     renderEditor([], onChanged);
-    await screen.findByLabelText("Task to depend on");
+    // Waited for by an *option*, not by the select. The select is rendered
+    // before `list_tasks` resolves — with the placeholder and nothing else —
+    // so `findByLabelText` returns an empty picker, and a `<select>` cannot
+    // take a value that has no matching `<option>`. On a fast machine the
+    // read had always landed by then; on a loaded CI runner it had not, and
+    // the change was silently dropped, leaving `picked` empty and the button
+    // disabled with no error to find.
+    await screen.findByRole("option", { name: "Add the schema" });
 
     fireEvent.change(screen.getByLabelText("Task to depend on"), {
       target: { value: "task-3" },

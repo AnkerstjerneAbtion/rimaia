@@ -1696,6 +1696,10 @@ pub(crate) enum Signal {
 }
 
 impl Signal {
+    // Read only by the `#[cfg(unix)]` half of this module: the non-unix
+    // `signal_group` logs that cancellation is unimplemented and never names a
+    // signal, which is the honest gap ADR-0004 records rather than a stub.
+    #[cfg_attr(not(unix), allow(dead_code))]
     pub(crate) const fn as_str(self) -> &'static str {
         match self {
             Self::Term => "TERM",

@@ -15,6 +15,12 @@
 //! CLAUDE.md's rule and the reason `SCRIPT_TIMEOUT` is read through
 //! `ctx.clock` in the first place.
 
+// Every test that runs a *script* is `#[cfg(unix)]` — there is no executable
+// bit to set anywhere else — and so are the fixture pieces only those tests
+// reach. Allowed rather than `#[cfg]`-gated one by one, so the fixture reads
+// as one thing instead of as a platform matrix.
+#![cfg_attr(not(unix), allow(dead_code))]
+
 use std::path::{Path, PathBuf};
 
 use pretty_assertions::assert_eq;
