@@ -30,6 +30,7 @@ alternatives.
 | [0020](0020-per-repository-git-credentials.md) | Per-repository git credentials, held by Rimaia | Accepted |
 | [0021](0021-mcp-first-capability-parity.md) | MCP-first: the tool surface is the whole product | Accepted |
 | [0022](0022-what-a-run-is-remembered-by.md) | What a run is remembered by, and what survives pruning | Accepted |
+| [0026](0026-a-provider-seam-for-the-agent-cli.md) | A provider seam for the agent CLI, drawn from Rimaia's needs | Accepted |
 
 ## Conventions
 

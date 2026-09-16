@@ -1698,6 +1698,60 @@ scope decision and the destructiveness exception), and
 
 **Binds.** 016, 024.
 
+## D27 — Task 031's cross-cutting choices
+
+**Question.** Task 031 draws a provider seam through `runner/`. Six decisions sit under it
+that no ADR covers and that task 032 would otherwise have to re-derive: where the provider
+module lives, how a provider is held, what happens to `Invocation`, who shapes the MCP
+document, whose identity variables are stripped, and where a second provider's fixtures go.
+
+**Decision.**
+
+1. **The provider lives at `crates/core/src/runner/provider/`, not at crate root.** Every
+   type the trait names — `RunIntent`, `RunEvent`, `Termination`, `ExitClass` — already lives
+   under `runner`; a top-level module would need `runner → provider` *and* `provider →
+   runner`.
+2. **Providers are zero-sized unit structs held as `Arc<dyn AgentProvider>` on
+   `RunnerConfig`.** `RunnerConfig` is `Clone + Debug` and is held in `AppState`,
+   `scheduler::queue::Shared`, `runner::strategy`'s call chain and the doctor's environment;
+   a type parameter would propagate into all of them. `Arc<T: ?Sized>` keeps both derives
+   where `Box<dyn>` would not keep `Clone`. Zero-sized means `Debug` can never leak a token.
+3. **`Invocation` is renamed `RunIntent` and loses its two Claude-shaped fields.**
+   `disallowed_tools: Vec<String>` becomes `forbidden: Vec<ForbiddenOperation>`, and
+   `mcp_config: Option<String>` becomes `rimaia_handle: Option<RimaiaHandle>`. The other
+   nine fields are neutral concepts and keep their names.
+4. **`RunHandles` mints the scoped URL; the provider shapes the document.**
+   `mcp_config_json` is removed from `crates/core/src/mcp/scope.rs` and replaced by
+   `endpoint_for(&RunGrant) -> Option<String>`. The `{"mcpServers":…}` shape becomes the
+   Claude provider's private business.
+5. **Identity-variable stripping takes the union over every registered provider, not the
+   active one's.** Rimaia is developed from inside a Claude Code session *and* may be
+   spawning something else; the converse arrives the moment anyone drives Rimaia from
+   another agent.
+6. **The second provider's fixtures live in their own directory with their own harness.**
+   `crates/core/tests/fixtures/cli/` stays Claude-only and `crates/core/tests/harness.rs`'s
+   existing assertions are not loosened.
+
+**Why.** (1) and (2) are about what a refactor is allowed to cost: both alternatives compile,
+and both spread the provider into modules that have no business knowing one exists — which is
+the thing ADR-0026 is trying to prevent, arriving as a type parameter instead of a `match`.
+(3) is where the mismatch actually is: those two fields are the whole of what a second
+provider cannot say, so leaving either as a `String` would leave the seam decorative. (4)
+splits a function that does two jobs — minting a scoped URL is Rimaia's, and spelling it as a
+config document is the provider's — and it is the one change that makes a flagless provider
+expressible at all. (5) is a rule about a failure nobody sees: a child that believes it is a
+nested session of its parent writes the wrong session id into a transcript and nothing else
+goes wrong until someone reads it. (6) protects a claim rather than a behaviour — seven tests
+iterate the recorded corpus asserting Claude properties, and a foreign file dropped in beside
+them turns every one of those into an exclusion list.
+
+See also [ADR-0026](adr/0026-a-provider-seam-for-the-agent-cli.md) (the seam itself),
+[ADR-0012](adr/0012-permission-posture-for-unattended-runs.md) point 3 (the blocklist a
+provider may not silently drop), and D17.4 (where the scoped handle comes from).
+
+**Binds.** 031, 032.
+
+
 ---
 
 ## How to use this
@@ -1725,6 +1779,8 @@ An implementation task reads the entries its number appears in, before writing c
 | [020](../tasks/020-per-task-execution-strategy.md) | D2 · D3 · D4 · D5 · D8 · D10 · D12 · D16 · D17 · D19 |
 | [021](../tasks/021-review-and-fix-loop.md) | D17 |
 | [024](../tasks/024-analytics.md) | D4 · D5 · D12 · D18 · D20 |
+| [031](../tasks/031-a-provider-seam-for-the-agent-cli.md) | D3 · D4 · D6 · D8 · D14 · D17 · D27 |
+| [032](../tasks/032-provider-vocabulary-outside-the-runner.md) | D3 · D8 · D22 · D27 |
 | every task | D4 and D6 as prohibitions |
 
 A reviewer treats any decision visible in a diff that is neither in an ADR nor here as a
