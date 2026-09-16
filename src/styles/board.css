@@ -341,6 +341,49 @@
   color: var(--text-1);
 }
 
+/* "Select all 12", between the heading and the count. `margin-left: auto`
+   rather than a grid column, so a header without it is laid out exactly as it
+   was before this existed. */
+.board-column-pick-all {
+  flex: none;
+  margin-left: auto;
+  padding: 0.05rem var(--space-2);
+  border-color: var(--border-1);
+  background: transparent;
+  box-shadow: none;
+  color: var(--text-2);
+  font-size: var(--font-size-xs);
+  font-weight: var(--font-weight-semibold);
+  white-space: nowrap;
+  opacity: 0;
+  transition: opacity var(--duration-fast) var(--ease-standard);
+}
+
+/* Revealed on approach, and kept up while the column holds a pick — the same
+   three conditions the card action row uses, including the `:has()` one, for
+   the same reason: a control that vanished while its own selection was live
+   would hide the way to clear it. Never `display: none`, so it stays tabbable
+   and `:focus-within` can bring it up for a keyboard user. */
+.board-column:hover .board-column-pick-all,
+.board-column:focus-within .board-column-pick-all,
+.board-column:has(.task-card-pick input:checked) .board-column-pick-all {
+  opacity: 1;
+}
+
+.board-column-pick-all:hover {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+/* A coarse pointer has no hover to reveal with — the same exemption the card
+   action row takes. */
+@media (hover: none) {
+  .board-column-pick-all {
+    opacity: 1;
+  }
+}
+
 .board-column-note {
   margin: 0;
   font-size: var(--font-size-xs);

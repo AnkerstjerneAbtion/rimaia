@@ -173,6 +173,39 @@ export function nextFocusTarget(
   return null;
 }
 
+/**
+ * Every card id from `anchorId` to `targetId` inclusive — what a shift-click
+ * on the pick checkbox takes.
+ *
+ * `null` when either id is unknown, or when the two sit in **different
+ * columns**. "Everything between" is only a meaningful phrase down one column:
+ * on a board laid out in four, the cards visually between a `ready` card and a
+ * `done` one are the rest of `ready` plus the whole of `in_review`, which is
+ * never what the gesture meant. A cross-column shift-click therefore falls
+ * back to picking the one card, rather than guessing at a large answer.
+ *
+ * Order-insensitive: shift-clicking upwards takes the same range as
+ * shift-clicking down.
+ */
+export function rangeBetween(
+  columns: BoardColumns<Task>,
+  anchorId: string,
+  targetId: string,
+): string[] | null {
+  const column = BOARD_COLUMNS.find((candidate) =>
+    columns[candidate].some((card) => card.id === anchorId),
+  );
+  if (!column) return null;
+
+  const list = columns[column];
+  const from = list.findIndex((card) => card.id === anchorId);
+  const to = list.findIndex((card) => card.id === targetId);
+  if (from === -1 || to === -1) return null;
+
+  const [start, end] = from <= to ? [from, to] : [to, from];
+  return list.slice(start, end + 1).map((card) => card.id);
+}
+
 /** `n` and `/` must not fire while the user is typing anywhere editable —
  *  task 005's own wording for the plan textarea, generalised to every
  *  editable surface so it keeps holding once stage 3 adds one. */
@@ -207,6 +240,10 @@ export function Board() {
   // Task 023's hand-picked set, kept beside `selectedTaskId` rather than merged
   // into it: opening a card to read it must not add it to the next pass.
   const [pickedTaskIds, setPickedTaskIds] = useState<ReadonlySet<string>>(new Set());
+  // Where the next shift-click measures from. A ref rather than state: it
+  // changes nothing on screen by itself, and a re-render per checkbox click
+  // to store it would be a render nobody can see.
+  const pickAnchorId = useRef<string | null>(null);
   const planPass = usePlanPass();
   const [searchQuery, setSearchQuery] = useState("");
   const [activeId, setActiveId] = useState<string | null>(null);
@@ -438,6 +475,60 @@ export function Board() {
 
   const activeCard = findCard(columns, activeId);
 
+  /**
+   * One card picked or unpicked — or, with `extendRange`, everything between
+   * it and the last plainly-picked card.
+   *
+   * The anchor moves on a plain pick and **stays** through a range, which is
+   * Finder's and Explorer's behaviour: shift-clicking again adjusts the same
+   * range rather than starting a new one from wherever the pointer happened to
+   * land. A range that `rangeBetween` refused — the two cards are in different
+   * columns — is a plain pick, so the anchor moves with it.
+   */
+  const handlePick = useCallback(
+    (id: string, picked: boolean, extendRange = false) => {
+      const range =
+        extendRange && pickAnchorId.current !== null
+          ? rangeBetween(filteredColumns, pickAnchorId.current, id)
+          : null;
+
+      setPickedTaskIds((current) => {
+        const next = new Set(current);
+        for (const each of range ?? [id]) {
+          if (picked) next.add(each);
+          else next.delete(each);
+        }
+        return next;
+      });
+
+      if (range === null) pickAnchorId.current = id;
+    },
+    [filteredColumns],
+  );
+
+  /** A whole column at once — the answer to "archive everything in Done",
+   *  which is most of what the picked set is ever used for. Scoped to what is
+   *  *displayed*, so it obeys the search box and the repository filter rather
+   *  than quietly taking cards the user cannot see. */
+  const handlePickColumn = useCallback(
+    (column: BoardColumn, picked: boolean) => {
+      const ids = filteredColumns[column].map((card) => card.id);
+      setPickedTaskIds((current) => {
+        const next = new Set(current);
+        for (const id of ids) {
+          if (picked) next.add(id);
+          else next.delete(id);
+        }
+        return next;
+      });
+      // Anchored at the bottom of what was just taken, so a shift-click
+      // immediately afterwards extends from there rather than from whatever
+      // card was last touched by hand.
+      pickAnchorId.current = picked ? (ids[ids.length - 1] ?? null) : null;
+    },
+    [filteredColumns],
+  );
+
   // Most recently put down first — the question in the archive is "when did I
   // stop looking at this", which is not the question `position` answers.
   // Flattened back out of the columns rather than read separately, so the
@@ -574,14 +665,8 @@ export function Board() {
                 selectedTaskId={selectedTaskId}
                 onSelect={setSelectedTaskId}
                 pickedTaskIds={pickedTaskIds}
-                onPick={(id, isPicked) =>
-                  setPickedTaskIds((current) => {
-                    const next = new Set(current);
-                    if (isPicked) next.add(id);
-                    else next.delete(id);
-                    return next;
-                  })
-                }
+                onPick={handlePick}
+                onPickColumn={handlePickColumn}
                 registerCardRef={registerCardRef}
                 onArrowNavigate={handleArrowNavigate}
                 dragDisabled={dragDisabled}

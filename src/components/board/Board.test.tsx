@@ -11,6 +11,7 @@ import {
   findCard,
   isEditableTarget,
   nextFocusTarget,
+  rangeBetween,
   resolveDrop,
 } from "./Board";
 import { COLUMN_TITLES } from "./Column";
@@ -238,6 +239,40 @@ describe("nextFocusTarget", () => {
   });
 });
 
+describe("rangeBetween", () => {
+  const columns = groupIntoColumns([
+    task({ id: "a", column: "ready", position: 0 }),
+    task({ id: "b", column: "ready", position: 1 }),
+    task({ id: "c", column: "ready", position: 2 }),
+    task({ id: "x", column: "in_review", position: 0 }),
+  ]);
+
+  it("takes both ends and everything between them", () => {
+    expect(rangeBetween(columns, "a", "c")).toEqual(["a", "b", "c"]);
+  });
+
+  it("reads the same upwards as downwards", () => {
+    // A shift-click is a gesture between two points, not a direction.
+    expect(rangeBetween(columns, "c", "a")).toEqual(["a", "b", "c"]);
+  });
+
+  it("is just the one card when both ends are the same", () => {
+    expect(rangeBetween(columns, "b", "b")).toEqual(["b"]);
+  });
+
+  it("refuses a range across two columns rather than guessing at a big one", () => {
+    // The cards visually "between" a `ready` card and an `in_review` one are
+    // the rest of `ready` plus the whole of `in_review`, which is never what
+    // the gesture meant — so the caller falls back to picking the one card.
+    expect(rangeBetween(columns, "a", "x")).toBeNull();
+  });
+
+  it("returns null for an id the board does not hold", () => {
+    expect(rangeBetween(columns, "a", "ghost")).toBeNull();
+    expect(rangeBetween(columns, "ghost", "a")).toBeNull();
+  });
+});
+
 describe("isEditableTarget", () => {
   it("treats inputs, textareas and contenteditable elements as typing surfaces", () => {
     expect(isEditableTarget(document.createElement("input"))).toBe(true);
@@ -404,6 +439,119 @@ describe("Board", () => {
     expect(
       await screen.findByText(/Archived 1 task\. Left 1 alone — Mid-flight: Cancel the run first/),
     ).toBeInTheDocument();
+  });
+
+  it("shift-clicking a checkbox picks everything between it and the last pick", async () => {
+    mockBackend({
+      tasks: [
+        task({ id: "a", column: "ready", position: 0, title: "One" }),
+        task({ id: "b", column: "ready", position: 1, title: "Two" }),
+        task({ id: "c", column: "ready", position: 2, title: "Three" }),
+      ],
+    });
+
+    render(<Board />);
+    fireEvent.click(await screen.findByRole("checkbox", { name: 'Select "One"' }));
+    fireEvent.click(screen.getByRole("checkbox", { name: 'Select "Three"' }), {
+      shiftKey: true,
+    });
+
+    expect(screen.getByRole("button", { name: "Archive 3 selected" })).toBeInTheDocument();
+    expect(screen.getByRole("checkbox", { name: 'Select "Two"' })).toBeChecked();
+  });
+
+  it("picks only the one card when a shift-click crosses columns", async () => {
+    // `rangeBetween` refuses the range; the click still has to do the ordinary
+    // thing rather than nothing at all.
+    mockBackend({
+      tasks: [
+        task({ id: "a", column: "ready", title: "Queued" }),
+        task({ id: "x", column: "in_review", title: "Waiting on you" }),
+      ],
+    });
+
+    render(<Board />);
+    fireEvent.click(await screen.findByRole("checkbox", { name: 'Select "Queued"' }));
+    fireEvent.click(screen.getByRole("checkbox", { name: 'Select "Waiting on you"' }), {
+      shiftKey: true,
+    });
+
+    expect(screen.getByRole("button", { name: "Archive 2 selected" })).toBeInTheDocument();
+  });
+
+  it("toggles the focused card's pick with x, without opening it", async () => {
+    mockBackend({ tasks: [task({ id: "a", title: "One" })] });
+    render(<Board />);
+    const card = (await screen.findByText("One")).closest("article");
+
+    fireEvent.keyDown(card!, { key: "x" });
+    expect(screen.getByRole("button", { name: "Archive 1 selected" })).toBeInTheDocument();
+    // `x` is a pick, not an open — the drawer is what Enter is for.
+    expect(screen.queryByRole("complementary")).not.toBeInTheDocument();
+
+    fireEvent.keyDown(card!, { key: "x" });
+    expect(
+      screen.queryByRole("button", { name: /Archive \d+ selected/ }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("extends the range from the keyboard with shift+x", async () => {
+    mockBackend({
+      tasks: [
+        task({ id: "a", column: "ready", position: 0, title: "One" }),
+        task({ id: "b", column: "ready", position: 1, title: "Two" }),
+        task({ id: "c", column: "ready", position: 2, title: "Three" }),
+      ],
+    });
+
+    render(<Board />);
+    fireEvent.keyDown((await screen.findByText("One")).closest("article")!, { key: "x" });
+    fireEvent.keyDown(screen.getByText("Three").closest("article")!, {
+      key: "X",
+      shiftKey: true,
+    });
+
+    expect(screen.getByRole("button", { name: "Archive 3 selected" })).toBeInTheDocument();
+  });
+
+  it("picks a whole column, and clears it again", async () => {
+    // "Archive everything in Done" is most of what the picked set is for.
+    mockBackend({
+      tasks: [
+        task({ id: "a", column: "done", position: 0, title: "One" }),
+        task({ id: "b", column: "done", position: 1, title: "Two" }),
+        task({ id: "c", column: "ready", title: "Still queued" }),
+      ],
+    });
+
+    render(<Board />);
+    fireEvent.click(await screen.findByRole("button", { name: "Select all 2" }));
+
+    expect(screen.getByRole("button", { name: "Archive 2 selected" })).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Clear" }));
+    expect(
+      screen.queryByRole("button", { name: /Archive \d+ selected/ }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("takes only the cards the search box is showing", async () => {
+    // The control obeys what is displayed rather than quietly taking cards the
+    // user cannot see.
+    mockBackend({
+      tasks: [
+        task({ id: "a", column: "done", position: 0, title: "Parser work" }),
+        task({ id: "b", column: "done", position: 1, title: "Something else" }),
+      ],
+    });
+
+    render(<Board />);
+    fireEvent.change(await screen.findByLabelText("Search task titles"), {
+      target: { value: "parser" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Select all 1" }));
+
+    expect(screen.getByRole("button", { name: "Archive 1 selected" })).toBeInTheDocument();
   });
 
   it("offers no bulk archive until something is picked", async () => {
