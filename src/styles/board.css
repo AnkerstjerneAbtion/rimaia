@@ -1877,13 +1877,36 @@
 /* The multi-select. Sits at the left of the action row, opposite "Run now",
    and stays out of the way until the user is picking a set. */
 .task-card-pick {
+  position: relative;
   display: inline-flex;
   align-items: center;
   margin-right: auto;
   cursor: pointer;
 }
 
+/* The hit target, which is deliberately bigger than the box it is drawn
+   around. A native checkbox is ~13px, and picking five cards was five precise
+   clicks on a control that only appears mid-hover.
+   Grown with an overlay rather than with padding, because padding on the label
+   would push the actions row taller and the whole card would jump on hover —
+   this reaches past the box without occupying any layout. It only extends
+   left and down into the card's own padding: "Run now" and the Open-in menu
+   are at the far end of a `justify-content: flex-end` row, so there is nothing
+   here to steal a click from. */
+.task-card-pick::after {
+  content: "";
+  position: absolute;
+  inset-block: calc(var(--space-2) * -1);
+  inset-inline-start: calc(var(--space-2) * -1);
+  inset-inline-end: calc(var(--space-1) * -1);
+}
+
 .task-card-pick input {
+  /* 1rem rather than the browser default, so the box is findable at a glance
+     down a column of fifty cards. Together with the overlay above this is a
+     ~32px target, past WCAG 2.2's 24px minimum. */
+  inline-size: 1rem;
+  block-size: 1rem;
   margin: 0;
   accent-color: var(--accent);
 }
