@@ -522,7 +522,7 @@ pub struct RunnerConfig {
     pub program: PathBuf,
     /// How long a cancelled child is given to emit its `result` before SIGKILL.
     pub grace_period: Duration,
-    /// See [`Invocation::max_turns`].
+    /// See [`RunIntent::max_turns`](provider::RunIntent::max_turns).
     pub max_turns: Option<u32>,
     /// Where a strategy run mints its scoped MCP token (seam-contract D17.4).
     ///

@@ -367,7 +367,7 @@ impl McpTask {
 /// The axum path the scoped route is registered at — `/mcp/run/{token}`.
 ///
 /// Built from [`MCP_PATH`] and the same prefix constant
-/// [`RunHandles::mcp_config_json`] builds its URL from, so the route the server
+/// [`RunHandles::endpoint_for`] builds its URL from, so the route the server
 /// listens on and the URL a run is handed cannot drift apart.
 fn run_route_path() -> String {
     format!("{MCP_PATH}{RUN_ROUTE_PREFIX}{{token}}")

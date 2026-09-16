@@ -319,7 +319,7 @@ fn a_task_with_no_model_lets_the_cli_choose_its_own() {
 #[test]
 fn each_disallowed_tool_is_its_own_argument_and_a_turn_budget_terminates_the_list() {
     // `--disallowedTools` is variadic, so what ends its list is the next flag.
-    // That is why the order in `Invocation::args` is a contract and not a
+    // That is why the order in `ClaudeProvider::plan_spawn` is a contract and not a
     // preference: a budget appended anywhere else would be swallowed as a tool.
     let invocation = RunIntent {
         forbidden: vec![
