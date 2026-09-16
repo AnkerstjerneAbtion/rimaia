@@ -45,7 +45,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 
 use crate::db::new_id;
 use crate::error::{Error, Result};
-use crate::mcp::{MCP_PATH, MCP_SERVER_NAME};
+use crate::mcp::MCP_PATH;
 
 /// Where the scoped route hangs, relative to [`MCP_PATH`].
 ///
@@ -473,35 +473,26 @@ impl RunHandles {
         })
     }
 
-    /// The `--mcp-config` argument for a run holding `grant`, or `None` when
+    /// The scoped URL a run holding `grant` reaches Rimaia on, or `None` when
     /// nothing is listening.
     ///
-    /// An inline JSON string rather than a file (seam-contract D17.4):
-    /// `runner::process` earns its tests by pinning argv byte for byte and a
-    /// temp path changes every run, and there is nothing to create, clean up,
-    /// or leave inside a worktree where the run could stage it.
+    /// **A URL, not a document** (ADR-0026 point 2, seam-contract D27.4). Minting
+    /// the address is Rimaia's; shaping it into something an agent can call — an
+    /// inline JSON config, a file in a config home, an environment variable — is
+    /// the provider's, because those are not the same thing on two providers and
+    /// a `String` of one provider's JSON cannot become the other.
     ///
-    /// It takes the grant rather than a bare token so that a config can only be
+    /// It takes the grant rather than a bare token so that a URL can only be
     /// built by whoever holds the grant, which is the same thing as saying it
     /// cannot outlive the token it names. `None` has exactly one cause — no
     /// endpoint bound, the busy-port case seam-contract D16.7 makes non-fatal —
     /// so the caller can say "see Settings → MCP" without qualifying it.
-    pub fn mcp_config_json(&self, grant: &RunGrant) -> Option<String> {
+    pub fn endpoint_for(&self, grant: &RunGrant) -> Option<String> {
         let endpoint = self.endpoint()?;
-        let url = format!(
+        Some(format!(
             "{endpoint}{MCP_PATH}{RUN_ROUTE_PREFIX}{token}",
             token = grant.token
-        );
-
-        // `serde_json` rather than `format!`, so a URL is escaped as JSON
-        // demands rather than as this line happens to assume. `Value`'s
-        // `Display` is the compact form, which is what has to survive argv.
-        Some(
-            serde_json::json!({
-                "mcpServers": { MCP_SERVER_NAME: { "type": "http", "url": url } }
-            })
-            .to_string(),
-        )
+        ))
     }
 
     fn revoke(&self, token: &str) {
@@ -535,7 +526,7 @@ pub struct RunGrant {
 impl RunGrant {
     /// The minted token. Mostly for a test that wants to assert the URL a run
     /// was handed; the runner itself should ask for
-    /// [`mcp_config_json`](RunHandles::mcp_config_json).
+    /// [`endpoint_for`](RunHandles::endpoint_for).
     pub fn token(&self) -> &str {
         &self.token
     }
@@ -632,34 +623,29 @@ mod tests {
     }
 
     #[test]
-    fn the_mcp_config_is_an_inline_json_object_naming_the_bound_port_and_the_token() {
+    fn the_scoped_endpoint_names_the_bound_port_and_the_run_s_own_token() {
         let handles = bound();
         let grant = handles.grant("task-1");
 
-        let config = handles
-            .mcp_config_json(&grant)
-            .expect("an endpoint is bound");
-
         assert_eq!(
-            config,
-            format!(
-                "{{\"mcpServers\":{{\"rimaia\":{{\"type\":\"http\",\
-                 \"url\":\"http://127.0.0.1:4517/mcp/run/{token}\"}}}}}}",
+            handles.endpoint_for(&grant),
+            Some(format!(
+                "http://127.0.0.1:4517/mcp/run/{token}",
                 token = grant.token()
-            )
+            ))
         );
     }
 
     #[test]
-    fn an_unbound_endpoint_yields_no_mcp_config_at_all() {
-        // Seam-contract D16.7's busy port, reaching the runner: no
-        // `--mcp-config` is passed, and the caller refuses to start a planner
-        // rather than starting one that cannot answer.
+    fn an_unbound_endpoint_yields_no_scoped_url_at_all() {
+        // Seam-contract D16.7's busy port, reaching the runner: the run is handed
+        // no handle, and the caller refuses to start a planner rather than
+        // starting one that cannot answer.
         let handles = RunHandles::default();
         let grant = handles.grant("task-1");
 
         assert_eq!(handles.endpoint(), None);
-        assert_eq!(handles.mcp_config_json(&grant), None);
+        assert_eq!(handles.endpoint_for(&grant), None);
     }
 
     #[test]
@@ -673,9 +659,9 @@ mod tests {
         handles.set_endpoint(Some("http://127.0.0.1:4600".to_string()));
 
         assert!(handles
-            .mcp_config_json(&grant)
+            .endpoint_for(&grant)
             .expect("an endpoint is bound")
-            .contains("http://127.0.0.1:4600/mcp/run/"));
+            .starts_with("http://127.0.0.1:4600/mcp/run/"));
     }
 
     #[test]

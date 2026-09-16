@@ -65,22 +65,28 @@ use crate::strategy::{self, Catalogue, EffectiveStrategy};
 use crate::tasks::strategy::{StrategyPlan, StrategyPlanRun, StrategyPlanStatus};
 use crate::tasks::{self, TaskDetail};
 
-use super::process::{
-    disallowed_tools, Attempt, CancelSignal, Invocation, PermissionMode, RunnerConfig,
-};
+use super::process::{forbidden_operations, Attempt, CancelSignal, PermissionMode, RunnerConfig};
 use super::prompt::{
     compose_strategy_prompt, compose_strategy_system_append, StrategyGuidance,
     SET_TASK_STRATEGY_TOOL,
 };
+use super::provider::{self, ForbiddenOperation, RimaiaHandle, RunIntent, SessionIntent};
 
-/// Tools a planner is denied on top of the implementation blocklist.
+/// What a planner is denied on top of the implementation blocklist.
 ///
-/// Denying `Bash` is what makes "runs in a worktree it will not disturb" true
-/// rather than merely intended — without it, an agent asked to understand a
-/// repository reaches for the test suite, in a checkout that belongs to a task
-/// nobody has run yet. Read, Grep and Glob are all a planner needs to read a
+/// Denying every shell command is what makes "runs in a worktree it will not
+/// disturb" true rather than merely intended — without it, an agent asked to
+/// understand a repository reaches for the test suite, in a checkout that
+/// belongs to a task nobody has run yet. Reading is all a planner needs to read a
 /// plan and name a model.
-const PLANNER_DENIED_TOOLS: [&str; 4] = ["Write", "Edit", "NotebookEdit", "Bash"];
+///
+/// Operations rather than tool names (ADR-0026 point 4): which tools those are
+/// is the provider's answer, and a provider that cannot answer refuses the run
+/// rather than being handed four strings it has never heard of.
+const PLANNER_FORBIDDEN: [ForbiddenOperation; 2] = [
+    ForbiddenOperation::AnyFileMutation,
+    ForbiddenOperation::AnyShellCommand,
+];
 
 /// The prefix a strategy transcript's synthetic id carries.
 ///
@@ -234,7 +240,7 @@ async fn plan(
     // whichever way it returns. The grant *is* the lifetime of the run's ability
     // to address Rimaia, so there is nothing to remember to revoke.
     let grant = config.run_handles.grant(task_id);
-    let Some(mcp_config) = config.run_handles.mcp_config_json(&grant) else {
+    let Some(url) = config.run_handles.endpoint_for(&grant) else {
         // Seam-contract D16.7 makes a busy MCP port non-fatal to startup, which
         // means a run can reach here with nothing listening. Spawning a planner
         // whose only way to answer is a server that is not there would burn a
@@ -247,7 +253,33 @@ async fn plan(
     };
 
     let prompt = compose_strategy_prompt(detail, repository, catalogue);
-    let invocation = planner_invocation(ctx, catalogue, task_id, mcp_config).await?;
+    let home = paths.provider_home(config.provider.id(), task_id);
+    let conversation = new_id();
+    let intent = planner_intent(
+        ctx,
+        config,
+        catalogue,
+        task_id,
+        &prompt,
+        worktree,
+        &conversation,
+        &home,
+        RimaiaHandle {
+            url,
+            server: crate::mcp::MCP_SERVER_NAME,
+        },
+    )
+    .await?;
+
+    // A provider that cannot be handed a scoped handle, cannot deny the tools
+    // the planner must not have, or cannot be isolated is not a planner failure
+    // to *diagnose* — it is one to fall back from, which is the same route
+    // seam-contract D16.7 already takes for a busy port. The `default` chain is
+    // waiting, and it is what ADR-0016 says a failed planner falls back to.
+    let plan = match provider::negotiate(config.provider.capabilities(), &intent) {
+        Ok(plan) => plan,
+        Err(refusal) => return Ok(Planned::Failed(refusal.message)),
+    };
 
     // No `runs` row, so no run id — a synthetic one, whose only job is to name a
     // transcript beside the implementation's. See this module's header.
@@ -268,9 +300,8 @@ async fn plan(
         Attempt {
             task_id,
             run_id: &transcript_id,
-            worktree,
-            prompt: &prompt,
-            invocation: &invocation,
+            intent: &intent,
+            plan: &plan,
             cancel,
         },
     )
@@ -306,7 +337,7 @@ async fn plan(
     // panel can say what the decision cost. A best-effort second write: the
     // proposal is already on the card and losing the receipt is not worth
     // failing a run that succeeded.
-    stamp_run_metadata(ctx, task_id, &after, &invocation, &outcome).await;
+    stamp_run_metadata(ctx, task_id, &after, &conversation, &outcome).await;
 
     Ok(Planned::Wrote)
 }
@@ -328,25 +359,28 @@ async fn plan(
 ///   whatever the operator has configured.
 /// - **Bounded by `--max-turns`** from the catalogue, so a planner in a loop
 ///   costs cents.
-async fn planner_invocation(
+#[allow(clippy::too_many_arguments)]
+async fn planner_intent<'a>(
     ctx: &ServiceContext,
+    config: &RunnerConfig,
     catalogue: &Catalogue,
     task_id: &str,
-    mcp_config: String,
-) -> Result<Invocation> {
-    let mut denied = disallowed_tools(&ctx.pool).await?;
-    for tool in PLANNER_DENIED_TOOLS {
-        if !denied.iter().any(|held| held == tool) {
-            denied.push(tool.to_string());
-        }
-    }
+    prompt: &'a str,
+    worktree: &'a Path,
+    conversation: &'a str,
+    home: &'a Path,
+    handle: RimaiaHandle,
+) -> Result<RunIntent<'a>> {
+    let forbidden =
+        forbidden_operations(&ctx.pool, config.provider.as_ref(), PLANNER_FORBIDDEN).await?;
 
-    Ok(Invocation {
-        session_id: new_id(),
-        resume: false,
+    Ok(RunIntent {
+        session: SessionIntent::Open { conversation, home },
         permission_mode: PermissionMode::AcceptEdits,
         run_environment: RunEnvironment::StrictLocal,
         system_append: compose_strategy_system_append(task_id, SET_TASK_STRATEGY_TOOL),
+        prompt,
+        workspace: worktree,
         model: catalogue.planner.model.clone(),
         effort: catalogue.planner.effort.clone(),
         // The one tool the planner exists to call, pre-approved.
@@ -365,9 +399,9 @@ async fn planner_invocation(
         // planner is permitted exactly its own write-back, while
         // `PLANNER_DENIED_TOOLS` still denies it every way of touching the
         // worktree it is reading.
-        allowed_tools: vec![SET_TASK_STRATEGY_TOOL.to_string()],
-        disallowed_tools: denied,
-        mcp_config: Some(mcp_config),
+        required_tools: vec![crate::mcp::Tool::SetTaskStrategy.as_str()],
+        forbidden,
+        rimaia_handle: Some(handle),
         max_turns: Some(catalogue.planner.max_turns),
     })
 }
@@ -392,7 +426,7 @@ async fn stamp_run_metadata(
     ctx: &ServiceContext,
     task_id: &str,
     after: &TaskDetail,
-    invocation: &Invocation,
+    conversation: &str,
     outcome: &super::outcome::RunOutcome,
 ) {
     let Some(mut plan) = StrategyPlan::from_stored(after.task.strategy_plan.as_deref()) else {
@@ -403,7 +437,7 @@ async fn stamp_run_metadata(
     }
 
     plan.run = Some(StrategyPlanRun {
-        session_id: Some(invocation.session_id.clone()),
+        session_id: Some(conversation.to_string()),
         num_turns: outcome.num_turns,
         cost_usd: outcome.cost_usd,
         error: None,

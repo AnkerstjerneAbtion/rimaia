@@ -11,6 +11,7 @@
 use std::path::{Path, PathBuf};
 
 use crate::error::Result;
+use crate::runner::provider::ProviderId;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AppPaths {
@@ -46,6 +47,30 @@ impl AppPaths {
     }
 
     /// Rolling application logs — Rimaia's own diagnostics, not run transcripts.
+    /// Where a provider keeps one task's conversations
+    /// (`<data>/providers/<provider>/<task-id>/`, ADR-0026 point 5).
+    ///
+    /// Created and owned by Rimaia, per provider and per task. A provider that
+    /// takes a session id up front ignores it; a provider that resumes "the last
+    /// conversation here" is made exact by it, because ADR-0005 already gives
+    /// every task a worktree of its own.
+    pub fn provider_home(&self, provider: ProviderId, task_id: &str) -> PathBuf {
+        self.providers_dir().join(provider.as_str()).join(task_id)
+    }
+
+    pub fn providers_dir(&self) -> PathBuf {
+        self.data_dir.join("providers")
+    }
+
+    /// Per-attempt working space for whatever a provider has to write down.
+    ///
+    /// Deliberately **not** under [`runs_dir`](Self::runs_dir): that directory is
+    /// walked for disk accounting and pruned by task 016, and a scratch file
+    /// there would be counted as a transcript.
+    pub fn scratch_dir(&self) -> PathBuf {
+        self.data_dir.join("scratch")
+    }
+
     pub fn logs_dir(&self) -> PathBuf {
         self.data_dir.join("logs")
     }
@@ -56,6 +81,8 @@ impl AppPaths {
             self.data_dir.clone(),
             self.worktrees_dir(),
             self.runs_dir(),
+            self.providers_dir(),
+            self.scratch_dir(),
             self.logs_dir(),
         ] {
             std::fs::create_dir_all(&dir)?;
@@ -77,6 +104,15 @@ mod tests {
             Path::new("/tmp/rimaia-test/worktrees")
         );
         assert_eq!(paths.runs_dir(), Path::new("/tmp/rimaia-test/runs"));
+        assert_eq!(
+            paths.providers_dir(),
+            Path::new("/tmp/rimaia-test/providers")
+        );
+        assert_eq!(paths.scratch_dir(), Path::new("/tmp/rimaia-test/scratch"));
+        assert_eq!(
+            paths.provider_home(ProviderId::ClaudeCode, "task-1"),
+            Path::new("/tmp/rimaia-test/providers/claude-code/task-1"),
+        );
         assert_eq!(paths.logs_dir(), Path::new("/tmp/rimaia-test/logs"));
     }
 

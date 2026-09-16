@@ -47,8 +47,11 @@ use rimaia_core::runner::process::{
     DEFAULT_DISALLOWED_TOOLS, DISALLOWED_TOOLS,
 };
 use rimaia_core::runner::prompt::compose_prompt;
+use rimaia_core::runner::provider::{
+    AgentProvider, ClaudeProvider, ForbiddenOperation, ProviderId, RimaiaHandle, SessionIntent,
+};
 use rimaia_core::runner::{
-    run_task, CancelSignal, Invocation, PermissionMode, RunRequest, RunTrigger, RunnerConfig,
+    run_task, CancelSignal, PermissionMode, RunIntent, RunRequest, RunTrigger, RunnerConfig,
 };
 use rimaia_core::tasks::{self, NewTask, Patch, TaskPatch};
 use rimaia_core::testing::fixtures::{fixture_lines, fixture_path};
@@ -73,28 +76,51 @@ const TASK_TITLE: &str = "Add truncate_slug";
 // the same class of contract as prompt composition, and the one place a silent
 // change would be least visible.
 
-/// The canonical invocation the assertions below vary one field of at a time.
-fn invocation() -> Invocation {
-    Invocation {
-        session_id: SESSION_ID.to_string(),
-        resume: false,
+/// The canonical intent the assertions below vary one field of at a time.
+fn invocation() -> RunIntent<'static> {
+    RunIntent {
+        session: SessionIntent::Open {
+            conversation: SESSION_ID,
+            home: home(),
+        },
         permission_mode: PermissionMode::BypassPermissions,
         run_environment: RunEnvironment::Inherit,
         system_append: "You are running unattended, started by Rimaia.".to_string(),
+        prompt: "do the thing",
+        workspace: workspace(),
         model: Some("claude-sonnet-5".to_string()),
         effort: None,
-        allowed_tools: Vec::new(),
-        disallowed_tools: Vec::new(),
+        required_tools: Vec::new(),
+        forbidden: Vec::new(),
         // An implementation run reaches Rimaia through nothing. The scoped
         // handle is the strategy run's, and `runner_strategy.rs` pins the
         // vector that carries it.
-        mcp_config: None,
+        rimaia_handle: None,
         max_turns: None,
     }
 }
 
-fn argv(invocation: &Invocation) -> Vec<String> {
-    invocation.args()
+/// The vector this provider turns that intent into (ADR-0026).
+///
+/// `scratch` is a real directory only because the signature takes one: Claude
+/// Code's every channel is an argument, so nothing is ever written there. A
+/// provider that needs a file is what the parameter exists for.
+fn argv(intent: &RunIntent<'_>) -> Vec<String> {
+    ClaudeProvider
+        .plan_spawn(intent, Path::new("/tmp/rimaia-scratch"))
+        .expect("a plan this provider can express")
+        .args
+}
+
+/// Where a provider would keep this task's conversations, and where the run
+/// would happen. Neither reaches Claude Code's vector; both are on the intent
+/// because every provider needs them and some spell them.
+fn home() -> &'static Path {
+    Path::new("/tmp/rimaia-home")
+}
+
+fn workspace() -> &'static Path {
+    Path::new("/tmp/rimaia-worktree")
 }
 
 #[test]
@@ -121,10 +147,74 @@ fn a_queued_run_bypasses_permissions_and_inherits_the_operators_configuration() 
 }
 
 #[test]
+fn the_claude_argv_carries_every_flag_in_the_order_the_contract_documents() {
+    // Eight tests above vary one field each, and none of them pins the whole
+    // vector with every flag present — so a reordering that each one
+    // individually tolerates passes all eight. This is the one that does not:
+    // one maximally-populated intent, one exact vector, in the order
+    // `ClaudeProvider::plan_spawn` documents as a contract rather than an
+    // accident.
+    let intent = RunIntent {
+        session: SessionIntent::Continue {
+            conversation: SESSION_ID,
+            home: home(),
+            last_announced: Some("ignored-by-a-provider-that-was-given-an-id"),
+        },
+        run_environment: RunEnvironment::StrictLocal,
+        effort: Some("high".to_string()),
+        required_tools: vec!["set_task_strategy"],
+        forbidden: vec![
+            ForbiddenOperation::HardResetToRemote,
+            ForbiddenOperation::AnyShellCommand,
+            operator_rule("Bash(rm -rf /:*)"),
+        ],
+        rimaia_handle: Some(RimaiaHandle {
+            url: "http://127.0.0.1:4517/mcp/run/tok".to_string(),
+            server: "rimaia",
+        }),
+        max_turns: Some(40),
+        ..invocation()
+    };
+
+    assert_eq!(
+        argv(&intent),
+        vec![
+            "-p",
+            "--output-format",
+            "stream-json",
+            "--verbose",
+            "--resume",
+            SESSION_ID,
+            "--permission-mode",
+            "bypassPermissions",
+            "--strict-mcp-config",
+            "--setting-sources",
+            "project,local",
+            "--append-system-prompt",
+            "You are running unattended, started by Rimaia.",
+            "--model",
+            "claude-sonnet-5",
+            "--effort",
+            "high",
+            "--allowedTools",
+            "mcp__rimaia__set_task_strategy",
+            "--disallowedTools",
+            "Bash(git reset --hard origin/:*)",
+            "Bash",
+            "Bash(rm -rf /:*)",
+            "--mcp-config",
+            r#"{"mcpServers":{"rimaia":{"type":"http","url":"http://127.0.0.1:4517/mcp/run/tok"}}}"#,
+            "--max-turns",
+            "40",
+        ]
+    );
+}
+
+#[test]
 fn a_manual_run_accepts_edits_rather_than_bypassing_permissions() {
     // ADR-0012 point 6: "a run started manually with the app in the foreground
     // defaults to `acceptEdits`; bypass is for the unattended path."
-    let invocation = Invocation {
+    let invocation = RunIntent {
         permission_mode: RunTrigger::Manual.permission_mode(),
         ..invocation()
     };
@@ -157,7 +247,7 @@ fn strict_local_adds_two_isolation_flags_and_never_bare() {
     // in as many words not to implement this mode with it, because it also
     // disables `CLAUDE.md` discovery — which is the repository's own
     // instructions, wanted in both modes.
-    let invocation = Invocation {
+    let invocation = RunIntent {
         run_environment: RunEnvironment::StrictLocal,
         ..invocation()
     };
@@ -188,7 +278,7 @@ fn strict_local_adds_two_isolation_flags_and_never_bare() {
 
 #[test]
 fn an_effort_is_passed_only_when_the_task_names_one() {
-    let with_effort = Invocation {
+    let with_effort = RunIntent {
         effort: Some("high".to_string()),
         ..invocation()
     };
@@ -204,7 +294,7 @@ fn an_effort_is_passed_only_when_the_task_names_one() {
 fn a_task_with_no_model_lets_the_cli_choose_its_own() {
     // ADR-0016 makes the column nullable precisely so "not set" is expressible,
     // and an empty `--model` would be a worse answer than no flag at all.
-    let invocation = Invocation {
+    let invocation = RunIntent {
         model: None,
         ..invocation()
     };
@@ -231,10 +321,10 @@ fn each_disallowed_tool_is_its_own_argument_and_a_turn_budget_terminates_the_lis
     // `--disallowedTools` is variadic, so what ends its list is the next flag.
     // That is why the order in `Invocation::args` is a contract and not a
     // preference: a budget appended anywhere else would be swallowed as a tool.
-    let invocation = Invocation {
-        disallowed_tools: vec![
-            "Bash(git push --force:*)".to_string(),
-            "Bash(git push -f:*)".to_string(),
+    let invocation = RunIntent {
+        forbidden: vec![
+            operator_rule("Bash(git push --force:*)"),
+            operator_rule("Bash(git push -f:*)"),
         ],
         max_turns: Some(40),
         ..invocation()
@@ -260,8 +350,12 @@ fn a_resume_replaces_the_session_id_it_would_otherwise_have_opened() {
     // `--resume` on the retry is the right shape". They are alternatives — one
     // opens an id, the other reuses one — and everything else about the
     // invocation is unchanged, which is what makes a retry a continuation.
-    let resume = Invocation {
-        resume: true,
+    let resume = RunIntent {
+        session: SessionIntent::Continue {
+            conversation: SESSION_ID,
+            home: home(),
+            last_announced: None,
+        },
         ..invocation()
     };
     let first = argv(&invocation());
@@ -282,16 +376,22 @@ fn the_default_blocklist_is_adr_0012s_three_operations_flag_first_and_remote_fir
     // remote-first one (`git push origin --force main`) — both orderings are
     // pinned here for that reason, plus the `git push origin :branch` delete
     // shorthand, which carries neither `--delete` nor `-d`.
+    //
+    // Grouped by operation since ADR-0026, because that is what the list now
+    // *is*: the three `ForbiddenOperation`s an unset setting means, expanded by
+    // this provider in the order an intent carries them. The eleven patterns are
+    // unchanged; only their order is, and it is no longer free to drift from the
+    // expansion.
     assert_eq!(
         DEFAULT_DISALLOWED_TOOLS,
         [
             "Bash(git push --force:*)",
             "Bash(git push -f:*)",
             "Bash(git push --force-with-lease:*)",
-            "Bash(git push --delete:*)",
-            "Bash(git push -d:*)",
             "Bash(git push origin --force:*)",
             "Bash(git push origin -f:*)",
+            "Bash(git push --delete:*)",
+            "Bash(git push -d:*)",
             "Bash(git push origin --delete:*)",
             "Bash(git push origin -d:*)",
             "Bash(git push origin :*)",
@@ -569,7 +669,7 @@ fn an_init_that_echoes_a_different_mode_is_refused_by_name() {
     assert_eq!(error.code(), ErrorCode::Internal);
     assert_eq!(
         error.to_string(),
-        "Claude Code applied permission mode \"bypassPermissions\" when Rimaia asked for \
+        "the agent CLI applied permission mode \"bypassPermissions\" when Rimaia asked for \
          \"acceptEdits\". The run was stopped rather than continued under a posture nobody \
          chose (ADR-0012)."
     );
@@ -1540,22 +1640,39 @@ impl RunnerFixture {
 
 /// The planner's shape: narrow mode, its one tool allowed by name, every
 /// writing tool denied, isolated, and bounded.
-fn planner_invocation() -> Invocation {
-    Invocation {
-        session_id: SESSION_ID.to_string(),
-        resume: false,
+fn planner_invocation() -> RunIntent<'static> {
+    RunIntent {
+        session: SessionIntent::Open {
+            conversation: SESSION_ID,
+            home: home(),
+        },
         permission_mode: PermissionMode::AcceptEdits,
         run_environment: RunEnvironment::StrictLocal,
         system_append: "You are running unattended, started by Rimaia.".to_string(),
+        prompt: "plan the work",
+        workspace: workspace(),
         model: Some("haiku".to_string()),
         effort: Some("low".to_string()),
-        allowed_tools: vec!["mcp__rimaia__set_task_strategy".to_string()],
-        disallowed_tools: vec!["Write".to_string(), "Bash".to_string()],
-        mcp_config: Some(
-            r#"{"mcpServers":{"rimaia":{"type":"http","url":"http://127.0.0.1:4517/mcp/run/tok"}}}"#
-                .to_string(),
-        ),
+        // Rimaia's name for the tool; `mcp__rimaia__set_task_strategy` is this
+        // provider's spelling of it, which is what the assertions below read.
+        required_tools: vec!["set_task_strategy"],
+        forbidden: vec![
+            ForbiddenOperation::AnyFileMutation,
+            ForbiddenOperation::AnyShellCommand,
+        ],
+        rimaia_handle: Some(RimaiaHandle {
+            url: "http://127.0.0.1:4517/mcp/run/tok".to_string(),
+            server: "rimaia",
+        }),
         max_turns: Some(6),
+    }
+}
+
+/// A blocklist pattern the operator wrote, in the vocabulary they wrote it in.
+fn operator_rule(rule: &str) -> ForbiddenOperation {
+    ForbiddenOperation::ProviderRule {
+        provider: ProviderId::ClaudeCode,
+        rule: rule.to_string(),
     }
 }
 

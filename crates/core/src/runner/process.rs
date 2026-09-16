@@ -1,4 +1,5 @@
-//! Spawning the Claude Code CLI, and the life of one run (ADR-0004, ADR-0012).
+//! Spawning the agent CLI, and the life of one run (ADR-0004, ADR-0012,
+//! ADR-0026).
 //!
 //! Stages either side of this are pure: [`events`](super::events) knows what a
 //! line means and [`outcome`](super::outcome) knows what an ending means, and
@@ -7,14 +8,21 @@
 //! signals and process groups, because everything it gets wrong shows up at 2am
 //! as a hung queue or an orphaned `node` still holding a port.
 //!
-//! # The invocation is a pure function, on purpose
+//! # Which CLI, and what this module still owns
 //!
-//! [`Invocation::args`] takes no context and touches nothing: it is (task,
-//! repository, settings, trigger) in, argument vector out. That is what makes
-//! ADR-0012's permission posture and ADR-0004's isolation flags assertable as
-//! exact vectors, the same class of contract as prompt composition — the flags
-//! this product is most dangerous to get wrong are the ones a test can pin
-//! byte for byte without spawning anything.
+//! ADR-0026 moved the flag vocabulary behind
+//! [`AgentProvider`](super::provider::AgentProvider): a
+//! [`RunIntent`](super::provider::RunIntent) in, a
+//! [`SpawnPlan`](super::provider::SpawnPlan) out. Nothing below this line knows
+//! a flag. What stays here is everything that touches a pipe, a signal or a
+//! process group — written once, for every provider, because a provider that
+//! spawned its own child could leak a process tree or write a transcript Rimaia
+//! cannot read.
+//!
+//! The intent is still a pure value, which is what makes ADR-0012's permission
+//! posture and ADR-0004's isolation flags assertable as exact vectors: the flags
+//! this product is most dangerous to get wrong are the ones a test can pin byte
+//! for byte without spawning anything.
 //!
 //! **Argument vectors, never `sh -c`.** A worktree path routinely contains a
 //! space, and the composed system prompt contains newlines and quotes.
@@ -28,11 +36,13 @@
 //!    operator's own MCP servers, which ADR-0004's amendment decides is worth
 //!    it by default. See `db::settings::ENVIRONMENT_SETUP_COST_USD` for why the
 //!    spike's "3.6x" is the misleading way to state that.
-//! 2. **Stripping `CLAUDE_*` is not a choice** and is not configurable. Those
-//!    variables are process identity, not user config: a child told
-//!    `CLAUDE_CODE_SESSION_ID` believes it is a nested session of whatever
-//!    spawned Rimaia. Rimaia is developed and tested from inside a Claude Code
-//!    session, so this is live, not theoretical. See [`is_process_identity`].
+//! 2. **Stripping an agent's identity variables is not a choice** and is not
+//!    configurable. Those variables are process identity, not user config: a
+//!    child told `CLAUDE_CODE_SESSION_ID` believes it is a nested session of
+//!    whatever spawned Rimaia. Rimaia is developed and tested from inside a
+//!    Claude Code session, so this is live, not theoretical. The rule takes the
+//!    **union** over every registered provider rather than the active one's
+//!    (seam-contract D27.5) — see [`is_process_identity`].
 //!
 //! # Cancellation is a signal to a process *group*
 //!
@@ -60,7 +70,7 @@ use crate::context::ServiceContext;
 use crate::db::settings::{self, RunEnvironment};
 use crate::db::{new_id, ExitClass, Run, RunState, RunStatus, Task};
 use crate::error::{Error, Result};
-use crate::mcp::{RunHandles, MCP_SERVER_NAME};
+use crate::mcp::RunHandles;
 use crate::paths::AppPaths;
 use crate::repo;
 use crate::runner::events::{EventStream, InitEvent, RunEvent, TokenUsage};
@@ -68,6 +78,10 @@ use crate::runner::outcome::{
     finish_run, start_run, NewRun, PullRequestWatch, RunOutcome, SpawnedAs, Termination,
 };
 use crate::runner::prompt::{compose_prompt, compose_resume_prompt, compose_system_append};
+use crate::runner::provider::{
+    self, claude, AgentProvider, ForbiddenOperation, PromptStyle, RunIntent, RunPlan,
+    SessionIntent, SpawnPlan,
+};
 use crate::runner::strategy;
 use crate::scheduler::attempts::{self, Ending};
 use crate::scheduler::{pause, retry, InFlight};
@@ -78,17 +92,19 @@ use crate::worktree::{self, Worktree};
 // Constants
 // ---------------------------------------------------------------------------
 
-/// The prerequisite, resolved through `PATH`. **Never bundled** (ADR-0004): it
-/// is the same binary the operator already trusts interactively, carrying the
-/// subscription auth Rimaia deliberately never handles.
-pub const CLAUDE_CLI: &str = "claude";
-
-/// What `strict_local` restricts settings discovery to (ADR-0004's amendment).
+/// The prerequisite's default program name, and the blocklist an unset setting
+/// means, re-exported at the paths they have always had.
 ///
-/// Deliberately **not** `--bare`: that would also switch off `CLAUDE.md`
-/// discovery, and a repository's own `CLAUDE.md` is wanted in both modes — it is
-/// the project's instructions, not the operator's configuration.
-const SETTING_SOURCES: &str = "project,local";
+/// Both moved behind the provider seam (ADR-0026), and both are still Claude
+/// Code's: the doctor imports the first and `tests/runner_process.rs` imports
+/// both, and neither import line changes. If somebody later drops these
+/// re-exports it is a compile error, never a silent break.
+pub use claude::{is_process_identity, CLAUDE_CLI, DEFAULT_DISALLOWED_TOOLS};
+
+/// ADR-0012's two postures, at the path every caller already used. The type
+/// itself lives beside the intent it rides on, because it is a Rimaia concept
+/// and not one provider's flag.
+pub use provider::PermissionMode;
 
 /// How long a cancelled run is given to emit its `result` and exit before it is
 /// killed outright.
@@ -114,49 +130,10 @@ const KILL: &str = "kill";
 ///
 /// Read through [`settings::get`] rather than through SQL of this module's own,
 /// which is seam-contract D3's rule. The key constant sits here rather than in
-/// [`settings`] because the vocabulary is the runner's — these are Claude Code
-/// permission-rule patterns, and nothing outside this module has any business
-/// knowing their shape.
+/// [`settings`] because the vocabulary is the runner's — the stored value is
+/// written in the active provider's own rule language, and nothing outside this
+/// module has any business knowing its shape.
 pub const DISALLOWED_TOOLS: &str = "disallowed_tools";
-
-/// What a run refuses to let the agent do when the setting is unset.
-///
-/// ADR-0012 point 3's three operations — force-pushing, hard resets against
-/// remotes, remote branch deletion — each spelled both flag-first
-/// (`git push --force origin main`) and remote-first (`git push origin
-/// --force main`), because `Bash(x:*)` is a **command-line prefix** match and
-/// covering only one ordering is not a blocklist for the flag, only for one
-/// way of typing it. `Bash(git push origin :*)` additionally covers the
-/// `git push origin :branch` delete shorthand, which carries no `--delete` or
-/// `-d` token at all.
-///
-/// This still does not cover every phrasing — `git push origin +main:main`
-/// forces via refspec with no `--force`/`-f` token to match, and a remote
-/// named anything other than `origin` is untouched by the reset pattern —
-/// which is exactly the incompleteness the next paragraph names.
-///
-/// **This is not a sandbox and does not pretend to be one.** ADR-0012's own
-/// Consequences say so: "the denied-tools list is a blocklist, and blocklists
-/// are incomplete by construction. It reduces the common accidents". The
-/// isolation that actually bounds a run is the worktree (ADR-0005); this stops
-/// the specific mistakes that reach past it into a shared remote.
-pub const DEFAULT_DISALLOWED_TOOLS: [&str; 11] = [
-    "Bash(git push --force:*)",
-    "Bash(git push -f:*)",
-    "Bash(git push --force-with-lease:*)",
-    "Bash(git push --delete:*)",
-    "Bash(git push -d:*)",
-    "Bash(git push origin --force:*)",
-    "Bash(git push origin -f:*)",
-    "Bash(git push origin --delete:*)",
-    "Bash(git push origin -d:*)",
-    "Bash(git push origin :*)",
-    "Bash(git reset --hard origin/:*)",
-];
-
-/// The prefix that marks an environment variable as Claude Code's own process
-/// identity. See [`is_process_identity`].
-const IDENTITY_PREFIX: &str = "CLAUDE";
 
 /// The `settings` key holding the per-attempt turn budget (ADR-0011:
 /// "`--max-turns` per attempt bounds runaway loops").
@@ -189,33 +166,6 @@ pub const DEFAULT_MAX_TURNS: u32 = 300;
 // What a run is allowed to do
 // ---------------------------------------------------------------------------
 
-/// ADR-0012's two postures, and there is no third.
-///
-/// The ADR is emphatic that this is "the decision with the largest blast radius
-/// in the product", so it is an enum rather than a string threaded through a
-/// call chain: a mode is chosen once, from a [`RunTrigger`], and the `init`
-/// event is checked against it rather than trusted (see
-/// [`verify_permission_mode`]).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum PermissionMode {
-    /// Unattended: no prompts, behind a per-repository opt-in.
-    BypassPermissions,
-    /// A run the operator started with the app in front of them. ADR-0012's
-    /// "conservative default for interactive runs".
-    AcceptEdits,
-}
-
-impl PermissionMode {
-    /// The CLI's own spelling, which is also what `init` echoes back — one
-    /// string, so the request and the verification cannot drift apart.
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::BypassPermissions => "bypassPermissions",
-            Self::AcceptEdits => "acceptEdits",
-        }
-    }
-}
-
 /// Who asked for this run.
 ///
 /// Task 008 only ever produces [`Manual`](RunTrigger::Manual) — the queue is
@@ -238,185 +188,14 @@ impl RunTrigger {
 }
 
 // ---------------------------------------------------------------------------
-// The argument vector
-// ---------------------------------------------------------------------------
-
-/// Everything the CLI invocation is a pure function of.
-///
-/// Assembled once by [`run_task`] and then only read, so the exact vector a run
-/// was spawned with is a value a test can hold — see this module's header for
-/// why that matters more here than almost anywhere else in the codebase.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Invocation {
-    /// Minted by Rimaia **before** the process exists, so `--resume` works even
-    /// if the child dies before emitting its `init` (ADR-0004). ADR-0011 has
-    /// every attempt of a task's eventual retry loop share this id; driving
-    /// that loop — deciding *when* a fresh call reuses one — is task 014's job
-    /// (task 008's own task file lists "Retry and resume behaviour (014)" as
-    /// out of scope), so [`run_task`] mints a fresh one on every call it makes.
-    pub session_id: String,
-    /// Continue an existing session rather than opening this one.
-    ///
-    /// `spike/FINDINGS.md` §6 is explicit about the pairing: "`--session-id` on
-    /// the first run and `--resume` on the retry is the right shape". They are
-    /// alternatives, not companions — the first opens an id, the second reuses
-    /// one. Task 014 is what sets this; task 008 never does.
-    pub resume: bool,
-    pub permission_mode: PermissionMode,
-    pub run_environment: RunEnvironment,
-    /// `--append-system-prompt`, from [`compose_system_append`]. ADR-0012 point
-    /// 4 reserves this channel for orchestrator facts the agent may not weigh
-    /// against the task.
-    pub system_append: String,
-    /// `None` lets the CLI pick, which is what a task with no explicit strategy
-    /// means (ADR-0016: the column is nullable precisely so "not set" is
-    /// expressible). An empty `--model` would be a worse answer than no flag.
-    pub model: Option<String>,
-    pub effort: Option<String>,
-    /// `--allowedTools`: tools pre-approved for this session, so the run never
-    /// stops to ask.
-    ///
-    /// Empty for an implementation run, which gets its blanket approval from
-    /// `bypassPermissions` (ADR-0012) and needs no list. Non-empty for a
-    /// strategy run, and that is not a nicety — it is the only reason the
-    /// planner can answer at all.
-    ///
-    /// **`acceptEdits` does not cover MCP tools.** It auto-approves file edits;
-    /// an `mcp__*` call still raises a permission request, and an unattended run
-    /// has nobody to grant it, so the call is refused and the planner produces
-    /// nothing. Naming the one tool here is what keeps ADR-0012's argument for
-    /// the *narrow* posture intact instead of reaching for
-    /// `bypassPermissions`: the planner is permitted exactly its own write-back
-    /// and nothing else, while `disallowed_tools` still denies it every way of
-    /// touching the worktree.
-    pub allowed_tools: Vec<String>,
-    pub disallowed_tools: Vec<String>,
-    /// `--mcp-config`, as an inline JSON string from
-    /// [`RunHandles::mcp_config_json`](crate::mcp::RunHandles::mcp_config_json)
-    /// (seam-contract D17.4).
-    ///
-    /// `None` for an implementation run, which reaches Rimaia through nothing
-    /// and has no reason to. `Some` for a strategy run, whose entire output is
-    /// one call back through the scoped handle this names — and also `None` for
-    /// a strategy run when no endpoint is bound, the busy-port case D16.7 makes
-    /// non-fatal, which [`strategy::resolve`](super::strategy::resolve) refuses
-    /// to plan into rather than spawning a planner that cannot answer.
-    pub mcp_config: Option<String>,
-    /// ADR-0011 bounds a runaway loop with this. Left `None` by task 008: there
-    /// is no column and no setting holding a turn budget, and *what* the budget
-    /// should be is retry policy, which is task 014's. The field is here so that
-    /// task adds a value rather than a flag.
-    ///
-    /// Task 020 is the first caller to set it: a planner's budget comes from
-    /// the catalogue, so a strategy run is bounded even though the retry loop
-    /// that will eventually bound implementation runs is still task 014's.
-    pub max_turns: Option<u32>,
-}
-
-impl Invocation {
-    /// The argv, in task 008's documented order.
-    ///
-    /// Order is part of the contract rather than an accident: `--disallowedTools`
-    /// is variadic, so it has to be followed by a flag (or by nothing) for its
-    /// list to terminate where this function intends.
-    pub fn args(&self) -> Vec<String> {
-        let mut args = vec![
-            "-p".to_string(),
-            "--output-format".to_string(),
-            "stream-json".to_string(),
-            "--verbose".to_string(),
-        ];
-
-        args.push(
-            if self.resume {
-                "--resume"
-            } else {
-                "--session-id"
-            }
-            .to_string(),
-        );
-        args.push(self.session_id.clone());
-
-        args.push("--permission-mode".to_string());
-        args.push(self.permission_mode.as_str().to_string());
-
-        if self.run_environment == RunEnvironment::StrictLocal {
-            args.push("--strict-mcp-config".to_string());
-            args.push("--setting-sources".to_string());
-            args.push(SETTING_SOURCES.to_string());
-        }
-
-        args.push("--append-system-prompt".to_string());
-        args.push(self.system_append.clone());
-
-        if let Some(model) = &self.model {
-            args.push("--model".to_string());
-            args.push(model.clone());
-        }
-        if let Some(effort) = &self.effort {
-            args.push("--effort".to_string());
-            args.push(effort.clone());
-        }
-
-        // Before `--disallowedTools` so the two variadic lists read in the order
-        // a human reasons about them — what this run may do, then what it may
-        // not. Each `--` token ends the previous list, so the pairing is safe in
-        // either order; this one is just the legible one.
-        if !self.allowed_tools.is_empty() {
-            args.push("--allowedTools".to_string());
-            args.extend(self.allowed_tools.iter().cloned());
-        }
-
-        if !self.disallowed_tools.is_empty() {
-            args.push("--disallowedTools".to_string());
-            args.extend(self.disallowed_tools.iter().cloned());
-        }
-
-        // Immediately after the other variadic flag and before `--max-turns`,
-        // which is the ordering contract `--disallowedTools` above already
-        // documents: `--mcp-config` also takes "JSON files or strings
-        // (space-separated)", so what ends its list is the next `--` token.
-        // Anything non-flag appended after it would be read as a second config.
-        if let Some(mcp_config) = &self.mcp_config {
-            args.push("--mcp-config".to_string());
-            args.push(mcp_config.clone());
-        }
-
-        if let Some(max_turns) = self.max_turns {
-            args.push("--max-turns".to_string());
-            args.push(max_turns.to_string());
-        }
-
-        args
-    }
-}
-
-// ---------------------------------------------------------------------------
 // The environment the child inherits
 // ---------------------------------------------------------------------------
-
-/// Whether a parent environment variable is Claude Code's own process identity
-/// and must therefore not reach the child.
-///
-/// **A prefix rule, not a list.** `spike/FINDINGS.md` §2b counted thirteen
-/// `CLAUDE_*` / `CLAUDECODE` variables exported into children by Claude Code
-/// 2.1.234; a list of thirteen names is a list that goes stale on the next
-/// release, and the failure it produces — a child quietly believing it is a
-/// nested session of its parent — is invisible until someone reads a transcript
-/// and finds the wrong session id. The prefix is `CLAUDE` rather than `CLAUDE_`
-/// because `CLAUDECODE` carries no underscore.
-///
-/// Case-insensitive so the rule means the same thing on a platform whose
-/// environment is not case-sensitive.
-pub fn is_process_identity(name: &str) -> bool {
-    name.get(..IDENTITY_PREFIX.len())
-        .is_some_and(|head| head.eq_ignore_ascii_case(IDENTITY_PREFIX))
-}
 
 /// Removes Rimaia's own inherited process identity from a child's environment.
 ///
 /// Rule 2 of this module's header: unconditional, in both `run_environment`
-/// modes, and not a setting. Removals rather than a rebuilt environment, because
+/// modes, not a setting, and taking the **union** over every provider rather
+/// than the active one's (seam-contract D27.5). Removals rather than a rebuilt environment, because
 /// everything else — `PATH`, `HOME`, the operator's shell configuration — is
 /// exactly what a run is supposed to have.
 ///
@@ -449,11 +228,25 @@ where
     I: IntoIterator<Item = S>,
     S: Into<String>,
 {
+    let prefixes = provider::identity_prefixes();
     parent
         .into_iter()
         .map(Into::into)
-        .filter(|name| is_process_identity(name))
+        .filter(|name| is_identity_of_any_provider(&prefixes, name))
         .collect()
+}
+
+/// Whether `name` starts with any registered provider's identity prefix.
+///
+/// Case-insensitive, so the rule means the same thing on a platform whose
+/// environment is not case-sensitive, and on a *slice* of prefixes because one
+/// provider exports two of them — a fix that assumes a single string is exactly
+/// what seam-contract D27.5 exists to fail.
+fn is_identity_of_any_provider(prefixes: &[&str], name: &str) -> bool {
+    prefixes.iter().any(|prefix| {
+        name.get(..prefix.len())
+            .is_some_and(|head| head.eq_ignore_ascii_case(prefix))
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -463,7 +256,7 @@ where
 /// Rimaia's own MCP tools, denied to an implementation run whatever the
 /// operator's configuration says.
 ///
-/// # Why this is not in [`DEFAULT_DISALLOWED_TOOLS`]
+/// # Why this is not part of the blocklist setting
 ///
 /// That list is configuration, and an explicitly empty setting means an empty
 /// list — the operator is allowed to turn it off. This is not configuration. It
@@ -482,17 +275,18 @@ where
 /// own card `done`, or change the model every future run uses, with no bash
 /// involved at all.
 ///
-/// # Derived, not listed
+/// # Named as an intent, spelled by the provider
 ///
-/// Built from [`Tool::ALL`](crate::mcp::Tool::ALL) rather than spelled out, so a
-/// tool added later is denied by existing.
+/// Which tool names that is, and whether a whole server can be denied at once,
+/// is one provider's business (ADR-0026 point 4). What Rimaia states is the
+/// operation.
 ///
 /// # A trap for task 021
 ///
 /// This denies by *tool name*, and a scoped handle registers under the same
 /// server name — so it will block a legitimate scoped handle just as
 /// effectively as the inherited operator one. That is correct today, because an
-/// implementation run gets `mcp_config: None` and has no scoped handle to
+/// implementation run gets `rimaia_handle: None` and has no scoped handle to
 /// block. It stops being correct the moment task 021 gives one to a run so it
 /// can write findings back to its own card, which is exactly what ADR-0017
 /// plans.
@@ -502,17 +296,7 @@ where
 /// when no grant was minted for the run, or establish that `--allowedTools`
 /// overrides `--disallowedTools` in the CLI — which is **not verified here**
 /// and should not be assumed.
-fn rimaia_tools_denied_to_a_run() -> Vec<String> {
-    // The bare server name denies the whole server where Claude Code supports
-    // it; the per-tool entries are what make the denial exact if it does not.
-    std::iter::once(format!("mcp__{MCP_SERVER_NAME}"))
-        .chain(
-            crate::mcp::Tool::ALL
-                .iter()
-                .map(|tool| format!("mcp__{MCP_SERVER_NAME}__{}", tool.as_str())),
-        )
-        .collect()
-}
+const RIMAIA_TOOL_SURFACE: ForbiddenOperation = ForbiddenOperation::RimaiaToolSurface;
 
 /// The tool blocklist, or [`DEFAULT_DISALLOWED_TOOLS`] when nobody has set one.
 ///
@@ -538,6 +322,40 @@ pub async fn disallowed_tools(pool: &sqlx::SqlitePool) -> Result<Vec<String>> {
         .filter(|line| !line.is_empty())
         .map(str::to_string)
         .collect())
+}
+
+/// The blocklist as the **operations** an intent carries (ADR-0026 point 4).
+///
+/// The same setting [`disallowed_tools`] reads, one level up: an unset setting
+/// means ADR-0012 point 3's three operations, and a set one means the operator's
+/// own rules, each tagged with the provider whose vocabulary it was written in.
+/// The tag is what stops those strings being handed to a provider that never
+/// spoke them — and what stops them being silently dropped either.
+///
+/// `extra` is whatever the caller adds on top: the Rimaia tool surface for an
+/// implementation run, the planner's own denials for a strategy run.
+pub(crate) async fn forbidden_operations(
+    pool: &sqlx::SqlitePool,
+    provider: &dyn AgentProvider,
+    extra: impl IntoIterator<Item = ForbiddenOperation>,
+) -> Result<Vec<ForbiddenOperation>> {
+    let stored = settings::get(pool, DISALLOWED_TOOLS).await?;
+
+    let mut forbidden: Vec<ForbiddenOperation> = match &stored {
+        None => claude::DEFAULT_FORBIDDEN.to_vec(),
+        Some(stored) => stored
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+            .map(|rule| ForbiddenOperation::ProviderRule {
+                provider: provider.id(),
+                rule: rule.to_string(),
+            })
+            .collect(),
+    };
+    forbidden.extend(extra);
+
+    Ok(forbidden)
 }
 
 /// The per-attempt turn budget, or [`DEFAULT_MAX_TURNS`] when nobody has set
@@ -689,6 +507,15 @@ impl CancelSignal {
 /// The knobs that belong to the runner rather than to a task.
 #[derive(Debug, Clone)]
 pub struct RunnerConfig {
+    /// Which agent CLI this installation drives (ADR-0026, seam-contract D27.2).
+    ///
+    /// `Arc<dyn …>` rather than a type parameter because this struct is held in
+    /// `AppState`, in the queue's shared state, in the strategy resolver's call
+    /// chain and in the doctor's environment, and a parameter would propagate
+    /// into all of them. `Arc` over `Box` because it keeps the `Clone` those
+    /// holders depend on; every provider is zero-sized, so the `Debug` above can
+    /// never print a token.
+    pub provider: Arc<dyn AgentProvider>,
     /// Resolved through `PATH` by default. A path is accepted so a test can
     /// point at a stand-in, and so an operator with a non-standard install has
     /// somewhere for that to go later.
@@ -713,9 +540,13 @@ pub struct RunnerConfig {
 }
 
 impl Default for RunnerConfig {
+    /// **Claude Code, and nothing else.** The test-only provider exists to
+    /// falsify the seam, never to be reached by a default — see
+    /// `the_default_provider_is_still_claude_code`.
     fn default() -> Self {
         Self {
-            program: PathBuf::from(CLAUDE_CLI),
+            provider: Arc::new(claude::ClaudeProvider),
+            program: PathBuf::from(claude::ClaudeProvider.default_program()),
             grace_period: DEFAULT_GRACE_PERIOD,
             max_turns: None,
             run_handles: RunHandles::default(),
@@ -799,11 +630,13 @@ impl RunRequest {
 pub struct Attempt<'a> {
     pub task_id: &'a str,
     pub run_id: &'a str,
-    /// The child's working directory (ADR-0005). Never the user's own checkout.
-    pub worktree: &'a Path,
-    /// Delivered on stdin, which is then closed — see [`execute`].
-    pub prompt: &'a str,
-    pub invocation: &'a Invocation,
+    /// What Rimaia wants, in a vocabulary no provider owns. Carries the prompt
+    /// and the workspace, which used to sit beside it here.
+    pub intent: &'a RunIntent<'a>,
+    /// What [`negotiate`](provider::negotiate) decided about this intent against
+    /// this provider. Carried rather than re-derived, so the run is supervised
+    /// under the same answer it was admitted under.
+    pub plan: &'a RunPlan,
     pub cancel: &'a CancelSignal,
 }
 
@@ -843,16 +676,21 @@ async fn prepare_worktree(
 /// 1. **The repository's opt-in** (ADR-0012). Checked through
 ///    [`repo::ensure_unattended_runs_allowed`] rather than re-derived, so the
 ///    board's disabled "Run now" tooltip and this refusal are one sentence.
-/// 2. **The CLI exists.** Before anything is written, per task 008's acceptance
+/// 2. **The provider can express this run** (ADR-0026).
+///    [`negotiate`](provider::negotiate) reads the capabilities and refuses a
+///    combination this provider cannot honour — ahead of the probe for the same
+///    reason the probe is ahead of everything else, and so that a refusal leaves
+///    no worktree, no claim and no `runs` row.
+/// 3. **The CLI exists.** Before anything is written, per task 008's acceptance
 ///    criterion — a missing prerequisite must not leave a half-open run.
-/// 3. **The worktree**, through task 007's idempotent [`worktree::prepare`],
+/// 4. **The worktree**, through task 007's idempotent [`worktree::prepare`],
 ///    holding the repository's [`preparation_lock`](InFlight::preparation_lock)
 ///    across it when the caller supplied a registry — see
 ///    [`prepare_worktree`]. This is also what writes `tasks.branch`, which is
 ///    why the task detail is re-read afterwards: the composed prompt names the
 ///    branch, and composing it from the row as it was a moment earlier would
 ///    name nothing.
-/// 4. **The claim.** The task goes to `run_state = running` before the row is
+/// 5. **The claim.** The task goes to `run_state = running` before the row is
 ///    opened, mirroring ADR-0010's selection-then-run order.
 pub async fn run_task(
     ctx: &ServiceContext,
@@ -865,8 +703,68 @@ pub async fn run_task(
     let repository = repo::get(ctx, &detail.task.repository_id).await?;
     repo::ensure_unattended_runs_allowed(&repository)?;
 
+    // Read before the claim rather than after it, which they used to be. Nothing
+    // here can strand anything — they are settings reads — and negotiating
+    // against the same values the run is then spawned with is what makes the
+    // refusal mean something: a blocklist read twice could be refused on one
+    // value and spawned on another.
+    let run_environment = settings::run_environment(&ctx.pool).await?;
+    let turns = max_turns(&ctx.pool).await?;
+    let forbidden =
+        forbidden_operations(&ctx.pool, config.provider.as_ref(), [RIMAIA_TOOL_SURFACE]).await?;
+
+    // Rimaia's conversation id, minted before anything exists so a resume works
+    // even against a provider whose child dies before announcing itself
+    // (ADR-0004, ADR-0026 point 5). It is also the retry-budget boundary
+    // `scheduler::attempts` counts against, which is why a resume reuses the
+    // one the session already has.
+    let conversation = match &request.resume {
+        Some(resume) => resume.session_id.clone(),
+        None => new_id(),
+    };
+    let home = paths.provider_home(config.provider.id(), &task_id);
+
+    // Everything `negotiate` reads is already known; the prompt and the
+    // workspace are not, and it reads neither. The real intent is this one with
+    // those three filled in, so there is exactly one place the fields a
+    // capability was judged against are written down.
+    let mut intent = RunIntent {
+        session: session_intent(&request, &conversation, &home),
+        permission_mode: request.trigger.permission_mode(),
+        run_environment,
+        system_append: String::new(),
+        prompt: "",
+        model: None,
+        effort: None,
+        // The setting, unless this installation's wiring overrides it — which
+        // in production it never does (`RunnerConfig::default` leaves it
+        // `None`), and which a test or a future strategy caller may.
+        max_turns: config.max_turns.or(Some(turns)),
+        workspace: Path::new(""),
+        forbidden,
+        // Empty: ADR-0012 gives an unattended implementation run
+        // `bypassPermissions`, which approves everything the blocklist has not
+        // already taken away. A list here would narrow that, which is task
+        // 012's or 014's decision to make, not this line's.
+        required_tools: Vec::new(),
+        // An implementation run reaches Rimaia through nothing: the scoped
+        // handle exists so a *planner* can answer, and ADR-0016 gives the
+        // implementation run no reason to write to its own card.
+        rimaia_handle: None,
+    };
+
+    let plan = provider::negotiate(config.provider.capabilities(), &intent)?;
+    for warning in &plan.warnings {
+        tracing::warn!(%task_id, provider = %config.provider.id(), warning, "the provider could not honour part of this run");
+    }
+
     let version = probe_cli(&config.program).await?;
-    tracing::debug!(%task_id, cli = %version, "the Claude Code prerequisite is installed");
+    tracing::debug!(
+        %task_id,
+        provider = %config.provider.id(),
+        cli = %version,
+        "the agent CLI prerequisite is installed",
+    );
 
     let worktree =
         prepare_worktree(ctx, request.in_flight.as_ref(), &repository.id, &task_id).await?;
@@ -949,14 +847,11 @@ pub async fn run_task(
         // it said before the planner ran.
         let detail = tasks::get_task(ctx, &task_id).await?;
         let base = settings::base_instructions(&ctx.pool).await?;
-        let run_environment = settings::run_environment(&ctx.pool).await?;
-        let disallowed = disallowed_tools(&ctx.pool).await?;
-        let turns = max_turns(&ctx.pool).await?;
-        Ok::<_, Error>((detail, base, run_environment, disallowed, turns))
+        Ok::<_, Error>((detail, base))
     }
     .await;
 
-    let (detail, base, run_environment, disallowed, turns) = match prepared {
+    let (detail, base) = match prepared {
         Ok(prepared) => prepared,
         Err(error) => {
             release(ctx, &task_id).await;
@@ -964,54 +859,33 @@ pub async fn run_task(
         }
     };
 
-    // ADR-0011: "retries resume, they do not restart... every retry is
-    // `claude -p --resume <session-id>` with a short continuation prompt". The
-    // composed prompt is already in the session; sending it again would
-    // re-spend the tokens that produced the context this attempt exists to
-    // reuse, and would read to the agent as a fresh instruction to start over.
-    let prompt = match &request.resume {
-        Some(_) => compose_resume_prompt(&detail),
-        None => compose_prompt(&base, &detail, &repository, guidance.as_ref()),
+    // ADR-0011: "retries resume, they do not restart... every retry is a resume
+    // with a short continuation prompt". The composed prompt is already in the
+    // session; sending it again would re-spend the tokens that produced the
+    // context this attempt exists to reuse, and would read to the agent as a
+    // fresh instruction to start over.
+    //
+    // **Which of the two this is, is the provider's ability to continue and not
+    // `request.resume`** (ADR-0026 point 6): a continuation delivered into a
+    // fresh session produces an agent with no plan, no context and an empty
+    // diff — a seam bug that would read as a bad model.
+    let prompt = match plan.prompt_style {
+        PromptStyle::Continuation => compose_resume_prompt(&detail),
+        PromptStyle::Composed => compose_prompt(&base, &detail, &repository, guidance.as_ref()),
     };
 
-    let invocation = Invocation {
-        session_id: match &request.resume {
-            Some(resume) => resume.session_id.clone(),
-            None => new_id(),
-        },
-        resume: request.resume.is_some(),
-        permission_mode: request.trigger.permission_mode(),
-        run_environment,
-        system_append: compose_system_append(&detail, &repository),
-        model,
-        effort,
-        // Empty: ADR-0012 gives an unattended implementation run
-        // `bypassPermissions`, which approves everything the blocklist has not
-        // already taken away. A list here would narrow that, which is task
-        // 012's or 014's decision to make, not this line's.
-        allowed_tools: Vec::new(),
-        // The operator's blocklist, plus the denial that is not theirs to turn
-        // off — see `rimaia_tools_denied_to_a_run`.
-        disallowed_tools: disallowed
-            .into_iter()
-            .chain(rimaia_tools_denied_to_a_run())
-            .collect(),
-        // An implementation run reaches Rimaia through nothing: the scoped
-        // handle exists so a *planner* can answer, and ADR-0016 gives the
-        // implementation run no reason to write to its own card.
-        mcp_config: None,
-        // The setting, unless this installation's wiring overrides it — which
-        // in production it never does (`RunnerConfig::default` leaves it
-        // `None`), and which a test or a future strategy caller may.
-        max_turns: config.max_turns.or(Some(turns)),
-    };
+    intent.system_append = compose_system_append(&detail, &repository);
+    intent.model = model;
+    intent.effort = effort;
+    intent.prompt = &prompt;
+    intent.workspace = Path::new(&worktree.path);
 
     let run = match start_run(
         ctx,
         paths,
         NewRun {
             task_id: task_id.clone(),
-            session_id: invocation.session_id.clone(),
+            session_id: conversation.clone(),
             prompt: prompt.clone(),
             // ADR-0008: what this attempt was actually branched from, taken off
             // the worktree `prepare` just resolved rather than resolved again,
@@ -1034,9 +908,8 @@ pub async fn run_task(
     let attempt = Attempt {
         task_id: &task_id,
         run_id: &run.id,
-        worktree: Path::new(&worktree.path),
-        prompt: &prompt,
-        invocation: &invocation,
+        intent: &intent,
+        plan: &plan,
         cancel: &request.cancel,
     };
 
@@ -1192,6 +1065,29 @@ async fn claim(ctx: &ServiceContext, task: &Task) -> Result<()> {
     Ok(())
 }
 
+/// Which conversation this attempt belongs to, and where its provider keeps
+/// them.
+///
+/// `last_announced` is `None` here and deliberately so: recovering the id a
+/// previous attempt's *provider* announced means reading that attempt's
+/// transcript, which only a provider that resumes `ById` and did not take
+/// Rimaia's own id would need. Claude Code takes the id it is given, so there is
+/// nothing to recover and nothing to persist (ADR-0026 point 5).
+fn session_intent<'a>(
+    request: &RunRequest,
+    conversation: &'a str,
+    home: &'a Path,
+) -> SessionIntent<'a> {
+    match request.resume {
+        Some(_) => SessionIntent::Continue {
+            conversation,
+            home,
+            last_announced: None,
+        },
+        None => SessionIntent::Open { conversation, home },
+    }
+}
+
 /// Undoes a claim that never became a run.
 ///
 /// Best effort and deliberately not fatal: the caller is already returning an
@@ -1260,6 +1156,14 @@ fn override_as_fatal(outcome: &mut RunOutcome, message: String) {
 /// loop starts: a several-thousand-token prompt is larger than a pipe buffer,
 /// so writing it inline would block until the child drained it, and the child
 /// cannot be read from while we are blocked writing to it.
+///
+/// # The scratch directory
+///
+/// One per attempt, created here and removed on every exit path including a
+/// panic (see [`Scratch`]). A provider whose only channel for something is a file
+/// writes it there; a provider whose channels are all arguments never touches it.
+/// It lives outside `runs/` so it is not mistaken for a transcript by the disk
+/// accounting or the pruner.
 pub async fn execute(
     ctx: &ServiceContext,
     paths: &AppPaths,
@@ -1267,7 +1171,26 @@ pub async fn execute(
     attempt: Attempt<'_>,
 ) -> Result<RunOutcome> {
     let mut stream = EventStream::create(ctx, paths, attempt.task_id, attempt.run_id)?;
-    let mut process = spawn(config, &attempt)?;
+
+    // Before the child exists, so the record of what this run was allowed to be
+    // is there even if the spawn fails. A warning rather than a refusal is the
+    // whole point of the `AskBeforeCommands` arm — somebody chose this — and a
+    // fact nobody wrote down is a fact nobody reads in the morning.
+    for operation in &attempt.plan.unenforced {
+        let note = format!(
+            "rimaia: {} could not stop the agent from {}; this attempt ran without that              mitigation (ADR-0012, ADR-0026)",
+            config.provider.id(),
+            operation.describe(),
+        );
+        tracing::warn!(run_id = %attempt.run_id, note, "a mitigation was not enforced");
+        if let Err(error) = stream.observe_stderr(&note) {
+            tracing::warn!(run_id = %attempt.run_id, %error, "could not record an unenforced mitigation");
+        }
+    }
+
+    let scratch = Scratch::create(paths, attempt.run_id)?;
+    let plan = config.provider.plan_spawn(attempt.intent, scratch.path())?;
+    let mut process = spawn(config, &attempt, &plan)?;
     let group = process.group;
 
     let mut stdin = process
@@ -1275,7 +1198,7 @@ pub async fn execute(
         .stdin
         .take()
         .ok_or_else(|| Error::internal("the child's stdin was piped but is not there"))?;
-    let prompt = attempt.prompt.to_string();
+    let prompt = plan.stdin.clone();
     let writer = tokio::spawn(async move {
         stdin.write_all(prompt.as_bytes()).await?;
         stdin.shutdown().await
@@ -1339,10 +1262,8 @@ pub async fn execute(
                             // absent (the CLI's own default) or an alias, and
                             // this is the resolved name a later chart groups by.
                             observed_model.clone_from(&init.model);
-                            report_applied_environment(init, attempt.invocation);
-                            if let Err(error) =
-                                verify_permission_mode(init, attempt.invocation.permission_mode)
-                            {
+                            report_applied_environment(init, attempt.intent);
+                            if let Err(error) = verify_applied_posture(&attempt, init) {
                                 fatal.get_or_insert_with(|| error.to_string());
                                 begin_termination(
                                     &mut terminating, group, &mut grace, config.grace_period,
@@ -1461,9 +1382,9 @@ pub async fn execute(
     // `init` never arrived keeps a killed run's model recorded; falling all the
     // way to `None` when neither exists is D18's "not recorded".
     outcome.spawned_as = SpawnedAs {
-        model: observed_model.or_else(|| attempt.invocation.model.clone()),
-        effort: attempt.invocation.effort.clone(),
-        run_environment: Some(attempt.invocation.run_environment.as_str().to_string()),
+        model: observed_model.or_else(|| attempt.intent.model.clone()),
+        effort: attempt.intent.effort.clone(),
+        run_environment: Some(attempt.intent.run_environment.as_str().to_string()),
     };
 
     if stream.malformed_lines() > 0 {
@@ -1482,7 +1403,7 @@ pub async fn execute(
         tracing::warn!(
             run_id = %attempt.run_id,
             denied = stream.denied_tool_calls(),
-            permission_mode = attempt.invocation.permission_mode.as_str(),
+            permission_mode = ?attempt.intent.permission_mode,
             "tool calls were refused for want of approval",
         );
     }
@@ -1553,38 +1474,83 @@ impl Drop for ChildProcess {
     }
 }
 
+/// A per-attempt directory a provider may write into, removed whichever way the
+/// run ends.
+///
+/// `Drop` rather than a call at the end of [`execute`], because the interesting
+/// exits are the ones nobody writes a line for: a cancelled future, a panic, the
+/// app quitting. Removal failures are logged and swallowed — a leftover
+/// directory is litter, and turning it into an error would replace whatever
+/// actually went wrong.
+#[derive(Debug)]
+struct Scratch {
+    path: PathBuf,
+}
+
+impl Scratch {
+    fn create(paths: &AppPaths, run_id: &str) -> Result<Self> {
+        let path = paths.scratch_dir().join(run_id);
+        std::fs::create_dir_all(&path)?;
+        Ok(Self { path })
+    }
+
+    fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
+impl Drop for Scratch {
+    fn drop(&mut self) {
+        if let Err(error) = std::fs::remove_dir_all(&self.path) {
+            if error.kind() != std::io::ErrorKind::NotFound {
+                tracing::warn!(path = %self.path.display(), %error, "could not remove a run's scratch directory");
+            }
+        }
+    }
+}
+
 /// Builds the command and starts it.
-fn spawn(config: &RunnerConfig, attempt: &Attempt<'_>) -> Result<ChildProcess> {
+///
+/// The provider decided *what* to start; everything here is how a child is
+/// started safely, which is the same for all of them.
+fn spawn(config: &RunnerConfig, attempt: &Attempt<'_>, plan: &SpawnPlan) -> Result<ChildProcess> {
+    let workspace = attempt.intent.workspace;
     let mut command = Command::new(&config.program);
     command
-        .args(attempt.invocation.args())
-        .current_dir(attempt.worktree)
+        .args(&plan.args)
+        .current_dir(workspace)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
 
+    // Rimaia's rule first, the provider's delta second: a provider may not undo
+    // the identity stripping by setting one of the variables back.
     strip_process_identity(&mut command);
+    for name in &plan.env_remove {
+        command.env_remove(name);
+    }
+    for (name, value) in &plan.env_set {
+        command.env(name, value);
+    }
     set_process_group(&mut command);
 
     let child = command.spawn().map_err(|error| {
         missing_cli(
             &config.program,
-            format!(
-                "could not start it in {}: {error}",
-                attempt.worktree.display()
-            ),
+            format!("could not start it in {}: {error}", workspace.display()),
         )
     })?;
     let group = child.id();
 
     tracing::debug!(
         run_id = %attempt.run_id,
+        provider = %config.provider.id(),
         pid = group,
-        worktree = %attempt.worktree.display(),
-        environment = attempt.invocation.run_environment.as_str(),
-        permission_mode = attempt.invocation.permission_mode.as_str(),
-        "spawned the Claude Code CLI",
+        worktree = %workspace.display(),
+        environment = attempt.intent.run_environment.as_str(),
+        permission_mode = ?attempt.intent.permission_mode,
+        "spawned the agent CLI",
     );
 
     Ok(ChildProcess {
@@ -1699,20 +1665,38 @@ fn blocking_signal_group(_group: u32, _signal: Signal) -> std::io::Result<()> {
 /// the failure that rule exists to prevent. The warning is the record.
 pub fn verify_permission_mode(init: &InitEvent, requested: PermissionMode) -> Result<()> {
     match init.permission_mode.as_deref() {
-        Some(applied) if applied != requested.as_str() => Err(Error::internal(format!(
-            "Claude Code applied permission mode \"{applied}\" when Rimaia asked for \"{}\". \
-             The run was stopped rather than continued under a posture nobody chose (ADR-0012).",
-            requested.as_str(),
-        ))),
+        Some(applied) if claude::posture_from_str(applied) != Some(requested) => {
+            Err(Error::internal(format!(
+                "the agent CLI applied permission mode \"{applied}\" when Rimaia asked for \"{}\". \
+                 The run was stopped rather than continued under a posture nobody chose \
+                 (ADR-0012).",
+                claude::posture(requested),
+            )))
+        }
         Some(_) => Ok(()),
         None => {
             tracing::warn!(
-                requested = requested.as_str(),
+                requested = ?requested,
                 "the init event named no permission mode; it could not be verified",
             );
             Ok(())
         }
     }
+}
+
+/// [`verify_permission_mode`], skipped for a provider that reports no posture at
+/// all.
+///
+/// The distinction is the one [`PostureEcho`](provider::PostureEcho) draws: a
+/// provider that *states* a posture is checked against it, always and fatally,
+/// and a provider that states none had that recorded as a warning on the run
+/// when it was admitted. This is not a licence to ignore a mismatch — a silent
+/// provider that suddenly speaks is still checked.
+fn verify_applied_posture(attempt: &Attempt<'_>, init: &InitEvent) -> Result<()> {
+    if !attempt.plan.verify_posture && init.permission_mode.is_none() {
+        return Ok(());
+    }
+    verify_permission_mode(init, attempt.intent.permission_mode)
 }
 
 /// Logs what the run actually inherited, and warns where it is not what was
@@ -1723,7 +1707,7 @@ pub fn verify_permission_mode(init: &InitEvent, requested: PermissionMode) -> Re
 /// be *visible* ("task 018's doctor should report the hooks and MCP servers a
 /// run will inherit, so it is a visible choice rather than a surprise at 2am"),
 /// which is a log line and a doctor, not a killed run.
-fn report_applied_environment(init: &InitEvent, invocation: &Invocation) {
+fn report_applied_environment(init: &InitEvent, intent: &RunIntent<'_>) {
     let servers: Vec<&str> = init
         .mcp_servers
         .iter()
@@ -1738,7 +1722,7 @@ fn report_applied_environment(init: &InitEvent, invocation: &Invocation) {
         "the run's applied configuration",
     );
 
-    if invocation.run_environment == RunEnvironment::StrictLocal && !servers.is_empty() {
+    if intent.run_environment == RunEnvironment::StrictLocal && !servers.is_empty() {
         tracing::warn!(
             servers = servers.join(", "),
             "strict_local was requested but MCP servers are connected",
@@ -1760,49 +1744,6 @@ fn report_applied_environment(init: &InitEvent, invocation: &Invocation) {
 mod tests {
     use super::*;
     use pretty_assertions::assert_eq;
-
-    /// The thirteen names `spike/FINDINGS.md` §2b counted, spelled out here so
-    /// the prefix rule is tested against the vocabulary that actually leaks
-    /// rather than against a synthetic `CLAUDE_X`.
-    const OBSERVED_LEAKS: [&str; 4] = [
-        "CLAUDECODE",
-        "CLAUDE_CODE_SESSION_ID",
-        "CLAUDE_CODE_CHILD_SESSION",
-        "CLAUDE_CODE_ENTRYPOINT",
-    ];
-
-    #[test]
-    fn every_claude_variable_is_process_identity_including_the_one_with_no_underscore() {
-        for name in OBSERVED_LEAKS {
-            assert!(is_process_identity(name), "{name} must not reach a child");
-        }
-        // The reason the prefix is `CLAUDE` and not `CLAUDE_`.
-        assert!(is_process_identity("CLAUDECODE"));
-    }
-
-    #[test]
-    fn a_variable_that_merely_mentions_claude_elsewhere_is_kept() {
-        for name in [
-            "PATH",
-            "HOME",
-            "MY_CLAUDE_NOTES",
-            "ANTHROPIC_API_KEY",
-            "CLAUD",
-        ] {
-            assert!(
-                !is_process_identity(name),
-                "{name} was stripped unnecessarily"
-            );
-        }
-    }
-
-    #[test]
-    fn a_variable_name_that_is_not_ascii_does_not_panic_on_a_byte_boundary() {
-        // `get(..6)` returns None rather than slicing through a multi-byte
-        // character, which is the whole reason it is used instead of indexing.
-        assert!(!is_process_identity("CLAÜDE_CODE"));
-        assert!(!is_process_identity("🚀"));
-    }
 
     #[test]
     fn the_identity_rule_selects_only_the_leaking_names_from_a_whole_environment() {
@@ -1827,6 +1768,7 @@ mod tests {
     fn a_trigger_decides_the_permission_mode_and_nothing_else_does() {
         // ADR-0012 point 6: bypass is for the unattended path, and a run started
         // by hand with the app in front of the operator defaults to acceptEdits.
+        // How each is *spelled* is the provider's, and is asserted there.
         assert_eq!(
             RunTrigger::Queued.permission_mode(),
             PermissionMode::BypassPermissions
@@ -1835,11 +1777,6 @@ mod tests {
             RunTrigger::Manual.permission_mode(),
             PermissionMode::AcceptEdits
         );
-        assert_eq!(
-            PermissionMode::BypassPermissions.as_str(),
-            "bypassPermissions"
-        );
-        assert_eq!(PermissionMode::AcceptEdits.as_str(), "acceptEdits");
     }
 
     #[tokio::test]

@@ -1257,23 +1257,14 @@ async fn serving(
     (handle, tokio::spawn(task.run()))
 }
 
-/// The URL a run is actually handed, read back out of its `--mcp-config`.
+/// The URL a run is actually handed.
 ///
-/// Deliberately not one a test formats: what the runner puts in argv has to be
-/// what the router serves, and that is exactly the seam a hand-written URL
-/// would hide.
+/// Deliberately not one a test formats: what the runner hands the child has to
+/// be what the router serves, and that is exactly the seam a hand-written URL
+/// would hide. How that URL is then *spelled* for one agent CLI is the
+/// provider's (ADR-0026), and `runner_process.rs` asserts that half.
 fn scoped_url(handles: &RunHandles, grant: &RunGrant) -> String {
-    let config: Value = serde_json::from_str(
-        &handles
-            .mcp_config_json(grant)
-            .expect("an endpoint is bound"),
-    )
-    .expect("the config is JSON");
-
-    config["mcpServers"]["rimaia"]["url"]
-        .as_str()
-        .expect("the config names a url")
-        .to_string()
+    handles.endpoint_for(grant).expect("an endpoint is bound")
 }
 
 /// One `get_task`, called the way an agent calls it.
