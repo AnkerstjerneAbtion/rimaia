@@ -41,7 +41,7 @@ use pretty_assertions::assert_eq;
 use rimaia_core::db::settings::{self, RunEnvironment};
 use rimaia_core::db::{BoardColumn, ExitClass, Run, RunState, RunStatus, Task};
 use rimaia_core::repo::{self, NewRepository};
-use rimaia_core::runner::events::{parse_line, stderr_path, transcript_path, RunEvent, RunTail};
+use rimaia_core::runner::events::{stderr_path, transcript_path, RunEvent, RunTail};
 use rimaia_core::runner::process::{
     disallowed_tools, inherited_identity_vars, is_process_identity, verify_permission_mode,
     DEFAULT_DISALLOWED_TOOLS, DISALLOWED_TOOLS,
@@ -646,7 +646,10 @@ fn an_init_that_echoes_the_mode_that_was_requested_passes() {
     // Every recording in the corpus was captured under `bypassPermissions`.
     let init = init_of("success");
 
-    assert_eq!(init.permission_mode.as_deref(), Some("bypassPermissions"));
+    assert_eq!(
+        init.permission_mode,
+        Some(PermissionMode::BypassPermissions)
+    );
     verify_permission_mode(&init, PermissionMode::BypassPermissions).expect("the modes agree");
 }
 
@@ -660,7 +663,10 @@ fn an_init_that_echoes_a_different_mode_is_refused_by_name() {
     let mut raw: serde_json::Value = serde_json::from_str(&line).expect("the init event is JSON");
     raw["permissionMode"] = serde_json::json!("bypassPermissions");
 
-    let RunEvent::Init(init) = parse_line(&raw.to_string()).expect("still JSON") else {
+    let RunEvent::Init(init) = ClaudeProvider
+        .parse_line(&raw.to_string())
+        .expect("still JSON")
+    else {
         panic!("the first line of a recording is its init event");
     };
     let error = verify_permission_mode(&init, PermissionMode::AcceptEdits)
@@ -1427,7 +1433,7 @@ fn canonical(path: &str) -> PathBuf {
 /// The `init` event of a recording, as the runner would see it.
 fn init_of(fixture: &str) -> rimaia_core::runner::events::InitEvent {
     fixture_lines(fixture)
-        .filter_map(|line| parse_line(&line).ok())
+        .filter_map(|line| ClaudeProvider.parse_line(&line).ok())
         .find_map(|event| match event {
             RunEvent::Init(init) => Some(init),
             _ => None,

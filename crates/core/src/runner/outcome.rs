@@ -9,31 +9,28 @@
 //! prove that *something* comes back for every recording, which is what protects
 //! a queue from a CLI update.
 //!
-//! # Classify on `terminal_reason` and `subtype`, never on the exit code
+//! # Classify on what the run said, never on the exit code
 //!
-//! `spike/FINDINGS.md` §5 measured three signatures against Claude Code 2.1.234:
-//!
-//! | Scenario | exit | `subtype` | `terminal_reason` |
-//! | --- | --- | --- | --- |
-//! | Success | 0 | `success` | `completed` |
-//! | Killed (SIGTERM) | 143 | `error_during_execution` | `aborted_streaming` |
-//! | Turn limit | 1 | `error_max_turns` | `max_turns` |
-//!
-//! Two things follow that the ADR originally had wrong. **A killed run still
-//! emits a `result` before exiting** — the stream does not simply stop. And it
-//! exits **143**, not by signal, so `status.code().is_none()` is the wrong "was
-//! it signalled" check. [`Termination::exit_code`] is carried for the record and
+//! `spike/FINDINGS.md` §5 measured it: **a killed run still emits a terminal
+//! event before exiting** — the stream does not simply stop — and it exits
+//! **143**, not by signal, so `status.code().is_none()` is the wrong "was it
+//! signalled" check. [`Termination::exit_code`] is carried for the record and
 //! for an error message a human reads; [`classify`] never branches on it.
 //!
-//! # The `usage_limit` gap, on purpose
+//! # Rimaia's policy over a neutral vocabulary (ADR-0026 point 3)
 //!
-//! `spike/FINDINGS.md` §4: the `rate_limit_event` payload when
-//! `rate_limit_info.status` is something other than `"allowed"` was **never
-//! observed**, and there is no `usage_limit` fixture. So this module classifies
-//! on the predicate the whole corpus proves — the field *names* `status`,
-//! `resetsAt` and `rateLimitType`, and "the status is not `allowed`" — and
-//! invents no vocabulary for the payload nobody has seen. Capturing the real one
-//! the first time a queue hits the wall is a human's job.
+//! **This module has no provider in it.** It reads an
+//! [`EndReason`](crate::runner::events::EndReason) and a
+//! [`UsageReport`](crate::runner::events::UsageReport), which every provider
+//! answers in the same six and three words, and decides which of ADR-0011's six
+//! classes that is. A provider that could answer [`ExitClass`] directly could
+//! satisfy the seam with no stream involved at all, and the classes are Rimaia's
+//! state machine rather than anybody's wire format.
+//!
+//! Which terminal words map onto which [`EndReason`], and whether an unfamiliar
+//! usage status is a wall, are each one provider's business and are argued in
+//! that provider's module — `spike/FINDINGS.md` §4's "the corpus proves one
+//! value, so the predicate is *not allowed*" included.
 
 use chrono::{DateTime, Utc};
 
@@ -43,22 +40,10 @@ use crate::error::{Error, Result};
 use crate::events::ChangeEvent;
 use crate::paths::AppPaths;
 use crate::runner::events::{
-    transcript_path, ContentBlock, EventStream, RateLimitEvent, ResultEvent, RunEvent, TokenUsage,
+    transcript_path, ContentBlock, EndReason, EventStream, ResultEvent, RunEvent, TokenUsage,
+    UsageReport,
 };
 use crate::tasks::{move_task_to_bottom, set_run_state};
-
-/// The `terminal_reason` and `subtype` vocabulary the corpus proves. Anything
-/// outside it is an unknown termination, and ADR-0011 says an unknown
-/// termination is [`ExitClass::Transient`].
-const TERMINAL_COMPLETED: &str = "completed";
-const TERMINAL_ABORTED_STREAMING: &str = "aborted_streaming";
-const TERMINAL_MAX_TURNS: &str = "max_turns";
-const SUBTYPE_SUCCESS: &str = "success";
-const SUBTYPE_MAX_TURNS: &str = "error_max_turns";
-
-/// The one `rate_limit_info.status` any recording has ever carried
-/// (`spike/FINDINGS.md` §4). Every other value is a limit; see [`classify`].
-const RATE_LIMIT_ALLOWED: &str = "allowed";
 
 // ---------------------------------------------------------------------------
 // What the classifier is allowed to look at
@@ -77,8 +62,9 @@ const RATE_LIMIT_ALLOWED: &str = "allowed";
 pub struct Termination<'a> {
     /// The terminal event, or `None` for a stream that never reached one.
     pub result: Option<&'a ResultEvent>,
-    /// The most recent `rate_limit_event`. Present on every real run.
-    pub rate_limit: Option<&'a RateLimitEvent>,
+    /// What the provider last said about the usage window, and when. Present on
+    /// every real run, because a healthy window is reported too.
+    pub usage: Option<&'a UsageReport>,
     /// Whether *Rimaia* asked for this ending. A user cancellation and an
     /// outside kill produce the same `aborted_streaming` result; only the caller
     /// knows which one happened, which is why this is a field and not something
@@ -99,7 +85,7 @@ impl<'a> Termination<'a> {
     pub fn from_stream(stream: &'a EventStream) -> Self {
         Self {
             result: stream.result(),
-            rate_limit: stream.rate_limit(),
+            usage: stream.usage(),
             cancel_requested: false,
             exit_code: None,
             denied_tool_calls: stream.denied_tool_calls(),
@@ -117,18 +103,14 @@ impl<'a> Termination<'a> {
         self
     }
 
-    /// Whether the usage window reported anything other than "you may proceed".
+    /// Whether the provider said this run hit the wall.
     ///
-    /// The predicate is "not `allowed`" rather than a match against a set of
-    /// limit values, because the corpus proves exactly one value and it is this
-    /// one. A closed set of guessed alternatives would be a fabricated contract
-    /// in the one module ADR-0011 says must not have one — and it would fail
-    /// *closed*, classifying a real limit as a hard failure at 2am, which is the
-    /// precise mistake that ADR names. See `spike/FINDINGS.md` §4.
+    /// **`Unknown` is not a wall** (ADR-0026 point 8). A provider that reports a
+    /// percentage continuously must not have "93% used" read as a limit: that
+    /// would raise ADR-0011's *global* pause on a healthy run, stopping the whole
+    /// queue on a heartbeat. Only a provider saying so is a limit.
     fn hit_a_usage_limit(&self) -> bool {
-        self.rate_limit
-            .and_then(|limit| limit.status.as_deref())
-            .is_some_and(|status| !status.eq_ignore_ascii_case(RATE_LIMIT_ALLOWED))
+        self.usage.is_some_and(UsageReport::hit_a_wall)
     }
 }
 
@@ -157,18 +139,20 @@ impl<'a> Termination<'a> {
 ///    row left `running`. A classifier that also produced it would make the
 ///    word mean two things and stop `status = 'interrupted'` answering "did
 ///    Rimaia crash?".
-/// 4. **`max_turns` is [`Fatal`](ExitClass::Fatal)**, named in ADR-0011's fatal
-///    row, and it is tested *before* the usage-limit check below. A turn limit
-///    is the one terminal reason a rate limit cannot itself produce, and it is
-///    the one ADR-0011 names fatal by hand — so it is the one thing a stray or
-///    unrecognised `rate_limit_info.status` must not be allowed to outrank.
-///    Retrying a turn limit just spends the same tokens again.
+/// 4. **A spent turn budget is [`Fatal`](ExitClass::Fatal)**, named in
+///    ADR-0011's fatal row, and it is tested *before* the usage-limit check
+///    below. A turn limit is the one ending a rate limit cannot itself produce,
+///    and it is the one ADR-0011 names fatal by hand — so it is the one thing a
+///    stray or unrecognised usage report must not be allowed to outrank.
+///    Retrying a turn limit just spends the same tokens again. A provider that
+///    says it **refused** the work is fatal on the same argument: the next
+///    attempt is refused identically.
 /// 5. **A usage limit outranks every other terminal reason.** Whatever the CLI
 ///    reports after hitting the wall — including `aborted_streaming` below,
 ///    which a real limit plausibly produces — waiting for the reset is the
 ///    recovery, and misreading it as `fatal` is the failure mode ADR-0011 calls
 ///    out by name.
-/// 6. **`aborted_streaming` is [`Interrupted`](ExitClass::Interrupted)** —
+/// 6. **[`EndReason::Interrupted`] is [`Interrupted`](ExitClass::Interrupted)** —
 ///    positive evidence from the CLI that the run was killed mid-stream, which
 ///    is ADR-0011's "process died". The corpus backs the action too:
 ///    `interrupted-sigterm.jsonl` and `resume-success.jsonl` share a
@@ -193,26 +177,25 @@ pub fn classify(termination: &Termination<'_>) -> ExitClass {
         };
     };
 
-    match (result.terminal_reason.as_deref(), result.subtype.as_deref()) {
-        (Some(TERMINAL_MAX_TURNS), _) | (_, Some(SUBTYPE_MAX_TURNS)) => ExitClass::Fatal,
+    match result.end {
+        EndReason::TurnBudgetExhausted | EndReason::Refused => ExitClass::Fatal,
         _ if termination.hit_a_usage_limit() => ExitClass::UsageLimit,
-        (Some(TERMINAL_ABORTED_STREAMING), _) => ExitClass::Interrupted,
+        EndReason::Interrupted => ExitClass::Interrupted,
         _ => ExitClass::Transient,
     }
 }
 
-/// A run that both said it was not an error and named a shape of success the
-/// corpus proves.
+/// A run the provider said finished the work.
 ///
-/// The conjunction is deliberate. `is_error: false` alone would let a renamed
-/// `terminal_reason` read as success, and the wrong direction to fail in is
-/// "declare victory": a success moves the task to `in_review` and stops, where
-/// the [`Transient`](ExitClass::Transient) default resumes the session and finds
-/// the work already done.
+/// One word, because the conjunction that used to live here — "it did not report
+/// an error *and* it named a shape of success the corpus proves" — is a
+/// statement about one wire format and now lives with it. The direction it
+/// failed in is unchanged and is the important half: never "declare victory",
+/// because a success moves the task to `in_review` and stops, where the
+/// [`Transient`](ExitClass::Transient) default resumes the session and finds the
+/// work already done.
 fn is_success(result: &ResultEvent) -> bool {
-    !result.is_error
-        && (result.terminal_reason.as_deref() == Some(TERMINAL_COMPLETED)
-            || result.subtype.as_deref() == Some(SUBTYPE_SUCCESS))
+    result.end == EndReason::Completed
 }
 
 // ---------------------------------------------------------------------------
@@ -309,9 +292,10 @@ impl RunOutcome {
             duration_ms: result.and_then(|result| result.duration_ms),
             pr_url,
             usage_limit_resets_at: match exit_class {
-                ExitClass::UsageLimit => termination
-                    .rate_limit
-                    .and_then(RateLimitEvent::resets_at_utc),
+                // Resolved here, once, against the instant the line was read —
+                // never against `finish_run`'s clock, which is wrong by however
+                // long the run then took to die (ADR-0026 point 7).
+                ExitClass::UsageLimit => termination.usage.and_then(UsageReport::reopens_at),
                 _ => None,
             },
             // Not known here either, and for a sharper reason than the fields
@@ -352,7 +336,7 @@ fn error_message(exit_class: ExitClass, termination: &Termination<'_>) -> Option
     match exit_class {
         ExitClass::Success => None,
         ExitClass::Cancelled => Some("the run was cancelled".to_string()),
-        ExitClass::UsageLimit => Some(usage_limit_message(termination.rate_limit)),
+        ExitClass::UsageLimit => Some(usage_limit_message(termination.usage)),
         _ => Some(match termination.result {
             Some(result) => failure_message(result),
             // The exit code earns its keep here and nowhere else: it does not
@@ -402,26 +386,38 @@ fn failure_message(result: &ResultEvent) -> String {
         return text.to_string();
     }
 
-    format!(
-        "the run ended with subtype \"{subtype}\" and terminal reason \"{reason}\"",
-        subtype = result.subtype.as_deref().unwrap_or("unknown"),
-        reason = result.terminal_reason.as_deref().unwrap_or("unknown"),
-    )
+    // The provider's own words, where it gave any. "The run ended" alone is a
+    // true sentence that explains nothing, which is why the detail rides on the
+    // ending rather than being re-derived here from a vocabulary this module no
+    // longer has.
+    match &result.end {
+        EndReason::Errored {
+            detail: Some(detail),
+        } => format!("the run ended with {detail}"),
+        EndReason::Errored { detail: None } => "the run ended reporting an error it did not \
+             describe"
+            .to_string(),
+        EndReason::TurnBudgetExhausted => "the run used its whole turn budget".to_string(),
+        EndReason::Refused => "the agent refused the work".to_string(),
+        EndReason::Interrupted => "the run was killed mid-stream".to_string(),
+        EndReason::Completed => "the run finished".to_string(),
+        EndReason::Unknown => "the run ended in a way the agent CLI did not describe".to_string(),
+    }
 }
 
-/// Assembled from the three field names the corpus proves and nothing else — a
-/// message quoting an invented `status` value would read as observed fact.
-fn usage_limit_message(rate_limit: Option<&RateLimitEvent>) -> String {
+/// The window's own label and the instant it reopens, and nothing else — a
+/// message quoting a status value nobody has observed would read as fact.
+fn usage_limit_message(usage: Option<&UsageReport>) -> String {
     let mut message = "the run stopped at a usage limit".to_string();
-    let Some(rate_limit) = rate_limit else {
+    let Some(usage) = usage else {
         return message;
     };
 
-    if let Some(kind) = rate_limit.rate_limit_type.as_deref() {
-        message.push_str(&format!(" ({kind})"));
+    if let Some(label) = usage.window.label.as_deref() {
+        message.push_str(&format!(" ({label})"));
     }
-    if let Some(reset) = rate_limit.resets_at_utc() {
-        message.push_str(&format!("; it resets at {}", reset.to_rfc3339()));
+    if let Some(reopens) = usage.reopens_at() {
+        message.push_str(&format!("; it resets at {}", reopens.to_rfc3339()));
     }
     message
 }

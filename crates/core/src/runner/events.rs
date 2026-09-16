@@ -44,7 +44,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use chrono::{DateTime, TimeZone, Utc};
+use chrono::{DateTime, Duration, Utc};
 use serde::Serialize;
 use serde_json::Value;
 
@@ -53,6 +53,7 @@ use crate::context::ServiceContext;
 use crate::error::Result;
 use crate::events::RunId;
 use crate::paths::AppPaths;
+use crate::runner::provider::{AgentProvider, ClaudeProvider, PermissionMode};
 
 /// How many unread [`RunTail`] snapshots the channel keeps for a receiver that
 /// falls behind (seam-contract D14).
@@ -146,12 +147,12 @@ pub enum RunEvent {
     Init(InitEvent),
     Assistant(AssistantEvent),
     User(UserEvent),
-    RateLimit(RateLimitEvent),
+    Usage(UsageWindow),
     Result(ResultEvent),
     Other(OtherEvent),
 }
 
-/// `system`/`init` — the applied configuration, echoed back (ADR-0004).
+/// The applied configuration, echoed back (ADR-0004).
 ///
 /// The runner asks for a permission mode and an isolation posture; this is the
 /// CLI reporting what it actually did with them. Verifying rather than assuming
@@ -167,12 +168,19 @@ pub struct InitEvent {
     pub session_id: Option<String>,
     pub cwd: Option<String>,
     pub model: Option<String>,
-    /// `permissionMode` — camelCase in the stream, unlike its neighbours.
-    pub permission_mode: Option<String>,
-    /// `apiKeySource`. `"none"` confirms subscription auth rather than a
-    /// metered API key, which is ADR-0004's premise.
+    /// The posture the provider says it applied, **typed**.
+    ///
+    /// Typed rather than a string so the provider normalises its own spelling
+    /// and shared code compares two values (ADR-0026 point 3). `None` covers
+    /// both "reported nothing" and "reported a word this provider does not
+    /// know" — which are the same thing to a caller that can only say "it could
+    /// not be verified".
+    pub permission_mode: Option<PermissionMode>,
+    /// `"none"` confirms subscription auth rather than a metered API key, which
+    /// is ADR-0004's premise.
     pub api_key_source: Option<String>,
-    pub claude_code_version: Option<String>,
+    /// The agent CLI's own version, as it announced it.
+    pub agent_version: Option<String>,
     pub tools: Vec<String>,
     pub mcp_servers: Vec<McpServer>,
 }
@@ -224,62 +232,119 @@ pub enum ContentBlock {
     Other(Value),
 }
 
-/// `rate_limit_event` — the usage-limit signal, typed (ADR-0011's amendment).
+/// What the provider last said about the usage window (ADR-0011's amendment,
+/// ADR-0026 point 7 and point 8).
 ///
-/// Arrives early and unprompted on **every** run, not only on failure, which is
-/// what lets task 014 read limit state before committing to a long task. Do not
-/// grep an error message for this.
+/// Arrives unprompted on a healthy run, not only on failure, which is what lets
+/// the scheduler read limit state before committing to a long task. Do not grep
+/// an error message for this.
 ///
-/// `status` is a `String` and not an enum on purpose. `spike/FINDINGS.md` §4 is
-/// explicit that the only value ever observed is `"allowed"` — the spike never
-/// hit a real limit, and there is no `usage_limit` fixture. Inventing variants
-/// for the payload nobody has seen would manufacture a contract that the
-/// classifier could then be written to "pass" against, in exactly the module
-/// ADR-0011 calls the one most likely to break on a CLI update and the one whose
-/// breakage is least visible. The three field *names* below are what the corpus
-/// proves; their vocabulary is not.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub struct RateLimitEvent {
-    pub status: Option<String>,
-    /// `resetsAt`, epoch seconds.
-    pub resets_at: Option<i64>,
-    /// `rateLimitType`, e.g. `"five_hour"`.
-    pub rate_limit_type: Option<String>,
+/// # Three states, and why `Unknown` is not a wall
+///
+/// A provider that reports a percentage on every turn must not have "93% used"
+/// read as a limit — that would raise ADR-0011's **global** pause on a perfectly
+/// healthy run. So a window is a wall only when the provider says it is
+/// [`Exhausted`](UsageState::Exhausted), and everything a provider says that
+/// Rimaia cannot interpret is [`Unknown`](UsageState::Unknown), which is not a
+/// wall either.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct UsageWindow {
+    pub state: UsageState,
+    /// When the window reopens, as the line reported it.
+    pub reopens: Option<WindowReopen>,
+    /// What the provider calls this window, e.g. `five_hour`. Carried for the
+    /// message a human reads, never for a decision.
+    pub label: Option<String>,
+    /// How much of the window is spent, where a provider says. **Never a
+    /// classification input** — see this type's header.
+    pub used_percent: Option<f64>,
 }
 
-impl RateLimitEvent {
-    /// [`resets_at`](Self::resets_at) as an instant, or `None` when it is absent
-    /// or outside the representable range.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum UsageState {
+    /// The provider said this run may proceed.
+    Allowed,
+    /// The provider said it may not. ADR-0011's wall.
+    Exhausted,
+    /// The provider said something, and it was not either of the above.
     ///
-    /// The scheduler waits until this plus jitter (ADR-0011), so an epoch the
-    /// CLI reports nonsensically must read as "no reset time known" rather than
-    /// panic a run that is otherwise fine.
-    pub fn resets_at_utc(&self) -> Option<DateTime<Utc>> {
-        self.resets_at
-            .and_then(|epoch| Utc.timestamp_opt(epoch, 0).single())
+    /// The default, and deliberately the *safe* one: a run whose window nobody
+    /// could read is a run that carries on.
+    #[default]
+    Unknown,
+}
+
+/// When a closed window reopens, as one line reported it.
+///
+/// Two shapes because providers genuinely report two: an absolute instant, and a
+/// duration relative to the moment it spoke. Resolving a relative one later —
+/// at `finish_run`, say — would be wrong by however long the run then took to
+/// die, in the direction that wastes a night.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WindowReopen {
+    At(DateTime<Utc>),
+    After(Duration),
+}
+
+/// One [`UsageWindow`] and the instant the clock said when its line was read.
+///
+/// The pairing is the whole of ADR-0026 point 7: the duration is what the
+/// provider said, `observed_at` is when it said it, and
+/// [`reopens_at`](Self::reopens_at) is the one place the two become an instant.
+#[derive(Debug, Clone, PartialEq)]
+pub struct UsageReport {
+    pub window: UsageWindow,
+    pub observed_at: DateTime<Utc>,
+}
+
+impl UsageReport {
+    /// The instant this window reopens, or `None` when the provider named none.
+    ///
+    /// The scheduler waits until this plus jitter (ADR-0011), so a reported
+    /// instant outside the representable range reads as "no reset time known"
+    /// rather than panicking a run that is otherwise fine — which is also what
+    /// `usage_limit_without_reset_time_falls_back_to_fixed_poll` then does with
+    /// it.
+    pub fn reopens_at(&self) -> Option<DateTime<Utc>> {
+        match self.window.reopens? {
+            WindowReopen::At(instant) => Some(instant),
+            WindowReopen::After(duration) => self.observed_at.checked_add_signed(duration),
+        }
+    }
+
+    /// Whether the provider reported a wall. `Unknown` is not one (point 8).
+    pub fn hit_a_wall(&self) -> bool {
+        self.window.state == UsageState::Exhausted
     }
 }
 
-/// `result` — the terminal event, which arrives even when the run was killed.
+/// The terminal event, which arrives even when the run was killed.
 ///
 /// `spike/FINDINGS.md` §5: a SIGTERM-killed run emits this and *then* exits 143.
-/// The stream does not simply stop, so classification reads `terminal_reason`
-/// with `subtype` and never the exit code alone. Everything the `runs` row needs
-/// is already here — turns, cost, duration — with nothing to derive.
+/// The stream does not simply stop, so classification reads what the run *said*
+/// and never the exit code alone. Everything the `runs` row needs is already
+/// here — turns, cost, duration — with nothing to derive.
+///
+/// Every number is `Option` and stays so: a provider that reports no dollar
+/// figure means seam-contract D18's "not recorded", never zero.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct ResultEvent {
-    pub subtype: Option<String>,
-    /// The cleanest discriminator, and the one the original ADR did not have:
-    /// `completed`, `aborted_streaming`, `max_turns`.
-    pub terminal_reason: Option<String>,
-    pub is_error: bool,
+    /// Why the run stopped, in Rimaia's vocabulary (ADR-0026 point 3). The
+    /// provider normalises its own terminal words into this; what each one is
+    /// *worth* is [`classify`](crate::runner::outcome::classify)'s, and stays
+    /// Rimaia's policy.
+    pub end: EndReason,
     pub num_turns: Option<i64>,
     pub total_cost_usd: Option<f64>,
     pub duration_ms: Option<i64>,
+    /// The id the *provider* announced for this conversation. Carried for a
+    /// provider that resumes by id and has to recover it from a transcript;
+    /// **never persisted** — `runs.session_id` is Rimaia's own (ADR-0026 point
+    /// 5).
     pub session_id: Option<String>,
     pub stop_reason: Option<String>,
-    /// The agent's own closing summary. Present on `success`, null on the error
-    /// subtypes, which carry [`errors`](Self::errors) instead.
+    /// The agent's own closing summary. Present on a clean finish, absent on the
+    /// endings that carry [`errors`](Self::errors) instead.
     pub result: Option<String>,
     pub errors: Vec<String>,
     /// Kept whole: nothing reads its shape yet, and ADR-0012 makes a denial
@@ -287,6 +352,35 @@ pub struct ResultEvent {
     pub permission_denials: Vec<Value>,
     /// The four token counts ADR-0022 persists. Absent fields stay `None`.
     pub usage: TokenUsage,
+    /// What this event said about the usage window, for a provider that reports
+    /// it on the terminal event rather than on one of its own.
+    pub usage_window: Option<UsageWindow>,
+}
+
+/// Why a run stopped, in the only vocabulary shared code is allowed to see.
+///
+/// Six values, chosen because each one is a *different decision* for
+/// [`classify`](crate::runner::outcome::classify) and not because any provider
+/// spells them this way. A provider maps its own terminal words onto these; a
+/// word it has never seen is [`Unknown`](EndReason::Unknown), which ADR-0011
+/// makes transient rather than fatal.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum EndReason {
+    /// The agent finished the work and said so.
+    Completed,
+    /// The run was killed mid-stream — ADR-0011's "process died".
+    Interrupted,
+    /// The per-attempt turn budget ran out (ADR-0011's fatal row).
+    TurnBudgetExhausted,
+    /// The provider declined to do the work. Retrying spends the same tokens on
+    /// the same refusal.
+    Refused,
+    /// It failed, and said something about it.
+    Errored { detail: Option<String> },
+    /// It ended in a way this provider could not describe. **The default**, and
+    /// deliberately the one ADR-0011 retries.
+    #[default]
+    Unknown,
 }
 
 /// What one attempt spent, off the terminal event's `usage` object.
@@ -310,18 +404,6 @@ pub struct TokenUsage {
     pub cache_creation_tokens: Option<i64>,
 }
 
-impl TokenUsage {
-    fn from_value(raw: &Value) -> Self {
-        let usage = raw.get("usage").unwrap_or(&Value::Null);
-        Self {
-            input_tokens: integer(usage, "input_tokens"),
-            output_tokens: integer(usage, "output_tokens"),
-            cache_read_tokens: integer(usage, "cache_read_input_tokens"),
-            cache_creation_tokens: integer(usage, "cache_creation_input_tokens"),
-        }
-    }
-}
-
 /// An event this version does not model, kept whole.
 #[derive(Debug, Clone, PartialEq)]
 pub struct OtherEvent {
@@ -333,173 +415,22 @@ pub struct OtherEvent {
 }
 
 impl RunEvent {
-    /// Dispatches a parsed document onto a variant. Never fails.
+    /// A neutral name for this event, for logging and for a test that wants to
+    /// say what it saw.
     ///
-    /// Falling back to [`Other`](RunEvent::Other) rather than erroring is the
-    /// tolerance rule: an event whose `type` we know but whose body changed
-    /// shape is still an event, and dropping it would be a worse answer than
-    /// keeping it opaque.
-    pub fn from_value(raw: Value) -> Self {
-        let event_type = text(&raw, "type").unwrap_or_default();
-        let subtype = text(&raw, "subtype");
-
-        match (event_type.as_str(), subtype.as_deref()) {
-            ("system", Some("init")) => Self::Init(InitEvent::from_value(&raw)),
-            ("assistant", _) => Self::Assistant(AssistantEvent::from_value(&raw)),
-            ("user", _) => Self::User(UserEvent::from_value(&raw)),
-            ("rate_limit_event", _) => Self::RateLimit(RateLimitEvent::from_value(&raw)),
-            ("result", _) => Self::Result(ResultEvent::from_value(&raw)),
-            _ => Self::Other(OtherEvent {
-                event_type,
-                subtype,
-                raw,
-            }),
-        }
-    }
-
-    /// The top-level `type`, for logging and for a test that wants to say what
-    /// it saw. Never the nested `message.type`.
+    /// Rimaia's word, never the provider's wire type — except for
+    /// [`Other`](RunEvent::Other), where the provider's own word is the whole of
+    /// what is known about it.
     pub fn event_type(&self) -> &str {
         match self {
-            Self::Init(_) => "system",
+            Self::Init(_) => "init",
             Self::Assistant(_) => "assistant",
             Self::User(_) => "user",
-            Self::RateLimit(_) => "rate_limit_event",
+            Self::Usage(_) => "usage",
             Self::Result(_) => "result",
             Self::Other(other) => &other.event_type,
         }
     }
-}
-
-impl InitEvent {
-    fn from_value(raw: &Value) -> Self {
-        Self {
-            session_id: text(raw, "session_id"),
-            cwd: text(raw, "cwd"),
-            model: text(raw, "model"),
-            permission_mode: text(raw, "permissionMode"),
-            api_key_source: text(raw, "apiKeySource"),
-            claude_code_version: text(raw, "claude_code_version"),
-            tools: strings(raw, "tools"),
-            mcp_servers: array(raw, "mcp_servers")
-                .iter()
-                .filter_map(McpServer::from_value)
-                .collect(),
-        }
-    }
-}
-
-impl McpServer {
-    /// `None` for an entry with no name — a server we cannot name is one nothing
-    /// downstream could assert against anyway.
-    fn from_value(raw: &Value) -> Option<Self> {
-        Some(Self {
-            name: text(raw, "name")?,
-            status: text(raw, "status"),
-        })
-    }
-}
-
-impl AssistantEvent {
-    fn from_value(raw: &Value) -> Self {
-        let message = raw.get("message");
-        Self {
-            session_id: text(raw, "session_id"),
-            message_id: message.and_then(|message| text(message, "id")),
-            content: content_blocks(message),
-        }
-    }
-}
-
-impl UserEvent {
-    fn from_value(raw: &Value) -> Self {
-        Self {
-            session_id: text(raw, "session_id"),
-            content: content_blocks(raw.get("message")),
-        }
-    }
-}
-
-impl RateLimitEvent {
-    fn from_value(raw: &Value) -> Self {
-        let info = raw.get("rate_limit_info").unwrap_or(&Value::Null);
-        Self {
-            status: text(info, "status"),
-            resets_at: integer(info, "resetsAt"),
-            rate_limit_type: text(info, "rateLimitType"),
-        }
-    }
-}
-
-impl ResultEvent {
-    fn from_value(raw: &Value) -> Self {
-        Self {
-            subtype: text(raw, "subtype"),
-            terminal_reason: text(raw, "terminal_reason"),
-            is_error: flag(raw, "is_error").unwrap_or(false),
-            num_turns: integer(raw, "num_turns"),
-            total_cost_usd: number(raw, "total_cost_usd"),
-            duration_ms: integer(raw, "duration_ms"),
-            session_id: text(raw, "session_id"),
-            stop_reason: text(raw, "stop_reason"),
-            result: text(raw, "result"),
-            errors: strings(raw, "errors"),
-            permission_denials: array(raw, "permission_denials").to_vec(),
-            usage: TokenUsage::from_value(raw),
-        }
-    }
-}
-
-impl ContentBlock {
-    fn from_value(raw: &Value) -> Self {
-        // `type` here is the *block's* type, one level below the event's. This
-        // is the nesting that defeats substring matching (spike section 3).
-        match text(raw, "type").as_deref() {
-            Some("text") => Self::Text(text(raw, "text").unwrap_or_default()),
-            Some("tool_use") => match (text(raw, "id"), text(raw, "name")) {
-                (Some(id), Some(name)) => Self::ToolUse {
-                    id,
-                    name,
-                    input: raw.get("input").cloned().unwrap_or(Value::Null),
-                },
-                // A tool call we cannot name or correlate is not one the live
-                // view can show; keep it whole rather than half-modelled.
-                _ => Self::Other(raw.clone()),
-            },
-            Some("tool_result") => match text(raw, "tool_use_id") {
-                Some(tool_use_id) => Self::ToolResult {
-                    tool_use_id,
-                    is_error: flag(raw, "is_error").unwrap_or(false),
-                },
-                None => Self::Other(raw.clone()),
-            },
-            _ => Self::Other(raw.clone()),
-        }
-    }
-}
-
-fn content_blocks(message: Option<&Value>) -> Vec<ContentBlock> {
-    message
-        .map(|message| array(message, "content"))
-        .unwrap_or_default()
-        .iter()
-        .map(ContentBlock::from_value)
-        .collect()
-}
-
-// ---------------------------------------------------------------------------
-// Parsing one line
-// ---------------------------------------------------------------------------
-
-/// Parses one line of the stream.
-///
-/// The only failure is a line that is not JSON at all — the condition
-/// `malformed-line.jsonl` records, and `truncated-stream.jsonl` ends on. The
-/// caller logs it, keeps the raw line in the transcript, and reads the next one;
-/// it is never fatal, because the events on either side of a bad line are still
-/// the run's evidence.
-pub fn parse_line(line: &str) -> std::result::Result<RunEvent, serde_json::Error> {
-    serde_json::from_str(line).map(RunEvent::from_value)
 }
 
 // ---------------------------------------------------------------------------
@@ -910,11 +841,15 @@ impl std::fmt::Debug for RunProgress {
 /// (ADR-0015).
 pub struct EventStream {
     context: ServiceContext,
+    /// Who decides what a line means (ADR-0026). Defaulted rather than required,
+    /// so no existing call site had to learn that a provider exists — see
+    /// [`driven_by`](Self::driven_by).
+    provider: Arc<dyn AgentProvider>,
     transcript: Transcript,
     stderr: StderrLog,
     progress: RunProgress,
     init: Option<InitEvent>,
-    rate_limit: Option<RateLimitEvent>,
+    usage: Option<UsageReport>,
     result: Option<ResultEvent>,
     malformed_lines: u64,
     denied_tool_calls: u64,
@@ -934,15 +869,28 @@ impl EventStream {
     ) -> Result<Self> {
         Ok(Self {
             context: context.clone(),
+            provider: Arc::new(ClaudeProvider),
             transcript: Transcript::create(paths, task_id, run_id)?,
             stderr: StderrLog::new(paths, task_id, run_id),
             progress: RunProgress::new(run_id, context.clock.clone()),
             init: None,
-            rate_limit: None,
+            usage: None,
             result: None,
             malformed_lines: 0,
             denied_tool_calls: 0,
         })
+    }
+
+    /// Reads this stream as `provider` speaks it.
+    ///
+    /// A builder rather than a parameter on [`create`](Self::create), in the
+    /// style of the rest of this type: every existing caller replays the Claude
+    /// corpus and says so by not saying anything, and the one caller that knows
+    /// which provider it spawned says which.
+    #[must_use]
+    pub fn driven_by(mut self, provider: Arc<dyn AgentProvider>) -> Self {
+        self.provider = provider;
+        self
     }
 
     /// Persists one raw stdout line, parses it, folds it in, and publishes a
@@ -961,7 +909,7 @@ impl EventStream {
         // Before parsing, so a line we cannot read is still evidence.
         self.transcript.append(raw_line)?;
 
-        let event = match parse_line(raw_line) {
+        let event = match self.provider.parse_line(raw_line) {
             Ok(event) => event,
             Err(error) => {
                 self.malformed_lines += 1;
@@ -980,8 +928,16 @@ impl EventStream {
 
         match &event {
             RunEvent::Init(init) => self.init = Some(init.clone()),
-            RunEvent::RateLimit(rate_limit) => self.rate_limit = Some(rate_limit.clone()),
-            RunEvent::Result(result) => self.result = Some(result.clone()),
+            RunEvent::Usage(window) => self.observe_usage(window.clone()),
+            RunEvent::Result(result) => {
+                // A provider that reports the window on its terminal event
+                // rather than on one of its own is folded in on the same terms,
+                // latching included.
+                if let Some(window) = &result.usage_window {
+                    self.observe_usage(window.clone());
+                }
+                self.result = Some(result.clone());
+            }
             RunEvent::Other(other) => tracing::debug!(
                 run_id = %self.progress.run_id,
                 event_type = %other.event_type,
@@ -1009,9 +965,42 @@ impl EventStream {
         self.init.as_ref()
     }
 
-    /// The most recent usage-limit report. Present on every real run.
-    pub fn rate_limit(&self) -> Option<&RateLimitEvent> {
-        self.rate_limit.as_ref()
+    /// What the provider last said about the usage window, and when it said it.
+    ///
+    /// **`Exhausted` latches** — see [`observe_usage`](Self::observe_usage).
+    pub fn usage(&self) -> Option<&UsageReport> {
+        self.usage.as_ref()
+    }
+
+    /// Folds one usage report in, stamping it with the instant its line was
+    /// read.
+    ///
+    /// # Why a refusal latches
+    ///
+    /// A provider that reports the window on **every turn** will happily report
+    /// `allowed` again after the turn that hit the wall — a heartbeat, not a
+    /// retraction. Letting that clear the refusal would classify the run as
+    /// `transient` instead of `usage_limit`, so a walled task backs off
+    /// 1m/5m/15m into a window that is still closed and is abandoned by
+    /// morning. That is ADR-0011's named nightmare reached by a route that only
+    /// exists once a second provider's shape is taken seriously (ADR-0026 point
+    /// 8).
+    ///
+    /// The clock is the injected one, so a test drives this with no `sleep`
+    /// anywhere.
+    fn observe_usage(&mut self, window: UsageWindow) {
+        let report = UsageReport {
+            window,
+            observed_at: self.context.clock.now(),
+        };
+
+        let latched = self
+            .usage
+            .as_ref()
+            .is_some_and(|held| held.hit_a_wall() && !report.hit_a_wall());
+        if !latched {
+            self.usage = Some(report);
+        }
     }
 
     /// The terminal event, or `None` for a stream that stopped without one —
@@ -1075,43 +1064,16 @@ impl std::fmt::Debug for EventStream {
 // Extractors
 // ---------------------------------------------------------------------------
 //
-// One shape each, all returning `Option`/empty rather than erroring. A field
-// that changed type under us costs that field and nothing else.
+// What is left here after ADR-0026 reads the *live view's* own values off a tool
+// input, which is a provider-shaped document this module deliberately keeps
+// opaque — the wire extractors that read an event's fields moved into the
+// provider with the format they were reading.
 
 fn text(value: &Value, key: &str) -> Option<String> {
     value
         .get(key)
         .and_then(Value::as_str)
         .map(ToOwned::to_owned)
-}
-
-fn integer(value: &Value, key: &str) -> Option<i64> {
-    value.get(key).and_then(Value::as_i64)
-}
-
-fn number(value: &Value, key: &str) -> Option<f64> {
-    value.get(key).and_then(Value::as_f64)
-}
-
-fn flag(value: &Value, key: &str) -> Option<bool> {
-    value.get(key).and_then(Value::as_bool)
-}
-
-fn array<'a>(value: &'a Value, key: &str) -> &'a [Value] {
-    value
-        .get(key)
-        .and_then(Value::as_array)
-        .map(Vec::as_slice)
-        .unwrap_or_default()
-}
-
-/// The string members of `key`, skipping anything that is not a string.
-fn strings(value: &Value, key: &str) -> Vec<String> {
-    array(value, key)
-        .iter()
-        .filter_map(Value::as_str)
-        .map(ToOwned::to_owned)
-        .collect()
 }
 
 /// At most `max_chars` characters, with [`TRUNCATION_MARKER`] when it had to
@@ -1136,7 +1098,7 @@ mod tests {
     use serde_json::json;
 
     fn parse(line: &str) -> RunEvent {
-        parse_line(line).expect("the line is JSON")
+        ClaudeProvider.parse_line(line).expect("the line is JSON")
     }
 
     /// The typed gate first, the phrase only to tell a refusal from an
@@ -1157,87 +1119,6 @@ mod tests {
             !reports_a_permission_denial(&parse(discussed), discussed),
             "an assistant talking about approval is not a tool being refused",
         );
-    }
-
-    #[test]
-    fn a_line_that_is_not_json_is_the_only_parse_failure() {
-        assert!(parse_line("{\"type\": \"result\", \"num_tur").is_err());
-        assert!(parse_line("not json at all").is_err());
-    }
-
-    #[test]
-    fn an_event_type_nobody_models_keeps_its_whole_document() {
-        let raw = r#"{"type":"telemetry_ping","payload":{"heartbeat":true}}"#;
-
-        let RunEvent::Other(other) = parse(raw) else {
-            panic!("an unfamiliar type must not be forced into a modelled variant");
-        };
-        assert_eq!(other.event_type, "telemetry_ping");
-        assert_eq!(other.subtype, None);
-        assert_eq!(other.raw, serde_json::from_str::<Value>(raw).unwrap());
-    }
-
-    #[test]
-    fn a_system_subtype_nobody_models_is_opaque_rather_than_an_error() {
-        // Spike section 3: `system` carries many subtypes and several are
-        // undocumented. Only `init` is modelled; the rest keep their JSON.
-        let RunEvent::Other(other) =
-            parse(r#"{"type":"system","subtype":"vcs_state_changed","branch":"rimaia/x"}"#)
-        else {
-            panic!("an unfamiliar subtype must not be forced into `init`");
-        };
-
-        assert_eq!(other.event_type, "system");
-        assert_eq!(other.subtype.as_deref(), Some("vcs_state_changed"));
-        assert_eq!(other.raw["branch"], json!("rimaia/x"));
-    }
-
-    #[test]
-    fn an_event_whose_body_changed_shape_still_arrives_with_the_fields_that_did_not() {
-        // The tolerance rule at field granularity: `tools` became objects and
-        // `num_turns` a string, and neither costs the event or its neighbours.
-        let RunEvent::Init(init) = parse(
-            r#"{"type":"system","subtype":"init","model":"claude-sonnet-5","tools":[{"name":"Read"}]}"#,
-        ) else {
-            panic!("expected an init event");
-        };
-        assert_eq!(init.model.as_deref(), Some("claude-sonnet-5"));
-        assert_eq!(init.tools, Vec::<String>::new());
-
-        let RunEvent::Result(result) =
-            parse(r#"{"type":"result","subtype":"success","num_turns":"five"}"#)
-        else {
-            panic!("expected a result event");
-        };
-        assert_eq!(result.subtype.as_deref(), Some("success"));
-        assert_eq!(result.num_turns, None);
-    }
-
-    #[test]
-    fn an_mcp_server_entry_without_a_name_is_dropped_rather_than_named_empty() {
-        let RunEvent::Init(init) = parse(
-            r#"{"type":"system","subtype":"init","mcp_servers":[{"status":"connected"},{"name":"Brewale","status":"connected"}]}"#,
-        ) else {
-            panic!("expected an init event");
-        };
-
-        assert_eq!(
-            init.mcp_servers,
-            vec![McpServer {
-                name: "Brewale".to_string(),
-                status: Some("connected".to_string()),
-            }]
-        );
-    }
-
-    #[test]
-    fn a_rate_limit_epoch_outside_the_representable_range_reads_as_no_reset_time() {
-        let event = RateLimitEvent {
-            resets_at: Some(i64::MAX),
-            ..RateLimitEvent::default()
-        };
-
-        assert_eq!(event.resets_at_utc(), None);
     }
 
     #[test]

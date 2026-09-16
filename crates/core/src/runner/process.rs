@@ -1664,15 +1664,13 @@ fn blocking_signal_group(_group: u32, _signal: Signal) -> std::io::Result<()> {
 /// otherwise fail every run at once — the loudest possible version of exactly
 /// the failure that rule exists to prevent. The warning is the record.
 pub fn verify_permission_mode(init: &InitEvent, requested: PermissionMode) -> Result<()> {
-    match init.permission_mode.as_deref() {
-        Some(applied) if claude::posture_from_str(applied) != Some(requested) => {
-            Err(Error::internal(format!(
-                "the agent CLI applied permission mode \"{applied}\" when Rimaia asked for \"{}\". \
-                 The run was stopped rather than continued under a posture nobody chose \
-                 (ADR-0012).",
-                claude::posture(requested),
-            )))
-        }
+    match init.permission_mode {
+        Some(applied) if applied != requested => Err(Error::internal(format!(
+            "the agent CLI applied permission mode \"{}\" when Rimaia asked for \"{}\". The run \
+             was stopped rather than continued under a posture nobody chose (ADR-0012).",
+            claude::posture(applied),
+            claude::posture(requested),
+        ))),
         Some(_) => Ok(()),
         None => {
             tracing::warn!(
@@ -1718,7 +1716,7 @@ fn report_applied_environment(init: &InitEvent, intent: &RunIntent<'_>) {
         tools = init.tools.len(),
         mcp_servers = servers.len(),
         model = init.model.as_deref().unwrap_or("-"),
-        version = init.claude_code_version.as_deref().unwrap_or("-"),
+        version = init.agent_version.as_deref().unwrap_or("-"),
         "the run's applied configuration",
     );
 
