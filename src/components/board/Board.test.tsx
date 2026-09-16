@@ -460,6 +460,53 @@ describe("Board", () => {
     expect(screen.getByRole("checkbox", { name: 'Select "Two"' })).toBeChecked();
   });
 
+  it("shift-clicking the card body extends the range, without opening it", async () => {
+    // The gesture every file manager already taught the user: shift-click the
+    // row, not the 16px box on it.
+    mockBackend({
+      tasks: [
+        task({ id: "a", column: "ready", position: 0, title: "One" }),
+        task({ id: "b", column: "ready", position: 1, title: "Two" }),
+        task({ id: "c", column: "ready", position: 2, title: "Three" }),
+      ],
+    });
+
+    render(<Board />);
+    fireEvent.click(await screen.findByRole("checkbox", { name: 'Select "One"' }));
+    fireEvent.click(screen.getByText("Three").closest("article")!, { shiftKey: true });
+
+    expect(screen.getByRole("button", { name: "Archive 3 selected" })).toBeInTheDocument();
+    // A pick, not an open — the drawer is still what a plain click is for.
+    expect(screen.queryByRole("complementary")).not.toBeInTheDocument();
+  });
+
+  it("still opens a card on a plain click while other cards are picked", async () => {
+    // The whole argument against a selection mode: a plain click means one
+    // thing, whatever is picked elsewhere on the board.
+    mockBackend({
+      tasks: [
+        task({ id: "a", column: "ready", position: 0, title: "One" }),
+        task({ id: "b", column: "ready", position: 1, title: "Two" }),
+      ],
+    });
+
+    render(<Board />);
+    fireEvent.click(await screen.findByRole("checkbox", { name: 'Select "One"' }));
+    fireEvent.click(screen.getByText("Two").closest("article")!);
+
+    expect(await screen.findByRole("complementary")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Archive 1 selected" })).toBeInTheDocument();
+  });
+
+  it("shift-clicking a card with nothing picked takes just that card", async () => {
+    mockBackend({ tasks: [task({ id: "a", title: "One" })] });
+
+    render(<Board />);
+    fireEvent.click((await screen.findByText("One")).closest("article")!, { shiftKey: true });
+
+    expect(screen.getByRole("button", { name: "Archive 1 selected" })).toBeInTheDocument();
+  });
+
   it("picks only the one card when a shift-click crosses columns", async () => {
     // `rangeBetween` refuses the range; the click still has to do the ordinary
     // thing rather than nothing at all.
@@ -477,6 +524,32 @@ describe("Board", () => {
     });
 
     expect(screen.getByRole("button", { name: "Archive 2 selected" })).toBeInTheDocument();
+  });
+
+  it("flags the card it moves focus to, so the ring shows in WebKit", async () => {
+    // WebKit does not match `:focus-visible` on a programmatic `focus()`, so
+    // arrow navigation moved focus silently and the outline only appeared
+    // once a later keypress convinced the engine a keyboard was in use.
+    mockBackend({
+      tasks: [
+        task({ id: "a", column: "ready", position: 0, title: "One" }),
+        task({ id: "b", column: "ready", position: 1, title: "Two" }),
+      ],
+    });
+
+    render(<Board />);
+    const first = (await screen.findByText("One")).closest("article")!;
+    const second = screen.getByText("Two").closest("article")!;
+
+    fireEvent.keyDown(first, { key: "ArrowDown" });
+
+    expect(second).toHaveFocus();
+    expect(second).toHaveAttribute("data-keyboard-focused");
+
+    // And it goes again the moment focus does, so a stale flag can never
+    // outline a card nobody is on.
+    fireEvent.blur(second);
+    expect(second).not.toHaveAttribute("data-keyboard-focused");
   });
 
   it("toggles the focused card's pick with x, without opening it", async () => {

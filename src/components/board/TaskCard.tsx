@@ -548,6 +548,29 @@ export function TaskCard({
     );
   }
 
+  /**
+   * A plain click opens the card; a shift-click extends the picked range.
+   *
+   * This is **not** the selection mode the board declined: the modifier always
+   * means the same thing, so a plain click still opens a card whatever is
+   * picked elsewhere. What it buys is the gesture every file manager already
+   * taught the user — shift-click the row, not a 16px box on it.
+   *
+   * With no anchor to measure from, `rangeBetween` hands back nothing and the
+   * board picks this card alone, which is also what Finder does.
+   */
+  function handleClick(event: ReactMouseEvent<HTMLElement>) {
+    if (event.shiftKey && onPick) {
+      // Shift-click is also the browser's "extend the text selection" gesture,
+      // and a card is mostly text. Cleared in the same turn as the click, so
+      // the range never paints.
+      window.getSelection()?.removeAllRanges();
+      onPick(task.id, !picked, true);
+      return;
+    }
+    onSelect(task.id);
+  }
+
   function handleKeyDown(event: ReactKeyboardEvent<HTMLElement>) {
     // dnd-kit's own keyboard handling first (Space to lift, arrows and
     // Escape while a keyboard drag is active) — it calls `preventDefault()`
@@ -608,7 +631,7 @@ export function TaskCard({
       {...attributes}
       {...listeners}
       onKeyDown={handleKeyDown}
-      onClick={() => onSelect(task.id)}
+      onClick={handleClick}
     >
       <CardFace task={task} repositoryName={repositoryName} now={now} />
 
@@ -649,7 +672,7 @@ export function TaskCard({
             // are always on screen, and fifty of these down a board would be
             // fifty pieces of furniture. The input keeps its own `aria-label`,
             // so this adds a description rather than renaming anything.
-            title="Select. Shift-click, or press X on the card — shift+X takes everything between this and your last pick."
+            title="Select. Shift-click anywhere on a card, or press X on it — either one with Shift takes everything between it and your last pick."
             onPointerDown={(event) => event.stopPropagation()}
             onKeyDown={(event) => event.stopPropagation()}
             onClick={(event) => event.stopPropagation()}

@@ -523,6 +523,16 @@
   outline-offset: 2px;
 }
 
+/* The same ring, for the focus the board moves itself. WebKit does not match
+   `:focus-visible` on a programmatic `focus()`, which is exactly how arrow
+   navigation between cards works — see `Board`'s `handleArrowNavigate` for why
+   the flag has to be ours. `:focus` is required alongside it so a flag left
+   behind cannot outline a card that does not have focus. */
+.task-card[data-keyboard-focused]:focus {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
 .task-card-dragging {
   opacity: 0.4;
 }

@@ -386,9 +386,36 @@ export function Board() {
     setActiveId(null);
   }
 
+  /**
+   * Moves focus to the next card, and makes the ring visible while doing it.
+   *
+   * `focus()` on its own is not enough. WebKit — which is what a Tauri window
+   * is on macOS — does not match `:focus-visible` on an element focused
+   * programmatically, so the card took focus silently and the outline only
+   * appeared once some later keypress convinced the engine a keyboard was in
+   * use. `focus({ focusVisible: true })` is Firefox-only, so the flag is ours.
+   *
+   * An attribute rather than state, because state here would re-render every
+   * card on the board on every arrow press for a two-pixel outline. It is
+   * removed on the card's own blur, and `board.css` requires `:focus`
+   * alongside it, so a flag left behind by anything can never outline a card
+   * that does not have focus.
+   */
   function handleArrowNavigate(fromId: string, key: string) {
     const targetId = nextFocusTarget(filteredColumns, fromId, key);
-    if (targetId) cardRefs.current.get(targetId)?.focus();
+    if (!targetId) return;
+    const element = cardRefs.current.get(targetId);
+    if (!element) return;
+
+    element.dataset.keyboardFocused = "true";
+    element.addEventListener(
+      "blur",
+      () => {
+        delete element.dataset.keyboardFocused;
+      },
+      { once: true },
+    );
+    element.focus();
   }
 
   const handleNewTask = useCallback(() => {
