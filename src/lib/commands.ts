@@ -3,6 +3,8 @@ import { invoke } from "@tauri-apps/api/core";
 import type {
   Analytics,
   AppInfo,
+  ArchivedTask,
+  ArchiveReport,
   AutoCleanup,
   BoardColumn,
   CleanupReport,
@@ -15,6 +17,7 @@ import type {
   McpStatus,
   NewTaskInput,
   NewTaskLinkInput,
+  OnArchive,
   OpenInTarget,
   PlanPass,
   PlanSelectionInput,
@@ -141,6 +144,24 @@ export function setRepositoryUnattendedRuns(id: string, allow: boolean): Promise
 }
 
 /**
+ * Chooses what archiving a task in this repository cleans up (ADR-0025
+ * point 4).
+ *
+ * Both halves in one call, because the mode and the path are one decision: a
+ * repository set to `"script"` with nothing to run is not one of the three
+ * states. `script` is required for that mode and rejected for the others, and
+ * the path is validated here rather than when an archive fires — absolute,
+ * existing, a file, executable.
+ */
+export function setRepositoryOnArchive(
+  id: string,
+  onArchive: OnArchive,
+  script: string | null,
+): Promise<Repository> {
+  return call<Repository>("set_repository_on_archive", { id, onArchive, script });
+}
+
+/**
  * Raises or lowers ADR-0010's per-repository cap.
  *
  * Its own command rather than a field on {@link updateRepository}, for the
@@ -224,6 +245,35 @@ export function updateTask(id: string, patch: TaskPatchInput): Promise<Task> {
 
 export function deleteTask(id: string): Promise<void> {
   return call<void>("delete_task", { id });
+}
+
+/**
+ * Takes one task off the board, keeping its runs, its links and its dependency
+ * edges (ADR-0025) — and runs whatever cleanup its repository is configured
+ * for, reporting the outcome on the result.
+ *
+ * Rejects for a `running` or `waiting_retry` task. There is no force to pass:
+ * archiving can trigger a deletion, and a process is writing in that directory.
+ */
+export function archiveTask(id: string): Promise<ArchivedTask> {
+  return call<ArchivedTask>("archive_task", { id });
+}
+
+/**
+ * Archives the board's picked set, in the order given.
+ *
+ * Resolves with a report rather than rejecting on the first guard: nine safe
+ * cards must not be held up by a tenth that is mid-run (seam-contract D20
+ * point 2).
+ */
+export function archiveTasks(ids: readonly string[]): Promise<ArchiveReport> {
+  return call<ArchiveReport>("archive_tasks", { ids });
+}
+
+/** Puts an archived task back in the column it was in. Nothing the cleanup
+ *  deleted comes back. */
+export function unarchiveTask(id: string): Promise<Task> {
+  return call<Task>("unarchive_task", { id });
 }
 
 /**

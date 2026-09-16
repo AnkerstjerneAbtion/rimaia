@@ -36,6 +36,7 @@ function taskSummary(overrides: Partial<TaskSummary> = {}): TaskSummary {
     createdAt: "2026-08-20T11:00:00+00:00",
     updatedAt: "2026-08-20T11:00:00+00:00",
     source: "ui",
+    archivedAt: null,
     linkCount: 0,
     dependencyCount: 0,
     blockedByIncomplete: false,

@@ -75,6 +75,7 @@ function task(overrides: Partial<Task> = {}): Task {
     createdAt: "2026-08-20T11:00:00Z",
     updatedAt: "2026-08-20T11:55:00Z",
     source: "ui",
+    archivedAt: null,
     ...overrides,
   };
 }
@@ -89,6 +90,8 @@ function repository(overrides: Partial<Repository> = {}): Repository {
     allowUnattendedRuns: true,
     maxConcurrency: 1,
     createdAt: "2026-08-20T09:00:00Z",
+    onArchive: "none",
+    onArchiveScript: null,
     ...overrides,
   };
 }

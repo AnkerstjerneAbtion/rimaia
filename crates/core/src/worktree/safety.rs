@@ -48,7 +48,7 @@ use crate::error::{Error, Result};
 /// meaning against a process working directory the caller does not control,
 /// and a `..` in the unresolved tail cannot be collapsed without guessing
 /// what it would have resolved to.
-pub(super) async fn resolve(path: &Path) -> Result<PathBuf> {
+pub(crate) async fn resolve(path: &Path) -> Result<PathBuf> {
     if !path.is_absolute() {
         return Err(Error::invalid(format!(
             "{} must be an absolute path",

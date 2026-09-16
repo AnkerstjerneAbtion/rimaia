@@ -29,6 +29,7 @@ function task(id: string): Task {
     createdAt: "2026-08-20T11:00:00Z",
     updatedAt: "2026-08-20T11:00:00Z",
     source: "ui",
+    archivedAt: null,
   };
 }
 
@@ -43,6 +44,7 @@ function renderColumn(cards: Task[]) {
         onSelect={vi.fn()}
         pickedTaskIds={new Set<string>()}
         onPick={vi.fn()}
+        onPickColumn={vi.fn()}
         registerCardRef={vi.fn()}
         onArrowNavigate={vi.fn()}
         dragDisabled={false}

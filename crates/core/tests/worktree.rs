@@ -1457,6 +1457,7 @@ async fn move_to(f: &Fixture, task_id: &str, column: BoardColumn) {
             repository_id: Some(f.repository.id.clone()),
             column: Some(column),
             run_state: None,
+            ..TaskFilter::default()
         },
     )
     .await

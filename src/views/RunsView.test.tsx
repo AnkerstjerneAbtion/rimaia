@@ -40,6 +40,7 @@ function taskSummary(overrides: Partial<TaskSummary> = {}): TaskSummary {
     createdAt: "2026-08-20T11:00:00Z",
     updatedAt: "2026-08-20T11:55:00Z",
     source: "ui",
+    archivedAt: null,
     linkCount: 0,
     dependencyCount: 0,
     blockedByIncomplete: false,
@@ -64,6 +65,8 @@ function repository(overrides: Partial<Repository> = {}): Repository {
     allowUnattendedRuns: true,
     maxConcurrency: 1,
     createdAt: "2026-08-20T09:00:00Z",
+    onArchive: "none",
+    onArchiveScript: null,
     ...overrides,
   };
 }

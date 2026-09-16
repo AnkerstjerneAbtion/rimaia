@@ -33,21 +33,23 @@ use crate::db::{BoardColumn, StrategySource};
 use crate::doctor;
 use crate::mcp::error::ToolError;
 use crate::mcp::requests::{
-    AddTaskLinkRequest, AnalyticsRequest, ClearableField, CreateTaskRequest,
-    DoctorDismissalRequest, GetStrategyDefaultsRequest, GetTaskRequest, ListTasksRequest,
-    MoveTaskRequest, PlanSelectionRequest, RemoveTaskLinkRequest, RepositoryRequest,
-    ScheduleConfigRequest, ScheduleRequest, SetMaxConcurrencyRequest,
-    SetRepositoryMaxConcurrencyRequest, SetScheduleEnabledRequest, SetScheduleModeRequest,
-    SetStrategyApprovalRequest, SetStrategyCatalogueRequest, SetStrategyDefaultsRequest,
-    SetTaskDependenciesRequest, SetTaskStrategyRequest, SetWorktreeAutoCleanupRequest,
-    SubscriptionCostRequest, TaskStrategyRequest, UpdateScheduleRequest, UpdateTaskRequest,
+    AddTaskLinkRequest, AnalyticsRequest, ArchiveTaskRequest, ArchiveTasksRequest, ClearableField,
+    CreateTaskRequest, DoctorDismissalRequest, GetStrategyDefaultsRequest, GetTaskRequest,
+    ListTasksRequest, MoveTaskRequest, PlanSelectionRequest, RemoveTaskLinkRequest,
+    RepositoryRequest, ScheduleConfigRequest, ScheduleRequest, SetMaxConcurrencyRequest,
+    SetRepositoryMaxConcurrencyRequest, SetRepositoryOnArchiveRequest, SetScheduleEnabledRequest,
+    SetScheduleModeRequest, SetStrategyApprovalRequest, SetStrategyCatalogueRequest,
+    SetStrategyDefaultsRequest, SetTaskDependenciesRequest, SetTaskStrategyRequest,
+    SetWorktreeAutoCleanupRequest, SubscriptionCostRequest, TaskStrategyRequest,
+    UpdateScheduleRequest, UpdateTaskRequest,
 };
 use crate::mcp::responses::{
-    AnalyticsView, BaseInstructionsView, CredentialStatusView, DismissalView, DoctorDismissalsView,
-    DoctorReportView, OnboardingView, PlanPassView, PlanResultView, PreflightView,
-    RepositoryListView, RepositoryView, RunCapacityView, ScheduleDeletedView, ScheduleListView,
-    ScheduleView, StrategyApprovalView, SubscriptionCostView, TaskListItem, TaskListView, TaskView,
-    TimezoneListView, WorktreeAutoCleanupView, WorktreeListView, WorktreeView,
+    AnalyticsView, ArchiveReportView, ArchivedTaskView, BaseInstructionsView, CredentialStatusView,
+    DismissalView, DoctorDismissalsView, DoctorReportView, OnboardingView, PlanPassView,
+    PlanResultView, PreflightView, RepositoryListView, RepositoryOnArchiveView, RepositoryView,
+    RunCapacityView, ScheduleDeletedView, ScheduleListView, ScheduleView, StrategyApprovalView,
+    SubscriptionCostView, TaskListItem, TaskListView, TaskView, TimezoneListView,
+    WorktreeAutoCleanupView, WorktreeListView, WorktreeView,
 };
 use crate::mcp::scope::{RunScope, Tool};
 use crate::runner::prompt::TEMPLATE_VARIABLES;
@@ -56,7 +58,7 @@ use crate::schedule;
 use crate::scheduler::{self, capacity};
 use crate::strategy::{self, Catalogue, StrategyDefaults};
 use crate::tasks::{NewTask, NewTaskLink, Patch, TaskFilter, TaskPatch};
-use crate::{db, repo, tasks, worktree, Result};
+use crate::{archive, db, repo, tasks, worktree, Result};
 
 /// What Claude Code is told this server is for, before it has read a single
 /// tool description.
@@ -475,6 +477,7 @@ work, to check what is waiting in `ready`, or to find the tasks a new one should
                 repository_id: request.repository_id,
                 column: request.column,
                 run_state: request.run_state,
+                archived: request.archived,
             },
         )
         .await?;
@@ -886,6 +889,83 @@ not is gone. `off` restores the default."
     }
 
     #[tool(
+        description = "Take a task off the user's board without deleting anything. The task keeps \
+its run history, its links and its dependency edges, and can be put back with `unarchive_task`. \
+Call this instead of asking a human to delete a task when a card is finished with: it is the \
+safe way to tidy a board. Archiving also fires whatever cleanup the repository is configured for, which may \
+remove the task's git worktree or run a script the user wrote, so the result tells you what it \
+did. A task that is running or waiting to retry is refused: cancel the run first."
+    )]
+    pub async fn archive_task(
+        &self,
+        Parameters(request): Parameters<ArchiveTaskRequest>,
+    ) -> Result<Json<ArchivedTaskView>, ToolError> {
+        self.scope.authorize(Tool::ArchiveTask, None)?;
+        let archived = tasks::archive_task(&self.ctx, &request.task_id).await?;
+        Ok(Json(archived.into()))
+    }
+
+    #[tool(
+        description = "Archive several tasks at once, in the order given. Call this to tidy a \
+finished milestone in one go. Nothing stops at the first refusal: the result lists what was archived and what was left alone with the reason for \
+each, so a set containing one running task still archives the rest. Use `archive_task` instead when you are asking about one card and want the \
+refusal as an error."
+    )]
+    pub async fn archive_tasks(
+        &self,
+        Parameters(request): Parameters<ArchiveTasksRequest>,
+    ) -> Result<Json<ArchiveReportView>, ToolError> {
+        self.scope.authorize(Tool::ArchiveTasks, None)?;
+        let report = tasks::archive_tasks(&self.ctx, &request.task_ids).await?;
+        Ok(Json(report.into()))
+    }
+
+    #[tool(
+        description = "Put an archived task back on the board, in the column it was in. Call \
+this when a user asks for an archived card back, or when work you thought was finished turns out \
+not to be. Nothing the archive's cleanup deleted comes back — a removed worktree stays removed \
+and the next run recreates it. Use `list_tasks` with `archived: archived` to find the task id."
+    )]
+    pub async fn unarchive_task(
+        &self,
+        Parameters(request): Parameters<ArchiveTaskRequest>,
+    ) -> Result<Json<TaskView>, ToolError> {
+        self.scope.authorize(Tool::UnarchiveTask, None)?;
+        tasks::unarchive_task(&self.ctx, &request.task_id).await?;
+        let detail = tasks::get_task(&self.ctx, &request.task_id).await?;
+        Ok(Json(TaskView::from(detail)))
+    }
+
+    #[tool(
+        description = "Call this to choose what archiving a task in one repository cleans up: `none` leaves \
+everything alone, `remove_worktree` deletes the task's checkout using Rimaia's own guards (it \
+refuses a dirty or unpushed worktree and never deletes a branch), and `script` runs an executable \
+the user names instead. Tell the user before setting `script` that Rimaia then does no cleanup \
+of its own and applies none of those guards — their script can delete uncommitted work. The \
+script must be an absolute path to an executable file, not a command line; it is run with the \
+repository as its working directory and is given RIMAIA_TASK_ID, RIMAIA_TASK_TITLE, \
+RIMAIA_REPOSITORY_PATH, RIMAIA_BRANCH and RIMAIA_WORKTREE_PATH in its environment."
+    )]
+    pub async fn set_repository_on_archive(
+        &self,
+        Parameters(request): Parameters<SetRepositoryOnArchiveRequest>,
+    ) -> Result<Json<RepositoryOnArchiveView>, ToolError> {
+        self.scope.authorize(Tool::SetRepositoryOnArchive, None)?;
+        let repository = archive::set_repository_on_archive(
+            &self.ctx,
+            &request.repository_id,
+            request.on_archive,
+            request.script,
+        )
+        .await?;
+        Ok(Json(RepositoryOnArchiveView {
+            repository_id: repository.id,
+            on_archive: repository.on_archive,
+            script: repository.on_archive_script,
+        }))
+    }
+
+    #[tool(
         description = "Accept a planner's proposal on behalf of the user, marking the strategy as \
 theirs rather than the planner's. A later planner run will then leave it alone. Call this when a human has \
 reviewed a proposal and is happy with it; it speaks for that human, so a run cannot call it — \
@@ -1136,6 +1216,10 @@ impl RimaiaServer {
                 repository_id: Some(task.task.repository_id.clone()),
                 column: Some(column),
                 run_state: None,
+                // The bottom of a *visible* column. An archived card still
+                // carries a position, and landing a move below one would put
+                // the new card off the end of the board it can see.
+                ..TaskFilter::default()
             },
         )
         .await?;
@@ -1198,9 +1282,11 @@ mod tests {
     /// capability parity a rule. What replaces a count is the property that
     /// actually matters — a registered tool with no run-scope decision cannot
     /// reach the wire.
-    const REGISTERED_TOOLS: [&str; 44] = [
+    const REGISTERED_TOOLS: [&str; 48] = [
         "accept_task_strategy",
         "add_task_link",
+        "archive_task",
+        "archive_tasks",
         "clear_task_strategy",
         "create_schedule",
         "create_task",
@@ -1232,6 +1318,7 @@ mod tests {
         "run_doctor",
         "set_max_concurrency",
         "set_repository_max_concurrency",
+        "set_repository_on_archive",
         "set_schedule_enabled",
         "set_schedule_mode",
         "set_strategy_approval",
@@ -1241,6 +1328,7 @@ mod tests {
         "set_task_dependencies",
         "set_task_strategy",
         "set_worktree_auto_cleanup",
+        "unarchive_task",
         "update_schedule",
         "update_task",
     ];

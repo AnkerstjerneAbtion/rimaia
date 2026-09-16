@@ -37,6 +37,17 @@ type KeyDownHandler = (event: ReactKeyboardEvent<HTMLElement>) => void;
 
 const ARROW_KEYS = new Set(["ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight"]);
 
+/** Whether the gesture behind a checkbox's `change` held Shift.
+ *
+ * Duck-typed rather than `instanceof MouseEvent`: the same `change` is also
+ * produced by Space on a focused box, where the native event carries no
+ * modifier at all, and jsdom's event classes are not the browser's. A missing
+ * flag reads as "no range", which is the safe answer for a gesture that would
+ * otherwise pick a column's worth of cards nobody asked for. */
+function isShiftClick(event: Event): boolean {
+  return "shiftKey" in event && (event as MouseEvent).shiftKey === true;
+}
+
 // ---------------------------------------------------------------------------
 // "Run now" (task 008) — a shared, single-flight repository lookup.
 //
@@ -463,7 +474,9 @@ interface TaskCardProps extends CardFace {
   /** Task 023's hand-picked set. Absent on `TaskCardPreview` and in the drag
    *  overlay, where there is nothing to pick. */
   readonly picked?: boolean;
-  readonly onPick?: (id: string, picked: boolean) => void;
+  /** `extendRange` is a shift-click or shift-`x`. The range arithmetic is
+   *  `Board`'s (`rangeBetween`) — a card knows nothing about its neighbours. */
+  readonly onPick?: (id: string, picked: boolean, extendRange?: boolean) => void;
 }
 
 /**
@@ -535,6 +548,29 @@ export function TaskCard({
     );
   }
 
+  /**
+   * A plain click opens the card; a shift-click extends the picked range.
+   *
+   * This is **not** the selection mode the board declined: the modifier always
+   * means the same thing, so a plain click still opens a card whatever is
+   * picked elsewhere. What it buys is the gesture every file manager already
+   * taught the user — shift-click the row, not a 16px box on it.
+   *
+   * With no anchor to measure from, `rangeBetween` hands back nothing and the
+   * board picks this card alone, which is also what Finder does.
+   */
+  function handleClick(event: ReactMouseEvent<HTMLElement>) {
+    if (event.shiftKey && onPick) {
+      // Shift-click is also the browser's "extend the text selection" gesture,
+      // and a card is mostly text. Cleared in the same turn as the click, so
+      // the range never paints.
+      window.getSelection()?.removeAllRanges();
+      onPick(task.id, !picked, true);
+      return;
+    }
+    onSelect(task.id);
+  }
+
   function handleKeyDown(event: ReactKeyboardEvent<HTMLElement>) {
     // dnd-kit's own keyboard handling first (Space to lift, arrows and
     // Escape while a keyboard drag is active) — it calls `preventDefault()`
@@ -557,6 +593,15 @@ export function TaskCard({
     if (event.key === "Enter") {
       event.preventDefault();
       onSelect(task.id);
+      return;
+    }
+
+    // Gmail's key, on the card the arrows already move focus between: picking
+    // ten cards is ten keystrokes and no aiming at all. Shift+X extends from
+    // the last plainly-picked card, the same as shift-clicking the box.
+    if ((event.key === "x" || event.key === "X") && onPick) {
+      event.preventDefault();
+      onPick(task.id, !picked, event.shiftKey);
     }
   }
 
@@ -586,7 +631,7 @@ export function TaskCard({
       {...attributes}
       {...listeners}
       onKeyDown={handleKeyDown}
-      onClick={() => onSelect(task.id)}
+      onClick={handleClick}
     >
       <CardFace task={task} repositoryName={repositoryName} now={now} />
 
@@ -614,10 +659,20 @@ export function TaskCard({
         {/* Task 023's hand-picked set. A checkbox rather than a click-modifier,
             because the modifier would be invisible and the card already claims
             click, Enter, Space and the arrows. Isolated from the drag surface
-            the same way "Run now" is. */}
+            the same way "Run now" is.
+
+            The label says "Select", not "Select for planning": since task 030
+            the set drives archiving too, and a checkbox that names one of its
+            two consumers is worse than one that names neither (D26.6). */}
         {onPick && (
           <label
             className="task-card-pick"
+            // The only place the two range gestures are discoverable. Not a
+            // `<kbd>` chip like the toolbar's: those sit next to controls that
+            // are always on screen, and fifty of these down a board would be
+            // fifty pieces of furniture. The input keeps its own `aria-label`,
+            // so this adds a description rather than renaming anything.
+            title="Select. Shift-click anywhere on a card, or press X on it — either one with Shift takes everything between it and your last pick."
             onPointerDown={(event) => event.stopPropagation()}
             onKeyDown={(event) => event.stopPropagation()}
             onClick={(event) => event.stopPropagation()}
@@ -625,8 +680,15 @@ export function TaskCard({
             <input
               type="checkbox"
               checked={picked ?? false}
-              onChange={(event) => onPick(task.id, event.target.checked)}
-              aria-label={`Select "${task.title}" for planning`}
+              // React synthesises a checkbox's `change` from the underlying
+              // click, so the modifier is on the native event — which is also
+              // why this is not an `onClick` of its own: two handlers on one
+              // element racing to read the same gesture is worse than one
+              // handler reading the event it was already given.
+              onChange={(event) =>
+                onPick(task.id, event.target.checked, isShiftClick(event.nativeEvent))
+              }
+              aria-label={`Select "${task.title}"`}
             />
           </label>
         )}

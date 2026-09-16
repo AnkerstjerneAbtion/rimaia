@@ -4,6 +4,8 @@
 //! what a caller *supplies* is a subset with its own optionality, and that
 //! subset is these types.
 
+use serde::{Deserialize, Serialize};
+
 use crate::db::{BoardColumn, RunState, StrategyMode};
 
 /// What [`crate::tasks::create_task`] takes.
@@ -108,13 +110,60 @@ pub struct TaskPatch {
     pub effort: Patch<String>,
 }
 
+/// Which side of ADR-0025's archive line a [`crate::tasks::list_tasks`] call
+/// wants (seam-contract D26.1).
+///
+/// **The default is the whole point.** `list_tasks` is not only the board's
+/// read: it is the scheduler's
+/// ([`crate::scheduler::selection`]), the plan pass's
+/// ([`crate::runner::strategy::selected_tasks`]) and the MCP tool's. A
+/// `Default` that means "not archived" gives all four the right answer with no
+/// call site edited, while a default of [`All`](ArchiveFilter::All) would have
+/// put archived tasks back in the run queue — and the first place anyone would
+/// have learned that is a night run.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, schemars::JsonSchema,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum ArchiveFilter {
+    /// On the board. `archived_at IS NULL`.
+    #[default]
+    Active,
+    /// Off the board. What the archive view reads.
+    Archived,
+    /// Both. Nothing in the product renders this; it exists so a caller
+    /// counting history does not have to make two calls and merge them.
+    All,
+}
+
+impl ArchiveFilter {
+    /// The predicate this appends to [`crate::tasks::list_tasks`]' `WHERE`
+    /// chain, or `None` when it constrains nothing.
+    ///
+    /// A literal rather than a bind, for the reason seam-contract D5 gives for
+    /// that query being hand-built at all: the value is one of three variants of
+    /// a Rust enum and there is no user input within reach of it.
+    pub(crate) const fn predicate(self) -> Option<&'static str> {
+        match self {
+            ArchiveFilter::Active => Some(" AND t.archived_at IS NULL"),
+            ArchiveFilter::Archived => Some(" AND t.archived_at IS NOT NULL"),
+            ArchiveFilter::All => None,
+        }
+    }
+}
+
 /// What [`crate::tasks::list_tasks`] filters on. A field left `None` matches
 /// everything; combining fields narrows the result, it never widens it.
+///
+/// [`archived`](TaskFilter::archived) is the one field that is not an `Option`,
+/// because "no opinion" is not one of its three answers — see
+/// [`ArchiveFilter`].
 #[derive(Debug, Clone, Default)]
 pub struct TaskFilter {
     pub repository_id: Option<String>,
     pub column: Option<BoardColumn>,
     pub run_state: Option<RunState>,
+    pub archived: ArchiveFilter,
 }
 
 /// What [`crate::tasks::update_task_link`] takes. `label` and `url` are both

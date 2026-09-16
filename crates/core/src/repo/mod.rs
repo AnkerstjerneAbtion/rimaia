@@ -85,7 +85,8 @@ pub async fn list(ctx: &ServiceContext) -> Result<Vec<Repository>> {
         SELECT id, name, path, default_branch, worktree_root, allow_unattended_runs,
                max_concurrency, created_at AS "created_at: chrono::DateTime<chrono::Utc>",
                credential_login, credential_label,
-               credential_added_at AS "credential_added_at: chrono::DateTime<chrono::Utc>"
+               credential_added_at AS "credential_added_at: chrono::DateTime<chrono::Utc>",
+               on_archive AS "on_archive: crate::db::OnArchive", on_archive_script
         FROM repositories
         ORDER BY name ASC, created_at ASC
         "#
@@ -118,7 +119,8 @@ where
         SELECT id, name, path, default_branch, worktree_root, allow_unattended_runs,
                max_concurrency, created_at AS "created_at: chrono::DateTime<chrono::Utc>",
                credential_login, credential_label,
-               credential_added_at AS "credential_added_at: chrono::DateTime<chrono::Utc>"
+               credential_added_at AS "credential_added_at: chrono::DateTime<chrono::Utc>",
+               on_archive AS "on_archive: crate::db::OnArchive", on_archive_script
         FROM repositories
         WHERE id = ?1
         "#,

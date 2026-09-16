@@ -319,6 +319,7 @@ async fn list_tasks_filters_by_repository_column_and_run_state() {
             repository_id: Some(repository_a.clone()),
             column: Some(BoardColumn::Ready),
             run_state: None,
+            ..TaskFilter::default()
         },
     )
     .await
@@ -338,6 +339,7 @@ async fn list_tasks_filters_by_repository_column_and_run_state() {
             repository_id: Some(repository_a),
             column: None,
             run_state: None,
+            ..TaskFilter::default()
         },
     )
     .await
@@ -367,6 +369,7 @@ async fn list_tasks_orders_a_column_by_position() {
             repository_id: Some(repository_id),
             column: Some(BoardColumn::Ready),
             run_state: None,
+            ..TaskFilter::default()
         },
     )
     .await
@@ -1278,6 +1281,7 @@ async fn moving_a_task_to_the_top_of_its_own_column_reorders_it() {
             repository_id: Some(repository_id),
             column: Some(BoardColumn::Ready),
             run_state: None,
+            ..TaskFilter::default()
         },
     )
     .await
@@ -1468,6 +1472,7 @@ async fn a_forced_rebalance_still_lands_the_task_between_its_neighbours() {
             repository_id: Some(repository_id),
             column: Some(BoardColumn::Ready),
             run_state: None,
+            ..TaskFilter::default()
         },
     )
     .await
@@ -1748,6 +1753,7 @@ async fn list_one(h: &TestContext, repository_id: &str, task_id: &str) -> TaskSu
             repository_id: Some(repository_id.to_string()),
             column: None,
             run_state: None,
+            ..TaskFilter::default()
         },
     )
     .await
@@ -1767,6 +1773,7 @@ async fn column_titles(h: &TestContext, repository_id: &str, column: BoardColumn
             repository_id: Some(repository_id.to_string()),
             column: Some(column),
             run_state: None,
+            ..TaskFilter::default()
         },
     )
     .await

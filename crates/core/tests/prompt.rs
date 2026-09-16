@@ -786,6 +786,7 @@ fn task() -> TaskDetail {
             created_at: timestamp(),
             updated_at: timestamp(),
             source: MutationSource::Ui,
+            archived_at: None,
         },
         links: vec![
             link("Asana", "https://app.asana.com/0/1/2", 0.0),
@@ -821,6 +822,8 @@ fn repository() -> Repository {
         credential_login: None,
         credential_label: None,
         credential_added_at: None,
+        on_archive: rimaia_core::db::OnArchive::None,
+        on_archive_script: None,
     }
 }
 

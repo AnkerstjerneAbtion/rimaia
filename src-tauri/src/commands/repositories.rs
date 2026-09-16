@@ -15,9 +15,10 @@
 //! carries the login, the label and the date and never the secret.
 //! Seam-contract D25 records it.
 
+use rimaia_core::archive;
 use rimaia_core::credentials::provision::{self, Verification};
 use rimaia_core::credentials::Secret;
-use rimaia_core::db::Repository;
+use rimaia_core::db::{OnArchive, Repository};
 use rimaia_core::repo::{self, NewRepository, RemoteInfo, RepositoryPatch};
 use rimaia_core::{Error, Result};
 use serde::Deserialize;
@@ -118,6 +119,24 @@ pub async fn set_repository_max_concurrency(
     max_concurrency: i64,
 ) -> Result<Repository> {
     repo::set_max_concurrency(&state.context, &id, max_concurrency).await
+}
+
+/// Chooses what archiving a task in this repository cleans up (ADR-0025
+/// point 4).
+///
+/// Both halves in one call, because the mode and the path are **one**
+/// decision: a row spelling `script` with nothing to run is not one of the
+/// three states, and two commands would make that intermediate reachable. The
+/// script path is validated here rather than when an archive fires, which is
+/// the only moment there is a human present to read the refusal.
+#[tauri::command]
+pub async fn set_repository_on_archive(
+    state: State<'_, AppState>,
+    id: String,
+    on_archive: OnArchive,
+    script: Option<String>,
+) -> Result<Repository> {
+    archive::set_repository_on_archive(&state.context, &id, on_archive, script).await
 }
 
 /// Flips ADR-0012's per-repository opt-in to unattended runs. The

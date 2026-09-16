@@ -40,6 +40,7 @@ function task(overrides: Partial<Task> = {}): Task {
     createdAt: "2026-08-20T11:00:00Z",
     updatedAt: "2026-08-20T11:00:00Z",
     source: "ui",
+    archivedAt: null,
     ...overrides,
   };
 }

@@ -619,8 +619,10 @@ pub(crate) async fn auto_remove_on_done(ctx: &ServiceContext, task_id: &str) {
 
 /// The two run states that mean a process is working in that directory, or one
 /// is about to be. Shared with the inventory so the UI disables the button the
-/// service would refuse.
-fn is_live(run_state: RunState) -> bool {
+/// service would refuse — and, since task 030, with `tasks::archive_task`,
+/// which has to refuse a live task *before* it stamps the row rather than
+/// discovering it inside a cleanup that may not even run (ADR-0025 point 3).
+pub(crate) fn is_live(run_state: RunState) -> bool {
     matches!(run_state, RunState::Running | RunState::WaitingRetry)
 }
 

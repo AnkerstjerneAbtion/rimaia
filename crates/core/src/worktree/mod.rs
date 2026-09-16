@@ -47,7 +47,10 @@ mod base_ref;
 pub mod cleanup;
 mod git;
 mod naming;
-mod safety;
+// `pub(crate)` rather than private since task 030: `archive::validate_script_path`
+// needs the same "absolute, no `..`, canonicalized" rule, and a second copy of
+// that check is exactly what this module's own header argues against.
+pub(crate) mod safety;
 
 pub use cleanup::{
     auto_cleanup, inventory, remove_done_worktrees, remove_merged_worktrees, remove_worktree,

@@ -20,13 +20,13 @@ use serde::Deserialize;
 use chrono::{DateTime, Utc};
 
 use crate::db::settings::Dismissal;
-use crate::db::{BoardColumn, RunState, ScheduleMode, StrategyMode};
+use crate::db::{BoardColumn, OnArchive, RunState, ScheduleMode, StrategyMode};
 use crate::doctor::Check;
 use crate::error::{Error, Result};
 use crate::runner::strategy::PlanSelection;
 use crate::schedule::ScheduleInput;
 use crate::strategy::StrategyApproval;
-use crate::tasks::{StrategyPhase, StrategyPlan, StrategyWorkflow};
+use crate::tasks::{ArchiveFilter, StrategyPhase, StrategyPlan, StrategyWorkflow};
 use crate::worktree::AutoCleanup;
 
 /// `create_task`: a whole plan, handed over in one call.
@@ -75,6 +75,43 @@ pub struct ListTasksRequest {
     pub column: Option<BoardColumn>,
     #[serde(default)]
     pub run_state: Option<RunState>,
+    /// Which side of ADR-0025's archive line to read. Omitted means the board —
+    /// the same default every other caller of `list_tasks` gets, and the reason
+    /// [`ArchiveFilter`]'s `Default` is the load-bearing part of seam-contract
+    /// D26.1 rather than a convenience.
+    #[serde(default)]
+    pub archived: ArchiveFilter,
+}
+
+/// `archive_task` / `unarchive_task`: one task, by id.
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct ArchiveTaskRequest {
+    pub task_id: String,
+}
+
+/// `archive_tasks`: a hand-picked set, in the caller's order.
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct ArchiveTasksRequest {
+    pub task_ids: Vec<String>,
+}
+
+/// `set_repository_on_archive`: the cleanup slot, both halves at once.
+///
+/// One request rather than two tools, because ADR-0025 point 4 makes the mode
+/// and the path **one** decision — a row spelling `script` with nothing to run
+/// is not one of the three states, and two calls would make that intermediate
+/// reachable.
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct SetRepositoryOnArchiveRequest {
+    pub repository_id: String,
+    pub on_archive: OnArchive,
+    /// Required when `on_archive` is `script`, refused otherwise. An absolute
+    /// path to one executable file, never a command line.
+    #[serde(default)]
+    pub script: Option<String>,
 }
 
 /// `update_task`: patch semantics, with erasure spelled out.

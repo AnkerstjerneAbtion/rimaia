@@ -9,8 +9,8 @@
 
 use rimaia_core::db::{BoardColumn, RunState, StrategyMode, Task, TaskLink};
 use rimaia_core::tasks::{
-    self, NewTask, NewTaskLink, Patch, TaskDetail, TaskFilter, TaskLinkPatch, TaskPatch,
-    TaskSummary,
+    self, ArchiveFilter, ArchiveReport, ArchivedTask, NewTask, NewTaskLink, Patch, TaskDetail,
+    TaskFilter, TaskLinkPatch, TaskPatch, TaskSummary,
 };
 use rimaia_core::Result;
 use serde::{Deserialize, Deserializer};
@@ -64,6 +64,11 @@ pub struct TaskFilterInput {
     pub column: Option<BoardColumn>,
     #[serde(default)]
     pub run_state: Option<RunState>,
+    /// Which side of ADR-0025's archive line to read. Absent means the board,
+    /// which is what makes every existing caller keep working (seam-contract
+    /// D26.1).
+    #[serde(default)]
+    pub archived: ArchiveFilter,
 }
 
 /// Deserializes a field that must distinguish "not provided" from "provided
@@ -174,6 +179,7 @@ pub async fn list_tasks(
             repository_id: filter.repository_id,
             column: filter.column,
             run_state: filter.run_state,
+            archived: filter.archived,
         },
     )
     .await
@@ -207,6 +213,29 @@ pub async fn update_task(
 #[tauri::command]
 pub async fn delete_task(state: State<'_, AppState>, id: String) -> Result<()> {
     tasks::delete_task(&state.context, &id).await
+}
+
+/// Takes one task off the board, keeping its runs, its links and its edges
+/// (ADR-0025) — and runs whatever cleanup its repository is configured for.
+///
+/// Refused for a `running` or `waiting_retry` task, with no force to pass.
+#[tauri::command]
+pub async fn archive_task(state: State<'_, AppState>, id: String) -> Result<ArchivedTask> {
+    tasks::archive_task(&state.context, &id).await
+}
+
+/// Archives the board's hand-picked set, reporting refusals instead of
+/// aborting on the first one (seam-contract D20 point 2, D26.3).
+#[tauri::command]
+pub async fn archive_tasks(state: State<'_, AppState>, ids: Vec<String>) -> Result<ArchiveReport> {
+    tasks::archive_tasks(&state.context, &ids).await
+}
+
+/// Puts an archived task back in the column it was in. Nothing the cleanup
+/// deleted comes back.
+#[tauri::command]
+pub async fn unarchive_task(state: State<'_, AppState>, id: String) -> Result<Task> {
+    tasks::unarchive_task(&state.context, &id).await
 }
 
 /// Moves a task to `column`, landing it between `before_id` and `after_id` —

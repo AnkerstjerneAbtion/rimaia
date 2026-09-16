@@ -17,18 +17,19 @@ use schemars::JsonSchema;
 use serde::Serialize;
 
 use crate::analytics::Analytics;
+use crate::archive::OnArchiveOutcome;
 use crate::credentials::StoreStatus;
 use crate::db::settings::Dismissal;
 use crate::db::{
-    BoardColumn, ExitClass, MutationSource, Repository, Run, RunState, RunStatus, Schedule,
-    ScheduleMode, StrategyMode, StrategySource, TaskLink,
+    BoardColumn, ExitClass, MutationSource, OnArchive, Repository, Run, RunState, RunStatus,
+    Schedule, ScheduleMode, StrategyMode, StrategySource, TaskLink,
 };
 use crate::doctor::{CheckResult, DoctorReport};
 use crate::runner::strategy::{PlanOutcome, PlanPass, PlanResult};
 use crate::schedule::{PreflightSummary, ScheduleView as CoreScheduleView};
 use crate::scheduler::RunCapacity;
 use crate::strategy::StrategyApproval;
-use crate::tasks::{TaskDetail, TaskSummary};
+use crate::tasks::{ArchiveReport, ArchivedTask, RefusedArchive, TaskDetail, TaskSummary};
 use crate::worktree::{AutoCleanup, WorktreeInventoryEntry};
 
 /// One registered repository, as `list_repositories` reports it.
@@ -915,6 +916,138 @@ pub struct WorktreeAutoCleanupView {
     pub setting: AutoCleanup,
 }
 
+/// What a repository's archive cleanup did to one task (ADR-0025 point 6).
+///
+/// A flat shape rather than the core enum's tagged one, because a `snake_case`
+/// projection of an externally-tagged enum is a schema an agent has to
+/// destructure before it can say "it removed 900 MB". `detail` is the sentence
+/// to repeat back; the rest is what it is a sentence about.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub struct ArchiveCleanupView {
+    /// `nothing` · `worktree_removed` · `script_ran` · `failed`.
+    pub kind: String,
+    /// Set for `worktree_removed`.
+    pub bytes_freed: Option<u64>,
+    /// Set for `script_ran`; `None` there means the script was killed by a
+    /// signal, which includes the archive timeout.
+    pub exit_code: Option<i32>,
+    /// The script's output tail, or the refusal, or nothing.
+    pub detail: Option<String>,
+    /// Worth putting in front of the user as a problem — a refusal, or a script
+    /// that said no. Computed here so an agent does not re-derive a rule that
+    /// already exists in core.
+    pub needs_attention: bool,
+}
+
+impl From<OnArchiveOutcome> for ArchiveCleanupView {
+    fn from(outcome: OnArchiveOutcome) -> Self {
+        let needs_attention = outcome.needs_attention();
+        match outcome {
+            OnArchiveOutcome::Nothing => Self {
+                kind: "nothing".to_string(),
+                bytes_freed: None,
+                exit_code: None,
+                detail: None,
+                needs_attention,
+            },
+            OnArchiveOutcome::WorktreeRemoved { bytes_freed } => Self {
+                kind: "worktree_removed".to_string(),
+                bytes_freed: Some(bytes_freed),
+                exit_code: None,
+                detail: None,
+                needs_attention,
+            },
+            OnArchiveOutcome::ScriptRan { exit_code, output } => Self {
+                kind: "script_ran".to_string(),
+                bytes_freed: None,
+                exit_code,
+                detail: (!output.is_empty()).then_some(output),
+                needs_attention,
+            },
+            OnArchiveOutcome::Failed { reason } => Self {
+                kind: "failed".to_string(),
+                bytes_freed: None,
+                exit_code: None,
+                detail: Some(reason),
+                needs_attention,
+            },
+        }
+    }
+}
+
+/// One task that left the board.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub struct ArchivedTaskView {
+    pub task_id: String,
+    pub title: String,
+    pub archived_at: DateTime<Utc>,
+    pub cleanup: ArchiveCleanupView,
+}
+
+impl From<ArchivedTask> for ArchivedTaskView {
+    fn from(archived: ArchivedTask) -> Self {
+        Self {
+            task_id: archived.task_id,
+            title: archived.title,
+            archived_at: archived.archived_at,
+            cleanup: archived.cleanup.into(),
+        }
+    }
+}
+
+/// One task a bulk archive would not touch, and the sentence to repeat back.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub struct RefusedArchiveView {
+    pub task_id: String,
+    pub title: String,
+    pub reason: String,
+}
+
+impl From<RefusedArchive> for RefusedArchiveView {
+    fn from(refused: RefusedArchive) -> Self {
+        Self {
+            task_id: refused.task_id,
+            title: refused.title,
+            reason: refused.reason,
+        }
+    }
+}
+
+/// What a bulk archive did, both halves.
+///
+/// Both lists always present, even when empty: a caller that has to
+/// distinguish "nothing was refused" from "the field is missing" is a caller
+/// that will get it wrong once.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub struct ArchiveReportView {
+    pub archived: Vec<ArchivedTaskView>,
+    pub refused: Vec<RefusedArchiveView>,
+}
+
+impl From<ArchiveReport> for ArchiveReportView {
+    fn from(report: ArchiveReport) -> Self {
+        Self {
+            archived: report.archived.into_iter().map(Into::into).collect(),
+            refused: report.refused.into_iter().map(Into::into).collect(),
+        }
+    }
+}
+
+/// A repository's archive cleanup slot, as `set_repository_on_archive` hands it
+/// back.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub struct RepositoryOnArchiveView {
+    pub repository_id: String,
+    pub on_archive: OnArchive,
+    /// The stored path, canonicalized. `None` for every mode but `script`.
+    pub script: Option<String>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -945,6 +1078,7 @@ mod tests {
             created_at: "2026-08-20T12:00:00Z".parse().expect("a literal timestamp"),
             updated_at: "2026-08-20T12:30:00Z".parse().expect("a literal timestamp"),
             source: MutationSource::Mcp,
+            archived_at: None,
         }
     }
 

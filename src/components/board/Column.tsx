@@ -141,7 +141,12 @@ interface ColumnProps {
    *  planning pass and opening is a navigation, and conflating them would mean
    *  a user could not read a card without adding it to the pass. */
   readonly pickedTaskIds: ReadonlySet<string>;
-  readonly onPick: (id: string, picked: boolean) => void;
+  /** `extendRange` is a shift-click (or shift-`x`): take everything between
+   *  this card and the last plainly-picked one, when both are in this column.
+   *  `Board` owns the range arithmetic — see its `rangeBetween`. */
+  readonly onPick: (id: string, picked: boolean, extendRange?: boolean) => void;
+  /** Every displayed card in this column at once. */
+  readonly onPickColumn: (column: BoardColumnId, picked: boolean) => void;
   readonly registerCardRef: (id: string, element: HTMLElement | null) => void;
   readonly onArrowNavigate: (id: string, key: string) => void;
   /** True while a title search is filtering the board — dragging while some
@@ -160,6 +165,7 @@ export function Column({
   onSelect,
   pickedTaskIds,
   onPick,
+  onPickColumn,
   registerCardRef,
   onArrowNavigate,
   dragDisabled,
@@ -171,6 +177,7 @@ export function Column({
   const { setNodeRef, isOver } = useDroppable({ id: column, disabled: dragDisabled });
   const ids = cards.map((card) => card.id);
   const stats = columnStats(cards);
+  const allPicked = cards.length > 0 && cards.every((card) => pickedTaskIds.has(card.id));
 
   return (
     <section className={`board-column board-column-${column}`} aria-label={COLUMN_TITLES[column]}>
@@ -181,6 +188,20 @@ export function Column({
       <header className="board-column-header">
         <div className="board-column-heading">
           <h3>{COLUMN_TITLES[column]}</h3>
+          {/* Most of what the picked set is ever used for is "everything in
+              this column", so it is one control rather than N clicks. Quiet,
+              and revealed the way the card action row is (board.css): a
+              permanent button on all four headers would be four pieces of
+              furniture for something nobody does most of the time. */}
+          {cards.length > 0 && (
+            <button
+              type="button"
+              className="board-column-pick-all"
+              onClick={() => onPickColumn(column, !allPicked)}
+            >
+              {allPicked ? "Clear" : `Select all ${cards.length}`}
+            </button>
+          )}
           <span className="board-column-count tabular-nums">{cards.length}</span>
         </div>
         {/* ADR-0007's "board order *is* execution order", said once where the

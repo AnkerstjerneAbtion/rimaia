@@ -20,6 +20,7 @@ use serde::Serialize;
 use sqlx::sqlite::SqliteRow;
 use sqlx::{FromRow, Row, SqliteConnection, SqlitePool};
 
+use crate::archive::OnArchiveOutcome;
 use crate::context::ServiceContext;
 use crate::db::{
     new_id, BoardColumn, ExitClass, MutationSource, Run, RunState, RunStatus, StrategyMode,
@@ -377,6 +378,14 @@ pub async fn list_tasks(ctx: &ServiceContext, filter: TaskFilter) -> Result<Vec<
     if filter.run_state.is_some() {
         sql.push_str(" AND t.run_state = ?");
     }
+    // ADR-0025's third axis. A literal rather than a bind, and appended
+    // unconditionally rather than behind an `is_some()`, because its "no
+    // opinion" answer is a variant instead of an absence — see
+    // [`ArchiveFilter`] for why the *default* of that enum is the load-bearing
+    // part (seam-contract D26.1).
+    if let Some(predicate) = filter.archived.predicate() {
+        sql.push_str(predicate);
+    }
     // Qualified with `t.`: `runs` carries an `id` and a `task_id` of its own,
     // so an unqualified ordering column would be ambiguous the moment the join
     // above matched.
@@ -656,6 +665,205 @@ pub async fn delete_task(ctx: &ServiceContext, id: &str) -> Result<()> {
 
     ctx.publish(ChangeEvent::tasks([id.to_string()]));
     Ok(())
+}
+
+/// One task that left the board, and what its repository's cleanup did.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ArchivedTask {
+    pub task_id: String,
+    pub title: String,
+    pub archived_at: DateTime<Utc>,
+    /// Carried back rather than logged, because ADR-0025 point 6 makes the
+    /// action the half of this the user explicitly asked for — and because
+    /// asking a second time what the cleanup did would be asking after the
+    /// process had exited and the bytes were gone (seam-contract D26.3).
+    pub cleanup: OnArchiveOutcome,
+}
+
+/// One task a bulk archive declined to touch, and why.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RefusedArchive {
+    pub task_id: String,
+    pub title: String,
+    /// The refusal as [`archive_task`] would have raised it — the same
+    /// sentence, so a user who meets a guard in bulk and then again
+    /// individually is told the same thing twice rather than two things once.
+    pub reason: String,
+}
+
+/// What a bulk archive did and what it would not do.
+///
+/// A report rather than a `Result`, for seam-contract D20 point 2's reason
+/// reached one level up: archiving nine cards must not be stopped by the tenth
+/// being mid-run, and must say which one it was.
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ArchiveReport {
+    pub archived: Vec<ArchivedTask>,
+    pub refused: Vec<RefusedArchive>,
+}
+
+/// Takes a task off the board, keeping everything (ADR-0025).
+///
+/// The opposite of [`delete_task`] in exactly the dimension that matters: the
+/// `runs` rows, the transcripts, the links and the dependency edges all
+/// survive, because this is "I am finished looking at this" rather than "this
+/// never happened". `delete_task` remains the only thing in the product that
+/// removes a `runs` row.
+///
+/// # Order of operations, and why the cleanup is last
+///
+/// Stamp, commit, publish, *then* clean up. The archive has already happened
+/// and been published by the time the repository's configured action starts, so
+/// a cleanup a guard declined cannot report the archive as having failed
+/// (ADR-0025 point 6, seam-contract D20 point 3's argument one level up). The
+/// outcome is carried back on [`ArchivedTask::cleanup`] rather than logged,
+/// because unlike `auto_remove_on_done` the user asked for this one.
+///
+/// # The one guard, and why it has no override
+///
+/// `running` and `waiting_retry` refuse, with no flag anywhere that makes them
+/// available — seam-contract D20 point 1's unoverridable guard, reached here
+/// because archiving is the *trigger* for something that may delete the
+/// directory a process is writing in. `queued` is deliberately allowed:
+/// archiving is how a task leaves tonight's queue without moving backwards on
+/// the board, and it works because
+/// [`scheduler::selection`](crate::scheduler::selection) has no task read of
+/// its own — it calls [`list_tasks`], whose filter defaults to excluding
+/// archived rows.
+#[tracing::instrument(skip_all, fields(source = ctx.source.as_str(), task_id = %id))]
+pub async fn archive_task(ctx: &ServiceContext, id: &str) -> Result<ArchivedTask> {
+    let task = fetch_task_row(&ctx.pool, id).await?;
+
+    if crate::worktree::cleanup::is_live(task.run_state) {
+        return Err(Error::invalid(format!(
+            "\"{title}\" is {state} — it stays on the board until the run finishes. Cancel the \
+             run first; there is no way to force this one, because archiving it could delete a \
+             directory a process is writing in right now. (task {id})",
+            title = task.title,
+            state = match task.run_state {
+                RunState::WaitingRetry => "waiting to retry",
+                _ => "running",
+            },
+        )));
+    }
+
+    if let Some(archived_at) = task.archived_at {
+        // Idempotent rather than an error: the state the caller wanted is the
+        // state it is in, and a bulk archive over a selection that overlaps
+        // what is already archived should not report N refusals for it.
+        return Ok(ArchivedTask {
+            task_id: task.id,
+            title: task.title,
+            archived_at,
+            cleanup: OnArchiveOutcome::Nothing,
+        });
+    }
+
+    let now = ctx.clock.now();
+    sqlx::query!(
+        "UPDATE tasks SET archived_at = ?1, updated_at = ?1 WHERE id = ?2",
+        now,
+        id,
+    )
+    .execute(&ctx.pool)
+    .await?;
+
+    ctx.publish(ChangeEvent::tasks([id.to_string()]));
+
+    let cleanup = crate::archive::run_on_archive(ctx, &task).await;
+    if cleanup.needs_attention() {
+        tracing::info!(task_id = %id, ?cleanup, "an archive's cleanup did not go cleanly");
+    }
+    // The cleanup may have cleared `worktree_path`, which is a card the archive
+    // view renders. One more event rather than one before the action, because
+    // the first publish is what makes the board drop the card promptly and this
+    // one only corrects what the archive list shows.
+    if matches!(cleanup, OnArchiveOutcome::WorktreeRemoved { .. }) {
+        ctx.publish(ChangeEvent::tasks([id.to_string()]));
+    }
+
+    Ok(ArchivedTask {
+        task_id: task.id,
+        title: task.title,
+        archived_at: now,
+        cleanup,
+    })
+}
+
+/// Puts a task back on the board, in the column it never left.
+///
+/// Clears `archived_at` and nothing else. `position` is deliberately untouched:
+/// a rebalance may have happened while the card was away, so the float can
+/// collide with a neighbour's — and [`list_tasks`]' ordering already breaks a
+/// position tie on `created_at` then `id`, exactly as `rebalance_column`
+/// renumbers by. A collision is an ordering question, not a corruption.
+///
+/// Nothing is undone about the cleanup. A worktree that was removed stays
+/// removed and the next run recreates it, which is what
+/// [`worktree::prepare`](crate::worktree::prepare) does for any task that has
+/// none.
+#[tracing::instrument(skip_all, fields(source = ctx.source.as_str(), task_id = %id))]
+pub async fn unarchive_task(ctx: &ServiceContext, id: &str) -> Result<Task> {
+    let task = fetch_task_row(&ctx.pool, id).await?;
+    if task.archived_at.is_none() {
+        return Ok(task);
+    }
+
+    let now = ctx.clock.now();
+    sqlx::query!(
+        "UPDATE tasks SET archived_at = NULL, updated_at = ?1 WHERE id = ?2",
+        now,
+        id,
+    )
+    .execute(&ctx.pool)
+    .await?;
+
+    ctx.publish(ChangeEvent::tasks([id.to_string()]));
+    fetch_task_row(&ctx.pool, id).await
+}
+
+/// Archives every task in `ids`, reporting what it would not touch.
+///
+/// A loop over [`archive_task`] collecting refusals instead of aborting, the
+/// way `worktree::cleanup::sweep` loops `remove_worktree` — and for the same
+/// reason (seam-contract D20 point 2, D26.3). One click standing in for N
+/// decisions carries exactly the authority one click would have: there is no
+/// force here, because [`archive_task`] has none to pass.
+///
+/// Order is the caller's. The board hands over the picked set, and a user
+/// reading a report of nine successes and one refusal is reading it against the
+/// order they picked in.
+#[tracing::instrument(skip_all, fields(source = ctx.source.as_str(), count = ids.len()))]
+pub async fn archive_tasks(ctx: &ServiceContext, ids: &[String]) -> Result<ArchiveReport> {
+    if ids.is_empty() {
+        return Err(Error::invalid("name at least one task to archive"));
+    }
+
+    let mut report = ArchiveReport::default();
+    for id in ids {
+        match archive_task(ctx, id).await {
+            Ok(archived) => report.archived.push(archived),
+            Err(error) => {
+                // The title is worth a second read: a report that named ten
+                // uuids would be unreadable, and the row may be gone entirely,
+                // in which case the id is genuinely all there is to say.
+                let title = fetch_task_row(&ctx.pool, id)
+                    .await
+                    .map(|task| task.title)
+                    .unwrap_or_else(|_| id.clone());
+                report.refused.push(RefusedArchive {
+                    task_id: id.clone(),
+                    title,
+                    reason: error.to_string(),
+                });
+            }
+        }
+    }
+
+    Ok(report)
 }
 
 /// Moves a task to `column`, landing it between `before_id` (the card that
@@ -1040,7 +1248,8 @@ where
             strategy_plan, strategy_source AS "strategy_source: StrategySource",
             strategy_updated_at AS "strategy_updated_at: DateTime<Utc>",
             created_at AS "created_at: DateTime<Utc>", updated_at AS "updated_at: DateTime<Utc>",
-            source AS "source: MutationSource"
+            source AS "source: MutationSource",
+            archived_at AS "archived_at: DateTime<Utc>"
            FROM tasks WHERE id = ?1"#,
         id,
     )
@@ -1296,6 +1505,7 @@ mod tests {
                 created_at: "2026-08-20T12:00:00Z".parse().expect("a literal timestamp"),
                 updated_at: "2026-08-20T12:30:00Z".parse().expect("a literal timestamp"),
                 source: MutationSource::Ui,
+                archived_at: None,
             },
             link_count: 2,
             dependency_count: 1,
@@ -1370,6 +1580,7 @@ mod tests {
                 created_at: "2026-08-20T12:00:00Z".parse().expect("a literal timestamp"),
                 updated_at: "2026-08-20T12:00:00Z".parse().expect("a literal timestamp"),
                 source: MutationSource::Mcp,
+                archived_at: None,
             },
             link_count: 0,
             dependency_count: 0,
@@ -1707,6 +1918,7 @@ mod tests {
                 created_at: crate::testing::test_epoch(),
                 updated_at: crate::testing::test_epoch(),
                 source: MutationSource::Ui,
+                archived_at: None,
             },
             link_count: 0,
             dependency_count: 0,

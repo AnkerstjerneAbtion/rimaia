@@ -11,6 +11,7 @@ import {
   findCard,
   isEditableTarget,
   nextFocusTarget,
+  rangeBetween,
   resolveDrop,
 } from "./Board";
 import { COLUMN_TITLES } from "./Column";
@@ -87,6 +88,7 @@ function task(overrides: Partial<Task> = {}): Task {
     createdAt: "2026-08-20T11:00:00Z",
     updatedAt: "2026-08-20T11:00:00Z",
     source: "ui",
+    archivedAt: null,
     ...overrides,
   };
 }
@@ -101,6 +103,8 @@ function repository(overrides: Partial<Repository> = {}): Repository {
     allowUnattendedRuns: false,
     maxConcurrency: 1,
     createdAt: "2026-08-20T09:00:00Z",
+    onArchive: "none",
+    onArchiveScript: null,
     ...overrides,
   };
 }
@@ -235,6 +239,40 @@ describe("nextFocusTarget", () => {
   });
 });
 
+describe("rangeBetween", () => {
+  const columns = groupIntoColumns([
+    task({ id: "a", column: "ready", position: 0 }),
+    task({ id: "b", column: "ready", position: 1 }),
+    task({ id: "c", column: "ready", position: 2 }),
+    task({ id: "x", column: "in_review", position: 0 }),
+  ]);
+
+  it("takes both ends and everything between them", () => {
+    expect(rangeBetween(columns, "a", "c")).toEqual(["a", "b", "c"]);
+  });
+
+  it("reads the same upwards as downwards", () => {
+    // A shift-click is a gesture between two points, not a direction.
+    expect(rangeBetween(columns, "c", "a")).toEqual(["a", "b", "c"]);
+  });
+
+  it("is just the one card when both ends are the same", () => {
+    expect(rangeBetween(columns, "b", "b")).toEqual(["b"]);
+  });
+
+  it("refuses a range across two columns rather than guessing at a big one", () => {
+    // The cards visually "between" a `ready` card and an `in_review` one are
+    // the rest of `ready` plus the whole of `in_review`, which is never what
+    // the gesture meant — so the caller falls back to picking the one card.
+    expect(rangeBetween(columns, "a", "x")).toBeNull();
+  });
+
+  it("returns null for an id the board does not hold", () => {
+    expect(rangeBetween(columns, "a", "ghost")).toBeNull();
+    expect(rangeBetween(columns, "ghost", "a")).toBeNull();
+  });
+});
+
 describe("isEditableTarget", () => {
   it("treats inputs, textareas and contenteditable elements as typing surfaces", () => {
     expect(isEditableTarget(document.createElement("input"))).toBe(true);
@@ -361,6 +399,296 @@ describe("Board", () => {
     // Scoped to the card's own repo label - the toolbar's repository filter
     // also renders "rimaia", as an <option>.
     expect(screen.getAllByText("rimaia", { selector: ".task-card-repo" })).toHaveLength(2);
+  });
+
+  it("archives the picked cards and reports what was refused", async () => {
+    // Task 023's picked set, driving ADR-0025's bulk archive. The report is
+    // the point: nine safe cards must not be held up by a tenth that is
+    // mid-run, and the user has to be told which one.
+    mockBackend({
+      tasks: [
+        task({ id: "a", column: "ready", title: "Done with this" }),
+        task({ id: "b", column: "ready", title: "Mid-flight", runState: "running" }),
+      ],
+    });
+    mockInvoke.mockImplementation(async (command) => {
+      if (command === "list_tasks") {
+        return [
+          task({ id: "a", column: "ready", title: "Done with this" }),
+          task({ id: "b", column: "ready", title: "Mid-flight", runState: "running" }),
+        ];
+      }
+      if (command === "list_repositories") return [repository()];
+      if (command === "archive_tasks") {
+        return {
+          archived: [
+            { taskId: "a", title: "Done with this", archivedAt: "x", cleanup: { kind: "nothing" } },
+          ],
+          refused: [{ taskId: "b", title: "Mid-flight", reason: "Cancel the run first" }],
+        };
+      }
+      throw new Error(`unexpected command: ${command}`);
+    });
+
+    render(<Board />);
+    fireEvent.click(await screen.findByRole("checkbox", { name: 'Select "Done with this"' }));
+    fireEvent.click(screen.getByRole("checkbox", { name: 'Select "Mid-flight"' }));
+    fireEvent.click(screen.getByRole("button", { name: "Archive 2 selected" }));
+
+    expect(mockInvoke).toHaveBeenCalledWith("archive_tasks", { ids: ["a", "b"] });
+    expect(
+      await screen.findByText(/Archived 1 task\. Left 1 alone — Mid-flight: Cancel the run first/),
+    ).toBeInTheDocument();
+  });
+
+  it("shift-clicking a checkbox picks everything between it and the last pick", async () => {
+    mockBackend({
+      tasks: [
+        task({ id: "a", column: "ready", position: 0, title: "One" }),
+        task({ id: "b", column: "ready", position: 1, title: "Two" }),
+        task({ id: "c", column: "ready", position: 2, title: "Three" }),
+      ],
+    });
+
+    render(<Board />);
+    fireEvent.click(await screen.findByRole("checkbox", { name: 'Select "One"' }));
+    fireEvent.click(screen.getByRole("checkbox", { name: 'Select "Three"' }), {
+      shiftKey: true,
+    });
+
+    expect(screen.getByRole("button", { name: "Archive 3 selected" })).toBeInTheDocument();
+    expect(screen.getByRole("checkbox", { name: 'Select "Two"' })).toBeChecked();
+  });
+
+  it("shift-clicking the card body extends the range, without opening it", async () => {
+    // The gesture every file manager already taught the user: shift-click the
+    // row, not the 16px box on it.
+    mockBackend({
+      tasks: [
+        task({ id: "a", column: "ready", position: 0, title: "One" }),
+        task({ id: "b", column: "ready", position: 1, title: "Two" }),
+        task({ id: "c", column: "ready", position: 2, title: "Three" }),
+      ],
+    });
+
+    render(<Board />);
+    fireEvent.click(await screen.findByRole("checkbox", { name: 'Select "One"' }));
+    fireEvent.click(screen.getByText("Three").closest("article")!, { shiftKey: true });
+
+    expect(screen.getByRole("button", { name: "Archive 3 selected" })).toBeInTheDocument();
+    // A pick, not an open — the drawer is still what a plain click is for.
+    expect(screen.queryByRole("complementary")).not.toBeInTheDocument();
+  });
+
+  it("still opens a card on a plain click while other cards are picked", async () => {
+    // The whole argument against a selection mode: a plain click means one
+    // thing, whatever is picked elsewhere on the board.
+    mockBackend({
+      tasks: [
+        task({ id: "a", column: "ready", position: 0, title: "One" }),
+        task({ id: "b", column: "ready", position: 1, title: "Two" }),
+      ],
+    });
+
+    render(<Board />);
+    fireEvent.click(await screen.findByRole("checkbox", { name: 'Select "One"' }));
+    fireEvent.click(screen.getByText("Two").closest("article")!);
+
+    expect(await screen.findByRole("complementary")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Archive 1 selected" })).toBeInTheDocument();
+  });
+
+  it("shift-clicking a card with nothing picked takes just that card", async () => {
+    mockBackend({ tasks: [task({ id: "a", title: "One" })] });
+
+    render(<Board />);
+    fireEvent.click((await screen.findByText("One")).closest("article")!, { shiftKey: true });
+
+    expect(screen.getByRole("button", { name: "Archive 1 selected" })).toBeInTheDocument();
+  });
+
+  it("picks only the one card when a shift-click crosses columns", async () => {
+    // `rangeBetween` refuses the range; the click still has to do the ordinary
+    // thing rather than nothing at all.
+    mockBackend({
+      tasks: [
+        task({ id: "a", column: "ready", title: "Queued" }),
+        task({ id: "x", column: "in_review", title: "Waiting on you" }),
+      ],
+    });
+
+    render(<Board />);
+    fireEvent.click(await screen.findByRole("checkbox", { name: 'Select "Queued"' }));
+    fireEvent.click(screen.getByRole("checkbox", { name: 'Select "Waiting on you"' }), {
+      shiftKey: true,
+    });
+
+    expect(screen.getByRole("button", { name: "Archive 2 selected" })).toBeInTheDocument();
+  });
+
+  it("flags the card it moves focus to, so the ring shows in WebKit", async () => {
+    // WebKit does not match `:focus-visible` on a programmatic `focus()`, so
+    // arrow navigation moved focus silently and the outline only appeared
+    // once a later keypress convinced the engine a keyboard was in use.
+    mockBackend({
+      tasks: [
+        task({ id: "a", column: "ready", position: 0, title: "One" }),
+        task({ id: "b", column: "ready", position: 1, title: "Two" }),
+      ],
+    });
+
+    render(<Board />);
+    const first = (await screen.findByText("One")).closest("article")!;
+    const second = screen.getByText("Two").closest("article")!;
+
+    fireEvent.keyDown(first, { key: "ArrowDown" });
+
+    expect(second).toHaveFocus();
+    expect(second).toHaveAttribute("data-keyboard-focused");
+
+    // And it goes again the moment focus does, so a stale flag can never
+    // outline a card nobody is on.
+    fireEvent.blur(second);
+    expect(second).not.toHaveAttribute("data-keyboard-focused");
+  });
+
+  it("toggles the focused card's pick with x, without opening it", async () => {
+    mockBackend({ tasks: [task({ id: "a", title: "One" })] });
+    render(<Board />);
+    const card = (await screen.findByText("One")).closest("article");
+
+    fireEvent.keyDown(card!, { key: "x" });
+    expect(screen.getByRole("button", { name: "Archive 1 selected" })).toBeInTheDocument();
+    // `x` is a pick, not an open — the drawer is what Enter is for.
+    expect(screen.queryByRole("complementary")).not.toBeInTheDocument();
+
+    fireEvent.keyDown(card!, { key: "x" });
+    expect(
+      screen.queryByRole("button", { name: /Archive \d+ selected/ }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("extends the range from the keyboard with shift+x", async () => {
+    mockBackend({
+      tasks: [
+        task({ id: "a", column: "ready", position: 0, title: "One" }),
+        task({ id: "b", column: "ready", position: 1, title: "Two" }),
+        task({ id: "c", column: "ready", position: 2, title: "Three" }),
+      ],
+    });
+
+    render(<Board />);
+    fireEvent.keyDown((await screen.findByText("One")).closest("article")!, { key: "x" });
+    fireEvent.keyDown(screen.getByText("Three").closest("article")!, {
+      key: "X",
+      shiftKey: true,
+    });
+
+    expect(screen.getByRole("button", { name: "Archive 3 selected" })).toBeInTheDocument();
+  });
+
+  it("picks a whole column, and clears it again", async () => {
+    // "Archive everything in Done" is most of what the picked set is for.
+    mockBackend({
+      tasks: [
+        task({ id: "a", column: "done", position: 0, title: "One" }),
+        task({ id: "b", column: "done", position: 1, title: "Two" }),
+        task({ id: "c", column: "ready", title: "Still queued" }),
+      ],
+    });
+
+    render(<Board />);
+    fireEvent.click(await screen.findByRole("button", { name: "Select all 2" }));
+
+    expect(screen.getByRole("button", { name: "Archive 2 selected" })).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Clear" }));
+    expect(
+      screen.queryByRole("button", { name: /Archive \d+ selected/ }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("takes only the cards the search box is showing", async () => {
+    // The control obeys what is displayed rather than quietly taking cards the
+    // user cannot see.
+    mockBackend({
+      tasks: [
+        task({ id: "a", column: "done", position: 0, title: "Parser work" }),
+        task({ id: "b", column: "done", position: 1, title: "Something else" }),
+      ],
+    });
+
+    render(<Board />);
+    fireEvent.change(await screen.findByLabelText("Search task titles"), {
+      target: { value: "parser" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Select all 1" }));
+
+    expect(screen.getByRole("button", { name: "Archive 1 selected" })).toBeInTheDocument();
+  });
+
+  it("offers no bulk archive until something is picked", async () => {
+    mockBackend({ tasks: [task({ id: "a", title: "Done with this" })] });
+    render(<Board />);
+    await screen.findByText("Done with this");
+
+    expect(screen.queryByRole("button", { name: /Archive \d+ selected/ })).not.toBeInTheDocument();
+  });
+
+  it("drops a picked id when the card it named disappears", async () => {
+    // The prune `selectedTaskId` has always had and the picked set never did
+    // (seam-contract D26.6). A stale id is now a stale *archive* target, so
+    // "Archive 1 selected" must not survive the card leaving the board.
+    //
+    // Driven by the repository filter rather than by a `tasks:changed` event,
+    // because `mockBackend` keeps one handler per event name and every
+    // rendered `TaskCard` subscribes to that name too — firing the map entry
+    // would reach the last card mounted, not the board.
+    mockBackend({ tasks: [] });
+    mockInvoke.mockImplementation(async (command, args) => {
+      if (command === "list_tasks") {
+        const filter = (args as { filter?: { repositoryId?: string } }).filter;
+        return filter?.repositoryId === "repo-2"
+          ? []
+          : [task({ id: "a", title: "Done with this" })];
+      }
+      if (command === "list_repositories") {
+        return [repository(), repository({ id: "repo-2", name: "other" })];
+      }
+      throw new Error(`unexpected command: ${command}`);
+    });
+
+    render(<Board />);
+    fireEvent.click(await screen.findByRole("checkbox", { name: 'Select "Done with this"' }));
+    expect(screen.getByRole("button", { name: "Archive 1 selected" })).toBeInTheDocument();
+
+    fireEvent.change(screen.getByLabelText("Repository"), { target: { value: "repo-2" } });
+
+    await waitFor(() =>
+      expect(
+        screen.queryByRole("button", { name: /Archive \d+ selected/ }),
+      ).not.toBeInTheDocument(),
+    );
+  });
+
+  it("swaps the columns for the archive, reading the same list with the filter flipped", async () => {
+    mockBackend({ tasks: [] });
+    mockInvoke.mockImplementation(async (command, args) => {
+      if (command === "list_tasks") {
+        const filter = (args as { filter?: { archived?: string } }).filter;
+        return filter?.archived === "archived"
+          ? [task({ id: "z", title: "Put down in July", archivedAt: "2026-07-01T10:00:00Z" })]
+          : [];
+      }
+      if (command === "list_repositories") return [repository()];
+      throw new Error(`unexpected command: ${command}`);
+    });
+
+    render(<Board />);
+    fireEvent.click(await screen.findByRole("button", { name: "Archive" }));
+
+    expect(await screen.findByText("Put down in July")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Back to the board" })).toBeInTheDocument();
   });
 
   it("shows what belongs in an empty column instead of a blank box", async () => {

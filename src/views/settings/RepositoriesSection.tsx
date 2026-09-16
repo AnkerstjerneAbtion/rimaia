@@ -9,6 +9,7 @@ import {
   listRepositories,
   removeRepository,
   setRepositoryMaxConcurrency,
+  setRepositoryOnArchive,
   setRepositoryUnattendedRuns,
   setStrategyDefaults,
   toRimaiaError,
@@ -17,12 +18,14 @@ import {
 import { subscribeToRepositoriesChanged } from "../../lib/events";
 import type {
   Catalogue,
+  OnArchive,
   RemoteInfo,
   Repository,
   RimaiaError,
   StrategyDefaults,
 } from "../../types";
 import { CredentialSection } from "./CredentialSection";
+import { OnArchiveFields } from "./OnArchiveFields";
 import { StrategyDefaultsFields } from "./StrategyDefaultsFields";
 
 /**
@@ -246,6 +249,24 @@ export function RepositoriesSection() {
     }
   }
 
+  // Not optimistic, for `handleConcurrencyChange`'s reason and one more: the
+  // script path is *validated* on write — absolute, existing, a file,
+  // executable — so a form that painted the new value first would be claiming
+  // a cleanup the database refused.
+  async function handleOnArchiveChange(
+    repository: Repository,
+    mode: OnArchive,
+    script: string | null,
+  ) {
+    setRowErrors((prev) => ({ ...prev, [repository.id]: null }));
+    try {
+      await setRepositoryOnArchive(repository.id, mode, script);
+      refresh();
+    } catch (thrown) {
+      setRowErrors((prev) => ({ ...prev, [repository.id]: toRimaiaError(thrown) }));
+    }
+  }
+
   async function confirmEnableUnattended(repository: Repository) {
     setRowErrors((prev) => ({ ...prev, [repository.id]: null }));
     try {
@@ -425,6 +446,16 @@ export function RepositoriesSection() {
                       : "Raise this only for a repository whose tasks genuinely do not interfere. Running several repositories at once needs nothing here."}
                   </p>
                 </div>
+
+                {/* ADR-0025's cleanup slot. Beside the concurrency control
+                    rather than in Settings → Storage, because what a teardown
+                    has to do is a fact about *this* repository's
+                    infrastructure — a global one would either be useless or
+                    would run the wrong teardown against the wrong project. */}
+                <OnArchiveFields
+                  repository={repository}
+                  onChange={(mode, script) => handleOnArchiveChange(repository, mode, script)}
+                />
 
                 {/* Beside the opt-in, because the two answer the same
                     question about this repository: what a run here is allowed

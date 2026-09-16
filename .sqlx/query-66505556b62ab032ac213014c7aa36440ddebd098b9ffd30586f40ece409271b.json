@@ -1,6 +1,6 @@
 {
   "db_name": "SQLite",
-  "query": "\n        SELECT id, name, path, default_branch, worktree_root, allow_unattended_runs,\n               max_concurrency, created_at AS \"created_at: chrono::DateTime<chrono::Utc>\",\n               credential_login, credential_label,\n               credential_added_at AS \"credential_added_at: chrono::DateTime<chrono::Utc>\"\n        FROM repositories\n        ORDER BY name ASC, created_at ASC\n        ",
+  "query": "SELECT id, name, path, default_branch, worktree_root, allow_unattended_runs,\n            max_concurrency, created_at AS \"created_at: DateTime<Utc>\",\n            credential_login, credential_label,\n            credential_added_at AS \"credential_added_at: DateTime<Utc>\",\n            on_archive AS \"on_archive: rimaia_core::db::OnArchive\", on_archive_script\n           FROM repositories WHERE id = ?1",
   "describe": {
     "columns": [
       {
@@ -39,7 +39,7 @@
         "type_info": "Integer"
       },
       {
-        "name": "created_at: chrono::DateTime<chrono::Utc>",
+        "name": "created_at: DateTime<Utc>",
         "ordinal": 7,
         "type_info": "Text"
       },
@@ -54,13 +54,23 @@
         "type_info": "Text"
       },
       {
-        "name": "credential_added_at: chrono::DateTime<chrono::Utc>",
+        "name": "credential_added_at: DateTime<Utc>",
         "ordinal": 10,
+        "type_info": "Text"
+      },
+      {
+        "name": "on_archive: rimaia_core::db::OnArchive",
+        "ordinal": 11,
+        "type_info": "Text"
+      },
+      {
+        "name": "on_archive_script",
+        "ordinal": 12,
         "type_info": "Text"
       }
     ],
     "parameters": {
-      "Right": 0
+      "Right": 1
     },
     "nullable": [
       false,
@@ -73,8 +83,10 @@
       false,
       true,
       true,
+      true,
+      false,
       true
     ]
   },
-  "hash": "29516052113d64a8a06304aea563f9a48349e959a44b1373ef450d41b0126892"
+  "hash": "66505556b62ab032ac213014c7aa36440ddebd098b9ffd30586f40ece409271b"
 }

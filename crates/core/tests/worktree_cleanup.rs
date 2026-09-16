@@ -907,6 +907,7 @@ impl Fixture {
                 repository_id: Some(self.repository.id.clone()),
                 column: Some(column),
                 run_state: None,
+                ..tasks::TaskFilter::default()
             },
         )
         .await

@@ -1,0 +1,76 @@
+-- Archiving, and what one archive is allowed to clean up (ADR-0025, task 030).
+--
+-- # The seventh migration, and the ask D4 demands
+--
+-- Seam-contract D4 fixes the list and says "a task that believes it needs a
+-- seventh stops and asks". Task 030 believed it; D4's 2026-09-15 amendment is
+-- the answer, and it is where the argument lives rather than here. The short
+-- version: none of these three columns could ride along with an existing file,
+-- because every existing file is merged and has already run on the user's own
+-- database, and ADR-0003 makes those append-only outright.
+--
+-- The timestamp sorts after every migration already on disk. That is D4's own
+-- 2026-09-02 lesson applied — a reserved filename is a bet on merge order this
+-- repository cannot make.
+
+-- # A third axis, not a fifth column
+--
+-- ADR-0007 refused to make execution state a fifth board column and gave the
+-- reason: the column says where a task is in *your* process, and a second
+-- question needs a second field. "Is this still on the board at all" is a third
+-- question, orthogonal to both — a `done` task and a `not_ready` task can each
+-- be archived, and unarchiving returns a card to the column it never left.
+--
+-- The schema says the same thing independently: `board_column`'s CHECK is four
+-- literals, SQLite cannot widen one in place, and two tests already pin the
+-- string 'archived' as an *invalid* column value on purpose
+-- (`an_unrecognised_board_column_is_refused` in crates/core/tests/store.rs, and
+-- "drops a card whose column is none of the four" in src/lib/board.test.ts). A
+-- fifth column would have had to delete both of them to land.
+--
+-- Nullable, and NULL *is* "on the board" — the same shape `run_environment`
+-- uses for its default (20260820120100_seed_settings.sql): one spelling for one
+-- state, so there is nothing for a boolean and a timestamp to disagree about.
+-- When it is set it is RFC 3339 UTC like every other timestamp in this schema,
+-- and it is what the archive view sorts by.
+--
+-- No index. `idx_tasks_board` already leads with `repository_id` and this is one
+-- desktop user's board; a second index on a column with two distinct values
+-- would cost writes and buy nothing.
+ALTER TABLE tasks ADD COLUMN archived_at TEXT;
+
+-- # The cleanup slot: one field, three states
+--
+-- ADR-0025 point 4. A script and the built-in worktree removal are mutually
+-- exclusive *by construction* rather than by a rule in the service — two live
+-- fields would let a user configure Rimaia's guarded removal to run against a
+-- directory their script had already deleted, and would make "what happens when
+-- I archive" a two-field question.
+--
+-- On the repository row rather than in `settings`, against D3's usual pull,
+-- because a teardown command is a fact about one repository's infrastructure.
+-- There is deliberately no global default: one script that must branch on
+-- $RIMAIA_REPOSITORY_PATH is a per-repository setting the user implements
+-- themselves, in bash.
+--
+-- NOT NULL DEFAULT 'none' with the whole domain in the CHECK, for the reason
+-- 20260826120000_task_source.sql's header gives: SQLite cannot widen a CHECK
+-- afterwards, so a fourth mode would be a rename-copy-drop rebuild. Three is
+-- the design (ADR-0025 point 4) and a fourth would be an architectural change
+-- anyway. The backfill is O(1) — the default is recorded in the schema, not
+-- written into every row — and 'none' is the fact rather than a guess, since no
+-- repository that exists when this runs has ever been asked the question.
+ALTER TABLE repositories ADD COLUMN on_archive TEXT NOT NULL DEFAULT 'none'
+    CHECK (on_archive IN ('none', 'remove_worktree', 'script'));
+
+-- An absolute path to one executable file, never a command line (ADR-0025
+-- point 5): splitting a command line correctly is shell quoting, which is
+-- `sh -c` with our own bugs, and CLAUDE.md forbids it for a reason that starts
+-- with repository paths containing spaces.
+--
+-- Nullable, and meaningful only when `on_archive = 'script'`. The service
+-- refuses to write one without the other and validates the path when it is
+-- *written* — absolute, exists, a file, executable — so a broken path is a form
+-- error rather than a surprise at 3am. It is not a CHECK because none of those
+-- four properties is knowable from the string.
+ALTER TABLE repositories ADD COLUMN on_archive_script TEXT;

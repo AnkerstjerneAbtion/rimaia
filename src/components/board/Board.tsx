@@ -17,8 +17,9 @@ import type {
 } from "@dnd-kit/core";
 import { sortableKeyboardCoordinates } from "@dnd-kit/sortable";
 
-import { createTask, toRimaiaError } from "../../lib/commands";
+import { archiveTasks, createTask, toRimaiaError } from "../../lib/commands";
 import { BOARD_COLUMNS, visibleColumns } from "../../lib/board";
+import { describeArchiveReport } from "../../lib/archive";
 import type { BoardCard, BoardColumns } from "../../lib/board";
 import type { BoardColumn, RimaiaError, Task, TaskSummary } from "../../types";
 import { useRepositories, useTasks } from "../../hooks/useTasks";
@@ -26,6 +27,7 @@ import { ErrorBanner } from "../ErrorBanner";
 import { BoardToolbar } from "./BoardToolbar";
 import { PlanPassPanel, usePlanPass } from "./PlanPassPanel";
 import { Column, COLUMN_TITLES } from "./Column";
+import { ArchiveList } from "./ArchiveList";
 import { TaskCardPreview } from "./TaskCard";
 import { TaskDetailPanel } from "./TaskDetailPanel";
 
@@ -171,6 +173,39 @@ export function nextFocusTarget(
   return null;
 }
 
+/**
+ * Every card id from `anchorId` to `targetId` inclusive — what a shift-click
+ * on the pick checkbox takes.
+ *
+ * `null` when either id is unknown, or when the two sit in **different
+ * columns**. "Everything between" is only a meaningful phrase down one column:
+ * on a board laid out in four, the cards visually between a `ready` card and a
+ * `done` one are the rest of `ready` plus the whole of `in_review`, which is
+ * never what the gesture meant. A cross-column shift-click therefore falls
+ * back to picking the one card, rather than guessing at a large answer.
+ *
+ * Order-insensitive: shift-clicking upwards takes the same range as
+ * shift-clicking down.
+ */
+export function rangeBetween(
+  columns: BoardColumns<Task>,
+  anchorId: string,
+  targetId: string,
+): string[] | null {
+  const column = BOARD_COLUMNS.find((candidate) =>
+    columns[candidate].some((card) => card.id === anchorId),
+  );
+  if (!column) return null;
+
+  const list = columns[column];
+  const from = list.findIndex((card) => card.id === anchorId);
+  const to = list.findIndex((card) => card.id === targetId);
+  if (from === -1 || to === -1) return null;
+
+  const [start, end] = from <= to ? [from, to] : [to, from];
+  return list.slice(start, end + 1).map((card) => card.id);
+}
+
 /** `n` and `/` must not fire while the user is typing anywhere editable —
  *  task 005's own wording for the plan textarea, generalised to every
  *  editable surface so it keeps holding once stage 3 adds one. */
@@ -191,18 +226,31 @@ export function isEditableTarget(target: EventTarget | null): boolean {
 
 export function Board() {
   const [repositoryFilter, setRepositoryFilter] = useState<string | null>(null);
+  // ADR-0025's archive, as a view of the same read rather than a second one:
+  // `useTasks` flips `list_tasks`' filter and everything downstream — the
+  // projection, the ordering, the `tasks:changed` subscription — is unchanged.
+  const [showArchive, setShowArchive] = useState(false);
   const { repositories, error: repositoriesError } = useRepositories();
-  const { state, loading, readError, refresh, moveCard, dismissRejection } =
-    useTasks(repositoryFilter);
+  const { state, loading, readError, refresh, moveCard, dismissRejection } = useTasks(
+    repositoryFilter,
+    showArchive ? "archived" : "active",
+  );
 
   const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
   // Task 023's hand-picked set, kept beside `selectedTaskId` rather than merged
   // into it: opening a card to read it must not add it to the next pass.
   const [pickedTaskIds, setPickedTaskIds] = useState<ReadonlySet<string>>(new Set());
+  // Where the next shift-click measures from. A ref rather than state: it
+  // changes nothing on screen by itself, and a re-render per checkbox click
+  // to store it would be a render nobody can see.
+  const pickAnchorId = useRef<string | null>(null);
   const planPass = usePlanPass();
   const [searchQuery, setSearchQuery] = useState("");
   const [activeId, setActiveId] = useState<string | null>(null);
   const [createError, setCreateError] = useState<RimaiaError | null>(null);
+  const [archiving, setArchiving] = useState(false);
+  const [archiveReport, setArchiveReport] = useState<string | null>(null);
+  const [archiveError, setArchiveError] = useState<RimaiaError | null>(null);
 
   // Re-renders every 30s so "relative time of last activity" does not go
   // stale while a card just sits there — a UI refresh tick, not a fake-able
@@ -263,6 +311,19 @@ export function Board() {
     // out by a repository switch — rather than showing stale content.
     if (selectedTaskId && !selectedTask) setSelectedTaskId(null);
   }, [selectedTaskId, selectedTask]);
+
+  // The same rule for the picked set, which has never had it (seam-contract
+  // D26.6). It was harmless while the set only fed a planner that resolves
+  // ids and refuses unknown ones with a sentence; it is not harmless now that
+  // a stale id is a stale *archive* target.
+  useEffect(() => {
+    setPickedTaskIds((current) => {
+      if (current.size === 0) return current;
+      const live = new Set(state.tasks.map((task) => task.id));
+      const next = new Set([...current].filter((id) => live.has(id)));
+      return next.size === current.size ? current : next;
+    });
+  }, [state.tasks]);
 
   // The other half of the detail panel's focus handling: it is an overlay
   // drawer that takes focus when it opens, so closing it has to give focus
@@ -325,9 +386,36 @@ export function Board() {
     setActiveId(null);
   }
 
+  /**
+   * Moves focus to the next card, and makes the ring visible while doing it.
+   *
+   * `focus()` on its own is not enough. WebKit — which is what a Tauri window
+   * is on macOS — does not match `:focus-visible` on an element focused
+   * programmatically, so the card took focus silently and the outline only
+   * appeared once some later keypress convinced the engine a keyboard was in
+   * use. `focus({ focusVisible: true })` is Firefox-only, so the flag is ours.
+   *
+   * An attribute rather than state, because state here would re-render every
+   * card on the board on every arrow press for a two-pixel outline. It is
+   * removed on the card's own blur, and `board.css` requires `:focus`
+   * alongside it, so a flag left behind by anything can never outline a card
+   * that does not have focus.
+   */
   function handleArrowNavigate(fromId: string, key: string) {
     const targetId = nextFocusTarget(filteredColumns, fromId, key);
-    if (targetId) cardRefs.current.get(targetId)?.focus();
+    if (!targetId) return;
+    const element = cardRefs.current.get(targetId);
+    if (!element) return;
+
+    element.dataset.keyboardFocused = "true";
+    element.addEventListener(
+      "blur",
+      () => {
+        delete element.dataset.keyboardFocused;
+      },
+      { once: true },
+    );
+    element.focus();
   }
 
   const handleNewTask = useCallback(() => {
@@ -414,6 +502,72 @@ export function Board() {
 
   const activeCard = findCard(columns, activeId);
 
+  /**
+   * One card picked or unpicked — or, with `extendRange`, everything between
+   * it and the last plainly-picked card.
+   *
+   * The anchor moves on a plain pick and **stays** through a range, which is
+   * Finder's and Explorer's behaviour: shift-clicking again adjusts the same
+   * range rather than starting a new one from wherever the pointer happened to
+   * land. A range that `rangeBetween` refused — the two cards are in different
+   * columns — is a plain pick, so the anchor moves with it.
+   */
+  const handlePick = useCallback(
+    (id: string, picked: boolean, extendRange = false) => {
+      const range =
+        extendRange && pickAnchorId.current !== null
+          ? rangeBetween(filteredColumns, pickAnchorId.current, id)
+          : null;
+
+      setPickedTaskIds((current) => {
+        const next = new Set(current);
+        for (const each of range ?? [id]) {
+          if (picked) next.add(each);
+          else next.delete(each);
+        }
+        return next;
+      });
+
+      if (range === null) pickAnchorId.current = id;
+    },
+    [filteredColumns],
+  );
+
+  /** A whole column at once — the answer to "archive everything in Done",
+   *  which is most of what the picked set is ever used for. Scoped to what is
+   *  *displayed*, so it obeys the search box and the repository filter rather
+   *  than quietly taking cards the user cannot see. */
+  const handlePickColumn = useCallback(
+    (column: BoardColumn, picked: boolean) => {
+      const ids = filteredColumns[column].map((card) => card.id);
+      setPickedTaskIds((current) => {
+        const next = new Set(current);
+        for (const id of ids) {
+          if (picked) next.add(id);
+          else next.delete(id);
+        }
+        return next;
+      });
+      // Anchored at the bottom of what was just taken, so a shift-click
+      // immediately afterwards extends from there rather than from whatever
+      // card was last touched by hand.
+      pickAnchorId.current = picked ? (ids[ids.length - 1] ?? null) : null;
+    },
+    [filteredColumns],
+  );
+
+  // Most recently put down first — the question in the archive is "when did I
+  // stop looking at this", which is not the question `position` answers.
+  // Flattened back out of the columns rather than read separately, so the
+  // search box and the repository filter keep working unchanged.
+  const archivedCards = useMemo(
+    () =>
+      BOARD_COLUMNS.flatMap((column) => filteredColumns[column]).sort((left, right) =>
+        (right.archivedAt ?? "").localeCompare(left.archivedAt ?? ""),
+      ),
+    [filteredColumns],
+  );
+
   return (
     <div className="board-view">
       <BoardToolbar
@@ -427,6 +581,37 @@ export function Board() {
         newTaskDisabled={repositories.length === 0}
         pickedCount={pickedTaskIds.size}
         planDisabled={planPass.running || repositories.length === 0}
+        archiveDisabled={archiving}
+        showArchive={showArchive}
+        onToggleArchive={() => {
+          // The picked set is a set of *board* cards; carrying it across would
+          // leave "Archive 3 selected" pointing at cards this view cannot see.
+          setPickedTaskIds(new Set());
+          setArchiveReport(null);
+          setShowArchive((current) => !current);
+        }}
+        onArchive={() => {
+          setArchiving(true);
+          setArchiveError(null);
+          setArchiveReport(null);
+          archiveTasks([...pickedTaskIds]).then(
+            (report) => {
+              setArchiveReport(describeArchiveReport(report));
+              // Only the ids that actually went: a refused card stays picked,
+              // because the user's next move is to deal with it.
+              const archived = new Set(report.archived.map((entry) => entry.taskId));
+              setPickedTaskIds(
+                (current) => new Set([...current].filter((id) => !archived.has(id))),
+              );
+              setArchiving(false);
+              void refresh();
+            },
+            (thrown) => {
+              setArchiveError(toRimaiaError(thrown));
+              setArchiving(false);
+            },
+          );
+        }}
         onPlan={() => {
           // The repository filter already on the toolbar is the scope, and the
           // `ready` column is the default because that is the run queue — the
@@ -467,9 +652,29 @@ export function Board() {
           onDismiss={dismissRejection}
         />
       )}
+      {archiveError && (
+        <ErrorBanner error={archiveError} onDismiss={() => setArchiveError(null)} />
+      )}
+      {archiveReport && (
+        <p role="status" className="board-archive-report muted">
+          {archiveReport}{" "}
+          <button type="button" className="link" onClick={() => setArchiveReport(null)}>
+            Dismiss
+          </button>
+        </p>
+      )}
       {loading && state.tasks.length === 0 && <p className="muted">Reading tasks…</p>}
 
       <div className="board-layout">
+        {showArchive ? (
+          <ArchiveList
+            cards={archivedCards}
+            repositoriesById={repositoryNamesById}
+            now={now}
+            onSelect={setSelectedTaskId}
+            onUnarchived={() => void refresh()}
+          />
+        ) : (
         <DndContext
           sensors={sensors}
           accessibility={{ announcements }}
@@ -487,14 +692,8 @@ export function Board() {
                 selectedTaskId={selectedTaskId}
                 onSelect={setSelectedTaskId}
                 pickedTaskIds={pickedTaskIds}
-                onPick={(id, isPicked) =>
-                  setPickedTaskIds((current) => {
-                    const next = new Set(current);
-                    if (isPicked) next.add(id);
-                    else next.delete(id);
-                    return next;
-                  })
-                }
+                onPick={handlePick}
+                onPickColumn={handlePickColumn}
                 registerCardRef={registerCardRef}
                 onArrowNavigate={handleArrowNavigate}
                 dragDisabled={dragDisabled}
@@ -514,6 +713,7 @@ export function Board() {
             ) : null}
           </DragOverlay>
         </DndContext>
+        )}
 
         {selectedTask && (
           <TaskDetailPanel

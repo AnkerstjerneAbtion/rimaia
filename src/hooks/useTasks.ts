@@ -11,6 +11,7 @@ import {
 } from "../lib/board";
 import type { BoardAction, BoardState } from "../lib/board";
 import type {
+  ArchiveFilter,
   BoardColumn,
   RimaiaError,
   Repository,
@@ -28,6 +29,11 @@ import type {
  * to it is an explicit, memoisable dependency: switching the board's
  * repository filter is a fresh `list_tasks` read, the same as any other
  * filter change would be.
+ *
+ * `archived` is a second scalar for exactly that reason, rather than the two
+ * being merged into one `TaskFilterInput` object: an object literal is a new
+ * identity on every render, which would make the `useCallback` below refetch
+ * on every keystroke elsewhere in the tree.
  */
 export interface UseTasksResult {
   /**
@@ -70,7 +76,10 @@ export interface UseTasksResult {
   readonly dismissRejection: () => void;
 }
 
-export function useTasks(repositoryId: string | null): UseTasksResult {
+export function useTasks(
+  repositoryId: string | null,
+  archived: ArchiveFilter = "active",
+): UseTasksResult {
   const [state, setState] = useState<BoardState<TaskSummary>>(() =>
     initialBoardState<TaskSummary>(),
   );
@@ -94,7 +103,13 @@ export function useTasks(repositoryId: string | null): UseTasksResult {
   const latestRequestId = useRef(0);
 
   const refresh = useCallback(() => {
-    const filter: TaskFilterInput = repositoryId ? { repositoryId } : {};
+    const filter: TaskFilterInput = {
+      ...(repositoryId ? { repositoryId } : {}),
+      // Omitted for the board, so the wire stays exactly what it was before
+      // ADR-0025 for the case that is 99% of reads — and so the backend's own
+      // default is the one thing deciding what "the board" means.
+      ...(archived === "active" ? {} : { archived }),
+    };
     const requestId = (latestRequestId.current += 1);
     return listTasks(filter).then(
       (tasks) => {
@@ -109,7 +124,7 @@ export function useTasks(repositoryId: string | null): UseTasksResult {
         setLoading(false);
       },
     );
-  }, [repositoryId]);
+  }, [repositoryId, archived]);
 
   useEffect(() => {
     setLoading(true);

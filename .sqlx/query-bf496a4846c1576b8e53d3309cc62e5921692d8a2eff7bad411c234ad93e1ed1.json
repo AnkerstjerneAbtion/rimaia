@@ -1,6 +1,6 @@
 {
   "db_name": "SQLite",
-  "query": "SELECT dep.id, dep.repository_id, dep.title, dep.plan, dep.extra_instructions,\n            dep.board_column AS \"column: BoardColumn\", dep.position,\n            dep.run_state AS \"run_state: RunState\", dep.branch, dep.worktree_path,\n            dep.strategy_mode AS \"strategy_mode: StrategyMode\", dep.model, dep.effort,\n            dep.strategy_plan, dep.strategy_source AS \"strategy_source: StrategySource\",\n            dep.strategy_updated_at AS \"strategy_updated_at: DateTime<Utc>\",\n            dep.created_at AS \"created_at: DateTime<Utc>\",\n            dep.updated_at AS \"updated_at: DateTime<Utc>\",\n            dep.source AS \"source: MutationSource\"\n           FROM task_dependencies d\n           JOIN tasks dep ON dep.id = d.depends_on_task_id\n          WHERE d.task_id = ?1",
+  "query": "SELECT dep.id, dep.repository_id, dep.title, dep.plan, dep.extra_instructions,\n            dep.board_column AS \"column: BoardColumn\", dep.position,\n            dep.run_state AS \"run_state: RunState\", dep.branch, dep.worktree_path,\n            dep.strategy_mode AS \"strategy_mode: StrategyMode\", dep.model, dep.effort,\n            dep.strategy_plan, dep.strategy_source AS \"strategy_source: StrategySource\",\n            dep.strategy_updated_at AS \"strategy_updated_at: DateTime<Utc>\",\n            dep.created_at AS \"created_at: DateTime<Utc>\",\n            dep.updated_at AS \"updated_at: DateTime<Utc>\",\n            dep.source AS \"source: MutationSource\",\n            dep.archived_at AS \"archived_at: DateTime<Utc>\"\n           FROM task_dependencies d\n           JOIN tasks dep ON dep.id = d.depends_on_task_id\n          WHERE d.task_id = ?1",
   "describe": {
     "columns": [
       {
@@ -97,6 +97,11 @@
         "name": "source: MutationSource",
         "ordinal": 18,
         "type_info": "Text"
+      },
+      {
+        "name": "archived_at: DateTime<Utc>",
+        "ordinal": 19,
+        "type_info": "Text"
       }
     ],
     "parameters": {
@@ -121,8 +126,9 @@
       true,
       false,
       false,
-      false
+      false,
+      true
     ]
   },
-  "hash": "5e7140d9588d66814c1c9257cd652a2df1b0ae0556b77f41aa73da53e4a0c0ac"
+  "hash": "bf496a4846c1576b8e53d3309cc62e5921692d8a2eff7bad411c234ad93e1ed1"
 }

@@ -415,6 +415,7 @@ mod tests {
                 created_at: at("2026-08-20T12:00:00Z"),
                 updated_at: at("2026-08-20T12:00:00Z"),
                 source: MutationSource::Ui,
+                archived_at: None,
             },
             link_count: 0,
             dependency_count: 0,

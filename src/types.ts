@@ -300,7 +300,18 @@ export interface Repository {
   maxConcurrency: number;
   /** RFC 3339 UTC, as sqlx writes it — see the module note above `RimaiaError`. */
   createdAt: string;
+  /** What archiving a task in this repository cleans up (ADR-0025 point 4).
+   *  One slot, three states — a script and the built-in worktree removal are
+   *  mutually exclusive by construction, not by a rule the form enforces. */
+  onArchive: OnArchive;
+  /** The executable `"script"` names, canonicalized. `null` for every other
+   *  mode. */
+  onArchiveScript: string | null;
 }
+
+/** ADR-0025's cleanup slot. `"script"` means Rimaia does no cleanup of its own
+ *  and applies none of task 016's guards — the script owns all of it. */
+export type OnArchive = "none" | "remove_worktree" | "script";
 
 /**
  * Mirrors `rimaia_core::repo::RemoteInfo` — fresh on every call, never
@@ -421,6 +432,10 @@ export interface Task {
   /** Creation provenance, never rewritten (ADR-0019): a task created on the
    *  board and later patched over MCP still reads `ui`. */
   source: MutationSource;
+  /** When the user took this card off the board (ADR-0025). `null` *is* "on
+   *  the board" — a third axis, orthogonal to both `column` and `runState`,
+   *  and deliberately not a fifth `BoardColumn`. */
+  archivedAt: string | null;
 }
 
 /** Mirrors `rimaia_core::db::TaskLink`. One `{label, url}` external reference. */
@@ -571,6 +586,52 @@ export interface TaskFilterInput {
   repositoryId?: string;
   column?: BoardColumn;
   runState?: RunState;
+  /** Which side of ADR-0025's archive line to read. Omitted means the board,
+   *  which is the default every caller of `list_tasks` gets — the board, the
+   *  scheduler and the plan pass alike (seam-contract D26.1). */
+  archived?: ArchiveFilter;
+}
+
+/** @see TaskFilterInput.archived */
+export type ArchiveFilter = "active" | "archived" | "all";
+
+/**
+ * What a repository's cleanup did to one archived task, as `archive_task`
+ * hands it back (ADR-0025 point 6).
+ *
+ * Externally tagged, matching the Rust enum: `kind` is the discriminant, and
+ * the payload fields are present only on the variant that carries them.
+ */
+export type OnArchiveOutcome =
+  | { kind: "nothing" }
+  | { kind: "worktreeRemoved"; bytesFreed: number }
+  /** `exitCode` is `null` for a script stopped by a signal, which includes the
+   *  archive timeout. */
+  | { kind: "scriptRan"; exitCode: number | null; output: string }
+  | { kind: "failed"; reason: string };
+
+/** One task that left the board. */
+export interface ArchivedTask {
+  taskId: string;
+  title: string;
+  archivedAt: string;
+  cleanup: OnArchiveOutcome;
+}
+
+/** One task a bulk archive would not touch, and why. */
+export interface RefusedArchive {
+  taskId: string;
+  title: string;
+  /** The sentence `archiveTask` would have thrown — the same words, so meeting
+   *  a guard in bulk and then individually says one thing twice. */
+  reason: string;
+}
+
+/** What a bulk archive did, both halves. A report rather than a rejection:
+ *  nine safe cards must not be held up by a tenth that is mid-run. */
+export interface ArchiveReport {
+  archived: ArchivedTask[];
+  refused: RefusedArchive[];
 }
 
 /**
