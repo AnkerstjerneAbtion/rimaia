@@ -115,6 +115,10 @@ export function WelcomeView({ onFinish }: { onFinish: () => void }) {
     },
     {
       title: "Add the MCP server",
+      // Deliberately still "Claude Code session" (task 032): this step is
+      // about Claude Code as an MCP *client* of Rimaia (ADR-0006), which is a
+      // different relationship from the agent CLI a task run actually
+      // spawns — see `mcpAddCommand`'s own note.
       blurb:
         "Lets a Claude Code session hand a finished plan straight to Rimaia's board instead of implementing it there and then.",
       checks: ["mcp_port"],

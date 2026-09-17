@@ -5,7 +5,14 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 
 import { RunsView } from "./RunsView";
-import type { QueueStatus, Repository, RunListEntry, TaskDetail, TaskSummary } from "../types";
+import type {
+  QueueStatus,
+  Repository,
+  RunCostSummary,
+  RunListEntry,
+  TaskDetail,
+  TaskSummary,
+} from "../types";
 
 // Mocked at the Tauri seam, not `lib/commands.ts`/`lib/events.ts` — see
 // `StorageSection.test.tsx`'s own comment for why.
@@ -166,6 +173,7 @@ function mockBackend({
   runEnvironment = "inherit" as "inherit" | "strict_local",
   queue = queueStatus(),
   historyEntries = [] as RunListEntry[],
+  runCostSummary = null as RunCostSummary | null,
 } = {}) {
   // Arrays, not a bare handler per name: task 009 adds a second `tasks:changed`
   // subscriber (the queue-status effect, alongside the pre-existing
@@ -195,6 +203,7 @@ function mockBackend({
     }
     if (command === "list_repositories") return repositories;
     if (command === "get_run_environment") return runEnvironment;
+    if (command === "get_run_cost_summary") return runCostSummary;
     if (command === "get_queue_status") return queue;
     if (command === "get_task") {
       const taskId = (args as { id: string }).id;
@@ -312,6 +321,50 @@ describe("RunsView", () => {
     render(<RunsView />);
 
     expect(await screen.findByText(/Strict \/ local/)).toBeInTheDocument();
+  });
+
+  it("quotes no setup cost for a provider nobody has measured", async () => {
+    // Task 032: a provider whose `inherit_cost_usd()` is `None` gets no figure
+    // at all — not zero, and not Claude Code's — even once runs have reported
+    // costs to compare against.
+    mockBackend({
+      runningTasks: [],
+      runEnvironment: "inherit",
+      runCostSummary: {
+        medianUsd: 0.42,
+        sampleSize: 3,
+        inheritCostUsd: null,
+        providerDisplayName: "Ledger",
+      },
+    });
+
+    render(<RunsView />);
+
+    const note = await screen.findByText(/Inherit \(default\) environment/);
+    await waitFor(() =>
+      expect(mockInvoke.mock.calls.some(([c]) => c === "get_run_cost_summary")).toBe(true),
+    );
+    // Let the summary's own render land before asserting on its absence.
+    await act(async () => {});
+    expect(note.textContent).not.toMatch(/setup per run|\$/);
+    expect(document.body.textContent).not.toMatch(/Claude Code/);
+  });
+
+  it("quotes the active provider's own measured setup cost", async () => {
+    mockBackend({
+      runningTasks: [],
+      runEnvironment: "inherit",
+      runCostSummary: {
+        medianUsd: 0.42,
+        sampleSize: 3,
+        inheritCostUsd: 0.05,
+        providerDisplayName: "Ledger",
+      },
+    });
+
+    render(<RunsView />);
+
+    expect(await screen.findByText(/About \$0\.05 of setup per run/)).toBeInTheDocument();
   });
 
   it("re-reads the running-task list on tasks:changed", async () => {

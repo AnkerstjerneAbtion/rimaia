@@ -71,6 +71,7 @@ describe("the execution-strategy wrappers (task 020)", () => {
     },
     json: '{ "models": [{ "id": "opus", "label": "Opus" }] }',
     defaultJson: '{ "models": [] }',
+    providerInfo: { id: "claude-code", displayName: "Claude Code" },
   };
 
   const defaults: StrategyDefaults = {
