@@ -188,10 +188,14 @@ describe("InstructionsSection", () => {
     // What must not be softened is the part that does not shrink as a run
     // gets longer: a much larger tool surface, and a personal hook that
     // silently changes how the agent works. The dollar figure is stated in
-    // the Runs view, where it can be put against real run costs.
-    expect(screen.getByText(/255 tools instead of 26/)).toBeInTheDocument();
-    expect(screen.getByText(/SessionStart hook/)).toBeInTheDocument();
+    // the Runs view, where it can be put against real run costs. The copy
+    // itself is provider-neutral (task 032): it no longer names Claude
+    // Code's own tool count or hook name, since a run may spawn a different
+    // agent CLI.
+    expect(screen.getByText(/noisier/)).toBeInTheDocument();
+    expect(screen.getByText(/personal hook/)).toBeInTheDocument();
     expect(screen.queryByText(/3\.6/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/Claude Code/)).not.toBeInTheDocument();
   });
 
   it("switches run environment and calls set_run_environment", async () => {

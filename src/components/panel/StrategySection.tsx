@@ -37,13 +37,34 @@ export const STRATEGY_MODE_LABELS: Record<StrategyMode, string> = {
  * repository default", and this section says "from the repository default"
  * beside the effective value. Exported so the two never drift into two
  * vocabularies for one backend enum.
+ *
+ * `claude_code`'s entry here is the static fallback `TaskCard` uses, where no
+ * provider name is in hand. This section itself calls {@link strategyOriginLabel}
+ * instead, which interpolates the active provider's own name (task 032) — see
+ * that function's own doc for why the two must not be the same string.
  */
 export const STRATEGY_ORIGIN_LABELS: Record<StrategyOrigin, string> = {
   task: "this task",
   repository: "the repository default",
   global: "the global default",
-  claude_code: "Claude Code's own default",
+  claude_code: "the agent's own default",
 };
+
+/**
+ * {@link STRATEGY_ORIGIN_LABELS}, except `claude_code` — "nothing configured
+ * anywhere, so the provider's own default applies" — names the provider that
+ * would actually apply, rather than a frozen product name or a generic
+ * placeholder. The wire value stays `claude_code` (it is provider-independent
+ * in *meaning*, and renaming it is a separate, deferred decision); only the
+ * prose changes.
+ */
+export function strategyOriginLabel(
+  origin: StrategyOrigin,
+  providerDisplayName: string,
+): string {
+  if (origin === "claude_code") return `${providerDisplayName}'s own default`;
+  return STRATEGY_ORIGIN_LABELS[origin];
+}
 
 const WORKFLOW_LABELS: Record<StrategyWorkflow, string> = {
   single_agent: "One agent, start to finish",
@@ -70,6 +91,10 @@ const EMPTY_CATALOGUE: Catalogue = {
   efforts: [],
   planner: { model: null, effort: null, max_turns: 0 },
 };
+
+/** What {@link useStrategyCatalogue} renders before `get_strategy_catalogue`
+ *  has answered — a neutral placeholder, never a frozen product name. */
+const UNKNOWN_PROVIDER_NAME = "the agent";
 
 /**
  * The `strategy_plan` envelope (seam-contract D17.3), or `null` when there is
@@ -183,7 +208,7 @@ export function StrategySection({
   const [editingProposal, setEditingProposal] = useState(false);
   const [error, setError] = useState<RimaiaError | null>(null);
   const [saving, setSaving] = useState(false);
-  const catalogue = useStrategyCatalogue();
+  const { catalogue, providerDisplayName } = useStrategyCatalogue();
 
   const plan = parseStrategyPlan(strategyPlan);
   // A proposal the planner still owns. Accepting it is `strategy_source`
@@ -345,7 +370,9 @@ export function StrategySection({
           </select>
         </label>
         <span className="strategy-effective muted">
-          {loading || effective === null ? "Loading…" : effectiveSummary(effective)}
+          {loading || effective === null
+            ? "Loading…"
+            : effectiveSummary(effective, providerDisplayName)}
         </span>
       </div>
 
@@ -406,8 +433,11 @@ export function StrategySection({
 }
 
 /** What a run would spawn with, and who said so. */
-function effectiveSummary(effective: EffectiveStrategyFields): string {
-  const origin = STRATEGY_ORIGIN_LABELS[effective.effectiveOrigin];
+function effectiveSummary(
+  effective: EffectiveStrategyFields,
+  providerDisplayName: string,
+): string {
+  const origin = strategyOriginLabel(effective.effectiveOrigin, providerDisplayName);
   const badge = strategyBadgeText(effective.effectiveModel, effective.effectiveEffort);
   return badge === null
     ? `Runs with no model or effort flag — ${origin} decides.`
@@ -570,8 +600,17 @@ function StrategyProposal({
  * rendered as off-catalogue options, which is what an unread catalogue makes
  * them), and there is nothing the user did here to be told about.
  */
-function useStrategyCatalogue(): Catalogue {
-  const [catalogue, setCatalogue] = useState<Catalogue>(EMPTY_CATALOGUE);
+interface StrategyCatalogueState {
+  readonly catalogue: Catalogue;
+  /** The active provider's own name (task 032), for {@link strategyOriginLabel}. */
+  readonly providerDisplayName: string;
+}
+
+function useStrategyCatalogue(): StrategyCatalogueState {
+  const [state, setState] = useState<StrategyCatalogueState>({
+    catalogue: EMPTY_CATALOGUE,
+    providerDisplayName: UNKNOWN_PROVIDER_NAME,
+  });
 
   useEffect(() => {
     let active = true;
@@ -580,7 +619,12 @@ function useStrategyCatalogue(): Catalogue {
     function load() {
       getStrategyCatalogue().then(
         (view) => {
-          if (active) setCatalogue(view.catalogue);
+          if (active) {
+            setState({
+              catalogue: view.catalogue,
+              providerDisplayName: view.providerInfo.displayName,
+            });
+          }
         },
         () => {
           // No event bridge, or the read itself failed — `EMPTY_CATALOGUE`
@@ -611,5 +655,5 @@ function useStrategyCatalogue(): Catalogue {
     };
   }, []);
 
-  return catalogue;
+  return state;
 }

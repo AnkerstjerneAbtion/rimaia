@@ -5,7 +5,14 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 
 import { RunsView } from "./RunsView";
-import type { QueueStatus, Repository, RunListEntry, TaskDetail, TaskSummary } from "../types";
+import type {
+  QueueStatus,
+  Repository,
+  RunCostSummary,
+  RunListEntry,
+  TaskDetail,
+  TaskSummary,
+} from "../types";
 
 // Mocked at the Tauri seam, not `lib/commands.ts`/`lib/events.ts` — see
 // `StorageSection.test.tsx`'s own comment for why.
@@ -163,6 +170,7 @@ function mockBackend({
   runEnvironment = "inherit" as "inherit" | "strict_local",
   queue = queueStatus(),
   historyEntries = [] as RunListEntry[],
+  runCostSummary = null as RunCostSummary | null,
 } = {}) {
   // Arrays, not a bare handler per name: task 009 adds a second `tasks:changed`
   // subscriber (the queue-status effect, alongside the pre-existing
@@ -192,6 +200,7 @@ function mockBackend({
     }
     if (command === "list_repositories") return repositories;
     if (command === "get_run_environment") return runEnvironment;
+    if (command === "get_run_cost_summary") return runCostSummary;
     if (command === "get_queue_status") return queue;
     if (command === "get_task") {
       const taskId = (args as { id: string }).id;
@@ -309,6 +318,26 @@ describe("RunsView", () => {
     render(<RunsView />);
 
     expect(await screen.findByText(/Strict \/ local/)).toBeInTheDocument();
+  });
+
+  it("names the active provider in the inherit-cost note, not a hardcoded product name", async () => {
+    // Task 032: the sentence must not say "Claude Code" for a provider that
+    // is not Claude Code, and no run has reported a cost yet here, which is
+    // exactly the branch that used to hardcode the name.
+    mockBackend({
+      runningTasks: [],
+      runEnvironment: "inherit",
+      runCostSummary: {
+        medianUsd: null,
+        sampleSize: 0,
+        inheritCostUsd: null,
+        providerDisplayName: "Ledger",
+      },
+    });
+
+    render(<RunsView />);
+
+    expect(await screen.findByText(/Inheriting your Ledger environment/)).toBeInTheDocument();
   });
 
   it("re-reads the running-task list on tasks:changed", async () => {

@@ -414,7 +414,7 @@ export function RunsView() {
           Environment: {runEnvironment === "inherit" ? "Inherit (default)" : "Strict / local"}.{" "}
           {runEnvironment === "inherit"
             ? overheadNote ??
-              "Inheriting your Claude Code environment adds a fixed setup cost to every run."
+              `Inheriting your ${runCosts?.providerDisplayName ?? "agent CLI's"} environment adds to every run.`
             : "Only each repository's own CLAUDE.md and project settings reach a run."}{" "}
           Change this in Settings → Instructions; a finished run's own cost shows on its task's
           detail panel.

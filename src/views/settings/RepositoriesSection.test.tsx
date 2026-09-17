@@ -72,6 +72,7 @@ function catalogueView(): StrategyCatalogueView {
     },
     json: CATALOGUE_JSON,
     defaultJson: CATALOGUE_JSON,
+    providerInfo: { id: "claude-code", displayName: "Claude Code" },
   };
 }
 

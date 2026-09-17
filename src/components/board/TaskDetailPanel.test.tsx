@@ -127,6 +127,7 @@ describe("TaskDetailPanel", () => {
           catalogue: { models: [], efforts: [], planner: { model: null, effort: null, max_turns: 0 } },
           json: "{}",
           defaultJson: "{}",
+          providerInfo: { id: "claude-code", displayName: "Claude Code" },
         };
       }
       throw new Error(`unexpected command: ${command}`);

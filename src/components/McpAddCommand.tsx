@@ -4,8 +4,17 @@ import { getMcpStatus, toRimaiaError } from "../lib/commands";
 import { subscribeToSettingsChanged } from "../lib/events";
 import type { McpStatus, RimaiaError } from "../types";
 
-/** Built from `boundAddress`, never from `configuredPort` — see `McpSection`'s
- *  contract note. The two disagree in exactly the case worth showing. */
+/**
+ * Built from `boundAddress`, never from `configuredPort` — see `McpSection`'s
+ * contract note. The two disagree in exactly the case worth showing.
+ *
+ * **Deliberately still `claude mcp add` (task 032).** This is Claude Code as
+ * an MCP *client* of Rimaia (ADR-0006) — a user handing a plan in from their
+ * own interactive session — which is a different relationship from the agent
+ * CLI Rimaia drives to run a task. A user could well drive another provider
+ * for tasks and still plan from a Claude Code session, so neutralising this
+ * line would make it wrong rather than general.
+ */
 export function mcpAddCommand(status: McpStatus | null): string | null {
   if (!status || status.state !== "listening" || !status.boundAddress) return null;
   return `claude mcp add --transport http rimaia http://${status.boundAddress}/mcp`;

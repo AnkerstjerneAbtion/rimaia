@@ -41,6 +41,14 @@ const CATALOGUE: StrategyCatalogueView = {
   },
   json: "{}",
   defaultJson: "{}",
+  providerInfo: { id: "claude-code", displayName: "Claude Code" },
+};
+
+/** Task 032's falsification: the same catalogue, from a provider that is not
+ *  Claude Code, so a hardcoded product name fails a test rather than shipping. */
+const LEDGER_CATALOGUE: StrategyCatalogueView = {
+  ...CATALOGUE,
+  providerInfo: { id: "ledger", displayName: "Ledger" },
 };
 
 const PROPOSAL: StrategyPlan = {
@@ -172,6 +180,23 @@ describe("StrategySection", () => {
     expect(
       await screen.findByText(
         "Runs with no model or effort flag — Claude Code's own default decides.",
+      ),
+    ).toBeInTheDocument();
+  });
+
+  it("names whichever provider is actually active, not a hardcoded product name", async () => {
+    // Task 032: without this, "Claude Code's own default" is a string that
+    // merely moved from one file to another, and nothing would catch it
+    // drifting from the active provider again.
+    mockInvoke.mockImplementation(async (command) => {
+      if (command === "get_strategy_catalogue") return LEDGER_CATALOGUE;
+      throw new Error(`unexpected command: ${command}`);
+    });
+    renderSection({ effective: effective({ effectiveOrigin: "claude_code" }) });
+
+    expect(
+      await screen.findByText(
+        "Runs with no model or effort flag — Ledger's own default decides.",
       ),
     ).toBeInTheDocument();
   });

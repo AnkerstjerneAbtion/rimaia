@@ -438,6 +438,10 @@ export interface TaskLinkPatchInput {
 export interface RunCostSummary {
   medianUsd: number | null;
   sampleSize: number;
+  /** The active provider's own measured setup cost, or `null` for a provider
+   *  nobody has measured — `null` means say nothing about cost, not zero. */
+  inheritCostUsd: number | null;
+  providerDisplayName: string;
 }
 
 export type RunEnvironment = "inherit" | "strict_local";
@@ -512,6 +516,17 @@ export interface StrategyCatalogueView {
    *  retyped here: a second copy of the default list is a second thing to
    *  update when a model is added. */
   defaultJson: string;
+  /** The agent CLI this installation actually drives (task 032) — carried on
+   *  this payload rather than a new command, since every component that needs
+   *  it already reads this one. */
+  providerInfo: ProviderInfo;
+}
+
+/** The name a "… chooses" sentence interpolates. Not the frozen `Check` /
+ *  storage identity — this is free prose. */
+export interface ProviderInfo {
+  id: string;
+  displayName: string;
 }
 
 /**

@@ -44,15 +44,19 @@ function catalogueView(overrides: Partial<StrategyCatalogueView> = {}): Strategy
     },
     json: DEFAULT_JSON,
     defaultJson: DEFAULT_JSON,
+    providerInfo: { id: "claude-code", displayName: "Claude Code" },
     ...overrides,
   };
 }
 
 /** The three reads the section makes on mount, so every test below only has to
  *  say what it is actually about. */
-function mockBackend(handler: (command: string, args?: unknown) => unknown = unexpected) {
+function mockBackend(
+  handler: (command: string, args?: unknown) => unknown = unexpected,
+  catalogue: StrategyCatalogueView = catalogueView(),
+) {
   mockInvoke.mockImplementation(async (command, args) => {
-    if (command === "get_strategy_catalogue") return catalogueView();
+    if (command === "get_strategy_catalogue") return catalogue;
     if (command === "get_strategy_defaults") return { mode: "default" };
     if (command === "get_strategy_approval") return "automatic";
     return handler(command, args);
@@ -98,6 +102,21 @@ describe("StrategySection", () => {
     // The rejected draft stays on screen: it is the thing with the missing
     // brace in it, and reverting would throw away what was just typed.
     expect(editor).toHaveValue('{"models": [');
+  });
+
+  it("names whichever provider is actually active in the three placeholder labels", async () => {
+    // Task 032: these used to say "Claude Code chooses" unconditionally.
+    mockBackend(unexpected, catalogueView({
+      providerInfo: { id: "ledger", displayName: "Ledger" },
+    }));
+
+    render(<StrategySection />);
+
+    // The global default's model and effort selects share one "No default"
+    // placeholder, so it appears twice — once per dropdown.
+    expect(await screen.findAllByText("No default — Ledger chooses")).toHaveLength(2);
+    expect(screen.getByText("No model — Ledger chooses")).toBeInTheDocument();
+    expect(screen.getByText("No effort — Ledger chooses")).toBeInTheDocument();
   });
 
   it("writes the backend's own default catalogue when Restore defaults is clicked", async () => {
