@@ -3,6 +3,7 @@ id: "032"
 title: Provider vocabulary outside the runner
 milestone: v0.4
 status: ready
+landed: "#33"
 depends_on: ["031"]
 adrs: ["0026", "0004", "0016", "0022"]
 size: M
