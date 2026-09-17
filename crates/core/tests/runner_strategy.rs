@@ -49,11 +49,16 @@ use rimaia_core::runner::events::{transcript_path, RunTail};
 use rimaia_core::runner::process::{DEFAULT_DISALLOWED_TOOLS, DEFAULT_MAX_TURNS};
 use rimaia_core::runner::prompt::{
     compose_prompt, compose_strategy_prompt, compose_strategy_system_append, compose_system_append,
-    StrategyGuidance, SET_TASK_STRATEGY_TOOL,
+    StrategyGuidance,
 };
+use rimaia_core::runner::provider::ClaudeProvider;
 use rimaia_core::runner::{
     run_task, CancelSignal, ResumeSession, RunRequest, RunTrigger, RunnerConfig,
 };
+
+/// `ClaudeProvider::tool_handle`, at the path every fixture in this file was
+/// recorded against — `RunnerConfig::default()` is Claude Code (ADR-0026).
+const SET_TASK_STRATEGY_TOOL: &str = "mcp__rimaia__set_task_strategy";
 use rimaia_core::strategy::{self, StrategyDefaults};
 use rimaia_core::tasks::{
     self, NewTask, Patch, StrategyPlan, StrategyPlanStatus, StrategyWorkflow, TaskDetail, TaskPatch,
@@ -323,13 +328,19 @@ async fn each_run_is_sent_its_own_prompt_and_the_proposal_reaches_the_implementa
     // links, and the planner changed none of them.
     let detail = fixture.detail().await;
     let repository = fixture.repository().await;
-    let catalogue = strategy::catalogue::catalogue(&fixture.harness.context.pool)
+    let catalogue = strategy::catalogue::catalogue(&fixture.harness.context.pool, &ClaudeProvider)
         .await
         .expect("the catalogue");
 
     assert_eq!(
         cli.stdin(1),
-        compose_strategy_prompt(&detail, &repository, &catalogue)
+        compose_strategy_prompt(
+            &detail,
+            &repository,
+            &catalogue,
+            SET_TASK_STRATEGY_TOOL,
+            "subagents",
+        )
     );
     let base = settings::base_instructions(&fixture.harness.context.pool)
         .await
@@ -349,7 +360,7 @@ async fn each_run_is_sent_its_own_prompt_and_the_proposal_reaches_the_implementa
     );
     assert_eq!(
         cli.stdin(2),
-        compose_prompt(&base, &detail, &repository, guidance.as_ref())
+        compose_prompt(&base, &detail, &repository, guidance.as_ref(), "subagents")
     );
 }
 

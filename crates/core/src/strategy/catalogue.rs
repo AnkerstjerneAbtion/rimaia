@@ -15,9 +15,13 @@
 //! away, and a user who has never opened Settings still gets a list that
 //! matches the release they installed.
 //!
-//! [`DEFAULT_CATALOGUE_JSON`] is exported because Settings' "Restore defaults"
-//! needs bytes to write, and a test below pins it against
-//! [`Catalogue::default`] so the two cannot drift.
+//! **What "the default catalogue" is is a provider's answer, not this
+//! module's** (task 032, ADR-0026): [`Catalogue::default`] and
+//! [`PlannerBudget::default`] are the *neutral* Rust defaults — no models, no
+//! opinion — and an installation's actual defaults come from
+//! [`AgentProvider::default_catalogue`](crate::runner::provider::AgentProvider::default_catalogue).
+//! [`catalogue`] falls back to that when the `strategy_catalogue` key is
+//! absent or will not parse.
 
 use serde::{Deserialize, Serialize};
 use sqlx::SqlitePool;
@@ -36,30 +40,6 @@ pub const STRATEGY_CATALOGUE: &str = "strategy_catalogue";
 /// the same reason the model list is: the number that bounds a cheap model is
 /// not the number that bounds an expensive one.
 const DEFAULT_PLANNER_MAX_TURNS: u32 = 6;
-
-/// What "Restore defaults" writes, and what an absent key stands for.
-///
-/// Duplicated between this constant and [`Catalogue::default`] on purpose —
-/// the textarea in Settings edits *text*, and a `serde_json::to_string_pretty`
-/// of the Rust value would render with whatever key order and indentation
-/// serde happened to choose. A test below parses this into the Rust value and
-/// asserts they agree, which is the same pin `DEFAULT_BASE_INSTRUCTIONS` keeps
-/// against its migration.
-pub const DEFAULT_CATALOGUE_JSON: &str = r#"{
-  "models": [
-    { "id": "opus", "label": "Opus" },
-    { "id": "sonnet", "label": "Sonnet" },
-    { "id": "haiku", "label": "Haiku" }
-  ],
-  "efforts": [
-    { "id": "low", "label": "Low" },
-    { "id": "medium", "label": "Medium" },
-    { "id": "high", "label": "High" },
-    { "id": "xhigh", "label": "Extra high" },
-    { "id": "max", "label": "Max" }
-  ],
-  "planner": { "model": "haiku", "effort": "low", "max_turns": 6 }
-}"#;
 
 /// One choice in a dropdown.
 ///
@@ -83,11 +63,14 @@ pub struct CatalogueEntry {
 /// The strategy run's own budget, so ADR-0016's "a new model does not require a
 /// release" covers the planner too and not only the work it plans.
 ///
-/// `model` and `effort` are optional and default to *absent*, not to the
-/// built-in planner: a user who writes `"planner": {}` has said something, and
-/// what they have said is "no `--model`, let the CLI choose". The built-in
-/// haiku/low pair lives in [`Catalogue::default`], where an *unedited* key
-/// reaches it. Explicit beats default, the same rule
+/// `model` and `effort` are optional and default to *absent*, not to a
+/// provider's built-in planner: a user who writes `"planner": {}` has said
+/// something, and what they have said is "no `--model`, let the CLI choose".
+/// The active provider's own pairing — Claude: haiku/low — lives in
+/// [`AgentProvider::default_catalogue`](crate::runner::provider::AgentProvider::default_catalogue),
+/// where an *unedited* key reaches it; [`PlannerBudget::default`] itself is
+/// the neutral value with no opinion, for the reason [`Catalogue::default`]
+/// gives. Explicit beats default, the same rule
 /// [`crate::runner::process::disallowed_tools`] states for an empty blocklist.
 /// `JsonSchema` because ADR-0021 puts this on the tool surface, and because
 /// unlike a row type it *is* the wire shape: seam-contract D16.1 keeps row types
@@ -111,10 +94,13 @@ fn default_planner_max_turns() -> u32 {
 }
 
 impl Default for PlannerBudget {
+    /// No model, no effort — the CLI's own default decides. Not a Claude
+    /// opinion in disguise: `max_turns` is Rimaia's own safety bound
+    /// (ADR-0011), not a model name.
     fn default() -> Self {
         Self {
-            model: Some("haiku".to_string()),
-            effort: Some("low".to_string()),
+            model: None,
+            effort: None,
             max_turns: DEFAULT_PLANNER_MAX_TURNS,
         }
     }
@@ -122,17 +108,16 @@ impl Default for PlannerBudget {
 
 /// Everything the strategy dropdowns and the planner read.
 ///
-/// `#[serde(default)]` at the container is what makes a *field* someone did not
-/// write fall back to the built-in list while an explicitly empty one stays
-/// empty. The distinction is deliberate: `"models": []` is an operator saying
-/// "offer nothing", which is a thing they are allowed to do, and silently
-/// restoring the default would be the same defect
-/// [`crate::db::settings::base_instructions`] documents about a field a user
-/// cleared.
+/// This is the *resolved* shape — always fully populated, one way or another
+/// — which is what [`RawCatalogue`] exists beside it to make possible: telling
+/// "the operator wrote nothing here" (fill in from the provider) apart from
+/// "the operator wrote an empty list" (leave it empty) needs `Option`, and
+/// `#[serde(default)]` on this struct's own fields cannot see which happened
+/// once parsing has already collapsed the two.
 ///
-/// `deny_unknown_fields` because this is hand-edited JSON and a misspelled key
-/// is otherwise invisible: the whole value falls back to the default anyway
-/// (see [`parse`]), so the choice is only between a warning that names the
+/// `deny_unknown_fields` on [`RawCatalogue`] is what catches a misspelled key
+/// in hand-edited JSON — the whole value falls back to the provider's default
+/// (see [`catalogue`]), so the choice is only between a warning that names the
 /// typo and a silence that does not.
 /// `JsonSchema` because ADR-0021 puts this on the tool surface, and because
 /// unlike a row type it *is* the wire shape: seam-contract D16.1 keeps row types
@@ -149,33 +134,23 @@ pub struct Catalogue {
 }
 
 impl Default for Catalogue {
+    /// No models, no efforts, the neutral [`PlannerBudget::default`] — the
+    /// answer for a Rust value with no provider in front of it. What an
+    /// *unconfigured installation* actually offers is
+    /// [`AgentProvider::default_catalogue`](crate::runner::provider::AgentProvider::default_catalogue),
+    /// which [`catalogue`] reaches for instead of this.
     fn default() -> Self {
         Self {
-            models: entries(&[("opus", "Opus"), ("sonnet", "Sonnet"), ("haiku", "Haiku")]),
-            efforts: entries(&[
-                ("low", "Low"),
-                ("medium", "Medium"),
-                ("high", "High"),
-                ("xhigh", "Extra high"),
-                ("max", "Max"),
-            ]),
+            models: Vec::new(),
+            efforts: Vec::new(),
             planner: PlannerBudget::default(),
         }
     }
 }
 
-fn entries(pairs: &[(&str, &str)]) -> Vec<CatalogueEntry> {
-    pairs
-        .iter()
-        .map(|(id, label)| CatalogueEntry {
-            id: (*id).to_string(),
-            label: (*label).to_string(),
-        })
-        .collect()
-}
-
-/// The configured catalogue, or [`Catalogue::default`] when the key is absent
-/// or holds something unparseable.
+/// The configured catalogue, or `provider`'s own
+/// [`default_catalogue`](crate::runner::provider::AgentProvider::default_catalogue)
+/// when the key is absent or holds something unparseable.
 ///
 /// Tolerant rather than fallible, exactly as
 /// [`RunEnvironment`](crate::db::RunEnvironment) and
@@ -183,18 +158,24 @@ fn entries(pairs: &[(&str, &str)]) -> Vec<CatalogueEntry> {
 /// reason: `settings.value` has no `CHECK` and the user is a supported writer
 /// of this file (ADR-0003). A brace hand-deleted in the `sqlite3` CLI costs a
 /// log line and the built-in list, never an overnight queue.
-pub async fn catalogue(pool: &SqlitePool) -> Result<Catalogue> {
+pub async fn catalogue(
+    pool: &SqlitePool,
+    provider: &dyn crate::runner::provider::AgentProvider,
+) -> Result<Catalogue> {
     let Some(stored) = settings::get(pool, STRATEGY_CATALOGUE).await? else {
-        return Ok(Catalogue::default());
+        return Ok(provider.default_catalogue());
     };
 
-    Ok(parse(&stored).unwrap_or_else(|message| {
-        tracing::warn!(
-            error = message,
-            "unparseable strategy_catalogue; falling back to the built-in one"
-        );
-        Catalogue::default()
-    }))
+    Ok(match parse_raw(&stored) {
+        Ok(raw) => resolve(raw, provider),
+        Err(message) => {
+            tracing::warn!(
+                error = message,
+                "unparseable strategy_catalogue; falling back to the built-in one"
+            );
+            provider.default_catalogue()
+        }
+    })
 }
 
 /// Stores the catalogue as the text the user typed, announcing it as a settings
@@ -211,26 +192,64 @@ pub async fn catalogue(pool: &SqlitePool) -> Result<Catalogue> {
 /// again, and what stays legible in the `sqlite3` CLI (ADR-0003).
 pub async fn set_catalogue(ctx: &ServiceContext, json: &str) -> Result<()> {
     let trimmed = json.trim();
-    parse(trimmed)
+    parse_raw(trimmed)
         .map_err(|message| Error::invalid(format!("the catalogue is not valid JSON: {message}")))?;
 
     settings::set(ctx, STRATEGY_CATALOGUE, trimmed).await
 }
 
+/// The catalogue as the operator wrote it — every field `Option`, so an absent
+/// one and an explicitly empty one stay told apart until [`resolve`] decides
+/// what each means. `deny_unknown_fields` for the reason [`Catalogue`]'s own
+/// doc gives.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawCatalogue {
+    models: Option<Vec<CatalogueEntry>>,
+    efforts: Option<Vec<CatalogueEntry>>,
+    planner: Option<PlannerBudget>,
+}
+
 /// One parser, so the tolerant read and the refusing write cannot disagree
 /// about what is valid.
-fn parse(stored: &str) -> std::result::Result<Catalogue, String> {
+fn parse_raw(stored: &str) -> std::result::Result<RawCatalogue, String> {
     serde_json::from_str(stored).map_err(|error| error.to_string())
+}
+
+/// A field the operator did not write reaches for `provider`'s own default; a
+/// field they wrote — even as an empty list — stays exactly what they wrote.
+/// "`\"models\": []`" is an operator saying "offer nothing", which is a thing
+/// they are allowed to do, and silently restoring the default would be the
+/// same defect [`crate::db::settings::base_instructions`] documents about a
+/// field a user cleared.
+fn resolve(raw: RawCatalogue, provider: &dyn crate::runner::provider::AgentProvider) -> Catalogue {
+    let default = provider.default_catalogue();
+    Catalogue {
+        models: raw.models.unwrap_or(default.models),
+        efforts: raw.efforts.unwrap_or(default.efforts),
+        planner: raw.planner.unwrap_or(default.planner),
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::runner::provider::{AgentProvider, ClaudeProvider};
     use crate::testing::{test_pool, TestContext};
     use pretty_assertions::assert_eq;
 
+    fn entries(pairs: &[(&str, &str)]) -> Vec<CatalogueEntry> {
+        pairs
+            .iter()
+            .map(|(id, label)| CatalogueEntry {
+                id: (*id).to_string(),
+                label: (*label).to_string(),
+            })
+            .collect()
+    }
+
     #[tokio::test]
-    async fn an_unconfigured_catalogue_is_the_built_in_default() {
+    async fn an_unconfigured_catalogue_is_the_providers_own_default() {
         let pool = test_pool().await;
 
         assert_eq!(
@@ -241,8 +260,10 @@ mod tests {
             "the key is deliberately unseeded"
         );
         assert_eq!(
-            catalogue(&pool).await.expect("read the default"),
-            Catalogue::default()
+            catalogue(&pool, &ClaudeProvider)
+                .await
+                .expect("read the default"),
+            ClaudeProvider.default_catalogue()
         );
     }
 
@@ -266,8 +287,10 @@ mod tests {
                 .expect("store a typo");
 
             assert_eq!(
-                catalogue(&h.context.pool).await.expect("read it back"),
-                Catalogue::default(),
+                catalogue(&h.context.pool, &ClaudeProvider)
+                    .await
+                    .expect("read it back"),
+                ClaudeProvider.default_catalogue(),
                 "a hand-edited {typo:?} must cost a log line, not a launch"
             );
         }
@@ -277,31 +300,35 @@ mod tests {
     async fn an_explicitly_empty_model_list_means_no_choices_not_the_default_list() {
         // The operator turning a dropdown off is a thing they are allowed to
         // do — `runner::process::disallowed_tools`' established rule. Note that
-        // `efforts`, which they did *not* write, still fills in.
+        // `efforts`, which they did *not* write, still fills in from the
+        // provider.
         let h = TestContext::new().await;
 
         settings::set(&h.context, STRATEGY_CATALOGUE, r#"{"models": []}"#)
             .await
             .expect("store an empty model list");
 
-        let stored = catalogue(&h.context.pool).await.expect("read it back");
+        let stored = catalogue(&h.context.pool, &ClaudeProvider)
+            .await
+            .expect("read it back");
 
         assert_eq!(stored.models, Vec::new());
-        assert_eq!(stored.efforts, Catalogue::default().efforts);
-        assert_eq!(stored.planner, PlannerBudget::default());
+        assert_eq!(stored.efforts, ClaudeProvider.default_catalogue().efforts);
+        assert_eq!(stored.planner, ClaudeProvider.default_catalogue().planner);
     }
 
     #[tokio::test]
     async fn a_planner_with_no_model_passes_no_model_flag_at_all() {
         // The last row of task 020's absent-value table: an explicit planner
-        // object without a `model` means the CLI chooses, not haiku.
+        // object without a `model` means the CLI chooses, not the provider's
+        // own pick.
         let h = TestContext::new().await;
 
         settings::set(&h.context, STRATEGY_CATALOGUE, r#"{"planner": {}}"#)
             .await
             .expect("store a planner with no model");
 
-        let planner = catalogue(&h.context.pool)
+        let planner = catalogue(&h.context.pool, &ClaudeProvider)
             .await
             .expect("read it back")
             .planner;
@@ -315,38 +342,18 @@ mod tests {
     }
 
     #[test]
-    fn the_default_catalogue_constant_parses_into_itself() {
-        // The pin that keeps the bytes "Restore defaults" writes and the value
-        // an unconfigured install reads from drifting apart.
+    fn an_unedited_catalogue_and_planner_budget_carry_no_providers_opinion() {
+        // `Catalogue::default` and `PlannerBudget::default` are the plain Rust
+        // values with nobody's model names in them — what an *installation*
+        // offers unconfigured is `AgentProvider::default_catalogue`, asserted
+        // against `ClaudeProvider` in `runner::provider::claude`'s own tests.
+        assert_eq!(Catalogue::default().models, Vec::<CatalogueEntry>::new());
+        assert_eq!(Catalogue::default().efforts, Vec::<CatalogueEntry>::new());
+        assert_eq!(PlannerBudget::default().model, None);
+        assert_eq!(PlannerBudget::default().effort, None);
         assert_eq!(
-            parse(DEFAULT_CATALOGUE_JSON).expect("the default must parse"),
-            Catalogue::default()
-        );
-    }
-
-    #[test]
-    fn the_default_catalogue_is_the_three_models_and_five_efforts_task_020_specifies() {
-        // The other half of the pin: the list spelled out here, so adding a
-        // model has to be a deliberate edit in two places rather than a typo
-        // in one.
-        let default = Catalogue::default();
-
-        assert_eq!(
-            default
-                .models
-                .iter()
-                .map(|entry| entry.id.as_str())
-                .collect::<Vec<_>>(),
-            ["opus", "sonnet", "haiku"]
-        );
-        assert_eq!(
-            default
-                .efforts
-                .iter()
-                .map(|entry| entry.id.as_str())
-                .collect::<Vec<_>>(),
-            ["low", "medium", "high", "xhigh", "max"],
-            "xhigh and max are new here; the panel's old list stopped at high"
+            PlannerBudget::default().max_turns,
+            DEFAULT_PLANNER_MAX_TURNS
         );
     }
 
@@ -367,7 +374,7 @@ mod tests {
             "the user's own formatting is what Settings shows them next time"
         );
         assert_eq!(
-            catalogue(&h.context.pool)
+            catalogue(&h.context.pool, &ClaudeProvider)
                 .await
                 .expect("read it back")
                 .models,
@@ -403,9 +410,12 @@ mod tests {
         // learns a model was added (ADR-0018).
         let mut h = TestContext::new().await;
 
-        set_catalogue(&h.context, DEFAULT_CATALOGUE_JSON)
-            .await
-            .expect("store the default");
+        set_catalogue(
+            &h.context,
+            r#"{"models": [{"id": "opus", "label": "Opus"}]}"#,
+        )
+        .await
+        .expect("store an edit");
 
         assert_eq!(
             h.changes.try_recv().expect("a publication"),

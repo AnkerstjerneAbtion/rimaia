@@ -46,43 +46,26 @@ Run the project's tests and linters before you finish.
 When the work is complete, push the branch and open a pull request describing what changed and why.
 If you cannot complete the task, stop, commit what you have, and explain what is blocking you.";
 
-/// How much of the operator's own Claude Code configuration a run inherits
-/// (ADR-0004's amendment, applied by task 008).
+/// How much of the operator's own configuration a run inherits (ADR-0004's
+/// amendment, applied by task 008).
 ///
 /// An enum rather than the stored string, so the two spellings are compared once
 /// here instead of at every call site. [`Inherit`](RunEnvironment::Inherit) is
 /// the default and has no seeded row: an absent key *is* `inherit`, which is
 /// also why there is no third `unset` variant.
-/// What inheriting the operator's environment adds to a run, in dollars.
 ///
-/// From `spike/FINDINGS.md` §2, which spawned the *same one-word prompt* twice:
-/// $0.1061 inherited against $0.0291 isolated, on 16,455 cache-creation tokens
-/// against 3,179. The difference is these ~13,300 tokens of tools, MCP servers
-/// and hooks loaded before the run reads its plan.
-///
-/// # It is a fixed cost, and the ratio is the misleading way to say it
-///
-/// The spike reported "3.6x", and that number is true only of the trivial
-/// prompt it was measured on, where setup *was* the whole run. This is charged
-/// once per session as cache creation, not per turn, so it does not scale with
-/// the work: the same ~$0.08 lands on a four-turn run and a forty-turn one. As
-/// a share of a real run it has been observed anywhere from 64% (a ten-cent
-/// metadata edit) to 0.2% (a $32 implementation).
-///
-/// Quoting the ratio in the UI therefore argues for `strict_local`, which is
-/// the opposite of what the spike concluded — it recommended inheriting by
-/// default, because reaching your own MCP servers mid-run is much of the point
-/// of a local desktop app. So the UI states the fixed cost and puts it in
-/// proportion against runs this installation has actually paid for.
-pub const ENVIRONMENT_SETUP_COST_USD: f64 = 0.077;
-
+/// What inheriting costs, in dollars, is a *provider's* answer, not a fact
+/// this module states — see
+/// [`AgentProvider::inherit_cost_usd`](crate::runner::provider::AgentProvider::inherit_cost_usd)
+/// (task 032). `runner::provider::claude::INHERIT_COST_USD` carries the
+/// measurement and the argument this doc used to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RunEnvironment {
     /// The operator's MCP servers, hooks and plugins are capability worth
-    /// having, and inheriting them is what makes a run behave like the user's
-    /// own Claude Code. It costs roughly 3.6x per run, which is why the toggle
-    /// surfaces per-run cost next to it.
+    /// having, and inheriting them is what makes a run behave like the
+    /// operator's own interactive session. What it costs is the active
+    /// provider's own answer — see this enum's own doc.
     #[default]
     Inherit,
     /// `--strict-mcp-config --setting-sources project,local`.

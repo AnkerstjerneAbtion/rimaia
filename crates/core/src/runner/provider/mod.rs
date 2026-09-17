@@ -41,12 +41,81 @@ use std::path::Path;
 use crate::db::settings::RunEnvironment;
 use crate::error::{Error, Result};
 use crate::runner::events::RunEvent;
+use crate::strategy::Catalogue;
 
 pub use claude::ClaudeProvider;
 pub use intent::{
     Autonomy, ForbiddenKind, ForbiddenOperation, PermissionMode, RimaiaHandle, RunIntent,
     SessionIntent,
 };
+
+// ---------------------------------------------------------------------------
+// Version vocabulary (task 032)
+// ---------------------------------------------------------------------------
+
+/// `major.minor.patch`, generalising what used to be
+/// `doctor::checks::MINIMUM_CLAUDE_VERSION` alone.
+pub type Version = (u32, u32, u32);
+
+/// The first `major.minor[.patch]` in `text`, and its rendering back.
+///
+/// Shared by every provider's [`AgentProvider::read_version`] and by the
+/// doctor's own `git` check, which is provider-agnostic and always real git —
+/// one parser for "a program printed a version string", since neither `git`
+/// nor an agent CLI prints a real semver.
+pub fn parse_version(text: &str) -> Option<Version> {
+    text.split(|character: char| !character.is_ascii_digit() && character != '.')
+        .filter(|token| !token.is_empty())
+        .find_map(|token| {
+            let mut parts = token.split('.');
+            let major = parts.next()?.parse::<u32>().ok()?;
+            let minor = parts.next()?.parse::<u32>().ok()?;
+            let patch = parts
+                .next()
+                .and_then(|part| part.parse::<u32>().ok())
+                .unwrap_or(0);
+            Some((major, minor, patch))
+        })
+}
+
+pub fn format_version((major, minor, patch): Version) -> String {
+    format!("{major}.{minor}.{patch}")
+}
+
+/// What a probe subprocess produced, for a provider's `read_version` or
+/// `read_auth` to interpret — the pure half of a probe, so it is unit-testable
+/// without a process. Rimaia spawns the [`SpawnPlan`] `version_probe`/
+/// `auth_probe` describe and hands the result back here.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ProbeOutput {
+    pub status: Option<i32>,
+    pub stdout: String,
+    pub stderr: String,
+}
+
+/// A provider's answer to "what version is this", read from a [`ProbeOutput`].
+///
+/// `raw` is always kept, even when `parsed` is `None`: a version line the
+/// parser could not read is still worth showing on a doctor row rather than
+/// silently discarding.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VersionReport {
+    pub raw: String,
+    pub parsed: Option<Version>,
+}
+
+/// A provider's answer to "is this CLI signed in", read from a [`ProbeOutput`].
+///
+/// There is no `Unauthenticated` distinct from `SignedOut` — a provider that
+/// can tell the difference says so in `detail` via `Undetermined`, and the
+/// doctor's own wording (from `checks::agent_authenticated`) already
+/// distinguishes "definitely signed out" from "could not tell".
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AuthState {
+    SignedIn { method: Option<String> },
+    SignedOut,
+    Undetermined { detail: String },
+}
 
 // ---------------------------------------------------------------------------
 // Identity
@@ -122,6 +191,61 @@ pub trait AgentProvider: std::fmt::Debug + Send + Sync + 'static {
     /// [`RunEvent::Other`](crate::runner::events::RunEvent::Other), which is a
     /// value and not a failure.
     fn parse_line(&self, line: &str) -> std::result::Result<RunEvent, serde_json::Error>;
+
+    // -----------------------------------------------------------------------
+    // Vocabulary outside the runner (task 032)
+    // -----------------------------------------------------------------------
+
+    /// The name a doctor row, an error sentence and the UI use.
+    ///
+    /// Prose, not identity — [`AgentProvider::id`] is frozen for storage and
+    /// `doctor_dismissals`; this is free to read well.
+    fn display_name(&self) -> &'static str;
+
+    /// What to run to learn this CLI's version. Rimaia spawns it, strips
+    /// process identity, and hands the bytes to [`AgentProvider::read_version`]
+    /// — two pure halves, so the spawning stays in one place
+    /// ([`runner::process::probe_cli`](crate::runner::process::probe_cli)) and
+    /// the parsing is unit-testable without a process.
+    fn version_probe(&self, program: &Path) -> SpawnPlan;
+
+    /// What [`AgentProvider::version_probe`]'s output means.
+    fn read_version(&self, output: &ProbeOutput) -> VersionReport;
+
+    /// What to run to learn whether this CLI is signed in, or `None` when this
+    /// provider's sign-in cannot be checked out of band. The doctor then omits
+    /// the row entirely rather than inventing a pass or a fail.
+    fn auth_probe(&self, program: &Path) -> Option<SpawnPlan>;
+
+    /// What [`AgentProvider::auth_probe`]'s output means. Never called when
+    /// `auth_probe` answered `None`.
+    fn read_auth(&self, output: &ProbeOutput) -> AuthState;
+
+    /// The oldest version whose stream this provider's [`AgentProvider::parse_line`]
+    /// was written against and verified — generalises what used to be the
+    /// Claude-only `MINIMUM_CLAUDE_VERSION`. A doctor row below it warns rather
+    /// than fails; see `doctor::checks::agent_cli`.
+    fn minimum_version(&self) -> Version;
+
+    /// How this provider spells one of Rimaia's MCP tools, so the prompt's
+    /// instruction and the planner's allow-list read the same string. Claude:
+    /// `mcp__rimaia__set_task_strategy`.
+    fn tool_handle(&self, server: &str, tool: &str) -> String;
+
+    /// The word this provider's agent will recognise for fanning out work
+    /// within its own session. Claude: `"subagents"`.
+    fn fanout_noun(&self) -> &'static str;
+
+    /// What inheriting the operator's configuration costs this provider per
+    /// run, in dollars, or `None` for a provider nobody has measured — the
+    /// Settings panel then says nothing about cost rather than guessing.
+    fn inherit_cost_usd(&self) -> Option<f64>;
+
+    /// The models and effort levels this provider offers when nobody has
+    /// edited `strategy_catalogue`, and the planner's own default budget.
+    /// [`CatalogueEntry`](crate::strategy::CatalogueEntry)'s `id` reaches this
+    /// provider verbatim as `--model`/`--effort` or their equivalent.
+    fn default_catalogue(&self) -> Catalogue;
 }
 
 /// How to start one attempt.

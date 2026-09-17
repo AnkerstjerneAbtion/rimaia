@@ -31,9 +31,7 @@ use rimaia_core::mcp::{
 use rimaia_core::repo;
 use rimaia_core::schedule::{self, ScheduleInput};
 use rimaia_core::scheduler::{capacity, CONCURRENCY_CEILING, DEFAULT_MAX_CONCURRENCY};
-use rimaia_core::strategy::{
-    self, Catalogue, CatalogueEntry, StrategyApproval, StrategyDefaults, DEFAULT_CATALOGUE_JSON,
-};
+use rimaia_core::strategy::{self, Catalogue, CatalogueEntry, StrategyApproval, StrategyDefaults};
 use rimaia_core::tasks::{self, NewTask};
 use rimaia_core::testing::{self, TestContext};
 use rimaia_core::Error;
@@ -480,7 +478,7 @@ async fn nothing_adr_0021_added_is_reachable_from_a_run() {
     assert_refusal(
         &as_result(
             run.set_strategy_catalogue(Parameters(request::<SetStrategyCatalogueRequest>(
-                json!({ "catalogue": DEFAULT_CATALOGUE_JSON }),
+                json!({ "catalogue": r#"{"models": [{"id": "opus", "label": "Opus"}]}"# }),
             )))
             .await,
         ),

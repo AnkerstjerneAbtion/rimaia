@@ -22,16 +22,11 @@ use crate::paths::AppPaths;
 use crate::repo::{self, GhStatus};
 use crate::runner::probe_cli;
 use crate::runner::process::strip_process_identity;
+use crate::runner::provider::{
+    format_version, parse_version, AgentProvider, AuthState, ProbeOutput,
+};
 
 use super::{Check, CheckResult};
-
-/// The CLI the spike measured against (`spike/FINDINGS.md`, 2026-08-20), and
-/// therefore the oldest `claude` any of this repository's parsing has been
-/// observed to work with. ADR-0004 asks for a pinned minimum; this is the only
-/// number there is evidence for.
-///
-/// Falling below it is a **warning**, never a refusal — see [`claude_cli`].
-pub const MINIMUM_CLAUDE_VERSION: (u32, u32, u32) = (2, 1, 234);
 
 /// `git worktree remove` landed in git 2.17.0, and
 /// [`crate::worktree`] uses it on every cleanup. `git worktree add`
@@ -55,41 +50,6 @@ pub const ROOMY_DISK_BYTES: u64 = 5 * 1024 * 1024 * 1024;
 /// of accumulating one per launch.
 const WRITE_PROBE_FILE: &str = ".rimaia-write-probe";
 
-type Version = (u32, u32, u32);
-
-/// The first `major.minor[.patch]` in `text`.
-///
-/// Hand-rolled rather than a `semver` dependency, which seam-contract D6 (as
-/// extended to Cargo by D16.3) would need an entry for and which would buy
-/// nothing: neither tool prints a semver string. `git` prints
-/// `git version 2.39.5 (Apple Git-154)` on macOS and
-/// `git version 2.50.0.windows.1` on Windows, and `claude` prints
-/// `2.1.258 (Claude Code)`. Taking the *first* such run of digits and dots is
-/// what makes all three read correctly — the Apple build number is second, and
-/// the Windows suffix is separated by a non-digit so it never joins the patch.
-///
-/// A missing patch reads as `0`. `git version 2.50` is not something any git in
-/// living memory prints, but treating it as unparseable would turn a version
-/// that is obviously new enough into a warning.
-fn parse_version(text: &str) -> Option<Version> {
-    text.split(|character: char| !character.is_ascii_digit() && character != '.')
-        .filter(|token| !token.is_empty())
-        .find_map(|token| {
-            let mut parts = token.split('.');
-            let major = parts.next()?.parse::<u32>().ok()?;
-            let minor = parts.next()?.parse::<u32>().ok()?;
-            let patch = parts
-                .next()
-                .and_then(|part| part.parse::<u32>().ok())
-                .unwrap_or(0);
-            Some((major, minor, patch))
-        })
-}
-
-fn format_version((major, minor, patch): Version) -> String {
-    format!("{major}.{minor}.{patch}")
-}
-
 /// Human bytes, for a disk-space row nobody should have to divide by 1024.
 fn format_bytes(bytes: u64) -> String {
     const GIB: f64 = (1024 * 1024 * 1024) as f64;
@@ -101,12 +61,20 @@ fn format_bytes(bytes: u64) -> String {
     }
 }
 
-/// `claude` on `PATH`, and new enough (ADR-0004).
+/// The agent CLI on `PATH`, and new enough (ADR-0004, ADR-0026).
 ///
-/// Reuses [`probe_cli`] rather than spawning `--version` a second way, so the
-/// doctor and the queue's own per-step probe cannot disagree about whether the
-/// binary runs — and so the message a missing binary produces is the one
-/// `runner::process` already wrote, rather than a second wording of it.
+/// Reuses [`probe_cli`] rather than spawning the version probe a second way,
+/// so the doctor and the queue's own per-step probe cannot disagree about
+/// whether the binary runs — and so the message a missing binary produces is
+/// the one `runner::process` already wrote, rather than a second wording of
+/// it. Parsing what it printed is `provider`'s own
+/// [`AgentProvider::read_version`] (task 032): this function no longer knows
+/// what a version string looks like for any particular CLI.
+///
+/// **`Check::ClaudeCli.as_str()` stays `"claude_cli"` whatever provider is
+/// active.** It is the key half of a stored `doctor_dismissals` row, and
+/// renaming it would silently un-dismiss every warning a user already put
+/// down. Only [`CheckResult::labeled`] changes, to the provider's own name.
 ///
 /// **An old version warns, it does not fail.** The minimum is evidence about
 /// what has been *tested*, not a claim about what breaks: a CLI one patch below
@@ -114,129 +82,146 @@ fn format_bytes(bytes: u64) -> String {
 /// design (ADR-0004), and locking the user out of their own queue over a
 /// version string is a worse outcome than the risk it avoids. A binary that
 /// cannot be run at all is a different question and does fail.
-pub async fn claude_cli(program: &Path) -> CheckResult {
-    let version_output = match probe_cli(program).await {
+pub async fn agent_cli(provider: &dyn AgentProvider, program: &Path) -> CheckResult {
+    let name = provider.display_name();
+    let label = format!("{name} CLI");
+
+    let version_output = match probe_cli(provider, program).await {
         Ok(output) => output,
         Err(error) => {
             return CheckResult::fail(
                 Check::ClaudeCli,
                 error.to_string(),
-                "Install Claude Code and check that `claude --version` runs in a terminal, \
-                 then press Re-check. Rimaia drives your own installation and never bundles one.",
-            );
+                format!(
+                    "Install {name} and check that its CLI runs in a terminal, then press \
+                     Re-check. Rimaia drives your own installation and never bundles one."
+                ),
+            )
+            .labeled(label);
         }
     };
 
-    match parse_version(&version_output) {
-        Some(version) if version >= MINIMUM_CLAUDE_VERSION => {
+    let report = provider.read_version(&ProbeOutput {
+        status: Some(0),
+        stdout: version_output.clone(),
+        stderr: String::new(),
+    });
+
+    match report.parsed {
+        Some(version) if version >= provider.minimum_version() => {
             CheckResult::pass(Check::ClaudeCli, format!("{version_output} on PATH."))
         }
         Some(version) => CheckResult::warn(
             Check::ClaudeCli,
             format!(
-                "Claude Code {} is older than {}, the oldest version Rimaia's event parsing has \
+                "{name} {} is older than {}, the oldest version Rimaia's event parsing has \
                  been tested against.",
                 format_version(version),
-                format_version(MINIMUM_CLAUDE_VERSION),
+                format_version(provider.minimum_version()),
             ),
-            "Run `claude update`. Runs may well work as they are — this is the version Rimaia \
-             was measured against, not a version it is known to break below.",
+            format!(
+                "Update {name}. Runs may well work as they are — this is the version Rimaia \
+                 was measured against, not a version it is known to break below."
+            ),
         ),
         None => CheckResult::warn(
             Check::ClaudeCli,
-            format!("`claude --version` printed something unrecognisable: {version_output}"),
-            "Check that `claude --version` prints a version number in a terminal. The CLI runs, \
-             so runs will most likely still work.",
+            format!("`{name}`'s version probe printed something unrecognisable: {version_output}"),
+            format!(
+                "Check that {name}'s CLI prints a version number in a terminal. It runs, so \
+                 runs will most likely still work."
+            ),
         ),
     }
+    .labeled(label)
 }
 
-/// Whether the CLI is signed in.
+/// Whether the CLI is signed in, or `None` when `provider` cannot be asked out
+/// of band at all — the doctor then omits the row entirely rather than
+/// inventing a pass or a fail (task 032).
 ///
-/// `claude auth status --json` answers `{"loggedIn": true, "authMethod": …}` and
-/// exits zero (verified against Claude Code 2.1.258). That is the mechanism, and
-/// it is a real one rather than a guess: it is non-interactive, it costs no
-/// tokens, and it does not depend on parsing an error message the way ADR-0004
-/// forbids for usage limits.
+/// **Only an explicit sign-out fails.** A probe [`AgentProvider::auth_probe`]
+/// could not run, or whose output [`AgentProvider::read_auth`] could not read,
+/// answers [`AuthState::Undetermined`] — most likely a CLI old enough not to
+/// have the subcommand this provider probes — and reporting "not signed in" on
+/// that evidence would be the doctor lying, which is worse than admitting a
+/// gap. Seam-contract D22 records the version dependency.
 ///
-/// **Only an explicit `loggedIn: false` fails.** A non-zero exit, a missing
-/// subcommand or unparseable output means the check could not be *performed* —
-/// most likely a CLI old enough not to have `auth status` — and reporting "not
-/// signed in" on that evidence would be the doctor lying, which is worse than
-/// the doctor admitting a gap. Seam-contract D22 records the version dependency.
-pub async fn claude_authenticated(program: &Path) -> CheckResult {
+/// **`Check::ClaudeAuthenticated.as_str()` stays `"claude_authenticated"`**,
+/// for the same `doctor_dismissals` reason [`agent_cli`] states.
+pub async fn agent_authenticated(
+    provider: &dyn AgentProvider,
+    program: &Path,
+) -> Option<CheckResult> {
+    let plan = provider.auth_probe(program)?;
+    let name = provider.display_name();
+    let label = format!("{name} sign-in");
+
     let mut command = Command::new(program);
-    command.args(["auth", "status", "--json"]);
+    command.args(&plan.args);
+    for (key, value) in &plan.env_set {
+        command.env(key, value);
+    }
     // The same rule every other child of Rimaia's follows — see
     // `strip_process_identity`'s own doc.
     strip_process_identity(&mut command);
+    for key in &plan.env_remove {
+        command.env_remove(key);
+    }
 
-    let undetermined = |detail: String| {
-        CheckResult::warn(
-            Check::ClaudeAuthenticated,
-            detail,
-            "Run `claude auth status` in a terminal. If it is not a known command, this CLI is \
-             older than the check and the sign-in cannot be verified from here — `claude` itself \
-             will still tell you at the start of a run.",
-        )
-    };
-
-    let output = match command.output().await {
-        Ok(output) => output,
-        Err(error) => {
-            return undetermined(format!(
+    let output = command.output().await;
+    let probe_output = match &output {
+        Ok(output) => ProbeOutput {
+            status: output.status.code(),
+            stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+            stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+        },
+        Err(error) => ProbeOutput {
+            status: None,
+            stdout: String::new(),
+            stderr: format!(
                 "the sign-in could not be checked because `{}` could not be run: {error}",
                 program.display()
-            ));
+            ),
+        },
+    };
+
+    let result = match provider.read_auth(&probe_output) {
+        AuthState::SignedIn { method } => {
+            let method = method
+                .map(|method| format!(" via {method}"))
+                .unwrap_or_default();
+            CheckResult::pass(Check::ClaudeAuthenticated, format!("Signed in{method}."))
         }
-    };
-    if !output.status.success() {
-        return undetermined(format!(
-            "`claude auth status --json` exited {}: {}",
-            output.status,
-            String::from_utf8_lossy(&output.stderr).trim(),
-        ));
-    }
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&stdout) else {
-        return undetermined(
-            "`claude auth status --json` did not answer with JSON, so the sign-in could not be \
-             verified."
-                .to_string(),
-        );
-    };
-    let Some(logged_in) = parsed.get("loggedIn").and_then(serde_json::Value::as_bool) else {
-        return undetermined(
-            "`claude auth status --json` answered without a `loggedIn` field, so the sign-in \
-             could not be verified."
-                .to_string(),
-        );
-    };
-
-    if !logged_in {
-        return CheckResult::fail(
+        AuthState::SignedOut => CheckResult::fail(
             Check::ClaudeAuthenticated,
-            "Claude Code is installed but not signed in, so every run would fail with an \
-             authentication error."
-                .to_string(),
-            "Run `claude auth login` in a terminal, then press Re-check. Rimaia never handles \
-             your credentials — it uses the sign-in the CLI already has.",
-        );
-    }
+            format!(
+                "{name} is installed but not signed in, so every run would fail with an \
+                 authentication error."
+            ),
+            format!(
+                "Sign in to {name} in a terminal, then press Re-check. Rimaia never handles \
+                 your credentials — it uses the sign-in the CLI already has."
+            ),
+        ),
+        AuthState::Undetermined { detail } => CheckResult::warn(
+            Check::ClaudeAuthenticated,
+            detail,
+            format!(
+                "Check {name}'s own sign-in status in a terminal. If this is not a known \
+                 command, this CLI is older than the check and the sign-in cannot be verified \
+                 from here — the CLI itself will still tell you at the start of a run."
+            ),
+        ),
+    };
 
-    let method = parsed
-        .get("authMethod")
-        .and_then(serde_json::Value::as_str)
-        .map(|method| format!(" via {method}"))
-        .unwrap_or_default();
-    CheckResult::pass(Check::ClaudeAuthenticated, format!("Signed in{method}."))
+    Some(result.labeled(label))
 }
 
 /// `git`, new enough for worktrees.
 ///
 /// **Fails rather than warns below the minimum**, which is the opposite of
-/// [`claude_cli`] and deliberately so: every task Rimaia runs begins by creating
+/// [`agent_cli`] and deliberately so: every task Rimaia runs begins by creating
 /// a worktree (ADR-0005), so a `git` that cannot do it is not a risk to weigh,
 /// it is every run failing at the same line. There is nothing for a user to
 /// discover by being allowed to try.
@@ -553,5 +538,29 @@ mod tests {
         assert_eq!(unbound.status, CheckStatus::Warn);
         assert!(unbound.detail.contains("4517"));
         assert_eq!(unbound.check, Check::McpPort);
+    }
+
+    #[cfg(feature = "testing")]
+    #[tokio::test]
+    async fn a_provider_with_no_sign_in_reports_no_row_rather_than_a_failing_one() {
+        // Ledger's `auth_probe` is `None` — its sign-in genuinely cannot be
+        // checked out of band. Inventing a pass or a fail on no evidence would
+        // be the doctor lying about a provider it cannot ask.
+        use crate::testing::provider::Ledger;
+
+        let result = agent_authenticated(&Ledger, Path::new("ledger")).await;
+
+        assert!(result.is_none());
+    }
+
+    #[cfg(feature = "testing")]
+    #[tokio::test]
+    async fn the_doctor_row_names_the_provider_it_actually_probed() {
+        use crate::runner::provider::ClaudeProvider;
+
+        let result = agent_cli(&ClaudeProvider, Path::new("a-binary-that-does-not-exist")).await;
+
+        assert_eq!(result.label, "Claude Code CLI");
+        assert_eq!(result.status, CheckStatus::Fail);
     }
 }

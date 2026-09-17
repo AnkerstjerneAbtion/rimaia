@@ -26,10 +26,19 @@ use rimaia_core::db::{
 };
 use rimaia_core::runner::prompt::{
     compose_prompt, compose_resume_prompt, compose_strategy_prompt, compose_strategy_system_append,
-    compose_system_append, StrategyGuidance, SET_TASK_STRATEGY_TOOL,
+    compose_system_append, StrategyGuidance,
 };
+use rimaia_core::runner::provider::{AgentProvider, ClaudeProvider};
 use rimaia_core::strategy::{Catalogue, CatalogueEntry, StrategyOrigin};
 use rimaia_core::tasks::TaskDetail;
+
+/// The tool handle and fan-out noun this file supplies to
+/// `compose_prompt`/`compose_strategy_prompt` — Claude's own, since that is
+/// what every fixture in this file was recorded against. Named as plain
+/// constants rather than read off `ClaudeProvider` so a test failure here
+/// points at composition, not at the provider seam.
+const TOOL: &str = "mcp__rimaia__set_task_strategy";
+const FANOUT_NOUN: &str = "subagents";
 
 // ---------------------------------------------------------------------------
 // compose_prompt
@@ -43,6 +52,7 @@ fn a_prompt_with_every_section_reads_in_the_order_adr_0009_fixes() {
         &task(),
         &repository(),
         None,
+        FANOUT_NOUN,
     );
 
     assert_eq!(
@@ -81,7 +91,13 @@ fn a_task_with_no_plan_omits_the_plan_section_and_its_heading() {
     task.task.plan = None;
 
     assert_eq!(
-        compose_prompt("Commit as you work.", &task, &repository(), None),
+        compose_prompt(
+            "Commit as you work.",
+            &task,
+            &repository(),
+            None,
+            FANOUT_NOUN
+        ),
         r#"# Base instructions
 
 Commit as you work.
@@ -113,8 +129,20 @@ fn a_plan_of_nothing_but_whitespace_is_the_same_as_no_plan() {
     absent.task.plan = None;
 
     assert_eq!(
-        compose_prompt("Commit as you work.", &blank, &repository(), None),
-        compose_prompt("Commit as you work.", &absent, &repository(), None)
+        compose_prompt(
+            "Commit as you work.",
+            &blank,
+            &repository(),
+            None,
+            FANOUT_NOUN
+        ),
+        compose_prompt(
+            "Commit as you work.",
+            &absent,
+            &repository(),
+            None,
+            FANOUT_NOUN
+        )
     );
 }
 
@@ -124,7 +152,13 @@ fn a_task_with_no_extra_instructions_omits_that_section_and_its_heading() {
     task.task.extra_instructions = None;
 
     assert_eq!(
-        compose_prompt("Commit as you work.", &task, &repository(), None),
+        compose_prompt(
+            "Commit as you work.",
+            &task,
+            &repository(),
+            None,
+            FANOUT_NOUN
+        ),
         r#"# Base instructions
 
 Commit as you work.
@@ -154,7 +188,13 @@ fn a_task_with_no_links_omits_the_links_line_rather_than_rendering_an_empty_one(
     task.links = vec![];
 
     assert_eq!(
-        compose_prompt("Commit as you work.", &task, &repository(), None),
+        compose_prompt(
+            "Commit as you work.",
+            &task,
+            &repository(),
+            None,
+            FANOUT_NOUN
+        ),
         r#"# Base instructions
 
 Commit as you work.
@@ -187,7 +227,7 @@ fn blank_base_instructions_omit_the_base_instructions_section() {
     task.task.extra_instructions = None;
 
     assert_eq!(
-        compose_prompt("", &task, &repository(), None),
+        compose_prompt("", &task, &repository(), None, FANOUT_NOUN),
         r#"# Task context
 
 - Title: Wire the board to the store
@@ -215,7 +255,13 @@ fn a_task_with_no_worktree_yet_omits_the_branch_line() {
     task.task.extra_instructions = None;
 
     assert_eq!(
-        compose_prompt("Commit as you work.", &task, &repository(), None),
+        compose_prompt(
+            "Commit as you work.",
+            &task,
+            &repository(),
+            None,
+            FANOUT_NOUN
+        ),
         r#"# Base instructions
 
 Commit as you work.
@@ -250,6 +296,7 @@ fn an_unknown_template_variable_survives_into_the_composed_prompt_verbatim() {
             &task,
             &repository(),
             None,
+            FANOUT_NOUN,
         ),
         r#"# Base instructions
 
@@ -280,6 +327,7 @@ fn every_known_template_variable_expands_in_the_base_instructions() {
             &task,
             &repository(),
             None,
+            FANOUT_NOUN,
         ),
         r#"# Base instructions
 
@@ -312,8 +360,8 @@ fn editing_base_instructions_cannot_reach_a_prompt_already_composed() {
     let task = task();
     let repository = repository();
 
-    let stored = compose_prompt("Open a draft PR.", &task, &repository, None);
-    let recomposed = compose_prompt("Never open a PR.", &task, &repository, None);
+    let stored = compose_prompt("Open a draft PR.", &task, &repository, None, FANOUT_NOUN);
+    let recomposed = compose_prompt("Never open a PR.", &task, &repository, None, FANOUT_NOUN);
 
     assert!(stored.contains("Open a draft PR."));
     assert!(!stored.contains("Never open a PR."));
@@ -358,7 +406,13 @@ Commit as you work.
 Skip the migration, it already landed."#;
 
     assert_eq!(
-        compose_prompt("Commit as you work.", &task(), &repository(), None),
+        compose_prompt(
+            "Commit as you work.",
+            &task(),
+            &repository(),
+            None,
+            FANOUT_NOUN
+        ),
         expected
     );
 
@@ -374,7 +428,8 @@ Skip the migration, it already landed."#;
             "Commit as you work.",
             &failed,
             &repository(),
-            StrategyGuidance::for_task(&failed).as_ref()
+            StrategyGuidance::for_task(&failed).as_ref(),
+            FANOUT_NOUN,
         ),
         expected
     );
@@ -391,7 +446,8 @@ Skip the migration, it already landed."#;
             "Commit as you work.",
             &single_agent,
             &repository(),
-            StrategyGuidance::for_task(&single_agent).as_ref()
+            StrategyGuidance::for_task(&single_agent).as_ref(),
+            FANOUT_NOUN,
         ),
         expected
     );
@@ -413,7 +469,13 @@ fn a_multi_agent_proposal_lands_between_the_plan_and_the_extra_instructions() {
     let guidance = StrategyGuidance::for_task(&task).expect("a multi-agent proposal is guidance");
 
     assert_eq!(
-        compose_prompt("Commit as you work.", &task, &repository(), Some(&guidance)),
+        compose_prompt(
+            "Commit as you work.",
+            &task,
+            &repository(),
+            Some(&guidance),
+            FANOUT_NOUN
+        ),
         r#"# Base instructions
 
 Commit as you work.
@@ -461,7 +523,13 @@ Skip the migration, it already landed."#
 #[test]
 fn the_strategy_prompt_has_exactly_the_sections_task_020_specifies() {
     assert_eq!(
-        compose_strategy_prompt(&task(), &repository(), &Catalogue::default()),
+        compose_strategy_prompt(
+            &task(),
+            &repository(),
+            &ClaudeProvider.default_catalogue(),
+            TOOL,
+            FANOUT_NOUN
+        ),
         r#"# Your job
 
 You are choosing how another agent should execute the task below. You are not implementing it, and nothing you decide here is code.
@@ -532,7 +600,13 @@ fn the_strategy_prompt_never_carries_the_base_instructions() {
     // instructions are where a run is told to commit, push and open a pull
     // request, and a planner that does any of those is a defect — the only
     // mention of one here is the prohibition in `# How to answer`.
-    let composed = compose_strategy_prompt(&task(), &repository(), &Catalogue::default());
+    let composed = compose_strategy_prompt(
+        &task(),
+        &repository(),
+        &ClaudeProvider.default_catalogue(),
+        TOOL,
+        FANOUT_NOUN,
+    );
 
     assert_eq!(
         headings(&composed),
@@ -568,7 +642,13 @@ fn the_strategy_prompt_names_the_task_id_and_the_write_back_tool() {
     let mut task = task();
     task.task.id = "3f2b1c00-0000-4000-8000-0000000000ff".to_string();
 
-    let composed = compose_strategy_prompt(&task, &repository(), &Catalogue::default());
+    let composed = compose_strategy_prompt(
+        &task,
+        &repository(),
+        &ClaudeProvider.default_catalogue(),
+        TOOL,
+        FANOUT_NOUN,
+    );
 
     assert_eq!(
         section(&composed, "# How to answer"),
@@ -585,8 +665,8 @@ Call `mcp__rimaia__set_task_strategy` exactly once, with:
 Then stop. Print nothing else: the tool call is the only answer that reaches Rimaia, and prose beside it is read by nobody. Do not edit files, run commands, or open a pull request."#
     );
     assert_eq!(
-        SET_TASK_STRATEGY_TOOL, "mcp__rimaia__set_task_strategy",
-        "the constant the runner hands to the system append is the name the prompt spells"
+        TOOL, "mcp__rimaia__set_task_strategy",
+        "the tool handle passed to composition is the name the prompt spells"
     );
 }
 
@@ -602,7 +682,7 @@ fn the_strategy_prompt_lists_every_model_and_effort_in_the_catalogue() {
         ..Catalogue::default()
     };
 
-    let composed = compose_strategy_prompt(&task(), &repository(), &catalogue);
+    let composed = compose_strategy_prompt(&task(), &repository(), &catalogue, TOOL, FANOUT_NOUN);
 
     assert_eq!(
         section(&composed, "# Available models"),
@@ -622,7 +702,8 @@ fn the_strategy_prompt_lists_every_model_and_effort_in_the_catalogue() {
     };
 
     assert!(
-        !compose_strategy_prompt(&task(), &repository(), &emptied).contains("# Available models"),
+        !compose_strategy_prompt(&task(), &repository(), &emptied, TOOL, FANOUT_NOUN)
+            .contains("# Available models"),
         "an empty list is an omitted section, not an empty one"
     );
 }
@@ -638,10 +719,7 @@ fn the_strategy_system_append_states_the_facts_adr_0012_reserves_it_for() {
     // prompt because ADR-0012's amendment puts it on the channel the run may not
     // treat as negotiable.
     assert_eq!(
-        compose_strategy_system_append(
-            "3f2b1c00-0000-4000-8000-000000000001",
-            SET_TASK_STRATEGY_TOOL
-        ),
+        compose_strategy_system_append("3f2b1c00-0000-4000-8000-000000000001", TOOL),
         "You are running unattended, started by Rimaia to decide how one task should be executed. What follows is how this session works, not a preference you may weigh against the job.\n\
          \n\
          - Nobody is watching and nobody can answer a question. There is no interactive terminal, and anything you ask will go unread until a human reviews this transcript, which may be many hours from now.\n\
@@ -655,10 +733,7 @@ fn the_strategy_system_append_carries_no_plan_and_no_catalogue() {
     // ADR-0012 splits the channels for the strategy run too: what the task is,
     // and what may be chosen for it, belong in the prompt where the planner may
     // reason about them.
-    let composed = compose_strategy_system_append(
-        "3f2b1c00-0000-4000-8000-000000000001",
-        SET_TASK_STRATEGY_TOOL,
-    );
+    let composed = compose_strategy_system_append("3f2b1c00-0000-4000-8000-000000000001", TOOL);
 
     assert!(!composed.contains("Read the store"), "the plan leaked");
     assert!(!composed.contains("# "), "a prompt section heading leaked");

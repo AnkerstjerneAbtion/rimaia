@@ -39,6 +39,7 @@
 pub mod checks;
 
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use serde::Serialize;
 
@@ -47,12 +48,10 @@ use crate::error::Result;
 use crate::mcp::{self, RunHandles};
 use crate::paths::AppPaths;
 use crate::repo;
-use crate::runner::process::CLAUDE_CLI;
+use crate::runner::provider::{claude::ClaudeProvider, AgentProvider};
 use crate::runner::RunnerConfig;
 
-pub use checks::{
-    MINIMUM_CLAUDE_VERSION, MINIMUM_GIT_VERSION, ROOMY_DISK_BYTES, USABLE_DISK_BYTES,
-};
+pub use checks::{MINIMUM_GIT_VERSION, ROOMY_DISK_BYTES, USABLE_DISK_BYTES};
 
 /// Which check a [`CheckResult`] came from.
 ///
@@ -167,7 +166,11 @@ pub struct CheckResult {
     /// which is two copies of prose that would drift the first time a check is
     /// renamed. Every constructor below fills it, so there is still exactly one
     /// place the words live.
-    pub label: &'static str,
+    ///
+    /// `String`, not `&'static str`: the CLI and sign-in rows interpolate
+    /// `AgentProvider::display_name` (task 032), which is only known once a
+    /// provider has been chosen — see [`CheckResult::labeled`].
+    pub label: String,
     /// Which repository this row is about, for the two per-repository checks.
     /// `None` for the six that describe the installation as a whole.
     ///
@@ -186,7 +189,7 @@ impl CheckResult {
     pub fn pass(check: Check, detail: impl Into<String>) -> Self {
         Self {
             check,
-            label: check.label(),
+            label: check.label().to_string(),
             repository: None,
             status: CheckStatus::Pass,
             detail: detail.into(),
@@ -197,7 +200,7 @@ impl CheckResult {
     pub fn warn(check: Check, detail: impl Into<String>, remediation: impl Into<String>) -> Self {
         Self {
             check,
-            label: check.label(),
+            label: check.label().to_string(),
             repository: None,
             status: CheckStatus::Warn,
             detail: detail.into(),
@@ -208,7 +211,7 @@ impl CheckResult {
     pub fn fail(check: Check, detail: impl Into<String>, remediation: impl Into<String>) -> Self {
         Self {
             check,
-            label: check.label(),
+            label: check.label().to_string(),
             repository: None,
             status: CheckStatus::Fail,
             detail: detail.into(),
@@ -219,6 +222,14 @@ impl CheckResult {
     /// Attaches the repository a per-repository row is about.
     pub fn about(mut self, repository: impl Into<String>) -> Self {
         self.repository = Some(repository.into());
+        self
+    }
+
+    /// Overrides [`Check::label`]'s static word with a provider-interpolated
+    /// one — the CLI and sign-in rows' own name, at `display_name()`, rather
+    /// than the frozen `Check` variant's own prose (task 032).
+    pub fn labeled(mut self, label: impl Into<String>) -> Self {
+        self.label = label.into();
         self
     }
 }
@@ -280,8 +291,8 @@ impl DoctorReport {
             .iter()
             .map(|result| {
                 let subject = match &result.repository {
-                    Some(repository) => format!("{} ({repository})", result.check.label()),
-                    None => result.check.label().to_string(),
+                    Some(repository) => format!("{} ({repository})", result.label),
+                    None => result.label.clone(),
                 };
                 match &result.remediation {
                     Some(remediation) => format!("{subject}: {} {remediation}", result.detail),
@@ -305,21 +316,25 @@ impl DoctorReport {
 
 /// The external binaries the doctor probes, injectable.
 ///
-/// `claude` comes from the runner's own [`RunnerConfig::program`] rather than
+/// `agent` comes from the runner's own [`RunnerConfig::program`] rather than
 /// from this struct's default whenever an [`Environment`] is built by
-/// [`Environment::for_runner`]: a doctor that reported on a *different* `claude`
-/// than the one the queue spawns would be reassuring about the wrong binary.
+/// [`Environment::for_runner`]: a doctor that reported on a *different* binary
+/// than the one the queue spawns would be reassuring about the wrong one.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Programs {
-    pub claude: PathBuf,
+    pub agent: PathBuf,
     pub git: PathBuf,
     pub gh: PathBuf,
 }
 
 impl Default for Programs {
+    /// Claude Code's own program name. [`Environment::for_runner`] is what
+    /// actually decides which binary a real doctor probes — this default is
+    /// only ever reached by [`Environment::new`], for a caller with no runner
+    /// in front of it yet.
     fn default() -> Self {
         Self {
-            claude: PathBuf::from(CLAUDE_CLI),
+            agent: PathBuf::from(ClaudeProvider.default_program()),
             git: PathBuf::from(repo::GIT_CLI),
             gh: PathBuf::from(repo::GH_CLI),
         }
@@ -335,11 +350,16 @@ impl Default for Programs {
 /// of its own — a doctor that tried to prove the port was free would have to
 /// take it from the server currently holding it, and would then report a
 /// healthy installation as broken (or, worse, briefly break it).
+///
+/// `provider` is the agent CLI the checks below name and probe — Claude Code
+/// unless [`Environment::for_runner`] says otherwise, for the same reason
+/// `programs.agent` defaults to it (task 032).
 #[derive(Debug, Clone)]
 pub struct Environment {
     pub programs: Programs,
     pub paths: AppPaths,
     pub run_handles: RunHandles,
+    pub provider: Arc<dyn AgentProvider>,
 }
 
 impl Environment {
@@ -349,19 +369,21 @@ impl Environment {
             programs: Programs::default(),
             paths,
             run_handles: RunHandles::default(),
+            provider: Arc::new(ClaudeProvider),
         }
     }
 
-    /// The shell's construction: the same `claude` binary and the same live
-    /// handle table the queue and the MCP server already share.
+    /// The shell's construction: the same binary, the same provider and the
+    /// same live handle table the queue and the MCP server already share.
     pub fn for_runner(paths: AppPaths, runner: &RunnerConfig) -> Self {
         Self {
             programs: Programs {
-                claude: runner.program.clone(),
+                agent: runner.program.clone(),
                 ..Programs::default()
             },
             paths,
             run_handles: runner.run_handles.clone(),
+            provider: runner.provider.clone(),
         }
     }
 
@@ -387,10 +409,10 @@ impl Environment {
 pub async fn run(ctx: &ServiceContext, environment: &Environment) -> Result<DoctorReport> {
     let repositories = repo::list(ctx).await?;
     let configured_port = mcp::configured_port(&ctx.pool).await?;
+    let provider = environment.provider.as_ref();
 
     let mut results = vec![
-        checks::claude_cli(&environment.programs.claude).await,
-        checks::claude_authenticated(&environment.programs.claude).await,
+        checks::agent_cli(provider, &environment.programs.agent).await,
         checks::git(&environment.programs.git).await,
         checks::data_directory(&environment.paths),
         checks::disk_space(&environment.paths),
@@ -399,6 +421,12 @@ pub async fn run(ctx: &ServiceContext, environment: &Environment) -> Result<Doct
             environment.run_handles.endpoint().as_deref(),
         ),
     ];
+    // No row at all for a provider whose sign-in cannot be checked out of
+    // band — inventing a pass or a fail would be worse than admitting the
+    // gap (task 032).
+    if let Some(result) = checks::agent_authenticated(provider, &environment.programs.agent).await {
+        results.push(result);
+    }
 
     // Sequentially rather than joined: this spawns up to two subprocesses per
     // repository, and a machine with a dozen registered repositories should not
@@ -410,4 +438,20 @@ pub async fn run(ctx: &ServiceContext, environment: &Environment) -> Result<Doct
     }
 
     Ok(DoctorReport::new(results))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_two_provider_checks_serialized_values_are_frozen_regardless_of_the_active_provider() {
+        // `Check::as_str` is the key half of a stored doctor-dismissal row (once
+        // that mechanism exists — task 032's own hazard). Renaming either
+        // string would silently un-dismiss every warning a user already put
+        // down, with no migration to catch it. Only `CheckResult::labeled`
+        // (the *prose*) is allowed to vary with the active provider.
+        assert_eq!(Check::ClaudeCli.as_str(), "claude_cli");
+        assert_eq!(Check::ClaudeAuthenticated.as_str(), "claude_authenticated");
+    }
 }

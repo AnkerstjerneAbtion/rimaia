@@ -34,7 +34,7 @@ use pretty_assertions::assert_eq;
 use rimaia_core::db::{BoardColumn, ExitClass, RunState, StrategyMode};
 use rimaia_core::repo::{self, NewRepository};
 use rimaia_core::runner::events::RunTail;
-use rimaia_core::runner::provider::ProviderId;
+use rimaia_core::runner::provider::{ClaudeProvider, ProviderId};
 use rimaia_core::runner::{
     run_task, AgentProvider, CancelSignal, RunRequest, RunnerConfig, STRATEGY_TRANSCRIPT_PREFIX,
 };
@@ -556,7 +556,7 @@ impl Fixture {
     /// Puts the task into ADR-0016's `planned` mode, so `run_task` would resolve
     /// a strategy before spawning the implementation run.
     async fn set_planned(&self) {
-        catalogue::catalogue(&self.harness.context.pool)
+        catalogue::catalogue(&self.harness.context.pool, &ClaudeProvider)
             .await
             .expect("the seeded catalogue");
         tasks::update_task(

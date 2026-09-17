@@ -20,6 +20,7 @@ use rimaia_core::db::Repository;
 use rimaia_core::doctor::{
     checks, Check, CheckResult, CheckStatus, DoctorReport, Environment, Programs,
 };
+use rimaia_core::runner::provider::ClaudeProvider;
 use rimaia_core::runner::RunnerConfig;
 use rimaia_core::scheduler::{self, InFlight, QueueState};
 use rimaia_core::testing::{TempRepo, TestContext};
@@ -114,7 +115,7 @@ async fn a_missing_claude_binary_is_a_blocking_failure_with_a_useful_message() {
     let renamed = dir.path().join("claude-2.1.258");
     std::fs::rename(&claude, &renamed).expect("the rename must succeed");
 
-    let result = checks::claude_cli(&claude).await;
+    let result = checks::agent_cli(&ClaudeProvider, &claude).await;
 
     assert_eq!(result.status, CheckStatus::Fail);
     assert_eq!(result.check, Check::ClaudeCli);
@@ -156,14 +157,21 @@ async fn a_claude_that_runs_but_is_signed_out_is_a_blocking_failure() {
          exit 1\n",
     );
 
-    assert_eq!(checks::claude_cli(&claude).await.status, CheckStatus::Pass);
+    assert_eq!(
+        checks::agent_cli(&ClaudeProvider, &claude).await.status,
+        CheckStatus::Pass
+    );
 
-    let result = checks::claude_authenticated(&claude).await;
+    let result = checks::agent_authenticated(&ClaudeProvider, &claude)
+        .await
+        .expect("Claude Code has an auth probe");
     assert_eq!(result.status, CheckStatus::Fail);
+    // Provider-neutral wording (task 032): the doctor no longer names a
+    // vendor's own sign-in command, only the provider it belongs to.
     assert!(result
         .remediation
         .expect("a failure carries a remediation")
-        .contains("claude auth login"));
+        .contains("Sign in to Claude Code"));
 }
 
 #[tokio::test]
@@ -181,7 +189,9 @@ async fn a_cli_too_old_to_answer_auth_status_is_a_warning_rather_than_a_false_ne
          exit 2\n",
     );
 
-    let result = checks::claude_authenticated(&claude).await;
+    let result = checks::agent_authenticated(&ClaudeProvider, &claude)
+        .await
+        .expect("Claude Code has an auth probe");
 
     assert_eq!(result.status, CheckStatus::Warn);
     assert!(!result.status.is_blocking());
@@ -196,7 +206,7 @@ async fn a_claude_older_than_the_pinned_minimum_warns_instead_of_locking_the_use
         "#!/bin/sh\necho '2.0.1 (Claude Code)'\nexit 0\n",
     );
 
-    let result = checks::claude_cli(&claude).await;
+    let result = checks::agent_cli(&ClaudeProvider, &claude).await;
 
     // Deliberately not a failure: see the check's own doc and seam-contract
     // D19. A version string is evidence about what has been tested, not a
@@ -612,7 +622,7 @@ async fn the_doctor_probes_the_runners_own_claude_rather_than_the_one_on_path() 
 
     let environment = Environment::for_runner(AppPaths::new(root.path()), &runner);
 
-    assert_eq!(environment.programs.claude, runner.program);
+    assert_eq!(environment.programs.agent, runner.program);
     // The other two keep their defaults; only `claude` is configurable.
     assert_eq!(environment.programs.git, Programs::default().git);
 }

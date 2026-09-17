@@ -51,7 +51,7 @@ pub async fn set_run_environment(state: State<'_, AppState>, value: RunEnvironme
 /// as the expensive one.
 #[tauri::command]
 pub async fn get_run_cost_summary(state: State<'_, AppState>) -> Result<RunCostSummary> {
-    outcome::observed_run_cost(&state.context.pool).await
+    outcome::observed_run_cost(&state.context.pool, state.runner.provider.as_ref()).await
 }
 
 /// The prompt `task_id` would receive right now, composed the same way task
@@ -79,5 +79,6 @@ pub async fn preview_composed_prompt(
         &detail,
         &repository,
         guidance.as_ref(),
+        state.runner.provider.fanout_noun(),
     ))
 }

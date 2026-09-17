@@ -1007,8 +1007,8 @@ mod tests {
 
 /// What this installation's finished runs have actually cost.
 ///
-/// Exists so the Settings copy can put
-/// [`ENVIRONMENT_SETUP_COST_USD`](crate::db::settings::ENVIRONMENT_SETUP_COST_USD)
+/// Exists so the Settings copy can put a provider's own
+/// [`AgentProvider::inherit_cost_usd`](crate::runner::provider::AgentProvider::inherit_cost_usd)
 /// in proportion against real runs rather than against the spike's one-word
 /// prompt. Without it the panel can only quote a ratio measured on a run that
 /// did no work, which overstates the cost of `inherit` by an order of magnitude
@@ -1019,6 +1019,12 @@ pub struct RunCostSummary {
     /// `None` until something has finished and reported a cost.
     pub median_usd: Option<f64>,
     pub sample_size: i64,
+    /// The active provider's own
+    /// [`AgentProvider::inherit_cost_usd`](crate::runner::provider::AgentProvider::inherit_cost_usd).
+    /// `None` for a provider nobody has measured — the panel then says
+    /// nothing about cost rather than a zero or a stale figure (task 032).
+    pub inherit_cost_usd: Option<f64>,
+    pub provider_display_name: &'static str,
 }
 
 /// The median cost of a finished run, and how many there were to look at.
@@ -1030,7 +1036,10 @@ pub struct RunCostSummary {
 /// Only runs that reported a cost count. A cancelled run that died before its
 /// `result` has `NULL` here, and treating that as zero would drag the answer
 /// toward nothing.
-pub async fn observed_run_cost(pool: &sqlx::SqlitePool) -> Result<RunCostSummary> {
+pub async fn observed_run_cost(
+    pool: &sqlx::SqlitePool,
+    provider: &dyn crate::runner::provider::AgentProvider,
+) -> Result<RunCostSummary> {
     let costs: Vec<f64> = sqlx::query_scalar!(
         r#"SELECT cost_usd AS "cost_usd!: f64" FROM runs
            WHERE cost_usd IS NOT NULL AND cost_usd > 0 ORDER BY cost_usd ASC"#,
@@ -1050,5 +1059,7 @@ pub async fn observed_run_cost(pool: &sqlx::SqlitePool) -> Result<RunCostSummary
     Ok(RunCostSummary {
         median_usd,
         sample_size,
+        inherit_cost_usd: provider.inherit_cost_usd(),
+        provider_display_name: provider.display_name(),
     })
 }

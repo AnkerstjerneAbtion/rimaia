@@ -491,7 +491,9 @@ told about."
     )]
     pub async fn get_strategy_catalogue(&self) -> Result<Json<Catalogue>, ToolError> {
         self.scope.authorize(Tool::GetStrategyCatalogue, None)?;
-        Ok(Json(strategy::catalogue::catalogue(&self.ctx.pool).await?))
+        Ok(Json(
+            strategy::catalogue::catalogue(&self.ctx.pool, self.doctor.provider.as_ref()).await?,
+        ))
     }
 
     #[tool(
@@ -506,7 +508,9 @@ before it is stored, so an unparseable one is refused and the previous catalogue
     ) -> Result<Json<Catalogue>, ToolError> {
         self.scope.authorize(Tool::SetStrategyCatalogue, None)?;
         strategy::catalogue::set_catalogue(&self.ctx, &request.catalogue).await?;
-        Ok(Json(strategy::catalogue::catalogue(&self.ctx.pool).await?))
+        Ok(Json(
+            strategy::catalogue::catalogue(&self.ctx.pool, self.doctor.provider.as_ref()).await?,
+        ))
     }
 
     #[tool(

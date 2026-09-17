@@ -19,7 +19,6 @@ use rimaia_core::runner::{probe_cli, strategy as runner_strategy};
 use rimaia_core::scheduler::LeaseOwner;
 use rimaia_core::strategy::{
     catalogue, settings as strategy_settings, Catalogue, StrategyApproval, StrategyDefaults,
-    DEFAULT_CATALOGUE_JSON,
 };
 use rimaia_core::{repo, tasks, Error, Result};
 use serde::Serialize;
@@ -42,24 +41,39 @@ use crate::state::AppState;
 ///   [`catalogue::set_catalogue`] deliberately stores what the user typed: their
 ///   key order and indentation are what they should see when they open Settings
 ///   again.
-/// - `default_json` is what "Restore defaults" writes. It crosses the boundary
-///   rather than being retyped in the frontend for the reason
-///   [`DEFAULT_CATALOGUE_JSON`] is exported at all — a second copy of the
-///   default list is a second thing to update when a model is added.
+/// - `default_json` is what "Restore defaults" writes: the active provider's
+///   own [`AgentProvider::default_catalogue`](rimaia_core::runner::provider::AgentProvider::default_catalogue),
+///   serialized here rather than retyped in the frontend — a second copy of
+///   the default list is a second thing to update when a model is added.
+/// - `provider_info` is carried here, rather than through a new command, so
+///   the origin label and the "No model — … chooses" placeholders (task 032)
+///   have the active provider's name without a `check-command-wiring.sh`
+///   change: every component that needs it already reads this payload.
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct StrategyCatalogueView {
     pub catalogue: Catalogue,
     pub json: String,
     pub default_json: String,
+    pub provider_info: ProviderInfoView,
+}
+
+/// The name a `--model chooses for you` sentence interpolates. Not
+/// [`rimaia_core::runner::provider::ProviderId`] itself: that identity is
+/// frozen for storage, and this is free prose (task 032).
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProviderInfoView {
+    pub id: String,
+    pub display_name: String,
 }
 
 /// The catalogue as stored, as parsed, and as it would be if restored.
 ///
-/// `json` falls back to [`DEFAULT_CATALOGUE_JSON`] when the key is absent — the
-/// unseeded case, which is every fresh install. The textarea then opens on the
-/// bytes an unconfigured Rimaia is actually using rather than on an empty box
-/// the user would have to fill in from the documentation.
+/// `json` falls back to the active provider's own default when the key is
+/// absent — the unseeded case, which is every fresh install. The textarea then
+/// opens on the bytes an unconfigured Rimaia is actually using rather than on
+/// an empty box the user would have to fill in from the documentation.
 #[tauri::command]
 pub async fn get_strategy_catalogue(state: State<'_, AppState>) -> Result<StrategyCatalogueView> {
     let pool = &state.context.pool;
@@ -68,10 +82,19 @@ pub async fn get_strategy_catalogue(state: State<'_, AppState>) -> Result<Strate
     // reader and writer.
     let stored = settings::get(pool, catalogue::STRATEGY_CATALOGUE).await?;
 
+    let provider = state.runner.provider.as_ref();
+    let default_catalogue = provider.default_catalogue();
+    let default_json = serde_json::to_string_pretty(&default_catalogue)
+        .map_err(|error| Error::internal(error.to_string()))?;
+
     Ok(StrategyCatalogueView {
-        catalogue: catalogue::catalogue(pool).await?,
-        json: stored.unwrap_or_else(|| DEFAULT_CATALOGUE_JSON.to_string()),
-        default_json: DEFAULT_CATALOGUE_JSON.to_string(),
+        catalogue: catalogue::catalogue(pool, provider).await?,
+        json: stored.unwrap_or_else(|| default_json.clone()),
+        default_json,
+        provider_info: ProviderInfoView {
+            id: provider.id().as_str().to_string(),
+            display_name: provider.display_name().to_string(),
+        },
     })
 }
 
@@ -223,7 +246,7 @@ pub async fn plan_task_strategy(state: State<'_, AppState>, task_id: String) -> 
     let cancel = lease.cancel_signal();
 
     repo::ensure_unattended_runs_allowed(&repository)?;
-    probe_cli(&config.program).await?;
+    probe_cli(config.provider.as_ref(), &config.program).await?;
 
     tauri::async_runtime::spawn(async move {
         let _lease = lease;

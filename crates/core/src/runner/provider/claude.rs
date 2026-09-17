@@ -41,9 +41,11 @@ use crate::runner::events::{
 
 use super::intent::{ForbiddenKind, ForbiddenOperation, PermissionMode, RunIntent, SessionIntent};
 use super::{
-    AgentProvider, Capabilities, HandleInjection, IsolationSupport, OrchestratorChannel,
-    PostureEcho, ProviderId, SessionCapability, SpawnPlan, TurnBudget,
+    parse_version, AgentProvider, AuthState, Capabilities, HandleInjection, IsolationSupport,
+    OrchestratorChannel, PostureEcho, ProbeOutput, ProviderId, SessionCapability, SpawnPlan,
+    TurnBudget, Version, VersionReport,
 };
+use crate::strategy::{Catalogue, CatalogueEntry, PlannerBudget};
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -60,6 +62,49 @@ pub const CLAUDE_CLI: &str = "claude";
 /// discovery, and a repository's own `CLAUDE.md` is wanted in both modes — it is
 /// the project's instructions, not the operator's configuration.
 const SETTING_SOURCES: &str = "project,local";
+
+/// The name a doctor row, an error sentence and the UI use (task 032).
+pub const DISPLAY_NAME: &str = "Claude Code";
+
+/// The CLI the spike measured against (`spike/FINDINGS.md`, 2026-08-20), and
+/// therefore the oldest `claude` any of this repository's parsing has been
+/// observed to work with. ADR-0004 asks for a pinned minimum; this is the only
+/// number there is evidence for.
+///
+/// Falling below it is a **warning**, never a refusal — see
+/// `doctor::checks::agent_cli`. Generalises what used to be
+/// `doctor::checks::MINIMUM_CLAUDE_VERSION`; moved here because it is a fact
+/// about this provider's own parsing, not about the doctor.
+pub const MINIMUM_VERSION: Version = (2, 1, 234);
+
+/// What inheriting the operator's configuration adds to a run, in dollars.
+///
+/// From `spike/FINDINGS.md` §2, which spawned the *same one-word prompt*
+/// twice: $0.1061 inherited against $0.0291 isolated, on 16,455
+/// cache-creation tokens against 3,179. The difference is these ~13,300
+/// tokens of tools, MCP servers and hooks loaded before the run reads its
+/// plan.
+///
+/// # It is a fixed cost, and the ratio is the misleading way to say it
+///
+/// The spike reported "3.6x", and that number is true only of the trivial
+/// prompt it was measured on, where setup *was* the whole run. This is
+/// charged once per session as cache creation, not per turn, so it does not
+/// scale with the work: the same ~$0.08 lands on a four-turn run and a
+/// forty-turn one. As a share of a real run it has been observed anywhere
+/// from 64% (a ten-cent metadata edit) to 0.2% (a $32 implementation).
+///
+/// Quoting the ratio in the UI therefore argues for `strict_local`, which is
+/// the opposite of what the spike concluded — it recommended inheriting by
+/// default, because reaching your own MCP servers mid-run is much of the
+/// point of a local desktop app. So the UI states the fixed cost and puts it
+/// in proportion against runs this installation has actually paid for.
+///
+/// Moved here from `db::settings::ENVIRONMENT_SETUP_COST_USD` (task 032): it
+/// is a Claude-measured number, and quoting it beside a different provider's
+/// toggle would be a fabricated figure on the one screen whose whole job is
+/// to inform a cost decision.
+pub const INHERIT_COST_USD: f64 = 0.077;
 
 /// The prefix that marks an environment variable as Claude Code's own process
 /// identity.
@@ -297,6 +342,126 @@ impl AgentProvider for ClaudeProvider {
     fn parse_line(&self, line: &str) -> std::result::Result<RunEvent, serde_json::Error> {
         serde_json::from_str(line).map(event_from_value)
     }
+
+    fn display_name(&self) -> &'static str {
+        DISPLAY_NAME
+    }
+
+    fn version_probe(&self, _program: &Path) -> SpawnPlan {
+        SpawnPlan {
+            args: vec!["--version".to_string()],
+            ..SpawnPlan::default()
+        }
+    }
+
+    fn read_version(&self, output: &ProbeOutput) -> VersionReport {
+        let raw = output.stdout.trim().to_string();
+        VersionReport {
+            parsed: parse_version(&raw),
+            raw,
+        }
+    }
+
+    fn auth_probe(&self, _program: &Path) -> Option<SpawnPlan> {
+        Some(SpawnPlan {
+            args: vec![
+                "auth".to_string(),
+                "status".to_string(),
+                "--json".to_string(),
+            ],
+            ..SpawnPlan::default()
+        })
+    }
+
+    /// `claude auth status --json` answers `{"loggedIn": true, "authMethod": …}`
+    /// and exits zero (verified against Claude Code 2.1.258).
+    ///
+    /// **Only an explicit `loggedIn: false` reads as signed out.** A missing
+    /// field, unparseable JSON, or a non-zero exit means the check could not be
+    /// *performed* — most likely a CLI old enough not to have `auth status` —
+    /// and reporting "not signed in" on that evidence would be this provider
+    /// lying, which is worse than admitting a gap.
+    fn read_auth(&self, output: &ProbeOutput) -> AuthState {
+        if output.status != Some(0) {
+            return AuthState::Undetermined {
+                detail: format!(
+                    "`claude auth status --json` exited {}: {}",
+                    output
+                        .status
+                        .map(|code| code.to_string())
+                        .unwrap_or_else(|| "with no code".to_string()),
+                    output.stderr.trim(),
+                ),
+            };
+        }
+
+        let Ok(parsed) = serde_json::from_str::<Value>(output.stdout.trim()) else {
+            return AuthState::Undetermined {
+                detail: "`claude auth status --json` did not answer with JSON".to_string(),
+            };
+        };
+        let Some(logged_in) = parsed.get("loggedIn").and_then(Value::as_bool) else {
+            return AuthState::Undetermined {
+                detail: "`claude auth status --json` answered without a `loggedIn` field"
+                    .to_string(),
+            };
+        };
+
+        if !logged_in {
+            return AuthState::SignedOut;
+        }
+        AuthState::SignedIn {
+            method: text(&parsed, "authMethod"),
+        }
+    }
+
+    fn minimum_version(&self) -> Version {
+        MINIMUM_VERSION
+    }
+
+    fn tool_handle(&self, server: &str, tool: &str) -> String {
+        format!("mcp__{server}__{tool}")
+    }
+
+    fn fanout_noun(&self) -> &'static str {
+        "subagents"
+    }
+
+    fn inherit_cost_usd(&self) -> Option<f64> {
+        Some(INHERIT_COST_USD)
+    }
+
+    fn default_catalogue(&self) -> Catalogue {
+        Catalogue {
+            models: catalogue_entries(&[
+                ("opus", "Opus"),
+                ("sonnet", "Sonnet"),
+                ("haiku", "Haiku"),
+            ]),
+            efforts: catalogue_entries(&[
+                ("low", "Low"),
+                ("medium", "Medium"),
+                ("high", "High"),
+                ("xhigh", "Extra high"),
+                ("max", "Max"),
+            ]),
+            planner: PlannerBudget {
+                model: Some("haiku".to_string()),
+                effort: Some("low".to_string()),
+                ..PlannerBudget::default()
+            },
+        }
+    }
+}
+
+fn catalogue_entries(pairs: &[(&str, &str)]) -> Vec<CatalogueEntry> {
+    pairs
+        .iter()
+        .map(|(id, label)| CatalogueEntry {
+            id: (*id).to_string(),
+            label: (*label).to_string(),
+        })
+        .collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -331,9 +496,12 @@ pub fn is_process_identity(name: &str) -> bool {
         .is_some_and(|head| head.eq_ignore_ascii_case(IDENTITY_PREFIX))
 }
 
-/// How this provider spells one of Rimaia's tool names.
+/// How this provider spells one of Rimaia's tool names, at the server name
+/// every call site here already uses. [`AgentProvider::tool_handle`] is the
+/// general form; this is the shorthand `plan_spawn` and
+/// [`rimaia_tool_surface`] reach for.
 fn tool_handle(tool: &str) -> String {
-    format!("mcp__{MCP_SERVER_NAME}__{tool}")
+    ClaudeProvider.tool_handle(MCP_SERVER_NAME, tool)
 }
 
 /// Rimaia's whole MCP tool surface, as this provider denies it.
@@ -958,6 +1126,66 @@ mod tests {
                 "{name} was stripped unnecessarily"
             );
         }
+    }
+
+    #[test]
+    fn the_default_catalogue_is_the_three_models_and_five_efforts_task_020_specifies() {
+        // Moved here from `strategy::catalogue`'s own tests (task 032): this is
+        // Claude's opinion, not a fact about the catalogue format, so it is
+        // pinned against `ClaudeProvider` rather than against `Catalogue::default`.
+        let default = ClaudeProvider.default_catalogue();
+
+        assert_eq!(
+            default
+                .models
+                .iter()
+                .map(|entry| entry.id.as_str())
+                .collect::<Vec<_>>(),
+            ["opus", "sonnet", "haiku"]
+        );
+        assert_eq!(
+            default
+                .efforts
+                .iter()
+                .map(|entry| entry.id.as_str())
+                .collect::<Vec<_>>(),
+            ["low", "medium", "high", "xhigh", "max"],
+            "xhigh and max are new here; the panel's old list stopped at high"
+        );
+        assert_eq!(default.planner.model.as_deref(), Some("haiku"));
+        assert_eq!(default.planner.effort.as_deref(), Some("low"));
+        assert_eq!(default.planner.max_turns, 6);
+    }
+
+    #[test]
+    fn a_version_line_parses_past_its_trailing_product_name() {
+        assert_eq!(
+            ClaudeProvider
+                .read_version(&ProbeOutput {
+                    status: Some(0),
+                    stdout: "2.1.258 (Claude Code)".to_string(),
+                    stderr: String::new(),
+                })
+                .parsed,
+            Some((2, 1, 258))
+        );
+    }
+
+    #[test]
+    fn a_signed_out_cli_is_told_apart_from_one_the_check_could_not_perform() {
+        let signed_out = ClaudeProvider.read_auth(&ProbeOutput {
+            status: Some(0),
+            stdout: r#"{"loggedIn": false}"#.to_string(),
+            stderr: String::new(),
+        });
+        assert_eq!(signed_out, AuthState::SignedOut);
+
+        let undetermined = ClaudeProvider.read_auth(&ProbeOutput {
+            status: Some(2),
+            stdout: String::new(),
+            stderr: "error: unknown command 'auth'".to_string(),
+        });
+        assert!(matches!(undetermined, AuthState::Undetermined { .. }));
     }
 
     #[test]

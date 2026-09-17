@@ -34,7 +34,7 @@
 //!    ~$0.08 of setup per run — ~13,300 cache-creation tokens, charged once per
 //!    session and not per turn (`spike/FINDINGS.md` §2) — and buys the
 //!    operator's own MCP servers, which ADR-0004's amendment decides is worth
-//!    it by default. See `db::settings::ENVIRONMENT_SETUP_COST_USD` for why the
+//!    it by default. See `provider::claude::INHERIT_COST_USD` for why the
 //!    spike's "3.6x" is the misleading way to state that.
 //! 2. **Stripping an agent's identity variables is not a choice** and is not
 //!    configurable. Those variables are process identity, not user config: a
@@ -393,20 +393,32 @@ pub async fn max_turns(pool: &sqlx::SqlitePool) -> Result<u32> {
 /// before a `runs` row exists — because task 008's acceptance criterion is that
 /// a missing binary is a clear error and not a task stuck `running` with a
 /// transcript that was never opened.
-pub async fn probe_cli(program: &Path) -> Result<String> {
+///
+/// Routed through [`AgentProvider::version_probe`] (task 032) rather than a
+/// hardcoded `--version`: what to run is the provider's own vocabulary, and
+/// this module stays the one place that owns the spawning.
+pub async fn probe_cli(provider: &dyn AgentProvider, program: &Path) -> Result<String> {
+    let plan = provider.version_probe(program);
     let mut command = Command::new(program);
-    command.arg("--version");
+    command.args(&plan.args);
+    for (key, value) in &plan.env_set {
+        command.env(key, value);
+    }
     // Even here. "Always strip" is easier to keep true than "strip on the paths
     // that matter", and this is a child of Rimaia's like any other.
     strip_process_identity(&mut command);
+    for key in &plan.env_remove {
+        command.env_remove(key);
+    }
 
     let output = command
         .output()
         .await
-        .map_err(|error| missing_cli(program, error.to_string()))?;
+        .map_err(|error| missing_cli(provider, program, error.to_string()))?;
 
     if !output.status.success() {
         return Err(missing_cli(
+            provider,
             program,
             String::from_utf8_lossy(&output.stderr).trim(),
         ));
@@ -418,15 +430,17 @@ pub async fn probe_cli(program: &Path) -> Result<String> {
 /// The sentence a user reads when the prerequisite is not there.
 ///
 /// It names what was looked for, where, and what to do — and says that Rimaia
-/// runs their own installation, because "install Claude Code" is otherwise a
-/// confusing thing to be told by an app that is visibly running Claude Code.
+/// runs their own installation, because "install <the CLI>" is otherwise a
+/// confusing thing to be told by an app that is visibly running it.
 /// No install command is quoted: there are several, they change, and a wrong one
 /// is worse than none.
-fn missing_cli(program: &Path, detail: impl AsRef<str>) -> Error {
+fn missing_cli(provider: &dyn AgentProvider, program: &Path, detail: impl AsRef<str>) -> Error {
     let detail = detail.as_ref();
+    let name = provider.display_name();
+    let cli = provider.default_program();
     let mut message = format!(
-        "could not run the Claude Code CLI ({}). Rimaia drives your own installation and never \
-         bundles one — install Claude Code, check that `{CLAUDE_CLI}` runs in a terminal, then \
+        "could not run the {name} CLI ({}). Rimaia drives your own installation and never \
+         bundles one — install {name}, check that `{cli}` runs in a terminal, then \
          start the run again",
         program.display(),
     );
@@ -758,7 +772,7 @@ pub async fn run_task(
         tracing::warn!(%task_id, provider = %config.provider.id(), warning, "the provider could not honour part of this run");
     }
 
-    let version = probe_cli(&config.program).await?;
+    let version = probe_cli(config.provider.as_ref(), &config.program).await?;
     tracing::debug!(
         %task_id,
         provider = %config.provider.id(),
@@ -871,7 +885,13 @@ pub async fn run_task(
     // diff — a seam bug that would read as a bad model.
     let prompt = match plan.prompt_style {
         PromptStyle::Continuation => compose_resume_prompt(&detail),
-        PromptStyle::Composed => compose_prompt(&base, &detail, &repository, guidance.as_ref()),
+        PromptStyle::Composed => compose_prompt(
+            &base,
+            &detail,
+            &repository,
+            guidance.as_ref(),
+            config.provider.fanout_noun(),
+        ),
     };
 
     intent.system_append = compose_system_append(&detail, &repository);
@@ -1538,6 +1558,7 @@ fn spawn(config: &RunnerConfig, attempt: &Attempt<'_>, plan: &SpawnPlan) -> Resu
 
     let child = command.spawn().map_err(|error| {
         missing_cli(
+            config.provider.as_ref(),
             &config.program,
             format!("could not start it in {}: {error}", workspace.display()),
         )
