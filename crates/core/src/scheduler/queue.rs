@@ -971,7 +971,11 @@ impl QueueTask {
         // breaks after the queue started is caught for `claude` by this line,
         // and for everything else by the run itself. Seam-contract D22 records
         // it so it is not later "improved".
-        probe_cli(&self.shared.runner.program).await?;
+        probe_cli(
+            self.shared.runner.provider.as_ref(),
+            &self.shared.runner.program,
+        )
+        .await?;
 
         let mut worked = false;
         for (entry, lease) in leased {

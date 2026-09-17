@@ -88,7 +88,7 @@ pub struct RimaiaServer {
     /// things it carries cannot be guessed from here and a wrong guess would be
     /// a doctor that reassures about the wrong installation: the app data
     /// directory is a platform lookup only the shell can do (see
-    /// [`AppPaths`](crate::AppPaths)), and `programs.claude` must be the very
+    /// [`AppPaths`](crate::AppPaths)), and `programs.agent` must be the very
     /// binary the runner would spawn. This is also the gap ADR-0021 names for
     /// `plan_task_strategy` — the MCP server not knowing the shell's `AppPaths`
     /// — closed for the one tool that only *reads* it.
@@ -719,7 +719,9 @@ told about."
     )]
     pub async fn get_strategy_catalogue(&self) -> Result<Json<Catalogue>, ToolError> {
         self.scope.authorize(Tool::GetStrategyCatalogue, None)?;
-        Ok(Json(strategy::catalogue::catalogue(&self.ctx.pool).await?))
+        Ok(Json(
+            strategy::catalogue::catalogue(&self.ctx.pool, self.doctor.provider.as_ref()).await?,
+        ))
     }
 
     #[tool(
@@ -734,7 +736,9 @@ before it is stored, so an unparseable one is refused and the previous catalogue
     ) -> Result<Json<Catalogue>, ToolError> {
         self.scope.authorize(Tool::SetStrategyCatalogue, None)?;
         strategy::catalogue::set_catalogue(&self.ctx, &request.catalogue).await?;
-        Ok(Json(strategy::catalogue::catalogue(&self.ctx.pool).await?))
+        Ok(Json(
+            strategy::catalogue::catalogue(&self.ctx.pool, self.doctor.provider.as_ref()).await?,
+        ))
     }
 
     #[tool(

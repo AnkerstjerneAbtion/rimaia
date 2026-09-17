@@ -68,10 +68,7 @@ use crate::tasks::strategy::{StrategyPlan, StrategyPlanRun, StrategyPlanStatus};
 use crate::tasks::{self, TaskDetail, TaskFilter, TaskSummary};
 
 use super::process::{forbidden_operations, Attempt, CancelSignal, PermissionMode, RunnerConfig};
-use super::prompt::{
-    compose_strategy_prompt, compose_strategy_system_append, StrategyGuidance,
-    SET_TASK_STRATEGY_TOOL,
-};
+use super::prompt::{compose_strategy_prompt, compose_strategy_system_append, StrategyGuidance};
 use super::provider::{self, ForbiddenOperation, RimaiaHandle, RunIntent, SessionIntent};
 
 /// What a planner is denied on top of the implementation blocklist.
@@ -139,7 +136,7 @@ pub async fn resolve(
         return Ok(ready(detail, &effective));
     }
 
-    let catalogue = strategy::catalogue::catalogue(&ctx.pool).await?;
+    let catalogue = strategy::catalogue::catalogue(&ctx.pool, config.provider.as_ref()).await?;
 
     match plan(
         ctx, paths, config, detail, repository, worktree, cancel, &catalogue,
@@ -255,7 +252,16 @@ async fn plan(
     };
 
     let credentials = super::process::repository_credentials(config, repository).await?;
-    let prompt = compose_strategy_prompt(detail, repository, catalogue);
+    let tool = config
+        .provider
+        .tool_handle(crate::mcp::MCP_SERVER_NAME, "set_task_strategy");
+    let prompt = compose_strategy_prompt(
+        detail,
+        repository,
+        catalogue,
+        &tool,
+        config.provider.fanout_noun(),
+    );
     let home = paths.provider_home(config.provider.id(), task_id);
     let conversation = new_id();
     let intent = planner_intent(
@@ -339,7 +345,7 @@ async fn plan(
     if !wrote {
         return Ok(Planned::Failed(match outcome.error_message {
             Some(message) => message,
-            None => format!("the strategy run finished without calling `{SET_TASK_STRATEGY_TOOL}`"),
+            None => format!("the strategy run finished without calling `{tool}`"),
         }));
     }
 
@@ -388,7 +394,12 @@ async fn planner_intent<'a>(
         session: SessionIntent::Open { conversation, home },
         permission_mode: PermissionMode::AcceptEdits,
         run_environment: RunEnvironment::StrictLocal,
-        system_append: compose_strategy_system_append(task_id, SET_TASK_STRATEGY_TOOL),
+        system_append: compose_strategy_system_append(
+            task_id,
+            &config
+                .provider
+                .tool_handle(crate::mcp::MCP_SERVER_NAME, "set_task_strategy"),
+        ),
         prompt,
         workspace: worktree,
         model: catalogue.planner.model.clone(),
@@ -601,7 +612,7 @@ pub async fn plan_claimed(
     // one is unchanged and a task that does not gets the same worktree its
     // implementation run would have used.
     let worktree = crate::worktree::prepare(ctx, &task_id).await?;
-    let catalogue = strategy::catalogue::catalogue(&ctx.pool).await?;
+    let catalogue = strategy::catalogue::catalogue(&ctx.pool, config.provider.as_ref()).await?;
 
     match plan(
         ctx,

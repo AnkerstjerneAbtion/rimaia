@@ -64,15 +64,6 @@ const AVAILABLE_MODELS_HEADING: &str = "# Available models";
 const AVAILABLE_EFFORTS_HEADING: &str = "# Available effort levels";
 const HOW_TO_ANSWER_HEADING: &str = "# How to answer";
 
-/// The planner's one way to answer, as Claude Code spells an MCP tool:
-/// `mcp__<server>__<tool>`, and the server is `rimaia` because that is the key
-/// the runner writes into `--mcp-config` (seam-contract D17.4).
-///
-/// Exported so that the caller of [`compose_strategy_system_append`] passes this
-/// same name rather than retyping it — the two channels naming different tools
-/// would be a defect no compiler catches.
-pub const SET_TASK_STRATEGY_TOOL: &str = "mcp__rimaia__set_task_strategy";
-
 /// A blank line between a heading and its body, and between sections.
 const SECTION_SEPARATOR: &str = "\n\n";
 
@@ -96,11 +87,17 @@ const SECTION_SEPARATOR: &str = "\n\n";
 /// There is no trailing newline. The string is stored verbatim in `runs.prompt`
 /// and compared byte for byte against the Settings preview, so it ends exactly
 /// where its last section does.
+///
+/// `fanout_noun` is the active provider's own word for fanning out within a
+/// session — Claude: `"subagents"` — reached through
+/// [`AgentProvider::fanout_noun`](crate::runner::provider::AgentProvider::fanout_noun)
+/// rather than written here (task 032): this module names no agent CLI.
 pub fn compose_prompt(
     base: &str,
     task: &TaskDetail,
     repo: &Repository,
     guidance: Option<&StrategyGuidance>,
+    fanout_noun: &str,
 ) -> String {
     let variables = Variables::of(task, repo);
 
@@ -123,7 +120,9 @@ pub fn compose_prompt(
     push_section(
         &mut sections,
         EXECUTION_STRATEGY_HEADING,
-        &guidance.map(execution_strategy).unwrap_or_default(),
+        &guidance
+            .map(|guidance| execution_strategy(guidance, fanout_noun))
+            .unwrap_or_default(),
     );
     push_section(
         &mut sections,
@@ -151,13 +150,22 @@ pub fn compose_prompt(
 /// an empty one — an operator who turned a dropdown off has said something, and
 /// what `# How to answer` then asks for is an id the planner has to name on its
 /// own.
+///
+/// `tool` and `fanout_noun` are the active provider's own vocabulary —
+/// [`AgentProvider::tool_handle`](crate::runner::provider::AgentProvider::tool_handle)
+/// and
+/// [`AgentProvider::fanout_noun`](crate::runner::provider::AgentProvider::fanout_noun)
+/// (task 032) — passed in rather than named here so this module contains no
+/// `mcp__` literal and no "subagent" literal of its own.
 pub fn compose_strategy_prompt(
     task: &TaskDetail,
     repo: &Repository,
     catalogue: &Catalogue,
+    tool: &str,
+    fanout_noun: &str,
 ) -> String {
     let mut sections = Vec::with_capacity(7);
-    push_section(&mut sections, YOUR_JOB_HEADING, YOUR_JOB);
+    push_section(&mut sections, YOUR_JOB_HEADING, &your_job(fanout_noun));
     push_section(
         &mut sections,
         TASK_CONTEXT_HEADING,
@@ -186,7 +194,7 @@ pub fn compose_strategy_prompt(
     push_section(
         &mut sections,
         HOW_TO_ANSWER_HEADING,
-        &how_to_answer(&task.task.id),
+        &how_to_answer(&task.task.id, tool),
     );
 
     sections.join(SECTION_SEPARATOR)
@@ -302,24 +310,29 @@ fn task_context(task: &TaskDetail, repo: &Repository) -> String {
 // The strategy prompt's own sections
 // ---------------------------------------------------------------------------
 
-/// `# Your job`, and the whole of it — a constant rather than a `format!`
-/// because nothing about the job varies by task. What varies is the plan it is
-/// judging, and that is the section below it.
+/// `# Your job`, and the whole of it — a function of `fanout_noun` rather than
+/// a plain constant, because that is the one word in it that is not the same
+/// for every provider. What varies by task is the plan it is judging, and that
+/// is the section below it.
 ///
-/// It says "not implementing" three ways on purpose. The planner is a Claude
-/// Code session sitting in a prepared worktree with a plan in front of it, which
-/// is exactly the situation it has been trained to start working in; the denied
+/// It says "not implementing" three ways on purpose. The planner is an agent
+/// session sitting in a prepared worktree with a plan in front of it, which is
+/// exactly the situation it has been trained to start working in; the denied
 /// tools stop it, but a run that spends six turns trying to edit files and then
 /// stops has still answered nothing.
-const YOUR_JOB: &str = "You are choosing how another agent should execute the task below. You are not implementing it, and nothing you decide here is code.
+fn your_job(fanout_noun: &str) -> String {
+    format!(
+        "You are choosing how another agent should execute the task below. You are not implementing it, and nothing you decide here is code.
 
 Read the plan and answer three questions:
 
 - **Which model should run it.** Pick from the models listed below.
 - **How much reasoning effort it needs.** Pick from the effort levels listed below. Reach for the expensive end only where the plan genuinely earns it: every task in the queue is paid for out of one subscription, and effort spent on a mechanical task is effort a hard one later tonight will not have.
-- **Whether the work fans out.** Most tasks do not. Propose a multi-agent workflow only when the plan holds parts that can genuinely be worked in parallel, and name those phases; the agent that implements this task will run them itself, with its own subagents.
+- **Whether the work fans out.** Most tasks do not. Propose a multi-agent workflow only when the plan holds parts that can genuinely be worked in parallel, and name those phases; the agent that implements this task will run them itself, with its own {fanout_noun}.
 
-The plan and any extra instructions below are what you are judging, not what you are carrying out.";
+The plan and any extra instructions below are what you are judging, not what you are carrying out."
+    )
+}
 
 /// One catalogue list, as the planner has to read it: the id it must copy
 /// verbatim, then the label a human would recognise.
@@ -345,11 +358,11 @@ fn choices(entries: &[CatalogueEntry]) -> String {
 /// free-form prose, and the scope check lives on the MCP path. A planner that
 /// reasons well and then forgets the call is detected by the runner and recorded
 /// as a failure — not rescued by parsing its prose.
-fn how_to_answer(task_id: &str) -> String {
+fn how_to_answer(task_id: &str, tool: &str) -> String {
     format!(
         "Answer with one tool call and nothing else.\n\
          \n\
-         Call `{SET_TASK_STRATEGY_TOOL}` exactly once, with:\n\
+         Call `{tool}` exactly once, with:\n\
          \n\
          - `task_id`: `{task_id}` — this task, and no other. A call naming a different task is refused.\n\
          - `model`: one id from **Available models** above, copied verbatim.\n\
@@ -490,7 +503,7 @@ enum Workflow {
 
 /// The body of `# Execution strategy`, or an empty string when the guidance has
 /// nothing to say — which [`push_section`] then omits, heading and all.
-fn execution_strategy(guidance: &StrategyGuidance) -> String {
+fn execution_strategy(guidance: &StrategyGuidance, fanout_noun: &str) -> String {
     if !guidance.multi_agent && guidance.phases.is_empty() {
         return String::new();
     }
@@ -500,10 +513,9 @@ fn execution_strategy(guidance: &StrategyGuidance) -> String {
     ];
 
     if guidance.multi_agent {
-        parts.push(
-            "This work fans out. Run it with subagents rather than as one linear pass, giving each only the part of the plan it needs."
-                .to_string(),
-        );
+        parts.push(format!(
+            "This work fans out. Run it with {fanout_noun} rather than as one linear pass, giving each only the part of the plan it needs."
+        ));
     }
 
     if !guidance.phases.is_empty() {
@@ -521,10 +533,9 @@ fn execution_strategy(guidance: &StrategyGuidance) -> String {
 
     // ADR-0016's boundary, in the prompt rather than only in an ADR: Rimaia
     // injects a strategy, it never orchestrates one.
-    parts.push(
-        "Rimaia does not run these phases; you do, in this session, with your own subagents."
-            .to_string(),
-    );
+    parts.push(format!(
+        "Rimaia does not run these phases; you do, in this session, with your own {fanout_noun}."
+    ));
 
     parts.join(SECTION_SEPARATOR)
 }

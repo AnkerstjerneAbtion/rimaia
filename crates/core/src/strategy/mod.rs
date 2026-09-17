@@ -20,6 +20,6 @@ pub mod catalogue;
 pub mod resolve;
 pub mod settings;
 
-pub use catalogue::{Catalogue, CatalogueEntry, PlannerBudget, DEFAULT_CATALOGUE_JSON};
+pub use catalogue::{Catalogue, CatalogueEntry, PlannerBudget};
 pub use resolve::{effective_strategy, EffectiveStrategy, StrategyOrigin};
 pub use settings::{StrategyApproval, StrategyDefaults};
