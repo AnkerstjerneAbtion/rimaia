@@ -367,6 +367,27 @@ describe("RunsView", () => {
     expect(await screen.findByText(/About \$0\.05 of setup per run/)).toBeInTheDocument();
   });
 
+  it("names the active provider as the one that reported a usage limit", async () => {
+    // Task 032's usage-limit banner: the hold is the provider's report, and
+    // "Claude Code reported" is wrong for every other one.
+    const hold = new Date(Date.now() + 60 * 60 * 1000).toISOString();
+    mockBackend({
+      runningTasks: [],
+      queue: queueStatus({ state: "running", usageLimitPauseUntil: hold }),
+      runCostSummary: {
+        medianUsd: null,
+        sampleSize: 0,
+        inheritCostUsd: null,
+        providerDisplayName: "Ledger",
+      },
+    });
+
+    render(<RunsView />);
+
+    expect(await screen.findByText(/Ledger reported a usage limit/)).toBeInTheDocument();
+    expect(document.body.textContent).not.toMatch(/Claude Code/);
+  });
+
   it("re-reads the running-task list on tasks:changed", async () => {
     let call = 0;
     const { fire } = mockBackend({ runningTasks: [] });

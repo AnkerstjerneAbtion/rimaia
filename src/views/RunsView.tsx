@@ -349,7 +349,7 @@ export function RunsView() {
   }, [historyFilter]);
 
   const overheadNote = environmentOverheadNote(runCosts);
-  const queueConsole = queueConsoleState(queueStatus);
+  const queueConsole = queueConsoleState(queueStatus, runCosts?.providerDisplayName ?? null);
   const claimable = queueStatus?.plan.filter((entry) => entry.skip === null).length ?? 0;
   const passedOver = (queueStatus?.plan.length ?? 0) - claimable;
 
@@ -682,6 +682,7 @@ function windowTime(iso: string): string {
  */
 function queueConsoleState(
   status: QueueStatus | null,
+  providerDisplayName: string | null,
 ): { tone: "running" | "paused" | "held"; label: string; detail: string } | null {
   if (!status) return null;
 
@@ -690,7 +691,7 @@ function queueConsoleState(
     return {
       tone: "held",
       label: "On hold",
-      detail: `Every run is held until ${windowTime(hold)} — Claude Code reported a usage limit. The queue picks up by itself; nothing here needs pressing.`,
+      detail: `Every run is held until ${windowTime(hold)} — ${providerDisplayName ?? "your agent CLI"} reported a usage limit. The queue picks up by itself; nothing here needs pressing.`,
     };
   }
 
