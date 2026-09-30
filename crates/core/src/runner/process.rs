@@ -1896,6 +1896,65 @@ mod tests {
         );
     }
 
+    #[test]
+    fn a_repository_credential_outranks_whatever_the_provider_put_in_its_plan() {
+        // ADR-0020's fail-closed rule may not depend on a provider getting it
+        // right: a provider setting `GH_TOKEN` or an ambient name the credential
+        // removes loses to the credential, and its own variables survive.
+        let plan = SpawnPlan {
+            args: vec!["run".to_string()],
+            env_set: vec![
+                ("LEDGER_HOME".to_string(), "/scratch/home".to_string()),
+                ("GH_TOKEN".to_string(), "the provider's".to_string()),
+                ("GITHUB_TOKEN".to_string(), "the operator's".to_string()),
+            ],
+            env_remove: vec!["LEDGER_SESSION".to_string()],
+            stdin: "the prompt".to_string(),
+        };
+        let credentials = ChildEnvironment {
+            remove: vec!["GITHUB_TOKEN".to_string()],
+            set: [
+                ("GIT_CONFIG_COUNT".to_string(), "1".to_string()),
+                ("GH_TOKEN".to_string(), "the repository's".to_string()),
+            ]
+            .into_iter()
+            .collect(),
+            ..ChildEnvironment::default()
+        };
+
+        let folded = with_repository_credentials(plan, &credentials);
+
+        assert_eq!(
+            folded.env_set,
+            vec![
+                ("LEDGER_HOME".to_string(), "/scratch/home".to_string()),
+                ("GH_TOKEN".to_string(), "the repository's".to_string()),
+                ("GIT_CONFIG_COUNT".to_string(), "1".to_string()),
+            ]
+        );
+        assert_eq!(
+            folded.env_remove,
+            vec!["LEDGER_SESSION".to_string(), "GITHUB_TOKEN".to_string()]
+        );
+        assert_eq!(folded.args, vec!["run".to_string()]);
+        assert_eq!(folded.stdin, "the prompt");
+    }
+
+    #[test]
+    fn a_repository_without_a_credential_leaves_the_providers_plan_untouched() {
+        let plan = SpawnPlan {
+            args: vec!["run".to_string()],
+            env_set: vec![("GH_TOKEN".to_string(), "ambient".to_string())],
+            env_remove: vec![],
+            stdin: "the prompt".to_string(),
+        };
+
+        assert_eq!(
+            with_repository_credentials(plan.clone(), &ChildEnvironment::ambient()),
+            plan
+        );
+    }
+
     #[tokio::test]
     async fn a_cancellation_that_arrived_before_anyone_waited_is_still_found() {
         // The reason this is a watch channel and not a `Notify`: the run loop
