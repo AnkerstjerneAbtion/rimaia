@@ -18,9 +18,10 @@
 use chrono::{DateTime, Duration, Utc};
 use pretty_assertions::assert_eq;
 use rimaia_core::runner::events::{
-    parse_line, Activity, EventStream, InitEvent, McpServer, OtherEvent, RunEvent, RunTail,
-    RECENT_ACTIVITY_CAPACITY,
+    Activity, EndReason, EventStream, InitEvent, McpServer, OtherEvent, RunEvent, RunTail,
+    UsageState, WindowReopen, RECENT_ACTIVITY_CAPACITY,
 };
+use rimaia_core::runner::provider::{AgentProvider, ClaudeProvider, PermissionMode};
 use rimaia_core::testing::fixtures::{all_fixtures, fixture_lines, fixture_path};
 use rimaia_core::testing::TestContext;
 use rimaia_core::AppPaths;
@@ -132,12 +133,8 @@ async fn the_malformed_line_is_skipped_and_every_event_after_it_still_arrives() 
         "the stream after the bad line must still terminate"
     );
     assert_eq!(
-        replay
-            .stream
-            .result()
-            .and_then(|result| result.terminal_reason.clone())
-            .as_deref(),
-        Some("completed")
+        replay.stream.result().map(|result| result.end.clone()),
+        Some(EndReason::Completed)
     );
 }
 
@@ -188,8 +185,8 @@ async fn an_unknown_system_subtype_stays_opaque_rather_than_becoming_an_init() {
     // Only `init` is modelled; a CLI that adds a subtype tomorrow must not be
     // able to overwrite the applied configuration this run verified.
     assert_eq!(
-        replay.init().permission_mode.as_deref(),
-        Some("bypassPermissions")
+        replay.init().permission_mode,
+        Some(PermissionMode::BypassPermissions)
     );
 }
 
@@ -222,7 +219,7 @@ async fn an_assistant_event_is_read_from_its_own_type_not_its_messages() {
     // level down, and `"type":"thinking"` or `"tool_use"` two levels down.
     assert_eq!(raw["message"]["type"], "message");
 
-    let event = parse_line(&line).expect("the line is JSON");
+    let event = ClaudeProvider.parse_line(&line).expect("the line is JSON");
 
     assert_eq!(event.event_type(), "assistant");
     let RunEvent::Assistant(assistant) = event else {
@@ -268,19 +265,24 @@ async fn the_init_event_reports_the_isolation_that_was_actually_applied() {
 #[tokio::test]
 async fn the_usage_limit_signal_is_read_from_its_own_fields_rather_than_grepped() {
     // ADR-0011's amendment: a typed event on every run, early and unprompted —
-    // not an error message to pattern-match. Only `status` is asserted by value,
-    // and only because `"allowed"` is the one value the corpus contains; see
-    // this file's header and `spike/FINDINGS.md` §4 for why nothing else is.
+    // not an error message to pattern-match. The state is `Allowed` because
+    // `"allowed"` is the one status the corpus contains; see this file's header
+    // and `spike/FINDINGS.md` §4 for why nothing else is asserted by value.
     let replay = Replay::of("success").await;
-    let limit = replay
+    let usage = replay
         .stream
-        .rate_limit()
+        .usage()
         .expect("every recorded run reports its limit state");
 
-    assert_eq!(limit.status.as_deref(), Some("allowed"));
-    assert_eq!(limit.rate_limit_type.as_deref(), Some("five_hour"));
-    assert_eq!(limit.resets_at, Some(1_787_224_800));
-    assert_eq!(limit.resets_at_utc(), Some(at("2026-08-20T11:20:00Z")));
+    assert_eq!(usage.window.state, UsageState::Allowed);
+    assert_eq!(usage.window.label.as_deref(), Some("five_hour"));
+    // This provider reports an absolute epoch, so the instant needs no clock to
+    // resolve — which is the half of ADR-0026 point 7 it exercises.
+    assert_eq!(
+        usage.window.reopens,
+        Some(WindowReopen::At(at("2026-08-20T11:20:00Z")))
+    );
+    assert_eq!(usage.reopens_at(), Some(at("2026-08-20T11:20:00Z")));
 }
 
 #[tokio::test]
@@ -290,9 +292,7 @@ async fn a_successful_result_carries_every_metric_the_runs_row_needs() {
     let replay = Replay::of("success").await;
     let result = replay.stream.result().expect("a terminal result");
 
-    assert_eq!(result.subtype.as_deref(), Some("success"));
-    assert_eq!(result.terminal_reason.as_deref(), Some("completed"));
-    assert!(!result.is_error);
+    assert_eq!(result.end, EndReason::Completed);
     assert_eq!(result.num_turns, Some(5));
     assert_eq!(result.total_cost_usd, Some(0.150_292_5));
     assert_eq!(result.duration_ms, Some(21_427));
@@ -308,9 +308,7 @@ async fn a_sigterm_killed_run_still_produces_a_result_event() {
     let replay = Replay::of("interrupted-sigterm").await;
     let result = replay.stream.result().expect("a terminal result");
 
-    assert_eq!(result.subtype.as_deref(), Some("error_during_execution"));
-    assert_eq!(result.terminal_reason.as_deref(), Some("aborted_streaming"));
-    assert!(result.is_error);
+    assert_eq!(result.end, EndReason::Interrupted);
     assert_eq!(result.result, None);
     assert!(!result.errors.is_empty(), "an error subtype says why");
 }
@@ -320,8 +318,7 @@ async fn a_turn_limit_reports_max_turns_rather_than_a_bare_non_zero_exit() {
     let replay = Replay::of("max-turns").await;
     let result = replay.stream.result().expect("a terminal result");
 
-    assert_eq!(result.subtype.as_deref(), Some("error_max_turns"));
-    assert_eq!(result.terminal_reason.as_deref(), Some("max_turns"));
+    assert_eq!(result.end, EndReason::TurnBudgetExhausted);
     assert_eq!(result.errors, vec!["Reached maximum number of turns (2)"]);
 }
 

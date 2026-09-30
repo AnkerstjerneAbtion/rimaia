@@ -1,0 +1,5 @@
+{"kind":"conversation.opened","body":{"conversation":"lgr_2b91d40f","engine":"ledger-large","version":"0.9.4","cwd":"/workspace"}}
+{"kind":"window","body":{"used_pct":8.0,"window":"5h","state":"open"}}
+{"kind":"agent.said","body":{"conversation":"lgr_2b91d40f","turn":"t1","text":"Starting on the migration."}}
+{"kind":"agent.tool","body":{"conversation":"lgr_2b91d40f","turn":"t1","call":"c1","tool":"shell","args":{"command":"cargo sqlx prepare"}}}
+{"kind":"finished","body":{"why":"stopped","turns":1,"ms":4120,"tokens":{"in":14203,"out":2981,"cached":9044},"errors":["the run was stopped before it finished"],"window":{"used_pct":9.0,"window":"5h","state":"open"}}}

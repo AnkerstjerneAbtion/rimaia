@@ -33,6 +33,7 @@ alternatives.
 | [0023](0023-an-overridable-data-directory.md) | An overridable data directory, so one branch cannot break every other | Accepted |
 | [0024](0024-a-calm-interface-that-travels-to-the-web.md) | A calm interface, and one that travels to the web | Accepted |
 | [0025](0025-archiving-a-task-and-what-it-may-clean-up.md) | Archiving a task, and what an archive is allowed to clean up | Accepted |
+| [0026](0026-a-provider-seam-for-the-agent-cli.md) | A provider seam for the agent CLI, drawn from Rimaia's needs | Accepted |
 
 ## Conventions
 

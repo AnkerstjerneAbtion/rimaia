@@ -1,11 +1,11 @@
-//! Claude Code process supervision: spawning the headless CLI, parsing its
-//! `stream-json` events, and classifying how a run ended (ADR-0004, ADR-0011).
+//! Agent CLI process supervision: spawning the headless CLI, parsing its event
+//! stream, and classifying how a run ended (ADR-0004, ADR-0011, ADR-0026).
 //!
 //! The CLI is a prerequisite, never bundled. Parsing is tolerant by rule —
-//! unknown event types are persisted and ignored, never fatal, so a Claude Code
-//! update cannot break an overnight queue. Outcome is classified on the `result`
-//! event's `terminal_reason` and `subtype`, not on the exit code alone: a
-//! SIGTERM-killed run still emits a `result` and exits 143.
+//! unknown event types are persisted and ignored, never fatal, so a CLI update
+//! cannot break an overnight queue. Outcome is classified on what the run
+//! *said* it was ending as, not on the exit code alone: a SIGTERM-killed run
+//! still emits its terminal event and exits 143.
 //!
 //! [`prompt`] landed first (task 006): task 008 needs a prompt to send, and
 //! composing it is unit-testable without spawning anything.
@@ -21,15 +21,23 @@
 //!
 //! [`run_task`] is the entry point that ties them together: one task in, one
 //! finished `runs` row out.
+//!
+//! [`provider`] is the fourth: which agent CLI those three are driving
+//! (ADR-0026). It owns two things — how an intent becomes a child process, and
+//! what one line of its output means — and the other three own everything else,
+//! which is what keeps a second provider from arriving as a second copy of the
+//! supervision.
 
 pub mod events;
 pub mod outcome;
 pub mod process;
 pub mod prompt;
+pub mod provider;
 pub mod strategy;
 
 pub use process::{
-    execute, max_turns, probe_cli, run_task, Attempt, CancelSignal, Invocation, PermissionMode,
-    ResumeSession, RunRequest, RunTrigger, RunnerConfig, DEFAULT_MAX_TURNS, MAX_TURNS,
+    execute, max_turns, probe_cli, run_task, Attempt, CancelSignal, PermissionMode, ResumeSession,
+    RunRequest, RunTrigger, RunnerConfig, DEFAULT_MAX_TURNS, MAX_TURNS,
 };
+pub use provider::{AgentProvider, ProviderId, RunIntent, SpawnPlan};
 pub use strategy::{Resolution, STRATEGY_TRANSCRIPT_PREFIX};

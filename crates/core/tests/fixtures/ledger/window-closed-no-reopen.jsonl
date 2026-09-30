@@ -1,0 +1,5 @@
+{"kind":"conversation.opened","body":{"conversation":"lgr_1a6f77c5","engine":"ledger-large","version":"0.9.4","cwd":"/workspace"}}
+{"kind":"window","body":{"used_pct":68.0,"window":"5h","state":"open"}}
+{"kind":"agent.said","body":{"conversation":"lgr_1a6f77c5","turn":"t1","text":"Working through the plan."}}
+{"kind":"window","body":{"used_pct":100.0,"window":"5h","state":"closed"}}
+{"kind":"finished","body":{"why":"window_closed","turns":1,"ms":5100,"tokens":{"in":2980,"out":388,"cached":0},"errors":["the usage window is closed"],"window":{"used_pct":4.0,"window":"5h","state":"open"}}}
