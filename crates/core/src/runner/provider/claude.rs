@@ -381,6 +381,11 @@ impl AgentProvider for ClaudeProvider {
     /// *performed* — most likely a CLI old enough not to have `auth status` —
     /// and reporting "not signed in" on that evidence would be this provider
     /// lying, which is worse than admitting a gap.
+    ///
+    /// Every `detail` below is byte-identical to what the doctor said before
+    /// the provider seam: an undetermined sign-in is a `warn`, and a `warn`'s
+    /// detail is part of the key a stored `doctor_dismissals` entry matches on
+    /// (task 027). Rewording one brings back every warning a user put down.
     fn read_auth(&self, output: &ProbeOutput) -> AuthState {
         if output.status != Some(0) {
             return AuthState::Undetermined {
@@ -388,7 +393,7 @@ impl AgentProvider for ClaudeProvider {
                     "`claude auth status --json` exited {}: {}",
                     output
                         .status
-                        .map(|code| code.to_string())
+                        .map(|code| format!("exit status: {code}"))
                         .unwrap_or_else(|| "with no code".to_string()),
                     output.stderr.trim(),
                 ),
@@ -397,12 +402,15 @@ impl AgentProvider for ClaudeProvider {
 
         let Ok(parsed) = serde_json::from_str::<Value>(output.stdout.trim()) else {
             return AuthState::Undetermined {
-                detail: "`claude auth status --json` did not answer with JSON".to_string(),
+                detail: "`claude auth status --json` did not answer with JSON, so the sign-in \
+                         could not be verified."
+                    .to_string(),
             };
         };
         let Some(logged_in) = parsed.get("loggedIn").and_then(Value::as_bool) else {
             return AuthState::Undetermined {
-                detail: "`claude auth status --json` answered without a `loggedIn` field"
+                detail: "`claude auth status --json` answered without a `loggedIn` field, so \
+                         the sign-in could not be verified."
                     .to_string(),
             };
         };
@@ -1186,6 +1194,45 @@ mod tests {
             stderr: "error: unknown command 'auth'".to_string(),
         });
         assert!(matches!(undetermined, AuthState::Undetermined { .. }));
+    }
+
+    #[test]
+    fn an_undetermined_sign_in_keeps_the_sentence_a_stored_dismissal_matches() {
+        // Each of these is a doctor `warn`, and a warn's detail is part of the
+        // key a `doctor_dismissals` entry is stored under (task 027). They are
+        // the sentences the doctor printed before the provider seam, so a user
+        // who put one down does not see it come back after the upgrade.
+        let detail = |output: ProbeOutput| match ClaudeProvider.read_auth(&output) {
+            AuthState::Undetermined { detail } => detail,
+            other => panic!("expected an undetermined sign-in, got {other:?}"),
+        };
+
+        assert_eq!(
+            detail(ProbeOutput {
+                status: Some(2),
+                stdout: String::new(),
+                stderr: "error: unknown command 'auth'\n".to_string(),
+            }),
+            "`claude auth status --json` exited exit status: 2: error: unknown command 'auth'"
+        );
+        assert_eq!(
+            detail(ProbeOutput {
+                status: Some(0),
+                stdout: "Logged in".to_string(),
+                stderr: String::new(),
+            }),
+            "`claude auth status --json` did not answer with JSON, so the sign-in could not be \
+             verified."
+        );
+        assert_eq!(
+            detail(ProbeOutput {
+                status: Some(0),
+                stdout: r#"{"authMethod": "claude.ai"}"#.to_string(),
+                stderr: String::new(),
+            }),
+            "`claude auth status --json` answered without a `loggedIn` field, so the sign-in \
+             could not be verified."
+        );
     }
 
     #[test]

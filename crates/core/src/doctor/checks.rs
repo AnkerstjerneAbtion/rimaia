@@ -61,6 +61,15 @@ fn format_bytes(bytes: u64) -> String {
     }
 }
 
+/// A provider's version probe spelled the way a user would type it: its
+/// default program name and the probe's arguments, never the resolved path.
+fn probe_command(provider: &dyn AgentProvider, program: &Path) -> String {
+    std::iter::once(provider.default_program().to_string())
+        .chain(provider.version_probe(program).args)
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 /// The agent CLI on `PATH`, and new enough (ADR-0004, ADR-0026).
 ///
 /// Reuses [`probe_cli`] rather than spawning the version probe a second way,
@@ -126,7 +135,13 @@ pub async fn agent_cli(provider: &dyn AgentProvider, program: &Path) -> CheckRes
         ),
         None => CheckResult::warn(
             Check::ClaudeCli,
-            format!("`{name}`'s version probe printed something unrecognisable: {version_output}"),
+            // The probe as the user would type it — `claude --version` for Claude
+            // Code, byte-identical to before the seam, because this `warn`'s
+            // detail is part of a stored dismissal's key (task 027).
+            format!(
+                "`{}` printed something unrecognisable: {version_output}",
+                probe_command(provider, program),
+            ),
             format!(
                 "Check that {name}'s CLI prints a version number in a terminal. It runs, so \
                  runs will most likely still work."
@@ -169,21 +184,37 @@ pub async fn agent_authenticated(
         command.env_remove(key);
     }
 
-    let output = command.output().await;
-    let probe_output = match &output {
-        Ok(output) => ProbeOutput {
-            status: output.status.code(),
-            stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
-            stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
-        },
-        Err(error) => ProbeOutput {
-            status: None,
-            stdout: String::new(),
-            stderr: format!(
-                "the sign-in could not be checked because `{}` could not be run: {error}",
-                program.display()
+    let undetermined = |detail: String| {
+        CheckResult::warn(
+            Check::ClaudeAuthenticated,
+            detail,
+            format!(
+                "Check {name}'s own sign-in status in a terminal. If this is not a known \
+                 command, this CLI is older than the check and the sign-in cannot be verified \
+                 from here — the CLI itself will still tell you at the start of a run."
             ),
-        },
+        )
+    };
+
+    // A probe that could not be spawned is Rimaia's to describe, not the
+    // provider's: there is no output for it to read, and the sentence names the
+    // program Rimaia tried to run.
+    let output = match command.output().await {
+        Ok(output) => output,
+        Err(error) => {
+            return Some(
+                undetermined(format!(
+                    "the sign-in could not be checked because `{}` could not be run: {error}",
+                    program.display()
+                ))
+                .labeled(label),
+            );
+        }
+    };
+    let probe_output = ProbeOutput {
+        status: output.status.code(),
+        stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+        stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
     };
 
     let result = match provider.read_auth(&probe_output) {
@@ -204,15 +235,7 @@ pub async fn agent_authenticated(
                  your credentials — it uses the sign-in the CLI already has."
             ),
         ),
-        AuthState::Undetermined { detail } => CheckResult::warn(
-            Check::ClaudeAuthenticated,
-            detail,
-            format!(
-                "Check {name}'s own sign-in status in a terminal. If this is not a known \
-                 command, this CLI is older than the check and the sign-in cannot be verified \
-                 from here — the CLI itself will still tell you at the start of a run."
-            ),
-        ),
+        AuthState::Undetermined { detail } => undetermined(detail),
     };
 
     Some(result.labeled(label))
@@ -561,6 +584,20 @@ mod tests {
         assert_eq!(unbound.status, CheckStatus::Warn);
         assert!(unbound.detail.contains("4517"));
         assert_eq!(unbound.check, Check::McpPort);
+    }
+
+    #[test]
+    fn claude_codes_version_probe_is_named_the_way_its_dismissals_were_stored() {
+        // The unrecognisable-version `warn` names the probe, and that detail is
+        // part of a stored dismissal's key (task 027): it has to read
+        // `claude --version` exactly as it did before the provider seam, and
+        // never the resolved path of whichever binary is configured.
+        use crate::runner::provider::ClaudeProvider;
+
+        assert_eq!(
+            probe_command(&ClaudeProvider, Path::new("/opt/homebrew/bin/claude")),
+            "claude --version"
+        );
     }
 
     #[cfg(feature = "testing")]
