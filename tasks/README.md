@@ -30,9 +30,9 @@ reviewable in the app afterwards.
 | 17 | [014](014-usage-limit-resilience.md) | Usage-limit resilience and resume | v0.2 | 009, 019 | [#18](https://github.com/AnkerstjerneAbtion/rimaia/pull/18) |
 | 18 | [015](015-run-history-and-log-viewer.md) | Run history and log viewer | v0.3 | 009 | #10 |
 | 19 | [016](016-worktree-lifecycle-and-cleanup.md) | Worktree lifecycle and cleanup | v0.3 | 007, 009 | #14 |
-| 20 | [017](017-morning-review-flow.md) | Morning review flow | v0.3 | 015 | — |
-| 21 | [026](026-open-worktree-in-editor.md) | Open a task's worktree in the tool the user actually works in | v0.3 | 005, 007 | [#28](https://github.com/AnkerstjerneAbtion/rimaia/pull/28) |
-| 22 | [028](028-let-a-run-see-the-ui-it-changed.md) | Let a run see the UI it changed | v0.3 | 005 | — |
+| 20 | [026](026-open-worktree-in-editor.md) | Open a task's worktree in the tool the user actually works in | v0.3 | 005, 007 | [#28](https://github.com/AnkerstjerneAbtion/rimaia/pull/28) |
+| 21 | [028](028-let-a-run-see-the-ui-it-changed.md) | Let a run see the UI it changed | v0.3 | 005 | — |
+| 22 | [017](017-morning-review-flow.md) | Morning review flow | v0.4 | 033, 034 | — |
 | 23 | [018](018-preflight-doctor-and-packaging.md) | Preflight doctor and packaging | v0.3 | 008 | #17 |
 | 24 | [025](025-startup-failure-dialog.md) | A startup failure a double-clicked bundle can see | v0.3 | 018 | [#28](https://github.com/AnkerstjerneAbtion/rimaia/pull/28) |
 | 25 | [029](029-a-development-database-that-is-not-the-users.md) | A development database that is not the user's | v0.3 | 018 | [#29](https://github.com/AnkerstjerneAbtion/rimaia/pull/29) |
@@ -63,7 +63,7 @@ the MCP server exists (task 010). Keep it valid YAML.
 ---
 id: "007"
 title: Git worktree service
-milestone: mvp             # mvp | v0.2 | v0.3 | v0.4
+milestone: mvp             # mvp | v0.2 | v0.3 | v0.4 | v0.5
 status: ready              # ready | not-ready — readiness to START, not doneness
 landed: "#3"               # the PR that landed it. Absent until it has landed.
 depends_on: ["003"]
