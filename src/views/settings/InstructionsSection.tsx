@@ -21,11 +21,16 @@ const RUN_ENVIRONMENT_OPTIONS: ReadonlyArray<{
   {
     value: "inherit",
     label: "Inherit (default)",
+    // Provider-neutral on purpose (task 032): "255 tools instead of 26" and
+    // "a personal SessionStart hook" are Claude Code specifics this sentence
+    // used to assert regardless of which agent CLI a run actually spawns.
+    // Degrading to a general description is the chosen answer over sourcing
+    // this prose from the provider — see the task's own note on this file.
     description:
-      "The full Claude Code environment you use interactively — your MCP servers, hooks, " +
-      "plugins and output styles, which is much of the point of running this locally. It " +
-      "loads roughly 255 tools instead of 26, so tool selection is noisier, and a personal " +
-      "SessionStart hook will alter how the agent works.",
+      "Your agent CLI's full environment as you use it interactively — its MCP servers, " +
+      "hooks, plugins and any personal configuration — which is much of the point of " +
+      "running this locally. Loading more of it makes tool selection noisier and lets a " +
+      "personal hook alter how the agent works.",
   },
   {
     value: "strict_local",

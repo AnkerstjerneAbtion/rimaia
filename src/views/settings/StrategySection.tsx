@@ -142,7 +142,10 @@ export function StrategySection() {
               effort of its own. A task, then its repository, then this — each of the three
               falling through independently (ADR-0016).
             </p>
-            <GlobalDefaults catalogue={view.catalogue} />
+            <GlobalDefaults
+              catalogue={view.catalogue}
+              providerDisplayName={view.providerInfo.displayName}
+            />
           </div>
 
           <div className="instructions-subsection">
@@ -157,7 +160,11 @@ export function StrategySection() {
               the model and effort, and writes them back through Rimaia&rsquo;s own MCP server
               — so it wants a cheap model and a short leash.
             </p>
-            <PlannerBudgetControls catalogue={view.catalogue} onStore={storeCatalogue} />
+            <PlannerBudgetControls
+              catalogue={view.catalogue}
+              providerDisplayName={view.providerInfo.displayName}
+              onStore={storeCatalogue}
+            />
           </div>
 
           <div className="instructions-subsection">
@@ -184,7 +191,13 @@ export function StrategySection() {
  * stored value to repaint from, and the same trade `RunEnvironmentToggle`
  * makes applies here.
  */
-function GlobalDefaults({ catalogue }: { readonly catalogue: Catalogue }) {
+function GlobalDefaults({
+  catalogue,
+  providerDisplayName,
+}: {
+  readonly catalogue: Catalogue;
+  readonly providerDisplayName: string;
+}) {
   const [value, setValue] = useState<StrategyDefaults | null>(null);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<RimaiaError | null>(null);
@@ -218,7 +231,7 @@ function GlobalDefaults({ catalogue }: { readonly catalogue: Catalogue }) {
           catalogue={catalogue}
           value={value}
           idPrefix="strategy-global"
-          unsetLabel="No default — Claude Code chooses"
+          unsetLabel={`No default — ${providerDisplayName} chooses`}
           disabled={saving}
           onChange={handleChange}
         />
@@ -319,8 +332,12 @@ interface CatalogueWriterProps {
  */
 function PlannerBudgetControls({
   catalogue,
+  providerDisplayName,
   onStore,
-}: CatalogueWriterProps & { readonly catalogue: Catalogue }) {
+}: CatalogueWriterProps & {
+  readonly catalogue: Catalogue;
+  readonly providerDisplayName: string;
+}) {
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<RimaiaError | null>(null);
   const [maxTurnsDraft, setMaxTurnsDraft] = useState(String(catalogue.planner.max_turns));
@@ -363,7 +380,7 @@ function PlannerBudgetControls({
         label="Planner model"
         entries={catalogue.models}
         value={catalogue.planner.model ?? null}
-        unsetLabel="No model — Claude Code chooses"
+        unsetLabel={`No model — ${providerDisplayName} chooses`}
         disabled={saving}
         onChange={(model) => store({ ...catalogue.planner, model })}
       />
@@ -372,7 +389,7 @@ function PlannerBudgetControls({
         label="Planner effort"
         entries={catalogue.efforts}
         value={catalogue.planner.effort ?? null}
-        unsetLabel="No effort — Claude Code chooses"
+        unsetLabel={`No effort — ${providerDisplayName} chooses`}
         disabled={saving}
         onChange={(effort) => store({ ...catalogue.planner, effort })}
       />

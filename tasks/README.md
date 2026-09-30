@@ -42,7 +42,7 @@ reviewable in the app afterwards.
 | 29 | [024](024-analytics.md) | Analytics — what the queue has actually done | v0.4 | 015 | [#28](https://github.com/AnkerstjerneAbtion/rimaia/pull/28) |
 | 30 | [030](030-archiving-tasks-and-on-archive-cleanup.md) | Archiving tasks, and on-archive cleanup | v0.3 | 005, 016 | [#31](https://github.com/AnkerstjerneAbtion/rimaia/pull/31) |
 | 31 | [031](031-a-provider-seam-for-the-agent-cli.md) | A provider seam for the agent CLI | v0.4 | — | [#32](https://github.com/AnkerstjerneAbtion/rimaia/pull/32) |
-| 32 | [032](032-provider-vocabulary-outside-the-runner.md) | Provider vocabulary outside the runner | v0.4 | 031 | — |
+| 32 | [032](032-provider-vocabulary-outside-the-runner.md) | Provider vocabulary outside the runner | v0.4 | 031 | [#33](https://github.com/AnkerstjerneAbtion/rimaia/pull/33) |
 
 ## Before task 001
 

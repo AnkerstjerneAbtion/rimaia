@@ -110,7 +110,7 @@ pub async fn start_task_run(state: State<'_, AppState>, task_id: String) -> Resu
     let cancel = lease.cancel_signal();
 
     repo::ensure_unattended_runs_allowed(&repository)?;
-    probe_cli(&config.program).await?;
+    probe_cli(config.provider.as_ref(), &config.program).await?;
 
     if scheduler::claim(&context, &task_id).await? == ClaimOutcome::Lost {
         return Err(Error::invalid(
@@ -186,7 +186,7 @@ pub async fn retry_task_now(state: State<'_, AppState>, task_id: String) -> Resu
     let cancel = lease.cancel_signal();
 
     repo::ensure_unattended_runs_allowed(&repository)?;
-    probe_cli(&config.program).await?;
+    probe_cli(config.provider.as_ref(), &config.program).await?;
 
     if scheduler::claim_retry(&context, &task_id).await? == ClaimOutcome::Lost {
         return Err(Error::invalid(

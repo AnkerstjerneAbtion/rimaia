@@ -52,13 +52,21 @@ use crate::runner::events::{
     TokenUsage, UsageState, UsageWindow, UserEvent, WindowReopen,
 };
 use crate::runner::provider::{
-    AgentProvider, Capabilities, HandleInjection, IsolationSupport, OrchestratorChannel,
-    PermissionMode, PostureEcho, ProviderId, ResumeStyle, RunIntent, SessionCapability, SpawnPlan,
-    TurnBudget,
+    parse_version, AgentProvider, AuthState, Capabilities, HandleInjection, IsolationSupport,
+    OrchestratorChannel, PermissionMode, PostureEcho, ProbeOutput, ProviderId, ResumeStyle,
+    RunIntent, SessionCapability, SpawnPlan, TurnBudget, Version, VersionReport,
 };
+use crate::strategy::{Catalogue, CatalogueEntry, PlannerBudget};
 
 /// What the operator would type. Never resolved through a real `PATH`.
 pub const LEDGER_CLI: &str = "ledger";
+
+/// The name a doctor row or an error sentence would use, if this provider were
+/// ever real. Deliberately not a product anyone could confuse for one.
+pub const DISPLAY_NAME: &str = "Ledger";
+
+/// A fictional minimum, chosen only to be obviously not Claude's.
+pub const MINIMUM_VERSION: Version = (0, 3, 0);
 
 /// Where this provider keeps its configuration, its conversations, and — when
 /// Rimaia hands it one — its MCP servers.
@@ -150,6 +158,46 @@ impl AgentProvider for Ledger {
     fn parse_line(&self, line: &str) -> std::result::Result<RunEvent, serde_json::Error> {
         serde_json::from_str(line).map(event_from_value)
     }
+
+    fn display_name(&self) -> &'static str {
+        DISPLAY_NAME
+    }
+
+    fn version_probe(&self, program: &Path) -> SpawnPlan {
+        version_probe(program)
+    }
+
+    fn read_version(&self, output: &ProbeOutput) -> VersionReport {
+        read_version(output)
+    }
+
+    fn auth_probe(&self, program: &Path) -> Option<SpawnPlan> {
+        auth_probe(program)
+    }
+
+    fn read_auth(&self, output: &ProbeOutput) -> AuthState {
+        read_auth(output)
+    }
+
+    fn minimum_version(&self) -> Version {
+        MINIMUM_VERSION
+    }
+
+    fn tool_handle(&self, server: &str, tool: &str) -> String {
+        tool_handle(server, tool)
+    }
+
+    fn fanout_noun(&self) -> &'static str {
+        "helpers"
+    }
+
+    fn inherit_cost_usd(&self) -> Option<f64> {
+        None
+    }
+
+    fn default_catalogue(&self) -> Catalogue {
+        default_catalogue()
+    }
 }
 
 impl AgentProvider for LedgerWithoutResume {
@@ -171,6 +219,123 @@ impl AgentProvider for LedgerWithoutResume {
 
     fn parse_line(&self, line: &str) -> std::result::Result<RunEvent, serde_json::Error> {
         serde_json::from_str(line).map(event_from_value)
+    }
+
+    fn display_name(&self) -> &'static str {
+        DISPLAY_NAME
+    }
+
+    fn version_probe(&self, program: &Path) -> SpawnPlan {
+        version_probe(program)
+    }
+
+    fn read_version(&self, output: &ProbeOutput) -> VersionReport {
+        read_version(output)
+    }
+
+    fn auth_probe(&self, program: &Path) -> Option<SpawnPlan> {
+        auth_probe(program)
+    }
+
+    fn read_auth(&self, output: &ProbeOutput) -> AuthState {
+        read_auth(output)
+    }
+
+    fn minimum_version(&self) -> Version {
+        MINIMUM_VERSION
+    }
+
+    fn tool_handle(&self, server: &str, tool: &str) -> String {
+        tool_handle(server, tool)
+    }
+
+    fn fanout_noun(&self) -> &'static str {
+        "helpers"
+    }
+
+    fn inherit_cost_usd(&self) -> Option<f64> {
+        None
+    }
+
+    fn default_catalogue(&self) -> Catalogue {
+        default_catalogue()
+    }
+}
+
+/// `ledger --version`. Unlike every other axis this provider varies
+/// deliberately (see this module's header table), the version probe shares
+/// Claude's flag on purpose: `crates/core/tests/fixtures/cli.rs`'s stand-in
+/// answers exactly one version flag for every provider it plays, and a
+/// fictional provider inventing a second one would need to teach the harness
+/// a subcommand no real CLI asked for. What proves the seam here is the
+/// *string* — `"0.9.4 (ledger)"`, nothing like Claude's — parsed by the same
+/// generic [`parse_version`], not the flag that requested it.
+fn version_probe(_program: &Path) -> SpawnPlan {
+    SpawnPlan {
+        args: vec!["--version".to_string()],
+        ..SpawnPlan::default()
+    }
+}
+
+fn read_version(output: &ProbeOutput) -> VersionReport {
+    let raw = output.stdout.trim().to_string();
+    VersionReport {
+        parsed: parse_version(&raw),
+        raw,
+    }
+}
+
+/// `None`: this fictional provider's sign-in genuinely cannot be checked out
+/// of band, which is the row task 032 exists to let a doctor omit rather than
+/// fake.
+fn auth_probe(_program: &Path) -> Option<SpawnPlan> {
+    None
+}
+
+/// Never reached in practice — [`auth_probe`] is always `None` — but the
+/// trait still requires an answer.
+fn read_auth(_output: &ProbeOutput) -> AuthState {
+    AuthState::Undetermined {
+        detail: "Ledger has no out-of-band sign-in check".to_string(),
+    }
+}
+
+/// This provider's own tool-naming convention — a `.` rather than Claude's
+/// `mcp__server__tool` double underscore, so a fix that assumes one provider's
+/// punctuation fails here first.
+fn tool_handle(server: &str, tool: &str) -> String {
+    format!("{server}.{tool}")
+}
+
+/// Deliberately not Claude's models or effort words, so a fix that assumes
+/// `opus`/`sonnet`/`haiku` fails here first.
+fn default_catalogue() -> Catalogue {
+    Catalogue {
+        models: vec![
+            CatalogueEntry {
+                id: "steady".to_string(),
+                label: "Steady".to_string(),
+            },
+            CatalogueEntry {
+                id: "swift".to_string(),
+                label: "Swift".to_string(),
+            },
+        ],
+        efforts: vec![
+            CatalogueEntry {
+                id: "careful".to_string(),
+                label: "Careful".to_string(),
+            },
+            CatalogueEntry {
+                id: "quick".to_string(),
+                label: "Quick".to_string(),
+            },
+        ],
+        planner: PlannerBudget {
+            model: Some("steady".to_string()),
+            effort: Some("careful".to_string()),
+            ..PlannerBudget::default()
+        },
     }
 }
 

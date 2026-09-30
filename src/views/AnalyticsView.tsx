@@ -3,6 +3,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { ErrorBanner } from "../components/ErrorBanner";
 import {
   getAnalytics,
+  getRunCostSummary,
   getSubscriptionCost,
   setSubscriptionCost,
   toRimaiaError,
@@ -80,6 +81,7 @@ export function AnalyticsView() {
   const [error, setError] = useState<RimaiaError | null>(null);
   const [loading, setLoading] = useState(true);
   const [subscriptionDraft, setSubscriptionDraft] = useState("");
+  const [providerDisplayName, setProviderDisplayName] = useState<string | null>(null);
 
   const refresh = useCallback(async (selected: PeriodId) => {
     setLoading(true);
@@ -107,6 +109,16 @@ export function AnalyticsView() {
   useEffect(() => {
     getSubscriptionCost().then(
       (value) => setSubscriptionDraft(value === null ? "" : String(value)),
+      () => undefined,
+    );
+  }, []);
+
+  // Whose subscription the figure below is, read off the payload that already
+  // carries it rather than a command of its own (task 032). Until it arrives,
+  // or if it cannot, the sentence names no product rather than guessing one.
+  useEffect(() => {
+    getRunCostSummary().then(
+      (summary) => setProviderDisplayName(summary.providerDisplayName),
       () => undefined,
     );
   }, []);
@@ -294,8 +306,9 @@ export function AnalyticsView() {
           <section className="panel">
             <h3>Against your subscription</h3>
             <p className="muted">
-              What you pay Anthropic each month. Rimaia cannot see your bill, so this is your
-              own figure — the comparison is not drawn until you enter one.
+              What you pay for {providerDisplayName ?? "your agent CLI"} each month. Rimaia cannot
+              see your bill, so this is your own figure — the comparison is not drawn until you
+              enter one.
             </p>
             <div className="analytics-subscription">
               <label>
