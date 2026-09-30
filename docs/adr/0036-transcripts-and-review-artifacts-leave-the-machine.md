@@ -1,6 +1,6 @@
 # 36. Transcripts and review artifacts leave the machine
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-09-30
 
 ## Context

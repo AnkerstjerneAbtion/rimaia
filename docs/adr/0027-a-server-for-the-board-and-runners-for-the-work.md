@@ -1,6 +1,6 @@
 # 27. A server for the board, runners for the work
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-09-30
 
 ## Context

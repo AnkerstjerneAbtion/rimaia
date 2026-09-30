@@ -1,6 +1,6 @@
 # 37. Hosting, backups, and version skew between the server and its runners
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-09-30
 
 ## Context

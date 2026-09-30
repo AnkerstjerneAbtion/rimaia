@@ -1,6 +1,6 @@
 # 28. The server owns the board's database, and each runner keeps its own store
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-09-30
 
 ## Context
@@ -64,6 +64,7 @@ their machines, subscriptions or preferences differ, it does not belong to the t
 | `max_turns` (a team ceiling; a runner may set lower) | `queue_state`, `active_run_window`, `usage_limit_pause_until` | |
 | `disallowed_tools` (a team floor; a runner may add more) | `worktree_auto_cleanup`, `doctor_dismissals`, `onboarding_dismissed` | |
 | transcript retention (ADR-0036) | per repository: clone path, `worktree_root`, `max_concurrency`, `on_archive`, `on_archive_script`, `credential_*` metadata | |
+| review loop (ADR-0017): `review_instructions`, enabled, `max_review_loops`, blocking severity | ceiling on model and effort for every run, the review phase's included (ADR-0032 point 3) | |
 | per repository: remote, default branch, unattended ceiling (ADR-0032) | per repository: unattended consent (ADR-0032) | |
 
 `max_turns` and `disallowed_tools` are split rather than placed, because each has a direction

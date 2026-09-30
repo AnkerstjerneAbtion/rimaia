@@ -1,6 +1,6 @@
 # 34. One API for the web and the desktop, split into board and local commands
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-09-30
 
 ## Context

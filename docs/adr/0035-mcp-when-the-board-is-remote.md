@@ -1,6 +1,6 @@
 # 35. MCP when the board is remote
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-09-30
 
 ## Context
@@ -106,9 +106,13 @@ ADR-0021 makes every capability reachable over MCP. On the hosted server two cat
 not, and ADR-0021's parity rule applies to them per command kind (ADR-0034 point 1):
 
 - **Starting a process.** The hosted server cannot spawn anything on a runner. It can only
-  make work claimable (ADR-0031). "Plan this task now", which ADR-0021 records as a known gap
-  (`plan_task_strategy` has never been an MCP tool), becomes a board tool that *requests* a
-  strategy run for the assignee's runner to claim. It no longer starts one directly.
+  make work claimable (ADR-0031). `plan_task_strategy` and `plan_tasks_strategy` (task 023)
+  are operator tools today that spawn the planner in-process (`mcp/scope.rs` refuses both to
+  runs). On the hosted server they keep their names and arguments but become **requests**:
+  they record a strategy run for the assignee's runner to claim with purpose `strategy`
+  (ADR-0031 point 1), and return once the request is recorded, not when the plan is done.
+  In solo mode, and on a connected desktop's loopback endpoint, they still start the planner
+  locally, because there the board and the runner are the same machine.
 - **Reconfiguring one machine** (runner settings, credentials, the checkout mapping). These
   are local commands (ADR-0034) with no board form. Their MCP reach is the desktop's loopback
   endpoint, answered locally, not forwarded.

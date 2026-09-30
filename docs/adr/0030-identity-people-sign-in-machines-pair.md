@@ -1,6 +1,6 @@
 # 30. Identity: people sign in, machines pair, sessions carry tokens
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-09-30
 
 ## Context

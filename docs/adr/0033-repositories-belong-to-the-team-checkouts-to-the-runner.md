@@ -1,6 +1,6 @@
 # 33. Repositories belong to the team; checkouts, branches and credentials belong to the runner
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-09-30
 
 ## Context

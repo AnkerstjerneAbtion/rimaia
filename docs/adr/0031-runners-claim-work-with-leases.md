@@ -1,6 +1,6 @@
 # 31. Runners claim work with leases, and retries stay on the machine that started them
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-09-30
 
 ## Context

@@ -1,6 +1,6 @@
 # 29. Teams, membership, and isolation between them
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-09-30
 
 ## Context

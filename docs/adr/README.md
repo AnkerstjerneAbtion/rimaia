@@ -34,17 +34,17 @@ alternatives.
 | [0024](0024-a-calm-interface-that-travels-to-the-web.md) | A calm interface, and one that travels to the web | Accepted |
 | [0025](0025-archiving-a-task-and-what-it-may-clean-up.md) | Archiving a task, and what an archive is allowed to clean up | Accepted |
 | [0026](0026-a-provider-seam-for-the-agent-cli.md) | A provider seam for the agent CLI, drawn from Rimaia's needs | Accepted |
-| [0027](0027-a-server-for-the-board-and-runners-for-the-work.md) | A server for the board, runners for the work | Proposed |
-| [0028](0028-the-server-owns-the-board-and-each-runner-keeps-its-own-store.md) | The server owns the board's database, and each runner keeps its own store | Proposed |
-| [0029](0029-teams-membership-and-isolation.md) | Teams, membership, and isolation between them | Proposed |
-| [0030](0030-identity-people-sign-in-machines-pair.md) | Identity: people sign in, machines pair, sessions carry tokens | Proposed |
-| [0031](0031-runners-claim-work-with-leases.md) | Runners claim work with leases, and retries stay on the machine that started them | Proposed |
-| [0032](0032-assignment-and-consent-to-run-on-a-machine.md) | Assignment, and consent to run someone's plan on your machine | Proposed |
-| [0033](0033-repositories-belong-to-the-team-checkouts-to-the-runner.md) | Repositories belong to the team; checkouts, branches and credentials belong to the runner | Proposed |
-| [0034](0034-one-api-for-the-web-and-the-desktop.md) | One API for the web and the desktop, split into board and local commands | Proposed |
-| [0035](0035-mcp-when-the-board-is-remote.md) | MCP when the board is remote | Proposed |
-| [0036](0036-transcripts-and-review-artifacts-leave-the-machine.md) | Transcripts and review artifacts leave the machine | Proposed |
-| [0037](0037-hosting-backups-and-version-skew.md) | Hosting, backups, and version skew between the server and its runners | Proposed |
+| [0027](0027-a-server-for-the-board-and-runners-for-the-work.md) | A server for the board, runners for the work | Accepted |
+| [0028](0028-the-server-owns-the-board-and-each-runner-keeps-its-own-store.md) | The server owns the board's database, and each runner keeps its own store | Accepted |
+| [0029](0029-teams-membership-and-isolation.md) | Teams, membership, and isolation between them | Accepted |
+| [0030](0030-identity-people-sign-in-machines-pair.md) | Identity: people sign in, machines pair, sessions carry tokens | Accepted |
+| [0031](0031-runners-claim-work-with-leases.md) | Runners claim work with leases, and retries stay on the machine that started them | Accepted |
+| [0032](0032-assignment-and-consent-to-run-on-a-machine.md) | Assignment, and consent to run someone's plan on your machine | Accepted |
+| [0033](0033-repositories-belong-to-the-team-checkouts-to-the-runner.md) | Repositories belong to the team; checkouts, branches and credentials belong to the runner | Accepted |
+| [0034](0034-one-api-for-the-web-and-the-desktop.md) | One API for the web and the desktop, split into board and local commands | Accepted |
+| [0035](0035-mcp-when-the-board-is-remote.md) | MCP when the board is remote | Accepted |
+| [0036](0036-transcripts-and-review-artifacts-leave-the-machine.md) | Transcripts and review artifacts leave the machine | Accepted |
+| [0037](0037-hosting-backups-and-version-skew.md) | Hosting, backups, and version skew between the server and its runners | Accepted |
 
 ## Conventions
 

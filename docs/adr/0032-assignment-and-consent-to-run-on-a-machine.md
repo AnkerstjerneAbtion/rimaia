@@ -1,6 +1,6 @@
 # 32. Assignment, and consent to run someone's plan on your machine
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-09-30
 
 ## Context
@@ -72,6 +72,8 @@ of content the run would execute. Each piece has an author and a revision:
 | --- | --- | --- |
 | The task's `plan` and `extra_instructions` | `tasks.plan_revision`, incremented by every edit to either | `plan_updated_by` |
 | The team's base instructions | a revision per team, incremented by every edit | the owner who edited it |
+| The team's review instructions, and a task's override of them (ADR-0017) | a revision per team and per task, incremented by every edit | the member who edited it |
+| Review findings a fix phase will act on, when another runner wrote them | the review run that produced them | the owner of the runner that ran the review |
 | The starting commit, when it is a dependency's | the dependency's `head_sha` (ADR-0033) | the owner of the runner that produced it |
 
 The owner consents to a piece of content in one of three ways:
