@@ -57,6 +57,7 @@ use std::time::Duration;
 use pretty_assertions::assert_eq;
 use rimaia_core::db::settings::{self, RunEnvironment};
 use rimaia_core::db::{BoardColumn, ExitClass, Run, RunState, RunStatus, Task};
+use rimaia_core::mcp::{MCP_SERVER_NAME, RUN_MCP_SERVER_NAME};
 use rimaia_core::repo::{self, NewRepository};
 use rimaia_core::runner::events::{stderr_path, transcript_path, RunEvent, RunTail};
 use rimaia_core::runner::process::{
@@ -65,7 +66,8 @@ use rimaia_core::runner::process::{
 };
 use rimaia_core::runner::prompt::compose_prompt;
 use rimaia_core::runner::provider::{
-    AgentProvider, ClaudeProvider, ForbiddenOperation, ProviderId, RimaiaHandle, SessionIntent,
+    claude, AgentProvider, ClaudeProvider, ForbiddenOperation, ProviderId, RimaiaHandle,
+    SessionIntent,
 };
 use rimaia_core::runner::{
     run_task, CancelSignal, PermissionMode, RunIntent, RunRequest, RunTrigger, RunnerConfig,
@@ -187,7 +189,7 @@ fn the_claude_argv_carries_every_flag_in_the_order_the_contract_documents() {
         ],
         rimaia_handle: Some(RimaiaHandle {
             url: "http://127.0.0.1:4517/mcp/run/tok".to_string(),
-            server: "rimaia",
+            server: RUN_MCP_SERVER_NAME,
         }),
         max_turns: Some(40),
         ..invocation()
@@ -214,16 +216,62 @@ fn the_claude_argv_carries_every_flag_in_the_order_the_contract_documents() {
             "--effort",
             "high",
             "--allowedTools",
-            "mcp__rimaia__set_task_strategy",
+            "mcp__rimaia-run__set_task_strategy",
             "--disallowedTools",
             "Bash(git reset --hard origin/:*)",
             "Bash",
             "Bash(rm -rf /:*)",
             "--mcp-config",
-            r#"{"mcpServers":{"rimaia":{"type":"http","url":"http://127.0.0.1:4517/mcp/run/tok"}}}"#,
+            r#"{"mcpServers":{"rimaia-run":{"type":"http","url":"http://127.0.0.1:4517/mcp/run/tok"}}}"#,
             "--max-turns",
             "40",
         ]
+    );
+}
+
+#[test]
+fn no_intent_ever_denies_the_run_scoped_server() {
+    // D30 point 2. The operator surface is spelled at `rimaia` only, so a run's
+    // own handle, served as `rimaia-run`, is never denied with it — whichever
+    // operations an intent carries, including an operator rule that happens to
+    // mention it by a prefix of the name.
+    let every_operation = vec![
+        ForbiddenOperation::RemoteHistoryRewrite,
+        ForbiddenOperation::RemoteBranchDeletion,
+        ForbiddenOperation::HardResetToRemote,
+        ForbiddenOperation::AnyFileMutation,
+        ForbiddenOperation::AnyShellCommand,
+        ForbiddenOperation::RimaiaToolSurface,
+        operator_rule("Bash(rm -rf /:*)"),
+    ];
+
+    let denied = claude::spell_out(&every_operation);
+
+    assert!(denied.iter().any(|pattern| pattern == "mcp__rimaia"));
+    assert!(
+        !denied
+            .iter()
+            .any(|pattern| pattern.starts_with(&format!("mcp__{RUN_MCP_SERVER_NAME}"))),
+        "{denied:?}"
+    );
+}
+
+#[test]
+fn a_tool_handle_normalises_the_server_segment_the_way_the_cli_does() {
+    // D30 point 3: an operator-chosen server name with a character outside
+    // `[A-Za-z0-9_-]` is registered by the CLI with `_` in its place, so the
+    // spelling a denial or a grant uses has to match.
+    assert_eq!(
+        ClaudeProvider.tool_handle(RUN_MCP_SERVER_NAME, "get_task"),
+        "mcp__rimaia-run__get_task"
+    );
+    assert_eq!(
+        ClaudeProvider.tool_handle(MCP_SERVER_NAME, "get_task"),
+        "mcp__rimaia__get_task"
+    );
+    assert_eq!(
+        ClaudeProvider.tool_handle("my rimaia.local", "get_task"),
+        "mcp__my_rimaia_local__get_task"
     );
 }
 
@@ -1676,8 +1724,9 @@ fn planner_invocation() -> RunIntent<'static> {
         workspace: workspace(),
         model: Some("haiku".to_string()),
         effort: Some("low".to_string()),
-        // Rimaia's name for the tool; `mcp__rimaia__set_task_strategy` is this
-        // provider's spelling of it, which is what the assertions below read.
+        // Rimaia's name for the tool; `mcp__rimaia-run__set_task_strategy` is
+        // this provider's spelling of it at the handle's own server, which is
+        // what the assertions below read (seam-contract D30 point 3).
         required_tools: vec!["set_task_strategy"],
         forbidden: vec![
             ForbiddenOperation::AnyFileMutation,
@@ -1685,7 +1734,7 @@ fn planner_invocation() -> RunIntent<'static> {
         ],
         rimaia_handle: Some(RimaiaHandle {
             url: "http://127.0.0.1:4517/mcp/run/tok".to_string(),
-            server: "rimaia",
+            server: RUN_MCP_SERVER_NAME,
         }),
         max_turns: Some(6),
     }
@@ -1712,7 +1761,7 @@ fn a_strategy_run_is_permitted_to_call_the_one_tool_it_exists_to_call() {
         .iter()
         .position(|arg| arg == "--allowedTools")
         .expect("a planner that cannot call its own write-back cannot plan");
-    assert_eq!(argv[at + 1], "mcp__rimaia__set_task_strategy");
+    assert_eq!(argv[at + 1], "mcp__rimaia-run__set_task_strategy");
 }
 
 #[test]
@@ -1761,7 +1810,7 @@ fn the_scoped_mcp_config_is_one_inline_json_argument_and_not_a_file_path() {
 
     let config: serde_json::Value =
         serde_json::from_str(&argv[at + 1]).expect("the config is an inline JSON string");
-    let url = config["mcpServers"]["rimaia"]["url"]
+    let url = config["mcpServers"]["rimaia-run"]["url"]
         .as_str()
         .expect("the scoped endpoint");
     assert!(url.contains("/mcp/run/"), "the run-scoped route, not /mcp");

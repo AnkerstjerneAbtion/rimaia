@@ -1052,6 +1052,9 @@ a diff with nothing to check them against.
    added tool can silently forget to read it. In the path it lives on the server value,
    where the type system carries it and one test can require every registered tool to
    declare a decision.
+
+   *Pointer, 2026-10-05 (task 035).* The document's key is `"rimaia-run"`, not `"rimaia"`:
+   the run-scoped handle is served under its own server name ([D30](#d30--the-run-scoped-handle-is-served-as-rimaia-run) point 1).
 5. **A strategy run gets no `runs` row, and its transcript is `strategy-<uuid>.jsonl`.**
    Three independent reasons, any one sufficient: `finish_run` → `apply_to_task` moves a
    successful run's card to `in_review`, so recording the planner would file the card for

@@ -23,6 +23,7 @@ use crate::db::settings::Dismissal;
 use crate::db::{BoardColumn, OnArchive, RunState, ScheduleMode, StrategyMode};
 use crate::doctor::Check;
 use crate::error::{Error, Result};
+use crate::review::{FindingResolution, FindingStatus, NewReviewFinding};
 use crate::runner::strategy::PlanSelection;
 use crate::schedule::ScheduleInput;
 use crate::strategy::StrategyApproval;
@@ -98,6 +99,65 @@ pub struct ReviewNoteRequest {
     /// What the review found. Required, and never blank: it is the only thing
     /// that differs between the reviewed run's input and the next run's.
     pub note: String,
+}
+
+/// `record_review_findings`: a review run's whole report, in one call.
+///
+/// No run id: it is the grant's, never the caller's (D30 point 5), so a run
+/// cannot write under another run's id even on its own task.
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct RecordReviewFindingsRequest {
+    pub task_id: String,
+    /// Every finding, most important first, or `[]` when the review found
+    /// nothing. An empty list is still the call a clean review must make.
+    pub findings: Vec<NewReviewFinding>,
+}
+
+/// What a fix run did with a finding.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ResolvedAs {
+    Fixed,
+    Rejected,
+}
+
+/// `resolve_review_finding`: one open finding, and what the fix run did. No
+/// run id, for [`RecordReviewFindingsRequest`]'s reason.
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct ResolveReviewFindingRequest {
+    pub task_id: String,
+    pub finding_id: String,
+    pub status: ResolvedAs,
+    /// What was done, for `fixed` (optional), or why the finding was declined,
+    /// for `rejected` (required, and never blank).
+    #[serde(default)]
+    pub resolution: Option<String>,
+}
+
+impl ResolveReviewFindingRequest {
+    pub fn into_resolution(self) -> FindingResolution {
+        match self.status {
+            ResolvedAs::Fixed => FindingResolution::Fixed {
+                note: self.resolution,
+            },
+            // A missing reason becomes a blank one, which the service refuses
+            // with the same sentence as a blank reason sent on purpose.
+            ResolvedAs::Rejected => FindingResolution::Rejected {
+                reason: self.resolution.unwrap_or_default(),
+            },
+        }
+    }
+}
+
+/// `list_review_findings`: one task's findings, optionally of one status.
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct ListReviewFindingsRequest {
+    pub task_id: String,
+    #[serde(default)]
+    pub status: Option<FindingStatus>,
 }
 
 /// `mark_review_digest_seen`: the digest's own `until`.

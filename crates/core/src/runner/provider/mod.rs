@@ -227,9 +227,9 @@ pub trait AgentProvider: std::fmt::Debug + Send + Sync + 'static {
     /// than fails; see `doctor::checks::agent_cli`.
     fn minimum_version(&self) -> Version;
 
-    /// How this provider spells one of Rimaia's MCP tools, so the prompt's
-    /// instruction and the planner's allow-list read the same string. Claude:
-    /// `mcp__rimaia__set_task_strategy`.
+    /// How this provider spells one of Rimaia's MCP tools at `server`, so the
+    /// prompt's instruction and the planner's allow-list read the same string.
+    /// Claude, at the run-scoped handle: `mcp__rimaia-run__set_task_strategy`.
     fn tool_handle(&self, server: &str, tool: &str) -> String;
 
     /// The word this provider's agent will recognise for fanning out work
@@ -479,6 +479,38 @@ pub fn negotiate(
     caps: &Capabilities,
     intent: &RunIntent<'_>,
 ) -> std::result::Result<RunPlan, Refusal> {
+    // Two wiring mistakes, refused first and for every intent rather than
+    // trusted to each call site (seam-contract D30 points 1 and 3). A handle
+    // named for the operator's server would be denied by the operator-surface
+    // denial every run carries, or worse, pre-approve that surface; and a grant
+    // with nothing to grant it through must never become a silent
+    // `--allowedTools` for it.
+    if let Some(handle) = &intent.rimaia_handle {
+        if handle.server == crate::mcp::MCP_SERVER_NAME {
+            return Err(Refusal {
+                provider: caps.id,
+                axis: RefusalAxis::HandleInjection,
+                message: format!(
+                    "a run's handle must be served as `{}`, never under the operator's `{}`, \
+                     which every run is denied.",
+                    crate::mcp::RUN_MCP_SERVER_NAME,
+                    crate::mcp::MCP_SERVER_NAME,
+                ),
+            });
+        }
+    }
+    if !intent.required_tools.is_empty() && intent.rimaia_handle.is_none() {
+        return Err(Refusal {
+            provider: caps.id,
+            axis: RefusalAxis::HandleInjection,
+            message: format!(
+                "this run names tools it must call ({}) but carries no handle to call them \
+                 through.",
+                intent.required_tools.join(", "),
+            ),
+        });
+    }
+
     let autonomy = intent.permission_mode.autonomy();
     let mut plan = RunPlan {
         prompt_style: if intent.session.is_continuation() && caps.session.can_continue() {
@@ -890,7 +922,7 @@ mod tests {
         let planner = RunIntent {
             rimaia_handle: Some(RimaiaHandle {
                 url: "http://127.0.0.1:4517/mcp/run/token".to_string(),
-                server: "rimaia",
+                server: crate::mcp::RUN_MCP_SERVER_NAME,
             }),
             ..intent(PermissionMode::AcceptEdits)
         };

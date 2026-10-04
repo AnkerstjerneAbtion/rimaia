@@ -171,3 +171,5 @@ shared-secret header — is orthogonal and composes: it would protect `/mcp` and
 
 Mechanism, and why a header-carried token was rejected instead of a path segment, is
 seam-contract D17.
+
+*Pointer, 2026-10-05 (task 035).* The run-scoped route is served under the server name `rimaia-run`, not `rimaia`, so the `--mcp-config` key above reads `"rimaia-run"`; seam-contract D30 point 1 decides it.

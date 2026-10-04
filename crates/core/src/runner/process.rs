@@ -256,8 +256,8 @@ fn is_identity_of_any_provider(prefixes: &[&str], name: &str) -> bool {
 // Settings this module reads
 // ---------------------------------------------------------------------------
 
-/// Rimaia's own MCP tools, denied to an implementation run whatever the
-/// operator's configuration says.
+/// Rimaia's operator tool surface, denied to every run the runner spawns
+/// whatever the operator's configuration says.
 ///
 /// # Why this is not part of the blocklist setting
 ///
@@ -284,21 +284,15 @@ fn is_identity_of_any_provider(prefixes: &[&str], name: &str) -> bool {
 /// is one provider's business (ADR-0026 point 4). What Rimaia states is the
 /// operation.
 ///
-/// # A trap for task 021
+/// # Every run, and never a run's own handle
 ///
-/// This denies by *tool name*, and a scoped handle registers under the same
-/// server name — so it will block a legitimate scoped handle just as
-/// effectively as the inherited operator one. That is correct today, because an
-/// implementation run gets `rimaia_handle: None` and has no scoped handle to
-/// block. It stops being correct the moment task 021 gives one to a run so it
-/// can write findings back to its own card, which is exactly what ADR-0017
-/// plans.
-///
-/// Whoever does that has three options and should pick deliberately: register
-/// the run-scoped handle under a distinct server name, apply this denial only
-/// when no grant was minted for the run, or establish that `--allowedTools`
-/// overrides `--disallowedTools` in the CLI — which is **not verified here**
-/// and should not be assumed.
+/// The denial works by tool name, so a run's own scoped handle is served under
+/// a different server name, `rimaia-run`, and this is spelled at the operator's
+/// `rimaia` only. That is what lets it be unconditional: [`forbidden_operations`]
+/// appends it for every intent, implementation, planner, review or fix, and no
+/// caller can drop it. Seam-contract D30 points 1 and 2 decide it, and
+/// `run-scoped-server-name.jsonl` records the CLI matching the server segment
+/// exactly rather than as a prefix.
 const RIMAIA_TOOL_SURFACE: ForbiddenOperation = ForbiddenOperation::RimaiaToolSurface;
 
 /// The tool blocklist, or [`DEFAULT_DISALLOWED_TOOLS`] when nobody has set one.
@@ -335,8 +329,11 @@ pub async fn disallowed_tools(pool: &sqlx::SqlitePool) -> Result<Vec<String>> {
 /// The tag is what stops those strings being handed to a provider that never
 /// spoke them — and what stops them being silently dropped either.
 ///
-/// `extra` is whatever the caller adds on top: the Rimaia tool surface for an
-/// implementation run, the planner's own denials for a strategy run.
+/// `extra` is whatever the caller adds on top, and only what is particular to
+/// it: nothing for an implementation run, the planner's own denials for a
+/// strategy run. The operator tool surface is appended here, after `extra`, for
+/// every intent (seam-contract D30 point 2), because a denial a caller has to
+/// remember is one a caller can forget.
 pub(crate) async fn forbidden_operations(
     pool: &sqlx::SqlitePool,
     provider: &dyn AgentProvider,
@@ -357,6 +354,7 @@ pub(crate) async fn forbidden_operations(
             .collect(),
     };
     forbidden.extend(extra);
+    forbidden.push(RIMAIA_TOOL_SURFACE);
 
     Ok(forbidden)
 }
@@ -747,8 +745,7 @@ pub async fn run_task(
     // value and spawned on another.
     let run_environment = settings::run_environment(&ctx.pool).await?;
     let turns = max_turns(&ctx.pool).await?;
-    let forbidden =
-        forbidden_operations(&ctx.pool, config.provider.as_ref(), [RIMAIA_TOOL_SURFACE]).await?;
+    let forbidden = forbidden_operations(&ctx.pool, config.provider.as_ref(), []).await?;
 
     // Rimaia's conversation id, minted before anything exists so a resume works
     // even against a provider whose child dies before announcing itself

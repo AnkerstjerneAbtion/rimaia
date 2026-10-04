@@ -83,8 +83,12 @@ pub enum FindingStatus {
 /// `snake_case` spell them identically and the MCP tool reuses this type as its
 /// argument element. A field with two words, if one is ever added, gets its own
 /// projection in `mcp/requests.rs` instead.
+///
+/// `deny_unknown_fields`, as every tool argument is (`mcp::requests`): a
+/// reviewer that sends a `fingerprint` is told so rather than having it
+/// dropped in silence.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct NewReviewFinding {
     pub severity: FindingSeverity,
     /// One line naming the problem. Must not be blank.

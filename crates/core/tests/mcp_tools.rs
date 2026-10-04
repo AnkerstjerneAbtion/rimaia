@@ -11,14 +11,18 @@
 //! rather than by constructing the structs, so the schema and the handler are
 //! exercised together.
 
-use rimaia_core::db::{settings, BoardColumn, MutationSource, StrategyMode, StrategySource};
-use rimaia_core::mcp::requests::{
-    ArchiveTaskRequest, ArchiveTasksRequest, GetTaskRequest, ListTasksRequest, MoveTaskRequest,
-    RemoveTaskLinkRequest, ReviewNoteRequest, SetRepositoryOnArchiveRequest,
-    SetTaskDependenciesRequest, UpdateTaskRequest,
+use rimaia_core::db::{
+    settings, BoardColumn, MutationSource, RunKind, StrategyMode, StrategySource,
 };
-use rimaia_core::mcp::responses::{TaskListView, TaskView};
+use rimaia_core::mcp::requests::{
+    ArchiveTaskRequest, ArchiveTasksRequest, GetTaskRequest, ListReviewFindingsRequest,
+    ListTasksRequest, MoveTaskRequest, RemoveTaskLinkRequest, ReviewNoteRequest,
+    SetRepositoryOnArchiveRequest, SetTaskDependenciesRequest, UpdateTaskRequest,
+};
+use rimaia_core::mcp::responses::{ReviewFindingView, TaskListView, TaskView};
 use rimaia_core::mcp::RimaiaServer;
+use rimaia_core::review::{self, FindingSeverity, NewReviewFinding};
+use rimaia_core::runner::outcome::{start_run, NewRun};
 use rimaia_core::strategy::{settings as strategy_settings, StrategyDefaults};
 use rimaia_core::tasks::{self, NewTask, StrategyPlan, TaskPatch};
 use rimaia_core::testing::{self, TestContext};
@@ -799,6 +803,88 @@ async fn setting_a_script_on_archive_without_a_path_is_refused_readably() {
         "{}",
         message(&refused),
     );
+}
+
+#[tokio::test]
+async fn list_review_findings_answers_the_same_over_mcp_and_the_tauri_command() {
+    // ADR-0021's parity: `commands::review::list_review_findings` is one line
+    // over `review::findings::list`, so the service's answer is the window's,
+    // and the tool must give the same findings in the same order.
+    let h = TestContext::new().await;
+    let repository_id = seed_repository(&h.context.pool, "rimaia", "/tmp/rimaia").await;
+    let task = create_task(&h, &repository_id, "Reviewed").await;
+    let paths = rimaia_core::AppPaths::new(std::path::Path::new("/tmp/rimaia-tools-test"));
+    let mut reviews = Vec::new();
+    for titles in [vec!["Zeta", "Alpha"], vec!["Mu"]] {
+        let review = start_run(
+            &h.context,
+            &paths,
+            NewRun {
+                task_id: task.id.clone(),
+                kind: RunKind::Review,
+                session_id: rimaia_core::db::new_id(),
+                prompt: "review it".to_string(),
+                base_ref: None,
+                base_sha: None,
+            },
+        )
+        .await
+        .expect("open a review row");
+        let findings = titles
+            .iter()
+            .map(|title| NewReviewFinding {
+                severity: FindingSeverity::Medium,
+                title: (*title).to_string(),
+                body: format!("{title}, explained."),
+                file: None,
+                line: None,
+            })
+            .collect();
+        review::findings::record(&h.context, &task.id, &review.id, findings)
+            .await
+            .expect("record the review's findings");
+        testing::runs::close_run(
+            &h.context,
+            &review.id,
+            rimaia_core::db::RunStatus::Succeeded,
+            rimaia_core::db::ExitClass::Success,
+            None,
+        )
+        .await;
+        reviews.push(review.id);
+    }
+
+    let window = review::findings::list(&h.context, &task.id, None)
+        .await
+        .expect("the window's read");
+    let Json(over_mcp) = server(&h)
+        .list_review_findings(Parameters(request::<ListReviewFindingsRequest>(
+            json!({ "task_id": task.id }),
+        )))
+        .await
+        .expect("the operator reads findings");
+
+    let window_view: Vec<ReviewFindingView> = window
+        .iter()
+        .cloned()
+        .map(ReviewFindingView::from)
+        .collect();
+    assert_eq!(over_mcp.findings, window_view);
+    let titles: Vec<&str> = over_mcp
+        .findings
+        .iter()
+        .map(|finding| finding.title.as_str())
+        .collect();
+    assert_eq!(titles, vec!["Zeta", "Alpha", "Mu"]);
+    assert_eq!(over_mcp.findings[2].review_run_id, reviews[1]);
+
+    let Json(open) = server(&h)
+        .list_review_findings(Parameters(request::<ListReviewFindingsRequest>(
+            json!({ "task_id": task.id, "status": "fixed" }),
+        )))
+        .await
+        .expect("filtered by status");
+    assert_eq!(open.findings, vec![]);
 }
 
 #[tokio::test]

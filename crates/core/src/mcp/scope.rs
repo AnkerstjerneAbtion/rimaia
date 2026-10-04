@@ -32,6 +32,15 @@
 //! *registered* tool to have an entry in [`Tool`], so a tool added later cannot
 //! reach the wire without someone having said what a run may do with it.
 //!
+//! # A token says what it was minted for
+//!
+//! The planner, a review and a fix each hold a handle to their own task, and
+//! each may do something different with it, so a token resolves to a task
+//! *and* a [`Grant`], and [`Tool::run_access`] decides per grant
+//! (seam-contract D30 point 5). The handle is served as `rimaia-run`, never as
+//! the operator's `rimaia`, so the denial of the operator surface every run
+//! carries never reaches it (D30 points 1 and 2).
+//!
 //! `tools/list` is deliberately **not** filtered by scope, so a run is offered
 //! tools it will be refused. That is the price of there being one decision
 //! point: a filtered advertisement would be a second copy of the table, free to
@@ -65,10 +74,64 @@ pub(crate) const RUN_ROUTE_PREFIX: &str = "/run/";
 /// tool can silently forget to read (seam-contract D17.4).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RunScope {
-    /// `/mcp` — the operator's own session. ADR-0006's table in full.
+    /// `/mcp` — the operator's own session. ADR-0006's table in full, less the
+    /// two tools only a run writes ([`Tool::is_run_output`]).
     Operator,
-    /// `/mcp/run/{token}` — one unattended run, working on one task.
-    Run { task_id: String },
+    /// `/mcp/run/{token}` — one unattended run, working on one task, for the
+    /// purpose its grant names.
+    Run { task_id: String, grant: Grant },
+}
+
+/// What a run-scoped token was minted for (seam-contract D30 point 5).
+///
+/// The planner, a review and a fix each hold a handle to their own task, and
+/// what each may do with it differs: the planner may amend the plan it is
+/// planning, a reviewer may only report, and a fixer may only resolve what was
+/// reported. A grant that said only "this task" would hand review and fix runs
+/// the planner's table, and a fixer rewriting the plan to match what it did is
+/// marking its own homework.
+///
+/// Not [`RunGrant`], which is the token holder whose `Drop` revokes the token.
+/// This is what the token was minted *for*, and the only one of the two an
+/// access decision reads. A review or fix carries its own run id, so what it
+/// writes is attributed to the run that holds the token and never to an id a
+/// request could name.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Grant {
+    Strategy,
+    Review { run_id: String },
+    Fix { run_id: String },
+}
+
+/// [`Grant`]'s discriminant, which is all [`Tool::run_access`] reads.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum GrantKind {
+    Strategy,
+    Review,
+    Fix,
+}
+
+impl GrantKind {
+    pub const ALL: [GrantKind; 3] = [GrantKind::Strategy, GrantKind::Review, GrantKind::Fix];
+}
+
+impl Grant {
+    pub fn kind(&self) -> GrantKind {
+        match self {
+            Grant::Strategy => GrantKind::Strategy,
+            Grant::Review { .. } => GrantKind::Review,
+            Grant::Fix { .. } => GrantKind::Fix,
+        }
+    }
+
+    /// The run a review or fix grant was minted for; `None` for the planner,
+    /// which has no `runs` row (D17.5).
+    pub fn run_id(&self) -> Option<&str> {
+        match self {
+            Grant::Strategy => None,
+            Grant::Review { run_id } | Grant::Fix { run_id } => Some(run_id),
+        }
+    }
 }
 
 /// Every tool this server registers (ADR-0021: the set is open, the scope
@@ -179,6 +242,13 @@ pub enum Tool {
     GetTaskDependents,
     GetReviewDigest,
     MarkReviewDigestSeen,
+
+    // Task 035. The findings a review run reports and a fix run resolves, and
+    // the operator's read of them. The two writes are a run's output and are
+    // refused to the operator — see `is_run_output`.
+    RecordReviewFindings,
+    ResolveReviewFinding,
+    ListReviewFindings,
 }
 
 /// What a [`RunScope::Run`] may do with one tool — ADR-0006's amendment table,
@@ -195,7 +265,7 @@ pub enum RunAccess {
 
 impl Tool {
     /// Every tool with a recorded decision, so a test can walk the table.
-    pub const ALL: [Tool; 54] = [
+    pub const ALL: [Tool; 57] = [
         Tool::AddTaskLink,
         Tool::CreateTask,
         Tool::GetBaseInstructions,
@@ -250,6 +320,9 @@ impl Tool {
         Tool::GetTaskDependents,
         Tool::GetReviewDigest,
         Tool::MarkReviewDigestSeen,
+        Tool::RecordReviewFindings,
+        Tool::ResolveReviewFinding,
+        Tool::ListReviewFindings,
     ];
 
     /// The wired name — what `tools/list` advertises and what the ADR table
@@ -310,6 +383,9 @@ impl Tool {
             Tool::GetTaskDependents => "get_task_dependents",
             Tool::GetReviewDigest => "get_review_digest",
             Tool::MarkReviewDigestSeen => "mark_review_digest_seen",
+            Tool::RecordReviewFindings => "record_review_findings",
+            Tool::ResolveReviewFinding => "resolve_review_finding",
+            Tool::ListReviewFindings => "list_review_findings",
         }
     }
 
@@ -322,16 +398,51 @@ impl Tool {
         Tool::ALL.into_iter().find(|tool| tool.as_str() == name)
     }
 
-    /// ADR-0006's amendment table, and the only copy of it in code.
-    pub const fn run_access(self) -> RunAccess {
+    /// Whether this tool writes something only a run produces.
+    ///
+    /// [`RunScope::authorize`] refuses these on the operator's door, the first
+    /// thing that door has ever been refused: a finding the operator wrote
+    /// would look exactly like a reviewer's in the morning (D30 point 5). No UI
+    /// command writes a finding either, so ADR-0021's parity is not affected.
+    pub const fn is_run_output(self) -> bool {
+        matches!(
+            self,
+            Tool::RecordReviewFindings | Tool::ResolveReviewFinding
+        )
+    }
+
+    /// ADR-0006's amendment table as D30 point 5 extends it per grant, and the
+    /// only copy of it in code.
+    pub const fn run_access(self, grant: GrantKind) -> RunAccess {
         match self {
-            // A run may read and amend the card it was started for, and that
-            // is the whole of its write surface.
-            Tool::AddTaskLink
-            | Tool::GetTask
-            | Tool::RemoveTaskLink
-            | Tool::SetTaskStrategy
-            | Tool::UpdateTask => RunAccess::OwnTaskOnly,
+            // Every run may read the card it was started for.
+            Tool::GetTask => RunAccess::OwnTaskOnly,
+
+            // The planner may amend the card it is planning, as task 020 let
+            // it. A reviewer or a fixer may not: a fixer rewriting the plan to
+            // match what it did, or a reviewer choosing the next model, is
+            // marking its own homework (D30 point 5).
+            Tool::AddTaskLink | Tool::RemoveTaskLink | Tool::SetTaskStrategy | Tool::UpdateTask => {
+                match grant {
+                    GrantKind::Strategy => RunAccess::OwnTaskOnly,
+                    GrantKind::Review | GrantKind::Fix => RunAccess::Refused,
+                }
+            }
+
+            // Each loop run writes exactly its own output, against its own
+            // task, under the run id its grant carries.
+            Tool::RecordReviewFindings => match grant {
+                GrantKind::Review => RunAccess::OwnTaskOnly,
+                GrantKind::Strategy | GrantKind::Fix => RunAccess::Refused,
+            },
+            Tool::ResolveReviewFinding => match grant {
+                GrantKind::Fix => RunAccess::OwnTaskOnly,
+                GrantKind::Strategy | GrantKind::Review => RunAccess::Refused,
+            },
+            // D30's "everything else" row, applied as written. A fix run is
+            // handed its findings in its prompt (task 021) and does not go
+            // looking for them.
+            Tool::ListReviewFindings => RunAccess::Refused,
 
             // Neither takes a task, and a run has a legitimate use for both:
             // the standing instructions it is working under, and the names of
@@ -505,6 +616,15 @@ impl Tool {
 }
 
 impl RunScope {
+    /// The run a review or fix handle was minted for. `None` on the
+    /// operator's door and for the planner.
+    pub fn run_id(&self) -> Option<&str> {
+        match self {
+            RunScope::Operator => None,
+            RunScope::Run { grant, .. } => grant.run_id(),
+        }
+    }
+
     /// The single decision point. **Every handler's first statement.**
     ///
     /// `target_task_id` is the task the call would touch — `None` for the two
@@ -517,13 +637,20 @@ impl RunScope {
     /// door (`mcp::error`). A scope check that invented its own shape would be
     /// the one refusal an agent could not handle like the rest.
     pub fn authorize(&self, tool: Tool, target_task_id: Option<&str>) -> Result<()> {
-        let RunScope::Run { task_id } = self else {
-            // The operator's door is ADR-0006's table in full. Task 020 takes
-            // nothing away from it.
+        let RunScope::Run { task_id, grant } = self else {
+            // The operator's door is ADR-0006's table in full, less what only
+            // a run may write.
+            if tool.is_run_output() {
+                return Err(Error::invalid(format!(
+                    "{tool} is not available here: only the run a finding belongs to writes it, \
+                     through its own run-scoped handle.",
+                    tool = tool.as_str(),
+                )));
+            }
             return Ok(());
         };
 
-        match tool.run_access() {
+        match tool.run_access(grant.kind()) {
             RunAccess::Unscoped => Ok(()),
 
             RunAccess::Refused => Err(Error::invalid(format!(
@@ -570,8 +697,8 @@ struct Table {
     /// `http://127.0.0.1:4517` — origin only. The path is this module's
     /// business, and `None` means nothing is listening.
     endpoint: Option<String>,
-    /// Token → task id. One entry per live [`RunGrant`].
-    granted: HashMap<String, String>,
+    /// Token → what it was minted for. One entry per live [`RunGrant`].
+    granted: HashMap<String, (String, Grant)>,
 }
 
 impl RunHandles {
@@ -591,16 +718,17 @@ impl RunHandles {
         self.lock().endpoint.clone()
     }
 
-    /// Mints a token for one run, valid until the returned grant is dropped.
+    /// Mints a token for one run, for the purpose `grant` names, valid until
+    /// the returned [`RunGrant`] is dropped.
     ///
     /// A hyphenated v4 UUID, like every other id in this app. Unguessable by
     /// accident rather than by an adversary — see this module's header on what
     /// the token is for.
-    pub fn grant(&self, task_id: &str) -> RunGrant {
+    pub fn grant(&self, task_id: &str, grant: Grant) -> RunGrant {
         let token = new_id();
         self.lock()
             .granted
-            .insert(token.clone(), task_id.to_string());
+            .insert(token.clone(), (task_id.to_string(), grant));
 
         RunGrant {
             token,
@@ -614,9 +742,13 @@ impl RunHandles {
     /// The two are deliberately indistinguishable: the route answers both with
     /// a bare 404, so this surface is not an oracle for which tokens exist.
     pub fn resolve(&self, token: &str) -> Option<RunScope> {
-        self.lock().granted.get(token).map(|task_id| RunScope::Run {
-            task_id: task_id.clone(),
-        })
+        self.lock()
+            .granted
+            .get(token)
+            .map(|(task_id, grant)| RunScope::Run {
+                task_id: task_id.clone(),
+                grant: grant.clone(),
+            })
     }
 
     /// The scoped URL a run holding `grant` reaches Rimaia on, or `None` when
@@ -729,15 +861,41 @@ mod tests {
     fn a_granted_token_resolves_to_its_own_task() {
         let handles = bound();
 
-        let grant = handles.grant("task-1");
+        let grant = handles.grant("task-1", Grant::Strategy);
 
         assert_eq!(
             handles.resolve(grant.token()),
             Some(RunScope::Run {
-                task_id: "task-1".to_string()
+                task_id: "task-1".to_string(),
+                grant: Grant::Strategy,
             })
         );
         assert_eq!(handles.resolve("not-a-token"), None);
+    }
+
+    #[test]
+    fn a_token_resolves_to_the_grant_it_was_minted_for() {
+        let handles = bound();
+
+        let review = handles.grant(
+            "task-1",
+            Grant::Review {
+                run_id: "run-7".to_string(),
+            },
+        );
+
+        let scope = handles.resolve(review.token()).expect("a live token");
+        assert_eq!(scope.run_id(), Some("run-7"));
+        assert_eq!(
+            scope,
+            RunScope::Run {
+                task_id: "task-1".to_string(),
+                grant: Grant::Review {
+                    run_id: "run-7".to_string()
+                },
+            }
+        );
+        assert_eq!(RunScope::Operator.run_id(), None);
     }
 
     #[test]
@@ -747,7 +905,7 @@ mod tests {
         // handle to a task behind.
         let handles = bound();
         let token = {
-            let grant = handles.grant("task-1");
+            let grant = handles.grant("task-1", Grant::Strategy);
             grant.token().to_string()
         };
 
@@ -760,8 +918,8 @@ mod tests {
         // be revoked by whichever run finished first.
         let handles = bound();
 
-        let first = handles.grant("task-1");
-        let second = handles.grant("task-1");
+        let first = handles.grant("task-1", Grant::Strategy);
+        let second = handles.grant("task-1", Grant::Strategy);
 
         assert_ne!(first.token(), second.token());
         assert!(handles.resolve(first.token()).is_some());
@@ -771,7 +929,7 @@ mod tests {
     #[test]
     fn the_scoped_endpoint_names_the_bound_port_and_the_run_s_own_token() {
         let handles = bound();
-        let grant = handles.grant("task-1");
+        let grant = handles.grant("task-1", Grant::Strategy);
 
         assert_eq!(
             handles.endpoint_for(&grant),
@@ -788,7 +946,7 @@ mod tests {
         // no handle, and the caller refuses to start a planner rather than
         // starting one that cannot answer.
         let handles = RunHandles::default();
-        let grant = handles.grant("task-1");
+        let grant = handles.grant("task-1", Grant::Strategy);
 
         assert_eq!(handles.endpoint(), None);
         assert_eq!(handles.endpoint_for(&grant), None);
@@ -800,7 +958,7 @@ mod tests {
         // startup: `commands::mcp::set_mcp_port` rebinds at runtime, and a
         // captured URL would send the next planner at a dead port.
         let handles = bound();
-        let grant = handles.grant("task-1");
+        let grant = handles.grant("task-1", Grant::Strategy);
 
         handles.set_endpoint(Some("http://127.0.0.1:4600".to_string()));
 

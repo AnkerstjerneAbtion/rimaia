@@ -76,7 +76,7 @@ pub mod server;
 pub mod settings;
 
 pub use error::ToolError;
-pub use scope::{RunAccess, RunGrant, RunHandles, RunScope, Tool};
+pub use scope::{Grant, GrantKind, RunAccess, RunGrant, RunHandles, RunScope, Tool};
 pub use server::RimaiaServer;
 pub use settings::{configured_port, set_configured_port, MCP_PORT};
 
@@ -87,17 +87,28 @@ use scope::RUN_ROUTE_PREFIX;
 /// configurable and is hard-coded to loopback.
 pub const DEFAULT_PORT: u16 = 4517;
 
-/// The path the streamable-HTTP endpoint is mounted at, so
-/// `http://127.0.0.1:4517/mcp` is what a user registers.
-/// The name Rimaia registers itself under in an `--mcp-config`, and the name a
-/// tool therefore wears as `mcp__rimaia__<tool>`.
+/// The **operator** surface's name: what the operator registers with
+/// `claude mcp add`, what the handshake reports on `/mcp`, and the name the
+/// denial every spawned run carries is spelled at (`runner::process`), so a
+/// tool there wears `mcp__rimaia__<tool>`.
 ///
-/// One constant because three places have to agree: the config the runner
-/// writes, the server info the handshake returns, and the denial an
-/// implementation run carries (`runner::process`). A disagreement between the
-/// last two would be a blocklist that silently matches nothing.
+/// Never the name of a run's own handle (seam-contract D30 point 1). A run that
+/// inherits the operator's configuration holds this registration and its own
+/// handle at once, and the denial works by tool name, so the two must not share
+/// one: if they did, denying the operator surface would deny the handle too, and
+/// the only way out would be to drop the denial for exactly the runs that carry
+/// a handle.
 pub const MCP_SERVER_NAME: &str = "rimaia";
 
+/// The **run-scoped** handle's name (D30 point 1): the key of the
+/// `--mcp-config` document a run is handed, what the handshake reports on
+/// `/mcp/run/{token}`, the server segment of every `required_tools` entry, and
+/// the tool names a prompt tells a run to call. Nothing ever registers it in a
+/// user's configuration.
+pub const RUN_MCP_SERVER_NAME: &str = "rimaia-run";
+
+/// The path the streamable-HTTP endpoint is mounted at, so
+/// `http://127.0.0.1:4517/mcp` is what a user registers.
 pub const MCP_PATH: &str = "/mcp";
 
 /// Whether the server is reachable, and if not, why.
@@ -397,7 +408,7 @@ async fn dispatch(
     Path(token): Path<String>,
     request: Request,
 ) -> Response {
-    let Some(RunScope::Run { task_id }) = route.handles.resolve(&token) else {
+    let Some(scope @ RunScope::Run { .. }) = route.handles.resolve(&token) else {
         // A bare 404 with no body. An unknown token and a revoked one must be
         // indistinguishable, and neither may hint that some *other* token would
         // have worked — this route is not an oracle for which runs exist.
@@ -408,7 +419,7 @@ async fn dispatch(
         route.ctx.clone(),
         route.doctor.clone(),
         route.planner.clone(),
-        task_id,
+        scope,
     )
     .handle(request)
     .await
@@ -433,15 +444,10 @@ fn scoped_service(
     ctx: ServiceContext,
     doctor: doctor::Environment,
     planner: PlannerAccess,
-    task_id: String,
+    scope: RunScope,
 ) -> StreamableHttpService<RimaiaServer, LocalSessionManager> {
     service_over(move || {
-        RimaiaServer::scoped(
-            ctx.clone(),
-            doctor.clone(),
-            planner.clone(),
-            task_id.clone(),
-        )
+        RimaiaServer::scoped(ctx.clone(), doctor.clone(), planner.clone(), scope.clone())
     })
 }
 

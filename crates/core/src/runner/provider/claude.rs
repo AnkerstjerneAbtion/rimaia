@@ -32,7 +32,7 @@ use chrono::{TimeZone, Utc};
 use serde_json::Value;
 
 use crate::db::settings::RunEnvironment;
-use crate::error::Result;
+use crate::error::{Error, Result};
 use crate::mcp::MCP_SERVER_NAME;
 use crate::runner::events::{
     AssistantEvent, ContentBlock, EndReason, InitEvent, McpServer, OtherEvent, ResultEvent,
@@ -296,9 +296,25 @@ impl AgentProvider for ClaudeProvider {
         // a human reasons about them — what this run may do, then what it may
         // not. Each `--` token ends the previous list, so the pairing is safe in
         // either order; this one is just the legible one.
+        //
+        // Spelled at the handle's own server (seam-contract D30 point 3), never at
+        // a constant: a grant pre-approved at the operator's name would be an
+        // `--allowedTools` for the very surface `--disallowedTools` denies.
         if !intent.required_tools.is_empty() {
+            let Some(handle) = &intent.rimaia_handle else {
+                // `negotiate` refuses this on `HandleInjection` before any plan
+                // is made, so reaching here is a caller that skipped it.
+                return Err(Error::internal(
+                    "required tools were named for an intent that carries no handle to call them through",
+                ));
+            };
             args.push("--allowedTools".to_string());
-            args.extend(intent.required_tools.iter().map(|tool| tool_handle(tool)));
+            args.extend(
+                intent
+                    .required_tools
+                    .iter()
+                    .map(|tool| self.tool_handle(handle.server, tool)),
+            );
         }
 
         let denied = spell_out(&intent.forbidden);
@@ -427,7 +443,22 @@ impl AgentProvider for ClaudeProvider {
         MINIMUM_VERSION
     }
 
+    /// The server segment is normalised the way the CLI normalises a server
+    /// name it registers: any character outside `[A-Za-z0-9_-]` becomes `_`
+    /// (seam-contract D30 point 3). `rimaia` and `rimaia-run` pass through
+    /// unchanged; an operator-chosen alias with a dot or a space would
+    /// otherwise be spelled as a tool name no call ever wears.
     fn tool_handle(&self, server: &str, tool: &str) -> String {
+        let server: String = server
+            .chars()
+            .map(|c| {
+                if c.is_ascii_alphanumeric() || c == '_' || c == '-' {
+                    c
+                } else {
+                    '_'
+                }
+            })
+            .collect();
         format!("mcp__{server}__{tool}")
     }
 
@@ -504,26 +535,31 @@ pub fn is_process_identity(name: &str) -> bool {
         .is_some_and(|head| head.eq_ignore_ascii_case(IDENTITY_PREFIX))
 }
 
-/// How this provider spells one of Rimaia's tool names, at the server name
-/// every call site here already uses. [`AgentProvider::tool_handle`] is the
-/// general form; this is the shorthand `plan_spawn` and
-/// [`rimaia_tool_surface`] reach for.
-fn tool_handle(tool: &str) -> String {
+/// How this provider spells one of Rimaia's tool names at the **operator's**
+/// server name. Only [`rimaia_tool_surface`] uses it: everything a run is
+/// allowed is spelled at its handle's own server (seam-contract D30 point 3).
+fn operator_tool_handle(tool: &str) -> String {
     ClaudeProvider.tool_handle(MCP_SERVER_NAME, tool)
 }
 
-/// Rimaia's whole MCP tool surface, as this provider denies it.
+/// Rimaia's operator tool surface, as this provider denies it.
 ///
 /// Derived from [`Tool::ALL`](crate::mcp::Tool::ALL) rather than spelled out, so
-/// a tool added later is denied by existing. The bare server name denies the
-/// whole server where Claude Code supports it; the per-tool entries are what
-/// make the denial exact if it does not.
+/// a tool added later is denied by existing. Spelled at `rimaia` and never at
+/// `rimaia-run` (D30 point 2), so a run's own handle is never denied with it.
+///
+/// The bare `mcp__rimaia` stays, because the CLI matches it against the server
+/// segment exactly and not as a prefix: `run-scoped-server-name.jsonl` records
+/// it hiding `rimaia`'s tools and leaving `rimaia-run`'s callable, under
+/// `bypassPermissions` and with no `--allowedTools` (D30 point 8). It denies
+/// whatever `rimaia` serves beyond [`Tool::ALL`](crate::mcp::Tool::ALL); the
+/// per-tool entries make the denial exact whatever a later CLI does with it.
 fn rimaia_tool_surface() -> Vec<String> {
     std::iter::once(format!("mcp__{MCP_SERVER_NAME}"))
         .chain(
             crate::mcp::Tool::ALL
                 .iter()
-                .map(|tool| tool_handle(tool.as_str())),
+                .map(|tool| operator_tool_handle(tool.as_str())),
         )
         .collect()
 }

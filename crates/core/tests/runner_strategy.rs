@@ -78,9 +78,12 @@ use rimaia_core::runner::{
 };
 use rimaia_core::scheduler::{InFlight, LeaseOwner};
 
-/// `ClaudeProvider::tool_handle`, at the path every fixture in this file was
-/// recorded against — `RunnerConfig::default()` is Claude Code (ADR-0026).
-const SET_TASK_STRATEGY_TOOL: &str = "mcp__rimaia__set_task_strategy";
+/// `ClaudeProvider::tool_handle` at the run-scoped handle's own server,
+/// `rimaia-run` (seam-contract D30 point 4) — `RunnerConfig::default()` is
+/// Claude Code (ADR-0026). `strategy-proposal.jsonl` was recorded when the
+/// handle was still served as `rimaia` and stays byte-identical; nothing here
+/// reads the tool name out of its stream.
+const SET_TASK_STRATEGY_TOOL: &str = "mcp__rimaia-run__set_task_strategy";
 use rimaia_core::strategy::{self, StrategyDefaults};
 use rimaia_core::tasks::{
     self, NewTask, Patch, StrategyPlan, StrategyPlanStatus, StrategyWorkflow, TaskDetail, TaskPatch,
@@ -170,6 +173,7 @@ async fn a_planned_task_spawns_its_planner_with_the_flags_that_let_it_answer() {
     ];
     expected.extend(DEFAULT_DISALLOWED_TOOLS.map(str::to_string));
     expected.extend(PLANNER_DENIED_TOOLS.map(str::to_string));
+    expected.extend(operator_surface_denial());
     expected.extend([
         "--mcp-config".to_string(),
         mcp_config.clone(),
@@ -183,7 +187,7 @@ async fn a_planned_task_spawns_its_planner_with_the_flags_that_let_it_answer() {
     // inline JSON, naming the run-scoped route on the address this server bound.
     let config: serde_json::Value =
         serde_json::from_str(&mcp_config).expect("--mcp-config is inline JSON, not a file path");
-    let url = config["mcpServers"]["rimaia"]["url"]
+    let url = config["mcpServers"]["rimaia-run"]["url"]
         .as_str()
         .expect("the config names a url");
     assert_eq!(
@@ -194,6 +198,65 @@ async fn a_planned_task_spawns_its_planner_with_the_flags_that_let_it_answer() {
             token = url.rsplit('/').next().expect("a token segment"),
         ),
         "the planner is handed the run-scoped route, not the operator's /mcp",
+    );
+}
+
+#[tokio::test]
+async fn the_planner_is_denied_the_operator_surface_too() {
+    // D30 points 2 and 4. The planner is `strict_local`, so the operator's
+    // registration is not loaded and this denial is belt and braces, but it is
+    // appended for every intent the runner builds, after the caller's own, and
+    // the planner's own write-back is spelled at `rimaia-run`, which the denial
+    // never names.
+    let fixture = StrategyFixture::planned().await;
+    let cli = FakeCli::writing_back(&fixture.task_id);
+
+    fixture.run(&cli).await.expect("the run completes");
+
+    let argv = cli.argv(1);
+    let mut expected_denial = DEFAULT_DISALLOWED_TOOLS.map(str::to_string).to_vec();
+    expected_denial.extend(PLANNER_DENIED_TOOLS.map(str::to_string));
+    expected_denial.extend(operator_surface_denial());
+    assert_eq!(list_after(&argv, "--disallowedTools"), expected_denial);
+    assert_eq!(
+        list_after(&argv, "--allowedTools"),
+        vec!["mcp__rimaia-run__set_task_strategy".to_string()],
+    );
+
+    let config: serde_json::Value = serde_json::from_str(&value_after(&argv, "--mcp-config"))
+        .expect("--mcp-config is inline JSON");
+    let servers: Vec<&String> = config["mcpServers"]
+        .as_object()
+        .expect("an object of servers")
+        .keys()
+        .collect();
+    assert_eq!(servers, vec!["rimaia-run"]);
+}
+
+#[tokio::test]
+async fn an_implementation_run_is_still_denied_every_operator_tool() {
+    // D30 point 2, on the run that has always carried it: every tool in
+    // `Tool::ALL` at the operator's name, the bare `mcp__rimaia` because the CLI
+    // matches it exactly (`run-scoped-server-name.jsonl`), and no handle at all.
+    let fixture = StrategyFixture::planned().await;
+    let cli = FakeCli::writing_back(&fixture.task_id);
+
+    fixture.run(&cli).await.expect("the run completes");
+
+    let argv = cli.argv(2);
+    let mut expected_denial = DEFAULT_DISALLOWED_TOOLS.map(str::to_string).to_vec();
+    expected_denial.push("mcp__rimaia".to_string());
+    expected_denial.extend(
+        Tool::ALL
+            .iter()
+            .map(|tool| format!("mcp__rimaia__{}", tool.as_str())),
+    );
+    assert_eq!(list_after(&argv, "--disallowedTools"), expected_denial);
+    assert!(
+        !argv
+            .iter()
+            .any(|arg| arg == "--mcp-config" || arg == "--allowedTools"),
+        "an implementation run is handed no handle and no grant: {argv:?}",
     );
 }
 
@@ -288,12 +351,7 @@ async fn the_implementation_run_spawns_with_exactly_the_model_and_effort_the_pla
     // auto-approves MCP calls — so without this an implementation run would
     // hold every tool `RunScope` refuses a run, including `move_task` and the
     // ADR-0021 configuration tools.
-    expected.push(format!("mcp__{MCP_SERVER_NAME}"));
-    expected.extend(
-        Tool::ALL
-            .iter()
-            .map(|tool| format!("mcp__{MCP_SERVER_NAME}__{}", tool.as_str())),
-    );
+    expected.extend(operator_surface_denial());
     // ADR-0011's per-attempt bound, which task 014 turned on for every
     // implementation run. Before it the flag was absent and the CLI's own
     // default applied — see `runner::process::DEFAULT_MAX_TURNS` on why the
@@ -1211,6 +1269,31 @@ fn make_executable(path: &Path) {
     use std::os::unix::fs::PermissionsExt;
     std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755))
         .expect("make the stand-in executable");
+}
+
+/// The operator surface as every spawned run is denied it (D30 point 2):
+/// spelled at `rimaia`, built from `Tool::ALL`, and never at `rimaia-run`.
+fn operator_surface_denial() -> Vec<String> {
+    std::iter::once(format!("mcp__{MCP_SERVER_NAME}"))
+        .chain(
+            Tool::ALL
+                .iter()
+                .map(|tool| format!("mcp__{MCP_SERVER_NAME}__{}", tool.as_str())),
+        )
+        .collect()
+}
+
+/// Every element between `flag` and the next flag.
+fn list_after(argv: &[String], flag: &str) -> Vec<String> {
+    let at = argv
+        .iter()
+        .position(|arg| arg == flag)
+        .unwrap_or_else(|| panic!("{flag} is in the argv: {argv:?}"));
+    argv[at + 1..]
+        .iter()
+        .take_while(|arg| !arg.starts_with("--"))
+        .cloned()
+        .collect()
 }
 
 /// The argument following `flag` in a recorded vector.

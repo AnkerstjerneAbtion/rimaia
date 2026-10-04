@@ -35,22 +35,23 @@ use crate::mcp::error::ToolError;
 use crate::mcp::requests::{
     AddTaskLinkRequest, AnalyticsRequest, ArchiveTaskRequest, ArchiveTasksRequest, ClearableField,
     CreateTaskRequest, DoctorDismissalRequest, GetStrategyDefaultsRequest, GetTaskRequest,
-    ListTasksRequest, MarkReviewDigestSeenRequest, MoveTaskRequest, PlanSelectionRequest,
-    RemoveTaskLinkRequest, RepositoryRequest, ReviewNoteRequest, ScheduleConfigRequest,
-    ScheduleRequest, SetMaxConcurrencyRequest, SetRepositoryMaxConcurrencyRequest,
-    SetRepositoryOnArchiveRequest, SetScheduleEnabledRequest, SetScheduleModeRequest,
-    SetStrategyApprovalRequest, SetStrategyCatalogueRequest, SetStrategyDefaultsRequest,
-    SetTaskDependenciesRequest, SetTaskStrategyRequest, SetWorktreeAutoCleanupRequest,
-    SubscriptionCostRequest, TaskStrategyRequest, UpdateScheduleRequest, UpdateTaskRequest,
+    ListReviewFindingsRequest, ListTasksRequest, MarkReviewDigestSeenRequest, MoveTaskRequest,
+    PlanSelectionRequest, RecordReviewFindingsRequest, RemoveTaskLinkRequest, RepositoryRequest,
+    ResolveReviewFindingRequest, ReviewNoteRequest, ScheduleConfigRequest, ScheduleRequest,
+    SetMaxConcurrencyRequest, SetRepositoryMaxConcurrencyRequest, SetRepositoryOnArchiveRequest,
+    SetScheduleEnabledRequest, SetScheduleModeRequest, SetStrategyApprovalRequest,
+    SetStrategyCatalogueRequest, SetStrategyDefaultsRequest, SetTaskDependenciesRequest,
+    SetTaskStrategyRequest, SetWorktreeAutoCleanupRequest, SubscriptionCostRequest,
+    TaskStrategyRequest, UpdateScheduleRequest, UpdateTaskRequest,
 };
 use crate::mcp::responses::{
     AnalyticsView, ArchiveReportView, ArchivedTaskView, BaseInstructionsView, CredentialStatusView,
     DigestMarkerView, DismissalView, DoctorDismissalsView, DoctorReportView, OnboardingView,
     PlanPassView, PlanResultView, PreflightView, RepositoryListView, RepositoryOnArchiveView,
-    RepositoryView, ReviewDigestView, ReviewOutcomeView, ReviewedTaskView, RunCapacityView,
-    ScheduleDeletedView, ScheduleListView, ScheduleView, StrategyApprovalView,
-    SubscriptionCostView, TaskDependentsView, TaskListItem, TaskListView, TaskView,
-    TimezoneListView, WorktreeAutoCleanupView, WorktreeListView, WorktreeView,
+    RepositoryView, ReviewDigestView, ReviewFindingView, ReviewFindingsView, ReviewOutcomeView,
+    ReviewedTaskView, RunCapacityView, ScheduleDeletedView, ScheduleListView, ScheduleView,
+    StrategyApprovalView, SubscriptionCostView, TaskDependentsView, TaskListItem, TaskListView,
+    TaskView, TimezoneListView, WorktreeAutoCleanupView, WorktreeListView, WorktreeView,
 };
 use crate::mcp::scope::{RunScope, Tool};
 use crate::review;
@@ -128,7 +129,8 @@ impl RimaiaServer {
         }
     }
 
-    /// A server reached through `/mcp/run/{token}`: one run, one task.
+    /// A server reached through `/mcp/run/{token}`: one run, one task, one
+    /// grant.
     ///
     /// A second constructor rather than a parameter on [`new`](Self::new),
     /// because a scope is not something the operator path should be able to get
@@ -137,13 +139,11 @@ impl RimaiaServer {
         ctx: ServiceContext,
         doctor: doctor::Environment,
         planner: PlannerAccess,
-        task_id: impl Into<String>,
+        scope: RunScope,
     ) -> Self {
         Self {
             ctx,
-            scope: RunScope::Run {
-                task_id: task_id.into(),
-            },
+            scope,
             doctor,
             planner,
         }
@@ -1039,6 +1039,70 @@ time in the future is refused. Call this once a digest has been read."
     }
 
     #[tool(
+        description = "Record what this review found, in ONE call. Call this as the last thing you do. \
+List every finding with its severity (`critical`, `high`, `medium` or `low`), a one-line `title`, \
+a `body` saying what is wrong and why it matters, and the repository-relative `file` and `line` \
+when it is about one place. When you found nothing, call this with `findings: []`: a review that \
+never calls is a failed review, not a clean one. A second call is refused. Only a review run can \
+call this, and only for its own task."
+    )]
+    pub async fn record_review_findings(
+        &self,
+        Parameters(request): Parameters<RecordReviewFindingsRequest>,
+    ) -> Result<Json<ReviewFindingsView>, ToolError> {
+        self.scope
+            .authorize(Tool::RecordReviewFindings, Some(&request.task_id))?;
+        let review_run_id = self.grant_run_id(Tool::RecordReviewFindings)?;
+        let recorded =
+            review::findings::record(&self.ctx, &request.task_id, review_run_id, request.findings)
+                .await?;
+        Ok(Json(recorded.into()))
+    }
+
+    #[tool(
+        description = "Say what you did about one open review finding on your task: `fixed`, \
+with an optional `resolution` saying how, or `rejected`, with a `resolution` saying why the \
+finding is wrong or not worth fixing (required). A \
+finding already resolved is refused. Call this once per finding you were handed; only a fix run \
+can, and only for its own task."
+    )]
+    pub async fn resolve_review_finding(
+        &self,
+        Parameters(request): Parameters<ResolveReviewFindingRequest>,
+    ) -> Result<Json<ReviewFindingView>, ToolError> {
+        self.scope
+            .authorize(Tool::ResolveReviewFinding, Some(&request.task_id))?;
+        let fix_run_id = self.grant_run_id(Tool::ResolveReviewFinding)?;
+        let task_id = request.task_id.clone();
+        let finding_id = request.finding_id.clone();
+        let resolved = review::findings::resolve(
+            &self.ctx,
+            &task_id,
+            &finding_id,
+            fix_run_id,
+            request.into_resolution(),
+        )
+        .await?;
+        Ok(Json(resolved.into()))
+    }
+
+    #[tool(
+        description = "List what review runs found on a task, oldest review first and each \
+review's findings in the order the reviewer gave them, optionally only those with one `status` \
+(`open`, `fixed` or `rejected`). A fixed or rejected finding carries the fix run's `resolution`. \
+Call this to tell the user what the automated review raised and what became of it."
+    )]
+    pub async fn list_review_findings(
+        &self,
+        Parameters(request): Parameters<ListReviewFindingsRequest>,
+    ) -> Result<Json<ReviewFindingsView>, ToolError> {
+        self.scope
+            .authorize(Tool::ListReviewFindings, Some(&request.task_id))?;
+        let findings = review::findings::list(&self.ctx, &request.task_id, request.status).await?;
+        Ok(Json(findings.into()))
+    }
+
+    #[tool(
         description = "Call this to choose what archiving a task in one repository cleans up: `none` leaves \
 everything alone, `remove_worktree` deletes the task's checkout using Rimaia's own guards (it \
 refuses a dirty or unpushed worktree and never deletes a branch), and `script` runs an executable \
@@ -1346,17 +1410,35 @@ fn patch_field(value: Option<String>, cleared: bool) -> Patch<String> {
     }
 }
 
+impl RimaiaServer {
+    /// The run id a review or fix handle was minted for, which is what its
+    /// writes are recorded under. Called after `authorize`, which has already
+    /// refused every door that has none, so a `None` here is a wiring mistake.
+    fn grant_run_id(&self, tool: Tool) -> Result<&str> {
+        self.scope.run_id().ok_or_else(|| {
+            crate::Error::internal(format!(
+                "{tool} was authorized on a handle with no run to record it under",
+                tool = tool.as_str(),
+            ))
+        })
+    }
+}
+
 #[tool_handler]
 impl ServerHandler for RimaiaServer {
     /// Written out rather than left to the macro's `name`/`version` arguments,
     /// which take string literals only — this way the version is
     /// `CARGO_PKG_VERSION` and cannot drift from the crate's.
+    ///
+    /// The name follows the door (seam-contract D30 point 1): `rimaia` on the
+    /// operator's `/mcp`, `rimaia-run` on a run's own handle.
     fn get_info(&self) -> ServerInfo {
+        let name = match self.scope {
+            RunScope::Operator => crate::mcp::MCP_SERVER_NAME,
+            RunScope::Run { .. } => crate::mcp::RUN_MCP_SERVER_NAME,
+        };
         ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
-            .with_server_info(Implementation::new(
-                crate::mcp::MCP_SERVER_NAME,
-                env!("CARGO_PKG_VERSION"),
-            ))
+            .with_server_info(Implementation::new(name, env!("CARGO_PKG_VERSION")))
             .with_instructions(SERVER_INSTRUCTIONS)
     }
 }
@@ -1384,7 +1466,7 @@ mod tests {
     /// capability parity a rule. What replaces a count is the property that
     /// actually matters — a registered tool with no run-scope decision cannot
     /// reach the wire.
-    const REGISTERED_TOOLS: [&str; 54] = [
+    const REGISTERED_TOOLS: [&str; 57] = [
         "accept_task_strategy",
         "add_task_link",
         "approve_task",
@@ -1410,6 +1492,7 @@ mod tests {
         "get_worktree_auto_cleanup",
         "give_up_on_task",
         "list_repositories",
+        "list_review_findings",
         "list_schedules",
         "list_tasks",
         "list_timezones",
@@ -1419,9 +1502,11 @@ mod tests {
         "plan_task_strategy",
         "plan_tasks_strategy",
         "preview_schedule_preflight",
+        "record_review_findings",
         "reject_task",
         "remove_task_link",
         "request_task_changes",
+        "resolve_review_finding",
         "restore_doctor_warning",
         "run_doctor",
         "set_max_concurrency",

@@ -27,7 +27,8 @@ use crate::db::{
 };
 use crate::doctor::{CheckResult, DoctorReport};
 use crate::review::{
-    Dependent, Digest, DigestEntry, DigestLoop, DigestOutcome, DigestTotals, ReviewOutcome,
+    Dependent, Digest, DigestEntry, DigestLoop, DigestOutcome, DigestTotals, FindingSeverity,
+    FindingStatus, ReviewFinding, ReviewOutcome,
 };
 use crate::runner::strategy::{PlanOutcome, PlanPass, PlanResult};
 use crate::schedule::{PreflightSummary, ScheduleView as CoreScheduleView};
@@ -1161,6 +1162,65 @@ impl From<Dependent> for DependentView {
 #[serde(rename_all = "snake_case")]
 pub struct TaskDependentsView {
     pub dependents: Vec<DependentView>,
+}
+
+/// One finding, as `record_review_findings`, `resolve_review_finding` and
+/// `list_review_findings` answer with it.
+#[derive(Debug, Clone, PartialEq, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub struct ReviewFindingView {
+    pub id: String,
+    pub task_id: String,
+    pub review_run_id: String,
+    /// The finding's place in the report that recorded it, from 0.
+    pub ordinal: i64,
+    pub severity: FindingSeverity,
+    pub title: String,
+    pub body: String,
+    pub file: Option<String>,
+    pub line: Option<i64>,
+    pub status: FindingStatus,
+    pub resolution: Option<String>,
+    pub resolved_by_run_id: Option<String>,
+    pub created_at: DateTime<Utc>,
+    pub resolved_at: Option<DateTime<Utc>>,
+}
+
+impl From<ReviewFinding> for ReviewFindingView {
+    fn from(finding: ReviewFinding) -> Self {
+        Self {
+            id: finding.id,
+            task_id: finding.task_id,
+            review_run_id: finding.review_run_id,
+            ordinal: finding.ordinal,
+            severity: finding.severity,
+            title: finding.title,
+            body: finding.body,
+            file: finding.file,
+            line: finding.line,
+            status: finding.status,
+            resolution: finding.resolution,
+            resolved_by_run_id: finding.resolved_by_run_id,
+            created_at: finding.created_at,
+            resolved_at: finding.resolved_at,
+        }
+    }
+}
+
+/// `record_review_findings` and `list_review_findings`, in review order and
+/// then in the order the reviewer gave them.
+#[derive(Debug, Clone, PartialEq, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub struct ReviewFindingsView {
+    pub findings: Vec<ReviewFindingView>,
+}
+
+impl From<Vec<ReviewFinding>> for ReviewFindingsView {
+    fn from(findings: Vec<ReviewFinding>) -> Self {
+        Self {
+            findings: findings.into_iter().map(Into::into).collect(),
+        }
+    }
 }
 
 /// `reject_task` and `request_task_changes`.

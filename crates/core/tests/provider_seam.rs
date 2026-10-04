@@ -32,13 +32,14 @@ use chrono::Duration;
 use pretty_assertions::assert_eq;
 use rimaia_core::db::settings::RunEnvironment;
 use rimaia_core::db::{BoardColumn, ExitClass, RunState};
+use rimaia_core::mcp::{MCP_SERVER_NAME, RUN_MCP_SERVER_NAME};
 use rimaia_core::repo::{self, NewRepository};
 use rimaia_core::runner::events::{EventStream, RunEvent, UsageState};
 use rimaia_core::runner::outcome::{classify, RunOutcome, Termination};
 use rimaia_core::runner::process::inherited_identity_vars;
 use rimaia_core::runner::provider::{
     negotiate, AgentProvider, ClaudeProvider, ForbiddenOperation, PermissionMode, PromptStyle,
-    ProviderId, RimaiaHandle, RunIntent, SessionIntent, SpawnPlan,
+    ProviderId, RefusalAxis, RimaiaHandle, RunIntent, SessionIntent, SpawnPlan,
 };
 use rimaia_core::runner::{run_task, RunRequest, RunTrigger, RunnerConfig};
 use rimaia_core::scheduler::retry::{self, RetryDecision, RetryKind, USAGE_LIMIT_FALLBACK_POLL};
@@ -79,7 +80,7 @@ fn intent<'a>(workspace: &'a Path, home: &'a Path) -> RunIntent<'a> {
         required_tools: vec!["set_task_strategy"],
         rimaia_handle: Some(RimaiaHandle {
             url: "http://127.0.0.1:4517/mcp/run/tok".to_string(),
-            server: "rimaia",
+            server: RUN_MCP_SERVER_NAME,
         }),
     }
 }
@@ -269,7 +270,10 @@ fn the_same_provider_records_what_it_could_not_enforce_when_a_human_started_the_
     let home = dir.path().join("home");
     let manual = RunIntent {
         permission_mode: PermissionMode::AcceptEdits,
+        // No handle and so no tools to pre-approve through one, which is what
+        // an implementation run carries (D30 point 3).
         rimaia_handle: None,
+        required_tools: vec![],
         run_environment: RunEnvironment::Inherit,
         ..intent(dir.path(), &home)
     };
@@ -306,7 +310,10 @@ fn a_provider_that_cannot_continue_is_planned_for_the_composed_prompt() {
             last_announced: None,
         },
         permission_mode: PermissionMode::AcceptEdits,
+        // No handle and so no tools to pre-approve through one, which is what
+        // an implementation run carries (D30 point 3).
         rimaia_handle: None,
+        required_tools: vec![],
         run_environment: RunEnvironment::Inherit,
         ..intent(dir.path(), &home)
     };
@@ -323,6 +330,50 @@ fn a_provider_that_cannot_continue_is_planned_for_the_composed_prompt() {
             .prompt_style,
         PromptStyle::Composed,
     );
+}
+
+#[test]
+fn a_handle_named_for_the_operator_server_is_refused() {
+    // D30 point 1, as a check every intent passes through rather than a
+    // property of today's call sites: a handle served as `rimaia` would be
+    // denied by the operator-surface denial every run carries.
+    let dir = TempDir::new().expect("temp dir");
+    let home = dir.path().join("home");
+    let named_for_the_operator = RunIntent {
+        rimaia_handle: Some(RimaiaHandle {
+            url: "http://127.0.0.1:4517/mcp/run/tok".to_string(),
+            server: MCP_SERVER_NAME,
+        }),
+        ..intent(dir.path(), &home)
+    };
+
+    for caps in [ClaudeProvider.capabilities(), Ledger.capabilities()] {
+        let refusal = negotiate(caps, &named_for_the_operator)
+            .expect_err("a handle under the operator's name");
+        assert_eq!(refusal.axis, RefusalAxis::HandleInjection);
+    }
+    assert!(
+        negotiate(ClaudeProvider.capabilities(), &intent(dir.path(), &home)).is_ok(),
+        "the same intent served as `rimaia-run` is planned",
+    );
+}
+
+#[test]
+fn required_tools_without_a_handle_are_refused_on_handle_injection() {
+    // D30 point 3: a grant with nothing to grant it through is a wiring bug,
+    // and must never become a silent `--allowedTools` for the operator surface.
+    let dir = TempDir::new().expect("temp dir");
+    let home = dir.path().join("home");
+    let no_handle = RunIntent {
+        rimaia_handle: None,
+        ..intent(dir.path(), &home)
+    };
+    assert_eq!(no_handle.required_tools, vec!["set_task_strategy"]);
+
+    for caps in [ClaudeProvider.capabilities(), Ledger.capabilities()] {
+        let refusal = negotiate(caps, &no_handle).expect_err("tools with no handle");
+        assert_eq!(refusal.axis, RefusalAxis::HandleInjection);
+    }
 }
 
 #[test]

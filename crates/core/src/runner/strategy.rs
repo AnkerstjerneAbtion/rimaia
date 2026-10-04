@@ -60,6 +60,7 @@ use crate::context::ServiceContext;
 use crate::db::settings::RunEnvironment;
 use crate::db::{new_id, BoardColumn, ExitClass, Repository, StrategyMode, StrategySource};
 use crate::error::Result;
+use crate::mcp::{Grant, RUN_MCP_SERVER_NAME};
 use crate::paths::AppPaths;
 use crate::scheduler::{InFlight, Lease, LeaseOwner, LeaseRefused};
 use crate::strategy::{self, Catalogue, EffectiveStrategy};
@@ -237,7 +238,7 @@ async fn plan(
     // Minted before anything is spawned and dropped when this function returns,
     // whichever way it returns. The grant *is* the lifetime of the run's ability
     // to address Rimaia, so there is nothing to remember to revoke.
-    let grant = config.run_handles.grant(task_id);
+    let grant = config.run_handles.grant(task_id, Grant::Strategy);
     let Some(url) = config.run_handles.endpoint_for(&grant) else {
         // Seam-contract D16.7 makes a busy MCP port non-fatal to startup, which
         // means a run can reach here with nothing listening. Spawning a planner
@@ -253,7 +254,7 @@ async fn plan(
     let credentials = super::process::repository_credentials(config, repository).await?;
     let tool = config
         .provider
-        .tool_handle(crate::mcp::MCP_SERVER_NAME, "set_task_strategy");
+        .tool_handle(RUN_MCP_SERVER_NAME, "set_task_strategy");
     let prompt = compose_strategy_prompt(
         detail,
         repository,
@@ -274,7 +275,7 @@ async fn plan(
         &home,
         RimaiaHandle {
             url,
-            server: crate::mcp::MCP_SERVER_NAME,
+            server: RUN_MCP_SERVER_NAME,
         },
     )
     .await?;
@@ -397,7 +398,7 @@ async fn planner_intent<'a>(
             task_id,
             &config
                 .provider
-                .tool_handle(crate::mcp::MCP_SERVER_NAME, "set_task_strategy"),
+                .tool_handle(RUN_MCP_SERVER_NAME, "set_task_strategy"),
         ),
         prompt,
         workspace: worktree,
@@ -412,7 +413,9 @@ async fn planner_intent<'a>(
         // ends looking successful, and the only trace is a tool result reading
         // "Claude requested permissions to use mcp__rimaia__set_task_strategy,
         // but you haven't granted it yet." Every planned task then falls back to
-        // the default, forever.
+        // the default, forever. `run-scoped-server-allowed.jsonl` records the
+        // grant matching the hyphenated `rimaia-run` server segment it is now
+        // spelled at (seam-contract D30 point 8).
         //
         // Naming it here rather than widening `permission_mode` to
         // `bypassPermissions` is what keeps ADR-0012's amendment honest: the
