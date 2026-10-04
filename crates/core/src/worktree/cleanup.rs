@@ -666,23 +666,39 @@ async fn ensure_committed(
     if authorization.uncommitted_changes.is_forced() {
         return Ok(());
     }
-    // Nothing on disk is nothing to lose; git is not asked, and would fail if
-    // it were.
-    if !matches!(tokio::fs::try_exists(path).await, Ok(true)) {
-        return Ok(());
-    }
-
-    let changes = git::dirty_file_count(path).await?;
+    let changes = uncommitted_change_count(path).await?;
     if changes == 0 {
         return Ok(());
     }
-    Err(Error::invalid(format!(
+    Err(Error::invalid(uncommitted_changes_sentence(
+        title,
+        changes,
+        "confirm that you want to, or commit the work first.",
+    )))
+}
+
+/// How many files in `path` differ from what git has committed.
+///
+/// Nothing on disk is nothing to lose; git is not asked, and would fail if it
+/// were. Shared with `review::actions`, whose reject has no force and so cannot
+/// use [`ensure_committed`]'s refusal, but must count the same way.
+pub(crate) async fn uncommitted_change_count(path: &Path) -> Result<i64> {
+    if !matches!(tokio::fs::try_exists(path).await, Ok(true)) {
+        return Ok(0);
+    }
+    git::dirty_file_count(path).await
+}
+
+/// The first half of every uncommitted-work refusal. `next_step` is the clause
+/// after the dash, which differs by what the caller offers: a confirmation for
+/// cleanup, none for a review's reject.
+pub(crate) fn uncommitted_changes_sentence(title: &str, changes: i64, next_step: &str) -> String {
+    format!(
         "\"{title}\" has {changes} uncommitted change{plural} in its worktree, committed nowhere \
-         else. Removing it would discard {them} for good — confirm that you want to, or commit \
-         the work first.",
+         else. Removing it would discard {them} for good — {next_step}",
         plural = if changes == 1 { "" } else { "s" },
         them = if changes == 1 { "it" } else { "them" },
-    )))
+    )
 }
 
 /// Refuses a worktree whose branch holds commits no remote has.

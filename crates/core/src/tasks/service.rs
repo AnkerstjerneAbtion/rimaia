@@ -626,15 +626,12 @@ pub async fn delete_task(ctx: &ServiceContext, id: &str) -> Result<()> {
     let mut tx = ctx.pool.begin().await?;
     fetch_task_row(&mut *tx, id).await?;
 
-    let dependents = sqlx::query_scalar!(
-        r#"SELECT t.title AS "title!"
-           FROM task_dependencies d JOIN tasks t ON t.id = d.task_id
-           WHERE d.depends_on_task_id = ?1
-           ORDER BY t.title ASC"#,
-        id,
-    )
-    .fetch_all(&mut *tx)
-    .await?;
+    let mut dependents: Vec<String> = super::dependencies::dependents_in(&mut *tx, id)
+        .await?
+        .into_iter()
+        .map(|dependent| dependent.title)
+        .collect();
+    dependents.sort();
 
     if !dependents.is_empty() {
         // Task 011's Scope: "already in 004; extend the message with the
@@ -936,8 +933,9 @@ pub async fn move_task_to_bottom(
     move_into_column(ctx, id, column, Destination::Bottom).await
 }
 
-/// Where a move lands a card, as the two callers above spell it.
-enum Destination<'a> {
+/// Where a move lands a card, as the callers above and `review::actions` spell
+/// it.
+pub(crate) enum Destination<'a> {
     /// Between two named neighbours, as the drag path supplies them.
     Between {
         before_id: Option<&'a str>,
@@ -965,45 +963,7 @@ async fn move_into_column(
     destination: Destination<'_>,
 ) -> Result<Task> {
     let mut tx = ctx.pool.begin_with("BEGIN IMMEDIATE").await?;
-    let task = fetch_task_row(&mut *tx, id).await?;
-
-    ensure_ready_has_a_plan(column, &task.plan, &task.title)?;
-
-    let bottom = match destination {
-        Destination::Between { .. } => None,
-        Destination::Bottom => bottom_of_column(&mut tx, &task.repository_id, column, id).await?,
-    };
-    let (before_id, after_id) = match destination {
-        Destination::Between {
-            before_id,
-            after_id,
-        } => (before_id, after_id),
-        // `None` for both is correct only when the column is empty, which is
-        // exactly what an empty lookup means here — and is the one case
-        // `resolve_task_position` accepts it in.
-        Destination::Bottom => (bottom.as_deref(), None),
-    };
-
-    let (position, rebalanced_ids) = resolve_task_position(
-        &mut tx,
-        &task.repository_id,
-        column,
-        id,
-        before_id,
-        after_id,
-    )
-    .await?;
-
-    let now = ctx.clock.now();
-    sqlx::query!(
-        "UPDATE tasks SET board_column = ?1, position = ?2, updated_at = ?3 WHERE id = ?4",
-        column,
-        position,
-        now,
-        id,
-    )
-    .execute(&mut *tx)
-    .await?;
+    let rebalanced_ids = move_within(ctx, &mut tx, id, column, destination).await?;
 
     tx.commit().await?;
 
@@ -1034,6 +994,61 @@ async fn move_into_column(
     }
 
     Ok(updated)
+}
+
+/// The move itself, inside a transaction the caller holds and commits.
+///
+/// Split out of [`move_into_column`] so that a review action can write its note
+/// and move the card in **one** transaction: a refused move then rolls the note
+/// back with it, and a retried action cannot append it twice. Returns the ids a
+/// forced rebalance renumbered, which the caller publishes alongside its own.
+pub(crate) async fn move_within(
+    ctx: &ServiceContext,
+    tx: &mut SqliteConnection,
+    id: &str,
+    column: BoardColumn,
+    destination: Destination<'_>,
+) -> Result<Vec<String>> {
+    let task = fetch_task_row(&mut *tx, id).await?;
+
+    ensure_ready_has_a_plan(column, &task.plan, &task.title)?;
+
+    let bottom = match destination {
+        Destination::Between { .. } => None,
+        Destination::Bottom => bottom_of_column(&mut *tx, &task.repository_id, column, id).await?,
+    };
+    let (before_id, after_id) = match destination {
+        Destination::Between {
+            before_id,
+            after_id,
+        } => (before_id, after_id),
+        // `None` for both is correct only when the column is empty, which is
+        // exactly what an empty lookup means here — and is the one case
+        // `resolve_task_position` accepts it in.
+        Destination::Bottom => (bottom.as_deref(), None),
+    };
+
+    let (position, rebalanced_ids) = resolve_task_position(
+        &mut *tx,
+        &task.repository_id,
+        column,
+        id,
+        before_id,
+        after_id,
+    )
+    .await?;
+
+    let now = ctx.clock.now();
+    sqlx::query!(
+        "UPDATE tasks SET board_column = ?1, position = ?2, updated_at = ?3 WHERE id = ?4",
+        column,
+        position,
+        now,
+        id,
+    )
+    .execute(&mut *tx)
+    .await?;
+    Ok(rebalanced_ids)
 }
 
 // ---------------------------------------------------------------------------
@@ -1076,7 +1091,11 @@ fn normalize_plan(plan: Option<String>) -> Option<String> {
 /// [`BoardColumn::Ready`] without a plan. Shared by [`create_task`],
 /// [`update_task`] and [`move_task`] so the invariant holds no matter which
 /// operation would otherwise produce that state.
-fn ensure_ready_has_a_plan(column: BoardColumn, plan: &Option<String>, title: &str) -> Result<()> {
+pub(crate) fn ensure_ready_has_a_plan(
+    column: BoardColumn,
+    plan: &Option<String>,
+    title: &str,
+) -> Result<()> {
     if column == BoardColumn::Ready && !plan_is_present(plan) {
         return Err(Error::invalid(format!(
             "cannot put \"{title}\" in ready without a plan"
@@ -1236,7 +1255,7 @@ async fn ensure_repository_is_reassignable(tx: &mut SqliteConnection, task: &Tas
 /// `&mut SqliteConnection` the way [`rebalance_column`] is: nothing here
 /// requires the caller's transaction the way a renumber does, so the
 /// flexibility is free.
-pub(super) async fn fetch_task_row<'e, E>(executor: E, id: &str) -> Result<Task>
+pub(crate) async fn fetch_task_row<'e, E>(executor: E, id: &str) -> Result<Task>
 where
     E: sqlx::Executor<'e, Database = sqlx::Sqlite>,
 {

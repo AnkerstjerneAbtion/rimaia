@@ -183,10 +183,53 @@ pub async fn dependencies_of(ctx: &ServiceContext, task_id: &str) -> Result<Vec<
     Ok(rows)
 }
 
+/// Every task that depends **directly** on `task_id`, in ADR-0008's order —
+/// the same comparator [`dependencies_of`] uses, so the two directions of one
+/// edge list agree about which task comes first.
+///
+/// Archived dependents are included: their edges still exist, and an archived
+/// task that was built on this one is exactly what a reviewer rejecting it
+/// should hear about.
+pub async fn dependents_of(ctx: &ServiceContext, task_id: &str) -> Result<Vec<Task>> {
+    fetch_task_row(&ctx.pool, task_id).await?;
+    dependents_in(&ctx.pool, task_id).await
+}
+
+/// [`dependents_of`]'s query, over any executor, so `delete_task` can ask it
+/// inside its own transaction and a review action inside its own. Does not
+/// check that `task_id` exists.
+pub(crate) async fn dependents_in<'e, E>(executor: E, task_id: &str) -> Result<Vec<Task>>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Sqlite>,
+{
+    let mut rows = sqlx::query_as!(
+        Task,
+        r#"SELECT dep.id, dep.repository_id, dep.title, dep.plan, dep.extra_instructions,
+            dep.board_column AS "column: BoardColumn", dep.position,
+            dep.run_state AS "run_state: RunState", dep.branch, dep.worktree_path,
+            dep.strategy_mode AS "strategy_mode: StrategyMode", dep.model, dep.effort,
+            dep.strategy_plan, dep.strategy_source AS "strategy_source: StrategySource",
+            dep.strategy_updated_at AS "strategy_updated_at: DateTime<Utc>",
+            dep.created_at AS "created_at: DateTime<Utc>",
+            dep.updated_at AS "updated_at: DateTime<Utc>",
+            dep.source AS "source: MutationSource",
+            dep.archived_at AS "archived_at: DateTime<Utc>"
+           FROM task_dependencies d
+           JOIN tasks dep ON dep.id = d.task_id
+          WHERE d.depends_on_task_id = ?1"#,
+        task_id,
+    )
+    .fetch_all(executor)
+    .await?;
+
+    rows.sort_by(compare_dependency_order);
+    Ok(rows)
+}
+
 /// ADR-0008's order over two dependency rows. Extracted so the base-ref rule
 /// and the blocked card cannot drift apart, and so it is testable without a
 /// database.
-fn compare_dependency_order(left: &Task, right: &Task) -> Ordering {
+pub(crate) fn compare_dependency_order(left: &Task, right: &Task) -> Ordering {
     left.column
         .board_rank()
         .cmp(&right.column.board_rank())

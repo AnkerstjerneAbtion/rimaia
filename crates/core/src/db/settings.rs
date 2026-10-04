@@ -126,10 +126,7 @@ impl RunEnvironment {
 /// Prefer the typed readers below — they are where an absent key gets its
 /// meaning.
 pub async fn get(pool: &SqlitePool, key: &str) -> Result<Option<String>> {
-    let value = sqlx::query_scalar!("SELECT value FROM settings WHERE key = ?1", key)
-        .fetch_optional(pool)
-        .await?;
-    Ok(value)
+    get_in(pool, key).await
 }
 
 /// Writes `key`, creating the row or replacing the value, and announces it.
@@ -138,17 +135,43 @@ pub async fn get(pool: &SqlitePool, key: &str) -> Result<Option<String>> {
 /// follows it rather than preceding it, because ADR-0018's rule is about what a
 /// subscriber can read when it re-reads.
 pub async fn set(ctx: &ServiceContext, key: &str, value: &str) -> Result<()> {
+    set_in(&ctx.pool, key, value).await?;
+
+    ctx.publish(ChangeEvent::Settings);
+    Ok(())
+}
+
+/// [`set`]'s write without its announcement, over any executor.
+///
+/// For a caller that writes a key inside a transaction it already holds — a
+/// review action advancing its digest marker with the move that earned it — and
+/// that publishes [`ChangeEvent::Settings`] itself, after its own commit.
+/// Everything else goes through [`set`], so there is still one statement for a
+/// key whichever path writes it.
+pub async fn set_in<'e, E>(executor: E, key: &str, value: &str) -> Result<()>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Sqlite>,
+{
     sqlx::query!(
         "INSERT INTO settings (key, value) VALUES (?1, ?2)
          ON CONFLICT (key) DO UPDATE SET value = excluded.value",
         key,
         value,
     )
-    .execute(&ctx.pool)
+    .execute(executor)
     .await?;
-
-    ctx.publish(ChangeEvent::Settings);
     Ok(())
+}
+
+/// [`get`] over any executor, so a read-then-write can share one transaction.
+pub async fn get_in<'e, E>(executor: E, key: &str) -> Result<Option<String>>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Sqlite>,
+{
+    let value = sqlx::query_scalar!("SELECT value FROM settings WHERE key = ?1", key)
+        .fetch_optional(executor)
+        .await?;
+    Ok(value)
 }
 
 /// The global base instructions, or the empty string when the key is absent.
