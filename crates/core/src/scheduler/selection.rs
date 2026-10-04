@@ -65,7 +65,7 @@ use crate::tasks::{self, TaskFilter, TaskSummary};
 /// colour, and only [`UnattendedRunsNotAllowed`](SkipReason::UnattendedRunsNotAllowed)
 /// is something the user has to act on before the queue can ever start the
 /// task.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum SkipReason {
     /// ADR-0012's per-repository opt-in is off. Un-opted repositories hold

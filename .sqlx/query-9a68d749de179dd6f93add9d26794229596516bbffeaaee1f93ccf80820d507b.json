@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT EXISTS(\n                 SELECT 1 FROM runs r\n                  WHERE r.task_id = ?1\n                    AND (r.base_ref = ?2\n                         OR r.base_sha IN (SELECT head_sha FROM runs\n                                            WHERE task_id = ?3\n                                              AND head_sha IS NOT NULL\n                                              AND base_sha IS NOT NULL\n                                              AND head_sha <> base_sha))\n               ) AS \"built_on!: bool\"",
+  "describe": {
+    "columns": [
+      {
+        "name": "built_on!: bool",
+        "ordinal": 0,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "9a68d749de179dd6f93add9d26794229596516bbffeaaee1f93ccf80820d507b"
+}

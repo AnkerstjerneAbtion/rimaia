@@ -1,0 +1,393 @@
+//! The overnight digest: what the queue did since the reviewer last finished a
+//! review (task 034, seam-contract D29 point 8).
+//!
+//! **One entry per task, never per run.** A task's outcome comes from its newest
+//! row in the window, so a failure that was retried and then succeeded is one
+//! `Completed` entry that says it took two runs. Rows only: no git, no worktree,
+//! because in team mode the board has no worktree (ADR-0033 point 7).
+
+use std::cmp::Ordering;
+use std::collections::{BTreeMap, HashMap, HashSet};
+
+use chrono::{DateTime, Duration, SecondsFormat, Utc};
+use serde::Serialize;
+use sqlx::{FromRow, SqliteConnection};
+
+use crate::context::ServiceContext;
+use crate::db::{settings, BoardColumn, RunState, RunStatus};
+use crate::error::{Error, Result};
+use crate::events::ChangeEvent;
+use crate::repo;
+use crate::scheduler::selection::{skip_reason, SkipReason};
+use crate::tasks::dependencies::compare_dependency_order;
+use crate::tasks::{list_tasks, TaskFilter, TaskSummary};
+
+/// How far back a digest looks when no review has ever been finished.
+pub const DIGEST_DEFAULT_WINDOW: Duration = Duration::hours(24);
+
+/// The instant through which the reviewer has seen the queue's work. An RFC 3339
+/// timestamp, owned by this module in D3's shape and stored by `db::settings`.
+/// Its placement is User (D28 part 4).
+pub const REVIEW_DIGEST_SEEN_THROUGH: &str = "review_digest_seen_through";
+
+/// What a task did in the window. Declared in attention-first order, which is
+/// also the order the digest is returned in.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, schemars::JsonSchema,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum DigestOutcome {
+    Failed,
+    Blocked,
+    WaitingRetry,
+    Interrupted,
+    Cancelled,
+    Running,
+    Completed,
+    Skipped,
+}
+
+impl DigestOutcome {
+    pub const ALL: [DigestOutcome; 8] = [
+        DigestOutcome::Failed,
+        DigestOutcome::Blocked,
+        DigestOutcome::WaitingRetry,
+        DigestOutcome::Interrupted,
+        DigestOutcome::Cancelled,
+        DigestOutcome::Running,
+        DigestOutcome::Completed,
+        DigestOutcome::Skipped,
+    ];
+}
+
+/// One task's night. Carries no plan text (D16.6).
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DigestEntry {
+    pub task_id: String,
+    pub title: String,
+    pub repository_id: String,
+    pub column: BoardColumn,
+    pub outcome: DigestOutcome,
+    /// How many of the task's rows ended in the window. `0` for a context entry
+    /// and for an entry whose only row is still open. The two numbers below
+    /// cover the same rows.
+    pub runs: i64,
+    pub run_seconds: Option<i64>,
+    /// `None` when there are no such rows **or when any of them has no recorded
+    /// cost**: a sum that silently leaves one out understates it (D18).
+    pub cost_usd: Option<f64>,
+    pub last_run_id: Option<String>,
+    pub error_message: Option<String>,
+    pub pr_url: Option<String>,
+    /// `Blocked` entries only: the dependency in the way.
+    pub blocking_title: Option<String>,
+    /// `Skipped` entries only.
+    pub skip_reason: Option<SkipReason>,
+}
+
+/// Run totals over every row that ended in the window, and entry counts.
+///
+/// The two are different things: `counts` is per entry, because `Blocked` and
+/// `Skipped` entries have no runs to count. Open runs are in no run total.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DigestTotals {
+    pub runs: i64,
+    pub run_seconds: i64,
+    /// Earliest `started_at` to latest `ended_at` among those rows.
+    pub span_seconds: Option<i64>,
+    pub cost_usd: f64,
+    /// Rows whose cost was never recorded. Counted, never summed as zero (D18).
+    pub runs_without_cost: i64,
+    /// Entries per outcome, every variant present.
+    pub counts: BTreeMap<DigestOutcome, i64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Digest {
+    /// Exclusive.
+    pub since: DateTime<Utc>,
+    /// Inclusive: the instant the digest was read. Callers pass it to
+    /// [`mark_seen`], so a run that ends between the read and the mark is never
+    /// skipped.
+    pub until: DateTime<Utc>,
+    pub entries: Vec<DigestEntry>,
+    pub totals: DigestTotals,
+}
+
+/// The marker, or `None` when no review has been finished. An unreadable value
+/// reads as absent, as every settings accessor tolerates a hand-edited row.
+pub async fn seen_through(pool: &sqlx::SqlitePool) -> Result<Option<DateTime<Utc>>> {
+    Ok(parse_marker(
+        settings::get(pool, REVIEW_DIGEST_SEEN_THROUGH).await?,
+    ))
+}
+
+fn parse_marker(stored: Option<String>) -> Option<DateTime<Utc>> {
+    let raw = stored?;
+    match DateTime::parse_from_rfc3339(raw.trim()) {
+        Ok(at) => Some(at.with_timezone(&Utc)),
+        Err(_) => {
+            tracing::warn!(
+                value = raw,
+                "unreadable review_digest_seen_through; ignoring it"
+            );
+            None
+        }
+    }
+}
+
+/// Stores `max(current, to)` through the caller's transaction and returns what
+/// is stored. Nothing moves the marker backwards. Does not publish.
+pub(crate) async fn advance_marker(
+    conn: &mut SqliteConnection,
+    to: DateTime<Utc>,
+) -> Result<DateTime<Utc>> {
+    let current = parse_marker(settings::get_in(&mut *conn, REVIEW_DIGEST_SEEN_THROUGH).await?);
+    let stored = current.map_or(to, |current| current.max(to));
+    settings::set_in(
+        &mut *conn,
+        REVIEW_DIGEST_SEEN_THROUGH,
+        &stored.to_rfc3339_opts(SecondsFormat::AutoSi, true),
+    )
+    .await?;
+    Ok(stored)
+}
+
+/// Marks the digest seen through `through`, which callers take from the digest
+/// they showed. Never moves the marker backwards, and refuses an instant that
+/// has not happened yet.
+#[tracing::instrument(skip_all, fields(source = ctx.source.as_str()))]
+pub async fn mark_seen(ctx: &ServiceContext, through: DateTime<Utc>) -> Result<DateTime<Utc>> {
+    if through > ctx.clock.now() {
+        return Err(Error::invalid(
+            "the review digest cannot be marked seen through a time that has not happened yet",
+        ));
+    }
+
+    // Read and write in one transaction, so two concurrent calls cannot
+    // interleave and leave the smaller value behind.
+    let mut tx = ctx.pool.begin_with("BEGIN IMMEDIATE").await?;
+    let stored = advance_marker(&mut tx, through).await?;
+    tx.commit().await?;
+
+    ctx.publish(ChangeEvent::Settings);
+    Ok(stored)
+}
+
+/// The window's rows, as the digest reads them.
+#[derive(Debug, FromRow)]
+struct WindowRun {
+    id: String,
+    task_id: String,
+    attempt: i64,
+    status: RunStatus,
+    started_at: DateTime<Utc>,
+    ended_at: Option<DateTime<Utc>>,
+    cost_usd: Option<f64>,
+    error_message: Option<String>,
+    pr_url: Option<String>,
+}
+
+impl WindowRun {
+    fn ended(&self) -> bool {
+        self.status != RunStatus::Running && self.ended_at.is_some()
+    }
+}
+
+/// What the queue did in `(since, until]`, plus what is still running.
+///
+/// `until` is now; `since` is the marker, or [`DIGEST_DEFAULT_WINDOW`] before it.
+pub async fn digest(ctx: &ServiceContext) -> Result<Digest> {
+    let until = ctx.clock.now();
+    let since = seen_through(&ctx.pool)
+        .await?
+        .unwrap_or(until - DIGEST_DEFAULT_WINDOW);
+
+    let rows: Vec<WindowRun> = sqlx::query_as(
+        "SELECT r.id, r.task_id, r.attempt, r.status, r.started_at, r.ended_at,
+                r.cost_usd, r.error_message, r.pr_url
+           FROM runs r JOIN tasks t ON t.id = r.task_id
+          WHERE t.archived_at IS NULL
+            AND (r.status = 'running'
+                 OR (r.ended_at IS NOT NULL AND r.ended_at > ?1 AND r.ended_at <= ?2))
+          ORDER BY r.task_id, r.attempt",
+    )
+    .bind(since)
+    .bind(until)
+    .fetch_all(&ctx.pool)
+    .await?;
+
+    // The board read already excludes archived tasks, and carries the blocked
+    // flag and `blocking_title` the context entries need.
+    let tasks = list_tasks(ctx, TaskFilter::default()).await?;
+    let task_by_id: HashMap<&str, &TaskSummary> = tasks
+        .iter()
+        .map(|summary| (summary.task.id.as_str(), summary))
+        .collect();
+
+    let mut rows_by_task: HashMap<&str, Vec<&WindowRun>> = HashMap::new();
+    for row in &rows {
+        rows_by_task
+            .entry(row.task_id.as_str())
+            .or_default()
+            .push(row);
+    }
+
+    let mut entries: Vec<(DigestEntry, &TaskSummary)> = Vec::new();
+    for (task_id, task_rows) in &rows_by_task {
+        let Some(summary) = task_by_id.get(task_id) else {
+            continue;
+        };
+        entries.push((run_backed_entry(summary, task_rows), summary));
+    }
+
+    // Context entries say what the night did not reach. They are gated on there
+    // being something it did reach: neither kind depends on the window, so
+    // without the gate a repository that never opted in would put an entry in
+    // every digest for good, and the marker could never empty it.
+    if !entries.is_empty() {
+        let opted_in: HashSet<String> = repo::list(ctx)
+            .await?
+            .into_iter()
+            .filter(repo::allows_unattended_runs)
+            .map(|repository| repository.id)
+            .collect();
+        for summary in &tasks {
+            if summary.task.column != BoardColumn::Ready
+                || rows_by_task.contains_key(summary.task.id.as_str())
+            {
+                continue;
+            }
+            if let Some(entry) = context_entry(summary, &opted_in, until) {
+                entries.push((entry, summary));
+            }
+        }
+    }
+
+    entries.sort_by(|(left, left_task), (right, right_task)| -> Ordering {
+        left.outcome
+            .cmp(&right.outcome)
+            .then_with(|| compare_dependency_order(&left_task.task, &right_task.task))
+    });
+
+    let totals = totals(&rows, &entries);
+    Ok(Digest {
+        since,
+        until,
+        entries: entries.into_iter().map(|(entry, _)| entry).collect(),
+        totals,
+    })
+}
+
+fn run_backed_entry(summary: &TaskSummary, rows: &[&WindowRun]) -> DigestEntry {
+    let newest = rows
+        .iter()
+        .max_by_key(|row| row.attempt)
+        .expect("a task with window rows has a newest one");
+
+    let outcome = match (newest.status, summary.task.run_state) {
+        (RunStatus::Running, _) => DigestOutcome::Running,
+        (RunStatus::Succeeded, _) => DigestOutcome::Completed,
+        (RunStatus::Failed | RunStatus::Interrupted, RunState::WaitingRetry) => {
+            DigestOutcome::WaitingRetry
+        }
+        (RunStatus::Failed, _) => DigestOutcome::Failed,
+        (RunStatus::Interrupted, _) => DigestOutcome::Interrupted,
+        (RunStatus::Cancelled, _) => DigestOutcome::Cancelled,
+    };
+
+    let ended: Vec<&&WindowRun> = rows.iter().filter(|row| row.ended()).collect();
+    let run_seconds = (!ended.is_empty()).then(|| ended.iter().map(|row| seconds(row)).sum());
+    let cost_usd = if ended.is_empty() || ended.iter().any(|row| row.cost_usd.is_none()) {
+        None
+    } else {
+        Some(ended.iter().filter_map(|row| row.cost_usd).sum())
+    };
+
+    DigestEntry {
+        task_id: summary.task.id.clone(),
+        title: summary.task.title.clone(),
+        repository_id: summary.task.repository_id.clone(),
+        column: summary.task.column,
+        outcome,
+        runs: ended.len() as i64,
+        run_seconds,
+        cost_usd,
+        last_run_id: Some(newest.id.clone()),
+        error_message: newest.error_message.clone(),
+        pr_url: newest.pr_url.clone(),
+        blocking_title: None,
+        skip_reason: None,
+    }
+}
+
+/// A `ready` task the night did not touch, and why not. `skip_reason` is called,
+/// not re-implemented.
+fn context_entry(
+    summary: &TaskSummary,
+    opted_in: &HashSet<String>,
+    now: DateTime<Utc>,
+) -> Option<DigestEntry> {
+    let (outcome, blocking_title, skip) = if summary.blocked_by_incomplete {
+        (DigestOutcome::Blocked, summary.blocking_title.clone(), None)
+    } else {
+        match skip_reason(summary, opted_in.contains(&summary.task.repository_id), now) {
+            Some(
+                reason @ (SkipReason::UnattendedRunsNotAllowed
+                | SkipReason::NeedsAttention
+                | SkipReason::WaitingForRetry),
+            ) => (DigestOutcome::Skipped, None, Some(reason)),
+            _ => return None,
+        }
+    };
+
+    Some(DigestEntry {
+        task_id: summary.task.id.clone(),
+        title: summary.task.title.clone(),
+        repository_id: summary.task.repository_id.clone(),
+        column: summary.task.column,
+        outcome,
+        runs: 0,
+        run_seconds: None,
+        cost_usd: None,
+        last_run_id: None,
+        error_message: None,
+        pr_url: None,
+        blocking_title,
+        skip_reason: skip,
+    })
+}
+
+fn seconds(row: &WindowRun) -> i64 {
+    row.ended_at
+        .map_or(0, |ended| (ended - row.started_at).num_seconds())
+}
+
+fn totals(rows: &[WindowRun], entries: &[(DigestEntry, &TaskSummary)]) -> DigestTotals {
+    let ended: Vec<&WindowRun> = rows.iter().filter(|row| row.ended()).collect();
+
+    let mut counts: BTreeMap<DigestOutcome, i64> = DigestOutcome::ALL
+        .into_iter()
+        .map(|outcome| (outcome, 0))
+        .collect();
+    for (entry, _) in entries {
+        *counts.entry(entry.outcome).or_default() += 1;
+    }
+
+    let earliest = ended.iter().map(|row| row.started_at).min();
+    let latest = ended.iter().filter_map(|row| row.ended_at).max();
+
+    DigestTotals {
+        runs: ended.len() as i64,
+        run_seconds: ended.iter().map(|row| seconds(row)).sum(),
+        span_seconds: earliest
+            .zip(latest)
+            .map(|(from, to)| (to - from).num_seconds()),
+        cost_usd: ended.iter().filter_map(|row| row.cost_usd).sum(),
+        runs_without_cost: ended.iter().filter(|row| row.cost_usd.is_none()).count() as i64,
+        counts,
+    }
+}

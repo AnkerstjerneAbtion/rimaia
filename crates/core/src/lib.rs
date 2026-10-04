@@ -23,6 +23,7 @@ pub mod mcp;
 pub mod openers;
 pub mod paths;
 pub mod repo;
+pub mod review;
 pub mod runner;
 pub mod runs;
 pub mod schedule;
