@@ -215,6 +215,13 @@ fn the_operator_endpoint_keeps_every_tool_it_had_before_task_020() {
             | Tool::ArchiveTasks
             | Tool::UnarchiveTask
             | Tool::SetRepositoryOnArchive => RunAccess::Refused,
+            // Task 034 (ADR-0021 point 3). See `review_tools_are_refused_to_a_run`.
+            Tool::ApproveTask
+            | Tool::RejectTask
+            | Tool::RequestTaskChanges
+            | Tool::GetTaskDependents
+            | Tool::GetReviewDigest
+            | Tool::MarkReviewDigestSeen => RunAccess::Refused,
         };
         assert_eq!(tool.run_access(), expected, "{}", tool.as_str());
     }
@@ -1600,4 +1607,30 @@ async fn board(h: &TestContext, repository_id: &str) -> Vec<String> {
     };
 
     listed.tasks.into_iter().map(|task| task.id).collect()
+}
+
+#[test]
+fn review_tools_are_refused_to_a_run() {
+    // Deciding a review is a run marking its own homework (D30 point 5); the
+    // digest and dependents reads enumerate other tasks (D16.6); and the marker
+    // write reconfigures the installation (ADR-0021 point 4).
+    let run = RunScope::Run {
+        task_id: "its-own-task".to_string(),
+    };
+    for tool in [
+        Tool::ApproveTask,
+        Tool::RejectTask,
+        Tool::RequestTaskChanges,
+        Tool::GetTaskDependents,
+        Tool::GetReviewDigest,
+        Tool::MarkReviewDigestSeen,
+    ] {
+        assert_eq!(tool.run_access(), RunAccess::Refused, "{}", tool.as_str());
+        assert!(
+            run.authorize(tool, Some("its-own-task")).is_err(),
+            "{} reached a run",
+            tool.as_str()
+        );
+        assert!(run.authorize(tool, None).is_err(), "{}", tool.as_str());
+    }
 }

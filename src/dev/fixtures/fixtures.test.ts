@@ -6,7 +6,7 @@ import { listen } from "@tauri-apps/api/event";
 import * as commands from "../../lib/commands";
 import commandsSource from "../../lib/commands.ts?raw";
 import * as events from "../../lib/events";
-import type { RunState } from "../../types";
+import type { ReviewDigest, RunState } from "../../types";
 import { ANSWERS } from "./answers";
 import { FIXTURE_SENTINEL } from "./constants";
 import { buildScenario, SCENARIO_NAMES } from "./seed";
@@ -68,6 +68,44 @@ describe("fixture answers", () => {
     }
     expect(vi.mocked(invoke)).not.toHaveBeenCalled();
     expect(vi.mocked(listen)).not.toHaveBeenCalled();
+  });
+
+  it("answers the review verdicts without changing the seed", async () => {
+    const transports = createFixtureTransports(buildScenario("busy"));
+    const before = await transports.command("list_tasks", { filter: {} });
+    const inReview = (before as Array<{ id: string; column: string }>).find(
+      (task) => task.column === "in_review",
+    );
+    expect(inReview).toBeDefined();
+    const taskId = inReview?.id;
+
+    await transports.command("approve_task", { taskId });
+    await transports.command("reject_task", { taskId, note: "No." });
+    await transports.command("request_task_changes", { taskId, note: "Fix." });
+
+    expect(await transports.command("list_tasks", { filter: {} })).toEqual(before);
+  });
+
+  it("answers an empty review digest in every scenario", async () => {
+    for (const name of SCENARIO_NAMES) {
+      const transports = createFixtureTransports(buildScenario(name));
+      const digest = (await transports.command("get_review_digest")) as ReviewDigest;
+
+      expect([name, digest.entries]).toEqual([name, []]);
+      expect(Object.keys(digest.totals.counts).sort()).toEqual(
+        [
+          "blocked",
+          "cancelled",
+          "completed",
+          "failed",
+          "interrupted",
+          "running",
+          "skipped",
+          "waiting_retry",
+        ],
+      );
+      expect(Object.values(digest.totals.counts).every((count) => count === 0)).toBe(true);
+    }
   });
 
   it("rejects a command with no row instead of hanging", async () => {

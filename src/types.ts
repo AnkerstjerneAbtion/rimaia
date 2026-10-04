@@ -1583,3 +1583,83 @@ export interface McpProbe {
   protocolVersion: string;
   toolCount: number;
 }
+
+/**
+ * Mirrors `rimaia_core::review::Dependent`. One task that depends directly on
+ * the task under review.
+ */
+export interface TaskDependent {
+  id: string;
+  title: string;
+  column: BoardColumn;
+  runState: RunState;
+  archivedAt: string | null;
+  /** At least one of its runs started from the reviewed task's work. */
+  builtOn: boolean;
+}
+
+/**
+ * Mirrors `rimaia_core::review::ReviewOutcome`, what a reject or a request for
+ * changes answers with.
+ */
+export interface ReviewOutcome {
+  task: Task;
+  /** Every direct dependent, read before the verdict's writes. */
+  dependents: TaskDependent[];
+  /** Where the rejected work is: the branch the task had, kept in git.
+   *  `null` for a request for changes. */
+  setAsideBranch: string | null;
+}
+
+/**
+ * Mirrors `rimaia_core::review::DigestOutcome`, in the attention-first order
+ * the service returns a digest in.
+ */
+export type DigestOutcome =
+  | "failed"
+  | "blocked"
+  | "waiting_retry"
+  | "interrupted"
+  | "cancelled"
+  | "running"
+  | "completed"
+  | "skipped";
+
+/** Mirrors `rimaia_core::review::DigestEntry`. One task's night. No plan text. */
+export interface DigestEntry {
+  taskId: string;
+  title: string;
+  repositoryId: string;
+  column: BoardColumn;
+  outcome: DigestOutcome;
+  /** Rows that ended in the window; `0` for a blocked or skipped entry. */
+  runs: number;
+  runSeconds: number | null;
+  /** `null` when there are no such rows or any of them has no recorded cost. */
+  costUsd: number | null;
+  lastRunId: string | null;
+  errorMessage: string | null;
+  prUrl: string | null;
+  blockingTitle: string | null;
+  skipReason: SkipReason | null;
+}
+
+/** Mirrors `rimaia_core::review::DigestTotals`. */
+export interface DigestTotals {
+  runs: number;
+  runSeconds: number;
+  spanSeconds: number | null;
+  costUsd: number;
+  runsWithoutCost: number;
+  /** Entries per outcome, every outcome present. */
+  counts: Record<DigestOutcome, number>;
+}
+
+/** Mirrors `rimaia_core::review::Digest`. */
+export interface ReviewDigest {
+  since: string;
+  /** Pass this to `markReviewDigestSeen` once the digest has been shown. */
+  until: string;
+  entries: DigestEntry[];
+  totals: DigestTotals;
+}

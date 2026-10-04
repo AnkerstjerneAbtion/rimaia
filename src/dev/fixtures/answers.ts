@@ -9,6 +9,8 @@ import type {
   PlanPass,
   PreflightSummary,
   PruneResult,
+  ReviewDigest,
+  ReviewOutcome,
   RimaiaError,
   Run,
   RunDetail,
@@ -17,6 +19,7 @@ import type {
   ScheduleView,
   StrategyCatalogueView,
   Task,
+  TaskDependent,
   TaskDetail,
   TaskFilterInput,
   TaskSummary,
@@ -25,6 +28,7 @@ import type {
   WorktreeInventory,
   WorktreeStatus,
 } from "../../types";
+import { FIXTURE_NOW } from "./constants";
 import type { Scenario } from "./seed";
 
 /**
@@ -55,6 +59,77 @@ function findTask(scenario: Scenario, id: unknown): TaskSummary {
   const found = scenario.tasks.find((candidate) => candidate.id === id);
   if (!found) refuse("not_found", `fixture mode has no task \`${String(id)}\``);
   return found;
+}
+
+const DAY_MS = 24 * 60 * 60 * 1000;
+
+/** The digest no scenario can contradict: nothing ended in the 24-hour window
+ *  that ends at {@link FIXTURE_NOW}. 017 gives this row per-scenario answers. */
+const EMPTY_DIGEST: ReviewDigest = {
+  since: new Date(Date.parse(FIXTURE_NOW) - DAY_MS).toISOString(),
+  until: FIXTURE_NOW,
+  entries: [],
+  totals: {
+    runs: 0,
+    runSeconds: 0,
+    spanSeconds: null,
+    costUsd: 0,
+    runsWithoutCost: 0,
+    counts: {
+      failed: 0,
+      blocked: 0,
+      waiting_retry: 0,
+      interrupted: 0,
+      cancelled: 0,
+      running: 0,
+      completed: 0,
+      skipped: 0,
+    },
+  },
+};
+
+/** The seeded tasks that a card names as blocked by `task`. The seed carries no
+ *  edges, only each card's `blockingTitle`, and no seeded run records a commit,
+ *  so nothing can have built on anything. */
+function dependentsOf(scenario: Scenario, id: unknown): TaskDependent[] {
+  const task = findTask(scenario, id);
+  return scenario.tasks
+    .filter((candidate) => candidate.blockingTitle === task.title)
+    .map((candidate) => ({
+      id: candidate.id,
+      title: candidate.title,
+      column: candidate.column,
+      runState: candidate.runState,
+      archivedAt: candidate.archivedAt,
+      builtOn: false,
+    }));
+}
+
+const CHANGES_REQUESTED_BLOCK =
+  "Review note (changes requested; the reviewed commits were kept, so build on them):\nFixture note.";
+const REJECTED_BLOCK =
+  "Review note (rejected; the task restarted on a fresh branch without those commits):\nFixture note.";
+
+function sentBack(
+  scenario: Scenario,
+  id: unknown,
+  block: string,
+  rejected: boolean,
+): ReviewOutcome {
+  const seeded = findTask(scenario, id);
+  const extraInstructions = seeded.extraInstructions
+    ? `${seeded.extraInstructions}\n\n${block}`
+    : block;
+  return {
+    task: {
+      ...seeded,
+      column: "ready",
+      extraInstructions,
+      ...(rejected ? { branch: null, worktreePath: null } : {}),
+    },
+    dependents: dependentsOf(scenario, id),
+    setAsideBranch: rejected ? seeded.branch : null,
+  };
 }
 
 function latestRun(scenario: Scenario, taskId: string): RunListEntry | null {
@@ -212,6 +287,12 @@ export const ANSWERS: Record<string, Answer> = {
   archive_tasks: () => EMPTY_ARCHIVE,
   unarchive_task: (args, s) => findTask(s, args.id),
   move_task: (args, s) => findTask(s, args.id),
+  approve_task: (args, s): Task => ({ ...findTask(s, args.taskId), column: "done" }),
+  reject_task: (args, s) => sentBack(s, args.taskId, REJECTED_BLOCK, true),
+  request_task_changes: (args, s) => sentBack(s, args.taskId, CHANGES_REQUESTED_BLOCK, false),
+  get_task_dependents: (args, s) => dependentsOf(s, args.taskId),
+  get_review_digest: () => EMPTY_DIGEST,
+  mark_review_digest_seen: (args) => args.through,
   set_task_run_state: (args, s) => findTask(s, args.id),
   add_task_link: unsupported("fixture mode does not edit links"),
   update_task_link: unsupported("fixture mode does not edit links"),

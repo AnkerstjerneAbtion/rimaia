@@ -90,6 +90,25 @@ pub struct ArchiveTaskRequest {
     pub task_id: String,
 }
 
+/// `reject_task` / `request_task_changes`: a task and the note the next run reads.
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct ReviewNoteRequest {
+    pub task_id: String,
+    /// What the review found. Required, and never blank: it is the only thing
+    /// that differs between the reviewed run's input and the next run's.
+    pub note: String,
+}
+
+/// `mark_review_digest_seen`: the digest's own `until`.
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct MarkReviewDigestSeenRequest {
+    /// An RFC 3339 instant, normally the `until` of the digest that was shown.
+    /// A time in the future is refused.
+    pub through: chrono::DateTime<chrono::Utc>,
+}
+
 /// `archive_tasks`: a hand-picked set, in the caller's order.
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]

@@ -20,17 +20,21 @@ use crate::analytics::Analytics;
 use crate::archive::OnArchiveOutcome;
 use crate::credentials::StoreStatus;
 use crate::db::settings::Dismissal;
+use crate::db::Task;
 use crate::db::{
     BoardColumn, ExitClass, MutationSource, OnArchive, Repository, Run, RunState, RunStatus,
     Schedule, ScheduleMode, StrategyMode, StrategySource, TaskLink,
 };
 use crate::doctor::{CheckResult, DoctorReport};
+use crate::review::{Dependent, Digest, DigestEntry, DigestOutcome, DigestTotals, ReviewOutcome};
 use crate::runner::strategy::{PlanOutcome, PlanPass, PlanResult};
 use crate::schedule::{PreflightSummary, ScheduleView as CoreScheduleView};
 use crate::scheduler::RunCapacity;
+use crate::scheduler::SkipReason;
 use crate::strategy::StrategyApproval;
 use crate::tasks::{ArchiveReport, ArchivedTask, RefusedArchive, TaskDetail, TaskSummary};
 use crate::worktree::{AutoCleanup, WorktreeInventoryEntry};
+use std::collections::BTreeMap;
 
 /// One registered repository, as `list_repositories` reports it.
 #[derive(Debug, Clone, PartialEq, Serialize, JsonSchema)]
@@ -1046,6 +1050,187 @@ pub struct RepositoryOnArchiveView {
     pub on_archive: OnArchive,
     /// The stored path, canonicalized. `None` for every mode but `script`.
     pub script: Option<String>,
+}
+
+/// A task as a review verdict leaves it. **No plan text** (D16.6): the caller
+/// decided about the work and already knows what was asked of it.
+#[derive(Debug, Clone, PartialEq, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub struct ReviewedTaskView {
+    pub id: String,
+    pub repository_id: String,
+    pub title: String,
+    pub column: BoardColumn,
+    pub run_state: RunState,
+    pub branch: Option<String>,
+    pub worktree_path: Option<String>,
+    /// Including any review note the verdict appended.
+    pub extra_instructions: Option<String>,
+}
+
+impl From<Task> for ReviewedTaskView {
+    fn from(task: Task) -> Self {
+        Self {
+            id: task.id,
+            repository_id: task.repository_id,
+            title: task.title,
+            column: task.column,
+            run_state: task.run_state,
+            branch: task.branch,
+            worktree_path: task.worktree_path,
+            extra_instructions: task.extra_instructions,
+        }
+    }
+}
+
+/// One task that depends directly on the task under review.
+#[derive(Debug, Clone, PartialEq, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub struct DependentView {
+    pub id: String,
+    pub title: String,
+    pub column: BoardColumn,
+    pub run_state: RunState,
+    pub archived: bool,
+    /// At least one of its runs started from the reviewed task's work.
+    pub built_on: bool,
+}
+
+impl From<Dependent> for DependentView {
+    fn from(dependent: Dependent) -> Self {
+        Self {
+            id: dependent.id,
+            title: dependent.title,
+            column: dependent.column,
+            run_state: dependent.run_state,
+            archived: dependent.archived_at.is_some(),
+            built_on: dependent.built_on,
+        }
+    }
+}
+
+/// `get_task_dependents`.
+#[derive(Debug, Clone, PartialEq, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub struct TaskDependentsView {
+    pub dependents: Vec<DependentView>,
+}
+
+/// `reject_task` and `request_task_changes`.
+#[derive(Debug, Clone, PartialEq, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub struct ReviewOutcomeView {
+    pub task: ReviewedTaskView,
+    /// Every direct dependent. Both verdicts take the task out of review, which
+    /// blocks them until it succeeds again.
+    pub dependents: Vec<DependentView>,
+    /// `reject_task` only: the branch that holds the rejected work, still in git.
+    pub set_aside_branch: Option<String>,
+}
+
+impl From<ReviewOutcome> for ReviewOutcomeView {
+    fn from(outcome: ReviewOutcome) -> Self {
+        Self {
+            task: outcome.task.into(),
+            dependents: outcome.dependents.into_iter().map(Into::into).collect(),
+            set_aside_branch: outcome.set_aside_branch,
+        }
+    }
+}
+
+/// One task's night.
+#[derive(Debug, Clone, PartialEq, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub struct DigestEntryView {
+    pub task_id: String,
+    pub title: String,
+    pub repository_id: String,
+    pub column: BoardColumn,
+    pub outcome: DigestOutcome,
+    pub runs: i64,
+    pub run_seconds: Option<i64>,
+    /// `None` when any of the counted runs has no recorded cost.
+    pub cost_usd: Option<f64>,
+    pub last_run_id: Option<String>,
+    pub error_message: Option<String>,
+    pub pr_url: Option<String>,
+    pub blocking_title: Option<String>,
+    pub skip_reason: Option<SkipReason>,
+}
+
+impl From<DigestEntry> for DigestEntryView {
+    fn from(entry: DigestEntry) -> Self {
+        Self {
+            task_id: entry.task_id,
+            title: entry.title,
+            repository_id: entry.repository_id,
+            column: entry.column,
+            outcome: entry.outcome,
+            runs: entry.runs,
+            run_seconds: entry.run_seconds,
+            cost_usd: entry.cost_usd,
+            last_run_id: entry.last_run_id,
+            error_message: entry.error_message,
+            pr_url: entry.pr_url,
+            blocking_title: entry.blocking_title,
+            skip_reason: entry.skip_reason,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub struct DigestTotalsView {
+    pub runs: i64,
+    pub run_seconds: i64,
+    pub span_seconds: Option<i64>,
+    pub cost_usd: f64,
+    pub runs_without_cost: i64,
+    /// Entries per outcome, every outcome present.
+    pub counts: BTreeMap<DigestOutcome, i64>,
+}
+
+impl From<DigestTotals> for DigestTotalsView {
+    fn from(totals: DigestTotals) -> Self {
+        Self {
+            runs: totals.runs,
+            run_seconds: totals.run_seconds,
+            span_seconds: totals.span_seconds,
+            cost_usd: totals.cost_usd,
+            runs_without_cost: totals.runs_without_cost,
+            counts: totals.counts,
+        }
+    }
+}
+
+/// `get_review_digest`.
+#[derive(Debug, Clone, PartialEq, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub struct ReviewDigestView {
+    pub since: DateTime<Utc>,
+    /// Pass this to `mark_review_digest_seen` once the digest has been read.
+    pub until: DateTime<Utc>,
+    pub entries: Vec<DigestEntryView>,
+    pub totals: DigestTotalsView,
+}
+
+impl From<Digest> for ReviewDigestView {
+    fn from(digest: Digest) -> Self {
+        Self {
+            since: digest.since,
+            until: digest.until,
+            entries: digest.entries.into_iter().map(Into::into).collect(),
+            totals: digest.totals.into(),
+        }
+    }
+}
+
+/// `mark_review_digest_seen`.
+#[derive(Debug, Clone, PartialEq, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub struct DigestMarkerView {
+    /// What is stored now: the later of the previous marker and the instant given.
+    pub seen_through: DateTime<Utc>,
 }
 
 #[cfg(test)]

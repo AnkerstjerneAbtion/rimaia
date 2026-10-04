@@ -169,6 +169,16 @@ pub enum Tool {
     ArchiveTasks,
     UnarchiveTask,
     SetRepositoryOnArchive,
+
+    // Task 034. The three verdicts a morning review ends in, the two reads that
+    // inform them, and the digest marker. All six are refused to a run — see
+    // `run_access`.
+    ApproveTask,
+    RejectTask,
+    RequestTaskChanges,
+    GetTaskDependents,
+    GetReviewDigest,
+    MarkReviewDigestSeen,
 }
 
 /// What a [`RunScope::Run`] may do with one tool — ADR-0006's amendment table,
@@ -185,7 +195,7 @@ pub enum RunAccess {
 
 impl Tool {
     /// Every tool with a recorded decision, so a test can walk the table.
-    pub const ALL: [Tool; 48] = [
+    pub const ALL: [Tool; 54] = [
         Tool::AddTaskLink,
         Tool::CreateTask,
         Tool::GetBaseInstructions,
@@ -234,6 +244,12 @@ impl Tool {
         Tool::ArchiveTasks,
         Tool::UnarchiveTask,
         Tool::SetRepositoryOnArchive,
+        Tool::ApproveTask,
+        Tool::RejectTask,
+        Tool::RequestTaskChanges,
+        Tool::GetTaskDependents,
+        Tool::GetReviewDigest,
+        Tool::MarkReviewDigestSeen,
     ];
 
     /// The wired name — what `tools/list` advertises and what the ADR table
@@ -288,6 +304,12 @@ impl Tool {
             Tool::ArchiveTasks => "archive_tasks",
             Tool::UnarchiveTask => "unarchive_task",
             Tool::SetRepositoryOnArchive => "set_repository_on_archive",
+            Tool::ApproveTask => "approve_task",
+            Tool::RejectTask => "reject_task",
+            Tool::RequestTaskChanges => "request_task_changes",
+            Tool::GetTaskDependents => "get_task_dependents",
+            Tool::GetReviewDigest => "get_review_digest",
+            Tool::MarkReviewDigestSeen => "mark_review_digest_seen",
         }
     }
 
@@ -465,6 +487,19 @@ impl Tool {
             // which account they belong to has been handed a map of the
             // operator's access for no use it has.
             Tool::GetRepositoryCredentialStatus => RunAccess::Refused,
+
+            // Task 034 (ADR-0021 point 3). Approve, reject and request changes
+            // are a run deciding a review, which is a run marking its own
+            // homework (D30 point 5). The digest and dependents reads
+            // enumerate other tasks, which is D16.6's objection and the reason
+            // `list_worktrees` is refused. The marker write reconfigures what
+            // the installation shows its operator (ADR-0021 point 4).
+            Tool::ApproveTask
+            | Tool::RejectTask
+            | Tool::RequestTaskChanges
+            | Tool::GetTaskDependents
+            | Tool::GetReviewDigest
+            | Tool::MarkReviewDigestSeen => RunAccess::Refused,
         }
     }
 }

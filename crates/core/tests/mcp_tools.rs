@@ -14,8 +14,8 @@
 use rimaia_core::db::{settings, BoardColumn, MutationSource, StrategyMode, StrategySource};
 use rimaia_core::mcp::requests::{
     ArchiveTaskRequest, ArchiveTasksRequest, GetTaskRequest, ListTasksRequest, MoveTaskRequest,
-    RemoveTaskLinkRequest, SetRepositoryOnArchiveRequest, SetTaskDependenciesRequest,
-    UpdateTaskRequest,
+    RemoveTaskLinkRequest, ReviewNoteRequest, SetRepositoryOnArchiveRequest,
+    SetTaskDependenciesRequest, UpdateTaskRequest,
 };
 use rimaia_core::mcp::responses::{TaskListView, TaskView};
 use rimaia_core::mcp::RimaiaServer;
@@ -403,6 +403,61 @@ async fn a_task_created_over_mcp_publishes_tasks_changed_on_the_original_subscri
         h.changes.try_recv().expect("a publication"),
         ChangeEvent::tasks([created.id])
     );
+}
+
+// ---------------------------------------------------------------------------
+// The review verdicts, through both doors (task 034, ADR-0006)
+
+#[tokio::test]
+async fn a_reject_over_mcp_writes_what_the_service_writes() {
+    let h = TestContext::new().await;
+    // Two repositories, so the twins land on the same positions: a column's
+    // bottom is per repository.
+    let direct_repo = seed_repository(&h.context.pool, "direct", "/tmp/direct").await;
+    let mcp_repo = seed_repository(&h.context.pool, "mcp", "/tmp/mcp").await;
+    let mut twins = Vec::new();
+    for repository_id in [&direct_repo, &mcp_repo] {
+        let task = tasks::create_task(
+            &h.context,
+            NewTask {
+                repository_id: repository_id.clone(),
+                title: "Review me".to_string(),
+                plan: Some("a plan".to_string()),
+                extra_instructions: Some("Keep it small.".to_string()),
+                column: Some(BoardColumn::InReview),
+                links: vec![],
+            },
+        )
+        .await
+        .expect("create a twin");
+        twins.push(task.id);
+    }
+
+    let direct = rimaia_core::review::reject(&h.context, &twins[0], "Wrong approach.")
+        .await
+        .expect("reject through the service");
+    let Json(over_mcp) = server(&h)
+        .reject_task(Parameters(request::<ReviewNoteRequest>(json!({
+            "task_id": twins[1],
+            "note": "Wrong approach.",
+        }))))
+        .await
+        .unwrap_or_else(|error| panic!("the tool must succeed: {:?}", error.0));
+
+    let twin = tasks::get_task(&h.context, &twins[1])
+        .await
+        .expect("twin")
+        .task;
+    assert_eq!(
+        over_mcp.task.extra_instructions,
+        direct.task.extra_instructions
+    );
+    assert_eq!(over_mcp.task.column, direct.task.column);
+    assert_eq!(twin.position, direct.task.position);
+    assert_eq!(twin.branch, direct.task.branch);
+    assert_eq!(twin.worktree_path, direct.task.worktree_path);
+    assert_eq!(over_mcp.set_aside_branch, direct.set_aside_branch);
+    assert!(over_mcp.dependents.is_empty());
 }
 
 // ---------------------------------------------------------------------------

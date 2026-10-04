@@ -30,6 +30,8 @@ import type {
   RemovalAuthorizationInput,
   RemovedWorktree,
   Repository,
+  ReviewDigest,
+  ReviewOutcome,
   RimaiaError,
   Run,
   RunCapacity,
@@ -49,6 +51,7 @@ import type {
   StrategyCatalogueView,
   StrategyDefaults,
   Task,
+  TaskDependent,
   TaskDetail,
   TaskFilterInput,
   TaskLink,
@@ -300,6 +303,55 @@ export function archiveTasks(ids: readonly string[]): Promise<ArchiveReport> {
  *  deleted comes back. */
 export function unarchiveTask(id: string): Promise<Task> {
   return call<Task>("unarchive_task", { id });
+}
+
+/**
+ * Approves a task waiting in review: it moves to the bottom of `done`.
+ *
+ * Rejects when the task is not in review, is archived, or has a run queued,
+ * running or waiting to retry. The same refusals apply to the two verdicts
+ * below, and they come from one rule in `rimaia_core::review`.
+ */
+export function approveTask(taskId: string): Promise<Task> {
+  return call<Task>("approve_task", { taskId });
+}
+
+/**
+ * Rejects a reviewed task: back to the bottom of `ready` with `note` appended
+ * to its extra instructions, its worktree removed and its branch **set aside in
+ * git, never deleted**, so the next run starts on a fresh branch. Rejects for a
+ * blank note, and for a worktree holding uncommitted changes (there is no force).
+ */
+export function rejectTask(taskId: string, note: string): Promise<ReviewOutcome> {
+  return call<ReviewOutcome>("reject_task", { taskId, note });
+}
+
+/**
+ * Sends a reviewed task back for another round: back to the bottom of `ready`
+ * with `note` appended, its worktree and branch kept, so the next run builds
+ * on the reviewed commits. Rejects for a blank note.
+ */
+export function requestTaskChanges(taskId: string, note: string): Promise<ReviewOutcome> {
+  return call<ReviewOutcome>("request_task_changes", { taskId, note });
+}
+
+/** The tasks that depend directly on this one, and which already built on it. */
+export function getTaskDependents(taskId: string): Promise<TaskDependent[]> {
+  return call<TaskDependent[]>("get_task_dependents", { taskId });
+}
+
+/** What the queue did since the last finished review. Render it as returned. */
+export function getReviewDigest(): Promise<ReviewDigest> {
+  return call<ReviewDigest>("get_review_digest");
+}
+
+/**
+ * Marks the digest seen through `through`, normally the `until` of the digest
+ * that was shown. Never moves the marker backwards; a future instant rejects.
+ * Resolves with what is stored.
+ */
+export function markReviewDigestSeen(through: string): Promise<string> {
+  return call<string>("mark_review_digest_seen", { through });
 }
 
 /**

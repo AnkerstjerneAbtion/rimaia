@@ -4,6 +4,12 @@ import { invoke } from "@tauri-apps/api/core";
 
 import {
   acceptTaskStrategy,
+  approveTask,
+  getReviewDigest,
+  getTaskDependents,
+  markReviewDigestSeen,
+  rejectTask,
+  requestTaskChanges,
   clearTaskStrategy,
   getStrategyApproval,
   getStrategyCatalogue,
@@ -235,5 +241,40 @@ describe("the retry controls (task 014)", () => {
         expect(error.message).toContain("not waiting");
       },
     );
+  });
+});
+
+describe("the review wrappers (task 034)", () => {
+  beforeEach(() => {
+    mockInvoke.mockReset();
+    mockInvoke.mockResolvedValue(undefined);
+  });
+
+  it("sends each verdict with the argument names the Rust commands take", async () => {
+    await approveTask("task-1");
+    await rejectTask("task-1", "Start over.");
+    await requestTaskChanges("task-1", "Add a test.");
+
+    expect(mockInvoke).toHaveBeenNthCalledWith(1, "approve_task", { taskId: "task-1" });
+    expect(mockInvoke).toHaveBeenNthCalledWith(2, "reject_task", {
+      taskId: "task-1",
+      note: "Start over.",
+    });
+    expect(mockInvoke).toHaveBeenNthCalledWith(3, "request_task_changes", {
+      taskId: "task-1",
+      note: "Add a test.",
+    });
+  });
+
+  it("sends the two reads and the marker write", async () => {
+    await getTaskDependents("task-1");
+    await getReviewDigest();
+    await markReviewDigestSeen("2026-10-04T12:00:00.000Z");
+
+    expect(mockInvoke).toHaveBeenNthCalledWith(1, "get_task_dependents", { taskId: "task-1" });
+    expect(mockInvoke).toHaveBeenNthCalledWith(2, "get_review_digest", undefined);
+    expect(mockInvoke).toHaveBeenNthCalledWith(3, "mark_review_digest_seen", {
+      through: "2026-10-04T12:00:00.000Z",
+    });
   });
 });

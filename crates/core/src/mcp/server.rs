@@ -35,23 +35,25 @@ use crate::mcp::error::ToolError;
 use crate::mcp::requests::{
     AddTaskLinkRequest, AnalyticsRequest, ArchiveTaskRequest, ArchiveTasksRequest, ClearableField,
     CreateTaskRequest, DoctorDismissalRequest, GetStrategyDefaultsRequest, GetTaskRequest,
-    ListTasksRequest, MoveTaskRequest, PlanSelectionRequest, RemoveTaskLinkRequest,
-    RepositoryRequest, ScheduleConfigRequest, ScheduleRequest, SetMaxConcurrencyRequest,
-    SetRepositoryMaxConcurrencyRequest, SetRepositoryOnArchiveRequest, SetScheduleEnabledRequest,
-    SetScheduleModeRequest, SetStrategyApprovalRequest, SetStrategyCatalogueRequest,
-    SetStrategyDefaultsRequest, SetTaskDependenciesRequest, SetTaskStrategyRequest,
-    SetWorktreeAutoCleanupRequest, SubscriptionCostRequest, TaskStrategyRequest,
-    UpdateScheduleRequest, UpdateTaskRequest,
+    ListTasksRequest, MarkReviewDigestSeenRequest, MoveTaskRequest, PlanSelectionRequest,
+    RemoveTaskLinkRequest, RepositoryRequest, ReviewNoteRequest, ScheduleConfigRequest,
+    ScheduleRequest, SetMaxConcurrencyRequest, SetRepositoryMaxConcurrencyRequest,
+    SetRepositoryOnArchiveRequest, SetScheduleEnabledRequest, SetScheduleModeRequest,
+    SetStrategyApprovalRequest, SetStrategyCatalogueRequest, SetStrategyDefaultsRequest,
+    SetTaskDependenciesRequest, SetTaskStrategyRequest, SetWorktreeAutoCleanupRequest,
+    SubscriptionCostRequest, TaskStrategyRequest, UpdateScheduleRequest, UpdateTaskRequest,
 };
 use crate::mcp::responses::{
     AnalyticsView, ArchiveReportView, ArchivedTaskView, BaseInstructionsView, CredentialStatusView,
-    DismissalView, DoctorDismissalsView, DoctorReportView, OnboardingView, PlanPassView,
-    PlanResultView, PreflightView, RepositoryListView, RepositoryOnArchiveView, RepositoryView,
-    RunCapacityView, ScheduleDeletedView, ScheduleListView, ScheduleView, StrategyApprovalView,
-    SubscriptionCostView, TaskListItem, TaskListView, TaskView, TimezoneListView,
-    WorktreeAutoCleanupView, WorktreeListView, WorktreeView,
+    DigestMarkerView, DismissalView, DoctorDismissalsView, DoctorReportView, OnboardingView,
+    PlanPassView, PlanResultView, PreflightView, RepositoryListView, RepositoryOnArchiveView,
+    RepositoryView, ReviewDigestView, ReviewOutcomeView, ReviewedTaskView, RunCapacityView,
+    ScheduleDeletedView, ScheduleListView, ScheduleView, StrategyApprovalView,
+    SubscriptionCostView, TaskDependentsView, TaskListItem, TaskListView, TaskView,
+    TimezoneListView, WorktreeAutoCleanupView, WorktreeListView, WorktreeView,
 };
 use crate::mcp::scope::{RunScope, Tool};
+use crate::review;
 use crate::runner::prompt::TEMPLATE_VARIABLES;
 use crate::runner::strategy::{self as runner_strategy, PlanOutcome, PlanSelection, PlannerAccess};
 use crate::schedule;
@@ -941,6 +943,102 @@ and the next run recreates it. Use `list_tasks` with `archived: archived` to fin
     }
 
     #[tool(
+        description = "Approve a task that is waiting in review: it moves to the bottom of `done`, \
+and its dependents stop being blocked. Call this only when a human asked you to, or when the work \
+has been checked. Refused when the task is not in review, is archived, or has a run queued, running \
+or waiting to retry. Approving also removes the task's worktree if the user turned on automatic \
+cleanup for done tasks."
+    )]
+    pub async fn approve_task(
+        &self,
+        Parameters(request): Parameters<ArchiveTaskRequest>,
+    ) -> Result<Json<ReviewedTaskView>, ToolError> {
+        self.scope.authorize(Tool::ApproveTask, None)?;
+        let task = review::approve(&self.ctx, &request.task_id).await?;
+        Ok(Json(task.into()))
+    }
+
+    #[tool(
+        description = "Send a reviewed task back for another round, KEEPING its branch, its \
+worktree and every commit on it. The task goes to the bottom of `ready` with your note appended \
+to its extra instructions, and the next run continues on the same commits and reads the note. Call \
+this when the work is on the right track and needs fixing. Do not use it when the approach is \
+wrong: that is `reject_task`. The note is required. A task whose last run failed or was cancelled \
+is refused: use Retry for it. The result lists every task that depends on this one, because both \
+this and `reject_task` take it out of review and so block them."
+    )]
+    pub async fn request_task_changes(
+        &self,
+        Parameters(request): Parameters<ReviewNoteRequest>,
+    ) -> Result<Json<ReviewOutcomeView>, ToolError> {
+        self.scope.authorize(Tool::RequestTaskChanges, None)?;
+        let outcome = review::request_changes(&self.ctx, &request.task_id, &request.note).await?;
+        Ok(Json(outcome.into()))
+    }
+
+    #[tool(
+        description = "Throw a reviewed task's work away and start it over. The task goes to the \
+bottom of `ready` with your note appended, its worktree directory is removed and its branch is \
+cleared, so the next run starts on a FRESH branch from the base and does NOT contain the rejected \
+commits. The old branch is not deleted: it stays in git, and `set_aside_branch` names it. Any pull \
+request opened from it is left as it was. Call this when the approach is wrong; call \
+`request_task_changes` when the work should be built on instead. Refused, with the count, when the \
+worktree has uncommitted changes, because removing them would lose them for good; there is no way \
+to force it. The note is required. The result lists every dependent, with `built_on` set for the \
+ones that already ran on this task's work."
+    )]
+    pub async fn reject_task(
+        &self,
+        Parameters(request): Parameters<ReviewNoteRequest>,
+    ) -> Result<Json<ReviewOutcomeView>, ToolError> {
+        self.scope.authorize(Tool::RejectTask, None)?;
+        let outcome = review::reject(&self.ctx, &request.task_id, &request.note).await?;
+        Ok(Json(outcome.into()))
+    }
+
+    #[tool(
+        description = "List the tasks that depend directly on this one, archived ones included, \
+with `built_on` true for each that already ran on top of this task's work. Call this before \
+`reject_task` or `request_task_changes`: either one blocks every dependent until the task \
+succeeds again."
+    )]
+    pub async fn get_task_dependents(
+        &self,
+        Parameters(request): Parameters<ArchiveTaskRequest>,
+    ) -> Result<Json<TaskDependentsView>, ToolError> {
+        self.scope.authorize(Tool::GetTaskDependents, None)?;
+        let dependents = review::dependents(&self.ctx, &request.task_id).await?;
+        Ok(Json(TaskDependentsView {
+            dependents: dependents.into_iter().map(Into::into).collect(),
+        }))
+    }
+
+    #[tool(
+        description = "What the queue did since the last review was finished: one entry per task \
+(never per run), failures and blocked chains first, with run totals and the cost where it was \
+recorded. A quiet board gives an empty digest. Call this to brief a human on the night."
+    )]
+    pub async fn get_review_digest(&self) -> Result<Json<ReviewDigestView>, ToolError> {
+        self.scope.authorize(Tool::GetReviewDigest, None)?;
+        let digest = review::digest(&self.ctx).await?;
+        Ok(Json(digest.into()))
+    }
+
+    #[tool(
+        description = "Mark the review digest as seen through an instant, normally the `until` of \
+the digest that was shown, so the next digest starts after it. It never moves backwards, and a \
+time in the future is refused. Call this once a digest has been read."
+    )]
+    pub async fn mark_review_digest_seen(
+        &self,
+        Parameters(request): Parameters<MarkReviewDigestSeenRequest>,
+    ) -> Result<Json<DigestMarkerView>, ToolError> {
+        self.scope.authorize(Tool::MarkReviewDigestSeen, None)?;
+        let seen_through = review::mark_seen(&self.ctx, request.through).await?;
+        Ok(Json(DigestMarkerView { seen_through }))
+    }
+
+    #[tool(
         description = "Call this to choose what archiving a task in one repository cleans up: `none` leaves \
 everything alone, `remove_worktree` deletes the task's checkout using Rimaia's own guards (it \
 refuses a dirty or unpushed worktree and never deletes a branch), and `script` runs an executable \
@@ -1286,9 +1384,10 @@ mod tests {
     /// capability parity a rule. What replaces a count is the property that
     /// actually matters — a registered tool with no run-scope decision cannot
     /// reach the wire.
-    const REGISTERED_TOOLS: [&str; 48] = [
+    const REGISTERED_TOOLS: [&str; 54] = [
         "accept_task_strategy",
         "add_task_link",
+        "approve_task",
         "archive_task",
         "archive_tasks",
         "clear_task_strategy",
@@ -1300,12 +1399,14 @@ mod tests {
         "get_analytics",
         "get_base_instructions",
         "get_repository_credential_status",
+        "get_review_digest",
         "get_run_capacity",
         "get_strategy_approval",
         "get_strategy_catalogue",
         "get_strategy_defaults",
         "get_subscription_cost",
         "get_task",
+        "get_task_dependents",
         "get_worktree_auto_cleanup",
         "give_up_on_task",
         "list_repositories",
@@ -1313,11 +1414,14 @@ mod tests {
         "list_tasks",
         "list_timezones",
         "list_worktrees",
+        "mark_review_digest_seen",
         "move_task",
         "plan_task_strategy",
         "plan_tasks_strategy",
         "preview_schedule_preflight",
+        "reject_task",
         "remove_task_link",
+        "request_task_changes",
         "restore_doctor_warning",
         "run_doctor",
         "set_max_concurrency",

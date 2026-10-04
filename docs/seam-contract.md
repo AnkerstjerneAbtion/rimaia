@@ -2396,7 +2396,7 @@ keep what it was for.
 
    | Placement | Keys | Goes to |
    | --- | --- | --- |
-   | User | `subscription_monthly_usd` | `user_settings`, by 038 |
+   | User | `subscription_monthly_usd`, `review_digest_seen_through` | `user_settings`, by 038 |
    | Runner | `run_environment`, `mcp_port`, `max_concurrency`, `schedule_mode`, `queue_state`, `active_run_window`, `usage_limit_pause_until`, `worktree_auto_cleanup`, `doctor_dismissals`, `onboarding_dismissed` | `runner.db`'s `runner_settings`, by task 040 |
    | Team | every other key. Today: `base_instructions`, `strategy_catalogue`, `strategy_default`, `strategy_default.<repository_id>` (D17.2), `strategy_approval`, `max_turns`, `disallowed_tools`, plus task 021's review-loop keys | `team_settings`, by 038 |
 
@@ -2623,10 +2623,10 @@ keep what it was for.
 
    INSERT INTO user_settings (user_id, key, value)
    SELECT a.user_id, s.key, s.value FROM settings AS s CROSS JOIN solo_adoption AS a
-    WHERE s.key = 'subscription_monthly_usd';
+    WHERE s.key IN ('subscription_monthly_usd', 'review_digest_seen_through');
    INSERT INTO team_settings (team_id, key, value)
    SELECT a.team_id, s.key, s.value FROM settings AS s CROSS JOIN solo_adoption AS a
-    WHERE s.key NOT IN ('subscription_monthly_usd',
+    WHERE s.key NOT IN ('subscription_monthly_usd', 'review_digest_seen_through',
                         'run_environment', 'mcp_port', 'max_concurrency', 'schedule_mode',
                         'queue_state', 'active_run_window', 'usage_limit_pause_until',
                         'worktree_auto_cleanup', 'doctor_dismissals', 'onboarding_dismissed');
@@ -3407,6 +3407,15 @@ applied above. The file is not frozen, because task 054 has not landed.
 All three are additive and nullable or defaulted, and none has a `CHECK`, so part 5 allows
 them outside the rebuild. **Binds.** 054 (writes all three), 061 (reads the first and the
 third).
+
+### Amendment, 2026-10-04 — the review digest's marker is a user setting (task 034)
+
+`review_digest_seen_through` is an RFC 3339 instant, owned by `review::digest` in D3's shape.
+Its placement is **User**: it records what this person has seen of the queue's work, so
+point 4's User row gains it, and both key lists in part 6's adoption SQL (the `user_settings`
+copy and the `team_settings` exclusion) name it, already applied above. No migration writes
+the key, and none may before 038. **Binds.** 034 (writes it), 038 (moves it), 017 (reads the
+digest it bounds).
 
 ---
 
@@ -5307,6 +5316,20 @@ There are 45 board commands: 37 from 046, and 8 flipped later. There are 52 loca
 | `dismiss_onboarding` | doctor | local | — | 046 | A runner setting |
 | `dismiss_doctor_warning` | doctor | local | — | 046 | A runner setting |
 | `restore_doctor_warning` | doctor | local | — | 046 | A runner setting |
+
+#### Added after 728a049 (task 034)
+
+Six commands added before 046, as point 8 requires. The counts above describe `main` at
+728a049 and are left as they are. Each cites ADR-0021 point 3 and task 034.
+
+| Command | Group | Kind | Effect | From | Note |
+| --- | --- | --- | --- | --- | --- |
+| `approve_task` | review | board | Write | 046 | As `move_task`: D20.3's auto-removal on `done` becomes the runner's reaction to the change event once `worktree_auto_cleanup` is a runner setting (ADR-0028 §2). ADR-0021 point 3, task 034 |
+| `reject_task` | review | board | Write | 046 | The board handler writes the note, `branch = NULL`, the move and the marker. The uncommitted-changes refusal and the worktree removal (`review::actions::set_aside_worktree`, with the `worktree_path` write inside it) run on the runner that holds the worktree, not in the handler (ADR-0033 §7). In connected mode the refusal is a runner-side check, and a synchronous refusal to the caller is not guaranteed (task 034). ADR-0021 point 3 |
+| `request_task_changes` | review | board | Write | 046 | Touches no disk. ADR-0021 point 3, task 034 |
+| `get_task_dependents` | review | board | Read | 046 | ADR-0021 point 3, task 034 |
+| `get_review_digest` | review | board | Read | 046 | Rows only, no git. ADR-0021 point 3, task 034 |
+| `mark_review_digest_seen` | review | board | Write | 046 | A user setting (`review_digest_seen_through`, D28 part 4). ADR-0021 point 3, task 034 |
 
 ---
 
