@@ -13,13 +13,16 @@
 
 use chrono::{DateTime, Utc};
 use pretty_assertions::assert_eq;
-use rimaia_core::db::{BoardColumn, ExitClass, MutationSource, RunState, RunStatus};
+use rimaia_core::db::{BoardColumn, ExitClass, MutationSource, RunKind, RunState, RunStatus};
+use rimaia_core::mcp::requests::GetTaskRequest;
+use rimaia_core::mcp::RimaiaServer;
 use rimaia_core::tasks::{
     self, LastRunSummary, NewTask, NewTaskLink, Patch, TaskFilter, TaskLinkPatch, TaskPatch,
     TaskSummary,
 };
-use rimaia_core::testing::TestContext;
+use rimaia_core::testing::{self, TestContext};
 use rimaia_core::{ChangeEvent, Clock, ErrorCode};
+use rmcp::handler::server::wrapper::{Json, Parameters};
 use sqlx::SqlitePool;
 
 // ---------------------------------------------------------------------------
@@ -422,6 +425,7 @@ async fn a_listed_task_carries_its_link_and_dependency_counts_and_its_last_run()
     assert_eq!(
         summary.last_run,
         Some(LastRunSummary {
+            kind: RunKind::Implementation,
             status: RunStatus::Running,
             exit_class: None,
             ended_at: None,
@@ -429,6 +433,69 @@ async fn a_listed_task_carries_its_link_and_dependency_counts_and_its_last_run()
         }),
         "a run still in flight has no exit class, no end and nothing scheduled after it"
     );
+}
+
+#[tokio::test]
+async fn the_cards_last_run_is_the_newest_row_of_any_kind() {
+    // D29 point 4: the card and the detail both mean "the task's newest row",
+    // whatever it was for, so a review waiting on a usage limit is what the card
+    // shows, and says it is a review.
+    let h = TestContext::new().await;
+    let repository_id = seed_repository(&h.context.pool).await;
+    let task = create_ready(&h, &repository_id, "reviewed", "plan").await;
+    seed_finished_run(
+        &h.context.pool,
+        &task.id,
+        1,
+        RunStatus::Succeeded,
+        ExitClass::Success,
+        "2026-08-20T09:00:00+00:00",
+    )
+    .await;
+    let review = seed_finished_run(
+        &h.context.pool,
+        &task.id,
+        2,
+        RunStatus::Failed,
+        ExitClass::UsageLimit,
+        "2026-08-20T10:00:00+00:00",
+    )
+    .await;
+    sqlx::query("UPDATE runs SET kind = 'review' WHERE id = ?1")
+        .bind(&review)
+        .execute(&h.context.pool)
+        .await
+        .expect("make the second row a review");
+
+    let summary = list_one(&h, &repository_id, &task.id).await;
+    let last_run = summary.last_run.expect("a card with runs has a last run");
+    assert_eq!(last_run.kind, RunKind::Review);
+    assert_eq!(last_run.status, RunStatus::Failed);
+
+    let detail = tasks::get_task(&h.context, &task.id)
+        .await
+        .expect("read the task");
+    let last_run = detail.last_run.expect("the detail's last run");
+    assert_eq!(last_run.id, review);
+    assert_eq!(last_run.kind, RunKind::Review);
+    assert_eq!(last_run.status, RunStatus::Failed);
+
+    // `get_task` over MCP says which kind its `last_run` was.
+    let server = RimaiaServer::new(
+        h.context.with_source(MutationSource::Mcp),
+        testing::doctor::environment(),
+        testing::doctor::planner_access(),
+    );
+    let request: GetTaskRequest =
+        serde_json::from_value(serde_json::json!({ "task_id": task.id })).expect("a request");
+    let Json(view) = server
+        .get_task(Parameters(request))
+        .await
+        .expect("get_task over MCP");
+    let wire = serde_json::to_value(&view).expect("a view serializes");
+    assert_eq!(wire["last_run"]["id"], serde_json::json!(review));
+    assert_eq!(wire["last_run"]["kind"], serde_json::json!("review"));
+    assert_eq!(wire["last_run"]["status"], serde_json::json!("failed"));
 }
 
 #[tokio::test]
@@ -482,6 +549,7 @@ async fn the_listed_last_run_is_the_highest_attempt_not_the_most_recently_ended(
     assert_eq!(
         summary.last_run,
         Some(LastRunSummary {
+            kind: RunKind::Implementation,
             // seam-contract D9: this is the only place the word "interrupted"
             // ever reaches the board, since `run_state` deliberately has no
             // such value.

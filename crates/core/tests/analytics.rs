@@ -10,15 +10,21 @@ use chrono::{DateTime, Duration, Utc};
 use pretty_assertions::assert_eq;
 use rimaia_core::analytics::{self, Period};
 use rimaia_core::db::settings;
-use rimaia_core::db::{BoardColumn, ExitClass, RunState, RunStatus, StrategyMode};
+use rimaia_core::db::{
+    BoardColumn, ExitClass, MutationSource, RunKind, RunState, RunStatus, StrategyMode,
+};
+use rimaia_core::mcp::requests::AnalyticsRequest;
+use rimaia_core::mcp::responses::{AnalyticsView, RunOutcomesView};
+use rimaia_core::mcp::RimaiaServer;
 use rimaia_core::repo::{self, NewRepository};
 use rimaia_core::runner::events::TokenUsage;
 use rimaia_core::runner::outcome::{finish_run, start_run, NewRun, RunOutcome, SpawnedAs};
 use rimaia_core::runs::bundle::RunCapture;
 use rimaia_core::runs::{self, PruneCriterion};
 use rimaia_core::tasks::{self, NewTask, TaskPatch};
-use rimaia_core::testing::{TempRepo, TestContext};
+use rimaia_core::testing::{self, TempRepo, TestContext};
 use rimaia_core::{AppPaths, Clock};
+use rmcp::handler::server::wrapper::{Json, Parameters};
 use tempfile::TempDir;
 
 struct Fixture {
@@ -95,6 +101,7 @@ impl Fixture {
             &self.paths,
             NewRun {
                 task_id: task_id.to_string(),
+                kind: RunKind::Implementation,
                 session_id: "session".to_string(),
                 prompt: "a prompt".to_string(),
                 base_ref: None,
@@ -144,6 +151,48 @@ impl Fixture {
         .await
         .expect("close the run row");
 
+        run.id
+    }
+
+    /// One review or fix row, closed the way task 021's arms will close it.
+    ///
+    /// `finish_run` refuses these kinds until 021, so the row is closed through
+    /// `testing::runs::close_run` and its cost written beside it, which is the
+    /// one capture column this page reads.
+    async fn loop_run(
+        &self,
+        task_id: &str,
+        kind: RunKind,
+        status: RunStatus,
+        minutes: i64,
+        cost_usd: f64,
+    ) -> String {
+        let run = start_run(
+            &self.harness.context,
+            &self.paths,
+            NewRun {
+                task_id: task_id.to_string(),
+                kind,
+                session_id: "loop-session".to_string(),
+                prompt: "a prompt".to_string(),
+                base_ref: None,
+                base_sha: None,
+            },
+        )
+        .await
+        .expect("open a run row");
+        self.harness.clock.advance(Duration::minutes(minutes));
+        let class = match status {
+            RunStatus::Succeeded => ExitClass::Success,
+            _ => ExitClass::Fatal,
+        };
+        testing::runs::close_run(&self.harness.context, &run.id, status, class, None).await;
+        sqlx::query("UPDATE runs SET cost_usd = ?1 WHERE id = ?2")
+            .bind(cost_usd)
+            .bind(&run.id)
+            .execute(&self.harness.context.pool)
+            .await
+            .expect("record the loop run's cost");
         run.id
     }
 
@@ -463,6 +512,7 @@ async fn the_longest_run_and_the_median_are_measured_rather_than_averaged() {
             &fixture.paths,
             NewRun {
                 task_id: task.clone(),
+                kind: RunKind::Implementation,
                 session_id: "session".to_string(),
                 prompt: "a prompt".to_string(),
                 base_ref: None,
@@ -508,6 +558,86 @@ async fn the_longest_run_and_the_median_are_measured_rather_than_averaged() {
     );
     // 1 + 5 + 30 minutes, summed — parallel runs each contribute their own.
     assert_eq!(page.unattended_hours, 36.0 / 60.0);
+}
+
+#[tokio::test]
+async fn implementation_and_review_loop_spend_sum_to_total_spend() {
+    // D29 point 7: a task's review loop is part of what it cost, so spend
+    // counts every kind, but a review's `succeeded` says the reviewer ran, not
+    // that the work was good, so the outcomes, the failure rate, the median
+    // and the strategy mix count implementation runs only.
+    let fixture = Fixture::new().await;
+    let looped = fixture.task("Looped", BoardColumn::InReview).await;
+    let failed = fixture.task("Failed", BoardColumn::Ready).await;
+    fixture
+        .attempt(&looped, RunStatus::Succeeded, Some(2.0), Some("opus"))
+        .await;
+    fixture
+        .attempt(&failed, RunStatus::Failed, Some(1.0), Some("opus"))
+        .await;
+    let before = fixture.page().await;
+
+    fixture
+        .loop_run(&looped, RunKind::Review, RunStatus::Succeeded, 3, 0.5)
+        .await;
+    fixture
+        .loop_run(&looped, RunKind::Fix, RunStatus::Failed, 40, 0.25)
+        .await;
+    let after = fixture.page().await;
+
+    assert_eq!(after.outcomes, before.outcomes);
+    assert_eq!(after.outcomes.failure_rate(), Some(0.5));
+    assert_eq!(
+        after.median_duration_seconds,
+        before.median_duration_seconds
+    );
+    assert_eq!(after.strategies, before.strategies);
+    assert_eq!(after.review_loop_outcomes.succeeded, 1);
+    assert_eq!(after.review_loop_outcomes.failed, 1);
+    assert_eq!(after.review_loop_outcomes.total(), 2);
+    assert_eq!(after.implementation_spend_usd, 3.0);
+    assert_eq!(after.review_loop_spend_usd, 0.75);
+    assert_eq!(
+        after.spend_usd,
+        after.implementation_spend_usd + after.review_loop_spend_usd
+    );
+    assert_eq!(after.spend_usd, fixture.sql_spend().await);
+    assert_eq!(
+        after.longest_run.as_ref().map(|run| run.seconds),
+        Some(40 * 60),
+        "the longest run counts every kind",
+    );
+
+    // ADR-0021: the agent's door reports what the window's door reports.
+    let server = RimaiaServer::new(
+        fixture.harness.context.with_source(MutationSource::Mcp),
+        testing::doctor::environment(),
+        testing::doctor::planner_access(),
+    );
+    let request: AnalyticsRequest =
+        serde_json::from_value(serde_json::json!({})).expect("an empty period");
+    let Json(view) = server
+        .get_analytics(Parameters(request))
+        .await
+        .expect("analytics over MCP");
+    assert_eq!(view, AnalyticsView::from(&after));
+    assert_eq!(view.review_loop_spend_usd, 0.75);
+    assert_eq!(
+        view.review_loop_outcomes,
+        RunOutcomesView {
+            runs_total: 2,
+            runs_succeeded: 1,
+            runs_failed: 1,
+            runs_cancelled: 0,
+            runs_interrupted: 0,
+            runs_running: 0,
+            failure_rate: Some(0.5),
+        },
+    );
+    assert_eq!(
+        view.runs_total, 2,
+        "the flat counts are implementation runs"
+    );
 }
 
 #[tokio::test]

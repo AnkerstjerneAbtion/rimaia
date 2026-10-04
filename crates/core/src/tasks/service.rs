@@ -23,8 +23,8 @@ use sqlx::{FromRow, Row, SqliteConnection, SqlitePool};
 use crate::archive::OnArchiveOutcome;
 use crate::context::ServiceContext;
 use crate::db::{
-    new_id, BoardColumn, ExitClass, MutationSource, Run, RunState, RunStatus, StrategyMode,
-    StrategySource, Task, TaskLink,
+    new_id, BoardColumn, ExitClass, MutationSource, Run, RunKind, RunState, RunStatus,
+    StrategyMode, StrategySource, Task, TaskLink,
 };
 use crate::error::{Error, Result};
 use crate::events::ChangeEvent;
@@ -105,9 +105,9 @@ pub struct TaskSummary {
     pub effective_origin: StrategyOrigin,
 }
 
-/// What a card shows about a task's most recent attempt.
+/// What a card shows about a task's most recent run, of any kind.
 ///
-/// Four fields of a [`Run`] rather than the row: the word "interrupted" is
+/// Five fields of a [`Run`] rather than the row: the kind says what the run was for, the word "interrupted" is
 /// read off `exit_class` (seam-contract D9), `ended_at` is the card's relative
 /// time, `resume_after` is when a `waiting_retry` card says it will come back,
 /// and the prompt, the session id and the transcript path are the panel's
@@ -115,6 +115,10 @@ pub struct TaskSummary {
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LastRunSummary {
+    /// What the newest row was for, of any kind (seam-contract D29 point 4,
+    /// D12's 2026-10-04 amendment), so a card can tell "reviewing" from
+    /// "running" and "review failed" from "failed".
+    pub kind: RunKind,
     pub status: RunStatus,
     pub exit_class: Option<ExitClass>,
     /// `None` while the attempt is still in flight — which is also why the
@@ -151,6 +155,7 @@ impl<'r> FromRow<'r, SqliteRow> for TaskSummary {
             // distinguishes "no run" from a run whose other fields are still
             // unset.
             Some(status) => Some(LastRunSummary {
+                kind: row.try_get("last_run_kind")?,
                 status,
                 exit_class: row.try_get("last_run_exit_class")?,
                 ended_at: row.try_get("last_run_ended_at")?,
@@ -229,6 +234,7 @@ SELECT t.*,
                   END ASC,
                   dep.position ASC, dep.created_at ASC, dep.id ASC
          LIMIT 1) AS blocking_title,
+       r.kind AS last_run_kind,
        r.status AS last_run_status,
        r.exit_class AS last_run_exit_class,
        r.ended_at AS last_run_ended_at,
@@ -1280,7 +1286,8 @@ where
 async fn fetch_last_run(pool: &SqlitePool, task_id: &str) -> Result<Option<Run>> {
     let run = sqlx::query_as!(
         Run,
-        r#"SELECT id, task_id, attempt, status AS "status: RunStatus", session_id, prompt,
+        r#"SELECT id, task_id, attempt, kind AS "kind: RunKind", status AS "status: RunStatus",
+            session_id, prompt,
             started_at AS "started_at: DateTime<Utc>", ended_at AS "ended_at: DateTime<Utc>",
             exit_class AS "exit_class: ExitClass", error_message, num_turns, cost_usd, log_path,
             pr_url, resume_after AS "resume_after: DateTime<Utc>", base_ref,
@@ -1533,6 +1540,7 @@ mod tests {
             // seam-contract D9's case: the task is `failed`, and the only place
             // the word "interrupted" reaches the board is this exit class.
             last_run: Some(LastRunSummary {
+                kind: RunKind::Implementation,
                 status: RunStatus::Interrupted,
                 exit_class: Some(ExitClass::Interrupted),
                 ended_at: Some("2026-08-20T12:29:00Z".parse().expect("a literal timestamp")),
@@ -1564,6 +1572,7 @@ mod tests {
         assert_eq!(
             wire["lastRun"],
             json!({
+                "kind": "implementation",
                 "status": "interrupted",
                 "exitClass": "interrupted",
                 "endedAt": "2026-08-20T12:29:00Z",

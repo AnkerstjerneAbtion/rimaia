@@ -19,7 +19,7 @@ use std::process::Command;
 
 use chrono::{DateTime, Duration, Utc};
 use pretty_assertions::assert_eq;
-use rimaia_core::db::{settings, BoardColumn, Run, RunState, Task};
+use rimaia_core::db::{settings, BoardColumn, Run, RunKind, RunState, Task};
 use rimaia_core::repo::{self, NewRepository};
 use rimaia_core::review::digest::{DigestEntry, DigestOutcome, DigestTotals};
 use rimaia_core::review::{self, Dependent, Digest};
@@ -518,6 +518,8 @@ async fn a_digest_after_six_tasks_reports_each_outcome() {
         pr_url: None,
         blocking_title: None,
         skip_reason: None,
+        last_run_kind: None,
+        review_loop: None,
     };
     let last_run = |task_id: &str, attempt: i64| format!("run-{task_id}-{attempt}");
 
@@ -531,6 +533,7 @@ async fn a_digest_after_six_tasks_reports_each_outcome() {
     expected_failed.run_seconds = Some(3600);
     expected_failed.cost_usd = Some(1.0);
     expected_failed.last_run_id = Some(last_run(&failed, 2));
+    expected_failed.last_run_kind = Some(RunKind::Implementation);
     expected_failed.error_message = Some("boom".to_string());
 
     let mut expected_blocked = entry(
@@ -551,6 +554,7 @@ async fn a_digest_after_six_tasks_reports_each_outcome() {
     expected_cancelled.run_seconds = Some(900);
     expected_cancelled.cost_usd = Some(0.25);
     expected_cancelled.last_run_id = Some(last_run(&cancelled, 1));
+    expected_cancelled.last_run_kind = Some(RunKind::Implementation);
 
     let mut expected_succeeded = entry(
         &succeeded,
@@ -562,6 +566,7 @@ async fn a_digest_after_six_tasks_reports_each_outcome() {
     expected_succeeded.run_seconds = Some(1800);
     expected_succeeded.cost_usd = Some(1.0);
     expected_succeeded.last_run_id = Some(last_run(&succeeded, 1));
+    expected_succeeded.last_run_kind = Some(RunKind::Implementation);
     expected_succeeded.pr_url = Some("https://example.com/pull/1".to_string());
 
     let mut expected_uncosted = entry(
@@ -573,6 +578,7 @@ async fn a_digest_after_six_tasks_reports_each_outcome() {
     expected_uncosted.runs = 1;
     expected_uncosted.run_seconds = Some(600);
     expected_uncosted.last_run_id = Some(last_run(&uncosted, 1));
+    expected_uncosted.last_run_kind = Some(RunKind::Implementation);
 
     let mut expected_skipped = entry(
         &skipped,
@@ -737,6 +743,99 @@ async fn a_task_with_three_runs_in_the_window_is_one_entry_with_the_newest_rows_
     assert_eq!(digest.totals.runs, 3);
     assert_eq!(digest.totals.cost_usd, 2.0);
     assert_eq!(digest.totals.runs_without_cost, 1);
+}
+
+#[tokio::test]
+async fn a_looped_task_is_one_digest_entry() {
+    // D29 point 8: a digest that listed runs would list a looped task three
+    // times. The entry says which kind its outcome came from, and its loop
+    // numbers are derived from the rows.
+    let f = Fixture::new().await;
+    let looped = f.task("Looped", BoardColumn::InReview).await;
+    let plain = f.task("Plain", BoardColumn::InReview).await;
+    f.run_row(RunRow::new(&looped, 1).window(-300, Some(-250)))
+        .await;
+    f.run_row(
+        RunRow::new(&looped, 2)
+            .kind(RunKind::Review)
+            .window(-240, Some(-230)),
+    )
+    .await;
+    f.run_row(
+        RunRow::new(&looped, 3)
+            .kind(RunKind::Fix)
+            .window(-220, Some(-200)),
+    )
+    .await;
+    let review_run = format!("run-{looped}-2");
+    f.finding(&looped, &review_run, 0, "open").await;
+    f.finding(&looped, &review_run, 1, "fixed").await;
+    f.finding(&looped, &review_run, 2, "open").await;
+    f.run_row(RunRow::new(&plain, 1).window(-100, Some(-90)))
+        .await;
+
+    let digest = review::digest(f.ctx()).await.expect("digest");
+
+    let looped_entries: Vec<&DigestEntry> = digest
+        .entries
+        .iter()
+        .filter(|entry| entry.task_id == looped)
+        .collect();
+    assert_eq!(looped_entries.len(), 1, "one entry, not one per run");
+    let entry = looped_entries[0];
+    assert_eq!(entry.outcome, DigestOutcome::Completed);
+    assert_eq!(entry.runs, 3);
+    assert_eq!(entry.last_run_id, Some(format!("run-{looped}-3")));
+    assert_eq!(entry.last_run_kind, Some(RunKind::Fix));
+    assert_eq!(
+        entry.review_loop,
+        Some(review::DigestLoop {
+            reviews_since_implementation: 1,
+            open_findings: 2,
+        }),
+    );
+    let plain_entry = digest
+        .entries
+        .iter()
+        .find(|entry| entry.task_id == plain)
+        .expect("the plain task's entry");
+    assert_eq!(plain_entry.last_run_kind, Some(RunKind::Implementation));
+    assert_eq!(plain_entry.review_loop, None);
+    assert_eq!(digest.totals.runs, 4, "the totals count runs of every kind");
+
+    // ADR-0021: the agent's door carries the same two fields.
+    let server = rimaia_core::mcp::RimaiaServer::new(
+        f.ctx().with_source(rimaia_core::db::MutationSource::Mcp),
+        rimaia_core::testing::doctor::environment(),
+        rimaia_core::testing::doctor::planner_access(),
+    );
+    let rmcp::handler::server::wrapper::Json(view) = server
+        .get_review_digest()
+        .await
+        .expect("the digest over MCP");
+    let wire = serde_json::to_value(&view).expect("a view serializes");
+    let looped_wire = wire["entries"]
+        .as_array()
+        .expect("entries")
+        .iter()
+        .find(|entry| entry["task_id"] == serde_json::json!(looped))
+        .expect("the looped task over MCP");
+    assert_eq!(looped_wire["last_run_kind"], serde_json::json!("fix"));
+    assert_eq!(
+        looped_wire["review_loop"],
+        serde_json::json!({ "reviews_since_implementation": 1, "open_findings": 2 }),
+    );
+    let plain_wire = wire["entries"]
+        .as_array()
+        .expect("entries")
+        .iter()
+        .find(|entry| entry["task_id"] == serde_json::json!(plain))
+        .expect("the plain task over MCP");
+    assert_eq!(
+        plain_wire["last_run_kind"],
+        serde_json::json!("implementation")
+    );
+    assert_eq!(plain_wire["review_loop"], serde_json::Value::Null);
 }
 
 #[tokio::test]
@@ -1442,9 +1541,10 @@ impl Fixture {
         sqlx::query(
             "INSERT INTO runs
                (id, task_id, attempt, status, session_id, prompt, started_at, ended_at,
-                exit_class, error_message, cost_usd, log_path, pr_url, base_ref, base_sha, head_sha)
+                exit_class, error_message, cost_usd, log_path, pr_url, base_ref, base_sha, head_sha,
+                kind)
              VALUES (?1, ?2, ?3, ?4, 'session', 'prompt', ?5, ?6, ?7, ?8, ?9, '/tmp/none.jsonl',
-                     ?10, ?11, ?12, ?13)",
+                     ?10, ?11, ?12, ?13, ?14)",
         )
         .bind(format!("run-{}-{}", row.task_id, row.attempt))
         .bind(&row.task_id)
@@ -1459,9 +1559,31 @@ impl Fixture {
         .bind(&row.base_ref)
         .bind(&row.base_sha)
         .bind(&row.head_sha)
+        .bind(row.kind)
         .execute(&self.ctx().pool)
         .await
         .expect("insert a run row");
+    }
+
+    /// One finding on `review_run_id`, written directly: the digest counts
+    /// rows, and how a reviewer writes them is `review::findings`' own test.
+    async fn finding(&self, task_id: &str, review_run_id: &str, ordinal: i64, status: &str) {
+        sqlx::query(
+            "INSERT INTO review_findings
+               (id, task_id, review_run_id, ordinal, severity, title, body, status, resolution,
+                created_at)
+             VALUES (?1, ?2, ?3, ?4, 'high', 'A finding', 'Why it matters.', ?5,
+                     CASE ?5 WHEN 'open' THEN NULL ELSE 'Done.' END, ?6)",
+        )
+        .bind(rimaia_core::db::new_id())
+        .bind(task_id)
+        .bind(review_run_id)
+        .bind(ordinal)
+        .bind(status)
+        .bind(test_epoch())
+        .execute(&self.ctx().pool)
+        .await
+        .expect("insert a finding");
     }
 }
 
@@ -1470,6 +1592,7 @@ impl Fixture {
 struct RunRow {
     task_id: String,
     attempt: i64,
+    kind: RunKind,
     status: &'static str,
     exit_class: Option<&'static str>,
     started_at: DateTime<Utc>,
@@ -1487,6 +1610,7 @@ impl RunRow {
         Self {
             task_id: task_id.to_string(),
             attempt,
+            kind: RunKind::Implementation,
             status: "succeeded",
             exit_class: Some("success"),
             started_at: test_epoch() - Duration::minutes(60),
@@ -1498,6 +1622,11 @@ impl RunRow {
             base_sha: None,
             head_sha: None,
         }
+    }
+
+    fn kind(mut self, kind: RunKind) -> Self {
+        self.kind = kind;
+        self
     }
 
     /// Minutes relative to the test epoch.

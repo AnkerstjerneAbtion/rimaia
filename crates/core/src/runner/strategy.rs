@@ -20,15 +20,14 @@
 //!
 //! # Why it has no `runs` row, no worktree and no branch
 //!
-//! No `runs` row, for three independent reasons and any one of them is enough:
-//! [`finish_run`](super::outcome::finish_run) calls `apply_to_task`, which on
-//! success moves the card to `in_review` — a planner that worked would end the
-//! task before it started. `idx_runs_task_attempt` is `UNIQUE(task_id, attempt)`
-//! and `start_run` computes `max(attempt) + 1`, so a strategy row would make
-//! `attempt` mean "attempts, and also the plannings", and seam-contract D12's
-//! card reads `last_run`, so the badge would show the planner's outcome instead
-//! of the implementation's. Distinguishing the two needs a `runs.kind` column,
-//! which is a fourth migration, which D17 exists to avoid.
+//! No `runs` row. `runs.kind` exists since task 035, and `'strategy'` is
+//! deliberately not one of its values (seam-contract D29 point 1), so the
+//! reasons this module once gave about telling a planner row apart from an
+//! implementation row are no longer what keeps it out. The reason that still
+//! holds is analytics: the planner's cost is already stamped on the proposal
+//! it writes, and `analytics` sums it from there as `planner_spend`, so a
+//! planner row would count that spend twice, once from the envelope and once
+//! from `runs`.
 //!
 //! The transcript still lands on disk, because
 //! [`Transcript::create`](super::events::Transcript::create) touches no

@@ -21,6 +21,17 @@
 //! ADR-0011 and ADR-0007's "failed tasks accumulate in `ready` unless the user
 //! acts" — the user acting *is* the thing that grants a new budget.
 //!
+//! # And so is the row's kind (seam-contract D29 point 3)
+//!
+//! From task 021 a task's rows mix implementation, review and fix runs, and the
+//! boundary is the first older row whose `(kind, session_id)` differs from the
+//! newest row's. Without the kind, a fix that resumes the implementation's
+//! session would keep spending the budget of the implementation before the
+//! review; with it, the review in between ends that budget, so each fix phase
+//! and each review gets its own. ADR-0011's "sharing the task's session id"
+//! now reads "sharing the newest row's kind and session id, with no other row
+//! in between" — still derived from the rows, still never a column.
+//!
 //! # Why the ending attempt is a parameter
 //!
 //! [`history`] is called at the one moment the newest row cannot answer for
@@ -36,8 +47,10 @@
 use chrono::{DateTime, Utc};
 
 use crate::context::ServiceContext;
-use crate::db::ExitClass;
+use crate::db::{ExitClass, RunKind};
 use crate::error::Result;
+use crate::runner::outcome::kind_not_wired_yet;
+use crate::runner::ResumeSession;
 use crate::scheduler::retry::AttemptHistory;
 
 /// The facts about the attempt that just ended which its own row cannot yet
@@ -52,6 +65,7 @@ pub struct Ending {
 /// One `runs` row, as far as the budget is concerned.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct AttemptRow {
+    kind: RunKind,
     session_id: String,
     /// NULL for a row that has not been closed out — the attempt that is
     /// ending, and any a crash left open.
@@ -73,25 +87,60 @@ pub async fn history(
     Ok(fold(&rows, ending))
 }
 
-/// The session a resume of `task_id` would continue, or `None` when there is
-/// nothing to continue.
+/// What a resume of a waiting task would continue: the newest row's kind and
+/// session (seam-contract D29 point 3).
 ///
-/// The newest attempt's session, which is the same one [`history`] counts
-/// backwards from — read separately because the queue needs it at claim time,
-/// after the decision has already been made and stored.
-pub async fn resumable_session(ctx: &ServiceContext, task_id: &str) -> Result<Option<String>> {
+/// The retry path resumes **the kind that was waiting**, so the kind travels
+/// with the session rather than being assumed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResumePoint {
+    pub kind: RunKind,
+    pub session_id: String,
+}
+
+/// The point a resume of `task_id` would continue from, or `None` when there
+/// is nothing to continue.
+///
+/// The newest row's, which is the same one [`history`] counts backwards from —
+/// read separately because the queue needs it at claim time, after the
+/// decision has already been made and stored.
+pub async fn resume_point(ctx: &ServiceContext, task_id: &str) -> Result<Option<ResumePoint>> {
     Ok(attempt_rows(ctx, task_id)
         .await?
         .into_iter()
         .next()
-        .map(|row| row.session_id))
+        .map(|row| ResumePoint {
+            kind: row.kind,
+            session_id: row.session_id,
+        }))
 }
 
-/// Newest attempt first. The order is what makes "count backwards while the
-/// session matches" a single pass.
+/// The resume an implementation run can make of `point`, decided **before**
+/// anything is claimed.
+///
+/// An implementation point becomes today's [`ResumeSession`], and no point
+/// stays none. A review or fix point is refused: resuming a reviewer as an
+/// implementer is the silent failure D29 exists to prevent, and task 021 is
+/// what wires those arms. This is the one place that refusal is spelled for a
+/// resume. Both callers apply it before `claim_retry`, so a refused resume has
+/// claimed nothing and leaves the task `waiting_retry` as it was.
+pub fn resume_as_implementation(point: Option<ResumePoint>) -> Result<Option<ResumeSession>> {
+    match point {
+        None => Ok(None),
+        Some(ResumePoint {
+            kind: RunKind::Implementation,
+            session_id,
+        }) => Ok(Some(ResumeSession { session_id })),
+        Some(ResumePoint { kind, .. }) => Err(kind_not_wired_yet(kind, "resumed")),
+    }
+}
+
+/// Newest row first, of every kind. The order is what makes "count backwards
+/// while the kind and session match" a single pass.
 async fn attempt_rows(ctx: &ServiceContext, task_id: &str) -> Result<Vec<AttemptRow>> {
     let rows = sqlx::query!(
-        r#"SELECT session_id AS "session_id!: String",
+        r#"SELECT kind AS "kind!: RunKind",
+                  session_id AS "session_id!: String",
                   exit_class AS "exit_class: ExitClass"
              FROM runs
             WHERE task_id = ?1
@@ -104,6 +153,7 @@ async fn attempt_rows(ctx: &ServiceContext, task_id: &str) -> Result<Vec<Attempt
     Ok(rows
         .into_iter()
         .map(|row| AttemptRow {
+            kind: row.kind,
             session_id: row.session_id,
             exit_class: row.exit_class,
         })
@@ -118,6 +168,7 @@ async fn attempt_rows(ctx: &ServiceContext, task_id: &str) -> Result<Vec<Attempt
 fn fold(rows: &[AttemptRow], ending: Ending) -> Option<AttemptHistory> {
     let (newest, older) = rows.split_first()?;
     let session_id = newest.session_id.clone();
+    let kind = newest.kind;
 
     let mut history = AttemptHistory {
         exit_class: ending.exit_class,
@@ -130,9 +181,10 @@ fn fold(rows: &[AttemptRow], ending: Ending) -> Option<AttemptHistory> {
 
     for row in older {
         // The boundary, and the whole of it: the first row from another session
-        // ends the budget, and everything before it is a previous night's
-        // history rather than this night's spend.
-        if row.session_id != session_id {
+        // or of another kind ends the budget, and everything before it is a
+        // previous night's history, or another phase's, rather than this
+        // phase's spend.
+        if row.session_id != session_id || row.kind != kind {
             break;
         }
 
@@ -160,7 +212,12 @@ mod tests {
     const OTHER_SESSION: &str = "0b6d3e2e-0000-4000-8000-00000000feed";
 
     fn row(session_id: &str, exit_class: Option<ExitClass>) -> AttemptRow {
+        kind_row(RunKind::Implementation, session_id, exit_class)
+    }
+
+    fn kind_row(kind: RunKind, session_id: &str, exit_class: Option<ExitClass>) -> AttemptRow {
         AttemptRow {
+            kind,
             session_id: session_id.to_string(),
             exit_class,
         }
@@ -200,6 +257,53 @@ mod tests {
             history.transient_attempts, 2,
             "the previous session's three failures are history, not budget",
         );
+    }
+
+    #[test]
+    fn a_row_of_another_kind_ends_the_budget_even_on_the_same_session() {
+        // A fix resuming the implementation's session with nothing between them:
+        // the session alone would let the fix inherit the implementation's two
+        // transient failures, and the kind is what ends that phase's count.
+        let rows = [
+            kind_row(RunKind::Fix, SESSION, None),
+            kind_row(RunKind::Implementation, SESSION, Some(ExitClass::Transient)),
+            kind_row(RunKind::Implementation, SESSION, Some(ExitClass::Transient)),
+        ];
+
+        let history = fold(&rows, ending(ExitClass::Transient)).expect("a task with runs");
+
+        assert_eq!(history.attempts_in_session, 1);
+        assert_eq!(history.transient_attempts, 1);
+    }
+
+    #[test]
+    fn only_an_implementation_point_resumes_as_an_implementation() {
+        assert_eq!(
+            resume_as_implementation(None).expect("nothing to resume"),
+            None
+        );
+        assert_eq!(
+            resume_as_implementation(Some(ResumePoint {
+                kind: RunKind::Implementation,
+                session_id: SESSION.to_string(),
+            }))
+            .expect("an implementation resumes"),
+            Some(ResumeSession {
+                session_id: SESSION.to_string(),
+            }),
+        );
+        for kind in [RunKind::Review, RunKind::Fix] {
+            let refusal = resume_as_implementation(Some(ResumePoint {
+                kind,
+                session_id: SESSION.to_string(),
+            }))
+            .expect_err("a review or fix is not resumed as an implementation");
+            assert!(
+                matches!(refusal, crate::error::Error::Invalid { .. }),
+                "{refusal:?}"
+            );
+            assert!(refusal.to_string().contains("task 021"), "{refusal}");
+        }
     }
 
     #[test]

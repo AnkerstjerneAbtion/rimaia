@@ -22,7 +22,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use pretty_assertions::assert_eq;
-use rimaia_core::db::{BoardColumn, ExitClass, Run, RunState, RunStatus};
+use rimaia_core::db::{BoardColumn, ExitClass, Run, RunKind, RunState, RunStatus};
 use rimaia_core::repo::{self, NewRepository};
 use rimaia_core::runner::events::TokenUsage;
 use rimaia_core::runner::outcome::{finish_run, start_run, NewRun, RunOutcome, SpawnedAs};
@@ -1001,6 +1001,7 @@ impl Fixture {
             &self.paths,
             NewRun {
                 task_id: self.task_id.clone(),
+                kind: RunKind::Implementation,
                 session_id: "0b6d3e2e-0000-4000-8000-00000000ba5e".to_string(),
                 prompt: "write the notes".to_string(),
                 base_ref: Some("main".to_string()),

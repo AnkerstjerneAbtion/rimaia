@@ -50,12 +50,14 @@ use std::time::Duration;
 
 use chrono::{DateTime, TimeDelta, Utc};
 use pretty_assertions::assert_eq;
-use rimaia_core::db::{BoardColumn, ExitClass, RunState, RunStatus, ScheduleMode, Task};
+use rimaia_core::db::{BoardColumn, ExitClass, RunKind, RunState, RunStatus, ScheduleMode, Task};
 use rimaia_core::repo::{self, NewRepository};
 use rimaia_core::runner::events::RunTail;
-use rimaia_core::runner::outcome::{start_run, NewRun};
+use rimaia_core::runner::events::TokenUsage;
+use rimaia_core::runner::outcome::{finish_run, start_run, NewRun, RunOutcome, SpawnedAs};
 use rimaia_core::runner::prompt::compose_resume_prompt;
 use rimaia_core::runner::{run_task, CancelSignal, RunRequest, RunTrigger, RunnerConfig};
+use rimaia_core::runs::bundle::RunCapture;
 use rimaia_core::schedule::window::RunWindow;
 use rimaia_core::schedule::{self as scheduler_schedule, ScheduleInput};
 use rimaia_core::scheduler::{
@@ -63,8 +65,8 @@ use rimaia_core::scheduler::{
 };
 use rimaia_core::startup;
 use rimaia_core::tasks::{self, NewTask, TaskFilter, TaskSummary};
-use rimaia_core::testing::{open_gate as open, FakeCli, TempRepo, TestContext};
-use rimaia_core::{AppPaths, ChangeEvent, Clock, ServiceContext};
+use rimaia_core::testing::{self, open_gate as open, FakeCli, TempRepo, TestContext};
+use rimaia_core::{AppPaths, ChangeEvent, Clock, ErrorCode, ServiceContext};
 use tempfile::TempDir;
 use tokio::sync::broadcast::Receiver;
 
@@ -1522,6 +1524,7 @@ async fn reopening_after_a_crash_shows_one_interrupted_task_and_leaves_the_rest_
         &fixture.paths,
         NewRun {
             task_id: crashed.clone(),
+            kind: RunKind::Implementation,
             session_id: "0b6d3e2e-0000-4000-8000-00000000c0de".to_string(),
             prompt: "implement the plan".to_string(),
             base_ref: None,
@@ -1678,6 +1681,7 @@ async fn reconciling_a_task_another_repair_already_settled_still_closes_its_run(
         &fixture.paths,
         NewRun {
             task_id: crashed.clone(),
+            kind: RunKind::Implementation,
             session_id: "0b6d3e2e-0000-4000-8000-00000000feed".to_string(),
             prompt: "implement the plan".to_string(),
             base_ref: None,
@@ -1777,6 +1781,7 @@ async fn a_launch_offers_a_crashed_run_for_resume_and_starts_nothing_until_the_q
         &fixture.paths,
         NewRun {
             task_id: crashed.clone(),
+            kind: RunKind::Implementation,
             session_id: SESSION.to_string(),
             prompt: "implement the plan".to_string(),
             // Task 011's column. These runs stand in for attempts a crash
@@ -2363,7 +2368,8 @@ async fn assert_a_wall_holds_every_other_start(mut fixture: Fixture) {
 #[tokio::test]
 async fn retry_now_starts_a_waiting_task_before_its_deadline() {
     // The operator's override. This drives the two core calls the
-    // `retry_task_now` command makes — `claim_retry` and `resumable_session` —
+    // `retry_task_now` command makes — `resume_point` with
+    // `resume_as_implementation`, then `claim_retry` —
     // for the same reason `a_starter_that_claims_before_it_spawns_never_produces_a_second_process`
     // does: `src-tauri` has no test harness of its own, so the closest thing to
     // a regression test for the button is the core pair it is thin over.
@@ -2392,16 +2398,21 @@ async fn retry_now_starts_a_waiting_task_before_its_deadline() {
         .expect("a scheduled resume");
     assert!(due > fixture.harness.clock.now());
 
+    // The command's order: the resume point is read and checked before the
+    // claim, so a refused resume would have claimed nothing.
+    let point = scheduler::resume_point(fixture.ctx(), &task_id)
+        .await
+        .expect("read the resume point");
+    let session = scheduler::resume_as_implementation(point)
+        .expect("an implementation resumes as one")
+        .expect("a task with attempts has one")
+        .session_id;
     assert_eq!(
         scheduler::claim_retry(fixture.ctx(), &task_id)
             .await
             .expect("claim the waiting task"),
         ClaimOutcome::Claimed,
     );
-    let session = scheduler::resumable_session(fixture.ctx(), &task_id)
-        .await
-        .expect("read the session")
-        .expect("a task with attempts has one");
     run_task(
         fixture.ctx(),
         &fixture.paths,
@@ -2481,6 +2492,244 @@ async fn giving_up_lands_a_waiting_task_in_failed() {
     );
 
     queue.shutdown();
+}
+
+// ---------------------------------------------------------------------------
+// Run kinds and the retry budget (seam-contract D29 point 3)
+// ---------------------------------------------------------------------------
+
+const IMPLEMENTATION_SESSION: &str = "0b6d3e2e-0000-4000-8000-0000000001a1";
+
+#[tokio::test]
+async fn a_review_between_two_fix_phases_ends_the_first_fix_phases_budget() {
+    // Each fix phase gets its own budget, even though every fix resumes the
+    // implementation's session: the review row between two phases ends the
+    // first one's count.
+    let fixture = Fixture::new().await;
+    let task_id = fixture.add_task("Looped").await;
+    walk_to(&fixture, &task_id, RunState::Running).await;
+    let implementation = open_row(
+        &fixture,
+        &task_id,
+        RunKind::Implementation,
+        IMPLEMENTATION_SESSION,
+    )
+    .await;
+    finish_implementation(&fixture, &implementation, ExitClass::Success, None).await;
+
+    let review = open_row(&fixture, &task_id, RunKind::Review, "review-session-1").await;
+    close_loop_row(&fixture, &review, RunStatus::Succeeded, ExitClass::Success).await;
+    for _ in 0..2 {
+        let fix = open_row(&fixture, &task_id, RunKind::Fix, IMPLEMENTATION_SESSION).await;
+        close_loop_row(&fixture, &fix, RunStatus::Failed, ExitClass::Transient).await;
+    }
+    let review = open_row(&fixture, &task_id, RunKind::Review, "review-session-2").await;
+    close_loop_row(&fixture, &review, RunStatus::Succeeded, ExitClass::Success).await;
+    let fix = open_row(&fixture, &task_id, RunKind::Fix, IMPLEMENTATION_SESSION).await;
+    close_loop_row(&fixture, &fix, RunStatus::Failed, ExitClass::Transient).await;
+    open_row(&fixture, &task_id, RunKind::Fix, IMPLEMENTATION_SESSION).await;
+
+    let history = scheduler::attempt_history(
+        fixture.ctx(),
+        &task_id,
+        scheduler::Ending {
+            exit_class: ExitClass::Transient,
+            usage_limit_resets_at: None,
+        },
+    )
+    .await
+    .expect("read the history")
+    .expect("a task with runs");
+
+    assert_eq!(history.session_id, IMPLEMENTATION_SESSION);
+    assert_eq!(
+        history.attempts_in_session, 2,
+        "the second fix phase's two rows, and not the first phase's two"
+    );
+    assert_eq!(history.transient_attempts, 2);
+}
+
+#[tokio::test]
+async fn a_fix_that_resumes_the_implementation_session_gets_its_own_budget() {
+    // The implementation spent one transient retry before it succeeded. A fix
+    // resuming that same session, after a review, starts with none spent.
+    let fixture = Fixture::new().await;
+    let task_id = fixture.add_task("Fixed").await;
+    walk_to(&fixture, &task_id, RunState::Running).await;
+    let first = open_row(
+        &fixture,
+        &task_id,
+        RunKind::Implementation,
+        IMPLEMENTATION_SESSION,
+    )
+    .await;
+    let resume_after = fixture.harness.clock.now() + TimeDelta::minutes(1);
+    finish_implementation(&fixture, &first, ExitClass::Transient, Some(resume_after)).await;
+    tasks::set_run_state(fixture.ctx(), &task_id, RunState::Running)
+        .await
+        .expect("the retry's own edge");
+    let second = open_row(
+        &fixture,
+        &task_id,
+        RunKind::Implementation,
+        IMPLEMENTATION_SESSION,
+    )
+    .await;
+    finish_implementation(&fixture, &second, ExitClass::Success, None).await;
+    let review = open_row(&fixture, &task_id, RunKind::Review, "review-session").await;
+    close_loop_row(&fixture, &review, RunStatus::Succeeded, ExitClass::Success).await;
+    open_row(&fixture, &task_id, RunKind::Fix, IMPLEMENTATION_SESSION).await;
+
+    let history = scheduler::attempt_history(
+        fixture.ctx(),
+        &task_id,
+        scheduler::Ending {
+            exit_class: ExitClass::Transient,
+            usage_limit_resets_at: None,
+        },
+    )
+    .await
+    .expect("read the history")
+    .expect("a task with runs");
+
+    assert_eq!(history.session_id, IMPLEMENTATION_SESSION);
+    assert_eq!(history.attempts_in_session, 1);
+    assert_eq!(
+        history.transient_attempts, 1,
+        "only the fix's own ending; the implementation's retry is its phase's"
+    );
+}
+
+#[tokio::test]
+async fn a_waiting_review_resumes_as_a_review_and_not_as_an_implementation() {
+    let mut fixture = Fixture::new().await;
+    let other_repository = fixture.register_repository(true).await;
+    let reviewed = fixture.add_task("Reviewed").await;
+    let ready = fixture.add_task_in(&other_repository, "Ready").await;
+
+    // A review that hit a transient wall and is due to be resumed, written the
+    // way task 021's review arm will leave it: the row closed with a deadline,
+    // and the task on ADR-0011's `running -> waiting_retry` edge. The card stays
+    // in `ready`, which is where the queue looks for a due retry.
+    walk_to(&fixture, &reviewed, RunState::Running).await;
+    let review = open_row(&fixture, &reviewed, RunKind::Review, "review-session").await;
+    let due = fixture.harness.clock.now() - TimeDelta::minutes(1);
+    testing::runs::close_run(
+        fixture.ctx(),
+        &review,
+        RunStatus::Failed,
+        ExitClass::Transient,
+        Some(due),
+    )
+    .await;
+    tasks::set_run_state(fixture.ctx(), &reviewed, RunState::WaitingRetry)
+        .await
+        .expect("the review is waiting to be retried");
+    let before = fixture
+        .detail(&reviewed)
+        .await
+        .last_run
+        .expect("the review row");
+
+    // The resume point says what was waiting, and the one function that turns
+    // it into an implementation resume refuses it.
+    let point = scheduler::resume_point(fixture.ctx(), &reviewed)
+        .await
+        .expect("read the resume point")
+        .expect("a task with runs");
+    assert_eq!(point.kind, RunKind::Review);
+    assert_eq!(point.session_id, "review-session");
+    let refusal = scheduler::resume_as_implementation(Some(point))
+        .expect_err("a review is not resumed as an implementation");
+    assert_eq!(refusal.code(), ErrorCode::Invalid);
+    assert_eq!(
+        refusal.to_string(),
+        "a review run cannot be resumed yet: review and fix runs arrive with task 021",
+    );
+
+    // One queue pass with room for both: the refused entry is skipped, and the
+    // other task's implementation run still starts.
+    fixture.set_parallel(2).await;
+    let mut changes = fixture.ctx().subscribe();
+    let queue = fixture.spawn_queue();
+    queue.start().await.expect("start the queue");
+    wait_until_in_review(&fixture, &mut changes, &ready).await;
+
+    assert_eq!(fixture.cli.attempts(&ready), 1);
+    assert_eq!(
+        fixture.cli.attempts(&reviewed),
+        0,
+        "no child for the review"
+    );
+    let after = fixture.detail(&reviewed).await;
+    assert_eq!(after.task.run_state, RunState::WaitingRetry);
+    assert_eq!(
+        after.last_run.as_ref(),
+        Some(&before),
+        "the review row and its resume_after are untouched",
+    );
+    assert_eq!(before.resume_after, Some(due));
+
+    queue.shutdown();
+}
+
+/// Opens a row of `kind` on `task_id` through `start_run`, the one writer.
+async fn open_row(fixture: &Fixture, task_id: &str, kind: RunKind, session_id: &str) -> String {
+    start_run(
+        fixture.ctx(),
+        &fixture.paths,
+        NewRun {
+            task_id: task_id.to_string(),
+            kind,
+            session_id: session_id.to_string(),
+            prompt: "a prompt".to_string(),
+            base_ref: None,
+            base_sha: None,
+        },
+    )
+    .await
+    .expect("open a run row")
+    .id
+}
+
+/// Closes an implementation row through `finish_run`, which lands the task.
+async fn finish_implementation(
+    fixture: &Fixture,
+    run_id: &str,
+    exit_class: ExitClass,
+    resume_after: Option<DateTime<Utc>>,
+) {
+    let status = match exit_class {
+        ExitClass::Success => RunStatus::Succeeded,
+        ExitClass::Interrupted => RunStatus::Interrupted,
+        ExitClass::Cancelled => RunStatus::Cancelled,
+        _ => RunStatus::Failed,
+    };
+    finish_run(
+        fixture.ctx(),
+        run_id,
+        &RunOutcome {
+            exit_class,
+            status,
+            error_message: None,
+            num_turns: Some(1),
+            cost_usd: Some(0.1),
+            duration_ms: None,
+            pr_url: None,
+            usage_limit_resets_at: None,
+            resume_after,
+            spawned_as: SpawnedAs::default(),
+            usage: TokenUsage::default(),
+        },
+        &RunCapture::default(),
+    )
+    .await
+    .expect("close an implementation row");
+}
+
+/// Closes a review or fix row, which `finish_run` refuses until task 021.
+async fn close_loop_row(fixture: &Fixture, run_id: &str, status: RunStatus, class: ExitClass) {
+    testing::runs::close_run(fixture.ctx(), run_id, status, class, None).await;
 }
 
 /// Resolves once `task_id` is waiting out a retry.
@@ -2974,6 +3223,7 @@ async fn a_schedule_firing_tonight_does_not_resume_a_run_last_night_crashed_on()
         &fixture.paths,
         NewRun {
             task_id: crashed.clone(),
+            kind: RunKind::Implementation,
             session_id: SESSION.to_string(),
             prompt: "implement the plan".to_string(),
             // Task 011's column. These runs stand in for attempts a crash
@@ -3063,6 +3313,7 @@ async fn a_schedule_that_does_open_a_window_resumes_exactly_what_start_would() {
         &fixture.paths,
         NewRun {
             task_id: crashed.clone(),
+            kind: RunKind::Implementation,
             session_id: SESSION.to_string(),
             prompt: "implement the plan".to_string(),
             // Task 011's column. These runs stand in for attempts a crash

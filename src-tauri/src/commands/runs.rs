@@ -21,9 +21,9 @@
 use std::path::Path;
 
 use chrono::{DateTime, Utc};
-use rimaia_core::db::{Run, RunStatus};
+use rimaia_core::db::{Run, RunKind, RunStatus};
 use rimaia_core::runner::events::RunTail;
-use rimaia_core::runner::{probe_cli, run_task, ResumeSession, RunRequest, RunTrigger};
+use rimaia_core::runner::{probe_cli, run_task, RunRequest, RunTrigger};
 use rimaia_core::runs::transcript::{self, SearchHit, TranscriptPage};
 use rimaia_core::runs::{self, PruneCriterion, PruneResult, RunDetail, RunFilter, RunListEntry};
 use rimaia_core::scheduler::{self, ClaimOutcome, LeaseOwner};
@@ -168,9 +168,10 @@ pub async fn start_task_run(state: State<'_, AppState>, task_id: String) -> Resu
 /// A task whose runs have been pruned away resumes as a fresh session, because
 /// there is nothing left to continue.
 ///
-/// The same two calls in the same order as `start_task_run` — lease, probe,
+/// The same calls in the same order as `start_task_run` — lease, probe,
 /// claim, spawn — with `claim_retry` in place of `claim` because the task is in
-/// `waiting_retry` and that is the edge ADR-0007 gives it.
+/// `waiting_retry` and that is the edge ADR-0007 gives it, and with the resume
+/// point read and checked before the claim rather than after it.
 #[tauri::command]
 pub async fn retry_task_now(state: State<'_, AppState>, task_id: String) -> Result<()> {
     let context = state.context.clone();
@@ -188,6 +189,14 @@ pub async fn retry_task_now(state: State<'_, AppState>, task_id: String) -> Resu
     repo::ensure_unattended_runs_allowed(&repository)?;
     probe_cli(config.provider.as_ref(), &config.program).await?;
 
+    // Before the claim (seam-contract D29 point 3): a review or fix waiting to
+    // be resumed is refused here, with the task still `waiting_retry` and its
+    // row and `resume_after` untouched. Refused after the claim, it would have
+    // to be released, which moves it to `failed`. Safe to read first because
+    // the lease above is held, so nothing else can start a run of this task.
+    let point = scheduler::resume_point(&context, &task_id).await?;
+    let resume = scheduler::resume_as_implementation(point)?;
+
     if scheduler::claim_retry(&context, &task_id).await? == ClaimOutcome::Lost {
         return Err(Error::invalid(
             "this task is not waiting to be retried; the queue may have already picked it up, \
@@ -195,9 +204,6 @@ pub async fn retry_task_now(state: State<'_, AppState>, task_id: String) -> Resu
         ));
     }
 
-    let resume = scheduler::resumable_session(&context, &task_id)
-        .await?
-        .map(|session_id| ResumeSession { session_id });
     let paths = state.paths.clone();
     let request = RunRequest {
         task_id: task_id.clone(),
@@ -277,6 +283,8 @@ pub struct RunFilterInput {
     #[serde(default)]
     pub status: Option<RunStatus>,
     #[serde(default)]
+    pub kind: Option<RunKind>,
+    #[serde(default)]
     pub since: Option<DateTime<Utc>>,
     #[serde(default)]
     pub until: Option<DateTime<Utc>>,
@@ -295,6 +303,7 @@ pub async fn list_runs(
         RunFilter {
             repository_id: filter.repository_id,
             status: filter.status,
+            kind: filter.kind,
             since: filter.since,
             until: filter.until,
         },

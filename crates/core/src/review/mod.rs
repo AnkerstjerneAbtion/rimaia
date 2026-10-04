@@ -22,7 +22,9 @@ use crate::tasks::service::fetch_task_row;
 use chrono::{DateTime, Utc};
 
 pub use actions::{approve, reject, request_changes, ReviewOutcome};
-pub use digest::{digest, mark_seen, Digest, DigestEntry, DigestOutcome, DigestTotals};
+pub use digest::{
+    digest, mark_seen, Digest, DigestEntry, DigestLoop, DigestOutcome, DigestTotals,
+};
 pub use note::Verdict;
 
 /// One task that depends directly on the task under review.

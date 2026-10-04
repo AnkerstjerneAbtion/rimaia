@@ -71,7 +71,7 @@ use crate::credentials::inject::ChildEnvironment;
 use crate::credentials::CredentialAccess;
 use crate::db::settings::{self, RunEnvironment};
 use crate::db::Repository;
-use crate::db::{new_id, ExitClass, Run, RunState, RunStatus, Task};
+use crate::db::{new_id, ExitClass, Run, RunKind, RunState, RunStatus, Task};
 use crate::error::{Error, Result};
 use crate::mcp::RunHandles;
 use crate::paths::AppPaths;
@@ -941,6 +941,7 @@ pub async fn run_task(
         paths,
         NewRun {
             task_id: task_id.clone(),
+            kind: RunKind::Implementation,
             session_id: conversation.clone(),
             prompt: prompt.clone(),
             // ADR-0008: what this attempt was actually branched from, taken off

@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO runs (id, task_id, attempt, status, session_id, prompt, started_at, log_path)\n         VALUES (?1, ?2, 1, 'running', 'session', 'prompt', ?3, '/tmp/log.jsonl')",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": []
+  },
+  "hash": "330f84470181aa3b6de021d1f13a5f52a1226225cbc761352f2511c4617094db"
+}

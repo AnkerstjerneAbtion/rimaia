@@ -17,8 +17,9 @@
 use chrono::{DateTime, Utc};
 use pretty_assertions::assert_eq;
 use rimaia_core::db::{
-    self, new_id, BoardColumn, ExitClass, MutationSource, Repository, Run, RunState, RunStatus,
-    Schedule, ScheduleMode, Setting, StrategyMode, StrategySource, Task, TaskDependency, TaskLink,
+    self, new_id, BoardColumn, ExitClass, MutationSource, Repository, Run, RunKind, RunState,
+    RunStatus, Schedule, ScheduleMode, Setting, StrategyMode, StrategySource, Task, TaskDependency,
+    TaskLink,
 };
 use rimaia_core::testing::test_pool;
 use serde::Serialize;
@@ -55,12 +56,14 @@ async fn a_fresh_database_gets_every_table_the_schema_declares() {
     // Read off ADR-0003's table list, not off the migration file, so this fails the way
     // an acceptance criterion should: by naming what is missing or extra, not by echoing
     // the SQL back at itself. `review_bundles` is ADR-0033 point 7's, added by task 033
-    // as seam-contract D28 part 6 declares it.
+    // as seam-contract D28 part 6 declares it, and `review_findings` ADR-0017's, added
+    // by task 035 the same way.
     assert_eq!(
         tables,
         vec![
             "repositories",
             "review_bundles",
+            "review_findings",
             "runs",
             "schedules",
             "settings",
@@ -447,6 +450,7 @@ async fn a_run_round_trips_every_field_exactly() {
             id: id.clone(),
             task_id: task_id.clone(),
             attempt: 2,
+            kind: RunKind::Implementation,
             status: RunStatus::Failed,
             session_id: "session-9".to_string(),
             prompt: "implement the thing".to_string(),
@@ -513,6 +517,7 @@ async fn a_run_round_trips_while_still_in_flight() {
             id: id.clone(),
             task_id: task_id.clone(),
             attempt: 1,
+            kind: RunKind::Implementation,
             status: RunStatus::Running,
             session_id: "session-1".to_string(),
             prompt: "implement the thing".to_string(),
@@ -926,6 +931,67 @@ async fn an_unrecognised_exit_class_is_refused() {
     let result = sqlx::query!(
         "INSERT INTO runs (id, task_id, attempt, status, session_id, prompt, started_at, exit_class, log_path)
          VALUES (?1, ?2, 1, 'failed', 'session', 'prompt', ?3, 'timeout', '/tmp/log.jsonl')",
+        id,
+        task_id,
+        NOW,
+    )
+    .execute(&pool)
+    .await;
+
+    assert_check_violation(result);
+}
+
+#[tokio::test]
+async fn runs_recorded_before_kinds_existed_read_as_implementation() {
+    // The migration's `DEFAULT 'implementation'` is what backfills every row
+    // written before task 035, and this insert, which names no kind, stands in
+    // for each of them. The backfill is the fact rather than a guess: before
+    // the column a run could only be an implementation attempt (D29 point 1).
+    let pool = test_pool().await;
+    let repository_id = insert_repository(&pool).await;
+    let task_id = insert_task(&pool, &repository_id, BoardColumn::Ready, RunState::Idle).await;
+    let id = new_id();
+    sqlx::query!(
+        "INSERT INTO runs (id, task_id, attempt, status, session_id, prompt, started_at, log_path)
+         VALUES (?1, ?2, 1, 'running', 'session', 'prompt', ?3, '/tmp/log.jsonl')",
+        id,
+        task_id,
+        NOW,
+    )
+    .execute(&pool)
+    .await
+    .expect("a row that names no kind");
+
+    assert_eq!(fetch_run(&pool, &id).await.kind, RunKind::Implementation);
+
+    // One attempt sequence per task across every kind (D29 point 2): the index
+    // the first migration created is exactly the index the database still has.
+    let index: String = sqlx::query_scalar!(
+        r#"SELECT sql AS "sql!" FROM sqlite_master
+            WHERE type = 'index' AND name = 'idx_runs_task_attempt'"#
+    )
+    .fetch_one(&pool)
+    .await
+    .expect("read the index back");
+    let created_by =
+        include_str!("../../../src-tauri/migrations/20260820120000_initial_schema.sql")
+            .lines()
+            .find(|line| line.contains("INDEX idx_runs_task_attempt"))
+            .expect("the initial schema creates the index");
+    assert_eq!(format!("{index};"), created_by);
+}
+
+#[tokio::test]
+async fn the_runs_table_refuses_a_strategy_kind() {
+    // The planner writes no row (D17.5), and the column refuses its word.
+    let pool = test_pool().await;
+    let repository_id = insert_repository(&pool).await;
+    let task_id = insert_task(&pool, &repository_id, BoardColumn::Ready, RunState::Idle).await;
+    let id = new_id();
+
+    let result = sqlx::query!(
+        "INSERT INTO runs (id, task_id, attempt, kind, status, session_id, prompt, started_at, log_path)
+         VALUES (?1, ?2, 1, 'strategy', 'running', 'session', 'prompt', ?3, '/tmp/log.jsonl')",
         id,
         task_id,
         NOW,
@@ -1413,7 +1479,8 @@ async fn fetch_task_dependency(
 async fn fetch_run(pool: &SqlitePool, id: &str) -> Run {
     sqlx::query_as!(
         Run,
-        r#"SELECT id, task_id, attempt, status AS "status: RunStatus", session_id, prompt,
+        r#"SELECT id, task_id, attempt, kind AS "kind: RunKind", status AS "status: RunStatus",
+            session_id, prompt,
             started_at AS "started_at: DateTime<Utc>", ended_at AS "ended_at: DateTime<Utc>",
             exit_class AS "exit_class: ExitClass", error_message, num_turns, cost_usd, log_path,
             pr_url, resume_after AS "resume_after: DateTime<Utc>", base_ref,

@@ -66,7 +66,7 @@ use sqlx::sqlite::SqliteRow;
 use sqlx::{FromRow, Row};
 
 use crate::context::ServiceContext;
-use crate::db::{Run, RunStatus};
+use crate::db::{Run, RunKind, RunStatus};
 use crate::error::{Error, Result};
 use crate::paths::AppPaths;
 use crate::worktree::{CommitSummary, DiffStat};
@@ -119,6 +119,9 @@ impl<'r> FromRow<'r, SqliteRow> for RunListEntry {
 pub struct RunFilter {
     pub repository_id: Option<String>,
     pub status: Option<RunStatus>,
+    /// What the runs were for. `None` is every kind (seam-contract D29
+    /// point 6): the Runs view is a history, and a history leaves nothing out.
+    pub kind: Option<RunKind>,
     /// Matches a run started at or after this instant.
     pub since: Option<DateTime<Utc>>,
     /// Matches a run started strictly *before* this instant.
@@ -157,6 +160,9 @@ pub async fn list_runs(ctx: &ServiceContext, filter: RunFilter) -> Result<Vec<Ru
     if filter.status.is_some() {
         sql.push_str(" AND r.status = ?");
     }
+    if filter.kind.is_some() {
+        sql.push_str(" AND r.kind = ?");
+    }
     if filter.since.is_some() {
         sql.push_str(" AND r.started_at >= ?");
     }
@@ -171,6 +177,9 @@ pub async fn list_runs(ctx: &ServiceContext, filter: RunFilter) -> Result<Vec<Ru
     }
     if let Some(status) = filter.status {
         query = query.bind(status);
+    }
+    if let Some(kind) = filter.kind {
+        query = query.bind(kind);
     }
     if let Some(since) = filter.since {
         query = query.bind(since);
@@ -769,6 +778,17 @@ mod tests {
         id
     }
 
+    /// Re-labels a seeded row's kind. `seed_run` names no kind, which is the
+    /// column default (D29 point 1); review and fix rows say so here.
+    async fn set_kind(ctx: &ServiceContext, run_id: &str, kind: RunKind) {
+        sqlx::query("UPDATE runs SET kind = ?1 WHERE id = ?2")
+            .bind(kind)
+            .bind(run_id)
+            .execute(&ctx.pool)
+            .await
+            .expect("set a run's kind");
+    }
+
     /// An [`AppPaths`] rooted at a test's own temp directory.
     ///
     /// The row-based half of pruning takes absolute `log_path`s off the rows
@@ -1080,6 +1100,7 @@ mod tests {
             RunFilter {
                 repository_id: Some(first_repo.clone()),
                 status: Some(RunStatus::Succeeded),
+                kind: None,
                 since: Some("2026-08-10T00:00:00Z".parse().expect("literal timestamp")),
                 until: None,
             },
@@ -1482,5 +1503,48 @@ mod tests {
             "a run still in flight keeps the transcript it is writing to",
         );
         assert!(other_task_log.exists(), "another task's log is untouched");
+    }
+
+    #[tokio::test]
+    async fn pruning_a_task_removes_its_review_and_fix_transcripts_too() {
+        // D29 point 6: pruning reads the whole history. A kind filter here
+        // would leave review and fix transcripts nothing could ever prune.
+        let h = TestContext::new().await;
+        let dir = tempfile::tempdir().expect("temp dir");
+        let now = h.context.clock.now();
+        let repository_id = seed_repository(&h.context, "rimaia").await;
+        let task_id = seed_task(&h.context, &repository_id, "Looped").await;
+
+        let mut logs = Vec::new();
+        for (attempt, kind) in [
+            (1, RunKind::Implementation),
+            (2, RunKind::Review),
+            (3, RunKind::Fix),
+        ] {
+            let log = dir.path().join(format!("attempt-{attempt}.jsonl"));
+            std::fs::write(&log, "{}\n").expect("write log");
+            let run_id = seed_run(
+                &h.context,
+                &task_id,
+                attempt,
+                RunStatus::Succeeded,
+                Some(ExitClass::Success),
+                now,
+                true,
+                log.to_str().expect("temp path is UTF-8"),
+            )
+            .await;
+            set_kind(&h.context, &run_id, kind).await;
+            logs.push(log);
+        }
+
+        let result = prune_logs(&h.context, &paths_at(&dir), PruneCriterion::Task(task_id))
+            .await
+            .expect("prune");
+
+        assert_eq!(result.runs_pruned, 3);
+        for log in &logs {
+            assert!(!log.exists(), "{} is pruned", log.display());
+        }
     }
 }

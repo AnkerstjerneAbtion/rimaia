@@ -5,6 +5,11 @@
 //! row in the window, so a failure that was retried and then succeeded is one
 //! `Completed` entry that says it took two runs. Rows only: no git, no worktree,
 //! because in team mode the board has no worktree (ADR-0033 point 7).
+//!
+//! A task's newest row may be a review or a fix (ADR-0017). The entry says
+//! which in `last_run_kind`, and its loop numbers are derived from the rows in
+//! `review_loop`, never stored (D29 point 8). The totals stay over runs, of
+//! every kind, as D29 point 7 counts spend.
 
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -14,7 +19,7 @@ use serde::Serialize;
 use sqlx::SqliteConnection;
 
 use crate::context::ServiceContext;
-use crate::db::{settings, BoardColumn, RunState, RunStatus};
+use crate::db::{settings, BoardColumn, RunKind, RunState, RunStatus};
 use crate::error::{Error, Result};
 use crate::events::ChangeEvent;
 use crate::repo;
@@ -84,6 +89,24 @@ pub struct DigestEntry {
     pub blocking_title: Option<String>,
     /// `Skipped` entries only.
     pub skip_reason: Option<SkipReason>,
+    /// The kind of the newest row, the one [`outcome`](Self::outcome) is taken
+    /// from. `None` for an entry with no row in the window. A succeeded review
+    /// is `Completed` with `Some(Review)`; what that means for the card is task
+    /// 021's.
+    pub last_run_kind: Option<RunKind>,
+    /// Where the task's review loop stands, or `None` when it has none.
+    pub review_loop: Option<DigestLoop>,
+}
+
+/// A task's review loop, derived from its rows (D29 point 8).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DigestLoop {
+    /// Review rows after the task's newest implementation row: which loop the
+    /// task is on.
+    pub reviews_since_implementation: u32,
+    /// The task's `open` findings, of every loop.
+    pub open_findings: u32,
 }
 
 /// Run totals over every row that ended in the window, and entry counts.
@@ -183,6 +206,7 @@ struct WindowRun {
     id: String,
     task_id: String,
     attempt: i64,
+    kind: RunKind,
     status: RunStatus,
     started_at: DateTime<Utc>,
     ended_at: Option<DateTime<Utc>>,
@@ -208,7 +232,7 @@ pub async fn digest(ctx: &ServiceContext) -> Result<Digest> {
 
     let rows = sqlx::query_as!(
         WindowRun,
-        r#"SELECT r.id AS "id!", r.task_id, r.attempt,
+        r#"SELECT r.id AS "id!", r.task_id, r.attempt, r.kind AS "kind: RunKind",
                   r.status AS "status: RunStatus",
                   r.started_at AS "started_at: DateTime<Utc>",
                   r.ended_at AS "ended_at: DateTime<Utc>",
@@ -271,6 +295,11 @@ pub async fn digest(ctx: &ServiceContext) -> Result<Digest> {
         }
     }
 
+    let loops = review_loops(ctx).await?;
+    for (entry, _) in &mut entries {
+        entry.review_loop = loops.get(entry.task_id.as_str()).copied();
+    }
+
     entries.sort_by(|(left, left_task), (right, right_task)| -> Ordering {
         left.outcome
             .cmp(&right.outcome)
@@ -325,7 +354,47 @@ fn run_backed_entry(summary: &TaskSummary, rows: &[&WindowRun]) -> DigestEntry {
         pr_url: newest.pr_url.clone(),
         blocking_title: None,
         skip_reason: None,
+        last_run_kind: Some(newest.kind),
+        review_loop: None,
     }
+}
+
+/// Every unarchived task with a review loop to report, keyed by task id.
+///
+/// Over the task's whole history rather than the window: which loop a task is
+/// on does not depend on when the reviewer last looked. One query for the
+/// digest, not one per entry.
+async fn review_loops(ctx: &ServiceContext) -> Result<HashMap<String, DigestLoop>> {
+    let rows = sqlx::query!(
+        r#"SELECT id AS "task_id!", reviews AS "reviews!: i64", open AS "open!: i64"
+             FROM (SELECT t.id,
+                          (SELECT count(*) FROM runs r
+                            WHERE r.task_id = t.id AND r.kind = 'review'
+                              AND r.attempt > coalesce(
+                                  (SELECT max(i.attempt) FROM runs i
+                                    WHERE i.task_id = t.id AND i.kind = 'implementation'),
+                                  0)) AS reviews,
+                          (SELECT count(*) FROM review_findings f
+                            WHERE f.task_id = t.id AND f.status = 'open') AS open
+                     FROM tasks t
+                    WHERE t.archived_at IS NULL)
+            WHERE reviews > 0 OR open > 0"#,
+    )
+    .fetch_all(&ctx.pool)
+    .await?;
+
+    Ok(rows
+        .into_iter()
+        .map(|row| {
+            (
+                row.task_id,
+                DigestLoop {
+                    reviews_since_implementation: u32::try_from(row.reviews).unwrap_or(u32::MAX),
+                    open_findings: u32::try_from(row.open).unwrap_or(u32::MAX),
+                },
+            )
+        })
+        .collect())
 }
 
 /// A `ready` task the night did not touch, and why not. `skip_reason` is called,
@@ -362,6 +431,8 @@ fn context_entry(
         pr_url: None,
         blocking_title,
         skip_reason: skip,
+        last_run_kind: None,
+        review_loop: None,
     })
 }
 

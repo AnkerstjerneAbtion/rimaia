@@ -35,7 +35,7 @@
 use chrono::{DateTime, Utc};
 
 use crate::context::ServiceContext;
-use crate::db::{new_id, BoardColumn, ExitClass, Run, RunState, RunStatus};
+use crate::db::{new_id, BoardColumn, ExitClass, Run, RunKind, RunState, RunStatus};
 use crate::error::{Error, Result};
 use crate::events::ChangeEvent;
 use crate::paths::AppPaths;
@@ -607,9 +607,16 @@ fn is_pull_request_number(segment: &str) -> bool {
 /// the one-line continuation rather than a second copy of the composed prompt,
 /// and a morning reviewer reading four rows sees one long prompt and three
 /// one-liners: the sequence of walls the task hit.
+///
+/// No `Default`, on purpose (seam-contract D29 point 1): [`kind`](Self::kind)
+/// has no value that is right for a caller that forgot it, and the column's
+/// own `DEFAULT` would quietly record a forgotten review as an implementation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NewRun {
     pub task_id: String,
+    /// What the run is for. Written once, here, and never updated: `finish_run`
+    /// reads it off the row and never takes it from its caller.
+    pub kind: RunKind,
     pub session_id: String,
     /// The composed prompt, verbatim, stored as a copy (ADR-0009). Task 006's
     /// "editing base instructions does not alter any already-stored run prompt"
@@ -689,12 +696,13 @@ pub async fn start_run(ctx: &ServiceContext, paths: &AppPaths, new_run: NewRun) 
     // moment.
     sqlx::query!(
         r#"INSERT INTO runs
-            (id, task_id, attempt, status, session_id, prompt, started_at, log_path, base_ref,
-             base_sha)
-           VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)"#,
+            (id, task_id, attempt, kind, status, session_id, prompt, started_at, log_path,
+             base_ref, base_sha)
+           VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)"#,
         id,
         new_run.task_id,
         attempt,
+        new_run.kind,
         RunStatus::Running,
         new_run.session_id,
         new_run.prompt,
@@ -729,6 +737,15 @@ pub async fn start_run(ctx: &ServiceContext, paths: &AppPaths, new_run: NewRun) 
 /// Refuses a run that already ended: finalising twice would run the task-side
 /// transitions again from a state they no longer apply to.
 ///
+/// # What the row was for decides what closing it means (D29 point 9)
+///
+/// The kind is read off the row, never taken from the caller, and dispatched on
+/// **before anything is written**. Only the implementation arm exists yet. What
+/// a finished review or fix does to the task is ADR-0017's and task 021's, and
+/// until then both refuse without touching the row or the task. Refusing after
+/// the `UPDATE` instead would commit a closed row and leave the task `running`
+/// with no process and no retry deadline.
+///
 /// # What the worktree was left as (task 033)
 ///
 /// `capture` is what the runner measured in the worktree before calling this:
@@ -754,6 +771,12 @@ pub async fn finish_run(
         return Err(Error::invalid(format!(
             "run {run_id} has already been finalized"
         )));
+    }
+    match run.kind {
+        RunKind::Implementation => {}
+        RunKind::Review | RunKind::Fix => {
+            return Err(kind_not_wired_yet(run.kind, "finished"));
+        }
     }
 
     let pr_url = outcome.pr_url.as_deref();
@@ -810,6 +833,23 @@ pub async fn finish_run(
     apply_to_task(ctx, &run.task_id, outcome).await?;
 
     fetch_run_row(&ctx.pool, run_id).await
+}
+
+/// The refusal every review or fix arm returns until task 021 wires it.
+///
+/// One sentence for both places that meet such a row — a resume and a finish —
+/// so they cannot drift apart. `Error::invalid` rather than a new code
+/// (seam-contract D8): before 021 nothing writes a review or fix row, so only a
+/// test or a hand-edited board reaches it.
+pub(crate) fn kind_not_wired_yet(kind: RunKind, action: &str) -> Error {
+    let kind = match kind {
+        RunKind::Implementation => "an implementation",
+        RunKind::Review => "a review",
+        RunKind::Fix => "a fix",
+    };
+    Error::invalid(format!(
+        "{kind} run cannot be {action} yet: review and fix runs arrive with task 021"
+    ))
 }
 
 /// Inserts `capture`'s bundle, when it has one and a head commit to anchor it.
@@ -948,7 +988,8 @@ where
 {
     sqlx::query_as!(
         Run,
-        r#"SELECT id, task_id, attempt, status AS "status: RunStatus", session_id, prompt,
+        r#"SELECT id, task_id, attempt, kind AS "kind: RunKind", status AS "status: RunStatus",
+            session_id, prompt,
             started_at AS "started_at: DateTime<Utc>", ended_at AS "ended_at: DateTime<Utc>",
             exit_class AS "exit_class: ExitClass", error_message, num_turns, cost_usd, log_path,
             pr_url, resume_after AS "resume_after: DateTime<Utc>", base_ref,
@@ -1115,6 +1156,10 @@ pub struct RunCostSummary {
 /// **Median, not mean.** Run costs are wildly skewed — one $32 implementation
 /// sits beside a dozen runs under a dollar — and a mean would let a single
 /// outlier decide what the panel tells the user about every run they do.
+///
+/// Every kind counts (seam-contract D29 point 6): the setup cost this median is
+/// compared against is paid once per spawned session, whatever the session was
+/// for, and leaving out short review runs would understate it.
 ///
 /// Only runs that reported a cost count. A cancelled run that died before its
 /// `result` has `NULL` here, and treating that as zero would drag the answer

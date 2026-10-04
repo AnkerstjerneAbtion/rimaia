@@ -440,6 +440,7 @@ mod tests {
     fn waiting(resume_after: Option<DateTime<Utc>>) -> TaskSummary {
         TaskSummary {
             last_run: Some(LastRunSummary {
+                kind: crate::db::RunKind::Implementation,
                 status: RunStatus::Failed,
                 exit_class: Some(crate::db::ExitClass::UsageLimit),
                 ended_at: Some(at("2026-08-20T01:59:00Z")),

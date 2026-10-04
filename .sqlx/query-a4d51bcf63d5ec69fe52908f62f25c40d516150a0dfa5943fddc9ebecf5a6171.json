@@ -1,0 +1,32 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT kind AS \"kind!: RunKind\",\n                  session_id AS \"session_id!: String\",\n                  exit_class AS \"exit_class: ExitClass\"\n             FROM runs\n            WHERE task_id = ?1\n            ORDER BY attempt DESC",
+  "describe": {
+    "columns": [
+      {
+        "name": "kind!: RunKind",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "session_id!: String",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "exit_class: ExitClass",
+        "ordinal": 2,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false,
+      true
+    ]
+  },
+  "hash": "a4d51bcf63d5ec69fe52908f62f25c40d516150a0dfa5943fddc9ebecf5a6171"
+}

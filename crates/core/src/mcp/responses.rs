@@ -16,17 +16,19 @@ use chrono::{DateTime, Utc};
 use schemars::JsonSchema;
 use serde::Serialize;
 
-use crate::analytics::Analytics;
+use crate::analytics::{Analytics, RunOutcomes};
 use crate::archive::OnArchiveOutcome;
 use crate::credentials::StoreStatus;
 use crate::db::settings::Dismissal;
 use crate::db::Task;
 use crate::db::{
-    BoardColumn, ExitClass, MutationSource, OnArchive, Repository, Run, RunState, RunStatus,
-    Schedule, ScheduleMode, StrategyMode, StrategySource, TaskLink,
+    BoardColumn, ExitClass, MutationSource, OnArchive, Repository, Run, RunKind, RunState,
+    RunStatus, Schedule, ScheduleMode, StrategyMode, StrategySource, TaskLink,
 };
 use crate::doctor::{CheckResult, DoctorReport};
-use crate::review::{Dependent, Digest, DigestEntry, DigestOutcome, DigestTotals, ReviewOutcome};
+use crate::review::{
+    Dependent, Digest, DigestEntry, DigestLoop, DigestOutcome, DigestTotals, ReviewOutcome,
+};
 use crate::runner::strategy::{PlanOutcome, PlanPass, PlanResult};
 use crate::schedule::{PreflightSummary, ScheduleView as CoreScheduleView};
 use crate::scheduler::RunCapacity;
@@ -288,6 +290,50 @@ impl CredentialStatusView {
 pub struct AnalyticsView {
     pub from: Option<DateTime<Utc>>,
     pub to: Option<DateTime<Utc>>,
+    /// `runs_total` through `failure_rate` count **implementation runs only**
+    /// (seam-contract D29 point 7): a review's `succeeded` says the reviewer
+    /// ran, not that the work was good. Review and fix runs are counted in
+    /// `review_loop_outcomes`.
+    pub runs_total: usize,
+    pub runs_succeeded: usize,
+    pub runs_failed: usize,
+    pub runs_cancelled: usize,
+    pub runs_interrupted: usize,
+    pub runs_running: usize,
+    /// Of the implementation runs that *ended*, `null` when none has.
+    pub failure_rate: Option<f64>,
+    /// Summed over the rows that have a cost, of every kind. Read
+    /// `runs_without_cost` before quoting it: a period predating ADR-0022's
+    /// capture columns is partly unrecorded rather than cheaper (seam-contract
+    /// D18). Always `implementation_spend_usd + review_loop_spend_usd`.
+    pub spend_usd: f64,
+    pub runs_without_cost: usize,
+    pub tasks_attempted: usize,
+    pub tasks_completed: usize,
+    /// Total spend over completed tasks — every failed attempt included, which
+    /// is the only honest way to say what a finished task cost.
+    pub cost_per_completed_task_usd: Option<f64>,
+    /// Of implementation runs only.
+    pub median_duration_seconds: Option<i64>,
+    /// Summed run duration, not wall-clock: parallel runs each contribute.
+    pub unattended_hours: f64,
+    pub models: Vec<ModelUseView>,
+    pub planner_spend_usd: f64,
+    pub implementation_spend_usd: f64,
+    /// What review and fix runs cost (ADR-0017's loop).
+    pub review_loop_spend_usd: f64,
+    /// How review and fix runs ended, in the same five counts and rate the
+    /// flat `runs_*` fields give for implementation runs.
+    pub review_loop_outcomes: RunOutcomesView,
+    /// The user's own figure, and `null` until they give one. Absent means the
+    /// comparison must not be drawn, never that the subscription is free.
+    pub subscription_monthly_usd: Option<f64>,
+}
+
+/// Five counts and a rate, nested where the implementation's are flat.
+#[derive(Debug, Clone, PartialEq, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub struct RunOutcomesView {
     pub runs_total: usize,
     pub runs_succeeded: usize,
     pub runs_failed: usize,
@@ -296,25 +342,20 @@ pub struct AnalyticsView {
     pub runs_running: usize,
     /// Of the runs that *ended*, `null` when none has.
     pub failure_rate: Option<f64>,
-    /// Summed over the rows that have a cost. Read `runs_without_cost` before
-    /// quoting it: a period predating ADR-0022's capture columns is partly
-    /// unrecorded rather than cheaper (seam-contract D18).
-    pub spend_usd: f64,
-    pub runs_without_cost: usize,
-    pub tasks_attempted: usize,
-    pub tasks_completed: usize,
-    /// Total spend over completed tasks — every failed attempt included, which
-    /// is the only honest way to say what a finished task cost.
-    pub cost_per_completed_task_usd: Option<f64>,
-    pub median_duration_seconds: Option<i64>,
-    /// Summed run duration, not wall-clock: parallel runs each contribute.
-    pub unattended_hours: f64,
-    pub models: Vec<ModelUseView>,
-    pub planner_spend_usd: f64,
-    pub implementation_spend_usd: f64,
-    /// The user's own figure, and `null` until they give one. Absent means the
-    /// comparison must not be drawn, never that the subscription is free.
-    pub subscription_monthly_usd: Option<f64>,
+}
+
+impl From<&RunOutcomes> for RunOutcomesView {
+    fn from(outcomes: &RunOutcomes) -> Self {
+        Self {
+            runs_total: outcomes.total(),
+            runs_succeeded: outcomes.succeeded,
+            runs_failed: outcomes.failed,
+            runs_cancelled: outcomes.cancelled,
+            runs_interrupted: outcomes.interrupted,
+            runs_running: outcomes.running,
+            failure_rate: outcomes.failure_rate(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, JsonSchema)]
@@ -355,6 +396,8 @@ impl From<&Analytics> for AnalyticsView {
                 .collect(),
             planner_spend_usd: report.planner_spend_usd,
             implementation_spend_usd: report.implementation_spend_usd,
+            review_loop_spend_usd: report.review_loop_spend_usd,
+            review_loop_outcomes: RunOutcomesView::from(&report.review_loop_outcomes),
             subscription_monthly_usd: report.subscription_monthly_usd,
         }
     }
@@ -612,6 +655,9 @@ impl From<TaskLink> for TaskLinkView {
 pub struct RunView {
     pub id: String,
     pub attempt: i64,
+    /// What the run was for: `get_task`'s `last_run` is the newest row of any
+    /// kind (seam-contract D29 point 4), so it has to say which.
+    pub kind: RunKind,
     pub status: RunStatus,
     pub exit_class: Option<ExitClass>,
     pub error_message: Option<String>,
@@ -625,6 +671,7 @@ impl From<Run> for RunView {
         Self {
             id: run.id,
             attempt: run.attempt,
+            kind: run.kind,
             status: run.status,
             exit_class: run.exit_class,
             error_message: run.error_message,
@@ -1156,6 +1203,30 @@ pub struct DigestEntryView {
     pub pr_url: Option<String>,
     pub blocking_title: Option<String>,
     pub skip_reason: Option<SkipReason>,
+    /// The kind of the newest row the outcome is taken from; `null` for an
+    /// entry with no row in the window.
+    pub last_run_kind: Option<RunKind>,
+    /// Where the task's review loop stands; `null` when it has none.
+    pub review_loop: Option<DigestLoopView>,
+}
+
+/// A task's review loop, derived from its rows (seam-contract D29 point 8).
+#[derive(Debug, Clone, PartialEq, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub struct DigestLoopView {
+    /// Review runs after the task's newest implementation run.
+    pub reviews_since_implementation: u32,
+    /// The task's open findings, of every loop.
+    pub open_findings: u32,
+}
+
+impl From<DigestLoop> for DigestLoopView {
+    fn from(review_loop: DigestLoop) -> Self {
+        Self {
+            reviews_since_implementation: review_loop.reviews_since_implementation,
+            open_findings: review_loop.open_findings,
+        }
+    }
 }
 
 impl From<DigestEntry> for DigestEntryView {
@@ -1174,6 +1245,8 @@ impl From<DigestEntry> for DigestEntryView {
             pr_url: entry.pr_url,
             blocking_title: entry.blocking_title,
             skip_reason: entry.skip_reason,
+            last_run_kind: entry.last_run_kind,
+            review_loop: entry.review_loop.map(Into::into),
         }
     }
 }
@@ -1334,6 +1407,7 @@ mod tests {
             blocked_by_incomplete: false,
             blocking_title: None,
             last_run: Some(LastRunSummary {
+                kind: crate::db::RunKind::Implementation,
                 status: RunStatus::Succeeded,
                 exit_class: Some(ExitClass::Success),
                 ended_at: None,
@@ -1384,6 +1458,7 @@ mod tests {
             id: "run-1".to_string(),
             task_id: "task-1".to_string(),
             attempt: 2,
+            kind: RunKind::Review,
             status: RunStatus::Failed,
             session_id: "session".to_string(),
             prompt: "the whole composed prompt".to_string(),
@@ -1410,6 +1485,7 @@ mod tests {
 
         let wire = serde_json::to_value(&view).expect("a DTO must always serialize");
 
+        assert_eq!(wire["kind"], json!("review"));
         assert_eq!(wire["exit_class"], json!("usage_limit"));
         assert_eq!(wire["error_message"], json!("usage limit reached"));
         // The transcript is a file (ADR-0013) and the prompt is the run's own

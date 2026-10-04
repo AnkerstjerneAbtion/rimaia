@@ -25,7 +25,7 @@ use std::path::{Path, PathBuf};
 
 use pretty_assertions::assert_eq;
 use rimaia_core::archive::OnArchiveOutcome;
-use rimaia_core::db::{BoardColumn, OnArchive, Repository, RunState, Task};
+use rimaia_core::db::{BoardColumn, OnArchive, Repository, RunKind, RunState, Task};
 use rimaia_core::repo::{self, NewRepository};
 use rimaia_core::tasks::{self, ArchiveFilter, NewTask, TaskFilter};
 use rimaia_core::testing::{TempRepo, TestContext};
@@ -714,6 +714,7 @@ impl Fixture {
             &self.paths,
             rimaia_core::runner::outcome::NewRun {
                 task_id: task_id.to_string(),
+                kind: RunKind::Implementation,
                 session_id: "session".to_string(),
                 prompt: "the composed prompt".to_string(),
                 base_ref: None,

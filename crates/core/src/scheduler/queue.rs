@@ -212,9 +212,7 @@ use crate::doctor;
 use crate::error::{Error, Result};
 use crate::events::ChangeEvent;
 use crate::paths::AppPaths;
-use crate::runner::{
-    probe_cli, run_task, CancelSignal, ResumeSession, RunRequest, RunTrigger, RunnerConfig,
-};
+use crate::runner::{probe_cli, run_task, CancelSignal, RunRequest, RunTrigger, RunnerConfig};
 use crate::schedule::window::{self, RunWindow};
 use crate::schedule::{self, fire, preflight, Due};
 use crate::scheduler::claim::{self, ClaimOutcome};
@@ -998,6 +996,37 @@ impl QueueTask {
             // running`, and a due retry takes ADR-0007's own
             // `waiting_retry -> running` edge in one conditional write.
             let resuming = entry.resume_after.is_some();
+
+            // Before the claim, never after (seam-contract D29 point 3). A
+            // refused resume must have claimed nothing: refusing after the
+            // claim would leave the task `running` with no process, and
+            // `claim::release` would then move it to `failed`, throwing away
+            // the retry it was waiting for. Reading first is safe because this
+            // entry's `InFlight` slot is held: while it is, nothing else in the
+            // app can start a run of this task, so the point read here is the
+            // point the claim resumes. `None` for a retry whose rows have gone
+            // — a pruned history, a hand-edited database — which starts a
+            // fresh session rather than refusing, because a task with no
+            // context to resume is exactly a task that should be started from
+            // the top.
+            let resume = if resuming {
+                let point = attempts::resume_point(ctx, &task_id).await?;
+                match attempts::resume_as_implementation(point) {
+                    Ok(resume) => resume,
+                    Err(refusal) => {
+                        // Logged and skipped, never `?`: one entry's refusal
+                        // must not abort the step for the rest of the batch.
+                        // Not `worked` either, so a refused entry does not
+                        // make the loop spin; the next change event wakes it.
+                        tracing::warn!(%task_id, %refusal, "the run queue cannot resume this task");
+                        drop(lease);
+                        continue;
+                    }
+                }
+            } else {
+                None
+            };
+
             let claimed = if resuming {
                 claim::claim_retry(ctx, &task_id).await?
             } else {
@@ -1011,20 +1040,6 @@ impl QueueTask {
                 worked = true;
                 continue;
             }
-
-            // After the claim, never before: a session read for a task the
-            // queue then lost the race for would be a query spent on somebody
-            // else's run. `None` for a retry whose rows have gone — a pruned
-            // history, a hand-edited database — which starts a fresh session
-            // rather than refusing, because a task with no context to resume is
-            // exactly a task that should be started from the top.
-            let resume = if resuming {
-                attempts::resumable_session(ctx, &task_id)
-                    .await?
-                    .map(|session_id| ResumeSession { session_id })
-            } else {
-                None
-            };
 
             if self.interrupted_since(&cancel).await? {
                 // Won the claim, but a Pause, a Stop or a shutdown landed

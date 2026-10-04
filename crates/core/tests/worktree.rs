@@ -20,7 +20,7 @@ use std::process::Command;
 
 use chrono::{DateTime, Utc};
 use pretty_assertions::assert_eq;
-use rimaia_core::db::{BoardColumn, Repository, RunState, Task};
+use rimaia_core::db::{BoardColumn, Repository, RunKind, RunState, Task};
 use rimaia_core::paths::AppPaths;
 use rimaia_core::repo::{self, NewRepository, RepositoryPatch};
 use rimaia_core::runner::outcome::{start_run, NewRun};
@@ -501,6 +501,7 @@ async fn the_resolved_base_is_recorded_on_the_run() {
         &paths,
         NewRun {
             task_id: b.id.clone(),
+            kind: RunKind::Implementation,
             session_id: "0b6d3e2e-0000-4000-8000-00000000ba5e".to_string(),
             prompt: "implement the plan".to_string(),
             base_ref: Some(b_worktree.base_ref.clone()),

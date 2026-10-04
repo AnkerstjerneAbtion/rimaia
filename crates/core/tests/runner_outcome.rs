@@ -25,7 +25,7 @@
 
 use chrono::Duration;
 use pretty_assertions::assert_eq;
-use rimaia_core::db::{settings, BoardColumn, ExitClass, RunState, RunStatus};
+use rimaia_core::db::{settings, BoardColumn, ExitClass, RunKind, RunState, RunStatus};
 use rimaia_core::runner::events::{
     EndReason, EventStream, ResultEvent, RunEvent, UsageReport, UsageState, UsageWindow,
     WindowReopen,
@@ -786,6 +786,7 @@ async fn a_run_against_a_task_that_does_not_exist_is_refused_by_name() {
         &fixture.paths,
         NewRun {
             task_id: "3f2b1c00-0000-4000-8000-00000000dead".to_string(),
+            kind: RunKind::Implementation,
             session_id: SESSION_ID.to_string(),
             prompt: "do the thing".to_string(),
             base_ref: None,
@@ -1055,6 +1056,52 @@ async fn finishing_a_run_twice_is_refused_rather_than_replaying_the_task_transit
         error.to_string(),
         format!("run {} has already been finalized", run.id)
     );
+}
+
+#[tokio::test]
+async fn finish_run_refuses_a_review_row_and_writes_nothing() {
+    // D29 point 9: the kind is read off the row and dispatched on before the
+    // `UPDATE`. Until task 021 wires the review and fix arms, closing such a row
+    // here would commit it closed and leave the task `running` with nothing to
+    // resume it, so both refuse and touch neither the row nor the task.
+    for kind in [RunKind::Review, RunKind::Fix] {
+        let mut fixture = RunFixture::new().await;
+        let task_id = fixture.task_id.clone();
+        let run = fixture
+            .start_kind(&task_id, kind, "review the branch")
+            .await;
+        let before = fixture.task().await;
+
+        let error = finish_run(
+            &fixture.harness.context,
+            &run.id,
+            &Replay::of("success").outcome(),
+            &RunCapture::default(),
+        )
+        .await
+        .expect_err("a review or fix row is not finished here before task 021");
+
+        assert_eq!(error.code(), ErrorCode::Invalid, "{kind:?}");
+        let article = if kind == RunKind::Review {
+            "a review"
+        } else {
+            "a fix"
+        };
+        assert_eq!(
+            error.to_string(),
+            format!(
+                "{article} run cannot be finished yet: review and fix runs arrive with task 021"
+            ),
+        );
+        let after = fixture.reread(&run.id).await;
+        assert_eq!(
+            after, run,
+            "the row is still open, exactly as it was opened"
+        );
+        assert_eq!(after.kind, kind);
+        assert_eq!(fixture.task().await, before, "{kind:?}");
+        assert_eq!(before.run_state, RunState::Running);
+    }
 }
 
 #[tokio::test]
@@ -1514,11 +1561,22 @@ impl RunFixture {
     }
 
     async fn start_for(&mut self, task_id: &str, prompt: &str) -> rimaia_core::db::Run {
+        self.start_kind(task_id, RunKind::Implementation, prompt)
+            .await
+    }
+
+    async fn start_kind(
+        &mut self,
+        task_id: &str,
+        kind: RunKind,
+        prompt: &str,
+    ) -> rimaia_core::db::Run {
         start_run(
             &self.harness.context,
             &self.paths,
             NewRun {
                 task_id: task_id.to_string(),
+                kind,
                 session_id: SESSION_ID.to_string(),
                 prompt: prompt.to_string(),
                 base_ref: None,

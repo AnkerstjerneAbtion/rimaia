@@ -69,7 +69,9 @@ pub mod retry;
 pub mod selection;
 pub mod state;
 
-pub use attempts::{history as attempt_history, resumable_session, Ending};
+pub use attempts::{
+    history as attempt_history, resume_as_implementation, resume_point, Ending, ResumePoint,
+};
 pub use capacity::{
     configured as configured_capacity, max_concurrency, resolve as resolve_capacity, schedule_mode,
     set_max_concurrency, set_schedule_mode, Resolved, RunCapacity, DEFAULT_MAX_CONCURRENCY,
