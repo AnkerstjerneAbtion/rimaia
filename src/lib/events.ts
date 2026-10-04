@@ -6,6 +6,30 @@ import type { PlanProgress, RunTail } from "../types";
 export type { UnlistenFn };
 
 /**
+ * What every subscribe wrapper goes through: an event name and a callback
+ * that receives the **payload**, never a Tauri event envelope. Replaceable
+ * for the same reason `CommandTransport` is (ADR-0034 point 4).
+ */
+export type EventTransport = <P>(
+  event: string,
+  onPayload: (payload: P) => void,
+) => Promise<UnlistenFn>;
+
+let installedTransport: EventTransport | undefined;
+
+/** Replace the transport; an entry point calls this, a component never does. */
+export function setEventTransport(transport: EventTransport | undefined): void {
+  installedTransport = transport;
+}
+
+const tauriTransport: EventTransport = <P>(event: string, onPayload: (payload: P) => void) =>
+  listen<P>(event, (e) => onPayload(e.payload));
+
+function subscribe<P>(event: string, onPayload: (payload: P) => void): Promise<UnlistenFn> {
+  return (installedTransport ?? tauriTransport)<P>(event, onPayload);
+}
+
+/**
  * The only module in the frontend that imports `@tauri-apps/api/event`
  * (seam-contract D7) — the event-side mirror of the rule `commands.ts`
  * states for `invoke`. Every Tauri event ADR-0018's shell forwarder emits
@@ -40,7 +64,7 @@ export type { UnlistenFn };
 export function subscribeToTasksChanged(
   onChanged: (taskIds: string[]) => void,
 ): Promise<UnlistenFn> {
-  return listen<string[]>("tasks:changed", (event) => onChanged(event.payload));
+  return subscribe<string[]>("tasks:changed", onChanged);
 }
 
 /** See {@link subscribeToTasksChanged} for the empty-array contract; the
@@ -48,7 +72,7 @@ export function subscribeToTasksChanged(
 export function subscribeToRepositoriesChanged(
   onChanged: (repositoryIds: string[]) => void,
 ): Promise<UnlistenFn> {
-  return listen<string[]>("repositories:changed", (event) => onChanged(event.payload));
+  return subscribe<string[]>("repositories:changed", onChanged);
 }
 
 /**
@@ -59,7 +83,7 @@ export function subscribeToRepositoriesChanged(
  * comment on why the event it publishes is untyped.
  */
 export function subscribeToSettingsChanged(onChanged: () => void): Promise<UnlistenFn> {
-  return listen<null>("settings:changed", () => onChanged());
+  return subscribe<null>("settings:changed", () => onChanged());
 }
 
 /** See {@link subscribeToTasksChanged} for the empty-array contract; the
@@ -67,7 +91,7 @@ export function subscribeToSettingsChanged(onChanged: () => void): Promise<Unlis
 export function subscribeToRunsChanged(
   onChanged: (runIds: string[]) => void,
 ): Promise<UnlistenFn> {
-  return listen<string[]>("runs:changed", (event) => onChanged(event.payload));
+  return subscribe<string[]>("runs:changed", onChanged);
 }
 
 /**
@@ -82,7 +106,7 @@ export function subscribeToRunsChanged(
  * snapshot's own `runId` if more than one run might be in flight.
  */
 export function subscribeToRunsTail(onTail: (tail: RunTail) => void): Promise<UnlistenFn> {
-  return listen<RunTail>("runs:tail", (event) => onTail(event.payload));
+  return subscribe<RunTail>("runs:tail", onTail);
 }
 
 /**
@@ -109,7 +133,7 @@ export function subscribeToRunsTail(onTail: (tail: RunTail) => void): Promise<Un
 export function subscribeToSchedulesChanged(
   onChanged: (scheduleIds: string[]) => void,
 ): Promise<UnlistenFn> {
-  return listen<string[]>("schedules:changed", (event) => onChanged(event.payload));
+  return subscribe<string[]>("schedules:changed", onChanged);
 }
 
 /**
@@ -127,5 +151,5 @@ export function subscribeToSchedulesChanged(
 export function subscribeToPlanPassProgress(
   onProgress: (progress: PlanProgress) => void,
 ): Promise<UnlistenFn> {
-  return listen<PlanProgress>("plan-pass:progress", (event) => onProgress(event.payload));
+  return subscribe<PlanProgress>("plan-pass:progress", onProgress);
 }

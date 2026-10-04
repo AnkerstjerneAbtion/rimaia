@@ -63,6 +63,32 @@ import type {
 } from "../types";
 
 /**
+ * What `call` sends through: the command name and its arguments in, whatever
+ * the backend answered (or a rejection) out. Replaceable so a caller that is
+ * not the Tauri shell — fixture mode today, an HTTP client later (ADR-0034
+ * point 4) — can answer the same commands without any component knowing.
+ */
+export type CommandTransport = (
+  command: string,
+  args?: Record<string, unknown>,
+) => Promise<unknown>;
+
+// `undefined` means "Tauri's invoke", looked up at call time below. Capturing
+// `invoke` here instead would bind whatever `vi.mock` had installed at import
+// time and break every test that re-mocks it per case.
+let installedTransport: CommandTransport | undefined;
+
+/**
+ * Replace the transport `call` sends through. Called by an entry point
+ * (`src/dev/main.tsx` today), never by a component, a view or a hook.
+ */
+export function setCommandTransport(transport: CommandTransport | undefined): void {
+  installedTransport = transport;
+}
+
+const tauriTransport: CommandTransport = (command, args) => invoke<unknown>(command, args);
+
+/**
  * The only module in the frontend that imports `invoke`.
  *
  * Every backend call goes through `call`, so the serialization boundary has one
@@ -72,7 +98,7 @@ import type {
  */
 async function call<T>(command: string, args?: Record<string, unknown>): Promise<T> {
   try {
-    return await invoke<T>(command, args);
+    return (await (installedTransport ?? tauriTransport)(command, args)) as T;
   } catch (thrown) {
     throw toRimaiaError(thrown);
   }
