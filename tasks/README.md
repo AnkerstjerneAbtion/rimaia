@@ -40,7 +40,7 @@ reviewable in the app afterwards.
 | 27 | [030](030-archiving-tasks-and-on-archive-cleanup.md) | Archiving tasks, and on-archive cleanup | v0.3 | 005, 016 | [#31](https://github.com/AnkerstjerneAbtion/rimaia/pull/31) |
 | 28 | [031](031-a-provider-seam-for-the-agent-cli.md) | A provider seam for the agent CLI | v0.4 | — | [#32](https://github.com/AnkerstjerneAbtion/rimaia/pull/32) |
 | 29 | [032](032-provider-vocabulary-outside-the-runner.md) | Provider vocabulary outside the runner | v0.4 | 031 | [#33](https://github.com/AnkerstjerneAbtion/rimaia/pull/33) |
-| 30 | [028](028-let-a-run-see-the-ui-it-changed.md) | Let a run see the UI it changed | v0.3 | 005 | — |
+| 30 | [028](028-let-a-run-see-the-ui-it-changed.md) | Let a run see the UI it changed | v0.3 | 005 | #34 |
 | 31 | [033](033-record-the-commit-a-run-ended-on-and-a-review-bundle.md) | Record the commit a run ended on, and a review bundle | v0.4 | 015, 030 | — |
 | 32 | [034](034-review-actions-on-every-door.md) | Review actions on every door | v0.4 | 033 | — |
 | 33 | [017](017-morning-review-flow.md) | Morning review flow | v0.4 | 033, 034 | — |
