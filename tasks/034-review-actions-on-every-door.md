@@ -6,6 +6,7 @@ status: ready
 depends_on: ["033"]
 adrs: ["0006", "0007", "0008", "0013", "0019", "0021", "0033"]
 size: M
+landed: "#34"
 ---
 
 # Review actions on every door

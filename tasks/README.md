@@ -42,7 +42,7 @@ reviewable in the app afterwards.
 | 29 | [032](032-provider-vocabulary-outside-the-runner.md) | Provider vocabulary outside the runner | v0.4 | 031 | [#33](https://github.com/AnkerstjerneAbtion/rimaia/pull/33) |
 | 30 | [028](028-let-a-run-see-the-ui-it-changed.md) | Let a run see the UI it changed | v0.3 | 005 | #34 |
 | 31 | [033](033-record-the-commit-a-run-ended-on-and-a-review-bundle.md) | Record the commit a run ended on, and a review bundle | v0.4 | 015, 030 | #34 |
-| 32 | [034](034-review-actions-on-every-door.md) | Review actions on every door | v0.4 | 033 | — |
+| 32 | [034](034-review-actions-on-every-door.md) | Review actions on every door | v0.4 | 033 | #34 |
 | 33 | [017](017-morning-review-flow.md) | Morning review flow | v0.4 | 033, 034 | — |
 | 34 | [035](035-runs-have-a-kind-and-review-findings-have-a-home.md) | Runs have a kind, and review findings have a home | v0.4 | 033, 034 | — |
 | 35 | [036](036-a-board-port-between-the-runner-and-the-board.md) | A board port between the runner and the board | v0.4 | 035 | — |
