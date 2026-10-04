@@ -6,6 +6,7 @@ status: ready
 depends_on: ["033", "034"]
 adrs: ["0007", "0008", "0013", "0024", "0033"]
 size: M
+landed: "#34"
 ---
 
 # Morning review flow
