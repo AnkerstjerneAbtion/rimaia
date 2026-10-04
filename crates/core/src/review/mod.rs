@@ -1,6 +1,7 @@
 //! The review half of the board: the three decisions a morning review ends in,
-//! what depends on the task being decided, and the overnight digest (ADR-0006,
-//! ADR-0007, ADR-0008, ADR-0021; task 034).
+//! what depends on the task being decided, the overnight digest (ADR-0006,
+//! ADR-0007, ADR-0008, ADR-0021; task 034), and what a review run found
+//! (ADR-0017; task 035).
 //!
 //! Every rule is written once, here. The Tauri commands, the MCP tools and, in
 //! team mode, the HTTP handlers are thin adapters over these functions, so the
@@ -9,6 +10,7 @@
 
 pub mod actions;
 pub mod digest;
+pub mod findings;
 pub mod note;
 
 use serde::Serialize;
@@ -22,8 +24,9 @@ use crate::tasks::service::fetch_task_row;
 use chrono::{DateTime, Utc};
 
 pub use actions::{approve, reject, request_changes, ReviewOutcome};
-pub use digest::{
-    digest, mark_seen, Digest, DigestEntry, DigestLoop, DigestOutcome, DigestTotals,
+pub use digest::{digest, mark_seen, Digest, DigestEntry, DigestLoop, DigestOutcome, DigestTotals};
+pub use findings::{
+    FindingResolution, FindingSeverity, FindingStatus, NewReviewFinding, ReviewFinding,
 };
 pub use note::Verdict;
 

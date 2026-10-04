@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO review_findings\n                (id, task_id, review_run_id, ordinal, severity, title, body, file, line,\n                 fingerprint, status, created_at)\n               VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, NULL, ?10, ?11)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 11
+    },
+    "nullable": []
+  },
+  "hash": "c3d247eb3f0f4eb21ca4a6126caa8dda311c35d1d1c566bfb34caf689a131389"
+}

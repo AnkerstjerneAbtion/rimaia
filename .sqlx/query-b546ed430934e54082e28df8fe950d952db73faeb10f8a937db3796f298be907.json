@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT findings_recorded_at AS \"findings_recorded_at: DateTime<Utc>\"\n             FROM runs WHERE id = ?1",
+  "describe": {
+    "columns": [
+      {
+        "name": "findings_recorded_at: DateTime<Utc>",
+        "ordinal": 0,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      true
+    ]
+  },
+  "hash": "b546ed430934e54082e28df8fe950d952db73faeb10f8a937db3796f298be907"
+}

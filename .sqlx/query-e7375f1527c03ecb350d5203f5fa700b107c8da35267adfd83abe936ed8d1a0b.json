@@ -1,0 +1,104 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT id AS \"id!\", task_id, review_run_id, ordinal,\n                  severity AS \"severity: FindingSeverity\", title, body, file, line, fingerprint,\n                  status AS \"status: FindingStatus\", resolution, resolved_by_run_id,\n                  created_at AS \"created_at: DateTime<Utc>\",\n                  resolved_at AS \"resolved_at: DateTime<Utc>\"\n             FROM review_findings WHERE id = ?1",
+  "describe": {
+    "columns": [
+      {
+        "name": "id!",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "task_id",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "review_run_id",
+        "ordinal": 2,
+        "type_info": "Text"
+      },
+      {
+        "name": "ordinal",
+        "ordinal": 3,
+        "type_info": "Integer"
+      },
+      {
+        "name": "severity: FindingSeverity",
+        "ordinal": 4,
+        "type_info": "Text"
+      },
+      {
+        "name": "title",
+        "ordinal": 5,
+        "type_info": "Text"
+      },
+      {
+        "name": "body",
+        "ordinal": 6,
+        "type_info": "Text"
+      },
+      {
+        "name": "file",
+        "ordinal": 7,
+        "type_info": "Text"
+      },
+      {
+        "name": "line",
+        "ordinal": 8,
+        "type_info": "Integer"
+      },
+      {
+        "name": "fingerprint",
+        "ordinal": 9,
+        "type_info": "Text"
+      },
+      {
+        "name": "status: FindingStatus",
+        "ordinal": 10,
+        "type_info": "Text"
+      },
+      {
+        "name": "resolution",
+        "ordinal": 11,
+        "type_info": "Text"
+      },
+      {
+        "name": "resolved_by_run_id",
+        "ordinal": 12,
+        "type_info": "Text"
+      },
+      {
+        "name": "created_at: DateTime<Utc>",
+        "ordinal": 13,
+        "type_info": "Text"
+      },
+      {
+        "name": "resolved_at: DateTime<Utc>",
+        "ordinal": 14,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      true,
+      true,
+      true,
+      false,
+      true,
+      true,
+      false,
+      true
+    ]
+  },
+  "hash": "e7375f1527c03ecb350d5203f5fa700b107c8da35267adfd83abe936ed8d1a0b"
+}

@@ -1,0 +1,104 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT f.id AS \"id!\", f.task_id, f.review_run_id, f.ordinal,\n                  f.severity AS \"severity: FindingSeverity\", f.title, f.body, f.file, f.line,\n                  f.fingerprint, f.status AS \"status: FindingStatus\", f.resolution,\n                  f.resolved_by_run_id,\n                  f.created_at AS \"created_at: DateTime<Utc>\",\n                  f.resolved_at AS \"resolved_at: DateTime<Utc>\"\n             FROM review_findings f\n             JOIN runs r ON r.id = f.review_run_id\n            WHERE f.task_id = ?1 AND (?2 IS NULL OR f.status = ?2)\n            ORDER BY r.attempt, f.ordinal",
+  "describe": {
+    "columns": [
+      {
+        "name": "id!",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "task_id",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "review_run_id",
+        "ordinal": 2,
+        "type_info": "Text"
+      },
+      {
+        "name": "ordinal",
+        "ordinal": 3,
+        "type_info": "Integer"
+      },
+      {
+        "name": "severity: FindingSeverity",
+        "ordinal": 4,
+        "type_info": "Text"
+      },
+      {
+        "name": "title",
+        "ordinal": 5,
+        "type_info": "Text"
+      },
+      {
+        "name": "body",
+        "ordinal": 6,
+        "type_info": "Text"
+      },
+      {
+        "name": "file",
+        "ordinal": 7,
+        "type_info": "Text"
+      },
+      {
+        "name": "line",
+        "ordinal": 8,
+        "type_info": "Integer"
+      },
+      {
+        "name": "fingerprint",
+        "ordinal": 9,
+        "type_info": "Text"
+      },
+      {
+        "name": "status: FindingStatus",
+        "ordinal": 10,
+        "type_info": "Text"
+      },
+      {
+        "name": "resolution",
+        "ordinal": 11,
+        "type_info": "Text"
+      },
+      {
+        "name": "resolved_by_run_id",
+        "ordinal": 12,
+        "type_info": "Text"
+      },
+      {
+        "name": "created_at: DateTime<Utc>",
+        "ordinal": 13,
+        "type_info": "Text"
+      },
+      {
+        "name": "resolved_at: DateTime<Utc>",
+        "ordinal": 14,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      true,
+      true,
+      true,
+      false,
+      true,
+      true,
+      false,
+      true
+    ]
+  },
+  "hash": "29641d86857b4473021c3f0fd171a8a8af4f1b9718a6ac211f9a8dcba53cce70"
+}

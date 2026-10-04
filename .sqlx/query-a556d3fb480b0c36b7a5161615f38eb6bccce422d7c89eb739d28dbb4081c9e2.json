@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE review_findings\n              SET status = ?1, resolution = ?2, resolved_by_run_id = ?3, resolved_at = ?4\n            WHERE id = ?5",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 5
+    },
+    "nullable": []
+  },
+  "hash": "a556d3fb480b0c36b7a5161615f38eb6bccce422d7c89eb739d28dbb4081c9e2"
+}
