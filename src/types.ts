@@ -31,10 +31,10 @@ export interface AppInfo {
 /**
  * `welcome` is deliberately **not** in `Sidebar`'s `VIEWS` array: it is a
  * destination the app can *start* on and that Settings can send you to, not a
- * permanent nav item. Task 001's no-router decision still holds — four views,
+ * permanent nav item. Task 001's no-router decision still holds — five views,
  * no URLs, no nesting, nothing to deep-link.
  */
-export type View = "board" | "runs" | "analytics" | "settings" | "welcome";
+export type View = "board" | "review" | "runs" | "analytics" | "settings" | "welcome";
 
 // ---------------------------------------------------------------------------
 // The preflight doctor (task 018) — mirrors `rimaia_core::doctor`.

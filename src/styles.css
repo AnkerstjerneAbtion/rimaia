@@ -113,6 +113,7 @@
 
 @import "./styles/board.css";
 @import "./styles/doctor.css";
+@import "./styles/review.css";
 @import "./styles/runs.css";
 @import "./styles/settings.css";
 
@@ -458,6 +459,15 @@ body {
   background: var(--accent-soft);
   border-left-color: var(--accent);
   color: var(--text-1);
+}
+
+.sidebar-link-count {
+  margin-left: var(--space-2);
+  padding: 0 var(--space-2);
+  border-radius: var(--radius-full);
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-size: var(--font-size-xs);
 }
 
 .sidebar-link[aria-current="page"] .sidebar-link-label {
