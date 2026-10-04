@@ -40,8 +40,8 @@ registry, the dispatcher and the `Caller` extractor together, before 047, means 
 be mounted without a caller. It also means the interim server fails closed.
 
 The order behind it matters just as much. 039 made every board service honour its
-context's scope and left a two-team fixture in `testing/`. 041 moved machine state off the
-board DTOs, and 045 added the last commands of M2. Serving the board over a network before
+context's scope and left a two-team fixture in `testing/`. 041 and 066 moved machine state
+off the board DTOs, and 045 added the last commands of M2. Serving the board over a network before
 all of that would put an unscoped query behind an open port. Serving it after means the
 HTTP half is only a transport, which is ADR-0034 point 2's claim.
 
@@ -51,7 +51,9 @@ Everything after this in M3 and M4 builds on the table:
 - 048 puts `Caller` on `/api/v1/events` and flips `get_run_tail`;
 - 049 gives `board<T>` its HTTP transport;
 - 052 mounts `/api/v1/runner/*` beside these routes and flips the run controls;
-- 054, 056 and 060 each flip rows the appendix names.
+- 054 and 056 each flip rows the appendix names, and 054 gives point 3a's machine-less
+  path its cleanup channel. The planning rows stay local (D32's amendment on them), and 060
+  adds two request rows instead.
 
 Without one list, each of those would keep a list of its own.
 
@@ -88,10 +90,12 @@ their last team.
 **2. The registry rows.** One row for every command the shell registers when this task
 starts: the 97 in D32's appendix, plus every row tasks 033 to 045 appended to it. Each row
 takes the kind and effect in its appendix row's *From* column **as of 046**. That gives 37
-board rows from the appendix. The eleven "local until then" rows are `local`, each with a
-line comment naming the task that flips it. Board rows appended by 033 to 045 (034's review
-actions, 035's findings reads, 021's loop controls, 045's consent and eligibility
-commands) are `board` rows here if their appendix row says 046.
+board rows from the appendix. The eight "local until then" rows are `local`, each with a
+line comment naming the task that flips it. The three planning rows are plain `local`
+rows (D32's amendment on them). 060's two request rows are not in the table yet. Board
+rows appended by 033 to 045 (034's review actions, 035's findings reads, 021's loop
+controls, 045's consent and eligibility commands) are `board` rows here if their appendix
+row says 046.
 
 **If a command exists in `lib.rs` with no appendix row, stop.** Point 8 made appending the
 row the earlier task's obligation. Classifying it here would be the judgement D32 says 046
@@ -108,31 +112,43 @@ so `{ id, column, beforeId, afterId }` deserializes exactly as Tauri's derived p
 did.
 
 **A board handler reads nothing but its `BoardRequest`.** Two handlers read
-`request.host.provider`: `get_run_cost_summary` and `get_strategy_catalogue`. Five read
+`request.host.provider`: `get_run_cost_summary` and `get_strategy_catalogue`. Six read
 `request.machine`, and only to pass it on (point 3a). If any other handler reaches for
 `paths`, the runner config, `in_flight`, the tails, the runner store or `request.machine`,
 its appendix row is wrong. Stop and say which.
 
-**3a. Five board rows still change this machine in solo, and keep doing so.** 041 left
+**3a. Six board rows still change this machine in solo, and keep doing so.** 041 left
 `tasks::archive_task`, `archive_tasks` and `move_task` as one core function each over
 `(&ServiceContext, Option<&MachineContext>, …)`: the board write, then, given a machine,
 the reaction. Archiving runs the on-archive policy (ADR-0025, D26), and moving to `done`
 runs D20.3's auto-removal. 034's `review::approve` runs that same auto-removal after its
 commit, and `review::reject` removes the worktree **before** its transaction and refuses a
-dirty one. After 041 both need a `Checkout` from `MachineContext` to do that, so they take
-the same shape. The rows are:
+dirty one. After 066 both need a `Checkout` from `MachineContext` to do that, so they take
+the same shape. So does 066's `repo::remove`, which forgets the repository's leftover
+worktree records and removes its checkout after the board removal. The rows are:
 
 - `archive_task`, `archive_tasks` and `move_task`;
-- `approve_task` and `reject_task` (034).
+- `approve_task` and `reject_task` (034);
+- `remove_repository` (066).
 
-All five are board rows from 046 in the appendix, and the appendix is right about where
-each ends up: the reaction becomes the runner's, driven by the change event, once 054's
-follow-up task gives it a channel and a place to report (054's Out of scope). Until then
-solo must keep the reaction. Without it, archiving and dragging to `done` silently stop
-cleaning up, and reject leaves the worktree on disk with its branch cleared.
+All six are board rows from 046 in the appendix. Solo must keep every reaction, in the
+same call, and keeps it after 054 too. Without it, archiving and dragging to `done`
+silently stop cleaning up, reject leaves the worktree on disk with its branch cleared, and
+removing a repository leaves its checkout behind.
+
+Without a machine, which means on a server, the six split. Four leave a cleanup owed:
+`archive_task`, `archive_tasks`, `move_task` and `approve_task`. 054 (Scope 5) gives those
+a channel and a place to report: the board sets `tasks.cleanup_pending`, the holding
+runner hears it on its heartbeat (D31's 2026-10-04 amendment), not through the change
+event, and reports a `CleanupDone`. The other two have nothing to defer. Reject's machine
+half is a guard that runs before its write, so on a server it stays skipped, as 041 left
+it. `remove_repository`'s checkout lives on whichever machine mapped it, and 054 adds no
+server reaction for it; a runner still holding that checkout gets the id back in
+`report_runner`'s `unknown_repositories`. The appendix notes say "the runner's reaction to
+the change event", and the amendment below corrects all six.
 
 This task decides the interim as follows, and records it as a dated D32 amendment in the
-same commit (points 2 and 3, and the five appendix rows' notes):
+same commit (points 2 and 3, and the six appendix rows' notes):
 
 - **The machine rides on the request, and only the shell puts one there.**
   `BoardRequest` gains `machine: Option<MachineContext>`. `MachineContext` is
@@ -144,19 +160,26 @@ same commit (points 2 and 3, and the five appendix rows' notes):
 - **`api::dispatch_with_machine(host, caller, machine: &MachineContext, name, args)`** is
   the one variant, and only `commands::board::route` calls it. Both go through one
   private function, so lookup, argument parsing, re-scoping and the span are shared.
-- **The five handlers each make one call:** 041's (or 034's, as 041 left it) core
-  function, with `request.machine.as_ref()`. That is what the MCP board tool passes
+- **The six handlers each make one call:** 041's, 066's or 034's core function, as those
+  tasks left it, with `request.machine.as_ref()`. That is what the MCP board tool passes
   (`self.local.as_ref().map(|l| &l.machine)`), so ADR-0006's one function behind every
   door still holds.
-- **With `None`, the server behaves as 041's `None` path does**: no reaction, and an
-  archive report that says `Nothing`. That stays true until 054's follow-up.
+- **With `None`, the server behaves as 041's and 066's `None` paths do**: no reaction,
+  and an archive report that says `Nothing`. That holds until 054, which changes the
+  machine-less path inside the same core functions, not the handlers: for a task with a
+  `runs` row naming a runner, archiving sets `cleanup_pending = 'archived'` and reports the
+  new `OnArchiveOutcome::Pending` instead of `Nothing`, and entering `done` through
+  `move_task` or `approve_task` sets `'done'`. The six handlers, `BoardRequest.machine` and
+  `dispatch_with_machine` are unchanged by 054, because solo still reacts in the same
+  call.
 
 Why not run the reaction in `route`, after `dispatch`: reject's machine half comes first
 and can refuse. Run after the board write, it could no longer refuse a dirty worktree, and
 034's atomicity would break. The archive report (030) also carries the reaction's outcome
 in the command's own answer, and rebuilding that in the shell would put a business rule in
-a transport. Why not keep the five `local` until 054: 054 does not flip them (its Out of
-scope defers the asynchronous path), and a `local` `move_task` means the browser (050)
+a transport. Why not keep the six `local` until 054: no task flips them. 054 adds the
+server's cleanup path inside the core functions these handlers already call, so it needs
+them as board rows, not as rows to flip. And a `local` `move_task` means the browser (050)
 cannot drag a card.
 
 If 041's diff gave `approve` or `reject` a different shape, follow that diff. If it left
@@ -445,8 +468,8 @@ enforces neither: it refuses a cycle through `[dependencies]` but not a sibling 
   050.
 - **Roles.** Owner-only refusals are 051's, as `invalid` with a sentence naming the role.
 - **The runner protocol, `/api/v1/runner/*` and `RunnerCaller`.** 052.
-- **Flipping any "local until then" row.** 052, 054, 056 and 060 each flip theirs, one
-  commit per flip.
+- **Flipping any "local until then" row.** 052, 054 and 056 each flip theirs, one commit
+  per flip.
 - **Hosted `/mcp` and MCP parity.** 060. The registry records no MCP pairing (D32 point 9).
 - **Converting today's local handlers that read `AppState.context`.** D32 point 8's rule is
   that a local handler never reads the board's context. The failure it prevents, a stale
@@ -457,8 +480,9 @@ enforces neither: it refuses a cycle through `[dependencies]` but not a sibling 
   stop-and-ask, not a silent expansion of this diff.
 - **How a caller in several teams names one team for an entity-less command.** 039 refuses
   `list_tasks` under a two-team scope, and ADR-0029 notes that the UI needs a team switcher.
-  No ADR or seam entry decides how an HTTP request narrows its scope. This task scopes to
-  every team the caller has, and 050 raises the question before building the switcher.
+  This task scopes to every team the caller has. 050 decides the narrowing, a
+  `Rimaia-Team` request header applied by `Caller::narrow_to` (050 Scope 3), and records it
+  in its seam entry.
 - **Docker, the lock file, the public URL, logging setup and metrics.** 062.
 - **Any migration, any query change, and any dependency** beyond `tower-http` with `trace`
   (D4, D6, D34).
@@ -486,9 +510,17 @@ enforces neither: it refuses a cycle through `[dependencies]` but not a sibling 
   - `a_solo_approve_and_reject_through_dispatch_reach_the_worktree`: approve with
     auto-cleanup removes the worktree, reject removes it and keeps the branch, and reject
     of a dirty worktree is still refused with nothing written;
-  - `the_server_dispatch_passes_no_machine`: the same `archive_task` and `move_task`
-    through `dispatch` leave the worktree in place and report `Nothing`.
-  - Exactly the five handlers in point 3a read `request.machine`; a `grep` in the PR body
+  - `the_server_dispatch_passes_no_machine`: each of the six through `dispatch` leaves the
+    machine untouched. `archive_task`, `archive_tasks`, `move_task` to `done` and
+    `approve_task` leave the worktree in place, and the archive report says `Nothing`;
+    `reject_task` writes its board half and leaves the worktree, dirty or not;
+    `remove_repository` removes the board row and leaves the checkout and its worktree
+    records. A comment at the `Nothing` assertion names 054, which changes it to `Pending`
+    for a task with a `runs` row naming a runner.
+  - `a_solo_remove_repository_through_dispatch_removes_the_checkout`: a repository whose
+    deleted task left a worktree record is removed, and neither the record nor the
+    checkout remains;
+  - Exactly the six handlers in point 3a read `request.machine`; a `grep` in the PR body
     shows it.
 - **Invoke payloads are unchanged.** `invoke_payloads_dispatch_unchanged` dispatches the
   exact argument objects that `src/lib/*.test.ts` and `src/**/*.test.tsx` assert
@@ -569,9 +601,13 @@ enforces neither: it refuses a cycle through `[dependencies]` but not a sibling 
   `src-tauri/src/commands/`. `AppState` has `board: Option<SoloBoard>`, set in `setup()`
   from `Caller::solo` and `AppState.machine`, and `route` calls `dispatch_with_machine`.
 - **D32 is amended.** A dated D32 amendment, in the same commit as point 3a, records
-  `BoardRequest.machine`, `dispatch_with_machine`, `SoloBoard`'s third field and the five
-  rows, and each of those five appendix notes says the reaction stays synchronous in solo
-  until 054's follow-up.
+  `BoardRequest.machine`, `dispatch_with_machine`, `SoloBoard`'s third field and the six
+  rows of point 3a, `remove_repository` included. Each of those six appendix notes says the
+  reaction stays synchronous in solo and what the server does without a machine: for
+  `archive_task`, `archive_tasks`, `move_task` and `approve_task`, that 054 records the
+  cleanup for the holding runner's heartbeat and turns the archive report from `Nothing`
+  into `Pending`; for `reject_task` and `remove_repository`, that the machine half is
+  skipped. No note still says "the change event".
 - **The wiring script** passes, and each of these scratch edits makes it fail. They are
   checked by hand and listed in the PR body:
   - a board row whose wrapper calls `local<`;
@@ -626,9 +662,9 @@ specification, and all nine points are this task's unless a point names another.
   stays the only module that imports `invoke`; **D10**; **D16.1**, since HTTP bodies are
   `camelCase` and MCP's are `snake_case`;
 - **D4** and **D6** as prohibitions;
-- for point 3a, 041's "Machine reactions to board actions stay synchronous in solo", 034's
-  approve and reject with their refusal table, and 054's Out of scope on asynchronous
-  archive cleanup.
+- for point 3a, 041's "Machine reactions to board actions", 066's `remove_repository`, 034's
+  approve and reject with their refusal table, 054's Scope 5 ("cleanup runs on the holding
+  runner"), and D31's 2026-10-04 amendment on `Heartbeat::cleanup`.
 
 ADR-0034 in full, ADR-0027 point 6, and ADR-0037 points 4 and 6. Also ADR-0029 point 5 and
 ADR-0030 points 2–8, for what `Caller` stands in for.
@@ -666,9 +702,10 @@ ADR-0030 points 2–8, for what `Caller` stands in for.
   `tenant_isolation.rs` table this task re-keys.
 - 040: the `crates/runner` manifest and CI steps to copy, and
   `rimaia_core_does_not_depend_on_rimaia_runner`.
-- 041: machine state is off the board DTOs, `update_repository` has lost `worktreeRoot`,
-  `MachineContext` is in `rimaia_core::machine` and on `AppState.machine`, and the
-  archive, move, approve and reject functions take `Option<&MachineContext>` (point 3a).
+- 041 and 066: machine state is off the board DTOs, `update_repository` has lost
+  `worktreeRoot`, `MachineContext` is in `rimaia_core::machine` and on `AppState.machine`,
+  and the archive, move, remove, approve and reject functions take
+  `Option<&MachineContext>` (point 3a).
 - 028: `CommandTransport` and the fixture-coverage test whose extraction point 9 rewrites.
 - 034, 021, 035 and 037: the review, findings, loop-control and `get_review_history` rows
   they appended to D32's appendix.
@@ -697,9 +734,12 @@ missing, stop: it belongs to that task, and this task should not improvise it.
 - 052: the router to nest `/api/v1/runner/*` in, beside the board routes but not in the
   registry, and `protocol::Version::parse` with `check_against` for the runner protocol's
   window.
-- 054's follow-up task: the five rows of point 3a, whose handlers stop passing
-  `request.machine` once the reaction is the runner's. `BoardRequest.machine` and
-  `dispatch_with_machine` go when the last of them does.
+- 054: the six rows of point 3a as board rows whose handlers make one call each, so that
+  it changes only the machine-less path inside 041's, 066's and 034's functions: the
+  `cleanup_pending` flag, `OnArchiveOutcome::Pending`, and the
+  `the_server_dispatch_passes_no_machine` assertion that goes with it. Solo's synchronous
+  reaction stays, so `BoardRequest.machine` and `dispatch_with_machine` stay; no task
+  removes them.
 - 059: `AppState.board` to set to `None`.
 
 **Why the case table lives in `testing/`.** D32 point 5 and ADR-0029 point 5 each want a
@@ -721,20 +761,16 @@ passes with more normalized, the transports differ, and that is the finding.
 - moving the 37-plus board handlers and their inputs: ~900, mostly moves, which `git diff
   -M` shows as such;
 - the shell's `route` and the single list: ~150;
+- point 3a's machine pass-through and its tests: ~250;
 - the server crate and the binary: ~400;
 - the HTTP suite and the case table: ~700, data-heavy;
 - the script rewrite: ~250;
 - `commands.ts`, CI and CLAUDE.md: ~250.
 
-That is roughly 3,400 lines before either addition this revision or 039 may bring:
-
-- point 3a and its tests add ~250;
-- if 039 used its size cut, the Tauri-command half of `tenant_isolation.rs` arrives here
-  too: four checks for each of roughly 150 commands, local rows included, which is another
-  ~1,000 lines of case data.
-
-Together that is well past one session. Cut in this order, and stop cutting as soon as the
-rest fits:
+That is roughly 3,650 lines. If 039 used its size cut, the Tauri-command half of
+`tenant_isolation.rs` arrives here too: four checks for each of roughly 150 commands, local
+rows included, which is another ~1,000 lines of case data and well past one session. Cut in
+this order, and stop cutting as soon as the rest fits:
 
 1. **The local-row half of `tenant_isolation.rs`**, if 039 left it here. It moves to 049's
    first commit, or to a task appended under the next free number and placed before 050.

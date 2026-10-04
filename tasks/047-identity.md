@@ -156,7 +156,8 @@ provider_id, identity) -> UserId`, in one transaction:
 - **`last_used_at` is written at most once an hour.** A request whose session was touched
   less than an hour ago writes nothing. Every write reaches the backup stream (ADR-0037
   point 2), and an hour's precision on a thirty-day rule costs nothing.
-- Signing out and revoking delete the row. A deleted session's cookie is an unknown secret.
+- Revoking deletes the row, and signing out is revoking (Scope 12). A deleted session's
+  cookie is an unknown secret.
 
 **6. API tokens (ADR-0030 points 3, 5 and 6).** `crates/core/src/identity/tokens.rs`.
 
@@ -187,12 +188,21 @@ provider_id, identity) -> UserId`, in one transaction:
 **7. Pairing (ADR-0030 point 5).** `crates/core/src/identity/pairing.rs`.
 
 - `create_code(ctx) -> PairingCode { code, expires_at }`: ten minutes, only the hash stored.
-- `redeem(pool, clock, code, label, provider) -> PairedRunner { runner_id, token }`: one
-  transaction that deletes the code row by its hash with `RETURNING`, refuses when nothing
-  came back or `expires_at` has passed, then writes the `runners` row (owner, label, the
-  provider as `ProviderId::as_str()`, `paired_at`) and its `rmr_` token. A code is useless
-  once used, whether or not the redemption that used it succeeded. `provider` must parse as a
-  `ProviderId`; add `ProviderId::parse` if no earlier task has.
+  The same transaction deletes the user's expired codes, so an unredeemed code does not
+  outlive its ten minutes in the table and in every backup.
+- `redeem(pool, clock, code, label, provider) -> PairedRunner { runner_id, token }`, in
+  three steps. First it validates the label (Scope 6's rule) and the provider, touching no
+  row, so a typo costs the person nothing. Then it deletes the code row by its hash with
+  `RETURNING` and **commits that delete on its own**, refusing when nothing came back or
+  `expires_at` has passed. Only then does it write, in a second transaction, the `runners`
+  row (owner, label, the provider as `ProviderId::as_str()`, `paired_at`) and its `rmr_`
+  token. A code is therefore useless once used, whether or not the redemption that used it
+  succeeded (058 relies on this); a failure in the second step costs a new code, never a
+  reusable one.
+- **`ProviderId::parse(&str) -> Result<ProviderId>`** is new here, in
+  `runner/provider/mod.rs`: the inverse of `as_str`, answering `Error::invalid` for an
+  unknown name. In a build without the `testing` feature `ledger` is unknown, as the
+  variant is. 052 reuses it.
 - `pair_own_runner(ctx, label, provider) -> PairedRunner`: the connected desktop's automatic
   pairing, with no code. Only a `Door::Desktop` caller may use it (Scope 12).
 - An unknown, used and expired code all get the same `invalid` sentence, so the answer is not
@@ -231,6 +241,12 @@ write.
   request has the proxy's address, and the per-address limit becomes one limit for the
   whole instance. That is still a limit, and fails closed. Reading a forwarded header safely
   needs to know which proxy to trust, which is 062's decision. 047 reads no forwarded header.
+- **There is one serve call.** Under 046's plain `axum::serve(listener, router)` the
+  `ConnectInfo` extractor fails at runtime, so every auth route would answer 500. New:
+  `rimaia_server::serve(listener, router)`, serving
+  `router.into_make_service_with_connect_info::<SocketAddr>()`. `main.rs` and 046's
+  `TestServer::spawn` in `crates/server/tests/common/mod.rs` both call it, so every server
+  test runs the production serve path.
 - **One limiter, shared.** The server builds one `Arc<RateLimiter>` and gives it both to
   `ServerState`, for the auth routes, and to `BoardHost`, for the three minting commands.
   `BoardHost` gains `rate_limits` here, under D32 point 2's rule that it grows only through
@@ -252,10 +268,14 @@ write.
   the session or the token (D32 point 7). For a personal access token with
   `api_token_teams` rows, it is the intersection of those rows with the user's current
   memberships. Removing someone from a team (051) therefore takes effect on their next
-  request, which is the reason ADR-0030 chose server-side sessions over JWTs.
+  request, which is the reason ADR-0030 chose server-side sessions over JWTs. **An empty
+  intersection is a failure**, not a caller with no grants: a restricted token whose user
+  has left every team it names reaches nothing, so it gets the same answer as a revoked one,
+  rather than `for_caller`'s `invalid`. 060's `/mcp` inherits this.
 - **Every failure is `Error::unauthenticated()`, with one message: `Sign in to continue.`**
-  Unknown, expired, revoked, wrong kind, unpaired, missing CSRF and wrong CSRF are
-  indistinguishable to the caller. The span records which one it was, never the credential.
+  Unknown, expired, revoked, wrong kind, unpaired, no reachable team, missing CSRF and wrong
+  CSRF are indistinguishable to the caller. The span records which one it was, never the
+  credential.
 - **A hash lookup is not a timing oracle for the secret.** The database compares hashes of
   256-bit secrets, and learning a prefix of a hash teaches nothing about the secret. `subtle`
   is used wherever a secret itself is compared in memory: the CSRF header, the OAuth `state`
@@ -263,9 +283,14 @@ write.
   code's hash; with that hash as the table's primary key there is no in-memory comparison
   left to make, and the code says so in a comment rather than adding one for show.
 
-046 added `ErrorCode::Unauthenticated` and its `src/types.ts` twin (D32 point 3). This task
-adds `Error::unauthenticated()` with the one message above and is the first production code
-that returns it. If 046 did not add the variant, add it here, with its TypeScript twin.
+046 added `Error::Unauthenticated { message }`, its constructor, and the `ErrorCode` and
+`src/types.ts` twins (Scope 6 there). This task changes that constructor to take no
+argument and always carry `Sign in to continue.`, so no call site can word a refusal
+differently. 046's own refusals use it unchanged in meaning: `RefuseAll`, and the
+extractor's in `crates/server/src/caller.rs` (both credentials at once, a cookie without its
+CSRF header, a door the surface does not accept). 046's
+`a_cookie_alone_is_unauthenticated_until_sessions_exist` is stale once sessions exist; it
+is rewritten as `a_cookie_without_its_csrf_header_is_unauthenticated`.
 
 **11. The server's half.** In `crates/server`:
 
@@ -283,11 +308,12 @@ that returns it. If 046 did not add the variant, add it here, with its TypeScrip
   | Route | Does |
   | --- | --- |
   | `GET /auth/github` | Browser sign-in. Mints `state` and a verifier, records a `Browser` pending entry, sets `rimaia_signin` = `state`, and redirects to the provider |
-  | `GET /auth/desktop?redirect_uri&state&code_challenge&code_challenge_method` | Desktop sign-in (ADR-0030 point 4). `redirect_uri` must be `http://127.0.0.1:<port>/callback` (RFC 8252 §7.3) and the method `S256`; anything else is refused before the provider is contacted. Otherwise as above, with a `Desktop` entry |
+  | `GET /auth/desktop?redirect_uri&state&code_challenge&code_challenge_method&label` | Desktop sign-in (ADR-0030 point 4). `redirect_uri` must be `http://127.0.0.1:<port>/callback` (RFC 8252 §7.3) and the method `S256`. `label` is optional, defaults to `Desktop app`, and is trimmed and held to 1–100 characters, as Scope 6's labels are. Anything else is refused before the provider is contacted. Otherwise as above, with a `Desktop` entry carrying the label |
   | `GET /auth/github/callback?code&state` | Compares `state` with `rimaia_signin` in constant time, takes the pending entry, exchanges, upserts the user. `Browser`: creates a session, sets the cookies, clears `rimaia_signin`, redirects to `/`. `Desktop`: mints a one-time code into `DesktopCodes` and redirects to `redirect_uri?code=…&state=<desktop_state>`, creating no browser session |
   | `POST /api/v1/auth/desktop_token` `{ code, codeVerifier, redirectUri }` | Takes the code, checks `pkce_challenge(codeVerifier)` against the stored challenge in constant time and the redirect URI for equality, and answers `NewApiToken` for an `rmd_` token labelled as `/auth/desktop` was asked |
   | `POST /api/v1/auth/pair` `{ code, label, provider }` | Scope 7's `redeem`. Answers `PairedRunner`. This is the call 058's `rimaia-runner pair` makes |
-  | `POST /api/v1/auth/sign_out` | Cookie and CSRF required. Deletes the session and clears both cookies. Answers `null` |
+
+  There is no sign-out route; signing out is a board row (Scope 12).
 
   The JSON routes use 046's error shape and status table, parse the body themselves as 046's
   board routes do, and apply 046's protocol check as a `Write` board row does. The three
@@ -319,7 +345,10 @@ that returns it. If 046 did not add the variant, add it here, with its TypeScrip
   URI, so the callback's `code` and `state` are not recorded. No `tracing` field in this task
   holds a secret, a hash, a code, a cookie or a header value. The span of every
   authenticated request carries `user_id` and the door (ADR-0030 point 8), which 046's
-  `command` span already does.
+  `command` span already does. No test here captures log output: that needs
+  `tracing-subscriber`, which D34 does not approve, and 062's log-hygiene test is the one
+  that adds it and covers these routes' codes, `state` values, cookies and bearer tokens.
+  Until then the rule is checked in review.
 
 **12. The account API: eight board rows (D32).** Handlers in
 `crates/core/src/api/board/account.rs`, registered in `api/registry.rs`, each with a
@@ -327,7 +356,7 @@ that returns it. If 046 did not add the variant, add it here, with its TypeScrip
 
 | Command | Effect | Does |
 | --- | --- | --- |
-| `get_account` | Read | The user (`id`, `login`, `avatarUrl`), their teams with name and role, and which credential this request used |
+| `get_account` | Read | The user (`id`, `login`, `avatarUrl`), their teams with name and role, and `current: { kind: "session" \| "desktop", id }`, the credential this request used |
 | `list_sessions` | Read | The user's live sessions: `id`, `userAgent`, `createdAt`, `lastUsedAt`, `current` |
 | `revoke_session` | Write | `{ id }`. Deletes one of the caller's sessions |
 | `list_api_tokens` | Read | `ApiTokenSummary`: `id`, `kind`, `label`, `runnerId`, `teamIds`, `createdAt`, `lastUsedAt`, `lastUsedFrom`, `expiresAt`, `current`. Never a hash |
@@ -342,11 +371,44 @@ that returns it. If 046 did not add the variant, add it here, with its TypeScrip
 - **Solo has no accounts** (ADR-0030 point 7). A `Door::Shell` caller is refused with
   `invalid`: `Accounts exist only on a Rimaia server.` The rows still exist in solo, because
   the registry is one list and the wiring script requires a wrapper for each.
+- **Signing out is `revoke_session` with `get_account`'s `current.id`.** The next request on
+  the old cookie presents a secret that no longer exists, which is `unauthenticated`, which
+  049 and 050 already treat as "show sign-in". The two cookies stay until the next sign-in
+  overwrites them; they hold a dead secret and its derivative, so leaving them costs
+  nothing. A route that cleared them would be an HTTP call outside `board<T>`, and D32
+  point 6 makes `board<T>` in `commands.ts` the only HTTP sender.
 - **They publish no `ChangeEvent`.** Sessions and tokens belong to a user, not a team, and
   `Change` has no variant for them. A second open tab sees a revocation on its next read.
-- **046's registry test holds them to the same bar as every other row.** Each gets a case in
-  `crates/server/tests/commands.rs`, run as user A against user B's ids, where every answer
-  must be `not_found`, and each `Read` publishes nothing.
+- **Each row gets a `BoardCase` in 046's `BOARD_CASES`**, in
+  `crates/core/src/testing/api.rs`, so core's `tenant_isolation.rs` and the server's
+  `commands.rs` run the one table, as 046's Scope 11 requires. "B's ids" here are the other
+  user's: `TwoTeams` gains, for each owner, one session and one token of each kind (the
+  runner token with its `runners` row), made through Scopes 5–7's functions and never by
+  hand-written `INSERT`s. Their ids join
+  the ids 039's scan looks for, and `sessions`, `api_tokens`, `api_token_teams` and
+  `runners` join B's snapshot. Both invokers run these cases as `Door::Desktop` over A's
+  fixture desktop token, so `current` agrees between transports.
+
+  | Command | `Foreign` | Probe |
+  | --- | --- | --- |
+  | `revoke_session` | `Ids` | B's session id: `not_found` |
+  | `revoke_api_token` | `Ids` | B's personal access token id: `not_found` |
+  | `create_personal_access_token` | `Ids` | `teamIds: [B's team]`: `not_found` |
+  | `get_account`, `list_sessions`, `list_api_tokens` | `EntityLess` | They take no argument; the answer holds none of B's ids |
+  | `create_pairing_code`, `pair_own_runner` | `EntityLess` | They name no entity; the scan and B's snapshot still apply |
+
+  No new `Foreign` kind is needed: 046 defines `EntityLess` as a command that can name no
+  entity, which is what these five are.
+- **`both_transports_answer_every_case_identically` normalizes one thing more.** Three
+  rows answer a secret minted by the call, so the two transports can never be equal on it.
+  047 widens 046's normalization by exactly `NewApiToken.token`, `PairedRunner.token` and
+  `PairingCode.code`, as a deliberate change to that test, and nothing else. Before
+  normalizing, the test asserts each transport's secret has its shape: the kind's prefix
+  then 43 base64url characters, or `XXXX-XXXX` over Crockford's alphabet. Normalization
+  therefore cannot hide a missing secret.
+- **Each row gets a fixture row in `src/dev/fixtures/`** (028): an explicit `invalid`
+  refusal with the solo shell's own sentence, `Accounts exist only on a Rimaia server.`,
+  because fixture mode is a solo board. `fixtures.test.ts` passes unmodified.
 
 **13. Documentation.** CLAUDE.md's Gotchas gains one bullet: no secret goes into a log
 line, a `Debug` output, an error message or a URL the server records; tokens, session
@@ -403,6 +465,7 @@ variables are listed wherever 046 documented its own.
   - `a_session_expires_after_thirty_idle_days_and_its_row_is_deleted`, which passes at 30
     days less one second after the last touch and fails at exactly 30 days;
   - `a_session_is_touched_at_most_once_an_hour`;
+  - `an_idle_expired_session_is_not_listed_and_the_next_sign_in_deletes_it`;
   - `a_revoked_session_is_refused_on_its_next_request`;
   - `a_cookie_request_without_the_csrf_header_is_refused_even_for_a_read`, and the same
     with a wrong header;
@@ -410,11 +473,16 @@ variables are listed wherever 046 documented its own.
     id, `rmr_` is `Runner` with its runner;
   - `a_token_whose_prefix_disagrees_with_its_row_is_refused`;
   - `an_expired_personal_access_token_is_refused`;
-  - `a_restricted_personal_access_token_sees_only_the_teams_it_names_and_still_belongs_to`;
+  - `a_restricted_personal_access_token_sees_only_the_teams_it_names_and_still_belongs_to`,
+    and is `unauthenticated` once its user belongs to none of them;
   - `removing_a_membership_takes_effect_on_the_next_request`;
   - `revoking_a_runner_token_unpairs_its_runner_and_keeps_the_row`;
   - `a_pairing_code_redeems_once_within_ten_minutes`, and
     `an_unknown_a_used_and_an_expired_code_get_the_same_answer`;
+  - `a_code_is_spent_even_when_the_redemption_fails_after_the_lookup`: with a test-only
+    `BEFORE INSERT ON runners` trigger that raises, `redeem` fails, and the same code then
+    gets the unknown-code answer. An invalid label or provider leaves the code redeemable;
+  - `creating_a_pairing_code_deletes_the_users_expired_ones`;
   - `a_pending_sign_in_is_single_use_and_expires_after_ten_minutes`, for both maps;
   - `a_rate_limit_refuses_the_attempt_after_its_limit_and_resets_with_the_window`, with
     the exact message `Too many attempts. Try again in 600 seconds.` for the eleventh `Pair`
@@ -423,8 +491,10 @@ variables are listed wherever 046 documented its own.
     exactly `{"code":"unauthenticated","message":"Sign in to continue."}`;
   - `account_commands_refuse_the_solo_shell`, for all eight rows, with the exact message.
 - These tests exist in `crates/server/tests/` and pass, against the real router on
-  `127.0.0.1:0`, a temporary board database, `TestClock` and `FakeIdentityProvider`, with
-  `reqwest` following no redirects:
+  `127.0.0.1:0` through `rimaia_server::serve`, a temporary board database, `TestClock` and
+  `FakeIdentityProvider`, with `reqwest` following no redirects. The tests parse
+  `Set-Cookie` and send a `Cookie` header by hand: reqwest's `cookies`, `json` and `form`
+  features are not approved (D34), and none is enabled:
   - `a_browser_signs_in_and_calls_a_board_command`: `/auth/github` redirects to the fake
     provider with a `state` and an S256 challenge and sets `rimaia_signin`; the callback
     sets `rimaia_session` and `rimaia_csrf` with exactly the attributes in Scope 11's
@@ -432,13 +502,16 @@ variables are listed wherever 046 documented its own.
     saw the verifier whose challenge was sent;
   - `a_callback_without_its_sign_in_cookie_is_refused` (login CSRF), and
     `a_callback_state_is_single_use` and `a_callback_after_ten_minutes_is_refused`;
-  - `sign_out_deletes_the_session_and_clears_both_cookies`;
+  - `revoking_the_current_session_signs_out`: `revoke_session` with `get_account`'s
+    `current.id`, then the same cookie and header get `401 unauthenticated`;
   - `the_desktop_signs_in_through_a_loopback_redirect`: the redirect carries a code and the
     desktop's own `state`; `desktop_token` with the right verifier answers an `rmd_` token
-    that authenticates as `Desktop`; the same code twice, a wrong verifier, and a different
-    redirect URI are each refused;
+    that authenticates as `Desktop` and carries the label asked for, or `Desktop app` when
+    none was; the same code twice, a wrong verifier, and a different redirect URI are each
+    refused;
   - `a_desktop_redirect_that_is_not_loopback_is_refused_before_the_provider`, for
-    `https://`, `localhost`, another host, and a missing `S256`;
+    `https://`, `localhost`, another host, a missing `S256`, and a blank or 101-character
+    label;
   - `a_headless_runner_pairs_with_a_code`: `create_pairing_code` over a session, then
     `/api/v1/auth/pair` answers a runner id and an `rmr_` token that authenticates as that
     `Runner`; a second redemption is refused;
@@ -449,9 +522,15 @@ variables are listed wherever 046 documented its own.
     passing again after `TestClock` crosses the window;
   - `a_minted_secret_appears_in_exactly_one_response`: after creating a personal access
     token, `list_api_tokens` and `get_account` contain neither the token nor its hash;
-  - the eight account rows each have a case in 046's `crates/server/tests/commands.rs`, so
-    `every_board_command_has_a_case`, `a_team_cannot_see_another_teams_ids` (run here as
-    another user's ids) and `both_transports_answer_every_case_identically` cover them.
+  - `a_cookie_without_its_csrf_header_is_unauthenticated`, replacing 046's cookie-alone
+    test.
+- The eight account rows have the `BoardCase`s Scope 12's table gives, in
+  `crates/core/src/testing/api.rs`, over `TwoTeams` extended as Scope 12 says. 046's
+  `every_board_command_has_a_case`, `a_team_cannot_see_another_teams_ids`,
+  `reads_publish_no_change_event` and core's `tenant_isolation.rs` pass with them, and
+  `both_transports_answer_every_case_identically` passes with only the three minted secrets
+  added to its normalization, each shape-checked first.
+- `grep -rn 'axum::serve' crates/server` finds only `rimaia_server::serve`.
 - `github_builds_the_authorize_url_github_documents`: for client id `Iv1.test`, redirect
   `https://rimaia.test/auth/github/callback`, state `state-1` and the RFC 7636 challenge
   above, `authorize_url` is exactly
@@ -462,8 +541,9 @@ variables are listed wherever 046 documented its own.
   subject; a `/user` answer without a numeric `id` is `internal`.
 - `src/lib/commands.ts` has a `board<T>` wrapper for each account row, `src/types.ts` its
   types, and `src/lib/commands.test.ts` asserts each wrapper's exact invoke name and payload,
-  mocked at `@tauri-apps/api/core` as the file already does. `./scripts/check-command-wiring.sh`
-  passes. No component changes.
+  mocked at `@tauri-apps/api/core` as the file already does. Each has its refusal row in
+  `src/dev/fixtures/`, and `src/dev/fixtures/fixtures.test.ts` passes unmodified.
+  `./scripts/check-command-wiring.sh` passes. No component changes.
 - The server refuses to start without `RIMAIA_PUBLIC_URL`, `RIMAIA_GITHUB_CLIENT_ID` or
   `RIMAIA_GITHUB_CLIENT_SECRET`, naming the missing variable, and never printing the secret.
 - `grep -rn 'RefuseAll' crates/server/src` finds no production wiring.
@@ -471,24 +551,29 @@ variables are listed wherever 046 documented its own.
 - Every CI check passes on all three operating systems, `aws-lc-sys` included, with the exact
   command list CLAUDE.md and `ci.yml` share after 046.
 - **Needs a person, and the PR body carries it as a checklist:** with a real GitHub OAuth app
-  (client id and secret supplied by a person) and `RIMAIA_PUBLIC_URL=http://localhost:<port>`,
-  sign in from a real browser; sign out; sign in again and see two sessions on
-  `list_sessions`; create and revoke a personal access token with `curl`; confirm that the
-  GitHub app's authorization page asks for nothing beyond reading the profile.
+  (client id and secret supplied by a person) whose callback URL is exactly
+  `http://localhost:<port>/auth/github/callback`, and
+  `RIMAIA_PUBLIC_URL=http://localhost:<port>`, sign in from Chrome or Firefox (Safari refuses
+  `Secure` cookies on `http://localhost`, which would fail sign-in for reasons unrelated to
+  this code); sign out by revoking the current session; sign in again and see that session
+  gone from `list_sessions` and the new one current; sign in from a second browser and see
+  two; create and revoke a personal access token with `curl`; confirm that the GitHub app's
+  authorization page asks for nothing beyond reading the profile.
 
 ## Notes
 
-**Read first.** ADR-0030 in full; it is this task's only ADR, and every point in it but 7
-and 8 lands here or names the task that finishes it. Then seam-contract D28: the
+**Read first.** ADR-0030 in full; every point in it but 7 and 8 lands here or names the
+task that finishes it. Then seam-contract D28: the
 `20261003120300_identity.sql` DDL, its lead-in paragraph, and "Sign-in state stays in memory"
-in its Why. D32 points 2, 3, 7 and 9 and its Binds line for 047 (`Authenticate`, the cookie
+in its Why. D32 points 2, 3, 6, 7 and 9 and its Binds line for 047 (`Authenticate`, the cookie
 and header names, the doors each surface accepts, CSRF on every cookie request). D33 point 3,
 the two-cache recipe. D34's rows for `sha2`, `rand`, `subtle`, `axum-extra` and reqwest's TLS
 feature, and its "Hand-written" paragraph for PKCE and rate limiting. D8 (no rate-limit
 code), D10 (ids are UUID strings), D11 (the server's startup refusal), D4's amendment (the
 file name, and that it is frozen once this lands). D6 and D34 as prohibitions. ADR-0029
-points 2 and 5 for sign-up and not-found; ADR-0037 points 2 and 6 for why nothing secret is
-written to a table or a log it does not need to be in.
+points 2 and 5 for sign-up and not-found; ADR-0034 for the `/api/v1` routes and the error
+shape; ADR-0037 points 2 and 6 for why nothing secret is written to a table or a log it does
+not need to be in.
 
 **Files to start from.** On `main` today: `crates/core/src/error.rs` (the constructor goes
 beside `invalid`), `crates/core/src/clock.rs` and `crates/core/src/testing/clock.rs`,
@@ -502,8 +587,10 @@ a secret out of output), `crates/core/src/runner/provider/mod.rs` (`ProviderId`)
 `crates/core/src/identity/mod.rs` (038: `create_personal_team`, `Role`),
 `crates/core/src/context.rs` (038's `scope` and `actor`, 046's `for_caller`),
 `crates/core/src/api/{mod.rs,registry.rs,caller.rs}` and `crates/core/src/api/board/` (046),
-`crates/core/src/testing/api.rs` (046's `FixedCaller`), `crates/server/src/caller.rs`,
-`crates/server/Cargo.toml` and `crates/server/tests/commands.rs` (046). A good layout for the
+`crates/core/src/testing/api.rs` (046's `FixedCaller` and `BOARD_CASES`),
+`crates/core/src/testing/teams.rs` (039's `TwoTeams`), `crates/server/src/caller.rs`,
+`crates/server/Cargo.toml`, `crates/server/tests/common/mod.rs` and
+`crates/server/tests/commands.rs` (046), and `src/dev/fixtures/` (028). A good layout for the
 new core code is one file per Scope item under `crates/core/src/identity/`, and for the
 server `crates/server/src/{auth.rs,github.rs}` plus `crates/server/tests/identity.rs`.
 
@@ -515,28 +602,35 @@ tables, `create_personal_team`, and `Role`. 039: every board service already fil
 `rimaia-server`, `ServerState` with a clock, the registry and `dispatch`, `Caller`, `Door`,
 `Credential`, `Authenticate`, `RefuseAll`, `FixedCaller`, the bearer half of the extractor,
 the status table, `ErrorCode::Unauthenticated`, the protocol header, and the per-row HTTP
-test suite. 047 changes none of 046's shapes; it fills in the one implementation 046 left
-refusing.
+test suite. 047 fills in the one implementation 046 left refusing. It grows `BoardHost` by
+one field (`rate_limits`) and `ServerState` by the auth fields (the identity provider,
+`PendingSignIns`, `DesktopCodes`, the limiter, the config), under D32 point 2's rule that
+these grow through the task that needs a field. It changes one signature 046 defined,
+`Error::unauthenticated` losing its argument (Scope 10), and one serve call (Scope 9).
 
 **What the next tasks expect.**
 
 - 048: `SessionsAndTokens` behind `GET /api/v1/events`, which accepts the same two doors.
 - 049: the `rimaia_csrf` cookie to read and the `X-Rimaia-CSRF` header to send;
-  `unauthenticated` as the one signal to sign in again.
-- 050: `/auth/github` to link to, `/auth/sign_out` to post to, the `?sign_in=` vocabulary,
-  and the eight account rows for the account page and the team switcher's list.
+  `unauthenticated` as the one signal to sign in again. No sign-out route: every HTTP call
+  the web app makes stays a `board<T>` call.
+- 050: `/auth/github` to link to, the `?sign_in=` vocabulary, and the eight account rows
+  for the account page and the team switcher's list. Sign out is `revoke_session` with
+  `get_account`'s `current.id`, after which the next request is `unauthenticated`.
 - 051: `upsert_user` as the only way a user appears; `get_account`'s team list, which it may
   extend. Deleting an account cascades through this task's tables.
 - 052: `Door::Runner { runner_id }` from an `rmr_` token, which `RunnerCaller` narrows to.
   057: `unpair_runner`, to which it adds releasing pins.
 - 058: `POST /api/v1/auth/pair` with `{ code, label, provider }`, answering `{ runnerId,
   token }`.
-- 059: `/auth/desktop`, `/api/v1/auth/desktop_token`, `pair_own_runner`, and
-  `create_personal_access_token` for the loopback endpoint's token.
+- 059: `/auth/desktop` with its optional `label`, `/api/v1/auth/desktop_token`,
+  `pair_own_runner`, and `create_personal_access_token` for the loopback endpoint's token.
 - 060: `Door::Mcp { token_id: Some(_) }` with the token's team restriction already applied to
-  `Caller.teams`.
-- 062: the three environment variables, and the forwarded-address question Scope 9 leaves
-  open.
+  `Caller.teams`, and a token that reaches no team already `unauthenticated`. 047 has no
+  log-capture test; 060's span criterion rests on 062's.
+- 062: the three environment variables, the forwarded-address question Scope 9 leaves
+  open, `rimaia_server::serve` as the one serve call, and the log-hygiene test covering
+  047's routes (Scope 11).
 
 **Two things a reviewer should see stated, not discovered.**
 
@@ -550,9 +644,7 @@ refusing.
 **Size.** L, and near the ceiling: roughly 1,300 lines of core (secrets, provider seam,
 sessions, tokens, pairing, pending state, rate limiter, `Authenticate`, account handlers)
 with about as much again in tests, 500 of server routes and the GitHub client, 250 of
-TypeScript wrappers, types and tests, and the migration, before the two `.sqlx` caches. If it
-runs over, cut the desktop half, the `/auth/desktop` and `desktop_token` routes,
-`DesktopCodes` and `pair_own_runner`, into the first commit of 059. Nothing between 047 and
-059 uses them, and the browser, pairing-code and personal-token paths stand on their own.
-The rate limiter and the constant-time comparisons are not candidates for cutting: ADR-0030
-says they are part of the feature.
+TypeScript wrappers, types and tests, and the migration, before the two `.sqlx` caches.
+There is no size cut. The desktop half stays: 059 is written against it and adds no server
+route. The rate limiter and the constant-time comparisons stay: ADR-0030 says they are part
+of the feature.

@@ -225,9 +225,9 @@ are unchanged: ids, never rows; publish after commit; never publish an empty lis
 
 **8. The three relaxed columns.** `repositories.path`, `repositories.worktree_root` and
 `runs.log_path` now infer `Option` in every `query!`. Each reader either handles `None` or
-uses a `"path!"`-style override whose comment names the task that retires the reader: 041
-for the two repository paths, 056 for `log_path`. `Repository` and `Run` keep their `String`
-fields, so no DTO the frontend sees changes shape. `.sqlx/` is regenerated with D5's recipe,
+uses a `"path!"`-style override whose comment names the task that retires the reader: 066,
+for all three. `Repository` and `Run` keep their `String` fields, so no DTO the frontend
+sees changes shape. `.sqlx/` is regenerated with D5's recipe,
 which D33 keeps for every task before 040.
 
 **9. Startup.** `src-tauri/src/lib.rs`'s `setup()` calls `identity::ensure_solo` after
@@ -328,8 +328,7 @@ the context with `TeamScope::one(solo.team_id)` and `solo.user_id`. `AppState` k
   `ctx.scope` except through `sole()` at the sites Scope 6 names, each with its comment.
   No published event names an id whose row belongs to a different team than its `team_id`.
 - `repositories.path`, `repositories.worktree_root` and `runs.log_path` are nullable in the
-  schema, and every override that keeps a reader on `String` carries a comment naming 041 or
-  056.
+  schema, and every override that keeps a reader on `String` carries a comment naming 066.
 - **Behaviour is unchanged.** No existing test's assertion about behaviour changes. An
   existing test's diff is confined to:
   - fixture setup: a team or runner in a raw insert, the identity in the harness, and the

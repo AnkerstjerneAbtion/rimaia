@@ -64,22 +64,16 @@ commits in this order, so a reviewer can read them apart:
 ### The contract is already amended; implement it
 
 D28's amendment of 2026-09-30 ("two columns in task 035's file, before it is written") and
-the dated line under D30 point 7 were made in Phase 0. Between them:
+the dated line under D30 point 7 were made in Phase 0, and say why. Both columns are already
+in D28 part 6's DDL for this file, and the first is already in 038's rebuild of `runs`:
 
-- **`runs.findings_recorded_at TEXT`** is the witness of a clean review. D30 point 7 needs
-  one call to `record_review_findings`, with `findings: []` when the review found nothing,
-  and an empty call writes no `review_findings` row. Without the column, a clean review and
-  one whose write-back never arrived are the same rows, which is exactly the false
-  confidence ADR-0017 names first. `review::findings::record` sets it in the same
-  transaction as the rows it writes, including when it writes none.
-- **`review_findings.ordinal INTEGER NOT NULL`**, with `idx_review_findings_review_run`
-  becoming `UNIQUE (review_run_id, ordinal)`, carries the reviewer's order within one call.
-  The implicit `rowid` would do today, but `VACUUM` (the sqlite3 CLI is a sanctioned writer,
-  ADR-0003) and any copy that does not carry it, such as task 051's, renumber it.
+- `runs.findings_recorded_at TEXT`, the witness of a clean review, set by
+  `review::findings::record` in the same transaction as its rows, including when it writes
+  none;
+- `review_findings.ordinal INTEGER NOT NULL`, with `idx_review_findings_review_run`
+  becoming `UNIQUE (review_run_id, ordinal)`.
 
-Both are already in D28 part 6's DDL for this file, and `findings_recorded_at` is already in
-038's rebuild of `runs`. This task writes the file as part 6 now reads. It edits neither
-entry again.
+This task writes the file as part 6 now reads. It edits neither entry again.
 
 ### The migration
 
@@ -129,8 +123,8 @@ cache arrives with task 040.
     leave the task `running` with no process, and `claim::release` would then move it to
     `failed`, throwing away the retry it was waiting for. So the read moves above the
     claim. It is safe there because both callers already hold D19's `InFlight` slot for the
-    task, and while it is held no other process can add a row to the task, so the point
-    read before the claim is the point the claim resumes. The comment in `try_step` that
+    task, and while it is held nothing else in the app can start a run of that task, so the
+    point read before the claim is the point the claim resumes. The comment in `try_step` that
     says "After the claim, never before" is rewritten to say this.
   - **The queue logs the refusal and moves to the next entry.** `tracing::warn!` with the
     task id and the refusal, drop that entry's slot, `continue`. It does not use `?`, which
@@ -203,8 +197,12 @@ cache arrives with task 040.
   (`planner_spend` counted twice) as the reason that still holds. `'strategy'` is not a
   `RunKind`.
 - `src/types.ts` mirrors the enum and every field above: `Run`, `LastRunSummary`,
-  `RunListEntry`, the analytics report and `DigestEntry`. Frontend test fixtures that build
-  these objects gain the fields. **No component renders them.** Rendering is task 037's.
+  `RunListEntry`, the analytics report and `DigestEntry`. Every object that builds one of
+  these gains the fields, or `npm run typecheck` fails: the frontend test fixtures in
+  `src/**/*.test.tsx`, and task 028's typed seed in `src/dev/fixtures/`, as 033 did for
+  `headSha`. Every existing seeded row is an implementation run, so the seed gains
+  `kind: "implementation"` and nothing new to look at. **No component renders them.**
+  Rendering is task 037's.
 - Seam-contract pointers, one dated line each, editing nothing else:
   - under D12: `last_run.kind`;
   - under D23 point 7: the budget boundary.
@@ -404,6 +402,14 @@ never assert a literal count.
   `listReviewFindings` wrapper in `src/lib/commands.ts`. This way task 037 is only UI.
   The two write tools have no command: no UI writes a finding (D30 point 5), so ADR-0021's
   parity is not affected.
+- **The wrapper gets its fixture row in the same commit** (task 028: every command
+  `commands.ts` sends has a row, or `fixtures.test.ts`'s coverage test fails). The row in
+  `src/dev/fixtures/` is a seeded answer typed `ReviewFinding[]` against `src/types.ts`,
+  not a refusal, since the read has something to show. Every scenario answers `[]`, except
+  `busy`, which answers two findings of one review run, one `open` and one `fixed` with its
+  `resolution` and `resolvedByRunId` set, so the row exercises every field of the type
+  rather than an empty array that type-checks against anything. No view calls the wrapper
+  yet, so no screenshot changes. 037 seeds the states it renders.
 - **D32's appendix gains one row in the same commit** (D32 point 8), under the dated
   "added after 728a049" sub-heading task 034 created: `list_review_findings`, module
   `review`, kind `board`, effect `Read`, From `046`, citing ADR-0021 point 3 and this task.
@@ -549,6 +555,13 @@ never assert a literal count.
 - `list_review_findings` returns the same findings, in the same order, through the MCP
   tool and through the Tauri command. `./scripts/check-command-wiring.sh` passes with the
   new command.
+- `src/dev/fixtures/` has a `list_review_findings` row, a seeded answer and not a refusal,
+  and task 028's `it("has an answer or an explicit refusal for every command commands.ts
+  sends")` and `it("never reaches invoke or listen in fixture mode")` pass with the new
+  wrapper, without changes to either test. `busy`'s answer holds one `open` and one `fixed`
+  finding; the seed's existing `Run`, `LastRunSummary`, `RunListEntry`, analytics and
+  digest objects carry the new fields, so `npm run typecheck` compiles the seed against
+  them.
 - D32's appendix has the `list_review_findings` row under the "added after 728a049"
   sub-heading.
 - `src/types.ts` carries `RunKind`, the `kind` fields, `ReviewFinding`,
@@ -630,6 +643,9 @@ the stream. If some test turns out to read that name out of the stream, stop and
 rather than editing the recording.
 
 **What the previous tasks provide.**
+- Task 028 provides the fixture mode, its typed seed in `src/dev/fixtures/` and the
+  coverage test that fails on a wrapper with no row. Its rule binds every task that adds a
+  command after it; this task adds one row, and changes no test of 028's.
 - Task 033 provides `runs.head_sha`, `runs.base_sha` and `review_bundles`, and the
   `20261001120000` file this one sorts after. A review row's `head_sha` is written by the
   same `finish_run` code as an implementation's (D29 point 5), so this task adds nothing
@@ -655,7 +671,11 @@ rather than editing the recording.
   `list_review_findings`.
 - **038** redeclares `runs.kind`, `runs.findings_recorded_at` and `idx_runs_task_kind` in
   the rebuild. D28 part 6's 038 block already does.
-- **051** copies `review_findings`, `ordinal` included, with an explicit column list.
+
+No later task copies `review_findings`. Task 051's copy to a team carries the title, plan
+and extra instructions only, and leaves findings behind with the rest of the task's
+history (ADR-0029 point 5). D28's 2026-09-30 amendment said otherwise until Phase 0
+corrected its example; `ordinal` is still needed, for the reasons the amendment gives.
 
 **Size.** This is an L, and at the top of what one session carries: roughly 3.5–4k lines,
 about half of which is tests and exact-string updates. It is not split, because the second

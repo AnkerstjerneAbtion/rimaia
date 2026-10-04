@@ -31,18 +31,57 @@ reviewable in the app afterwards.
 | 18 | [015](015-run-history-and-log-viewer.md) | Run history and log viewer | v0.3 | 009 | #10 |
 | 19 | [016](016-worktree-lifecycle-and-cleanup.md) | Worktree lifecycle and cleanup | v0.3 | 007, 009 | #14 |
 | 20 | [026](026-open-worktree-in-editor.md) | Open a task's worktree in the tool the user actually works in | v0.3 | 005, 007 | [#28](https://github.com/AnkerstjerneAbtion/rimaia/pull/28) |
-| 21 | [028](028-let-a-run-see-the-ui-it-changed.md) | Let a run see the UI it changed | v0.3 | 005 | — |
-| 22 | [017](017-morning-review-flow.md) | Morning review flow | v0.4 | 033, 034 | — |
-| 23 | [018](018-preflight-doctor-and-packaging.md) | Preflight doctor and packaging | v0.3 | 008 | #17 |
-| 24 | [025](025-startup-failure-dialog.md) | A startup failure a double-clicked bundle can see | v0.3 | 018 | [#28](https://github.com/AnkerstjerneAbtion/rimaia/pull/28) |
-| 25 | [029](029-a-development-database-that-is-not-the-users.md) | A development database that is not the user's | v0.3 | 018 | [#29](https://github.com/AnkerstjerneAbtion/rimaia/pull/29) |
-| 26 | [027](027-dismissable-doctor-warnings.md) | A doctor warning the user can put down | v0.3 | 018 | [#28](https://github.com/AnkerstjerneAbtion/rimaia/pull/28) |
-| 27 | [022](022-per-repository-git-credentials.md) | Per-repository git credentials | v0.3 | 003, 008 | [#28](https://github.com/AnkerstjerneAbtion/rimaia/pull/28) |
-| 28 | [021](021-review-and-fix-loop.md) | Review-and-fix loop | v0.4 | 015, 017, 020 | — |
-| 29 | [024](024-analytics.md) | Analytics — what the queue has actually done | v0.4 | 015 | [#28](https://github.com/AnkerstjerneAbtion/rimaia/pull/28) |
-| 30 | [030](030-archiving-tasks-and-on-archive-cleanup.md) | Archiving tasks, and on-archive cleanup | v0.3 | 005, 016 | [#31](https://github.com/AnkerstjerneAbtion/rimaia/pull/31) |
-| 31 | [031](031-a-provider-seam-for-the-agent-cli.md) | A provider seam for the agent CLI | v0.4 | — | [#32](https://github.com/AnkerstjerneAbtion/rimaia/pull/32) |
-| 32 | [032](032-provider-vocabulary-outside-the-runner.md) | Provider vocabulary outside the runner | v0.4 | 031 | [#33](https://github.com/AnkerstjerneAbtion/rimaia/pull/33) |
+| 21 | [018](018-preflight-doctor-and-packaging.md) | Preflight doctor and packaging | v0.3 | 008 | #17 |
+| 22 | [025](025-startup-failure-dialog.md) | A startup failure a double-clicked bundle can see | v0.3 | 018 | [#28](https://github.com/AnkerstjerneAbtion/rimaia/pull/28) |
+| 23 | [029](029-a-development-database-that-is-not-the-users.md) | A development database that is not the user's | v0.3 | 018 | [#29](https://github.com/AnkerstjerneAbtion/rimaia/pull/29) |
+| 24 | [027](027-dismissable-doctor-warnings.md) | A doctor warning the user can put down | v0.3 | 018 | [#28](https://github.com/AnkerstjerneAbtion/rimaia/pull/28) |
+| 25 | [022](022-per-repository-git-credentials.md) | Per-repository git credentials | v0.3 | 003, 008 | [#28](https://github.com/AnkerstjerneAbtion/rimaia/pull/28) |
+| 26 | [024](024-analytics.md) | Analytics — what the queue has actually done | v0.4 | 015 | [#28](https://github.com/AnkerstjerneAbtion/rimaia/pull/28) |
+| 27 | [030](030-archiving-tasks-and-on-archive-cleanup.md) | Archiving tasks, and on-archive cleanup | v0.3 | 005, 016 | [#31](https://github.com/AnkerstjerneAbtion/rimaia/pull/31) |
+| 28 | [031](031-a-provider-seam-for-the-agent-cli.md) | A provider seam for the agent CLI | v0.4 | — | [#32](https://github.com/AnkerstjerneAbtion/rimaia/pull/32) |
+| 29 | [032](032-provider-vocabulary-outside-the-runner.md) | Provider vocabulary outside the runner | v0.4 | 031 | [#33](https://github.com/AnkerstjerneAbtion/rimaia/pull/33) |
+| 30 | [028](028-let-a-run-see-the-ui-it-changed.md) | Let a run see the UI it changed | v0.3 | 005 | — |
+| 31 | [033](033-record-the-commit-a-run-ended-on-and-a-review-bundle.md) | Record the commit a run ended on, and a review bundle | v0.4 | 015, 030 | — |
+| 32 | [034](034-review-actions-on-every-door.md) | Review actions on every door | v0.4 | 033 | — |
+| 33 | [017](017-morning-review-flow.md) | Morning review flow | v0.4 | 033, 034 | — |
+| 34 | [035](035-runs-have-a-kind-and-review-findings-have-a-home.md) | Runs have a kind, and review findings have a home | v0.4 | 033, 034 | — |
+| 35 | [036](036-a-board-port-between-the-runner-and-the-board.md) | A board port between the runner and the board | v0.4 | 035 | — |
+| 36 | [021](021-review-and-fix-loop.md) | Review-and-fix loop | v0.4 | 035, 036 | — |
+| 37 | [037](037-the-review-loop-in-the-interface.md) | The review loop in the interface | v0.4 | 021 | — |
+| 38 | [038](038-team-mode-schema-and-a-scoped-service-context.md) | Team-mode schema, solo identity, and a scoped service context | v0.5 | 021, 036 | — |
+| 39 | [039](039-every-board-service-filters-by-team.md) | Every board service filters by team | v0.5 | 038 | — |
+| 40 | [040](040-the-runner-store.md) | The runner store | v0.5 | 039 | — |
+| 41 | [041](041-machine-state-moves-to-the-runner.md) | Machine state moves to the runner | v0.5 | 040 | — |
+| 42 | [066](066-checkouts-and-worktree-records-move-to-the-runner.md) | Checkouts and worktree records move to the runner | v0.5 | 041 | — |
+| 43 | [042](042-split-the-scheduler.md) | Split the scheduler into board selection and a runner loop | v0.5 | 041, 066 | — |
+| 44 | [043](043-runner-leases.md) | Runner leases, fencing and pinning | v0.5 | 042 | — |
+| 45 | [044](044-branch-from-the-dependencys-commit.md) | Branch from the dependency's commit | v0.5 | 043 | — |
+| 46 | [067](067-the-model-rule-and-who-may-start-a-run.md) | The model rule, and who may start a run | v0.5 | 043 | — |
+| 47 | [045](045-consent-and-eligibility.md) | Consent and eligibility | v0.5 | 021, 039, 043, 044, 067 | — |
+| 48 | [046](046-the-server-crate-and-one-command-registry.md) | The server crate and one command registry | v0.5 | 028, 037, 045 | — |
+| 49 | [047](047-identity.md) | Identity: sign-in, sessions and tokens | v0.5 | 046 | — |
+| 50 | [048](048-events-over-sse.md) | Change events over SSE, filtered by team | v0.5 | 047 | — |
+| 51 | [049](049-frontend-transport.md) | A frontend transport per command kind | v0.5 | 048, 028, 017 | — |
+| 52 | [050](050-the-web-shell.md) | The web shell | v0.5 | 049 | — |
+| 53 | [051](051-teams-invitations-and-roles.md) | Teams, invitations and roles | v0.5 | 050 | — |
+| 54 | [052](052-the-runner-protocol-and-an-http-board-adapter.md) | The runner protocol and an HTTP board adapter | v0.5 | 051 | — |
+| 55 | [070](070-a-context-that-acts-for-nobody.md) | A context that acts for nobody | v0.5 | 045, 046, 048, 051, 052 | — |
+| 56 | [053](053-leases-across-the-network.md) | Leases across the network | v0.5 | 052, 070 | — |
+| 57 | [054](054-repositories-by-remote.md) | Repositories by remote, checkouts by runner | v0.5 | 052, 053 | — |
+| 58 | [055](055-the-run-scoped-proxy-and-consent-laundering.md) | The run-scoped proxy, and runs that cannot launder consent | v0.5 | 053, 054 | — |
+| 59 | [056](056-transcripts-leave-the-machine.md) | Transcripts leave the machine | v0.5 | 053, 054, 055, 066 | — |
+| 60 | [068](068-transcript-retention-on-the-server.md) | Transcript retention on the server | v0.5 | 056 | — |
+| 61 | [057](057-push-postcondition-and-run-elsewhere.md) | Push postcondition, and run elsewhere | v0.5 | 053, 054, 056 | — |
+| 62 | [058](058-the-headless-runner.md) | The headless runner | v0.5 | 055, 056, 057 | — |
+| 63 | [059](059-desktop-connected-mode.md) | Desktop connected mode | v0.5 | 058 | — |
+| 64 | [060](060-hosted-mcp.md) | Hosted MCP | v0.5 | 055, 059, 068 | — |
+| 65 | [071](071-close-the-hosted-mcp-parity-gaps.md) | Close the hosted MCP parity gaps | v0.5 | 060 | — |
+| 66 | [061](061-assignment-consent-and-runners-in-the-interface.md) | Assignment and consent in the interface | v0.5 | 045, 059, 060 | — |
+| 67 | [069](069-runners-in-the-interface.md) | Runners in the interface | v0.5 | 061 | — |
+| 68 | [062](062-hosting.md) | Hosting, backups and observability | v0.5 | 056, 058, 060, 068 | — |
+| 69 | [063](063-a-signed-desktop-updater.md) | A signed desktop updater | v0.5 | 059, 061, 069 | — |
+| 70 | [064](064-docs-and-ci-final-pass.md) | Docs, CLAUDE.md and CI final pass | v0.5 | 060, 061, 062, 063, 069, 071 | — |
+| 71 | [065](065-drop-retired-columns.md) | Drop retired columns | v0.5 | 064 | — |
 
 ## Before task 001
 

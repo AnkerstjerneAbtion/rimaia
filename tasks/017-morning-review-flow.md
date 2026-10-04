@@ -179,23 +179,34 @@ The review view has two modes, the **digest** and the **queue**. It opens on the
   | `recorded`, `patch_truncated: true` | As above, but the patch holds only the file sections that fit, each whole. Each file left out carries 033's quiet "not in patch" marker. After the patch, one line: how many of the files are in it, how large the whole diff was (`patch_bytes`), and that the rest is on the PR, with the link. With no PR, the line says the rest is on the branch |
   | `recorded`, `patch_pruned_at` set | Totals, per-file list, commits and PR link as usual, and in place of the patch one line saying it was pruned and when |
   | `recorded`, `bundle: null` | "This run ended with no commits on its branch." No totals, no file list |
-  | `live` | "No diff was recorded for this run." The `diff` it carries is **deliberately not rendered**, not even its counts |
+  | `not_recorded` | "No diff was recorded for this run." No totals, no file list |
   | no run (`lastRun` is `null`, a card dragged into `in_review` by hand) | "This task has no run to review." |
 
   Nothing but a recorded bundle ever renders a file count. "0 files changed" would be a
-  claim about the branch that nobody made, and the `live` variant's `diff` is `get_run`
-  running live git on the desktop (033's fallback for rows with `head_sha` NULL). Rendering
-  it here would make the review view desktop-only for exactly those rows, which is what
-  ADR-0033 point 7 set out to avoid. The live diff stays in `RunDetailOverlay`, labelled as
-  the branch's current state, as 033 left it.
+  claim about the branch that nobody made. `not_recorded` carries nothing: 033's `get_run`
+  runs no git for any row, so there is no diff on it to show or to hide. The only way to a
+  diff for such a row is the local command `get_diff_summary`, which reads the branch as it
+  is now, on the machine holding the worktree. Calling it here would make the review view
+  desktop-only for exactly those rows, which is what ADR-0033 point 7 set out to avoid, and
+  would show the branch's present state as if it were what the run left. That fallback
+  stays in `RunDetailOverlay`, labelled as the branch's current state, as 033 left it.
 - **One renderer for the bundle, two presentations.** `RunDetailOverlay.tsx` renders the
-  same `RunReview` after 033, with the live diff shown and the patch in a collapsed
-  `<details>`. Extract its diff, commits and PR sections into one component,
-  `src/components/runs/RunReviewSections.tsx`, taking two props: `liveDiff: "render" |
-  "suppress"` and `patch: "collapsed" | "expanded"`. The overlay passes `render` and
-  `collapsed`, and its test from 033 passes unedited. The review view passes `suppress` and
-  `expanded`. The two views then cannot show the same bundle two ways, and neither
-  contradicts the other's acceptance criteria.
+  same `RunReview` after 033, with the patch in a collapsed `<details>` and, for
+  `not_recorded` only, its own `getDiffSummary(taskId)` call. Extract its diff, commits and
+  PR sections, that fallback call included, into one component,
+  `src/components/runs/RunReviewSections.tsx`, taking two props:
+  - `liveDiff: "fallback" | "none"` decides whether a `not_recorded` review calls
+    `getDiffSummary`. With `fallback` the component does exactly what 033's overlay does:
+    calls it, renders the answer under the "branch's current state" line, and renders the
+    one-line failure when it rejects. With `none` it calls nothing and renders "No diff was
+    recorded for this run." The prop changes nothing for a `recorded` review, which never
+    calls `getDiffSummary` under either value (033's criterion).
+  - `patch: "collapsed" | "expanded"`.
+
+  The overlay passes `fallback` and `collapsed`, and its test from 033 passes unedited,
+  because it mocks `invoke` and the call is the same call from a different component. The
+  review view passes `none` and `expanded`. The two views then cannot show the same bundle
+  two ways, and neither contradicts the other's acceptance criteria.
 - **No live git from this view.** It never calls `get_diff_summary` or
   `get_worktree_status`. Those are local commands (D32's appendix) and the browser will not
   have them.
@@ -264,7 +275,7 @@ than a second mechanism:
 | `review-truncated` | `Enter` | A queue task whose patch was truncated, with a PR |
 | `review-pruned` | `Enter` | A queue task whose patch was pruned |
 | `review-no-commits` | `Enter` | A queue task whose newest run is `recorded` with `bundle: null` |
-| `review-live` | `Enter` | A queue task whose newest run is `live` (recorded before 033) |
+| `review-not-recorded` | `Enter` | A queue task whose newest run is `not_recorded` (recorded before 033), while the fixture's `get_diff_summary` row still answers with files |
 | `review-chain` | `Enter r` | A task with three dependents (one `built_on`, one archived) and one dependency, with the reject note step open: its set-aside explanation and its warning |
 | `review-empty` | `Enter` | The empty queue |
 
@@ -281,8 +292,9 @@ In both colour schemes and at both widths, as 028's projects already do.
   findings store and the loop summary on a digest entry; task 021 produces them; task 037
   renders them in this view. Leave a place after the PR link where a findings section
   slots in, and build nothing in it.
-- **A live diff fallback** for runs recorded before 033. They show "no diff recorded", and
-  Open worktree is one key away on the desktop.
+- **A live diff fallback** for `not_recorded` runs, such as those recorded before 033.
+  They show "No diff was recorded for this run.", the run overlay keeps its
+  `getDiffSummary` fallback for them, and Open worktree is one key away on the desktop.
 - **Syntax highlighting, side-by-side diffs, per-file folding and inline comments.** The
   full diff is on the forge, one link away (ADR-0033 point 7).
 - **Forge actions:** merging, closing or commenting on a PR. A rejected task's old PR stays
@@ -373,12 +385,20 @@ injected `now` or from vitest's fake timers. No test waits on real time.
   `compareDocumentPosition`), with no click and the patch not inside a closed `<details>`.
   An `interrupted` run shows "Interrupted" while the task's `run_state` is `failed` (D9).
 - **Every `RunReview` variant renders its own line.** Truncated, pruned, `recorded` with
-  `bundle: null`, `live`, and no run at all each render the line in Scope's table. Only the
-  recorded-with-bundle cases render a file count. The `live` case renders no file count and
-  no file name **even though its `diff` lists files**. Across the whole keyboard test,
-  `get_diff_summary` and `get_worktree_status` are never invoked.
+  `bundle: null`, `not_recorded`, and no run at all each render the line in Scope's table.
+  Only the recorded-with-bundle cases render a file count. For `not_recorded`, the test's
+  mocked `invoke` would answer `get_diff_summary` with a summary listing files, and the
+  view still renders "No diff was recorded for this run." with no file count and none of
+  those file names, because it never invokes `get_diff_summary`. Across the whole keyboard
+  test, `get_diff_summary` and `get_worktree_status` are never invoked.
+- **`liveDiff` decides the fallback, and nothing else.** `RunReviewSections` given a
+  `not_recorded` review with `liveDiff: "fallback"` invokes `get_diff_summary` once with
+  the task id; with `liveDiff: "none"` it invokes nothing and renders "No diff was
+  recorded for this run."
+  Given a `recorded` review, it invokes `get_diff_summary` under neither value.
 - **The run overlay is unchanged.** `RunDetailOverlay.test.tsx`, as 033 left it, passes
-  unedited against the extracted `RunReviewSections`.
+  unedited against the extracted `RunReviewSections`, its two not-recorded cases
+  (`get_diff_summary` answering, and rejecting) included.
 - **Open PR and Open worktree.** `o` invokes `plugin:opener|open_url` with the newest
   run's `pr_url`, exactly. No file outside `src/lib/open.ts` imports
   `@tauri-apps/plugin-opener`. With no `pr_url` on the newest run, `o` invokes nothing, even

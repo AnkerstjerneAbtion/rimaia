@@ -50,6 +50,9 @@ later be imported into one server without colliding (ADR-0028). Solo never shows
 teams, but its services filter by team exactly as the server does. That is what makes "works in solo" evidence for
 "works connected".
 
+Seam-contract D28 part 3 says how: a migration adopts an existing install's board under a
+generated identity, and a fresh install creates the same rows in app code at first launch.
+
 ### 3. Two roles
 
 | Role | Can |

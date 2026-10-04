@@ -3,7 +3,7 @@ id: "049"
 title: A frontend transport per command kind
 milestone: v0.5
 status: ready
-depends_on: ["048", "028"]
+depends_on: ["048", "028", "017"]
 adrs: ["0034", "0024"]
 size: L
 ---
@@ -26,7 +26,9 @@ server and a local shell at once, or to a server alone:
 Components keep calling the same functions. The two exceptions this task makes are the two
 ADR-0034 names: the folder picker moves behind a local command, so no component imports a
 Tauri plugin, and `get_client_capabilities` arrives, so the UI can later ask what this client
-can do instead of guessing from the platform.
+can do instead of guessing from the platform. One `src/lib` file changes its behaviour by
+mode as well: 017's `src/lib/open.ts`, which opens a pull request through the opener plugin,
+uses `window.open` in the browser, as 017 said it would.
 
 **This task builds the transports and proves them with a mocked `fetch`.** It does not put
 the app in front of a real server. Serving the bundle, signing in and the browser states of
@@ -107,30 +109,47 @@ implementations to it rather than replacing it", and this task holds to that.
 **2. Events choose a transport by source.** In `src/lib/events.ts`:
 
 - **One exported table, `EVENT_SOURCES`**, maps each event name a subscribe wrapper uses to
-  the one source it arrives from, `"board"` or `"local"`. The rows are 048 Scope 3's table,
-  copied:
+  where it arrives from: `"board"`, `"local"` or `"both"`. The rows are 048 Scope 3's wire
+  table, copied with the three values 048's "What the next tasks expect" gives 049:
 
   | Event | Source |
   | --- | --- |
-  | `tasks:changed`, `repositories:changed`, `runs:changed` | board |
+  | `tasks:changed`, `repositories:changed` | both |
+  | `runs:changed` | board |
   | `settings:changed` (team and user settings only, after 048) | board |
   | `runs:tail` (opt-in per run, below) | board |
-  | `plan-pass:progress` | board |
+  | `plan-pass:progress` | local |
   | `runner:changed` (048's `subscribeToRunnerChanged`), `schedules:changed` | local |
 
-  **No row names two sources.** 048 split `settings:changed` precisely so that none has to,
-  and a two-source row would deliver every payload twice in solo and fixture mode, where one
-  transport serves both. 048 publishes `plan-pass:progress` on the board's live channel, so
-  a connected desktop that still plans locally before 060 does not see its own pass's
-  progress over SSE. That is 059's and 060's to settle, not a reason for a second source
-  here.
+  **Two names are `both`, because two machines write what they announce.** A task's board
+  row changes on the server, and its worktree record changes on the desktop
+  (`LocalChange::Worktrees`). A repository's row is the team's, and its checkout is the
+  runner's (`LocalChange::Checkouts`). A connected desktop that took `tasks:changed` from
+  SSE alone would never hear that its own worktree was removed, and the card would show it
+  until the next unrelated board change. The payload means the same on both sides, ids to
+  re-read, so a subscriber cannot tell which side spoke and does not need to.
+  **`plan-pass:progress` is `local`.** 048 Scope 4 gives it one producer, the desktop's local
+  plan pass, which emits straight into Tauri, and no board source. A connected desktop
+  therefore sees its own pass's progress through `listen`, and a browser, which runs no
+  pass, sees none.
 - The installed event transport becomes a pair as well, `{ board: EventTransport, local:
   EventTransport | null }`, with `setEventTransports(pair)` beside 028's
   `setEventTransport`, which again installs one transport for both. `subscribe<P>()`
-  subscribes through the source its row names, once. A source whose transport is `null`
-  (local, in the browser) subscribes to nothing, and the wrapper still resolves to an
-  `UnlistenFn`. A browser component that subscribes to `schedules:changed` therefore gets
-  silence, not an error.
+  subscribes through the source its row names, once per **distinct** transport:
+  - A `board` or `local` row subscribes through that one transport.
+  - A `both` row subscribes through `board` and through `local`, unless they are the same
+    transport, compared by identity, in which case it subscribes once. In solo and fixture
+    mode one transport serves both kinds, so a `both` row still delivers each payload once.
+    The default with nothing installed resolves both kinds to the same `listen` transport,
+    so it is one transport by this comparison too. In connected mode `board` is SSE and
+    `local` is `listen`, so the row subscribes to each and receives each side's events once.
+  - The wrapper resolves to one `UnlistenFn` that releases every subscription it made. If
+    the second subscription rejects, the first is released before the wrapper rejects, so a
+    failed subscribe leaves nothing behind.
+  - A source whose transport is `null` (local, in the browser) subscribes to nothing. A
+    `local` row still resolves to an `UnlistenFn`, so a browser component that subscribes to
+    `schedules:changed` gets silence, not an error. A `both` row subscribes through `board`
+    alone.
 - **028's `EventTransport` gains an optional third argument**, `options?: { runId?: string
   }`: `(event, onPayload, options?) => Promise<UnlistenFn>`. Tauri `listen` and the fixture
   transport ignore it. Only the SSE transport reads it, for the tail (below).
@@ -158,9 +177,12 @@ implementations to it rather than replacing it", and this task holds to that.
     - `onopen` accepts a `200` whose content type is `text/event-stream`, and resets the
       attempt counter.
     - `onopen` throws a `FatalStreamError` carrying the body's `{ code, message }` for any
-      `4xx`. 048 refuses before the stream with `401` (credential), `404` (a tail id it
-      cannot show) and `400` (more than eight tails). It serves the stream under version
-      skew, because the stream is a read, so it never answers `426`. `426` is fatal all the
+      `4xx`. 048 refuses before the stream with two statuses only: `401` (credential) and
+      `400` (a tail id that is not a UUID, or a ninth). It never refuses a tail with `404`:
+      a well-formed id it cannot show is dropped and the stream opens (048 Scope 6). It
+      serves the stream under version skew, because the stream is a read, so it never
+      answers `426` either. A `404` therefore means there is no events route at all (Vite's
+      dev server, a proxy, a server older than 048), and it and `426` are fatal all the
       same, defensively, as D34 asks. None of these changes by asking again. A body that is
       not that shape becomes the same `internal` error the HTTP transport makes.
     - `onopen` throws a retriable error for a `5xx`, and for a `200` that is not
@@ -175,7 +197,9 @@ implementations to it rather than replacing it", and this task holds to that.
   - **A fatal failure closes the stream and keeps its subscribers.** Every subscriber still
     holds its `UnlistenFn`, and the refcount is unchanged. The failure is reported to every
     subscriber of `subscribeToEventStreamFailure(onFailure)`, which is new in `events.ts`,
-    as `EventStreamFailure { error: RimaiaError, fatal: true, droppedTails: [] }`. 050 turns
+    as `EventStreamFailure { error: RimaiaError }`. Only fatal failures are reported. A
+    retriable one is retried with backoff and reported to no one, because the stream
+    recovers on its own and every reopen brings the burst. 050 turns
     `unauthenticated` into the sign-in page and `upgrade_required` into a reload. This task
     only reports them. **`reconnectEventStream()`**, also new, reopens the stream with the
     current credential and headers when it has subscribers, closing any stream still open,
@@ -203,15 +227,16 @@ implementations to it rather than replacing it", and this task holds to that.
       treats a refused subscription as "show the seeded snapshot", and keeps doing so.
       Watching the eight most recent instead was declined: it silently freezes a card that
       is still on screen.
-    - **A `404` on an open that named tails** is not fatal at first. The transport drops
-      every tail id in that request (it cannot tell which one was refused), reopens once
-      without them, and reports `EventStreamFailure { error, fatal: false, droppedTails }`.
-      A dropped id stays out of every later `?tail=` list until its last subscriber
-      unlistens, so it cannot turn each reconnect into a `404`. A `404` on an open with no
-      tails is fatal like any other `4xx`. A stale id arises only when a run's task is
-      deleted or when 050 switches team, and in both cases the card holding it is about to
-      unmount, so dropping its healthy neighbours too costs a few seconds of tail, not
-      board events.
+    - **A stale id simply never delivers a tail.** 048 does not look a well-formed id up:
+      an unknown run, a run deleted with its task and another team's run all open the same
+      stream, and that run's tail never arrives. So the transport has no path for a refused
+      tail and nothing to drop. A stale id stays in the `?tail=` list until its last
+      subscriber unlistens, and costs nothing while it does. It arises when a run's task is
+      deleted or when 050 switches team, and in both cases the card holding it keeps its
+      seeded snapshot (D14) until it unmounts. A `400` on an open that named tails is fatal
+      like any other `4xx`, and the transport does not retry without them: the client
+      only ever sends run ids the server gave it, capped at eight, so a `400` is a client
+      bug, and guessing which id caused it would hide that.
     - `ActiveRunCard.tsx` passes its `runId`. That is the one component edit this task is
       allowed besides `RepositoryAddForm.tsx`. Its own filter may stay.
   - **Hidden documents.** Keep the library's default `openWhenHidden: false`. A background
@@ -262,8 +287,10 @@ only the client knows.
   point 1 calls a command without a tool a defect unless the exception is recorded, so
   Scope 8's seam entry records both.
 
-**4. The folder picker moves behind a local command.** `RepositoryAddForm.tsx` is the only
-component that imports a Tauri plugin (ADR-0034 Context).
+**4. Plugins stay behind `src/lib`: the folder picker moves behind a local command, and the
+URL opener learns the browser.** `RepositoryAddForm.tsx` is the only component that imports
+a Tauri plugin (ADR-0034 Context). 017's `src/lib/open.ts` is the only `src/lib` file that
+does.
 
 - **The command:** `choose_folder`, taking `{ title }` and returning `string | null`, where
   `null` means the user cancelled. It lives in `src-tauri/src/commands/app.rs` and uses the
@@ -287,17 +314,44 @@ component that imports a Tauri plugin (ADR-0034 Context).
   `RepositoriesSection.test.tsx` mock `@tauri-apps/plugin-dialog`. They now answer
   `choose_folder` through the `invoke` mock they already have. They are the only existing
   test files, apart from `commands.test.ts` and `events.test.ts`, that this task edits.
+- **`openExternalUrl` opens with `window.open` in the browser.** 017 added
+  `openExternalUrl(url)` in `src/lib/open.ts` over `@tauri-apps/plugin-opener`'s `openUrl`,
+  for the review view's `o` key, and named this task as the one that switches it in the
+  browser. Without that, `openUrl` sends `plugin:opener|open_url` through `invoke`, which a
+  browser does not have, and `o` fails on every press.
+  - `open.ts` keeps an installed opener, `setUrlOpener(opener)`, beside the transport
+    setters and on the same terms: the default, with nothing installed, is the plugin's
+    `openUrl`, looked up at call time, so 017's tests pass unedited and solo and connected
+    desktops behave as they do today. `installTransports("browser")` installs
+    `browserUrlOpener`, which calls `window.open(url, "_blank", "noopener,noreferrer")`.
+    `window.open` is read from `globalThis` at call time, so a test stubs it the way
+    `mockHttp()` stubs `fetch`.
+  - `browserUrlOpener` refuses a URL whose scheme is not `http:` or `https:` with `{ code:
+    "invalid", message: "Only http and https links can be opened: <url>." }` and opens
+    nothing. A `pr_url` is written by a run, and the page that would open it is the board,
+    holding a session.
+  - It resolves once `window.open` returns. With `noopener` the call returns `null` whether
+    or not a window opened, so a blocked pop-up cannot be detected and is not reported.
+    `o` is a keypress, which browsers treat as a user gesture, so the pop-up blocker admits
+    it.
+  - `open.ts` keeps its plugin import, and is the one file Scope 7 allows it in. Declined:
+    an `open_url` local command in `commands.ts`. The browser's local transport refuses
+    every local command, so the browser would still need its own branch, and the desktop
+    would gain a Rust command, a registry row, a fixture row and a D20.6 exception for what
+    the plugin already does. 028's fixture entry installs no opener, so `o` in fixture mode
+    still fails as 017 describes.
 
 **5. The bootstrap.** A new `src/lib/client.ts` exports `installTransports(mode,
-connection?)`, which is pure apart from calling the four setters, and `bootstrapClient()`,
-which `src/main.tsx` awaits before its first render:
+connection?)`, which is pure apart from calling the transport setters and `setUrlOpener`,
+and `bootstrapClient()`, which `src/main.tsx` awaits before its first render:
 
 - `runningInDesktopShell()` is `false`: browser mode. `installTransports("browser")`
   installs HTTP and SSE at `window.location.origin` with a session credential for board
-  commands and events, the browser refusal as the local command transport, and `null` as
-  the local event transport. The credential's `csrf` is `csrfFromCookie()`, exported from
-  `client.ts`: it reads the `rimaia_csrf` cookie from `document.cookie` on every call, and
-  returns `null` when there is none. That is the mechanism 047 Scope 11 decided: a readable
+  commands and events, the browser refusal as the local command transport, `null` as the
+  local event transport, and `browserUrlOpener` through `setUrlOpener` (Scope 4). The
+  credential's `csrf` is `csrfFromCookie()`, exported from `client.ts`: it reads the
+  `rimaia_csrf` cookie from `document.cookie` on every call, and returns `null` when there
+  is none. That is the mechanism 047 Scope 11 decided: a readable
   cookie holding `csrf_for(secret)`, sent back as `X-Rimaia-CSRF`. The value is
   base64url, so it is used as read, with no decoding.
 - `runningInDesktopShell()` is `true`: ask for the capabilities through
@@ -354,12 +408,14 @@ already mocks `@tauri-apps/api/core`."
 - `@tauri-apps/api/core` is imported only by `commands.ts`;
 - `@tauri-apps/api/event` and `@microsoft/fetch-event-source` are imported only by
   `events.ts`;
-- no file imports `@tauri-apps/plugin-*`;
-- no file outside `src/lib/` calls a transport setter or `bootstrapClient`, except
-  `src/main.tsx` and `src/dev/main.tsx`.
+- `@tauri-apps/plugin-opener` is imported only by `src/lib/open.ts`, and no other file
+  imports any `@tauri-apps/plugin-*`;
+- no file outside `src/lib/` calls a transport setter, `setUrlOpener` or `bootstrapClient`,
+  except `src/main.tsx` and `src/dev/main.tsx`.
 
 This is how "no component imports a Tauri plugin" stays true after the one that did is
-fixed.
+fixed. The one allowed plugin import is named by path, not by pattern, so a second file that
+reaches for a plugin fails the test instead of slipping under an allowance.
 
 **8. The records.**
 
@@ -367,11 +423,14 @@ fixed.
   cross-cutting choices*. It records, each with its reason and the alternative it declined:
   the `ClientCapabilities` field names and the browser's fixed answer; `installTransports`,
   `bootstrapClient` and `csrfFromCookie`; `transportHeaders` as the one place request
-  headers are built; `EVENT_SOURCES` with one source per row; `subscribeToEventStreamFailure`,
-  `EventStreamFailure` and `reconnectEventStream`, with the fatal and retriable classes;
-  the tail's refcounted set, its cap and the `404` rule; `RECONNECT_BASE_MS` and
-  `RECONNECT_CAP_MS`; the `mockHttp()` API; and the two commands with no MCP tool under
-  D20.6's desktop-referent exception. It binds 050, 054, 056, 059, 061 and 063.
+  headers are built; `EVENT_SOURCES` with its three values, and a `both` row subscribing once
+  per distinct transport; `subscribeToEventStreamFailure`, `EventStreamFailure` and
+  `reconnectEventStream`, with the fatal and retriable classes and only fatal ones
+  reported; the tail's refcounted set, its cap, and a stale id left to deliver nothing;
+  `RECONNECT_BASE_MS` and `RECONNECT_CAP_MS`; `setUrlOpener`, `browserUrlOpener` and its
+  scheme rule, with the declined `open_url` command; the `mockHttp()` API; and the two
+  commands with no MCP tool under D20.6's desktop-referent exception. It binds 050, 054,
+  056, 059, 061 and 063.
 - A row for 049 in the seam contract's "How to use this" table: D6 · D7 · D8 · D14 · D20 ·
   D28 · D32 · D33 · D34, 048's entry, and this task's own.
 - The one-line D6 amendment from Scope 4.
@@ -392,14 +451,15 @@ fixed.
 - **Reacting to `unauthenticated` or `upgrade_required`** beyond rejecting the command and
   reporting the stream failure. What the app does next, including when to call
   `reconnectEventStream()`, is 050's.
-- **Showing a dropped tail.** A `fatal: false` failure is reported, and no component
-  renders it in this task.
+- **Telling the user a watched run's tail will not come.** A stale id is indistinguishable
+  from a quiet run on the wire, and the card's seeded snapshot is what it shows either way.
 - **New server routes or event names.** If the transport needs one, 046 or 048 missed it.
   Stop and say so.
 - **Request timeouts, retries of commands and offline queuing.** A command that fails
   rejects, as an `invoke` that fails does today.
-- **Removing `@tauri-apps/plugin-opener` or `@tauri-apps/plugin-notification`** from
-  `package.json`, even though no frontend file imports them.
+- **Removing `@tauri-apps/plugin-notification`** from `package.json`, even though no
+  frontend file imports it. `@tauri-apps/plugin-opener` stays, because `src/lib/open.ts`
+  imports it.
 
 ## Acceptance criteria
 
@@ -445,7 +505,8 @@ fixed.
   - `it("stops reconnecting and reports unauthenticated when the stream answers 401")`.
   - `it("stops reconnecting and reports the refusal when the stream answers 400, 404 or 426")`,
     one case per status, each opened with no tails. After each, advancing the fake clock
-    past `RECONNECT_CAP_MS` makes no further request.
+    past `RECONNECT_CAP_MS` makes no further request, and the one reported
+    `EventStreamFailure` equals `{ error }` with the body's code and message.
   - `it("reconnects after a failed stream once the backoff delay has passed")`, driven by
     `fail()`. It advances the fake clock by exactly `reconnectDelay(0)` and asserts the
     second request, and asserts none before that.
@@ -464,15 +525,29 @@ fixed.
   - `it("reconnects once for tail subscriptions made in the same tick")`.
   - `it("refuses a ninth watched run without reconnecting")`, with the exact message in
     Scope 2.
-  - `it("drops stale tail ids on a 404 and keeps delivering board events")`: an open naming
-    a tail answers `404`, the next open names none, a `tasks:changed` frame reaches its
-    subscriber, and one `EventStreamFailure` with `fatal: false` names the dropped id.
+  - `it("treats a 400 on an open that named tails as fatal and does not retry without them")`:
+    `opens` has exactly one entry, and advancing the clock past `RECONNECT_CAP_MS` adds
+    none.
+  - `it("reports no failure for a stream that opens but never sends a watched run's tail")`:
+    the open names the tail, a `tasks:changed` frame reaches its subscriber, nothing is
+    reported to `subscribeToEventStreamFailure`, and no second open happens until the tail
+    subscriber unlistens.
   - `it("delivers each payload once when one transport serves both sources")`, with 028's
-    `setEventTransport`.
-  - `it("subscribes board events over SSE and local events through listen in connected mode")`.
-  - `it("resolves a local-only subscription in the browser without subscribing to anything")`.
+    `setEventTransport`, for `tasks:changed` and `repositories:changed`, and again with
+    nothing installed through the `listen` mock.
+  - `it("subscribes board events over SSE and local events through listen in connected mode")`:
+    `runs:changed` reaches its subscriber from an SSE frame only, `schedules:changed` and
+    `plan-pass:progress` from a `listen` emission only, and neither local name is ever
+    registered on the stream.
+  - `it("delivers both sides of a both event in connected mode and releases both on unlisten")`:
+    a `tasks:changed` subscriber receives an SSE frame and a `listen` emission, each once.
+    After its `UnlistenFn`, neither side delivers, the `listen` mock's unlisten was called
+    and the stream is aborted.
+  - `it("resolves a local-only subscription in the browser without subscribing to anything")`,
+    and a `tasks:changed` subscription in the browser opens the stream and nothing else.
   - `it("has a source row for every event a subscribe wrapper uses")`, and each row equals
-    the table in Scope 2.
+    the table in Scope 2: `both` for `tasks:changed` and `repositories:changed`, `local` for
+    `plan-pass:progress`.
 - **The bootstrap, in `src/lib/client.test.ts`** (new). `runningInDesktopShell()` is driven
   through the `@tauri-apps/api/core` mock, which here provides `isTauri` beside `invoke`:
   - `it("installs HTTP and SSE with a session credential at the page's origin in the browser")`.
@@ -483,6 +558,15 @@ fixed.
   - `it("fails loudly naming task 059 when the shell answers connected")`. The rejection is
     exactly the error in Scope 5, and a board command sent afterwards still reaches
     `invoke`, which shows no transport was installed.
+  - `it("opens a pull request with window.open in the browser")`: after
+    `installTransports("browser")`, `openExternalUrl("https://github.com/o/r/pull/1")` calls
+    the stubbed `window.open` once with exactly that URL, `"_blank"` and
+    `"noopener,noreferrer"`, and `invoke` is never called.
+  - `it("refuses a link that is not http or https in the browser")`: `javascript:alert(1)`
+    rejects with exactly Scope 4's message, and `window.open` is never called.
+  - `it("still opens a pull request through the opener plugin in solo")`: after a solo
+    bootstrap, `openExternalUrl` reaches the `invoke` mock as
+    `plugin:opener|open_url`, and `window.open` is never called.
 - **Local commands:**
   - In `crates/core/src/api/capabilities.rs`:
     `a_desktop_without_a_server_is_solo_and_can_do_every_local_action` and
@@ -496,13 +580,14 @@ fixed.
     no longer lists `@tauri-apps/plugin-dialog`, and lists
     `@microsoft/fetch-event-source` at exactly `2.0.1`. No other dependency changes.
 - **The boundary**, in `src/lib/boundary.test.ts`:
-  `it("imports @tauri-apps only from commands.ts and events.ts, and no plugin at all")`,
+  `it("imports @tauri-apps only from commands.ts and events.ts, and a plugin only from open.ts")`,
   `it("imports fetch-event-source only from events.ts")` and
   `it("installs transports only from main.tsx, the fixture entry and src/lib")`.
 - **Nothing else moved:**
   - Every test file that mocks `@tauri-apps/api/core` passes, and none shows a change in
     `git diff --stat` except `commands.test.ts`, `WelcomeView.test.tsx` and
-    `RepositoriesSection.test.tsx`. `client.test.ts` is new. `ActiveRunCard`'s tests pass
+    `RepositoriesSection.test.tsx`. `client.test.ts` is new. 017's tests for `open.ts` and
+    the review view pass unedited. `ActiveRunCard`'s tests pass
     unedited, because the wrapper's own `runId` filter admits exactly the snapshots the
     card's filter did.
   - `./scripts/check-command-wiring.sh` passes with the two new local rows.
@@ -533,8 +618,9 @@ may change a pixel. 048's task file, Scopes 3, 6, 7 and 8 and its "What the next
 expect" (the wire table, the burst, `?tail=`, revalidation, the refusals). 047's Scope 11
 cookie table (`rimaia_csrf`). Seam entries:
 
-- **048's entry**, *Task 048's cross-cutting choices*: the wire table, `?tail=` and its cap,
-  the opening burst, and streams that end on revalidation;
+- **048's entry**, *Task 048's cross-cutting choices*: the wire table and its two two-sided
+  names, `?tail=`, its cap and its silent drop of an unknown id, the opening burst, plan
+  progress as a local emission, and streams that end on revalidation;
 - **D32**, points 3, 6 and 7 above all: wire format, status table, doors, cookie and header
   names, `PROTOCOL_VERSION`, and the browser refusal;
 - **D34**, the `@microsoft/fetch-event-source` row and its `onopen` rule, and the declined
@@ -564,6 +650,7 @@ regenerated `crates/runner/.sqlx/`, not a migration.
   `src/views/settings/RepositoriesSection.test.tsx`.
 - `src/components/runs/ActiveRunCard.tsx`, which passes its `runId` to
   `subscribeToRunsTail`.
+- `src/lib/open.ts` from 017, and its test.
 - `src/main.tsx`, and `src/dev/main.tsx` from 028.
 - `src/test/setup.ts`, `vitest.config.ts`.
 - `src-tauri/src/lib.rs`: the `DialogExt` import, the startup dialog's comment on threads,
@@ -580,9 +667,13 @@ regenerated `crates/runner/.sqlx/`, not a migration.
   header it is sent as (Scope 11); `rmd_` desktop tokens; `ErrorCode`'s `unauthenticated`.
   `upgrade_required` is 046's.
 - **048:** `GET /api/v1/events` filtered by team, the four-event burst on every open,
-  refusals as `400`, `401` and `404` before the stream, streams that end on revalidation,
-  `?tail=` with its cap of eight, `runner:changed` and `subscribeToRunnerChanged`, and the
-  split of machine-local events off the team channel.
+  refusals as `401` and `400` before the stream and never `404`, streams that end on
+  revalidation, `?tail=` with its cap of eight and an unknown id dropped rather than
+  refused, `runner:changed` and `subscribeToRunnerChanged`, `tasks:changed` and
+  `repositories:changed` announced from both sides, `plan-pass:progress` emitted only by
+  the local pass, and the split of machine-local events off the team channel.
+- **017:** `openExternalUrl` in `src/lib/open.ts` over the opener plugin, and its tests
+  through the `invoke` mock.
 - **028:** the two setters, the fixture transports, the fixture coverage test, the bundle
   test and `npm run screenshot`.
 
@@ -596,26 +687,31 @@ the difference would change a test's expected value, stop and ask rather than ch
 - **050:** browser mode working behind `bootstrapClient()`, `subscribeToEventStreamFailure`
   for `unauthenticated` and `upgrade_required`, `reconnectEventStream()` to call after a
   sign-in and on a team switch, `transportHeaders` as the one place to add the team header,
-  and `getClientCapabilities()` to hang browser states on. 050's CORS allow-list must admit the `Authorization`,
-  `Rimaia-Protocol` and `Content-Type` request headers from the Tauri origins, because this
-  transport sends all three and each triggers a preflight.
+  and `getClientCapabilities()` to hang browser states on. 050's CORS allow-list must admit
+  the `Authorization`, `Rimaia-Protocol` and `Content-Type` request headers from the Tauri
+  origins, because this transport sends all three and each triggers a preflight.
 - **059:** `installTransports("connected", { serverUrl, token })` exactly as tested here, a
   `client.test.ts` whose loud-failure case it replaces, and a `get_client_capabilities`
-  that already answers `connected` once `runner_identity` has a `server_url`. Also the
-  connected desktop's local plan-pass progress before 060, which Scope 2 leaves to it.
+  that already answers `connected` once `runner_identity` has a `server_url`, and
+  `plan-pass:progress` already arriving through `listen` in connected mode, because its row
+  is `local`.
 - **054:** `choose_folder` behind a local command, and `mockHttp()`.
 - **056:** `getClientCapabilities()` and `localRunnerId`.
 - **061:** `localRunnerId`, to tell "your runner" from someone else's.
 - **063:** adds `canUpdate` to `ClientCapabilities`, on both sides.
 
 **Size.** Roughly 2,400–3,200 lines: about 750 of transport code across `commands.ts`,
-`events.ts` and `client.ts`, 250 for the HTTP mock, 150 of Rust, and the rest tests. That
-fits one session. If it runs long, cut at the seam between Scopes 1, 2 and 5–7 on one side
-and Scopes 3 and 4 on the other. Land the transports, the mock and the boundary test first,
-and move `get_client_capabilities` and `choose_folder` to a follow-up task that 050 then
-depends on. The boundary test's "no plugin" assertion goes with them. **Never cut** the
+`events.ts` and `client.ts`, 250 for the HTTP mock, 150 of Rust, and the rest tests. The
+`both` rows and the browser opener add roughly what dropping the `404` tail path removes,
+so the estimate stands. That fits one session. If it runs long, cut at the seam between
+Scopes 1, 2 and 5–7 on one side and Scopes 3 and 4's folder picker on the other. Land the
+transports, the mock, the browser opener and the boundary test first, and move
+`get_client_capabilities` and `choose_folder` to a follow-up task that 050 then depends
+on. The boundary test's assertion about `RepositoryAddForm.tsx` goes with them; its
+`open.ts` allowance stays. **Never cut** the `both` rows, the
 fatal `4xx` handling on the stream, the reconnect after a clean close, the backoff, or the
-both-transports comparison. The first and third turn a signed-out tab into a request loop
-against the server, the second leaves a browser board that silently stops refreshing after
-048's first revalidation, and without the fourth nothing on the frontend shows the
+both-transports comparison. Without the first a connected desktop never hears about its own
+worktrees and checkouts. The second and fourth turn a signed-out tab into a request loop
+against the server, the third leaves a browser board that silently stops refreshing after
+048's first revalidation, and without the fifth nothing on the frontend shows the
 transports agree.

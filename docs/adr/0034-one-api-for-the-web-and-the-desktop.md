@@ -175,3 +175,36 @@ silent change of meaning.
   transport because MCP's shapes are deliberately different from the commands' (ADR-0021
   lists why), and a UI has needs, such as streaming events and bulk reads, that MCP tools
   are not designed for.
+
+## Amendment, 2026-10-04 — a browser shows where a runner's settings live, not their values
+
+Task 050 implements point 5 and found its second browser bullet, "runner settings are
+read-only, showing each of the user's runners", unimplementable as written. Appended rather
+than edited into the body above, so that everything written against the original text
+inherits both the rule and the change to it.
+
+**The board holds no runner settings.** Seam-contract D28 part 4 places every runner key
+(`run_environment`, `max_concurrency`, `schedule_mode`, the run window, `mcp_port` and the
+rest) in that runner's own `runner.db`, and the board's `runners` row holds only what the
+board needs to schedule and identify it: label, provider, version, eligibility (045), and
+when it was paired and last seen. A browser has nothing to read them from.
+
+**Reporting them would buy a stale copy at the moment it matters.** Every runner would
+write a summary of its settings to the board on each change, and the board would keep a
+second copy of values whose only source of truth is the runner. ADR-0018 rejects a second
+source of truth in an event payload for the same reason. The copy is also wrong exactly when
+a person looks for it: a runner that is offline, or asleep in a laptop bag, has not reported
+the change made on it since. A doctor result is different, and stays in point 5's third
+bullet: it is a dated observation, shown with the time it was made (054), not a value the
+browser presents as current.
+
+**So in the browser, for each of the user's runners, the runner settings view shows:**
+
+- the board's own facts about it: label, provider, version, eligibility, and last seen;
+- where its settings are changed: on that machine, in its desktop app, or for a headless
+  runner on that machine's own store (task 058);
+- its last reported doctor result, when there is one (point 5's third bullet, unchanged).
+
+No runner setting's value is shown, read-only or otherwise. A later task that wants one
+shown in the browser, or changed from it, amends seam-contract D28 to report it and D31 to
+carry it, and says here why the staleness is acceptable for that key.

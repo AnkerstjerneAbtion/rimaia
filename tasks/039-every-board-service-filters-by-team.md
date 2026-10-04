@@ -79,10 +79,12 @@ The rules:
     reads the actor's `user_settings` row under any scope. `set_subscription_cost` writes
     it, but its change event still needs a team until 048 (below), so it calls
     `ctx.scope.sole()?` **before** it writes and is refused under a two-team context. Its
-    comment names 048's `Audience::User` as the end of that refusal.
+    comment names 048's `Audience::User` as the end of that refusal. 034's
+    `review::mark_seen` is the same case and gets the same treatment (see "034's digest
+    marker" below).
   - **Everything else acts on exactly one team:** `list_tasks`, `list_repositories`,
-    `register_repository`, the team settings, machine-state writes, and the queue's
-    selection. The team is `ctx.scope.sole()?`, 038's `TeamScope::sole() ->
+    `register_repository`, 034's `review::digest`, the team settings, machine-state writes,
+    and the queue's selection. The team is `ctx.scope.sole()?`, 038's `TeamScope::sole() ->
     Result<&TeamId>`. A context that reaches more than one team is refused `invalid`. That
     is ADR-0035 point 2's refusal. 060 adds the `team` argument that avoids it on MCP, and
     050 adds the team switcher. 039 adds neither.
@@ -172,7 +174,9 @@ it routes every read and write through that function.
   and write any key in the legacy table, and eight modules call `set` today
   (`scheduler/{capacity,state,pause}.rs`, `schedule/window.rs`, `strategy/{catalogue,
   settings}.rs`, `mcp/settings.rs`, `worktree/cleanup.rs`). Both become private to
-  `db::settings`, or go.
+  `db::settings`, or go. So does 034's executor-generic `set_in(executor, key, value)`:
+  it writes any key into the legacy table, and its only callers are the digest marker's two
+  paths, which move to `set_user_in` below. No caller of `set_in` survives.
 - **Three `pub(crate)` accessor pairs replace them**, one per placement. They are
   `pub(crate)`, not private, because their callers live in `scheduler/`, `strategy/`,
   `mcp/settings.rs`, `worktree/cleanup.rs` and `runner/process.rs`:
@@ -182,7 +186,12 @@ it routes every read and write through that function.
     `written_during_run` to it, and 051 adds the owner check to it, so a key added later
     inherits both without anyone remembering to.
   - `get_user(ctx, key)` and `set_user(ctx, key, value)`, over `user_settings` for
-    `ctx.actor`.
+    `ctx.actor`. Beside them, **`get_user_in(ctx, conn, key)` and `set_user_in(ctx, conn,
+    key, value)`**, the same two statements run on a connection the caller's transaction
+    holds, publishing nothing. They take `ctx` for the actor and nothing else, never its
+    pool. They replace 034's `set_in` for the one key that needs a transactional write,
+    `review_digest_seen_through`. `get_user` and `set_user` are those two run over the pool,
+    `set_user` followed by its publish, so the key has one read and one write statement.
   - `get_runner(ctx, key)` and `set_runner(ctx, key, value)`, over the legacy `settings`
     table, with a doc comment naming 040 and 041. 041 deletes this pair.
 
@@ -200,8 +209,38 @@ it routes every read and write through that function.
   survives:
   - `set_team` publishes `ChangeEvent::settings(team_id)`, the written row's team;
   - `set_user` keeps `sole()`, with the comment rewritten to name 048's `Audience::User`;
+  - a review verdict that advanced the digest marker publishes `Settings` naming the
+    acted-on task's team, the same team its `Tasks` event names. The verdict names an
+    entity, so it needs no `sole()`, and the comment names 048's `Audience::User`;
   - `set_runner` and the `schedules` writers keep `sole()`, with the comment rewritten to
     name 041, which moves the state, and 048, which moves the event off the team channel.
+
+**034's digest marker.** `review_digest_seen_through` is placed **User** (D28 part 4, 034's
+amendment), and 034 left its team scoping here (034 Notes). 034 writes it through `set_in`
+into the legacy table, inside the review action's transaction. 039 keeps the transaction
+and changes the store:
+
+- **Both writers go through `set_user_in`, on the transaction they already hold.**
+  `mark_seen(ctx, through)` reads the current value with `get_user_in` and writes with
+  `set_user_in`, inside its one `BEGIN IMMEDIATE` transaction, as 034 specified. A review
+  verdict that advances the marker does the same inside its own transaction, so the column
+  move and the marker commit together or not at all. Neither writes the legacy `settings`
+  row, which stays in place, unread, for 065. `review::digest` reads the window's start
+  with `get_user`, the actor's row.
+- **The marker is the actor's.** A verdict writes `ctx.actor`'s row, never the row of the
+  user who triggered the run or owns the card. A teammate's review never moves another
+  user's marker.
+- **"Leaves no unarchived task in `in_review`" counts the acted-on task's team.** The count
+  is a scoped query, `team_id = <the task's team>`, in the verdict's transaction. Another
+  team's queue is neither counted nor revealed: a verdict that empties team A's queue
+  advances the marker whatever team B holds, and a verdict that leaves a task of A's in
+  `in_review` does not advance it, even under a context that reaches only A. This is the
+  "caller's team's queue" 034 asked for.
+- **The digest and `mark_seen` act on one team.** `review::digest` scopes its rows to
+  `ctx.scope.sole()?`, so its entries are the team whose queue a verdict empties.
+  `mark_seen` has no entity, and its `Settings` event needs a team until 048, so it calls
+  `ctx.scope.sole()?` **before** it writes, exactly as `set_subscription_cost` does. Both are
+  refused `invalid` under a two-team context.
 
 **The shell holds no pool.** `src-tauri/src/` gives every core call `&state.context`,
 never `&state.context.pool`. In `lib.rs`'s setup, the bare `pool` local is used only by
@@ -372,8 +411,9 @@ every command).
 - 038's `a_task_takes_its_repositorys_team` and
   `a_change_event_names_the_team_of_the_row_it_announces` still pass.
 - `a_context_reaching_two_teams_is_refused_an_entity_less_call`. `list_tasks`,
-  `list_repositories`, `register_repository`, `set_base_instructions` and
-  `set_subscription_cost` under the `both` context are refused `invalid`, and the message
+  `list_repositories`, `register_repository`, `set_base_instructions`,
+  `set_subscription_cost`, `get_review_digest` and `mark_review_digest_seen` under the
+  `both` context are refused `invalid`, and the message
   contains both teams' ids. `get_subscription_cost` answers with the actor's value, and
   analytics under the same context covers both teams. No refused call wrote anything.
 - `registering_a_directory_another_team_registered_reveals_nothing`. Team A registers the
@@ -399,6 +439,25 @@ every command).
   stale value in it is never read.
 - `db::settings::get` and `db::settings::set` are not `pub`. The per-placement accessors
   are `pub(crate)`, and `set_team` is the only function that writes `team_settings`.
+  034's `set_in` is gone: `grep -rn "set_in(" crates/core/src` returns nothing, and
+  `set_user_in` is the only statement that writes `user_settings`.
+- `the_digest_marker_is_written_to_the_actors_user_settings_row`. Under the `a` context,
+  `mark_seen` and a verdict that empties team A's queue each leave the new instant in A's
+  owner's `user_settings` row. The legacy `settings` row for `review_digest_seen_through`
+  is unchanged, B's owner's row is unchanged, and a stale value planted in the legacy row
+  is never read by `review::digest`. The verdict's `Settings` event names team A.
+- `the_review_that_empties_its_teams_queue_advances_the_marker_whatever_another_team_holds`.
+  Team A has one task in `in_review` and team B has several. Approving A's task under the
+  `a` context, and again on a fresh fixture under the `both` context, advances the marker
+  to the faked clock's `now`, and B's tasks, rows and owner's marker are unchanged.
+- `another_teams_empty_queue_does_not_advance_the_marker`. Team B's `in_review` is empty and
+  team A has two tasks there. A verdict on one of A's leaves the marker where it was, under
+  `a` and under `both`.
+- `a_refused_verdict_on_another_teams_task_leaves_every_marker_where_it_was`. Under the `a`
+  context, approving B's last `in_review` task is answered as a never-issued id would be,
+  and neither owner's `user_settings` row changes. The verdict's marker write runs on the
+  verdict's own transaction because `set_user_in` takes that connection; no test injects a
+  failure between the two writes, since 034's actions offer no seam for one.
 - `grep -rn "until 039" crates/core/src` returns nothing. Every team-settings event names
   the written row's team, and the remaining `sole()` sites at `set_user`, `set_runner` and
   the `schedules` writers each carry a comment naming 048, and 041 where it applies.
@@ -442,7 +501,10 @@ every command).
   - `identity::ensure_solo`: it returns the scope the context is built from;
   - `identity::create_personal_team`: it writes inside the caller's transaction, for
     `ensure_solo` and 047's sign-up (038);
-  - `context::ServiceContext::new`: it takes the pool the context wraps.
+  - `context::ServiceContext::new`: it takes the pool the context wraps;
+  - `db::settings::get_user_in` and `db::settings::set_user_in`: they read and write the
+    actor's row inside a review action's or `mark_seen`'s transaction; they take the context
+    for the actor, and check the key's placement like every accessor.
 
   A later task that needs an exception appends an entry with its reason in the same commit.
   040's `runner_placed` takes a context and needs none.
@@ -472,6 +534,9 @@ every command).
 - **D32** points 5 and 7, and the appendix. The appendix is the best list of which
   commands carry team data.
 - **D13**: the repository-change guard that the cross-team move refusal extends.
+- **034**, Scope's marker bullets and Notes' "039" item: `set_in`, `mark_seen`, and the
+  verdict that empties `in_review`. 039 changes where they write and what they count, not
+  when the marker moves.
 - Also D3, D5, D8, D10, D12, D16, D17 and D33.
 - ADR-0028 point 2 (settings placement), ADR-0030 point 8 (the actor and user settings),
   and ADR-0035 point 2 (the entity-less refusal).
@@ -508,13 +573,24 @@ is 038's to add, not 039's to improvise.
 **Where to start.** `crates/core/src/context.rs`, `crates/core/src/db/settings.rs`,
 `crates/core/src/tasks/service.rs` (19 queries), `tasks/links.rs`, `tasks/dependencies.rs`
 (034's `dependents_of` and its executor-generic query, `load_edges` and `cycle_error`),
-`repo/mod.rs`, `runs/mod.rs`, `startup.rs`, `analytics/mod.rs`, `runner/outcome.rs`,
-`runner/process.rs`, `strategy/settings.rs`, `strategy/catalogue.rs`,
+`review/{actions,digest}.rs` (034's marker paths), `repo/mod.rs`, `runs/mod.rs`,
+`startup.rs`, `analytics/mod.rs`, `runner/outcome.rs`, `runner/process.rs`,
+`strategy/settings.rs`, `strategy/catalogue.rs`,
 `scheduler/{capacity,selection,claim,reconcile}.rs`, `schedule/{mod,window,preflight}.rs`,
 `mcp/server.rs`, `mcp/scope.rs` (`RunHandles::grant`), `src-tauri/src/lib.rs`,
 `src-tauri/src/notify.rs` and `src-tauri/src/commands/*.rs`. The test patterns to copy are
 `crates/core/tests/mcp_scope.rs` (the registry test and the real loopback client) and
 `crates/core/tests/mcp_tools.rs` (one refusal, two doors).
+
+**One marker per user, one queue per team.** The marker is placed User, so a person in two
+teams has one marker and two queues. A verdict that empties team A's queue moves that one
+marker past team B's ended runs too, and B's digest, read later under a context for B,
+loses them. 039 does not make this worse than D28 already decided: the digest and
+`mark_seen` refuse a two-team context, so no single answer shows both teams' entries and
+then drops half of them. Solo has one team and never meets it. If 050's team switcher or
+060's `team` argument shows it matters, the fix is a marker keyed by user and team, which
+is a D28 part 4 amendment and a 038-shaped placement, not something this task invents.
+Say so in the PR.
 
 **Why the test compares answers rather than asserting `not_found`.** "Not found" can leak
 through the message, and a refusal that fires only for existing rows (a run-state check
@@ -526,8 +602,8 @@ whose refusals are not `not_found` at all.
 033–038 add more. Most need a `team_id` predicate or a join, which is roughly 1,000–1,500
 lines. The settings split is ~400 lines. The MCP case table is about 50 tools at ~8 lines
 each, around 400 lines, and the handle and board-port cases add ~200. Behaviour and
-structural tests are ~600 lines. That comes to 2,600–3,100 lines, at the upper edge of one
-session.
+structural tests are ~600 lines. The digest marker's move to `user_settings` and its four
+tests add ~150. That comes to 2,750–3,250 lines, at the upper edge of one session.
 
 A Tauri-command half here would add ~100 cases and a parse of `lib.rs` that 046 deletes. So
 it is not in this task: 046 writes it over `api::registry`, where enumerating the commands is

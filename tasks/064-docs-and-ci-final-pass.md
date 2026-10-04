@@ -3,9 +3,9 @@ id: "064"
 title: Docs, CLAUDE.md and CI final pass
 milestone: v0.5
 status: ready
-depends_on: ["060", "061", "062", "063"]
-adrs: ["0027", "0015"]
-size: S
+depends_on: ["060", "061", "062", "063", "069", "071"]
+adrs: ["0027", "0015", "0028", "0032", "0036", "0037"]
+size: M
 ---
 
 # Docs, CLAUDE.md and CI final pass
@@ -26,14 +26,29 @@ disagree").
 
 ## Why now
 
-Every task from 033 to 063 was told to update `CLAUDE.md` and CI in the same commit as the
-crate, migration or query that needed it, and each did so for its own slice:
+Every task in this chain was told to update `CLAUDE.md` and CI in the same commit as the
+crate, migration or query that needed it, and each did so for its own slice. This is the
+inventory the PR body accounts for, line by line:
 
-- 040 added the runner crate's lines and D33's two-cache recipe.
-- 046 added the server crate's lines and `scripts/check-crate-boundaries.sh`.
-- 038, 041, 042, 047 and 052 each appended one Gotchas bullet.
-- 039, 043, 045 and 051 each added a line to the "must have tests" list.
-- 050 added how to run the web shell. 028 added the screenshot section.
+| Task | Section | Added |
+| --- | --- | --- |
+| 028 | own section after `## Commands` | a run looks at its own screenshots |
+| 038 | Gotchas | board migrations go only through `db::migrate` |
+| 039 | Testing, Conventions | tenant isolation; every service goes through its scope |
+| 040 | Commands, Layout, `SQLX_OFFLINE` text, Gotchas | the runner crate, D33's recipe, `runner.db` under `RIMAIA_DATA_DIR` |
+| 041 (066 extends it) | Gotchas | machine state lives in `runner.db`; no board DTO carries an absolute path |
+| 042 | Gotchas | team and runner values, the stricter wins |
+| 043, 053 | Testing | the lease protocol; 053 adds expiry, restart grace and sleep recovery |
+| 045, 051, 057 | Testing | consent and eligibility; roles, last owner, invitations; push postcondition and pin release |
+| 046 | Commands, Layout, Gotchas, Conventions | the server crate, the boundary script, running the server, the registry |
+| 047, 050 | Gotchas (046's bullet) | the server's variables; running the web shell |
+| 047 | Gotchas | no secret in a log line |
+| 049 | Testing | `src/test/http.ts` |
+| 052 | Gotchas | the runner protocol is not in the registry |
+| 055 | Gotchas (rewrite) | strip `CLAUDE_*` and `RIMAIA_*` |
+| 057, 058, 059, 060 | Gotchas | push before success; the headless data directory; loopback `/mcp` tokens; hosted `/mcp` |
+| 062 | Layout, Gotchas (two) | `Dockerfile`, `docs/hosting.md`; the image needs both caches; `rehearse-restore.sh` is manual |
+| 063 | Commands | `cargo test -p rimaia --lib updater`, after `cargo check --workspace` |
 
 Nobody has read the result top to bottom. The Status paragraph still says "tasks 001–009,
 019 landed". "Read these before writing code" still counts 18 ADRs, and there are 37. The
@@ -52,9 +67,9 @@ This matters more than stale prose usually does, for two reasons:
   that makes it.
 
 It lands last among the v0.5 tasks because 060 to 063 are the last to touch these files.
-062 adds the container image and its build context, and 063 adds the updater and its
-signing step. Only 065 comes after, and it is `not-ready` for a release this PR does not
-ship.
+062 adds the container image and its build context, and 063 adds the updater, its release
+overlay and the `shell` job's one test step. Only 065 comes after, and it is `not-ready`
+for a release this PR does not ship.
 
 ## Scope
 
@@ -67,10 +82,10 @@ seam entry, it links there instead of paraphrasing.
   board, a runner owns the work, and solo is both in one process. Status says what is built
   **without listing task numbers**, and points to `tasks/README.md`'s Landed column for
   that. Listing task numbers is exactly how the current paragraph went stale. It also says
-  what has not yet been proven. That means the manual smoke checks from the plan's end of
-  M1, M2, M4 and M6: a real unattended night, a real `rimaia.db` migrated in place, two
-  users on two machines, and a Litestream restore. Each is described as unproven unless the
-  PR body's checklist records a person doing it (tasks/README.md, "Landed is not the same as
+  what has not yet been proven. These four manual checks are this task's list: a real
+  unattended night, a real `rimaia.db` migrated in place, two users on two machines, and a
+  Litestream restore. Each is described as unproven unless the PR body's checklist, which is
+  their record, shows a person doing it (tasks/README.md, "Landed is not the same as
   proven"). The `src/` and `src-tauri/` sentences are replaced, because after 042 the
   scheduler does not live in `src-tauri/`.
 - **Read these before writing code.** Drop the ADR count, and link the index instead. Item 4,
@@ -86,9 +101,11 @@ seam entry, it links there instead of paraphrasing.
     wording D33 point 4 and 046's Scope 14 gave them.
   - `src-tauri/`: "the shell that hosts a runner and, in solo mode, a server" (ADR-0027
     point 6).
-  - `scripts/`: the check scripts CI runs, and `screenshot.mjs`.
-  - Whatever 062 put at the root, such as the `Dockerfile` and the Litestream configuration,
-    at the paths 062 actually used.
+  - `scripts/`: the check scripts CI runs, `screenshot.mjs`, and `rehearse-restore.sh`,
+    marked manual (it needs Docker, and CI does not run it).
+  - `Dockerfile` as 062 added it, and one `docs/` row that absorbs 062's `docs/hosting.md`
+    row and names `docs/headless-runner.md` (058) and `docs/releasing.md` (063) beside the
+    ADRs and the seam contract.
 - **Commands.** The block becomes **exactly** CI's `run:` steps, in CI's order, and nothing
   else (Scope 3 defines "exactly"). Two consequences:
   - `npm run tauri dev` leaves the block. It moves to a new `## Running it` section (below),
@@ -106,11 +123,11 @@ seam entry, it links there instead of paraphrasing.
 - **`## Running it`, new, after the screenshot section.** One fenced block per mode, each
   copied from the task that built it rather than written fresh:
   - the solo app with a scratch data directory (029);
-  - the server with `RIMAIA_DATA_DIR`, `RIMAIA_LISTEN`, `RIMAIA_PUBLIC_URL` and the GitHub
-    client variables (046, 047);
-  - the web shell with `RIMAIA_WEB_ROOT` (050), moved here from wherever 050 put it;
-  - the headless runner's `pair` and `run` (058);
-  - the container image (062): build, run, and where the restore runbook is.
+  - the server, moved out of 046's Gotchas bullet with 047's variables, and checked against
+    the environment-variable table in `docs/hosting.md` (062);
+  - the web shell with `RIMAIA_WEB_ROOT` (050), which 050 added to that same bullet;
+  - the headless runner's `pair` and `run` (058), linking `docs/headless-runner.md`;
+  - the container image (062): build, run, and a link to `docs/hosting.md` for restore.
 
   Each block carries the ports it uses, per the Gotchas bullet below. No secret appears in
   any of them. OAuth values are `<placeholders>`.
@@ -146,10 +163,10 @@ seam entry, it links there instead of paraphrasing.
   - **Dependencies.** A dependency is still satisfied when its run succeeds. On a connected
     runner, success requires a pushed branch (ADR-0033, 057), and a dependent branches from
     the dependency's recorded `head_sha`, not from a local branch name (044).
-  - **`CLAUDE_*` stripping.** Rimaia's own `RIMAIA_*` variables are also stripped from every
-    run's environment, matched case-insensitively (D30 point 6). That includes
-    `RIMAIA_DATA_DIR`. A run in this repository that launches the app therefore has to set
-    its own scratch directory. It never inherits the operator's.
+  - **`CLAUDE_*` and `RIMAIA_*` stripping.** Check that 055's rewrite is there, then add
+    "matched case-insensitively" and the D30 point 6 citation, and the consequence: the
+    stripped set includes `RIMAIA_DATA_DIR`, so a run in this repository that launches the
+    app sets its own scratch directory and never inherits the operator's.
   - **The MCP server names.** `rimaia` is the operator's registration, and `rimaia-run` is
     the run-scoped handle. Nothing ever registers `rimaia-run` in a user's configuration
     (D30 point 1).
@@ -192,7 +209,10 @@ app, not for an agent, and keeps that register.
   mode is for, and what leaves the machine in each.
 - **Prerequisites.** Split the table by role. A desktop or headless runner needs `claude`,
   `git`, and `gh` when pull requests are asked for. The server needs none of them. Building
-  the headless runner needs Rust and no Tauri prerequisites.
+  the headless runner needs Rust and no Tauri prerequisites, and links
+  `docs/headless-runner.md`.
+- **Running from source.** Point at `CLAUDE.md`'s `## Running it` rather than repeating its
+  blocks, and keep the `RIMAIA_DATA_DIR` advice, now covering both stores.
 - **First run.** Describe the mode chooser (059) and then the solo steps as the welcome
   screen now presents them. Check the wording against the `welcome` capture from
   `npm run screenshot`, not from memory. The MCP step shows both registrations: loopback for
@@ -204,20 +224,21 @@ app, not for an agent, and keeps that register.
   with one table per mode:
   - **Solo:** both files, worktrees and transcripts local; nothing sent anywhere.
   - **Connected and headless:** plans, runs, review bundles and uploaded transcripts on the
-    server, subject to the team's retention and summaries-only settings (ADR-0036).
-    `runner.db`, checkouts, worktrees and credentials stay on the machine (ADR-0033).
+    server, subject to the team's retention setting (ADR-0036 point 6) and each runner's
+    summaries-only setting (point 5). `runner.db`, checkouts, worktrees and credentials stay
+    on the machine (ADR-0033).
 
-  Keep the `<app-data>/logs/rimaia.log` paragraph. Add ADR-0037 point 6's precondition in one
-  sentence: the hosted instance is not for teams outside Abtion until a data processing
-  agreement is in place.
+  Keep the `<app-data>/logs/rimaia.log` paragraph. Add one sentence: the hosted instance is
+  not for teams outside Abtion until the preconditions in ADR-0037 point 6 hold, a data
+  processing agreement among them.
 - **Cost.** Add the team-mode recommendation from Scope 1's run-environment bullet.
-- **Building a bundle.** State what 063 requires at build time. If 063 left
-  `bundle.createUpdaterArtifacts` on, `npm run tauri build` needs the updater signing key in
-  its environment. Name the variables 063 documented, and state what happens without them:
-  the build fails, or the updater artefacts are skipped. Name which one, from 063.
+- **Building a bundle.** `npm run tauri build` is unchanged and needs no key. A release
+  build is `npm run tauri:release`, which reads `src-tauri/tauri.release.conf.json` and
+  needs the signing key named in `docs/releasing.md` (063). The section links that file and
+  does not restate it.
 - **Hosting.** A new short section, for self-hosting (ADR-0037 point 1): one instance, one
-  volume, the environment variables, and a link to 062's restore runbook. Nothing about the
-  platform Abtion uses, which ADR-0037 leaves open.
+  volume, the environment variables, and a link to `docs/hosting.md` for deploy and restore.
+  Nothing about the platform Abtion uses, which ADR-0037 leaves open.
 - **Design.** Drop the "22 ADRs" and "24 tasks" counts. Keep the four links.
 - **Layout and Tests.** Mirror `CLAUDE.md`'s layout rows and its Rust test lines, and keep
   the pointer that the full CI list is in `CLAUDE.md`.
@@ -227,27 +248,30 @@ each of the following holds. The reviewer checks it the same way:
 
 - **Every `run:` step in `ci.yml` is a line in the commands block, and the reverse.** The only
   exceptions are setup steps that exist because a CI runner is a blank machine: `apt-get`,
-  `npm ci`, and the `uses:` actions. A step's `if: matrix.os == 'ubuntu-latest'` is not a
-  difference in the command. It is recorded in that step's comment, as `Format` and `Clippy`
-  already are.
+  `npm ci`, and the `uses:` actions. The block's `export SQLX_OFFLINE=true` line pairs with
+  the workflow-level `env: SQLX_OFFLINE`, not with a step. A step's
+  `if: matrix.os == 'ubuntu-latest'` is not a difference in the command. It is recorded in
+  that step's comment, as `Format` and `Clippy` already are.
 - **Order.** The block lists commands in the order a person should run them locally:
   - frontend: wiring check, typecheck, test, build;
   - then `cargo fmt`;
   - then each crate's clippy;
   - then the crate-boundary script;
   - then each crate's tests;
-  - then `cargo check --workspace --all-targets`.
+  - then `cargo check --workspace --all-targets`;
+  - then the shell crate's `cargo test -p rimaia --lib updater` (Linux only in CI, per 063).
 
   The jobs may run in parallel. The order inside each job matches the block's order for the
-  lines that job carries.
+  lines that job carries, so neither file has to be reordered.
 - **Job names are unchanged**: `Frontend`, `Core (logic) — ${{ matrix.os }}`,
-  `Tauri shell (check only)`. Required status checks match on them (D33 point 5). A job 062
-  or 063 added keeps the name it landed with.
+  `Tauri shell (check only)`. Required status checks match on them (D33 point 5), so the
+  shell job keeps "check only" in its name although 063 gave it a test step.
 - **Comments are true.** Each comment in `ci.yml` that describes something that changed is
   rewritten. Known candidates:
   - the wiring step's comment, which 046 was bound to rewrite;
   - the `core` job's comment, which speaks of `cargo test -p rimaia-core` alone;
-  - the Clippy step's "Linux only" comment, which now covers three crates.
+  - the Clippy step's "Linux only" comment, which now covers three crates;
+  - the `shell` job's comment, which must say it also runs the updater test.
 
   No comment names a task as if it were pending.
 - **The toolchain.** No step names a Rust version. `rust-toolchain.toml` stays the only place
@@ -255,18 +279,23 @@ each of the following holds. The reviewer checks it the same way:
 - **Offline caches.** `SQLX_OFFLINE: "true"` stays workflow-level. There is no
   `SQLX_OFFLINE_DIR`, no `sqlx-cli` and no `prepare --check` (D5, D33 point 5).
 
-If 062 added a CI job, for example one that builds the container image, its command appears
-in the block like every other. If it cannot be run locally, `CLAUDE.md` says why in one
-sentence under the block. It is never silently CI-only.
+**CI does not build the container image, on pull requests or on `main`.** This answers the
+question 062 left for this task (062's Notes; read `docs/hosting.md` for the context). A
+release build of the server and the bundle costs minutes per run, the image goes to no
+registry from CI, and `crates/server/tests/image.rs` already checks the `Dockerfile`'s
+structural rules on every run. `scripts/rehearse-restore.sh` stays the manual check that
+builds it. If a broken image ever reaches `main` unnoticed, a build job is its own task.
 
-**4. The seam contract's "How to use this" table.** Every task from 033 to 063 has a row, and
-each row lists the D entries whose Binds name that task. This task's own row is
-`D30 · D32 · D33 · D34`, with D4 and D6 as prohibitions. The table is filled from the Binds
-lines. It never changes an entry.
+**4. The seam contract's "How to use this" table.** Verify that every task in the chain
+(028, 033, 034, 017, 035, 036, 021, 037–063, 066–071) has a row listing the D
+entries whose Binds name it. Most tasks added their own. Backfill any missing row from the Binds
+lines, never by changing an entry. This task's own row is
+`D5 · D8 · D16 · D28 · D29 · D30 · D32 · D33`, with D4, D6 and D34 as prohibitions.
 
-**5. `tasks/README.md`.** The format block's milestone comment lists `v0.5`. The table's row
-for this task gets its Landed cell when the PR number exists (CLAUDE.md, "When you finish a
-task").
+**5. `tasks/README.md`.** Check that the milestone comment lists `v0.5` and that every task
+in the chain has a row. Phase 0 owns both, so a gap is backfilled here, not redesigned. This
+task's row gets its Landed cell when the PR
+number exists (CLAUDE.md, "When you finish a task").
 
 ## Out of scope
 
@@ -287,7 +316,8 @@ task").
 - **User documentation beyond the README**, such as a docs site, a hosted-service onboarding
   guide or a data processing agreement. ADR-0037 point 6 makes the agreement a precondition
   for external teams, and it is a person's work, not an agent's.
-- **Any new dependency, crate, migration, query, command or CI job.**
+- **Any new dependency, crate, migration, query, command or CI job**, an image build
+  included (Scope 3).
 
 ## Acceptance criteria
 
@@ -297,9 +327,10 @@ The contract. A reviewer checks each one at the task's tip.
   the block's line that has the same command text. That includes the crate-boundary script
   and the wiring script, and for each of the three crates `rimaia-core`, `rimaia-runner` and
   `rimaia-server`, one clippy line with `--all-targets -- -D warnings` and one
-  `cargo test -p` line with no feature flags. The only unpaired steps are the setup steps
+  `cargo test -p` line with no feature flags, plus 063's `cargo test -p rimaia --lib updater`
+  after `cargo check --workspace --all-targets`. The only unpaired steps are the setup steps
   Scope 3 names. The PR body carries the pairing as a two-column table: step name, block
-  line.
+  line, with `export SQLX_OFFLINE=true` paired to the workflow-level `env:`.
 - **Every command in the block passes** on a clean checkout, run through rustup with
   `SQLX_OFFLINE=true` exported, on the implementer's machine. The draft PR's CI is green on
   all three operating systems at the task's commit (`gh pr checks`).
@@ -316,39 +347,45 @@ The contract. A reviewer checks each one at the task's tip.
   row in `CLAUDE.md`'s layout table and in the README's, and every row names a path that
   exists.
 - **Every cited path exists.** Every backticked token in `CLAUDE.md` and `README.md` that
-  contains a `/` and names a repository path resolves in the tree at the tip. URLs, globs
-  and `<placeholder>` paths are excluded. The one-liner in Notes produces no output.
+  contains a `/` and names a repository path resolves in the tree at the tip. URLs, globs,
+  `<placeholder>` paths and gitignored output (`dist/`, `.screenshots/`) are excluded. The
+  one-liner in Notes produces no output, and its skip list, which the PR body shows, holds
+  only tokens that are not repository paths.
 - **Every `## Running it` block was run.** The PR body records, for each block, the exact
   command, the port it bound, and one line of output. The server block used placeholder OAuth
-  values, and was run until it answered 062's health endpoint. The headless block was run
+  values, and was run until it answered `/healthz` (062). The headless block was run
   until `pair` refused a made-up code with the error 058 defines. The container block was
   run until the image built and started. A block that could not be run records why. It is
   not dropped from the file.
 - **Status is honest.** The Status paragraphs in `CLAUDE.md` and `README.md` contain no task
-  count and no task-number list. Each of the manual smoke checks named in Scope 1 is either
-  marked as proven by the PR checklist or described as not yet proven.
+  count and no task-number list. Each of the four manual checks in Scope 1 is either marked
+  as proven by the PR checklist or described as not yet proven.
 - **The Gotchas carry the brief's three facts** (both stores under one `RIMAIA_DATA_DIR`,
   ports, the run-environment advice), plus the `RIMAIA_*` stripping and the `rimaia` /
-  `rimaia-run` names. Each cites its ADR or seam entry. No bullet from 038 to 063 was lost:
-  the PR body lists each task's bullet and where it now lives.
+  `rimaia-run` names. Each cites its ADR or seam entry. Nothing in Why now's inventory was
+  lost: the PR body lists each row and where it now lives.
 - **The must-test list covers every ADR that asked for a line.** ADR-0029 (tenant isolation)
   and ADR-0031 (the lease protocol) each have a line, and so do 045's and 051's additions.
   Each line names a module path that exists.
 - **The README no longer says there is no server.** "Where your data lives" has a solo table
   and a connected and headless table, and the first says nothing leaves the machine. "22
   ADRs" and "24 tasks" are gone. The doctor table includes 054's push check. Building a
-  bundle names 063's signing variables.
+  bundle says `npm run tauri build` needs no key and links `docs/releasing.md` for
+  `npm run tauri:release`. Hosting links `docs/hosting.md`.
 - **`ci.yml` is in its final shape.** Job names are unchanged. No step names a Rust version.
   `SQLX_OFFLINE` is set once, workflow-wide. No comment describes two `generate_handler!`
   lists or names a pending task. The file parses: the PR's CI run at the task's commit
   starts every job, which GitHub refuses to do for an invalid workflow.
 - **Dependencies match their approvals.** Every dependency in `package.json` and in each
-  crate's `Cargo.toml` that was added on this branch is on D6's list or on D34's, and is used
-  only from the crates D34 names. `cargo tree -d` shows one `axum`. This task adds nothing,
+  crate's `Cargo.toml` that was added on this branch is on D6's or D34's list, including
+  their dated amendments (D34's `tracing-subscriber` and `tracing-appender` rows, which 058
+  introduces, 063's `tauri` `test`-feature dev-dependency, and any answer to 048's
+  `tokio-stream` ask), and is used only from the
+  crates those lists name. `cargo tree -d` shows one `axum`. This task adds nothing,
   and if it finds a dependency that is on no list, it stops and asks.
-- **The seam table has a row for every task from 033 to 064**, filled from the Binds lines as
-  Scope 4 says. No entry's four parts changed (`git diff docs/seam-contract.md` touches only
-  the table).
+- **The seam table has a row for every task in Scope 4's chain, and for 064**, any backfill
+  taken from the Binds lines. No entry's four parts changed
+  (`git diff docs/seam-contract.md` touches only the table).
 - **No behaviour changed**, unless a docs-versus-code disagreement was found. In that case the
   commit adds the failing test first, named for the behaviour, and then the fix, as CLAUDE.md
   requires for a bug. Otherwise `git diff --stat` for the task touches only `CLAUDE.md`,
@@ -368,8 +405,8 @@ handler list), point 5 (the wiring script) and its Binds, which name this task a
 docs pass". D30 point 1 (the two server names) and point 6 (`RIMAIA_*` stripping and the
 resolver's residual). D34 (the dependency lists). D28's "Retired columns stay", so the docs
 do not promise a drop that 065 has not made. D4's team-mode amendment, for the migration
-list the Layout section may mention. D16 point 7 (a busy MCP port). Read D4 and D6 as
-prohibitions.
+list the Layout section may mention. D16 point 7 (a busy MCP port). D5 and D8, as D33 and
+D32 amend them, and D29 for run `kind`. Read D4, D6 and D34 as prohibitions.
 
 **Files to start from.** These exist at the start of the chain:
 
@@ -378,8 +415,8 @@ prohibitions.
 - `docs/seam-contract.md`, `docs/adr/README.md` and `tasks/README.md`.
 - The root `Cargo.toml` (`members`, `[workspace.dependencies]`), `package.json` and
   `rust-toolchain.toml`.
-- `vite.config.ts` (`port: 1420`), `src-tauri/tauri.conf.json` (`devUrl`, and 063's
-  `plugins.updater` and `bundle.createUpdaterArtifacts`).
+- `vite.config.ts` (`port: 1420`), `src-tauri/tauri.conf.json` (`devUrl`, and 063's empty
+  `plugins.updater`).
 - `crates/core/src/mcp/mod.rs` (`DEFAULT_PORT`, `MCP_SERVER_NAME`, and after 035
   `RUN_MCP_SERVER_NAME`).
 - `crates/core/src/paths.rs` (`AppPaths::resolve`; after 040 `runner_db_file`).
@@ -394,24 +431,29 @@ These are created by earlier tasks on this branch, so confirm the paths they lan
 - `crates/core/src/api/registry.rs` (046);
 - `src/test/http.ts` (049);
 - `playwright.config.ts`, `scripts/screenshot.mjs` and `screenshots/views.shot.ts` (028);
-- the `Dockerfile`, the Litestream configuration and the restore runbook (062);
-- the headless binary's subcommands (058).
+- `Dockerfile`, `docs/hosting.md` and `scripts/rehearse-restore.sh` (062);
+- `src-tauri/tauri.release.conf.json`, the `tauri:release` script and `docs/releasing.md`
+  (063);
+- `docs/headless-runner.md` and the headless binary's subcommands (058).
 
 **The path check.** Run this from the workspace root. It prints any backticked path in
-either document that does not exist. It must print nothing, apart from the lines it is
-already told to skip:
+either document that does not exist, and must print nothing:
 
 ```bash
+SKIP='origin/main text/event-stream'   # tokens with a slash that are not paths
 grep -ohE '`[A-Za-z0-9_.-]+/[A-Za-z0-9_./-]*`' CLAUDE.md README.md \
   | tr -d '`' | grep -vE '^(https?:|~|/tmp/|<)|[*<>]|(^|/)target/' | sort -u \
-  | while read -r p; do [ -e "$p" ] || echo "missing: $p"; done
+  | while read -r p; do
+      case " $SKIP " in *" $p "*) continue ;; esac
+      [ -e "$p" ] || git check-ignore -q "$p" || echo "missing: $p"
+    done
 ```
 
-A path under the app data directory (`<app-data>/logs/rimaia.log`) is written with its
-placeholder and is skipped by the `<` rule. Build output under a `target/` directory, such as
-the README's bundle path, does not exist on a clean checkout and is skipped too. If a real path trips the check because it is
-relative to a crate rather than to the root, write it from the root in the document. Do not
-widen the filter.
+A path under the app data directory (`<app-data>/logs/rimaia.log`) is skipped by the `<`
+rule. Build output under any `target/`, and gitignored output such as `dist/` and
+`.screenshots/latest/`, does not exist on a clean checkout and is skipped too. `SKIP` holds
+only git refs, MIME types and similar tokens; extend it for those and nothing else. If a real
+path trips the check because it is relative to a crate, write it from the root.
 
 **Migrations.** None. This task writes no migration, and it regenerates the caches only to
 prove they are already current. The complete lists are D4's team-mode amendment: nine board
@@ -429,11 +471,17 @@ should have caught it.
 
 **What the previous tasks provide.** 040 and 046 each left `CLAUDE.md` and `ci.yml` agreeing
 for their crate. 041, 045, 047, 049, 051 and 052 each claim that the block still matched CI
-at their tip. 060 finishes the command registry flips, so D32's appendix and the registry
-agree, and the wiring script passes. 061 finishes the UI, so the `welcome` and Settings
-captures are the ones the README describes. 062 adds the image, its build context
-(`src-tauri/migrations` and `crates/core/.sqlx/` included, per D33's Binds) and the runbook.
-063 adds the updater, its plugin and its signing configuration.
+at their tip. 056 makes the last command registry flip (the planning commands stay local,
+per D32's amendment on them), so D32's appendix and the registry agree, and the wiring
+script passes. 061 and 069 finish the UI, 069 last (it adds Settings' `This machine's limits`
+and the runner lines under Repositories), so the `welcome` and Settings captures are the ones
+the README describes. 068 adds the retention sweep and its team setting, and reaches this task
+through 062's `depends_on`. Neither adds a crate, a migration or a `CLAUDE.md` line, which is
+why neither has a row in "Why now"; both are in Scope 4's chain. 062 adds the image, its build context (`src-tauri/migrations` and
+`crates/core/.sqlx/` included, per D33's Binds), `docs/hosting.md`, and the image-build
+question Scope 3 answers. 063 adds the updater, its release overlay, `docs/releasing.md`
+(linked, not rewritten), and the `shell` job's `cargo test -p rimaia --lib updater` step
+with its CLAUDE.md line, already agreeing.
 
 **What the next task expects.** 065 drops the retired columns a release later. It is
 `not-ready`, and the workflow skips it. It expects `CLAUDE.md` to already say that retired
@@ -442,9 +490,10 @@ columns exist until then, and not to be read, so that nothing written between th
 pointing at D28's "Retired columns stay". After this task the PR leaves draft, so the
 documents written here are what a reviewer of the whole branch reads first.
 
-**Size.** S. Expect about 150–250 changed lines in `CLAUDE.md`, 150–250 in `README.md`,
-fewer than 40 in `ci.yml`, and about 35 table rows in the seam contract. That is well under
-one session. The time goes into running every command and every Running-it block, not into
-writing. If the diff passes about 800 lines, a bug fix from "When the docs and the code
-disagree" has grown into a feature. Stop and split it into its own task, numbered with the
+**Size.** M. The writing is small: about 150–250 changed lines in `CLAUDE.md`, 150–250 in
+`README.md`, fewer than 40 in `ci.yml`, and whatever rows the seam table lacks. The cost is
+verification: the full CI list on a clean checkout, two cold prepares, the server, a
+headless pairing and an image build, the dependency audit, and three-OS CI. If the diff
+passes about 800 lines, a bug fix from "When the docs and the code disagree" has grown into
+a feature. Stop and split it into its own task, numbered with the
 next free id and placed directly before this one in `tasks/README.md`.

@@ -3,8 +3,8 @@ id: "021"
 title: Review-and-fix loop
 milestone: v0.4
 status: ready
-depends_on: ["017", "035", "036"]
-adrs: ["0017", "0016", "0021"]
+depends_on: ["035", "036"]
+adrs: ["0017", "0016", "0021", "0009", "0011", "0012", "0004"]
 size: L
 ---
 
@@ -31,20 +31,23 @@ caught up. Three things were open, and each is now decided somewhere else:
   carries this task's three columns (`tasks.review_instructions`, `tasks.review_config`,
   `repositories.review_config`). The DDL is in seam-contract D28. This task adds no
   migration.
-- **How a run reaches its own card without reopening the operator surface.** The three-way
-  choice in the Notes below is resolved by D30: the run-scoped handle is served as
-  `rimaia-run`, and the operator-surface denial on `rimaia` is unconditional.
+- **How a run reaches its own card without reopening the operator surface.** D30: the
+  run-scoped handle is served as `rimaia-run`, and the operator-surface denial on `rimaia`
+  is unconditional. Task 020 had denied `mcp__rimaia*` to every run by tool name, which
+  would have blocked this task's write-back too; D30 records why a second server name is
+  the only one of the three ways out that keeps "a run reaches its own card and nothing
+  else" without a condition.
 - **Who decides whether a loop continues when the runner is not the board.** D31: the
   runner reports facts and `finish_run` answers `NextStep`. The budget is ADR-0017's rule,
   so it is decided in the board's code.
 
-It is written now, against task 036's `BoardPort`, because writing it against `run_task`'s
+It is written against task 036's `BoardPort`, because writing it against `run_task`'s
 direct board writes would mean moving it again in 042 and 052.
 
 The original condition was to revisit after task 017 had been used for real mornings. It
-remains a risk, not a gate. The loop is off by default, so landing the engine commits
-nobody to paying for it. If real mornings show that mechanical findings do not dominate,
-it stays off.
+is a risk, not a gate, and 017 is not a dependency: nothing here uses its code. The loop is
+off by default, so landing the engine commits nobody to paying for it. If real mornings
+show that mechanical findings do not dominate, it stays off.
 
 ## Scope
 
@@ -58,32 +61,50 @@ implement → review → findings? → fix → review → … → clean, or budg
   the default of 2 there are at most three reviews and two fixes. `0` with the loop on is
   ADR-0017's report-only mode: one review and no fix.
 - **A phase is a run of rows, not a row.** A review that hits a usage limit and resumes is
-  one phase across two rows. Phases are grouped by D29 point 3's rule: contiguous rows
-  sharing `(kind, session_id)`. This is how D29 point 8's "number of review rows after the
-  newest implementation row" is counted, so a retried review never spends the budget
-  twice.
-- **The loop belongs to the newest implementation row.** Rows after it make up the
+  one phase across two rows. A phase is a maximal run of contiguous rows sharing
+  `(kind, session_id)`, D29 point 3's boundary. Three things read phases, never rows:
+  - **the budget and every loop count.** A retried review never spends the budget twice.
+    This amends D29 point 8, which counts review *rows* (below);
+  - **the witness.** A review phase has **recorded** when any of its rows has
+    `runs.findings_recorded_at` set (D30 point 7 and its 2026-09-30 amendment), read
+    through task 035's store, never from a count of `review_findings` rows;
+  - **`HEAD` moved.** The phase's last row's `head_sha` is compared with the `head_sha` of
+    the row immediately before the phase's first row. A reviewer that committed in row 1
+    and resumed in row 2 has still moved `HEAD`. Either value `NULL` reads as moved: a
+    branch that cannot be compared is not a clean one.
+- **The loop belongs to the newest implementation phase.** Rows after it make up the
   current loop. Run now on a task starts from implementation again, and the budget resets
   with it.
 - **The run window bounds it.** A loop never starts a phase after
-  `FinishRun::window_closes_at`. The phase that is running finishes, and the task exits
-  through the table below.
+  `FinishRun::window_closes_at` (D24 point 4 is its source). The phase that is running
+  finishes, and the task exits through the table below.
 - **It never advances a task to `done`.** A human still approves (ADR-0017).
 
 ### Where each decision is made
 
-**Board side**, in 036's `board::service::finish_run`, inside the transaction that closes
-the row (D31 point 4):
+**Board side.** One function decides, and every path that closes a row reaches it.
 
-- `apply_to_task` dispatches on the closed row's `kind` (D29 point 9).
-- A pure function, `review_loop::decide`, takes the effective configuration, the task's
-  rows and findings, the finished outcome, `window_closes_at` and `now`, and returns the
-  next step and, on exit, where the task lands. Every exit in the table below is a case
-  of this function.
-- `Continue` is the next phase's claim, decided in the same transaction. The loop's
-  effective configuration is read again at that moment, so a setting changed mid-loop
-  takes effect at the next phase boundary. Task 045 adds consent to the same point
-  (D31 point 6).
+- `review_loop::decide` is pure. It takes the effective configuration, the current loop's
+  rows and findings, the closed row's outcome, `window_closes_at` and `now`, and returns
+  the `NextStep` and, on exit, where the task lands. Every exit in the table below is a
+  case of it.
+- It runs in `outcome::finish_run`'s task-side step, `apply_to_task`, which dispatches on
+  the closed row's `kind` (D29 point 9). 035's `Review` and `Fix` refusals in
+  `outcome::finish_run` are removed: a review or fix row closes like any other, and the
+  task-side step lands the task by the exit table. `board::service::finish_run` answers
+  the `NextStep` that step returns.
+- **Reconcile reaches the same step.** Until 043, `scheduler/reconcile.rs::reconcile_one`
+  calls `outcome::finish_run` directly. An open review or fix row a crash left therefore
+  lands `waiting_retry` when `retry::decide` gives a `resume_after` (D9's amendment), and
+  `in_review` with `idle`, unreviewed, otherwise. `settle` then finds nothing to do.
+  Reconcile's outcome is `interrupted`, never a success, so it never meets a `Continue`
+  case.
+- **The row-first ordering does not change.** The row's `UPDATE` commits before the
+  task-side step, as `outcome::finish_run`'s doc comment and reconcile's header rely on.
+  Inside the task-side step, `Continue` and the claim-side writes later tasks attach to it
+  (043's lease purpose, 045's consent re-check, D31 points 4 and 6) are made together in
+  one transaction. The effective configuration is read again there, so a setting changed
+  mid-loop takes effect at the next phase boundary.
 - While a loop continues, the task stays in its column with `run_state = running`, and
   nothing is written to `run_state`. `is_legal_run_state_transition` and its table do not
   change. The move to `in_review` happens once, when the loop exits, through
@@ -91,26 +112,72 @@ the row (D31 point 4):
 
 **Runner side**, in `run_task`: one loop, one spawn per iteration.
 
-- On `NextStep::Continue { kind }` it calls `run_context` for the fresh
-  `RunContext::review`, composes the phase, mints the `run_id` (D10) and the grant, then
-  calls `start_run` with that kind and runs the process.
-- It keeps D19's in-flight slot and the claim across phases, and releases them once.
-- A Cancel stops the running phase through the existing cancel path. The loop does not
-  continue after it.
-- The runner never counts loops and never chooses to continue. A runner that did would be
-  a second copy of ADR-0017's budget, on a machine the board does not control (D31's Why).
+- **Where it enters.** At `claim.resume.kind` when the claim carries a resume, reading
+  `RunContext::review` from the claim's context; at implementation otherwise.
+- **Each iteration.** On `NextStep::Continue { kind }` it calls `run_context` for the
+  fresh `RunContext::review`, composes the phase, mints the `run_id` (D10) and the grant,
+  calls `start_run` with that kind, and runs the process. Every phase is a `SpawnIntent`
+  spawned through the implementation's `plan_spawn` and `execute` path, so D25's
+  credential environment and redaction, D27.5's `CLAUDE_*` strip and D30 point 6's
+  per-spawn resolver (055) apply to every phase without a second copy.
+- **One claim.** It keeps D19's in-flight slot and the claim across phases, and releases
+  them once.
+- **Between phases, nothing ends through a bare `release`.** `release` moves a `running`
+  task to `failed` (D31 point 4), which would throw away a succeeded implementation. So
+  after a `Continue`, every exit before the next spawn is recorded as a row of the pending
+  kind and closed through `finish_run`: `fatal` for a refusal (below), a `run_context`
+  error or a missing worktree, and `cancelled` for a Cancel that arrives while no process
+  is running. The exit table then lands the task. Only if that row cannot be written does
+  the runner fall back to `release`. That case, and a crash between a `Continue` and the
+  next `start_run`, land the task `failed`. They are the named residual: the board could
+  not be written, or nothing was alive to write it.
+- **A phase refused before it spawns** is such a row, with the refusal as its
+  `error_message`. Examples: no MCP endpoint bound (the message names Settings → MCP, as
+  D17.4 does), a `negotiate` refusal, an unenforceable denial on an unattended run, or a
+  dirty worktree before a review (below). The history then shows it.
+- **A row without a spawn gets an empty transcript file** at its `log_path`, so
+  `startup::missing_run_logs` does not report it on every launch. This relaxes the initial
+  schema's comment on `runs` ("exists here only once a process was spawned for it"), and
+  ADR-0017's amendment says so.
+- **A review's worktree is checked on both sides.** A shell can edit files that
+  `AnyFileMutation` (`Write`, `Edit`, `NotebookEdit`) does not cover. Unchecked, a review
+  could land clean on a dirty worktree, and the next fix would commit the reviewer's edits
+  as its own. So:
+  - before spawning a review, the runner refuses the phase if tracked files have
+    uncommitted changes: the reviewer judges commits;
+  - after it, a review that left tracked changes is rewritten to `fatal` with
+    `The review changed the worktree without committing.`, the way `override_as_fatal`
+    rewrites an outcome, before `finish_run`.
 
-**Additions to 036's DTOs** (D31 point 6):
+  Untracked files are ignored on both sides, because a test run leaves them. The check is
+  a helper beside `worktree/git.rs`'s `is_dirty` that excludes untracked files.
+- **Cancel.** A Cancel stops the running phase through the existing cancel path. The loop
+  does not continue after it.
+- **The runner never counts loops and never chooses to continue.** A runner that did would
+  be a second copy of ADR-0017's budget, on a machine the board does not control (D31's
+  Why).
+
+**Resume by kind.** A resumed review or fix resumes as its own kind (D29 point 3). After
+036 the non-`Implementation` refusal lives in one place:
+`scheduler::attempts::resume_as_implementation`, applied by `board::service::claim` before
+any edge. This task removes it, so `Claim::resume` carries any kind and `run_task` enters
+at it. The two callers that pass that refusal on lose their special case: `try_step`'s
+handling of an `Invalid` from a `continue_session: true` claim in `scheduler/queue.rs`, and
+the manual starter in `crates/core/src/runner/start.rs`. `src-tauri/src/commands/runs.rs`'s
+"Retry now" stays a thin caller of the starter.
+
+**Additions to 036's DTOs** (D31 points 2 and 6):
 
 - `RunContext::review: Option<ReviewContext>`, holding:
   - the effective review instructions and `EffectiveReviewConfig`;
   - the newest review's open blocking findings, which the fix phase is composed from;
   - the task's rejected findings;
-  - the newest implementation row's `session_id`, `base_ref` and `base_sha`;
-  - the newest row's `head_sha` and its 033 bundle summary.
+  - the newest implementation phase's `session_id`, `base_ref` and `base_sha`;
+  - the newest row's `head_sha` and its 033 bundle summary;
+  - whether the current review phase has recorded, for the resume prompt.
 - The first production return of `NextStep::Continue`.
 - The contract suite in `crates/core/src/testing/board_contract.rs` gains 021's cases,
-  listed under Acceptance criteria.
+  listed under Acceptance criteria. They run through D31 point 9's in-process adapter.
 
 ### Exits
 
@@ -120,10 +187,10 @@ the row (D31 point 4):
 | implementation, success | loop off | `Released` | `in_review`, `idle`, no verdict (as today) |
 | implementation, success | loop on, window open | `Continue { Review }` | stays, `running` |
 | implementation, success | loop on, window closed | `Released` | `in_review`, `idle`, unreviewed |
-| review, success, `findings_recorded_at` set (its one `record_review_findings` call), `HEAD` unmoved | no open blocking finding | `Released` | `in_review`, `idle`, **clean** |
+| review, success, phase recorded, `HEAD` unmoved | no open blocking finding | `Released` | `in_review`, `idle`, **clean** |
 | same | blocking findings, fixes spent < budget, window open | `Continue { Fix }` | stays, `running` |
 | same | blocking findings, budget spent or window closed | `Released` | `in_review`, `idle`, findings remain |
-| review, success | `findings_recorded_at` is `NULL`, meaning no `record_review_findings` call (D30 point 7), or `HEAD` moved | `Released` | `in_review`, `idle`, unreviewed |
+| review, success | phase not recorded, or `HEAD` moved | `Released` | `in_review`, `idle`, unreviewed |
 | fix, success | window open | `Continue { Review }` | stays, `running` |
 | fix, success | window closed | `Released` | `in_review`, `idle`, unreviewed |
 | review or fix | retryable, `resume_after` set | `Released { resume_after }` | `waiting_retry`; resumes **as the same kind** |
@@ -133,23 +200,29 @@ Why each row lands where it does:
 
 - A failed or cancelled review or fix still lands in `in_review` with `idle`, because the
   implementation had already succeeded. Losing that to a reviewer's failure would be
-  worse than the loop being off.
-- A review whose `head_sha` differs from the preceding row's has changed the branch it
-  was asked to judge. It has become an unreviewed fixer, so it counts as a failed review.
-- A resumed review or fix goes through D29 point 3's `resume_point`, whose `Review` and
-  `Fix` arms this task wires in `scheduler/queue.rs` (`try_step`) and in
-  `src-tauri/src/commands/runs.rs` ("Retry now"). 035 left both arms refusing with
-  `Error::invalid`.
+  worse than the loop being off. This holds on every path that closes a row, reconcile's
+  included.
+- A review that moved `HEAD` has changed the branch it was asked to judge. It has become an
+  unreviewed fixer, so it counts as a failed review.
 
 ### The verdict: what "flagged" means, derived and never stored
 
-`review_loop::verdict` reads the current loop's rows and findings:
+```rust
+pub fn verdict(rows: &[LoopRow], findings: &[ReviewFinding], config: &EffectiveReviewConfig)
+    -> Verdict
+```
+
+It is pure. `LoopRow` is the projection of a `runs` row the loop reads: id, `kind`,
+`attempt`, `status`, `exit_class`, `session_id`, `head_sha` and whether
+`findings_recorded_at` is set. Its loader reads that column through
+`crates/core/src/review/findings.rs`, so 035's store stays its one reader. The values:
 
 - `None`: the loop is off and the task has no loop rows.
 - `Clean`.
 - `FindingsRemain { open_blocking }`.
 - `Unreviewed { reason }`, where `reason` is one of `not_reviewed`, `review_failed`,
-  `nothing_recorded`, `review_changed_branch` or `fix_not_reviewed`.
+  `nothing_recorded`, `review_changed_branch` or `fix_not_reviewed`. A review rewritten to
+  `fatal` for a dirty worktree is `review_failed`, and its row's message says why.
 
 A task is **flagged** when its verdict is `FindingsRemain` or `Unreviewed`. There is no
 column for it, for D29 point 8's reason and because D28 gives this task none.
@@ -175,14 +248,16 @@ shown, which is the property that matters.
 - **Posture.** The posture the implementation's claim trigger gives (ADR-0012,
   ADR-0031 point 7), plus two changes:
   - `ForbiddenOperation::AnyFileMutation` is added to the implementation's denials.
-  - `required_tools` is exactly `[record_review_findings]` (D30 point 7).
+  - `required_tools` is exactly `[record_review_findings]` (D30 point 7), spelled at the
+    handle's server (D30 point 3). An intent with `required_tools` and no handle is
+    `negotiate`'s `HandleInjection` refusal, and so a refused phase.
 
   Shell commands are not denied, because a review that cannot run the test suite is
-  guessing.
+  guessing. The worktree checks above are what keep the shell from editing unnoticed.
 - **Handle.** `RunHandles::grant(task_id, Grant::Review { run_id })`, served as
   `rimaia-run`. It is revoked on `Drop` at the end of the phase.
 - **Rows.** The row records the implementation row's `base_ref` and `base_sha`
-  (D29 point 4).
+  (D29 point 4), and D18's capture columns as any row does.
 
 **Fix phase.**
 
@@ -196,18 +271,17 @@ shown, which is the property that matters.
 - **Posture and environment.** The implementation's, plus `required_tools` of exactly
   `[resolve_review_finding]` through `Grant::Fix { run_id }`.
 
-**A phase refused before it spawns** is recorded as a row of its kind that finished
-`fatal`, with the refusal as its `error_message`. Examples: no MCP endpoint bound (the
-message names Settings → MCP, as D17.4 does), a `negotiate` refusal, or an unenforceable
-denial on an unattended run. The loop then exits through `finish_run` like every other
-failed phase, instead of through a second path that the history would not show.
-
 ### Prompts (ADR-0009's composition rules; exact strings under test)
 
 All live in `crates/core/src/runner/prompt.rs`. Each uses level-1 headings and
 `SECTION_SEPARATOR`, omits empty sections together with their heading, and has no trailing
-newline. Tool names come from the provider's `tool_handle` at `RUN_MCP_SERVER_NAME`.
+newline. Tool names come from the provider's `tool_handle` at `RUN_MCP_SERVER_NAME`
+(D30 point 1); `{tool}` below is that spelling.
 
+- **`# Task context` names the row's base.** `task_context` gains a `base_ref` argument.
+  `compose_prompt` passes `repo.default_branch`, so its exact strings do not change. The
+  review and fix prompts pass `ReviewContext`'s recorded `base_ref`, which since task 011
+  can be a dependency's branch, so it agrees with `# The change`.
 - **`compose_review_prompt`**:
   - Sections, in order: `# Your job` · `# Task context` · `# Plan` ·
     `# Extra instructions` · `# The change` · `# Review instructions` ·
@@ -237,9 +311,22 @@ newline. Tool names come from the provider's `tool_handle` at `RUN_MCP_SERVER_NA
   - `# How to answer` says a finding is advice, not an order. For each finding, the fixer
     calls `resolve_review_finding` with `fixed` and what it changed, or with `rejected`
     and why.
-- **`compose_fix_continuation`** (resumed fix): only `# Findings to address` and
-  `# How to answer`. A resumed session already holds the rest (ADR-0009: "Resumed runs do
-  not re-send the composed prompt").
+- **`compose_fix_continuation`** (a fix phase that starts on the implementation's session,
+  `fix_session = resume`): only `# Findings to address` and `# How to answer`. A resumed
+  session already holds the rest (ADR-0009: "Resumed runs do not re-send the composed
+  prompt").
+- **Resumed after a retryable exit**, in place of `compose_resume_prompt`, whose "Continue
+  the task" would tell a reviewer to implement. Single paragraphs, exactly:
+  - `compose_review_resume`, phase not yet recorded:
+    `Continue the review of "{title}" from where you stopped. The change and the review instructions are earlier in this session — do not start over. Do not edit, commit or push. Finish by calling {tool} exactly once, with findings: [] if you found nothing.`
+  - `compose_review_resume`, phase already recorded:
+    `Continue the review of "{title}" from where you stopped. Your findings are already recorded — do not call {tool} again, and do not edit, commit or push. Stop once you have finished what you were doing.`
+  - `compose_fix_resume`:
+    `Continue addressing the review findings on "{title}" from where you stopped. The findings and the instructions are earlier in this session — do not start over. Call {tool} for each finding you have not resolved yet, with fixed and what you changed, or rejected and why.`
+
+  A second `record_review_findings` call within one phase is not refused by 035's
+  per-run check, so the recorded variant is what keeps a resumed reviewer from recording
+  twice; `decide` reads the phase as recorded either way.
 - **Review instructions.**
   - The task's `review_instructions`, when non-blank, **replaces** the global setting
     rather than adding to it. An override that added would run two review skills on one
@@ -252,15 +339,15 @@ newline. Tool names come from the provider's `tool_handle` at `RUN_MCP_SERVER_NA
 
 ### Findings
 
-Task 035 owns the store, the two tools and their arguments. This task fills in the two
-behaviours 035 left to it:
+Task 035 owns the store (`crates/core/src/review/findings.rs`), the two tools and their
+arguments. This task fills in the two behaviours 035 left to it:
 
 - **The fingerprint.**
   - `fingerprint = normalise(file) + "|" + normalise(title)`. Here `normalise` trims,
     lowercases and collapses each run of whitespace to one space, and a NULL `file` is
     the empty string.
   - The line is left out on purpose, because a fix moves lines.
-  - It is computed in 035's `record_review_findings` writer, the one door for findings.
+  - It is computed in `review::findings::record`, the one writer of `review_findings`.
 - **Rejected findings are not raised again as new.** A finding whose fingerprint matches
   a `rejected` finding on the same task is stored with `status = 'rejected'` and
   `resolution = "Rejected earlier as <id>: <reason>"`. It never counts as blocking and
@@ -275,8 +362,7 @@ behaviours 035 left to it:
 
 ### Ping-pong detection (data only; 037 draws it)
 
-For each review phase after the first in the current loop, `review_loop::history`
-reports:
+For each review phase after the first in the current loop, the history reports:
 
 - `regressed`: findings whose fingerprint matches one the preceding fix marked `fixed`.
 - `new_after_fix`: blocking findings whose fingerprint the preceding review did not
@@ -320,9 +406,11 @@ optional, and an absent field inherits:
 
 ### Doors (ADR-0021 parity; ADR-0006: one core function behind each)
 
-There are four operator commands, each a thin Tauri command in a new
-`src-tauri/src/commands/review.rs`, registered in both `generate_handler!` lists in
-`src-tauri/src/lib.rs`, and each an MCP tool of the same name:
+There are four operator commands. Each is a thin Tauri command in
+`src-tauri/src/commands/review.rs`, the module task 034 created for its six review commands
+and 035 extended with `list_review_findings`; this task adds to it and does not create it.
+Each is registered in both `generate_handler!` lists in `src-tauri/src/lib.rs`, and each is
+an MCP tool of the same name:
 
 - `get_review_settings`: the global instructions and `ReviewConfig`.
 - `set_review_settings`.
@@ -340,36 +428,67 @@ Scope rules:
 - `get_task` and `TaskDetail` gain the task's two raw fields and
   `review_loop: Option<ReviewLoopSummary>`, which holds the effective `enabled` and
   `max_review_loops`, the fixes spent, the verdict, `open_blocking` and `ping_pong`. They
-  are mirrored in `src/types.ts`. 035 already puts a loop summary on 034's digest entry
-  (D29 point 8), and this extends that summary rather than writing a second one.
+  are mirrored in `src/types.ts`.
 - The frontend wrappers in `src/lib/commands.ts` are 037's.
+- **D32's appendix gains four rows in the commit that adds the commands** (D32 point 8:
+  every command added before 046 is classified when it is added, so 046 migrates it
+  without judging it). They are appended under the dated "added after 728a049" sub-heading
+  task 034 created, after 035's `list_review_findings` row, and the appendix's counts,
+  which describe `main` at 728a049, are left as they are. All four are module `review`,
+  kind `board`, From `046`, and each cites ADR-0021 points 3 and 4 and this task:
 
-### Reads for task 037
+  | Command | Effect | Note |
+  | --- | --- | --- |
+  | `get_review_settings` | Read | A team setting (D28 point 4, ADR-0028 §2). Refused to every grant (ADR-0021 §4) |
+  | `set_review_settings` | Write | A team setting. Refused to every grant: a run must not enable its own loop (ADR-0021 §4). `review_model` and `review_effort` are validated against the catalogue from `BoardHost.provider`, as `set_strategy_defaults` is (D32 point 2) |
+  | `set_repository_review_config` | Write | As `set_review_settings`, per repository. The config is a column on `repositories`, so it is board state, not a per-checkout runner setting (ADR-0033 §1) |
+  | `set_task_review` | Write | As `set_review_settings`, per task. 045 makes `review_instructions` consent-gated content with a revision (ADR-0032 §3); the handler stays on the board |
 
-`review_loop::history(ctx, task_id) -> ReviewHistory` returns the current loop's phases:
-each review with its findings, the fix that followed it and what that fix resolved, and
-the ping-pong lists. Earlier loops, meaning those before a re-run implementation, are
-included and marked as earlier. It is a service function with tests. 037 adds its command
+  None of the four touches the disk, spawns or reads a worktree, so none is a "local until
+  then" row.
+
+### Reads: pure builders, thin loaders
+
+The rules are pure functions over loaded rows, findings and effective configuration, so
+037 can call them per card over one batched read without copying a rule:
+
+- `verdict(rows, findings, config) -> Verdict` (above);
+- `summary(rows, findings, config) -> ReviewLoopSummary`;
+- `phases(rows, findings) -> ReviewHistory`: the current loop's phases, each review with
+  its findings, the fix that followed it and what that fix resolved, and the ping-pong
+  lists. Earlier loops, meaning those before a re-run implementation, are included and
+  marked as earlier.
+
+`review_loop::history(ctx, task_id)`, `get_task`'s summary and 035's digest entry are
+single-task loaders over them. **The digest's loop count becomes the phase count.** 035's
+`DigestLoop::reviews_since_implementation` is computed from `phases`, so the digest and
+`ReviewLoopSummary` cannot disagree about a retried review. 037 adds the history's command
 and tool.
 
-### ADR amendments (dated, appended, nothing above them edited)
+### Amendments (dated, appended, nothing above them edited)
 
+- **Seam-contract D29 point 8:** a loop number counts review *phases* after the newest
+  implementation phase, a phase being contiguous rows sharing `(kind, session_id)`, and
+  035's digest count follows it.
 - **ADR-0017**: the decisions under the headings above. These are:
-  - phase counting and the budget;
-  - the exits table and the verdict;
+  - phases, the phase-level witness, `HEAD` moved across a phase, and the budget;
+  - the exits table and the verdict, on every path that closes a row;
   - the fingerprint and the rejected carry-over;
   - override-replaces;
   - the enable spelling and the `0..=5` bound;
   - the run-window boundary;
-  - `HEAD` moved means a failed review;
-  - a refused phase is recorded as a failed row;
+  - the review's worktree checks;
+  - rows recorded without a spawn (a refused phase, an exit between phases), their empty
+    transcript, and the initial schema comment they relax;
+  - the residual: a crash, or an unwritable board, between phases lands `failed`;
   - the ping-pong definition.
-- **ADR-0009**: the review and fix prompts' section lists, in the form the planner's
-  amendment uses.
+- **ADR-0009**: the review and fix prompts' section lists and the two resume prompts, in
+  the form the planner's amendment uses.
 - **ADR-0004**: review and fix phases follow `run_environment`, unlike the planner, and
   why.
-- **ADR-0012**: two rows for the posture table, review and fix. CLAUDE.md forbids widening
-  the posture without this amendment.
+- **ADR-0012**: two rows for the posture table, review and fix, including why the shell
+  stays allowed and what the worktree checks close. CLAUDE.md forbids widening the posture
+  without this amendment.
 
 ## Out of scope
 
@@ -385,9 +504,9 @@ and tool.
 - **Consent.** Task 045 covers the revision of `review_instructions` and findings as
   consent-gated content (ADR-0032 point 3), and the re-check on `Continue`.
 - **The runner's model and effort cap on the review phase:** 045.
-- **Lease purposes moving at `start_run`:** 043. **`record_review_findings` over the
-  port:** 055. **The push postcondition on the loop's final commit** (ADR-0033 point 4):
-  057.
+- **Lease purposes moving at `start_run`, and per-runner reconcile:** 043.
+  **`record_review_findings` over the port:** 055. **The push postcondition on every
+  successful phase** (ADR-0033 point 4, as amended 2026-10-04): 057.
 - **The morning review (017) and review actions (034).** A human's approve, reject and
   needs-changes are theirs. The loop never takes any of them.
 - **Re-running only the review on a task already in `in_review`.** Run now starts from
@@ -427,8 +546,11 @@ and tool.
   - `enabling_the_loop_requires_the_cost_acknowledged_spelling`: `true` and `"on"` are
     refused at the service, the command and the tool.
   - `a_hand_edited_true_in_stored_config_reads_as_off`.
-  - `a_successful_implementation_with_the_loop_off_lands_exactly_as_before`: same rows,
-    same events, same column and run state as on `main`.
+  - `a_successful_implementation_with_the_loop_off_lands_exactly_as_before`: a golden
+    taken from today's behaviour, asserted explicitly. One `runs` row (`implementation`,
+    `succeeded`, attempt 1); the exact `ChangeEvent` sequence the close publishes, recorded
+    from the code before this task's first commit and asserted as a literal list; the task
+    in `in_review` with `idle`; `review_loop` `None`.
 - **Every exit in the table has a case** in `review_loop::decide`'s unit tests. Required
   names:
   - `findings_below_the_blocking_severity_do_not_start_a_fix`
@@ -437,32 +559,53 @@ and tool.
   - `a_closed_run_window_ends_the_loop_at_the_next_phase_boundary`
   - `a_review_that_records_nothing_lands_unreviewed_and_never_clean`
   - `a_review_that_moves_head_lands_unreviewed`
+  - `a_review_that_committed_before_its_usage_limit_still_lands_unreviewed`
+  - `a_resumed_review_that_recorded_before_the_limit_is_not_nothing_recorded`
   - `a_fatal_or_cancelled_review_lands_in_review_idle_unreviewed`
   - `the_budget_counts_phases_not_retried_rows`
   - `a_rerun_implementation_starts_a_fresh_budget`
-  - `no_loop_decision_moves_a_task_to_done`, which is exhaustive over the decision
-    function's inputs.
-- **Resume by kind.**
-  `a_review_waiting_on_a_usage_limit_is_resumed_by_the_queue_as_a_review`
-  uses the clock, not a sleep. It asserts that the second review spawn carries `--resume`
-  with the review's session and the continuation prompt, and that "Retry now" does the
-  same. `a_resumed_fix_continues_the_implementation_session_not_the_reviews` covers
-  `fix_session = resume`.
+  - `no_loop_decision_moves_a_task_to_done`, exhaustive over the enumerated domain: every
+    `RunKind` × `ExitClass` × {recorded, not recorded} × {`HEAD` moved, unmoved} ×
+    {window open, closed} × {budget left, spent} × {blocking finding, none}.
+- **Loop counts agree.** `a_retried_review_counts_once_in_the_digest_and_the_summary`:
+  a review that hit a usage limit and resumed is one phase in 035's digest entry and in
+  `ReviewLoopSummary`.
+- **Crash recovery.**
+  `a_review_left_open_by_a_crash_is_reconciled_into_in_review_or_a_review_resume`: drive
+  `reconcile_interrupted` on a task whose newest row is an open review. With retry budget
+  left it lands `waiting_retry` with a `resume_after`; with the budget spent it lands
+  `in_review`, `idle`, unreviewed. Never `failed`.
+- **Resume by kind**, using the clock, not a sleep:
+  - `a_review_waiting_on_a_usage_limit_is_resumed_by_the_queue_as_a_review`: the second
+    review spawn carries `--resume` with the review's session and `compose_review_resume`'s
+    text, and "Retry now" does the same.
+  - `a_fix_waiting_on_a_usage_limit_resumes_as_a_fix_with_the_fix_resume_prompt`.
+  - `a_resumed_fix_continues_the_implementation_session_not_the_reviews` covers
+    `fix_session = resume`.
 - **Fresh context.** `a_review_phase_opens_a_fresh_session_and_never_resumes`.
-- **Argv is pinned byte for byte, per the rules in `tests/runner_process.rs`:**
+- **Argv and environment are pinned byte for byte, per the rules in
+  `tests/runner_process.rs`:**
   - `a_review_phase_argv_carries_rimaia_run_and_denies_file_mutation`: the `--mcp-config`
     key is `rimaia-run`, `--allowedTools` is exactly the one review tool, the file-mutation
     denials are present, and the operator-surface denial is present with no
     `mcp__rimaia-run` pattern.
   - `a_fix_phase_argv_allows_only_resolve_review_finding`.
+  - `a_fix_phase_spawn_carries_the_repository_credentials_and_strips_claude_vars`: D25's
+    variables are present and redacted from the transcript, and D27.5's are absent.
 - **The grant is scoped and short-lived.**
   - `a_phase_grant_is_revoked_when_the_phase_ends`: the token answers not-found
     afterwards.
   - `a_review_grant_cannot_call_resolve_review_finding` and its converse.
-- **A refused phase is recorded.**
-  `a_review_refused_before_spawn_is_recorded_as_a_failed_review_row`: with no MCP
-  endpoint bound, a `review` row finishes `fatal` with a message naming Settings → MCP,
-  and the task lands `in_review`, unreviewed.
+- **Rows without a spawn are recorded.**
+  - `a_review_refused_before_spawn_is_recorded_as_a_failed_review_row`: with no MCP
+    endpoint bound, a `review` row finishes `fatal` with a message naming Settings → MCP,
+    the task lands `in_review`, unreviewed, and `startup::missing_run_logs` does not report
+    the row.
+  - `a_cancel_between_phases_lands_in_review_unreviewed`: a `cancelled` row of the
+    pending kind, and no `failed`.
+- **The worktree checks.**
+  - `a_review_that_leaves_tracked_changes_lands_unreviewed`.
+  - `a_review_is_refused_when_the_implementation_left_tracked_changes`.
 - **Phases share one claim.**
   - `the_in_flight_slot_is_held_across_phases_and_released_once`.
   - `the_task_stays_running_between_phases_and_moves_to_in_review_once`, asserting one
@@ -472,12 +615,15 @@ and tool.
   - `review_prompt_composes_its_eight_sections_in_order`
   - `review_prompt_omits_empty_sections_with_their_heading`
   - `review_prompt_without_a_bundle_names_the_commits_only`
+  - `review_and_fix_task_context_name_the_rows_base_ref`
   - `a_task_review_override_replaces_the_global_instructions`
   - `a_blank_task_override_falls_back_to_the_global_instructions`
   - `review_instructions_expand_template_variables_and_keep_unknown_ones`
   - `review_system_append_is_exact`
   - `fresh_fix_prompt_composes_base_instructions_plan_and_findings_in_order`
   - `resumed_fix_sends_only_the_findings_and_how_to_answer`
+  - `review_resume_prompt_is_exact_before_and_after_recording`
+  - `fix_resume_prompt_is_exact`
 - **Fingerprint and ping-pong:**
   - `fingerprint_ignores_line_case_and_whitespace`
   - `the_fix_receives_only_the_newest_reviews_open_blocking_findings`
@@ -497,11 +643,18 @@ and tool.
   and `tests/mcp_scope.rs` assert each is refused on the `Strategy`, `Review` and `Fix`
   grants. A parity test shows that the command and the tool reach the same service
   function.
+- **The four commands are in 034's `src-tauri/src/commands/review.rs`**, beside 034's six
+  and 035's one, and no second review command module exists.
+- **D32's appendix has the four rows** from Scope, under 034's "added after 728a049"
+  sub-heading, each with module `review`, kind `board`, its Effect (`Read` for
+  `get_review_settings`, `Write` for the three setters), From `046`, its Note, and the
+  ADR-0021 citation. They land in the same commit as the commands (D32 point 8), and the
+  appendix's 728a049 counts are unchanged.
 - **The engine never spends in tests.** No test in this task spawns anything but the
   `FakeCli` stand-in. Review and fix write-backs go over the real run-scoped HTTP route,
   in the way `tests/runner_strategy.rs`'s planner write-back does.
-- **The four ADR amendments exist**, dated and appended. The row for 021 in the
-  seam-contract "How to use this" table lists the entries in the Notes.
+- **The amendments exist**, dated and appended. The row for 021 in the seam-contract "How
+  to use this" table lists the entries in the Notes.
 - **No migration was added.** If a column 035 did not add turns out to be needed,
   **stop**: D4 and D28 make that a stop-and-ask. `.sqlx/` is regenerated for every
   changed or new query (D5, with `--all-targets`) and committed.
@@ -518,55 +671,65 @@ and tool.
 
 **Seam entries to read.**
 
-- D3: settings keys and accessors.
-- D8: no new error codes.
-- D10: ids.
+- D3: settings keys and accessors. D8: no new error codes. D10: ids.
+- D4 and D6 as prohibitions: no migration, no new dependency. The fingerprint is a
+  normalised string, not a hash. D5: the `.sqlx` cache.
+- D9 and its 2026-09-03 amendment: where an interrupted review lands.
 - D12: read only. The card field is 037's.
 - D17, points 2, 4, 5 and 9: tolerance, the handle's mechanism, the planner's precedent,
   and "no printed fallback".
+- D18: capture columns on review and fix rows.
 - D19: the in-flight slot across phases.
 - D20, point 3: the `…_acknowledged` spelling.
 - D23 point 7, as D29 amends it.
+- D24 point 4: the run window behind `window_closes_at`.
+- D25: credentials and redaction on every phase's spawn. D27, point 5: the identity strip.
 - D28: point 4's team placement, and the 035 file.
-- D29, all of it: points 3, 4, 8 and 9 are this task's instructions.
-- D30, points 2, 5 and 7: the name, the grant table, and "a clean review is an explicit
-  call". Point 7's 2026-09-30 amendment names the witness: `runs.findings_recorded_at`,
-  read through 035's `review::findings::recorded_at`, never a count of `review_findings`
-  rows.
-- D31, points 4, 5, 6 and 13.
-- D4 and D6 as prohibitions: no migration, no new dependency. The fingerprint is a
-  normalised string, not a hash.
+- D29, all of it: points 3, 4, 8 and 9 are this task's instructions, and point 8 is
+  amended here.
+- D30, all of it: point 1's name in prompts, point 3's spelling and `HandleInjection`
+  refusal, points 2, 5 and 7, and point 8's fixture.
+- D31, points 2–6, 9 and 13.
+- D32 point 8 and its appendix, including 034's "added after 728a049" sub-heading: the
+  four configuration commands are classified when they are added. Point 2 for why the
+  model check reads `BoardHost.provider` from 046 onward.
 
 **Files to start from.**
 
 - `crates/core/src/runner/process.rs`: `run_task` becomes the phase loop.
-  `forbidden_operations` and `RIMAIA_TOOL_SURFACE` are here. Its "A trap for task 021"
-  doc comment is replaced by 035 with a pointer to D30.
-- `crates/core/src/runner/prompt.rs`: the new compose functions sit beside
-  `compose_prompt` and the strategy pair.
+  `forbidden_operations`, `override_as_fatal` and `RIMAIA_TOOL_SURFACE` are here.
+- `crates/core/src/runner/prompt.rs`: `task_context`, and the new compose functions beside
+  `compose_prompt`, `compose_resume_prompt` and the strategy pair.
 - `crates/core/src/runner/strategy.rs`: the precedent for a handle-carrying intent, its
   grant and its "did it write" check.
-- `crates/core/src/runner/outcome.rs`: `apply_to_task` and `move_to_in_review`. From 036
-  they are behind `board::service::finish_run`.
-- `crates/core/src/scheduler/attempts.rs`: `history`. `resumable_session` becomes
-  035's `resume_point`.
-- `crates/core/src/scheduler/queue.rs` and `src-tauri/src/commands/runs.rs`: the two
-  `resume_point` callers.
+- `crates/core/src/runner/outcome.rs`: `finish_run`, `apply_to_task` and
+  `move_to_in_review`. Reached from 036's `board::service::finish_run` and, until 043,
+  from `scheduler/reconcile.rs`.
+- `crates/core/src/board/service.rs`'s `claim`, `crates/core/src/runner/start.rs` (036)
+  and `scheduler/queue.rs`'s `try_step`: the resume refusal and its two pass-throughs.
+- `crates/core/src/scheduler/attempts.rs`: `history`, `resume_point` and
+  `resume_as_implementation`.
+- `crates/core/src/review/findings.rs` (035): `record`, `recorded_at`. `review/digest.rs`
+  (034, 035): the loop count.
 - `crates/core/src/mcp/scope.rs`, `server.rs`, `requests.rs` and `responses.rs`: the four
   configuration tools.
 - `crates/core/src/db/settings.rs`: D3's key-owning shape.
 - `crates/core/src/tasks/service.rs`: `TaskDetail` and `get_task`.
+- `crates/core/src/worktree/git.rs`: `is_dirty`, beside which the tracked-only check goes.
 - `crates/core/src/testing/cli.rs`: `FakeCli`. A general `calls_tool_on_attempt` helper,
   lifted from `tests/runner_strategy.rs`'s planner write-back, keeps each test from
   hand-writing the `curl`.
 - `src-tauri/src/lib.rs`: both `generate_handler!` lists.
+- `src-tauri/src/commands/review.rs` (034, extended by 035): the four configuration
+  commands go beside `approve_task` and `list_review_findings`. It is not a new file.
+- `docs/seam-contract.md`: D32's appendix, under 034's dated sub-heading.
 - New files:
   - `crates/core/src/review_loop/` with `mod.rs`, `config.rs`, `decide.rs` and
-    `history.rs`. It is not named `review/`, which 034's review actions may take.
-  - `src-tauri/src/commands/review.rs`.
+    `history.rs`. It is a sibling of `review/`, which 034 and 035 created for the human's
+    actions and the findings store. 034's "task 021 adds the loop" beside them is met by
+    the sibling: the loop is the engine, and `review/` stays what a human or a reviewer
+    writes.
   - `crates/core/tests/review_loop.rs`.
-- 036 creates `crates/core/src/board/{port,types,service,in_process}.rs` and
-  `crates/core/src/testing/board_contract.rs`. None of them exists on `main` @ 728a049.
 
 **Migration.** None of its own. Its columns ride in 035's
 `src-tauri/migrations/20261001120100_run_kinds_and_review_findings.sql` (D28, D4
@@ -576,73 +739,48 @@ amendment).
 
 - **033:** `runs.head_sha`, `runs.base_sha`, and a review bundle for every finished row
   of every kind.
-- **017:** the morning review renders the newest row's bundle (D29 point 5), which after
-  a loop is the last review's.
-- **035** provides:
-  - `RunKind`, and `NewRun`/`StartRun` with a required `kind`;
-  - `review_findings`, and the two findings tools with their argument shapes;
-  - `runs.findings_recorded_at`, set by every `record_review_findings` call including an
-    empty one, and `review::findings::recorded_at`, its one reader (D30 point 7's
-    amendment);
-  - `rimaia-run` and the unconditional denial;
-  - `Grant::{Review, Fix}` with their `run_access` columns;
-  - `resume_point`, with two arms left for this task;
-  - the loop summary on 034's digest;
-  - a recorded fixture confirming that `--disallowedTools mcp__rimaia` does not deny
-    `mcp__rimaia-run__*` (D30 point 8).
-- **036** provides:
-  - `BoardPort` and `InProcessBoard`;
-  - `run_task(board, ctx, paths, config, claim, request)`;
-  - `finish_run` as the board's decision point, and `NextStep`;
-  - the contract suite.
+- **035:** `RunKind`; `NewRun`/`StartRun` with a required `kind`; `review_findings` and
+  `review::findings::{record, resolve, list, recorded_at}`; `runs.findings_recorded_at`,
+  set by every `record` call including an empty one; `rimaia-run` and the unconditional
+  denial; `Grant::{Review, Fix}` with their `run_access` columns; `resume_point` and the
+  refusals this task removes; the loop fields on 034's digest; and the fixture showing
+  that `--disallowedTools mcp__rimaia` does not deny `mcp__rimaia-run__*` (D30 point 8).
+- **036:** `BoardPort` and `InProcessBoard`; `run_task(board, ctx, paths, config, claim,
+  request)`; `finish_run` as the board's decision point, and `NextStep`; the manual
+  starter in `runner/start.rs`; the contract suite.
 
 **What the next tasks expect.**
 
-- **037** wraps this task's four commands in `commands.ts` and adds commands for
-  `review_loop::history`. It renders `ReviewLoopSummary` on the card through a D12
-  amendment, and puts the cost from `observed_run_cost` next to the acknowledgement.
-- **043** moves the lease's purpose at each `start_run`, and relies on phases never
-  leaving the claim.
+- **037** wraps this task's four commands in `commands.ts`, adds commands for
+  `review_loop::history`, and calls `summary` per card over one batched read. It renders
+  `ReviewLoopSummary` on the card through a D12 amendment, and puts the cost from
+  `observed_run_cost` next to the acknowledgement.
+- **043** moves the lease's purpose at each `start_run`, relies on phases never leaving the
+  claim, and takes reconcile per runner, which must keep reaching the same task-side step.
 - **045** adds consent to the `Continue` decision and a revision to
   `review_instructions`.
 - **055** carries `record_review_findings` over the port for connected runners.
-- **057** applies the push postcondition to the commit the loop ends on.
+- **057** applies the push postcondition to every successful phase, so the commit the loop
+  ends on is always on the remote (ADR-0033's 2026-10-04 amendment).
 
-**Size.** The estimate is about 3.5k lines of diff. Roughly half of that is tests. The
-decision function and the prompts are small. The phase loop in `run_task` and the argv
-tests are the bulk. If the diff runs past that, **cut the four configuration doors**
-(commands, tools and their parity tests) and move them to 037, which has their only UI
-consumer. The service functions and their tests stay here, because the engine reads
-them. Do not cut the verdict or the ping-pong data. 037 cannot derive them without core
-SQL of its own.
+**Size.** About 4.5k lines of diff, half of it tests. That is above task 035's
+3.5–4k, so plan the cut before starting rather than at the ceiling. The decision function
+and the prompts are small. The phase loop in `run_task`, the rows recorded between phases
+and the argv tests are the bulk. If the diff runs past 4.5k, **cut the four configuration
+doors** (commands, tools, their parity tests and D32 rows) and move them to 037, which has
+their only UI consumer; 037's Notes, "If 021 cut its configuration doors", already carry
+the matching instruction. The service functions and their tests stay here, because the
+engine reads them. If the cut is taken, these criteria move to 037 with the doors: the
+command and tool halves of `enabling_the_loop_requires_the_cost_acknowledged_spelling`
+(the service half stays), the MCP criterion, the parity test, and the two criteria on
+`commands/review.rs` and D32's appendix rows. Do not cut the verdict,
+the builders or the ping-pong data. 037 cannot derive them without core SQL of its own.
 
-**The operator's handle was denied to implementation runs, and this task had to undo
-that deliberately. D30 is how.** Task 020 found that an implementation run inherits the
-operator's Claude Code config, which registers the *unscoped* `/mcp`, and that
-`bypassPermissions` auto-approves MCP calls. So every run silently held `move_task`,
-`create_task` and every configuration tool that `RunScope` marks `Refused`. The fix
-denied `mcp__rimaia*` to implementation runs whatever the operator's blocklist says
-(`RIMAIA_TOOL_SURFACE` in `runner::process`). That denial is by tool name, and the
-scoped handle was registered under the same server name, so it would have blocked this
-task's write-back as well.
-
-The three ways out were:
-
-- give the run-scoped handle its own server name;
-- apply the denial only when no grant was minted;
-- establish that `--allowedTools` overrides `--disallowedTools`.
-
-D30 chose the first and records why the other two are wrong rather than merely weaker.
-The property it preserves is the one the denial bought: a run reaches its **own** card
-and nothing else. Review and fix runs inherit the operator's configuration by default, so
-they hold the operator registration and the handle at the same time. That is safe only
-because the denial never needs to know whether a grant exists.
-
-The failure mode to design against is false confidence: a task marked reviewed and clean
-that is not. That is why:
+**The failure mode to design against is false confidence**: a task marked reviewed and
+clean that is not. That is why:
 
 - nothing auto-advances to `done`;
 - a clean verdict needs an explicit empty call;
-- a review that changed the branch is not a review;
-- a failed phase lands as unreviewed and never as clean;
+- a review that changed the branch or the worktree is not a review;
+- a failed phase lands as unreviewed and never as clean, on every path that closes a row;
 - the loop count and the findings history are shown rather than a green tick.

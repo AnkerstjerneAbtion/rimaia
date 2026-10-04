@@ -3,9 +3,9 @@ id: "062"
 title: Hosting, backups and observability
 milestone: v0.5
 status: ready
-depends_on: ["056"]
-adrs: ["0037", "0036"]
-size: M
+depends_on: ["056", "058", "060", "068"]
+adrs: ["0037", "0036", "0028", "0030", "0031", "0034"]
+size: L
 ---
 
 # Hosting, backups and observability
@@ -56,10 +56,13 @@ rehearsed". This task makes both of those a script.
 
 ## Scope
 
-**1. Configuration, in one place (ADR-0037 point 1).** `crates/server/src/config.rs` already
-holds 046's parser, a function over a lookup closure, which 047 and 050 extended. This task
-makes it the single table of every variable the server reads, adds its own, and adds two
-refusals. When it is done, the table is:
+**1. Configuration, in one place (ADR-0037 point 1).** 046's parser, which 047 and 050
+extended, lives in `crates/server/src/config.rs` after this task; move it there if it landed
+elsewhere. Its input changes from a lookup closure to an iterator of `(OsString, OsString)`
+pairs, which `main` fills from `std::env::vars_os()`. A closure answers for a name it is
+asked about and cannot list the names nobody asked about, and the unknown-variable refusal
+below needs that list. This task makes the parser the single table of every variable the
+server reads, adds its own, and adds two refusals. When it is done, the table is:
 
 | Variable | Required | From | Meaning |
 | --- | --- | --- | --- |
@@ -121,7 +124,9 @@ refusals. When it is done, the table is:
 **3. Health (ADR-0037 point 7).** `GET /healthz` on the public listener:
 
 - It answers `200` with `{"status":"ok","version":"<CARGO_PKG_VERSION>","protocol":"<PROTOCOL_VERSION>"}`
-  once `SELECT 1` on the pool succeeds. Otherwise it answers `503` with
+  once `ops::ping(pool)` succeeds. That is `SELECT 1`, in `crates/core/src/ops.rs` beside
+  Scope 5's snapshot, because `rimaia-server` names no `sqlx` (046, D33 point 2) and reaches
+  the store only through `rimaia-core`. Otherwise it answers `503` with
   `{"status":"unavailable"}`. The cause goes into a `warn` line, never into the body, because
   a database error can name a path.
 - It takes no `Caller`, sets no cookie and reads no row. It is not a board route (D32 counts
@@ -140,12 +145,15 @@ refusals. When it is done, the table is:
   variable (CLAUDE.md's rule for spawned processes).
 - **Litestream's configuration is rendered, not checked in.** `backup::litestream::config(&BackupTarget) -> String`
   is a pure function, and its output is written to `<data dir>/litestream.yml` on each
-  start. It names `<data dir>/rimaia.db`, one replica derived from `RIMAIA_BACKUP_URL` (and
-  the endpoint, for S3-compatible stores), and **`retention: 720h`**. That retention is
-  ADR-0037 point 6's 30 days: a deleted team's rows age out of the backups when it passes.
-  The file holds no credential, because Litestream reads those from its environment. The
-  field names are those of the Litestream release the `Dockerfile` pins, and the rehearsal
-  is what proves them.
+  start. It names `<data dir>/rimaia.db` and its one `replica`, derived from
+  `RIMAIA_BACKUP_URL`. When `RIMAIA_BACKUP_S3_ENDPOINT` is set, the replica also carries
+  `endpoint` and `force-path-style: true`, which MinIO and most non-AWS stores need. The
+  top-level `snapshot` block sets **`retention: 720h`**. That is ADR-0037 point 6's 30
+  days: a deleted team's rows age out of the backups when it passes, and it is also how far
+  back a point-in-time restore reaches. The file holds no credential, because Litestream
+  reads those from its environment. **The field names are Litestream 0.5's.** 0.3's
+  `replicas:` list and its per-replica `retention` are a different format, and the
+  rehearsal is what proves the rendered file against the pinned binary.
 - **Restore on an empty volume.** When `rimaia.db` does not exist and a backup URL is
   configured, `main` runs `litestream restore -config <file> -if-db-not-exists
   -if-replica-exists <db path>` and waits for it to finish before `db::connect`. If the
@@ -172,17 +180,21 @@ refusals. When it is done, the table is:
   `<remote>` is derived from `RIMAIA_BACKUP_URL`: a local path for `file://`, rclone's
   on-the-fly `:s3:<bucket>/<prefix>` for `s3://`. The endpoint and `env_auth` go through
   `RCLONE_S3_*` variables set on the child, never through the argument vector. The
-  transcript root is 056's, read from its transcript store rather than re-derived here.
-  Success sets `rimaia_transcript_backup_last_success_timestamp_seconds` from the injected
-  clock. A failure increments `rimaia_transcript_backup_failures_total`, logs rclone's exit
+  transcript root is `<data dir>/transcripts/` (056). `main` computes it once and passes the
+  same path to `FileTranscriptStore::new` and to the backup module. `TranscriptStore` keeps
+  its four operations and gains no root accessor. Success sets
+  `rimaia_transcript_backup_last_success_timestamp_seconds` from the injected clock. A
+  failure increments `rimaia_transcript_backup_failures_total`, logs rclone's exit
   status (never its output, which names transcript keys), and retries at the next interval.
 - **Transcript restore** is `rclone copy <remote>/transcripts <transcript root>`, run by
   `main` after a database restore and before serving.
 - **Shutdown.** On SIGTERM or Ctrl-C the server:
   1. stops accepting connections;
-  2. tells 048's open streams to end;
+  2. calls `StreamControl::shutdown()`, which this task adds to 048's `StreamControl`: a
+     `tokio::sync::watch` arm that every stream loop selects beside its revalidation arm,
+     and that ends the stream;
   3. waits at most 10 seconds for in-flight requests;
-  4. closes the pool;
+  4. closes the pool with `close()` on the pool `ServiceContext` holds (no `sqlx` import);
   5. sends SIGTERM to Litestream and waits at most 10 seconds for it to exit.
 
   The order is the point. Litestream holds its own connection, so the server's close is not
@@ -190,6 +202,14 @@ refusals. When it is done, the table is:
   after the last write. SSE streams never end by themselves, so without step 2 a graceful
   shutdown would wait on them forever. On a platform that sends SIGTERM to process 1, the
   server is process 1 and handles the signal itself.
+
+  **Step 5 runs `kill -s TERM -- <pid>` as an argument vector**, as `rimaia-core`'s
+  `signal_group` does (with the child's pid, not a group). std and tokio can only SIGKILL a
+  `Child`, no `libc` or `nix` is approved (D34), and that function is `pub(crate)`. On
+  bookworm `kill` comes from `procps`, which the slim image lacks and CI's hosts have, so
+  the runtime image installs it and an image test asserts that. Steps 3 and 5 take up to 20
+  seconds, so the runbook requires a stop grace of at least 30 (Scope 10). A platform's
+  usual 10 would kill Litestream before its final sync.
 
 **5. Metrics (ADR-0037 point 7).** When `RIMAIA_METRICS_LISTEN` is set, a second listener
 serves `GET /metrics` in the Prometheus text format, and nothing else. It is never mounted on
@@ -216,12 +236,17 @@ text exactly:
 | `rimaia_litestream_up`, `rimaia_litestream_restarts_total` | gauge, counter | — | point 4 |
 | `rimaia_transcript_backup_last_success_timestamp_seconds`, `rimaia_transcript_backup_failures_total` | gauge, counter | — | point 4 |
 
-- **Claim latency** is the time the claim service call takes inside 052's claim handler in
-  `crates/server/src/runner_api.rs`. It is measured with two `Clock::now()` readings around
-  the `board::service` call, and **excludes the time a request spends parked in 053's long
-  poll**. A latency that included the park would measure how idle the queue is, not how
-  fast a claim is. The buckets are 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1 and 2.5
-  seconds.
+- **Claim latency excludes the time a request spends parked in 053's long poll.** A latency
+  that included the park would measure how idle the queue is, not how fast a claim is. The
+  park is inside `board::service`'s claim body (042 steps 1 to 3, with 053's wait between
+  attempts), so only `rimaia-core` can see where it ends, and the server never times the
+  call from outside. `crates/core/src/board/service.rs` splits the body into
+  `claim_timed(ctx, target)`, which returns what `claim` returns plus a `Duration`. It runs from
+  the start of the last attempt's selection to the end of its claim transaction, read from
+  `ctx.clock`. `claim` keeps its signature for both adapters and drops the duration, so
+  D31's port does not change. 052's handler in `crates/server/src/runner_api.rs` calls
+  `claim_timed` and records the figure. The buckets are 0.005, 0.01, 0.025, 0.05, 0.1,
+  0.25, 0.5, 1 and 2.5 seconds.
 - **Storage per team** comes from `rimaia-core`, `crates/core/src/ops.rs`,
   `ops::snapshot(pool, clock) -> OpsSnapshot`. That function reads the runner, lease and
   storage figures above. For each team: the sum of `runs.transcript_bytes` where
@@ -230,11 +255,12 @@ text exactly:
   because review and fix transcripts are stored too (D29 asks every reader of `runs` to say
   which kinds it means, and this is the answer). It reads no content column. Teams are
   labelled by id, never by name. It never reads `runs.log_path`, which 065 drops.
-- **`ops::snapshot` is the one deliberate cross-team read.** It takes the pool, not a
-  `ServiceContext`, because it has no caller and belongs to no team. It returns counts and
-  opaque ids only. It gets one entry, with that reason in a comment, in the allowlist of
-  039's `no_service_takes_a_pool_without_a_scope`. No registry row, no MCP tool and no
-  public route reaches it.
+- **`ops::snapshot` is the one deliberate cross-team read**, and `ops::ping` reads nothing.
+  Both take the pool, not a `ServiceContext`, because they have no caller and belong to no
+  team. The snapshot returns counts and opaque ids only. Each gets one entry, with its
+  reason in a comment, in the allowlist of 039's `no_service_takes_a_pool_without_a_scope`.
+  No registry row and no MCP tool reaches either, and the only route that does is
+  `/healthz`, to `ping`.
 - The snapshot is computed per scrape. At a scrape interval of 15 seconds or more, two
   grouped sums over indexed joins are cheaper than a cache and its staleness rules.
 
@@ -250,11 +276,13 @@ text exactly:
 - **No line carries content.** 046's trace layer already records the matched route and not
   the URI, and 047 already keeps secrets out of spans. This task makes that a test rather
   than a convention, and fixes whatever the test finds. The test covers task titles, plans,
-  base instructions, review instructions, review findings, transcript chunks, request
-  bodies (including malformed ones), bearer tokens, cookies, OAuth `code` and `state`
-  values, and `X-Forwarded-For` values.
-- It needs `tracing-subscriber`, which D34 does not approve (see Notes). This task writes
-  the amendment.
+  base instructions, review instructions, review findings, transcript chunks, the
+  review-bundle patch in a runner's `finish_run` body (052, 056), tool arguments sent to the
+  hosted `/mcp` door (060), request bodies (including malformed ones), bearer tokens,
+  cookies, OAuth `code` and `state` values, and `X-Forwarded-For` values.
+- `rimaia-server` takes `tracing-subscriber` with `{ workspace = true }`, the line 058
+  promoted under D34's row for it. Default features plus `env-filter` include the `fmt`
+  layer this needs. It takes no `tracing-appender`.
 
 **7. The client address behind a proxy.** 047 left this open.
 `RIMAIA_TRUSTED_PROXY_HOPS = n` says how many proxies in front of the server append to
@@ -302,31 +330,59 @@ proxy.
     `spike/` and `src-tauri/target/`, and **no pattern that matches a dot-directory in
     general**. A `.*` line drops both caches, and the build then fails offline, or worse,
     goes online.
-- **Stage `runtime`:** `debian:bookworm-slim` with `ca-certificates` and `libdbus-1-3`;
-  Litestream and rclone downloaded at an **exact version with the SHA-256 of the release
-  archive checked** (`sha256sum -c`); the server binary; `dist/` at `/app/web`; a non-root
-  user owning `/data`. `ENV RIMAIA_DATA_DIR=/data RIMAIA_LISTEN=0.0.0.0:8080
-  RIMAIA_WEB_ROOT=/app/web`, `EXPOSE 8080`, and `CMD ["/usr/local/bin/rimaia-server"]`. No
-  entrypoint script and no shell wrapper.
-- **Stage `rehearsal`**, built only with `--target rehearsal`: `runtime` plus the seed
-  example (point 10), so the rehearsal can write to a live database from inside the
-  container. The default target is `runtime`, and it does not contain the seed binary.
+- **Stage `tools`:** `debian:bookworm-slim` with `curl` and `unzip`. It downloads
+  **Litestream 0.5.17** (`litestream-<v>-linux-<arch>.tar.gz`) and **rclone 1.75.1**
+  (`rclone-v<v>-linux-<arch>.zip`), and checks each archive with `sha256sum -c`. A later
+  patch on the same line is acceptable, but a different line is not, because the config
+  format above is 0.5's. `ARG TARGETARCH` selects `amd64` or `arm64`, and any other value
+  fails the build. The rehearsal on an Apple Silicon Mac builds `linux/arm64`. **The four
+  checksums are copied from upstream's published files**: the Litestream release's
+  `checksums.txt` and `https://downloads.rclone.org/v<v>/SHA256SUMS`. Each file's URL goes
+  in a comment above the values copied from it. The implementing agent never computes a
+  checksum from an archive it downloaded itself, and never writes one from memory. If it
+  cannot fetch those files, it stops and asks.
+- **Stage `runtime-base`:** `debian:bookworm-slim` with `ca-certificates`, `libdbus-1-3`
+  and `procps` (Scope 4's `kill`); the two binaries from `tools`; the server binary;
+  `dist/` at `/app/web`; a non-root user owning `/data`. `ENV RIMAIA_DATA_DIR=/data
+  RIMAIA_LISTEN=0.0.0.0:8080 RIMAIA_WEB_ROOT=/app/web`, `EXPOSE 8080`, and
+  `CMD ["/usr/local/bin/rimaia-server"]`. No entrypoint script and no shell wrapper.
+- **Stage `rehearsal FROM runtime-base`**, built only with `--target rehearsal`: adds the
+  seed example (point 10), so the rehearsal can write to a live database from inside the
+  container.
+- **Stage `runtime FROM runtime-base`**, last. Docker builds the last stage by default, so
+  this order is what makes `runtime`, without the seed binary, the default target.
+- If Docker is available, the implementing agent runs `docker build .` once and says in the
+  PR body whether it did. Nothing else builds the image automatically (Out of scope).
 
 **10. The runbook and the rehearsal.**
 
 - **`docs/hosting.md`** is the operator's document, in the register of the rest of `docs/`:
   - the configuration table from point 1;
   - the deployment's fixed conditions: one instance, a persistent volume at `/data`, an EU
-    region, the health check at `/healthz` with a grace period longer than a restore, and
-    metrics on the private network only;
+    region, the health check at `/healthz` with a grace period longer than a restore, a
+    stop grace of at least 30 seconds (`docker run --stop-timeout 30`, or the platform's
+    kill timeout; Scope 4), and metrics on the private network only;
+  - **deploying and upgrading** (ADR-0037 point 3): stop the old container, then start the
+    new one. A rolling or overlapping deploy on one volume makes the new instance refuse on
+    the lock, or crash-loop until the old one exits. A deploy should finish within 053's
+    three-minute lease lifetime, or running work is interrupted and resumes pinned. Before
+    a deploy, confirm that the latest restore point is recent, because the new binary
+    migrates at start;
   - backups: what Litestream and rclone each hold, where, for how long, and why the 30 days
     are ADR-0037 point 6's;
   - **the restore runbook**, both paths: the automatic one (start on an empty volume), and a
     point-in-time one (`litestream restore -timestamp` into a scratch path, inspected, then
-    swapped in with the server stopped). It says what a restore cannot bring back: runs
-    that finished after the last transcript backup have a row whose transcript is missing
-    or short. A runner re-sends what 056's offset protocol says the server lacks only while
-    it still holds the local file;
+    swapped in with the server stopped). The point-in-time path brings back what happened
+    after the timestamp was undone, so two steps follow the swap, before the server serves
+    anyone. First, revoke every session and token in the restored database. One revoked
+    after the timestamp is live again (ADR-0030), so every person signs in again and every
+    runner pairs again. Second, re-apply every team and account deletion made after the
+    timestamp, found in the logs (051's purge span records the team id) and the
+    administrators' access record, because ADR-0037 point 6 deletes from the live database
+    immediately. The runbook also says what neither path can bring back: runs that
+    finished after the last transcript backup have a row whose transcript is missing or
+    short. A runner re-sends what 056's offset protocol says the server lacks only while it
+    still holds the local file;
   - log retention (30 days, matching backups) and who may read the logs;
   - production database access: named administrators only, and every access recorded in a
     log kept outside the repository (ADR-0037 point 7);
@@ -341,27 +397,35 @@ proxy.
   to a live database. `cargo check --workspace --all-targets` compiles it, so it cannot rot
   unnoticed.
 - **`scripts/rehearse-restore.sh [--replica file|s3]`** needs Docker and `sqlite3`, and
-  nothing from a cloud. Bash 3.2-safe, like the other scripts. `file` is the default, with a
-  bind-mounted directory as the replica. `s3` starts a MinIO container pinned by image
-  digest, with throwaway credentials. The script:
+  nothing from a cloud. Bash 3.2-safe, like the other scripts. `/data` is a **named Docker
+  volume**, never a bind mount: a bind-mounted directory is owned by the host's uid, which
+  the image's non-root user cannot write, and `flock` between two containers on a Docker
+  Desktop bind mount is unreliable, which would void step 10. `file` is the default, with
+  a second named volume as the replica, mounted at the same path in every container. `s3`
+  starts a MinIO container pinned by image digest, with throwaway credentials. The script:
   1. builds `--target rehearsal`;
-  2. seeds a scratch data directory and starts the container;
+  2. starts the container on a fresh volume and runs `rehearsal_seed` inside it;
   3. waits for `/healthz` by polling, with a deadline, never a fixed sleep;
-  4. runs `rehearsal_seed --more` inside the container, and records a timestamp between the
-     two seeds;
+  4. polls Litestream's own listing command for the pinned version (`litestream ltx` on
+     0.5) inside the container until the replica holds the first seed's last transaction,
+     then records a timestamp, then runs `rehearsal_seed --more`. A timestamp taken before
+     the replica caught up would make step 9 racy;
   5. waits for a transcript backup by polling the metrics listener's last-success gauge;
-  6. stops the container with SIGTERM;
-  7. copies the data directory aside, starts a fresh container on an **empty** volume, and
-     waits for `/healthz`;
-  8. compares the two databases with `sqlite3 .dump`, Litestream's own tables excluded, and
-     the transcript trees with `diff -r`. Both must be identical;
+  6. stops the container with `docker stop -t 30`;
+  7. copies `/data` out of the stopped container with `docker cp`, starts a fresh container
+     on an **empty** volume, and waits for `/healthz`;
+  8. stops the restored container the same way, copies its `/data` out, and compares the
+     two databases with
+     `sqlite3 .dump`, Litestream's own tables excluded, and the transcript trees with
+     `diff -r`. Both must be identical;
   9. runs a point-in-time restore to the recorded timestamp into a scratch file, and checks
      that the first seed's rows are present and the second's are absent;
-  10. starts a second container on the first one's volume while it runs, and checks that it
-      exits non-zero naming the lock;
+  10. starts the restored volume's container again, and while it runs starts a second
+      container on the same volume, and checks that the second exits non-zero naming the
+      lock;
   11. removes everything it created, and prints one `PASS` or `FAIL` line per step.
 
-**11. CLAUDE.md, the D34 amendment, and the query cache.**
+**11. CLAUDE.md, dependencies, and the query caches.**
 
 - **CLAUDE.md.** The layout table gains `Dockerfile` (the server image, ADR-0037) and
   `docs/hosting.md` (deploy, restore and observe). Gotchas gains one bullet: the image
@@ -370,16 +434,11 @@ proxy.
   that `scripts/rehearse-restore.sh` needs Docker, is not run by CI, and is run before
   go-live and after every backup-tool bump. `## Commands` does not change, because CI gains
   no step.
-- **D34 amendment**, `### Amendment, <date> — the server's log subscriber, and two binaries
-  in the image (task 062)`, in the four-part voice. It records:
-  - `tracing-subscriber` promoted to `[workspace.dependencies]` at `0.3` with `env-filter`
-    only, taken by `rimaia-server` and by `src-tauri` (which switches its line to
-    `{ workspace = true }`). No `json` feature, because that would add `tracing-serde` to
-    the tree. `Cargo.lock` gains no package.
-  - Litestream and rclone as binaries in the image, pinned by version and checksum in the
-    `Dockerfile`, and governed by neither D6 nor D34. D34's "no object-storage client"
-    declined a backend for the transcript *store*. rclone is a backup tool the server runs
-    as a child, and the store stays on disk.
+- **Dependencies.** The one Cargo change is `rimaia-server`'s `tracing-subscriber =
+  { workspace = true }`, on the line 058 promoted under D34's row. No `json` feature, which
+  would add `tracing-serde` to the tree. Litestream and rclone are binaries in the image,
+  pinned in the `Dockerfile` and governed by neither D6 nor D34, as D34's closing list
+  says (see Notes for why rclone is not the object-storage client D34 declines).
 - **`.sqlx/`.** `ops.rs` adds query macros to `rimaia-core`, so both caches are regenerated
   with D33's recipe and committed in this task.
 
@@ -390,7 +449,8 @@ proxy.
 - **Building the image in CI.** A release build of the server and the bundle on every pull
   request costs more than it catches. `crates/server/tests/image.rs` checks the
   `Dockerfile`'s structural rules on every run, and the full build is the rehearsal's first
-  step. Whether CI should build the image on `main` is a question for 064, raised in Notes.
+  step. Whether CI should build the image on pushes to `main` is 064's decision, and 064's
+  Scope carries the question.
 - **Object storage as the transcript store.** ADR-0036 point 7 keeps files on disk; backup
   copies them, and nothing reads from the bucket at run time.
 - **Re-uploading transcripts a restore lost.** That is 056's offset protocol working as
@@ -405,7 +465,7 @@ proxy.
   names the three alerts that matter: `rimaia_backup_configured == 0`,
   `rimaia_litestream_up == 0`, and a transcript backup older than two intervals.
 - **Any migration** (D4's list reserves none for 062), **any npm dependency**, and **any
-  Cargo dependency** beyond the `tracing-subscriber` promotion (D6, D34).
+  Cargo dependency** beyond Scope 11's one line (D6, D34).
 - **The desktop updater and out-of-date runners.** 063.
 
 ## Acceptance criteria
@@ -415,9 +475,12 @@ Rust tests use the real SQLite harness, `crates/core`'s `TestClock`, and real fi
 shell scripts written into a `TempDir` in the manner of `crates/core/src/testing/cli.rs`. They
 record their argv, their environment and, on SIGTERM, a line saying so. Like that module's
 scripts, they are `#[cfg(unix)]`. Every pure function they rely on is tested on all three
-operating systems. Exact strings are asserted exactly.
+operating systems. Exact strings are asserted exactly. Every test that runs
+`env!("CARGO_BIN_EXE_rimaia-server")` calls `env_clear()` and then sets each variable it
+needs, because a developer's shell may export `RIMAIA_DATA_DIR` (CLAUDE.md) or any other
+`RIMAIA_*` name.
 
-**Configuration** (`crates/server/src/config.rs` unit tests):
+**Configuration** (`crates/server/src/config.rs` unit tests, over literal pairs):
 
 - `an_unknown_rimaia_variable_is_refused_by_name`, using `RIMAIA_BACKUP_UR` as the typo.
 - `a_backup_url_with_credentials_is_refused`, `a_relative_file_backup_url_is_refused` and
@@ -439,8 +502,10 @@ operating systems. Exact strings are asserted exactly.
 
 **Backups** (`crates/server/src/backup/` unit tests, and `crates/server/tests/backup.rs`):
 
-- `litestream_config_for_an_s3_url_is_exactly` and `litestream_config_for_a_file_url_is_exactly`,
-  golden strings, each containing `retention: 720h`.
+- `litestream_config_for_an_s3_url_is_exactly`,
+  `litestream_config_for_an_s3_url_with_an_endpoint_is_exactly` (with `force-path-style:
+  true`) and `litestream_config_for_a_file_url_is_exactly`, golden strings in Litestream
+  0.5's format, each with `retention: 720h` under `snapshot`.
 - `the_rendered_litestream_config_holds_no_credential`.
 - `the_transcript_sync_argv_is_exactly`, with the `--backup-dir` stamp taken from a
   `TestClock` set to `2026-10-01T02:00:00Z`. `the_deleted_transcript_expiry_argv_is_exactly`
@@ -460,8 +525,13 @@ operating systems. Exact strings are asserted exactly.
 - `children_receive_only_the_backup_environment`: with `AWS_ACCESS_KEY_ID`,
   `RIMAIA_GITHUB_CLIENT_SECRET` and `CLAUDE_CODE_SESSION_ID` set in the parent, the recorded
   child environment has the first and neither of the others.
-- `shutdown_closes_the_pool_then_stops_litestream`: after shutdown the pool reports closed,
-  and the stand-in recorded its SIGTERM and exited.
+- `shutdown_closes_the_pool_then_stops_litestream`: the stand-in, on SIGTERM, writes a
+  marker and exits. The test's shutdown hook records the pool's `is_closed()` at the moment
+  the server runs `kill`, and the test asserts the pool was already closed then, and that
+  the marker exists afterwards. Order is the assertion, not just both effects.
+- `an_open_event_stream_ends_on_shutdown`: an SSE stream opened on `/api/v1/events` reaches
+  end-of-body once shutdown starts, and the shutdown finishes without waiting out its
+  10 seconds.
 
 **Health and metrics** (`crates/server/tests/ops.rs`, through a real listener and `reqwest`,
 as 046's suite does):
@@ -483,20 +553,26 @@ as 046's suite does):
 - `storage_is_labelled_by_team_id_and_never_by_name`: the team is named with a sentinel, and
   the sentinel does not appear.
 - `every_kind_of_run_counts_toward_storage` (D29).
+- `a_deleted_team_drops_out_of_storage_metrics`: a team deleted with 051's deletion service
+  has no `rimaia_team_storage_bytes` line on the next scrape (051's hand-off to this task).
 - `an_unmatched_path_is_counted_as_unmatched_not_by_its_uri`.
-- `claim_latency_excludes_the_long_poll_wait`: a claim parks, the `TestClock` advances 20
-  seconds, work arrives, and the one observation falls in the lowest bucket.
-- `ops::snapshot` is the only new entry in `no_service_takes_a_pool_without_a_scope`'s
-  allowlist, with its reason in a comment. No file under `crates/core/src/api/` or
-  `crates/core/src/mcp/` names `ops::`.
+- `claim_timed_measures_the_last_attempt_not_the_wait`, a `rimaia-core` test in
+  `crates/core/src/board/service.rs`: a `Next` claim with a `wait` parks, the `TestClock`
+  advances 20 seconds, work arrives, and the returned duration is zero.
+- `claim_latency_excludes_the_long_poll_wait`, the same sequence through 052's HTTP
+  handler: the one observation falls in the lowest bucket.
+- `ops::snapshot` and `ops::ping` are the only new entries in
+  `no_service_takes_a_pool_without_a_scope`'s allowlist, each with its reason in a comment.
+  No file under `crates/core/src/api/` or `crates/core/src/mcp/` names `ops::`.
 
 **Logs** (`crates/server/tests/log_hygiene.rs`, its own test binary, because it installs a
 global subscriber):
 
 - `log_lines_never_carry_board_content`. It installs the production subscriber over a
   buffer with `RIMAIA_LOG=rimaia_server=debug,rimaia_core=debug,info` and drives the server
-  over HTTP. Each category Scope 6 lists carries its own sentinel, and some requests
-  succeed while others fail validation. The test then asserts that the buffer is non-empty,
+  over HTTP. Each category Scope 6 lists carries its own sentinel, including one in a
+  `/mcp` tool call's arguments and one in a `finish_run` patch, and some requests succeed
+  while others fail validation. The test then asserts that the buffer is non-empty,
   names a matched route, and contains no sentinel.
 - `the_default_log_filter_is_exactly` `rimaia_server=info,rimaia_core=info,warn`.
 
@@ -520,21 +596,28 @@ global subscriber):
 - `the_dockerfile_builds_offline`: it sets `SQLX_OFFLINE=true` in the build stage and builds
   with `--locked -p rimaia-server`.
 - `the_dockerfile_names_no_rust_version`: no `FROM rust:` tag other than `1-…`.
-- `litestream_and_rclone_are_pinned_by_version_and_checksum`.
-- `the_runtime_image_runs_as_a_non_root_user`, and its default stage is `runtime`.
+- `litestream_and_rclone_are_pinned_by_version_and_checksum`: one exact version each, a
+  `sha256sum -c` for each, an archive and a checksum for both `amd64` and `arm64` selected
+  by `TARGETARCH`, and a comment naming the upstream checksum file's URL.
+- `the_runtime_image_runs_as_a_non_root_user`.
+- `the_default_stage_is_runtime_without_the_seed`: the last `FROM` line is
+  `FROM runtime-base AS runtime`, and that stage copies no `rehearsal_seed`.
+- `the_runtime_image_has_kill`: `runtime-base` installs `procps`.
 - `dockerignore_keeps_the_migrations_and_both_query_caches`: no line of `.dockerignore`
   matches `src-tauri/migrations`, `crates/core/.sqlx` or `crates/runner/.sqlx`, including
   `.*`, `**/.*` and `*.sqlx` shapes.
 
 **Documents and repository**:
 
-- `docs/hosting.md` exists with every section Scope 10 lists, and its configuration table
-  names exactly the variables `config.rs` accepts. A unit test compares the two lists, so
-  the document cannot drift from the code.
-- The D34 amendment exists in the four-part shape, and D34's Binds line names 062.
-  `cargo tree -d` shows one `tracing-subscriber`, and `Cargo.lock` gains no package.
-- 062 has a row in seam-contract's "How to use this" table: D4 and D6 as prohibitions, D8,
-  D11, D28, D29, D32, D33 and D34.
+- `docs/hosting.md` exists with every section Scope 10 lists, including deploying and
+  upgrading, the stop grace, and the two steps after a point-in-time swap. Its
+  configuration table names exactly the variables `config.rs` accepts. A unit test
+  compares the two lists, so the document cannot drift from the code.
+- `rimaia-server`'s manifest takes `tracing-subscriber` with `{ workspace = true }` and
+  adds no other dependency. `cargo tree -d` shows one `tracing-subscriber`, and
+  `Cargo.lock` gains no package.
+- 062 has a row in seam-contract's "How to use this" table: D4 · D5 · D6 · D8 · D11 · D19 ·
+  D28 · D29 · D31 · D32 · D33 · D34.
 - CLAUDE.md carries Scope 11's edits, and `## Commands` still equals `ci.yml` line for line.
 - Both `.sqlx/` caches are regenerated with D33's recipe and committed.
 - **Every CI check passes**, run with `SQLX_OFFLINE=true` exported: `npm run typecheck`,
@@ -556,13 +639,15 @@ global subscriber):
 ## Notes
 
 **Seam entries to read.** D4 and D6 as prohibitions: no migration, and no dependency beyond
-the one promotion this task records. D8: no new error code; a refused start is a process
-exit, not an `Error`. D11: what a refusal at startup looks like. D28: `runs.transcript_bytes`,
-`transcript_pruned_at`, `review_bundles.patch`, `runner_leases`, `runners.last_seen_at`, and
-its note that sign-in state stays in memory because Litestream would put it in backups. D29:
-the storage reader's answer about kinds. D32: `/healthz` and `/metrics` are not board routes,
-and every board route still takes a `Caller`. D33: the Binds line for 062, and the recipe.
-D34: what is approved, what is declined, and the shape of the amendment this task adds.
+Scope 11's line. D5: the cache rules D33 leaves standing. D8: no new error code; a refused
+start is a process exit, not an `Error`. D11: what a refusal at startup looks like. D19:
+why `fs4` stays confined. D28: `runs.transcript_bytes`, `transcript_pruned_at`,
+`review_bundles.patch`, `runner_leases`, `runners.last_seen_at`, and its note that sign-in
+state stays in memory because Litestream would put it in backups. D29: the storage reader's
+answer about kinds. D31: the claim body `claim_timed` splits, and `runner_api`. D32:
+`/healthz` and `/metrics` are not board routes, and every board route still takes a
+`Caller`. D33: the Binds line for 062, and the recipe. D34: the `tracing-subscriber` row,
+and the binaries in the image that it does not govern.
 
 **Files to start from.**
 
@@ -576,19 +661,25 @@ D34: what is approved, what is declined, and the shape of the amendment this tas
     recorded.
   - `crates/core/tests/runner_credentials.rs`: the `#![cfg(unix)]` precedent.
   - `crates/core/src/paths.rs`: `AppPaths::resolve`'s override rules.
+  - `crates/core/src/runner/process.rs` (or wherever 041 moved it): `KILL` and
+    `signal_group`, the argv shape Scope 4's shutdown copies.
   - `src-tauri/src/logging.rs`: `RIMAIA_LOG` and the filter idiom.
   - `.github/workflows/ci.yml`: the `libdbus-1-dev` step the build stage mirrors.
   - `rust-toolchain.toml`, the root `Cargo.toml`, `package.json` (`"build": "tsc && vite
     build"`) and `.gitignore`.
 - Created on this branch by earlier tasks:
   - `crates/server/src/main.rs`, `crates/server/src/lib.rs` (`ServerState`, `router`) and
-    `crates/server/src/config.rs` (046, extended by 047 and 050).
+    046's config parser, extended by 047 and 050.
   - 047's rate limiter.
   - 050's bundle middleware.
-  - 052's `crates/server/src/runner_api.rs`.
-  - 053's long poll and lease-lifetime constant.
+  - 042's claim body in `crates/core/src/board/service.rs`, with 053's long poll, and 052's
+    `crates/server/src/runner_api.rs`.
+  - 053's lease-lifetime constant.
   - 048's `StreamControl`.
-  - 056's transcript store and its root.
+  - 056's `FileTranscriptStore` and where `main` builds it.
+  - 058's `[workspace.dependencies]` lines for `tracing-subscriber`.
+  - 060's `/mcp` door.
+  - 051's deletion service.
   - 039's `no_service_takes_a_pool_without_a_scope`.
 
   Read them as they landed. If one is not where this file says, follow the code and say so
@@ -603,12 +694,13 @@ D34: what is approved, what is declined, and the shape of the amendment this tas
 - 047 provides three variables and a limiter keyed by the peer.
 - 050 provides the bundle, `RIMAIA_WEB_ROOT` and the header middleware.
 - 052 and 053 provide the claim handler and the lease lifetime.
-- 056 provides stored transcripts with byte counts, and pruning.
+- 056 provides stored transcripts with byte counts, and 068 prunes them.
+- 058 provides `tracing-subscriber` on the workspace line. 060 provides `/mcp`, whose tool
+  arguments the hygiene test covers. 051 provides team deletion.
 - 063 builds the desktop updater and shows out-of-date runners. It needs nothing from this
   task except a server that stays up.
-- 064's final pass reads `docs/hosting.md`. It confirms CLAUDE.md still matches CI, and
-  decides whether CI should build the image on pushes to `main`. **That is a question
-  raised here, not decided.**
+- 064's final pass reads `docs/hosting.md`, confirms CLAUDE.md still matches CI, and decides
+  whether CI should build the image on pushes to `main`. Its Scope carries that question.
 - 065 drops `runs.log_path`, which nothing in this task reads.
 
 **Why the server starts Litestream rather than `litestream replicate -exec`.** `-exec` is
@@ -624,24 +716,18 @@ file" is only true this way round.
 **Why rclone, and why the server schedules it.** Litestream replicates one SQLite file, not
 a directory. D34 declines an object-storage client inside the server, and it was right to:
 ADR-0036 point 7's store stays on disk. A backup tool run as a child is a different thing,
-and naming it in the amendment keeps D34's list literally true. Scheduling it in the server,
-rather than with cron or a shell loop, puts the interval on the injected clock and the result
-in a metric, and those are what make "backed up on a schedule" something a test can check.
+and D34 names it beside Litestream, so its list stays literally true. Scheduling it in the
+server, rather than with cron or a shell loop, puts the interval on the injected clock and the
+result in a metric, and those are what make "backed up on a schedule" something a test can
+check.
 
-**Two things the Phase 0 reviewer should see stated, not discovered.**
+**Open sign-up, stated rather than discovered.** 047 notes that nothing in ADRs 0027 to 0037
+limits which GitHub accounts may sign up to the hosted instance, and that if it must admit
+only some accounts "before 062 deploys it", that is a new ADR decision. This task does not
+deploy, and adds no allowlist. The runbook lists the question among the preconditions for
+going live, next to the data processing agreement.
 
-- *The D34 gap.* `tracing-subscriber` is not on D34's list, and 046 declined to install a
-  subscriber for exactly that reason. Promoting the line `src-tauri` already has adds nothing
-  to `Cargo.lock`, which is the same argument D6 accepted for `base64` and D34 accepted for
-  `sha2`. Accepting this task file accepts that amendment. If the reviewer does not, the
-  implementing agent stops at Scope 6 and asks.
-- *Open sign-up.* 047 notes that nothing in ADRs 0027 to 0037 limits which GitHub accounts
-  may sign up to the hosted instance, and that if it must admit only some accounts "before
-  062 deploys it", that is a new ADR decision. This task does not deploy, and adds no
-  allowlist. The runbook lists the question among the preconditions for going live, next to
-  the data processing agreement.
-
-**Size.** The plan sizes this M. The estimate puts it at the M/L line:
+**Size.** The plan sized this M. The estimate puts it at L, near 047's size:
 
 | Part | Lines |
 | --- | --- |
@@ -657,7 +743,7 @@ order, and amend the receiving task's file in the same commit:
 
 1. **The rehearsal's `s3` mode, the point-in-time step and the `rehearsal` stage.** The file
    mode's graceful restore stays and still proves the path. The runbook keeps the dropped
-   steps as manual ones, and 064 inherits them.
+   steps as manual ones, and 064's file gains them as a list in the same commit.
 2. **Per-route HTTP counters** collapse to one counter by status class. ADR-0037 point 7's
    "request and error metrics" still holds.
 3. **Scope 8's headers** move to a new task appended after 063. The hosted instance does not

@@ -727,6 +727,11 @@ unaffected, and nothing else about the shape changes. `blocked_by_incomplete` is
 
 The entry now binds 014 as well.
 
+### Amendment, 2026-10-04 — the last run has a kind, see D29
+
+The bulk read's last-run summary now says which kind of run it was. D29 states the rule and the
+query change. This entry's cost argument is unchanged.
+
 ## D13 — Whether a task can change repository
 
 **Question.** Task 005's Scope lists "Title, repository selector" in the task detail panel, but
@@ -1595,6 +1600,10 @@ guessed payload value that the classifier must never depend on.
 
 ---
 
+### Amendment, 2026-10-04 — the budget boundary reads run kinds, see D29
+
+Point 7's retry-budget boundary is now read over the run kinds D29 names. D29 states the rule.
+
 ## D24 — Task 013's cross-cutting choices
 
 **Question.** ADR-0010 fixes the three triggers, the run window and the modes, and stops
@@ -1985,7 +1994,7 @@ written down rather than discovered. (5) is ADR-0022 reaching a module it does n
 one is to argue it, not to leave it.
 
 See also [ADR-0005](adr/0005-git-worktree-per-task.md) (where worktrees live, and that the
-branch is left alone), [ADR-0021](adr/0021-mcp-first-tool-surface.md) points 4 and 5 (the
+branch is left alone), [ADR-0021](adr/0021-mcp-first-capability-parity.md) points 4 and 5 (the
 scope decision and the destructiveness exception), and
 [ADR-0022](adr/0022-what-a-run-is-remembered-by.md) part 2 (rows survive pruning).
 
@@ -2329,8 +2338,8 @@ keep what it was for.
    038 makes three columns optional for every `query!` that reads them:
    `repositories.path`, `repositories.worktree_root` and `runs.log_path` now infer
    `Option`. 038 updates every reader and regenerates `.sqlx`. A reader either handles
-   `None`, or, if it is solo-only until task 041, uses a `"path!"` override with a comment
-   naming 041.
+   `None`, or, if it is solo-only until task 066, uses a `"path!"` override with a comment
+   naming 066.
 
 3. **038 adopts the solo identity when there is a board to adopt. Otherwise the app creates
    it at first launch.** ADR-0029 point 2 says the solo team and user are "created by
@@ -2625,7 +2634,7 @@ keep what it was for.
    -- 4. repositories. allow_unattended_runs keeps its name and now means the team ceiling
    -- (ADR-0032 point 4); task 041 copies it into runner.db as the runner's consent. path,
    -- worktree_root, max_concurrency, credential_*, on_archive and on_archive_script are
-   -- retired: read until 041, dropped by 065.
+   -- retired: read until 066, dropped by 065.
    CREATE TABLE repositories_new (
        id                    TEXT NOT NULL PRIMARY KEY,
        team_id               TEXT NOT NULL REFERENCES teams (id) ON DELETE RESTRICT,
@@ -2660,7 +2669,7 @@ keep what it was for.
 
    -- 5. tasks. The repository reference becomes (repository_id, team_id), so the store
    -- itself refuses a task in another team than its repository (ADR-0029 point 5), and a
-   -- repository changing team under its tasks. worktree_path is retired (041, 065).
+   -- repository changing team under its tasks. worktree_path is retired (066, 065).
    CREATE TABLE tasks_new (
        id                  TEXT NOT NULL PRIMARY KEY,
        team_id             TEXT NOT NULL REFERENCES teams (id) ON DELETE RESTRICT,
@@ -2984,13 +2993,14 @@ keep what it was for.
        WHERE normalized_remote IS NOT NULL;
 
    -- ADR-0033 point 2: which runners map which team repositories, as last reported, with
-   -- the doctor's push check for each mapping.
+   -- each mapping's consent (ADR-0032 point 4) and the doctor's push check.
    CREATE TABLE runner_repositories (
-       runner_id       TEXT NOT NULL REFERENCES runners (id) ON DELETE CASCADE,
-       repository_id   TEXT NOT NULL REFERENCES repositories (id) ON DELETE CASCADE,
-       reported_at     TEXT NOT NULL,
-       push_checked_at TEXT,
-       push_error      TEXT,
+       runner_id          TEXT NOT NULL REFERENCES runners (id) ON DELETE CASCADE,
+       repository_id      TEXT NOT NULL REFERENCES repositories (id) ON DELETE CASCADE,
+       reported_at        TEXT NOT NULL,
+       unattended_consent BOOLEAN NOT NULL DEFAULT 0,
+       push_checked_at    TEXT,
+       push_error         TEXT,
        PRIMARY KEY (runner_id, repository_id)
    );
    CREATE INDEX idx_runner_repositories_repository ON runner_repositories (repository_id);
@@ -2998,6 +3008,11 @@ keep what it was for.
    -- ADR-0034 point 5: the browser shows each runner's last doctor result.
    ALTER TABLE runners ADD COLUMN doctor_report TEXT;
    ALTER TABLE runners ADD COLUMN doctor_reported_at TEXT;
+
+   -- ADR-0033 point 8: the cleanup a holding runner still owes ('archived' or 'done'), and
+   -- the on-archive result it reported. No CHECK: one on tasks is permanent (part 5).
+   ALTER TABLE tasks ADD COLUMN cleanup_pending TEXT;
+   ALTER TABLE tasks ADD COLUMN archive_outcome TEXT;
    ```
 
    **`20261003120600_transcripts_and_retention.sql` — task 056.** Retention is a
@@ -3274,7 +3289,7 @@ does with `kind`), D31 (the `LeaseRef` a held lease rebuilds) and D33 (the runne
 offline cache).
 
 **Binds.** 021 (its columns ride in 035), 033, 035, 038, 039, 040, 041, 042, 043, 044, 045,
-047, 051, 052, 053, 054, 055, 056, 057, 058, 059, 060, 062, 065.
+047, 051, 052, 053, 054, 055, 056, 057, 058, 059, 060, 062, 065, 066.
 
 ### D4 amendment, 2026-09-30 — team mode's thirteen files, named before any is written
 
@@ -3363,12 +3378,35 @@ naming a new file.
   run's `attempt`, then by the order the reviewer gave. D10's ids say nothing about order,
   `TestClock` gives one timestamp to a whole call, and the implicit `rowid` of a table with
   a `TEXT` primary key is renumbered by `VACUUM`, which the sqlite3 CLI may run (ADR-0003),
-  and by any copy that does not carry it, such as task 051's copy to a team. The writer
+  and by any copy that does not carry it, such as a later rebuild of the table. The writer
   sets `ordinal` to the finding's index in the call, from 0. The unique index serves the
   same lookup by `review_run_id` the plain one did.
 
 Nothing else in part 6 changes. **Binds.** 035 (writes both), 021 (reads the witness), 038
-(redeclares the first), 051 (copies the second).
+(redeclares the first). No task copies findings: task 051's copy to a team carries the
+title, plan and extra instructions only (ADR-0029 point 5), and names findings among what
+it leaves behind.
+
+### Amendment, 2026-10-04 — three columns in task 054's board file, before it is written
+
+Part 6's DDL for `20261003120500_repositories_by_remote.sql` gains three columns, already
+applied above. The file is not frozen, because task 054 has not landed.
+
+- **`runner_repositories.unattended_consent`.** D31 point 14 has the runner's report carry
+  its consent for each mapping, and the table had nowhere to keep it. Without it the board
+  would list a runner for a repository its queue never picks from. That is the invisible
+  state ADR-0033's Consequences want made visible, and 061 shows it per runner.
+- **`tasks.cleanup_pending`.** D31's 2026-10-04 amendment makes the heartbeat tell the
+  runner holding a task's worktree to clean up after an archive or a move to `done`. The
+  request is a column, not server memory, so a runner that was asleep at the archive still
+  hears it when it wakes. The Rust enum `CleanupTrigger` is its only writer.
+- **`tasks.archive_outcome`.** The JSON of D31's `ArchiveOutcomeSummary`. ADR-0025 point 6
+  makes the archive's result something that is reported, and on a server that result arrives
+  after `archive_task` has already returned. NULL until a runner reports one.
+
+All three are additive and nullable or defaulted, and none has a `CHECK`, so part 5 allows
+them outside the rebuild. **Binds.** 054 (writes all three), 061 (reads the first and the
+third).
 
 ---
 
@@ -3657,10 +3695,38 @@ error is raised in either case, only a worse night.
 **What is deliberately *not* here.** What a finished review or fix does to the task
 (`run_state`, column, flags) is ADR-0017's and task 021's. The findings table is task
 035's migration and not a reader of `runs`. The lease DDL is D28's. The push postcondition
-on the commit a loop ends on is ADR-0033 point 4 and task 057's.
+on every successful phase is ADR-0033 point 4, as amended 2026-10-04, and task 057's.
 
-**Binds.** 017, 021, 033, 034, 035, 036, 037, 038, 043, 044, 052, 056. It amends D12
+**Binds.** 017, 021, 033, 034, 035, 036, 037, 038, 043, 044, 052, 056, 062. It amends D12
 (`last_run.kind`) and D23 point 7 (the budget boundary).
+
+### Amendment, 2026-10-04 — point 5 takes implementation and fix rows only (task 044)
+
+Point 5's "no kind filter" is wrong in exactly one case. A reviewer that moves `HEAD` has
+made commits nobody reviewed, and task 021 calls that a failed review
+(`review_changed_branch`, "HEAD moved → Unreviewed"), but the row's `status` is still
+`succeeded`. With every kind, a dependent would build on those commits. A reviewer that
+leaves `HEAD` alone records the head it was handed, which is already the head of the row
+before it, so the filter changes nothing in the clean case. The query becomes:
+
+```sql
+SELECT id, head_sha FROM runs
+ WHERE task_id = ?1 AND status = 'succeeded'
+   AND kind IN ('implementation', 'fix')
+   AND head_sha IS NOT NULL AND trim(head_sha) <> ''
+ ORDER BY attempt DESC LIMIT 1
+```
+
+It also selects `id`, because task 045 needs the run that produced the base, and it excludes
+a blank `head_sha` in the `WHERE` like a NULL, so a blank row never ends the search early.
+
+From task 044 on, **`runs.base_ref` is a label and `runs.base_sha` is authoritative.** A
+chained run's `base_ref` is the dependency's branch name, or the commit when that branch is
+gone, and its `base_sha` is the dependency's last successful head, which can be behind that
+branch's tip. D28 part 6's comment on task 033's file ("`base_sha` is what that name
+resolved to") is read with this refinement.
+
+**Binds.** 044 (the query), 045 (reads the `id`), 061 (the same kinds in its batched read).
 
 ---
 
@@ -4016,7 +4082,7 @@ which task, and where does the suite live?
    }
    pub struct RunContext {
        pub task: TaskDetail,
-       pub repository: Repository,        // 041 and 054 narrow it to the board's pathless row
+       pub repository: Repository,        // 066 and 054 narrow it to the board's pathless row
        pub base_instructions: String,
        pub strategy: EffectiveStrategy,   // ADR-0016's precedence chain, resolved board-side
        pub catalogue: Catalogue,          // for this runner's provider
@@ -4256,7 +4322,7 @@ which task, and where does the suite live?
    | `queue::try_step` → `selection::plan`, `next_batch` | reads the board | `claim(Next)` | 042 |
    | `start_task_run` → `scheduler::claim`; `retry_task_now` → `claim_retry`; `process::claim` | `set_run_state` ×0–2 | `claim(Run { trigger: Manual, … })` in the starter; `process::claim` retires | 036 |
    | `process::release` (five sites in `run_task`); `claim::release` in `try_step` and `supervise` | `set_run_state(Failed)` | `release` | 036 |
-   | `run_task` → `repo::get`, `ensure_unattended_runs_allowed` | read | `RunContext::repository`; the starter checks it on `preview`; 041 moves the runner's half to its store, and 045 adds the team ceiling to the claim | 036 |
+   | `run_task` → `repo::get`, `ensure_unattended_runs_allowed` | read | `RunContext::repository`; the starter checks it on `preview`; 066 moves the runner's half to its store, and 045 adds the team ceiling to the claim | 036 |
    | `run_task` → `tasks::get_task` ×3, `settings::base_instructions`, `max_turns`, the `DISALLOWED_TOOLS` read in `forbidden_operations` | reads | `Claim::context`, `run_context` | 036 |
    | `strategy::resolve`, `effective_for` → `global_default`, `repository_default`, `catalogue`, `get_task` ×2 | reads | `RunContext::{strategy, catalogue}`, `run_context` | 036 |
    | `strategy::plan` → `get_task` for `strategy_updated_at` | read | `run_context` | 036 |
@@ -4270,14 +4336,14 @@ which task, and where does the suite live?
    | `outcome::finish_run` → `apply_to_task` → `move_task_to_bottom`, `set_run_state` | `UPDATE runs`, column, run state, publishes | `finish_run` | 036 |
    | `execute` → `EventStream::create(ctx, …)` → `publish_tail` | tail channel | `publish_tail` | 036 |
    | the JSONL transcript | runner disk | `append_transcript`, `FinishRun::transcript` | 056 |
-   | `worktree::prepare` → `write_worktree_columns` (also reached from `plan_claimed`) | `UPDATE tasks SET branch, worktree_path` | `record_branch`; the path moves to `runner.db` | 041 |
+   | `worktree::prepare` → `write_worktree_columns` (also reached from `plan_claimed`) | `UPDATE tasks SET branch, worktree_path` | `record_branch`; the path moves to `runner.db` | 066 |
    | `worktree::prepare` → `base_ref::resolve` | reads dependencies | `RunContext::base` | 044 |
    | `reconcile::reconcile` after `startup::survey` | `finish_run`, `set_run_state` | per runner: `finish_run` with the interrupted outcome, then `release` | 043 |
    | `QueueHandle` verbs, `tick_schedules`, `capacity::resolve`, `pause::active_until`, `settings::run_environment` | runner-owned state | never (ADR-0031 point 6) | 041 |
 
    036 ships every method except `run_tool`. Its in-process body needs the run-tool
    dispatch that 055 extracts from `mcp::server`, so 055 adds it, with the signature
-   above. Some methods have no production caller yet: `record_branch` until 041,
+   above. Some methods have no production caller yet: `record_branch` until 066,
    `claim(Next)` until 042, `heartbeat` until 053, `append_transcript` until 056 and
    `record_review_findings` until 055. Each still has its in-process body and its contract
    cases from the day it lands.
@@ -4384,14 +4450,14 @@ which task, and where does the suite live?
 
 14. **Not on the port.**
     - State that ADR-0028 point 2 assigns to a runner, and ADR-0031 point 6's queue
-      control. These are read through `ServiceContext` until 041 moves them to
+      control. These are read through `ServiceContext` until 041 and 066 move them to
       `runner.db`, and never go through the port.
     - The operator's reads and writes: `plan_all`'s `list_tasks` and every board command.
       These go through the operator's transport (ADR-0034).
     - Reports a runner makes without a lease: its checkout set, its doctor result, its
-      consent per repository, and on-archive results (ADR-0033 points 2 and 8, ADR-0034
-      point 5, ADR-0032 point 4). These belong to 054, which adds them as one method,
-      `report_runner`, by amending this entry.
+      consent per repository, and cleanup results (ADR-0033 points 2 and 8, ADR-0034
+      point 5, ADR-0032 point 4). These, and the one leaseless read a runner needs to map a
+      clone, are on the port after all: see the 2026-10-04 amendment below (task 054).
 
 **Why.** ADR-0027 point 5 already decided that the port exists and that one suite binds
 its adapters. It could not decide a signature, and the signature is exactly where two tasks
@@ -4442,7 +4508,125 @@ See also:
   (`rimaia-run` and its grants), D32 (`ProviderProfile`, `AppState.board`).
 
 **Binds.** 021, 033, 035, 036, 038, 039, 041, 042, 043, 044, 045, 046, 047, 048, 052, 053,
-054, 055, 056, 057, 058, 059, 060.
+054, 055, 056, 057, 058, 059, 060, 066.
+
+### Amendment, 2026-10-04 — two leaseless methods, and cleanup on the heartbeat (task 054)
+
+Point 14 gave task 054 one method for a runner's leaseless reports. Two gaps, found before
+054 was written, make that two methods and one heartbeat field:
+
+- **A headless runner cannot read the board any other way.** It holds only an `rmr_` token,
+  and 047 refuses that token on every board route. Mapping a clone needs the board's
+  repository, and 058's `checkout add` needs to find repositories by remote. Widening a
+  board route to runner tokens is exactly what 047's test forbids, so the read goes on the
+  port.
+- **ADR-0033 point 8's "reports the result" had no request to answer.** Point 4 makes the
+  heartbeat the board's only channel to a runner, and it carried fences and cancels only.
+
+Point 2's trait gains two methods in its runner-scoped group, and `BoardMethod` gains
+`FindRepositories` and `ReportRunner`:
+
+```rust
+fn find_repositories<'a>(&'a self, lookup: RepositoryLookup)
+    -> BoardFuture<'a, Vec<RepositoryRef>>;
+fn report_runner<'a>(&'a self, report: RunnerReport)
+    -> BoardFuture<'a, RunnerReportReceipt>;
+```
+
+```rust
+pub enum RepositoryLookup { ById(String), ByRemote(NormalizedRemote) }
+pub struct RepositoryRef {
+    pub id: String,
+    pub team_id: String,
+    pub team_name: String,
+    pub name: String,
+    pub default_branch: String,
+    pub normalized_remote: Option<String>,
+    pub served_remote_less_by: Option<String>, // see below
+}
+
+pub struct RunnerReport {
+    pub checkouts: Vec<CheckoutReport>,       // the whole verified set; replaces the last
+    pub doctor: Option<DoctorSummary>,        // None leaves the last one standing
+    pub branches_deleted: Vec<BranchDeleted>, // events; each is idempotent
+    pub cleanups: Vec<CleanupDone>,           // events; each is idempotent
+}
+pub struct CheckoutReport {
+    pub repository_id: String,
+    pub normalized_remote: Option<String>,    // the checkout's verified column
+    pub unattended_consent: bool,
+    pub push: Option<PushCheck>,              // None leaves the stored push columns
+}
+pub struct PushCheck { pub checked_at: DateTime<Utc>, pub error: Option<String> }
+pub struct DoctorSummary { pub ran_at: DateTime<Utc>, pub checks: Vec<ReportedCheck> }
+pub struct ReportedCheck {
+    pub check: String,                        // `Check::as_str`, so a newer check parses
+    pub status: CheckStatus,
+    pub repository_id: Option<String>,
+}
+pub struct BranchDeleted { pub task_id: String, pub branch: String }
+pub struct RunnerReportReceipt { pub unknown_repositories: Vec<String> }
+
+pub enum CleanupTrigger { Archived, Done } // tasks.cleanup_pending: 'archived' | 'done'
+pub struct CleanupRequest {
+    pub task_id: String,
+    pub team_id: String,
+    pub trigger: CleanupTrigger,
+}
+pub struct CleanupDone {
+    pub task_id: String,
+    pub trigger: CleanupTrigger,
+    pub outcome: Option<ArchiveOutcomeSummary>, // Some for Archived, None for Done
+}
+pub enum ArchiveOutcomeSummary {
+    Nothing,
+    WorktreeRemoved { bytes_freed: u64 },
+    ScriptRan { exit_code: Option<i32> },
+    Failed,
+}
+```
+
+`Heartbeat` becomes `{ fenced, cancel, cleanup: Vec<CleanupRequest> }`, the new field
+`#[serde(default)]` (point 6). What the additions mean, beside point 4:
+
+- **`find_repositories`** reads repositories in the teams the adapter's runner's owner
+  belongs to, and nothing else. An id outside them and an id that does not exist both get
+  an empty answer, never `NotFound` (ADR-0029 point 5). `ByRemote` returns every match, one
+  per team, so the same remote in two of the owner's teams returns both.
+  `served_remote_less_by` is set only on a remote-less repository that some other runner,
+  not unpaired and with its owner still a member, reports. Point 4's "`preview` is the only
+  read without a lease" now has this exception, and it returns no task.
+- **`report_runner`** is defined by task 054's Scope: the checkout set is a snapshot,
+  unknown ids are named in the receipt and written nowhere, and both event lists are
+  idempotent.
+- **`Heartbeat::cleanup`** lists the calling runner's owed cleanups: every task whose
+  `tasks.cleanup_pending` is set and whose latest `runs` row, of any kind, names this
+  runner. The board sets the column when a task is archived or enters `done` through a call
+  that has no machine to react on, which means on a server. Unarchiving, or moving out of
+  `done`, clears it. A `CleanupDone` clears it only while it still equals the reported
+  trigger. The runner reacts with the functions solo calls in the same call:
+  ADR-0025's policy for `Archived`, and D20.3's best-effort removal, under the runner's own
+  `worktree_auto_cleanup`, for `Done`. It then reports. In process the list is always
+  empty, because solo has already reacted.
+- **`ArchiveOutcomeSummary` is D26 point 3's `OnArchiveOutcome` without its
+  prose.** A script's output and a failure's reason can name paths, and ADR-0028 point 2
+  keeps paths off the board. They stay in the runner's log.
+- `every_lease_method_refuses_a_stale_generation` excludes both new methods, as it
+  excludes `Claim` and `Heartbeat`, because neither acts under a lease.
+
+**Binds.** 052 (routes and adapter bodies through its structure), 053 (the heartbeat's
+answer grows; its body does not), 054 (implements all of it), 058 and 059 (map through
+`find_repositories`), 061 (renders what the report stores).
+
+### Amendment, 2026-10-04 — `preview` gains a second reader (task 059)
+
+Point 4 says `preview` "exists only for a starter's preflight". From 059 it has a second
+reader, `preview_composed_prompt`, so that a connected desktop's prompt preview is composed
+from the context a claim would return and stays byte-for-byte a run's prompt (task 006).
+Nothing else about the method changes: it is advisory, it writes nothing, and a run is still
+composed from its claim's context. D35 point 8 is the decision. A third reader amends D35.
+
+**Binds.** 059.
 
 ---
 
@@ -4808,10 +4992,11 @@ list of its own.
 
 8. **A row's kind says where the command is served today. The appendix says where it ends
    up.**
-   - **Eleven commands are not yet served where they will end up.** They are board commands
+   - **Eight commands are not yet served where they will end up.** They are board commands
      in ADR-0034's sense, but they still spawn, cancel or read on this machine: Run now,
-     retry, cancel, the run tail, the three transcript reads, registering a repository by
-     path, and the three planning commands.
+     retry, cancel, the run tail, the three transcript reads, and registering a repository
+     by path. The three planning commands spawn here too, and stay `local` for good (the
+     2026-10-04 amendment on the planning commands, below).
    - **They enter the registry as `local` rows served by the shell.** The task in the
      appendix's *From* column flips each one to `board`.
    - **A flip is one commit.** That commit also moves the handler into `api/board/` and
@@ -4832,10 +5017,10 @@ list of its own.
    pool would not fail. It would answer from a stale file.
 
 9. **What the registry does not record.**
-   - **No MCP pairing.** 21 of today's 48 board commands have no MCP tool:
+   - **No MCP pairing.** 20 of today's 45 board commands have no MCP tool:
      - `delete_task`, deliberately (ADR-0021 §5);
      - `retry_task_now`, deliberately (D23);
-     - 19 others, which are ADR-0021 point 1 defects that predate this entry.
+     - 18 others, which are ADR-0021 point 1 defects that predate this entry.
 
      The pairing is not mechanical. `get_worktree_inventory` is served by the
      `list_worktrees` tool, and `set_task_strategy` is a tool with no command. ADR-0021 also
@@ -4892,7 +5077,8 @@ one list.
   ADR-0015 names it as the stand-in for the end-to-end test that would catch a missing
   registration.
 - **What the script guards is now small.** With board commands out of `generate_handler!`, the
-  literal list is 60 names at 046 and 49 once 060 lands.
+  literal list is 60 names at 046 and 52 once 056's flip lands, before the local commands
+  later tasks add.
 
 **Point 7: a caller on every route from the start.**
 
@@ -4941,8 +5127,9 @@ recorded no-tool commands).
 - **046** carries all nine points. It also rewrites two pieces of text that describe two
   lists: the script's line in CLAUDE.md's command list, and the comment above the handler
   list in `lib.rs`.
-- **033–045:** any command one of them adds is appended to the appendix (point 8).
-- **041:** `update_repository` loses `worktreeRoot`, and 041 follows the local-handler rule.
+- **033–045 and 066:** any command one of them adds is appended to the appendix (point 8).
+- **041 and 066:** follow the local-handler rule as the 2026-10-04 amendment below states it.
+  066 takes `worktreeRoot` out of `update_repository`.
 - **045:** `set_repository_unattended_runs` stays the runner's consent. The team ceiling
   becomes a new board row.
 - **047:** implements `Authenticate`, with the cookie, header and CSRF rules above.
@@ -4955,9 +5142,56 @@ recorded no-tool commands).
 - **054:** splits `register_repository`.
 - **056:** flips the transcript reads.
 - **059:** sets `AppState.board` to `None` when connected, and local handlers reach the board
-  over HTTP.
-- **060:** flips the planning commands, and `/mcp` builds its callers through `Authenticate`.
+  over HTTP, including through the core read functions 041 and 066 left them.
+- **060:** keeps the planning commands `local` and adds `request_task_strategy` and
+  `request_tasks_strategy` (the amendment on the planning commands, below), and `/mcp`
+  builds its callers through `Authenticate`.
+- **062:** `/healthz` and `/metrics` are not board routes and take no `Caller`; every board
+  route still does.
 - **064:** the final docs pass.
+
+### Amendment, 2026-10-04 — the local-handler rule before 059 (tasks 041 and 066)
+
+Point 8 says a local handler never reads the board's `ServiceContext`. Before 059 there is
+no remote board for one to reach, and before 046 no dispatcher, so 041 and 066 cannot follow
+it to the letter. What they follow instead:
+
+- **No handler they add or rewrite, Tauri command or MCP tool, issues a board query of its
+  own.** No `sqlx` call against the board pool appears in a local handler.
+- **Board facts come through named `rimaia-core` read functions over `AppState.context`.**
+  Each such call is listed in that task's PR.
+- **059 converts them**, when it sets `AppState.board` to `None` and local handlers reach the
+  board over HTTP. Until then each call answers from the one board that exists, which is
+  current.
+
+Why: the stale-board failure point 8 guards against first becomes possible when 059 makes a
+desktop connected. Routing through named functions now leaves 059 a list to convert rather
+than a search. 046 does not own this: its Out of scope hands the conversion to 059.
+
+### Amendment, 2026-10-04 — the planning commands stay local (task 060)
+
+The appendix first marked `plan_task_strategy`, `plan_tasks_strategy` and `cancel_plan_pass`
+"board, 060". They are `local` rows for good. 060 adds two board rows of its own instead,
+`request_task_strategy` and `request_tasks_strategy`, over its request service.
+
+- **Starting a planner is local; recording a request is board.** ADR-0034 point 1 classifies
+  a command by what it touches. The three commands claim on this machine's runner, spawn a
+  planner, and report a pass the window watches. A request writes two board columns that
+  some eligible runner acts on later.
+- **Flipping the names would break solo.** Plan now would become a request that a stopped
+  queue never serves, 023's watched pass would become N unwatched claims, and the board
+  would gain a `cancel_plan_pass` with nothing to cancel. ADR-0035 point 6 says that in solo
+  they "still start the planner locally".
+- **MCP keeps ADR-0035's names.** The hosted `/mcp` serves `plan_task_strategy` and
+  `plan_tasks_strategy` over the request service. A command name is one row of one kind, so
+  the command side needs names of its own.
+
+Counts, restated: of today's 97 commands, 45 are board (37 from 046, 8 flipped later) and 52
+are local. `cancel_plan_pass` was one of point 9's 19 defects, so 18 remain. 050's browser
+gates on the three planning commands stay. A browser Plan button calls the request commands
+instead (061).
+
+**Binds.** 046 and 050 (no planning flip, no planning gate deleted), 060, 061, 064.
 
 ### Appendix — today's 97 commands, classified
 
@@ -4969,7 +5203,8 @@ The table follows the order of the handler list in `src-tauri/src/lib.rs` (lines
 - **From** is the task whose commit makes the registry row that kind. A row marked "local
   until then" is served by the shell as a `local` row until that task flips it (point 8).
 
-There are 48 board commands: 37 from 046, and 11 flipped later. There are 49 local commands.
+There are 45 board commands: 37 from 046, and 8 flipped later. There are 52 local commands.
+060's two request rows follow the planning rows; they are not among today's 97.
 
 | Command | Module | Kind | Effect | From | Note |
 | --- | --- | --- | --- | --- | --- |
@@ -4978,7 +5213,7 @@ There are 48 board commands: 37 from 046, and 11 flipped later. There are 49 loc
 | `debug_provoke_error` | app | local | — | 046 | Debug builds only |
 | `list_repositories` | repositories | board | Read | 046 | The DTO loses `path`, `worktreeRoot` and the per-machine columns (ADR-0028 §2) |
 | `register_repository` | repositories | board | Write | 054, local until then | Split in two. The board half keeps the name and takes a remote (ADR-0033 §1). The local half maps a clone (ADR-0033 §2), and 054 names it |
-| `update_repository` | repositories | board | Write | 046 | Name and default branch. `worktreeRoot` is a runner setting and leaves the patch in 041 |
+| `update_repository` | repositories | board | Write | 046 | Name and default branch. `worktreeRoot` is a runner setting and leaves the patch in 066 |
 | `set_repository_unattended_runs` | repositories | local | — | 046 | The runner's consent (ADR-0032). 045 adds the team ceiling as a separate board command |
 | `set_repository_on_archive` | repositories | local | — | 046 | Runner configuration, per checkout (ADR-0033 §8) |
 | `set_repository_max_concurrency` | repositories | local | — | 046 | A per-runner cap (ADR-0031 §6) |
@@ -5017,9 +5252,11 @@ There are 48 board commands: 37 from 046, and 11 flipped later. There are 49 loc
 | `set_strategy_approval` | strategy | board | Write | 046 | |
 | `accept_task_strategy` | strategy | board | Write | 046 | |
 | `clear_task_strategy` | strategy | board | Write | 046 | |
-| `plan_task_strategy` | strategy | board | Write | 060, local until then | Records a request that the assignee's runner claims with purpose `strategy` (ADR-0035 §6) |
-| `plan_tasks_strategy` | strategy | board | Write | 060, local until then | As `plan_task_strategy`, and returns once the requests are recorded. 060 decides what replaces the shell's `plan-pass:progress` event |
-| `cancel_plan_pass` | strategy | board | Write | 060, local until then | The counterpart of `plan_tasks_strategy` |
+| `plan_task_strategy` | strategy | local | — | 046 | Claims on this machine's runner and starts the planner. Stays local (amendment above, 060) |
+| `plan_tasks_strategy` | strategy | local | — | 046 | This machine's watched pass, with `plan-pass:progress`. Stays local (amendment above) |
+| `cancel_plan_pass` | strategy | local | — | 046 | Cancels this machine's pass. Stays local (amendment above) |
+| `request_task_strategy` | strategy | board | Write | 060 | Records a request that an eligible runner claims with purpose `strategy` (ADR-0035 §6). Not among today's 97 |
+| `request_tasks_strategy` | strategy | board | Write | 060 | As `request_task_strategy`, over a selection. Not among today's 97 |
 | `get_worktree_status` | worktree | local | — | 046 | Live git in this machine's worktree. Other clients read the bundle on `get_run` (ADR-0033 §7) |
 | `get_diff_summary` | worktree | local | — | 046 | As `get_worktree_status` |
 | `reveal_task_worktree` | worktree | local | — | 046 | Only in the desktop app of the runner that holds the worktree (ADR-0033 §3) |
@@ -5254,8 +5491,8 @@ on its own.
 **Binds.** 040 lands points 1–6.
 
 - **Tasks that change a query or migration** in either crate from 040 on run the point 3
-  recipe and commit both caches: 041, 042, 043, 045, 047, 051, 054, 056, and any later task
-  that touches a query macro. The runner migrations are the ones D4 reserves:
+  recipe and commit both caches: 041, 066, 042, 043, 045, 047, 051, 054, 056, and any later
+  task that touches a query macro. The runner migrations are the ones D4 reserves:
   `20261003130000_runner_store.sql`, `20261003130100_machine_state.sql`,
   `20261003130200_checkout_mapping.sql` and `20261003130300_outbox.sql`, under
   `crates/runner/migrations/`.
@@ -5282,7 +5519,7 @@ what did they decline? Without an answer, each task either stops to ask in the m
 unattended run, or adds a dependency without anyone having decided it. D6 exists to rule out
 the second.
 
-**Decision.** Three npm packages and eight Cargo entries are approved. Each is introduced
+**Decision.** Three npm packages and ten Cargo entries are approved. Each is introduced
 by the task named here and by no earlier one. Later tasks reuse what is already in the tree.
 **The list is still closed**, and the D6 prohibition now also covers `devDependencies`
 explicitly, as well as the crates this backlog creates (`crates/server`, `crates/runner`).
@@ -5346,6 +5583,8 @@ named here:
 | `tower-http` | 046 | `0.6`, features `trace` (046), `cors` and `fs` (050) | `rimaia-server` |
 | `reqwest`, TLS feature | 047 | the existing `0.13` | `rimaia-server` (047), `rimaia-runner` (052), `src-tauri` (059) |
 | `clap` | 058 | `4`, feature `derive` | `rimaia-runner` only |
+| `tracing-subscriber` | 058 | the shell's `0.3`, default features plus `env-filter` | `src-tauri`, `rimaia-runner` (058), `rimaia-server` (062) |
+| `tracing-appender` | 058 | the shell's `0.2` | `src-tauri`, `rimaia-runner` |
 | `tauri-plugin-updater` | 063 | `2` | `src-tauri` only |
 
 - **`sha2` 0.10.** ADR-0030 point 3 stores only a SHA-256 hash of every `rmd_`/`rmr_`/`rmp_`
@@ -5405,6 +5644,15 @@ named here:
   read five variables. `rimaia-core` never takes it: a library has no command line.
   *Considered:* matching on `std::env::args` by hand, which works for two subcommands but
   leaves usage text and argument errors to be written, tested and kept in step.
+- **`tracing-subscriber` and `tracing-appender`, promoted, not added.** A headless runner
+  and a hosted server are diagnosed from their logs, and ADR-0037 point 6 needs the
+  server's to be tested for content (062). Both are `src-tauri`-only lines today, already
+  in `Cargo.lock` at these versions, so promoting them to `[workspace.dependencies]` adds
+  nothing to the tree: the argument D6 made for `base64` and this entry makes for `sha2`.
+  058 promotes both and switches `src-tauri` to `{ workspace = true }`; 062 reuses the
+  subscriber line in `rimaia-server`. **Default features stay on**, because they carry the
+  `fmt` layer every one of them writes with. No `json` feature, which would add
+  `tracing-serde`.
 
 Hand-written, as the approval already says:
 
@@ -5433,8 +5681,10 @@ Things this backlog does **not** take, so that each absence reads as a decision:
 - No object-storage client (ADR-0036 point 7 keeps transcripts on disk), and no `regex`
   for redaction: ADR-0036 point 4 matches names by suffix and redacts values exactly.
 - No `metrics` or `prometheus` crate for ADR-0037 point 7. The counters are atomics
-  rendered as text by a handler. Litestream is a binary in 062's image, pinned in the
-  `Dockerfile`, not a dependency that this entry or D6 governs.
+  rendered as text by a handler. Litestream and rclone are binaries in 062's image, pinned
+  by version and checksum in the `Dockerfile`, not dependencies that this entry or D6
+  governs. rclone is a backup tool the server runs as a child, not the object-storage
+  client declined above: the transcript store stays on disk.
 - **A known gap, recorded rather than guessed at.** `axum::response::Sse` takes a
   `Stream`, and 048 cannot build one from `tokio::sync::broadcast` without `futures-util`
   or `tokio-stream` as a direct dependency. Neither is approved here. 048 asks. The ask
@@ -5462,6 +5712,151 @@ sessions, PKCE, rate limits), [ADR-0034](adr/0034-one-api-for-the-web-and-the-de
 **Binds.** 028, 046, 047, 048, 049, 050, 052, 058, 059, 062, 063. Every other task is bound
 as a prohibition, on both sides of every crate boundary and in `devDependencies`.
 
+### Amendment, 2026-10-04 — 048's ask, answered
+
+The known gap above is closed before 048 starts, so that 048 never has to stop and ask in
+the middle of an unattended run. **`tokio-stream` is approved**, introduced by 048:
+
+| Crate | Task | Line | Crates that use it |
+| --- | --- | --- | --- |
+| `tokio-stream` | 048 | `0.1`, `default-features = false` | `rimaia-server` only |
+
+- **What for.** `tokio_stream::wrappers::ReceiverStream` turns the bounded `mpsc` receiver
+  that 048's per-stream pump fills into the `Stream` that `axum::response::Sse` takes. In
+  0.1.19, `ReceiverStream` is outside every feature gate, so no feature is turned on. The
+  default `time` feature is turned off, because nothing uses it.
+- **Nothing new in the tree.** `tokio-stream v0.1.19` is already in `Cargo.lock`, through
+  `rmcp` and `sqlx-core`. This is the argument D6 made for `base64` and this entry made for
+  `sha2`. It is one `[workspace.dependencies]` line, referenced with `{ workspace = true }`
+  from `crates/server/Cargo.toml` alone. `cargo tree -d` must show one `tokio-stream`.
+- **Core never takes it.** `Subscription::next()` is a plain `async fn`, so core's tests
+  drive it without a `Stream`. The desktop shell's forwarder loops over the same
+  subscription and needs no adapter either.
+- *Considered:* `futures-util`, which is larger than one adapter needs; and implementing
+  `http_body::Body` by hand, which needs `http-body` as a direct dependency to build a
+  `Frame`, so it is more code and still an ask. Also `BroadcastStream` straight over the
+  channel, which needs the `sync` feature and `tokio-util`, and would skip the subscription's
+  admission and re-read logic.
+
+---
+
+## D35 — Task 059's cross-cutting choices
+
+**Question.** Task 059 makes the desktop the second host of a connected runner. Ten choices
+sit under it that no ADR makes, and that 060, 061, 064 and 069 each meet again: how the
+mode is known, where the new secrets live, which tokens a run's output is scrubbed of, what
+the loopback endpoint admits, what it serves, how one host differs from the headless one,
+what "in the foreground" means for Run now, how a local handler reads a board it does not
+hold, what pairing asks, and how the mode changes. Left to the implementer, each would be
+decided in a diff with nothing for a reviewer to check it against.
+
+**Decision.**
+
+1. **The mode is derived, never stored.** `rimaia_runner::connection::resolve_mode(
+   board_file_exists, identity)` answers `Unchosen`, `Solo` or `Connected` from
+   `runner_identity` and whether `rimaia.db` exists, checked before `db::connect` (which
+   opens with `mode=rwc`). `desktop_state` adds `SignedOut` when the desktop token is
+   missing or the keychain is locked. Both are pure functions in the runner crate, and
+   `DesktopMode` is an enum. No column and no migration (D28's amendment makes one a
+   stop-and-ask).
+2. **Keychain accounts are keyed by runner id.** `runner-token:<runner_id>` and
+   `desktop-token:<runner_id>` (added by 056), and `loopback-mcp-token:<runner_id>` (059),
+   all as `CredentialKey` variants. The one new stored value is the `runner_settings` key
+   `loopback_mcp_token_id`, with a typed accessor (D3).
+3. **Every Rimaia token the machine holds is a host secret.** `secrets::host_secrets` reads
+   all three items, so `RunnerConfig::host_secrets` redacts the `rmr_`, `rmd_` and loopback
+   `rmp_` values from every transcript, stderr log and tail. It becomes `HostSecrets`, an
+   `Arc` over a lock around 056's `Redactor`, read once per spawn, and
+   `RunnerHost::add_host_secret` merges a token minted while the host runs. Minting is
+   refused while `InFlight` is not empty, because a run already spawned holds the redactor
+   it started with.
+4. **The loopback gate.** `mcp::build` takes a `LoopbackGate`, a shared handle over
+   `LoopbackAuth::{Open, Locked, Token { hash }}`, read on every request. Solo is `Open`.
+   Connected is `Token` with a stored loopback token and `Locked` without one. Only `/mcp`
+   is gated, never `/mcp/run/{token}`. A refusal is `401`, `WWW-Authenticate: Bearer`, and
+   D8's `unauthenticated` body. A token missing from `list_api_tokens` at a connected
+   launch locks the gate, and from 060 an upstream `401` locks it at once.
+5. **The connected loopback serves local tools only, under the name `rimaia`.**
+   `BoardTools::{Local(ServiceContext), Remote { origin }}` decides the board half. Under
+   `Remote`, a board tool is a tool error naming the server until 060's relay replaces the
+   refusal. In the relay, a local name shadows an upstream tool of the same name, and calls
+   go upstream with the loopback token, so the server records `Door::Mcp`.
+6. **One composition, two flags.** The desktop starts 058's `RunnerHost` with
+   `serve_run_proxy: false` (its `mcp::build` mounts the run route on the one loopback
+   listener) and `start_queue: false` (D15: a launch starts paused). The headless binary
+   passes `true` for both. The desktop takes 058's `runner.lock` before opening
+   `runner.db`.
+7. **ADR-0031 point 7's "with the app in the foreground" is met by the door, not by a
+   focus query.** `run_here` is a `local` command with no MCP tool and no HTTP route, so
+   only a click in this machine's Rimaia window reaches it, and that window is in the
+   foreground when it takes the click. No OS focus check is made: one could only disagree
+   with the click by racing it, and refusing then would turn a deliberate click into an
+   unattended run. Every other way to start a run on this machine (the board row, 052's
+   relay, a schedule, the loopback) is unattended. The posture is fixed at the claim.
+8. **A local handler reads the board through `BoardCommands` or the runner's
+   `BoardPort`, in both modes.** `rimaia_core::api::BoardCommands` has one method,
+   `call(name, args)`. `InProcessCommands` wraps 046's `api::dispatch` with the solo
+   `Caller`. `rimaia_runner::connection::HttpCommands` posts to `/api/v1/<name>` with the
+   desktop token. Three consequences are decided here:
+   - **`BoardPort::preview` gains a second reader**, `preview_composed_prompt`, beside D31
+     point 4's starter preflight. It stays advisory and writes nothing, and a run is still
+     composed from its claim's context.
+   - **A worktree's live status and diff measure from the recorded run's base** (the latest
+     `implementation` or `fix` run's `base_sha`, else `base_ref`, else the repository's
+     `default_branch`), in both modes. 044's fresh resolution and its warning are removed
+     from the live path.
+   - **D20 guard 1 refuses when the board cannot be reached.** It has no override, and an
+     unknown run state is not a spare directory.
+
+   `src-tauri/src/commands/` names `state.board` nowhere, and
+   `check-command-wiring.sh` enforces it.
+9. **Pairing asks two questions, and records the answers with the server.**
+   `connect_to_server` takes `uploadTranscripts` and `runEnvironment`. They are required on
+   a first connect, optional on Sign in again, and written in the runner-store transaction
+   that writes `runner_identity`, never before it. The form preselects *Upload full
+   transcripts* (ADR-0036 point 5's default) and *Strict / local* with ADR-0032 point 6's
+   recommendation, matching 058's `pair`. `get_transcript_upload` answers `{ value,
+   disclosure }`, with `disclosure` set to `transcripts::UPLOAD_DISCLOSURE`, so the
+   paragraph has one source. After pairing, the setting's control is Settings →
+   Connection, not 069's `This machine's limits`.
+10. **Changing mode restarts the app.** The choice is written, then `restart_app` calls
+    `AppHandle::restart()`. There is no teardown path: `setup()` builds the runner, the MCP
+    listener, the board port, `BoardCommands` and `AppState` once per mode.
+
+**Why.** (1) and (10) keep one construction path per mode. A stored mode could disagree with
+the rows it summarises, and a live switch would need a teardown nothing else exercises. (2)
+is ADR-0023's problem: two data directories on one machine must not share a keychain item.
+(3) follows ADR-0036 point 4 to its end. The loopback token is the one a run is most likely
+to see, because in `inherit` mode Claude Code's own configuration holds it as a header, and
+a redactor that learns of a token only at the next launch leaves a window in which it does
+not. (4) and (5) are ADR-0030 point 6 and ADR-0035 point 4 made concrete. Once connected,
+loopback reaches every team the user belongs to, and the gate is the control D30 point 6
+relies on for what the run denial cannot see. (6) is what keeps 058's host the only
+composition: the desktop differs by two booleans, not by a second builder. (7) is the reading
+an implementer would otherwise make silently, in one direction or the other. Writing it
+down means 061 does not add a focus check, and no later door is mistaken for an interactive
+one. (8) is D32 point 8 applied. The recorded base is the one the morning review already
+shows, and a single path means solo cannot drift from connected. (9) applies ADR-0036
+point 5 and ADR-0032 point 6 to the desktop's pairing. Writing the answers with the server
+means a failed connect cannot change a solo machine's `run_environment`, which both modes
+share since 041.
+
+See also [ADR-0030](adr/0030-identity-people-sign-in-machines-pair.md) points 4–6,
+[ADR-0031](adr/0031-runners-claim-work-with-leases.md) point 7,
+[ADR-0035](adr/0035-mcp-when-the-board-is-remote.md) point 4, D20 point 1, D30 point 6,
+D31 point 4, and D32 point 8 with its 2026-10-04 amendment.
+
+**Binds.**
+
+- **059** carries all ten points.
+- **060** builds the relay of point 5 behind the gate of point 4, adds the upstream `401`
+  lock, and keeps the local-name shadowing.
+- **061 and 069** treat `run_here` as the only interactive door (point 7), and add no
+  focus check. 069's `This machine's limits` does not carry `upload_transcripts` (point 9).
+- **Any later local handler** reads the board through point 8's seams. A new reader of
+  `BoardPort::preview` amends point 8.
+- **064** checks CLAUDE.md's connected-mode lines against points 2, 4 and 6.
+
 ---
 
 ## How to use this
@@ -5485,10 +5880,10 @@ An implementation task reads the entries its number appears in, before writing c
 | [014](../tasks/014-usage-limit-resilience.md) | D3 · D4 · D5 · D8 · D9 · D12 · D14 · D15 · D19 · D21 · D22 · D23 |
 | [015](../tasks/015-run-history-and-log-viewer.md) | D14 · D18 · D23 |
 | [016](../tasks/016-worktree-lifecycle-and-cleanup.md) | D17 · D18 · D20 |
-| [017](../tasks/017-morning-review-flow.md) | D7 · D8 · D9 · D12 · D18 · D29 · D32 |
+| [017](../tasks/017-morning-review-flow.md) | D4 · D6 · D7 · D8 · D9 · D12 · D18 · D29 · D32 · D34 |
 | [018](../tasks/018-preflight-doctor-and-packaging.md) | D11 · D16 · D22 |
 | [020](../tasks/020-per-task-execution-strategy.md) | D2 · D3 · D4 · D5 · D8 · D10 · D12 · D16 · D17 · D19 |
-| [021](../tasks/021-review-and-fix-loop.md) | D17 |
+| [021](../tasks/021-review-and-fix-loop.md) | D3 · D4 · D5 · D6 · D8 · D9 · D10 · D12 · D17 · D18 · D19 · D20 · D23 · D24 · D25 · D27 · D28 · D29 · D30 · D31 · D32 |
 | [022](../tasks/022-per-repository-git-credentials.md) | D4 · D5 · D6 · D8 · D10 · D14 · D20 · D25 |
 | [023](../tasks/023-batch-strategy-planning.md) | D16 · D17 · D19 · D21 |
 | [024](../tasks/024-analytics.md) | D4 · D5 · D12 · D18 · D20 |
@@ -5499,7 +5894,45 @@ An implementation task reads the entries its number appears in, before writing c
 | [030](../tasks/030-archiving-tasks-and-on-archive-cleanup.md) | D4 · D5 · D8 · D12 · D19 · D20 · D26 |
 | [031](../tasks/031-a-provider-seam-for-the-agent-cli.md) | D3 · D4 · D6 · D8 · D14 · D17 · D27 |
 | [032](../tasks/032-provider-vocabulary-outside-the-runner.md) | D3 · D8 · D22 · D27 |
+| [033](../tasks/033-record-the-commit-a-run-ended-on-and-a-review-bundle.md) | D2 · D4 · D5 · D8 · D10 · D18 · D20 · D28 · D29 · D31 · D32 · D33 · D34 |
+| [034](../tasks/034-review-actions-on-every-door.md) | D3 · D4 · D5 · D6 · D8 · D9 · D12 · D16 · D18 · D20 · D28 · D29 · D30 · D32 · D33 |
+| [035](../tasks/035-runs-have-a-kind-and-review-findings-have-a-home.md) | D2 · D4 · D5 · D6 · D8 · D10 · D12 · D16 · D17 · D18 · D19 · D23 · D27 · D28 · D29 · D30 · D31 · D32 · D33 |
+| [036](../tasks/036-a-board-port-between-the-runner-and-the-board.md) | D2 · D4 · D5 · D6 · D8 · D10 · D14 · D17 · D19 · D23 · D27 · D28 · D29 · D30 · D31 · D32 · D34 |
+| [037](../tasks/037-the-review-loop-in-the-interface.md) | D4 · D5 · D6 · D7 · D8 · D9 · D12 · D17 · D20 · D28 · D29 · D30 · D32 · D34 |
+| [038](../tasks/038-team-mode-schema-and-a-scoped-service-context.md) | D2 · D3 · D4 · D5 · D6 · D8 · D10 · D11 · D17 · D28 · D29 · D31 · D32 · D33 · D34 |
+| [039](../tasks/039-every-board-service-filters-by-team.md) | D3 · D4 · D5 · D6 · D8 · D10 · D12 · D13 · D16 · D17 · D20 · D21 · D23 · D24 · D28 · D29 · D30 · D31 · D32 · D33 · D34 |
 | [040](../tasks/040-the-runner-store.md) | D3 · D4 · D5 · D6 · D8 · D10 · D11 · D28 · D33 · D34 |
+| [041](../tasks/041-machine-state-moves-to-the-runner.md) | D3 · D4 · D5 · D6 · D7 · D8 · D10 · D11 · D12 · D13 · D15 · D16 · D17 · D19 · D20 · D21 · D22 · D23 · D24 · D25 · D26 · D28 · D29 · D30 · D31 · D32 · D33 · D34 |
+| [042](../tasks/042-split-the-scheduler.md) | D3 · D4 · D6 · D15 · D19 · D21 · D22 · D23 · D24 · D27 · D28 · D29 · D31 · D32 · D33 · D34 |
+| [043](../tasks/043-runner-leases.md) | D4 · D6 · D8 · D9 · D10 · D11 · D14 · D15 · D17 · D19 · D21 · D23 · D27 · D28 · D29 · D30 · D31 · D32 · D33 |
+| [044](../tasks/044-branch-from-the-dependencys-commit.md) | D4 · D5 · D8 · D18 · D20 · D28 · D29 · D31 · D32 · D33 |
+| [045](../tasks/045-consent-and-eligibility.md) | D2 · D3 · D4 · D6 · D8 · D10 · D12 · D16 · D17 · D21 · D23 · D27 · D28 · D29 · D30 · D31 · D32 · D33 · D34 |
+| [046](../tasks/046-the-server-crate-and-one-command-registry.md) | D2 · D4 · D6 · D7 · D8 · D10 · D11 · D16 · D20 · D26 · D28 · D29 · D31 · D32 · D33 · D34 |
+| [047](../tasks/047-identity.md) | D4 · D6 · D8 · D10 · D11 · D28 · D31 · D32 · D33 · D34 |
+| [048](../tasks/048-events-over-sse.md) | D2 · D4 · D6 · D7 · D8 · D10 · D14 · D24 · D28 · D31 · D32 · D33 · D34 |
+| [049](../tasks/049-frontend-transport.md) | D4 · D6 · D7 · D8 · D14 · D20 · D28 · D32 · D33 · D34 |
+| [050](../tasks/050-the-web-shell.md) | D4 · D6 · D7 · D8 · D10 · D11 · D12 · D14 · D22 · D28 · D29 · D32 · D33 · D34 |
+| [051](../tasks/051-teams-invitations-and-roles.md) | D2 · D3 · D4 · D6 · D7 · D8 · D10 · D16 · D28 · D32 · D33 · D34, and the entries 045, 048 and 050 add |
+| [052](../tasks/052-the-runner-protocol-and-an-http-board-adapter.md) | D4 · D6 · D8 · D10 · D14 · D19 · D28 · D29 · D31 · D32 · D33 · D34 |
+| [053](../tasks/053-leases-across-the-network.md) | D4 · D6 · D8 · D9 · D11 · D12 · D14 · D17 · D19 · D21 · D28 · D29 · D31 · D32 · D33 |
+| [054](../tasks/054-repositories-by-remote.md) | D2 · D4 · D6 · D7 · D8 · D10 · D11 · D20 · D22 · D25 · D26 · D28 · D30 · D31 · D32 · D33 · D34 |
+| [055](../tasks/055-the-run-scoped-proxy-and-consent-laundering.md) | D4 · D6 · D8 · D17 · D27 · D28 · D29 · D30 · D31 · D32 · D33 · D34 |
+| [056](../tasks/056-transcripts-leave-the-machine.md) | D3 · D4 · D5 · D6 · D8 · D9 · D10 · D14 · D17 · D18 · D19 · D20 · D23 · D25 · D28 · D29 · D31 · D32 · D33 · D34 |
+| [057](../tasks/057-push-postcondition-and-run-elsewhere.md) | D4 · D6 · D8 · D9 · D12 · D17 · D20 · D23 · D25 · D28 · D29 · D30 · D31 · D32 · D33 · D34 |
+| [058](../tasks/058-the-headless-runner.md) | D3 · D4 · D6 · D8 · D9 · D10 · D11 · D15 · D19 · D20 · D22 · D25 · D28 · D30 · D31 · D32 · D33 · D34 |
+| [059](../tasks/059-desktop-connected-mode.md) | D3 · D4 · D6 · D7 · D8 · D10 · D11 · D15 · D16 · D19 · D20 · D25 · D27 · D28 · D29 · D30 · D31 · D32 · D33 · D34 · D35 |
+| [060](../tasks/060-hosted-mcp.md) | D4 · D6 · D8 · D16 · D17 · D19 · D20 · D23 · D25 · D28 · D30 · D31 · D32 · D33 · D34 · D35, and the entries 045, 048, 050 and 051 add |
+| [061](../tasks/061-assignment-consent-and-runners-in-the-interface.md) | D3 · D4 · D6 · D7 · D8 · D9 · D10 · D12 · D16 · D17 · D28 · D29 · D30 · D31 · D32 · D33 · D34 · D35, and the entries 045, 050, 051, 054, 058 and 060 add |
+| [062](../tasks/062-hosting.md) | D4 · D5 · D6 · D8 · D11 · D19 · D28 · D29 · D31 · D32 · D33 · D34 |
+| [063](../tasks/063-a-signed-desktop-updater.md) | D4 · D6 · D7 · D8 · D9 · D11 · D15 · D20 · D28 · D32 · D33 · D34 |
+| [064](../tasks/064-docs-and-ci-final-pass.md) | D5 · D8 · D16 · D28 · D29 · D30 · D32 · D33 · D35, the entries 060 and 071 add, and D4, D6 and D34 as prohibitions |
+| [065](../tasks/065-drop-retired-columns.md) | D3 · D4 · D6 · D8 · D11 · D28 · D31 · D33, and D34 as a prohibition |
+| [066](../tasks/066-checkouts-and-worktree-records-move-to-the-runner.md) | D4 · D7 · D8 · D12 · D13 · D16 · D17 · D20 · D25 · D26 · D28 · D29 · D31 · D32 · D33 · D34 |
+| [067](../tasks/067-the-model-rule-and-who-may-start-a-run.md) | D8 · D17 · D19 · D27 · D28 · D29 · D31 · D32 · D33 |
+| [068](../tasks/068-transcript-retention-on-the-server.md) | D3 · D18 · D28 · D29 · D32 |
+| [069](../tasks/069-runners-in-the-interface.md) | D4 · D7 · D8 · D10 · D12 · D28 · D31 · D32 · D33 · D34 · D35 |
+| [070](../tasks/070-a-context-that-acts-for-nobody.md) | D8 · D10 · D32 · D33, and D4 and D6 as prohibitions |
+| [071](../tasks/071-close-the-hosted-mcp-parity-gaps.md) | D16 · D25 · D30 · D32 · D33, and the entries 048, 050, 054 and 060 add |
 | every task | D4 and D6 as prohibitions |
 
 A reviewer treats any decision visible in a diff that is neither in an ADR nor here as a

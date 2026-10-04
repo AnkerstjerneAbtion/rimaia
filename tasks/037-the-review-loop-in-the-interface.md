@@ -377,7 +377,7 @@ example `review-loop-panel--board--dark--1440.png`):
 | `review-loop-runs` | runs | the kind control, then `Review` | The Runs view filtered to reviews |
 | `review-loop-analytics` | analytics | — | The review-loop group |
 | `review-loop-settings` | settings | `Review each task after it is implemented` | Settings → Review with the confirmation open |
-| `review-loop-repository` | settings | the repository's review fields, if collapsed | A repository's fields showing `Inherit (…)` |
+| `review-loop-repository` | settings | — | A repository's fields showing `Inherit (…)` |
 
 Checking the global box writes nothing (Scope 6), and opening a card, opening a run and
 choosing a filter are reads, so every click above qualifies under 028's rule.
@@ -537,9 +537,8 @@ advisory, fixed, rejected and came-back can be told apart **without colour**.
   - D29 point 6 gains the dated one-line note from Scope 3.
   - D32's appendix gains the `get_review_history` row: module `review`, board, Read, 046,
     with a note that every grant refuses it. It is appended under 034's dated sub-heading
-    ("added after 728a049"), following D32 point 8's rule for 033–045 and extending it to
-    037. If this task built 021's four configuration commands (Notes), their rows go there
-    too.
+    ("added after 728a049"), as D32 point 8 requires of every task from 033 to 045. If this
+    task built 021's four configuration commands (Notes), their rows go there too.
   - The "How to use this" table gains a row for 037: D4 · D5 · D6 · D7 · D8 · D9 · D12 ·
     D17 · D20 · D28 · D29 · D30 · D32 · D34.
 - **No migration** is added, and `package.json` and `Cargo.toml` gain no dependency. Every
@@ -609,7 +608,7 @@ tool, never in the frontend, and say so in the PR.** Plausible gaps:
   without them the only way to do any of that is a TypeScript copy of 021's severity rule;
 - a pure verdict function, if 021's reads its own rows (Scope 2).
 
-Neither is a license to recompute a rule in TypeScript. If 021's budget turns out to count
+None of these is a license to recompute a rule in TypeScript. If 021's budget turns out to count
 sessions differently from `2N + 1`, **stop**: the cost sentence must never promise a bound
 the engine does not keep.
 

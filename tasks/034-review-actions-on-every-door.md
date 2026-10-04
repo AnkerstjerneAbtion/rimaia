@@ -112,7 +112,7 @@ pub fn append(existing: Option<&str>, verdict: Verdict, note: &str) -> String
   git or the filesystem. The board half is the note, `branch = NULL`, the move and the
   marker, in the transaction described under Atomicity. Team mode moves the first half to the
   runner that holds the worktree and leaves the second on the board (ADR-0033 point 7; see
-  "What the next tasks expect"). One function is what lets 041 move it without re-reading
+  "What the next tasks expect"). One function is what lets 066 move it without re-reading
   `reject`.
 
   The old branch, and any PR opened from it, stay exactly as they were. `ReviewOutcome` names
@@ -356,6 +356,34 @@ point 3). The auto-removal policy is a rule of the transition, and approve is th
   mirrored types in `src/types.ts` (`ReviewOutcome`, `TaskDependent`, `ReviewDigest`,
   `DigestEntry`, `DigestOutcome` and `DigestTotals`, reusing the existing `SkipReason`
   mirror). No component. Task 017 is written against exactly these names.
+- **Six fixture rows in `src/dev/fixtures/`** (task 028). 028's coverage test reads every
+  `call<…>("name"` literal out of `commands.ts`. A wrapper with no row fails it, and 028
+  put the rule in `CLAUDE.md` so that the task adding a command adds its row. Each row is
+  typed against the new mirrors in `src/types.ts`, so a row that drifts from the Rust shape
+  fails `npm run typecheck`. Every row answers. None is a refusal, because each command has
+  an honest picture to give, and 028 keeps refusals for commands that have nothing to show.
+  Following 028, a write answers without changing the seed, and a row is not a second
+  implementation of the service:
+
+  | Command | Answer, in every scenario |
+  | --- | --- |
+  | `get_review_digest` | An empty digest: no entries, the run totals `a_board_with_only_blocked_or_unopted_ready_tasks_has_an_empty_digest` asserts, copied, every `DigestOutcome` in `counts` at `0`, and any instant it carries an offset from `FIXTURE_NOW` (the 24-hour no-marker window ending there) |
+  | `get_task_dependents` | The seeded tasks with a dependency edge to `taskId`, as `TaskDependent`s in the seed's board order, every `built_on` `false`. No seeded run records a commit, so nothing can have built on anything |
+  | `approve_task` | The seeded task with `column: "done"` |
+  | `request_task_changes` | A `ReviewOutcome`: the seeded task with `column: "ready"` and a changes-requested block appended to its `extraInstructions` (a literal in the seed, not a TypeScript port of `review::note`); `dependents` as `get_task_dependents` gives them; `setAsideBranch: null` |
+  | `reject_task` | As `request_task_changes`, with `branch` and `worktreePath` `null` on the task and `setAsideBranch` the seeded task's `branch` |
+  | `mark_review_digest_seen` | What the command returns, and nothing else |
+
+  A `taskId` the seed does not hold is refused with `invalid` and a sentence naming the
+  id, the code the service would use (D8). That is the only refusal. The rows do not
+  re-implement the refusal table, the note's blank check or the digest's order. A fixture
+  is a picture, and the service's tests are where those rules are proved.
+
+  The digest is empty in every scenario on purpose. No screen reads it until 017, and an
+  empty digest is the one answer no scenario can contradict, `busy` included. 017 adds the
+  `review-*` scenarios (its "Fixture data for the screenshot script") and gives this row a
+  per-scenario answer then. This task adds no scenario and no row to
+  `screenshots/views.shot.ts`.
 - **D32's appendix** gains six rows, appended under a dated sub-heading ("added after
   728a049"), as D32 point 8 requires of any command added before 046. All six are `board`,
   `From` 046. The effect is `Read` for the two reads and `Write` for the other four, and each
@@ -374,6 +402,8 @@ point 3). The auto-removal policy is a rule of the transition, and approve is th
 ## Out of scope
 
 - **Every screen**: the digest, the review queue, the keys and the warnings are task 017's.
+  So are the `review-*` fixture scenarios, the per-scenario digest answers, and every
+  screenshot. This task's fixture rows are the coverage floor, not a picture of review.
 - **Forge actions.** Nothing here closes, comments on or merges a PR, or deletes a remote
   branch. A rejected task's old PR stays open, and `set_aside_branch` is how the UI tells the
   user about it.
@@ -487,7 +517,9 @@ substring.
   while the totals sum the other two and report `runs_without_cost: 1`.
 - `a_board_with_only_blocked_or_unopted_ready_tasks_has_an_empty_digest`. No row has ended
   in the window and none is open. A ready task blocked by a `not_ready` dependency and a
-  ready task in a repository without unattended opt-in exist. The digest has no entries.
+  ready task in a repository without unattended opt-in exist. The digest has no entries,
+  and its `DigestTotals` is asserted in full; the `get_review_digest` fixture row copies
+  that value.
 - `a_run_that_ended_at_or_before_the_marker_is_not_in_the_digest`, which covers the boundary
   instant.
 - `without_a_marker_the_digest_covers_the_last_24_hours`.
@@ -514,6 +546,18 @@ substring.
   `./scripts/check-command-wiring.sh` passes. `src/lib/commands.test.ts` asserts the exact
   command name and argument object that each of the six wrappers sends, by mocking
   `@tauri-apps/api/core`, not the wrappers.
+- **The fixture rows.** `src/dev/fixtures/` has a row for each of the six commands, each
+  answering as Scope's table gives it. In `src/dev/fixtures/fixtures.test.ts`, 028's
+  `has an answer or an explicit refusal for every command commands.ts sends` and `never
+  reaches invoke or listen in fixture mode` pass with no edit to either test. They pick the
+  six names up from `commands.ts` themselves, and an edit to make them pass would mean the
+  extraction no longer matches the wrapper shape. Two new tests sit beside them:
+  - `it("answers the review verdicts without changing the seed")`: `approve_task`,
+    `reject_task` and `request_task_changes` are each called on a seeded task, and
+    `list_tasks` then answers exactly what it answered before.
+  - `it("answers an empty review digest in every scenario")`: for every scenario name, the
+    `get_review_digest` answer has no entries and a `counts` entry of `0` for each of the
+    eight `DigestOutcome` variants.
 - D32's appendix has the six rows, with the `reject_task` and `approve_task` Notes as Scope
   gives them. D28 has the dated amendment for `review_digest_seen_through`.
   `docs/seam-contract.md`'s "How to use this" table has a row for 034, added by this task if
@@ -575,6 +619,11 @@ substring.
 - `src-tauri/src/commands/tasks.rs` and `src-tauri/src/commands/mod.rs`, and both lists in
   `src-tauri/src/lib.rs`.
 - `src/lib/commands.ts`, `src/lib/commands.test.ts` and `src/types.ts`.
+- `src/dev/fixtures/` (the seed, its command table and `constants.ts`'s `FIXTURE_NOW`) and
+  `src/dev/fixtures/fixtures.test.ts`, all task 028's. 028 is not in `depends_on`; it
+  comes before 033, which this task depends on, and 033 already edits the seed's `get_run`
+  row. If `src/dev/fixtures/` does not exist when this task starts, 028 has not landed:
+  stop and say so rather than building the fixture mode here.
 - Tests to extend: `crates/core/tests/tasks.rs`, `dependencies.rs`, `prompt.rs`,
   `runner_process.rs` (the pattern for driving a real run end to end), `mcp_scope.rs` and
   `mcp_tools.rs`. The digest's and the actions' own tests go in a new
@@ -598,6 +647,10 @@ because in team mode the board has no worktree (ADR-0033 point 7).
   empty, so the digest stays until the next finished review, or until something calls
   `mark_review_digest_seen`, an operator over MCP for example. If that turns out wrong in real
   mornings, the fix is a key in 017 calling the existing wrapper, not a second rule.
+  017 finds the six fixture rows in place and replaces only the `get_review_digest` and
+  `get_task_dependents` answers, per scenario, for its `review-*` scenarios. When it does,
+  `answers an empty review digest in every scenario` stops being true for those scenarios,
+  and 017 narrows that test to the scenarios it did not seed rather than deleting it.
 - **035** re-keys `run_access` by grant, and must keep all six tools ✘ for every grant. It
   adds `kind` to the digest's newest-row read. It adds a loop summary field to `DigestEntry`,
   a field added and not a shape changed.
@@ -609,14 +662,14 @@ because in team mode the board has no worktree (ADR-0033 point 7).
 - **045** bumps `tasks.plan_revision` when a note is appended (ADR-0032 point 3: every edit to
   `plan` or `extra_instructions`). Route the append through one private function in
   `review::actions` that writes `extra_instructions`, so 045 has exactly one place to add it.
-- **036, 041 and 059: reject's local half.** Reject writes the board and the disk, and
+- **036, 066 and 059: reject's local half.** Reject writes the board and the disk, and
   team mode puts those on different machines. 036's `BoardPort` is the runner's voice, and
   reject is a human's action, so reject does not go through the port. What 036 must know is
-  that `set_aside_worktree` is not a board write. When 041 takes `worktree_path` off the
+  that `set_aside_worktree` is not a board write. When 066 takes `worktree_path` off the
   board, it splits reject along the line Scope draws. The dirty-tree check,
   `worktree::remove` and the `worktree_path` write (becoming
   `MachineStore::forget_worktree`) are the runner's. The note, `branch = NULL`, the move
-  and the marker are the board's. 041's "no code writes `tasks.worktree_path`" includes
+  and the marker are the board's. 066's "no code writes `tasks.worktree_path`" includes
   reject. In solo mode both halves still run in one process, and the order in Scope still
   holds. In connected mode (059) the dirty-tree refusal is a check on the runner that holds
   the worktree, and a synchronous refusal to the person who clicked is not guaranteed. Two
@@ -640,8 +693,11 @@ are gated on run-backed ones for that reason, and
 `a_board_with_only_blocked_or_unopted_ready_tasks_has_an_empty_digest` guards it.
 
 **Size.** About 700 lines of core (actions 250, note 50, dependents 100, digest 300), 250 of
-adapters (commands, tools, projections, wrappers, types), and 1,300 of tests. That is roughly
-2,300 lines, inside one session. If it runs over, cut in this order: the `span_seconds` total,
-then `mark_review_digest_seen` as a command. Keep it as a service and an MCP tool, because
-017's automatic rule does not depend on the command. The note, the three actions, `built_on`
-and the digest's order are the task.
+adapters (commands, tools, projections, wrappers, types), 80 of fixture rows and their two
+tests, and 1,300 of tests. That is roughly 2,400 lines, still inside one session. If it runs
+over, cut in this order: the `span_seconds` total, then `mark_review_digest_seen` as a
+command. Keep it as a service and an MCP tool, because 017's automatic rule does not depend
+on the command. Cutting the command also removes its wrapper and its fixture row, since the
+coverage test only asks for rows that `commands.ts` sends. The fixture rows themselves are
+not on the cut list: without them `npm run test` fails. The note, the three actions,
+`built_on` and the digest's order are the task.

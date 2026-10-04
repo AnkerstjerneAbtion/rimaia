@@ -3,7 +3,7 @@ id: "055"
 title: The run-scoped proxy, and runs that cannot launder consent
 milestone: v0.5
 status: ready
-depends_on: ["052"]
+depends_on: ["053", "054"]
 adrs: ["0035", "0032", "0026"]
 size: L
 ---
@@ -96,8 +96,9 @@ pub async fn call(
   `get_base_instructions`, `list_repositories`, `update_task`, `add_task_link`,
   `remove_task_link` and `resolve_review_finding`. Each arm deserializes the tool's request
   type from `mcp::requests` and calls a body function. Every other tool falls through to
-  `scope.authorize(tool, None)`, so a refusal still comes from the one table, never from a
-  missing arm.
+  `scope.authorize(tool, None)` and returns its `Err`, so a refusal still comes from the one
+  table, never from a missing arm. If `authorize` passes a tool with no arm (an `Unscoped`
+  tool, say), the fallthrough returns `Error::internal`. It never returns `Ok`.
 - **The body functions are the handlers' bodies.** Each of the seven `RimaiaServer` handlers
   becomes a one-line call into the same function, so the operator's door and a run's door
   cannot diverge. `authorize` stays the first statement of each body (`mcp/scope.rs`'s "one
@@ -130,21 +131,29 @@ pub struct RunToolCall { pub tool: Tool, pub arguments: serde_json::Map<String, 
 
 1. **The fence.** 043's `board::lease::current(conn, lease, runner_id)`, with the calling
    runner's id from the adapter (D31 point 3), never from the body. A lease another runner
-   holds, a stale generation or a released lease is `Conflict`. A task outside the lease's
-   team is `NotFound`. Nothing is written.
-2. **The grant, derived from the lease row.** D30 point 5's mapping: `strategy` is
-   `Grant::Strategy`, `review` is `Grant::Review { run_id }`, and `fix` is
-   `Grant::Fix { run_id }`. `run_id` is read from `runner_leases.run_id`, never from the request (035: "a run id is
-   never a request argument"). A lease with purpose `implementation` is allowed no tool, and
-   every call under one is refused with exactly:
-   `"<tool> is not available to an implementation run: it was given no Rimaia handle."`
+   holds, a stale generation or a released lease is `Conflict`. A task outside
+   `LeaseRef.team_id` is `NotFound`. Nothing is written.
+2. **The grant, derived from the lease row.** D30 point 5's mapping, read from
+   `runner_leases.purpose` and `runner_leases.run_id`, never from the request (035: "a run
+   id is never a request argument"):
+   - `strategy` is `Grant::Strategy`, and so is `implementation` while `run_id IS NULL`.
+     A fresh claim's purpose is `implementation` (043), and `run_task` resolves the strategy
+     before `start_run`, so the planner a run spawns (`process.rs`, `strategy::resolve`)
+     holds exactly that lease. Nothing else is handed a handle before `start_run`. This
+     refines D30 point 5, which maps `implementation` to no tool, and Scope 10 records it.
+   - `review` is `Grant::Review { run_id }`, and `fix` is `Grant::Fix { run_id }`.
+   - `implementation` with a `run_id` is allowed no tool. `start_run` has moved the purpose
+     to the run's kind (043), so this is the implementation run itself. Every call under it
+     is refused with exactly:
+     `"<tool> is not available to an implementation run: it was given no Rimaia handle."`
 3. **The typed doors.** `set_task_strategy` and `record_review_findings` are refused with
    `Error::invalid`, because each has its own port method and each write keeps one door
    (D31 point 4).
 4. **The call.** `run_tools::call` over a context built for this call:
-   - `scope = TeamScope::one(<the lease row's team>)`, so an `Unscoped` read such as
-     `list_repositories` sees the lease's team and no other team the runner's owner is in;
-   - `actor` is the runner's owner, which is what 045's mark reads;
+   - `scope = TeamScope::one(<the leased task's team>)`, which step 1 checked against
+     `LeaseRef.team_id`, so an `Unscoped` read such as `list_repositories` sees that team
+     and no other team the runner's owner is in;
+   - `actor = Actor::User(<the runner's owner>)`, which is what 045's mark reads;
    - `source = MutationSource::Mcp`. The write is an agent's tool call (ADR-0019), whichever
      door carried it, and today's scoped route records exactly that. The adapter's own
      `System` source (D31 point 9) stays for reports.
@@ -154,9 +163,14 @@ the server's check is the **same** `run_access` table the runner applies (D30 po
 the grant it evaluates is one the runner could not have chosen.
 
 **4. The proxy.** New file `crates/core/src/mcp/run_proxy.rs`. It depends only on
-`Arc<dyn BoardPort>` and `RunHandles`, so the desktop and 058's headless runner serve the
-same code, and `rimaia-core` gains no dependency.
+`Arc<dyn BoardPort>`, `RunHandles` and a fence hook, so the desktop and 058's headless
+runner serve the same code, and `rimaia-core` gains no dependency.
 
+- **The fence hook.** `pub type FenceHook = Arc<dyn Fn(LeaseRef) + Send + Sync>`. Core
+  cannot call `crates/runner`, where 053 puts `fence::on_fenced`, so the host injects it:
+  the desktop shell and the headless binary each pass a closure over `fence::on_fenced`.
+  The hook returns at once, and a host whose reaction is async spawns it. Tests pass a
+  recording closure.
 - **`RunHandles` carries the lease.** `grant(task_id, Grant)` (035) becomes
   `grant(lease: LeaseRef, Grant)`, and `resolve(token)` returns the lease with the scope.
   Every caller that mints a grant already holds a claim, so already holds the `LeaseRef`.
@@ -186,12 +200,14 @@ same code, and `rimaia-core` gains no dependency.
     rebuilt from its `code` (D31 point 10) and handed to `ToolError`, so the payload is D8's
     `{ code, message }` whichever check refused.
 - **Mounting.** `mcp::build` takes the `Arc<dyn BoardPort>` that D31 point 8 puts on
-  `AppState` as `board_port`. It mounts `run_proxy::router(handles, board)` at the scoped
-  path in place of today's `dispatch`. `RunRoute`'s `ctx` and local-tools fields go with it.
-  `run_proxy::bind(handles, board) -> (RunProxyHandle, RunProxyTask)` binds `127.0.0.1:0`
-  as a literal and calls `RunHandles::set_endpoint`, for 058's headless runner, which has no
-  operator endpoint. It has the same infallible, status-carrying shape as `mcp::build`, for
-  the same reason.
+  `AppState` as `board_port`, and a `FenceHook`. It mounts
+  `run_proxy::router(handles, board, on_fenced)` at the scoped path in place of today's
+  `dispatch`. `RunRoute`'s `ctx` and local-tools fields go with it.
+  `run_proxy::bind(handles, board, on_fenced, port: u16) -> (RunProxyHandle, RunProxyTask)`
+  is for 058's headless runner, which has no operator endpoint. It binds the literal
+  `127.0.0.1` on `port`, where `0` means OS-chosen (058 passes `0`: `mcp_port` is the
+  operator listener's setting), and calls `RunHandles::set_endpoint` with the bound address. It has the same
+  infallible, status-carrying shape as `mcp::build`, for the same reason.
 - The doc comments in `mcp/mod.rs` and `mcp/scope.rs` that describe the scoped route as
   "the same `RimaiaServer` over the same `ServiceContext`" are rewritten to say what is now
   true: two checks, one table, and a route that holds no board.
@@ -202,9 +218,10 @@ same code, and `rimaia-core` gains no dependency.
   could not be reached and the call was not applied. Nothing is written locally, and nothing
   is queued. `run_tool` is not a report, so 056's outbox never holds it. The HTTP adapter
   does not retry (D31 point 10), and neither does the proxy. The agent may call again.
-- **`Conflict`.** The run gets the `Conflict` as a tool-level error. The proxy then hands the
-  lease to 053's one reaction to a fenced lease (D31 point 11): stop the process, keep the
-  worktree, do not push, drop the lease from `held`. It never decides that on its own.
+- **`Conflict`.** The run gets the `Conflict` as a tool-level error, and the proxy calls the
+  `FenceHook` with the lease. Through it the lease reaches 053's one reaction to a fenced
+  lease (D31 point 11): stop the process, keep the worktree, do not push, drop the lease
+  from `held`. The proxy never decides any of that on its own.
 
 ### Part B: runs that cannot launder consent
 
@@ -235,18 +252,27 @@ No test ever sets `RIMAIA_DATA_DIR` in the test process: sibling tests resolve p
   - `<workspace>/.mcp.json`, whether or not the operator approved it;
   - `managed-mcp.json` at the platform's path.
 
-  The managed path is one `cfg`-selected function, and the reading is an inner function that
-  takes it as a parameter, so tests pass a `TempDir` path and never write under `/Library` or
-  `/etc`. `urls` holds the `url` of an `http` or `sse` entry. For a `stdio` entry it holds
-  every element of `command`, `args` and the values of `env` that parses as an `http(s)` URL.
-  `env` is this task's addition to D30's list, because `mcp-remote`-style bridges are
-  configured either way. `source` names the file, and for `.claude.json` the key, for
+  The managed path is one `cfg`-selected function, used unless `RunnerConfig::managed_mcp`
+  (below) overrides it. `urls` holds the `url` of an `http` or `sse` entry. For a `stdio`
+  entry it holds every element of `command`, `args` and the values of `env` that parses as
+  an `http(s)` URL. `env` is this task's addition to D30's list, because `mcp-remote`-style
+  bridges are configured either way. `source` names the file, and for `.claude.json` the key, for
   example ``~/.claude.json (projects["/Users/bob/src/app"])``.
-- **`home` is the child's home.** It comes from the plan's `env_set` when a provider sets
-  `HOME`, and otherwise from this process's `HOME`, then `USERPROFILE` (the fallback
-  `crates/core/src/openers/mod.rs` uses). `RunnerConfig` gains `home: Option<PathBuf>`,
-  `None` in production. A test sets it to a `TempDir`, and when it is set it is also exported
-  to the child as `HOME`, so the child and the resolver read the same files in tests too.
+- **`RunnerConfig` gains three fields, all `None` in `Default` and in production:**
+  - `home: Option<PathBuf>`. When set it is the resolver's home and is exported to the
+    child as `HOME`. Otherwise `home` is the child's: the plan's `env_set` when a provider
+    sets `HOME`, then this process's `HOME`, then `USERPROFILE` (the fallback
+    `crates/core/src/openers/mod.rs` uses);
+  - `managed_mcp: Option<PathBuf>`;
+  - `server_origin: Option<Url>`, for `OwnEndpoints` below. The host sets it from
+    `runner_identity.server_url` (040) through 049's `identity::current`, as 054 fills
+    `doctor::Environment.connected`, so a spawn in `rimaia-core` never reads `runner.db`.
+
+  So that no test depends on the machine running it, every config a test spawns with sets
+  `home` to a `TempDir` and `managed_mcp` to a missing path in it: `RunnerFixture`,
+  `TestContext`, `testing::doctor`, and each test that builds a `RunnerConfig` itself. The
+  test repository keeps its git identity in repository config (`testing/repo.rs`), so a
+  child still commits under that `HOME`.
 - **`mcp::OwnEndpoints { loopback_ports, server_origin }` and its pure `is_own(&self, url) ->
   bool`**, parsed with `reqwest::Url` (no new dependency). A URL is Rimaia's when either of
   these holds:
@@ -260,15 +286,16 @@ No test ever sets `RIMAIA_DATA_DIR` in the test process: sibling tests resolve p
   - its origin (scheme, host, port) equals `server_origin`.
 
   `loopback_ports` is built per spawn from `RunHandles::endpoint()`'s bound port,
-  `mcp::configured_port` and `DEFAULT_PORT`. `server_origin` is the connected server's
-  origin that 052 stores in the runner store, or `None` in solo. A hostname that only DNS
-  resolves to loopback is not recognised, and Scope 10 states it as residual.
+  `mcp::configured_port` and `DEFAULT_PORT`. `server_origin` is `RunnerConfig`'s. A
+  hostname that only DNS resolves to loopback is not recognised, and Scope 10 states it as
+  residual.
 - **The denial.** `ForbiddenOperation::RimaiaToolSurface` becomes
   `RimaiaToolSurface { aliases: Vec<String> }`. `claude::spell_out` spells each alias exactly
   as `rimaia`: `mcp__<name>`, then `mcp__<name>__<tool>` for every `Tool::ALL`, with the name
   normalised by `tool_handle`'s `[A-Za-z0-9_-]` rule (D30 point 3). `rimaia`'s own patterns
   come first, then the aliases in the order the files were read, deduplicated keeping the
-  first occurrence.
+  first occurrence. So the commonest setup, `rimaia` registered at the operator port, adds
+  nothing to argv.
 - **Where it runs.** Per spawn, never cached, and only when the intent's `run_environment`
   is `inherit`. It runs at the point where `prompt` and `workspace` are filled in, for every
   intent the runner builds: implementation, review and fix (021). The planner is
@@ -276,19 +303,25 @@ No test ever sets `RIMAIA_DATA_DIR` in the test process: sibling tests resolve p
   and argv stays pinnable byte for byte.
 - **What the files can do to a run.**
   - A missing file contributes nothing.
-  - An unparseable file is logged with `tracing::warn!` and the task id, the way
+  - An unparseable file is logged with `tracing::warn!` and the task id, exactly as
     `plan.warnings` are logged today, and contributes nothing, because the CLI cannot load
-    servers from it either. The same goes for an unreadable one.
+    servers from it either. The same goes for an unreadable one. That log line is what this
+    task takes D30 point 6's "a warning on the run" to mean; nothing is stored on the run.
   - An inherited registration **named** `rimaia-run` refuses any intent that carries a
-    handle, on `RefusalAxis::HandleInjection`, before any run state is written. The message
-    is exactly:
+    handle, on `RefusalAxis::HandleInjection`, before anything is spawned. The message is
+    exactly:
 
     ```
     An MCP server named "rimaia-run" is already registered in <source>. Rimaia gives this run its own server under that name, and which of the two the agent CLI would load is not known, so the run was not started. Rename or remove that registration.
     ```
 
-    For a review, that refusal is a failed review (D30 point 7). An intent without a handle
-    is not refused. If that registration's URL is Rimaia's, it is denied like any alias.
+    Only review and fix can meet this, since the planner reads no file. Either is 021's
+    phase refused before it spawns: a row of its kind, finished `fatal`, with this message
+    as `error_message`. For a review that is a failed review (D30 point 7). An intent
+    without a handle is not refused, and if that registration's URL is Rimaia's it is
+    denied like any alias. That emits `mcp__rimaia-run` patterns for a handle-less intent,
+    so D30 point 2's "no `mcp__rimaia-run` pattern for any intent" narrows to any intent
+    that carries a handle. Scope 10 records the narrowing.
 
 **8. Two CLI facts, recorded (D30 point 8).** One recording against the pinned CLI in
 `crates/core/tests/fixtures/cli/`, captured the way 035 captured its fixture: from a shell,
@@ -311,8 +344,9 @@ This task makes sure every door that writes consent-gated content on behalf of a
 owner reaches it with that owner as `ctx.actor`:
 
 - a run's forwarded `update_task`, through Scope 3's context;
-- the owner's own personal access or desktop token, through 046's `/api/v1` routes and
-  047's authentication.
+- the owner's own desktop token or browser session, through 046's `/api/v1` routes and
+  047's authentication. D32's surface table admits only those two doors there. The owner's
+  `rmp_` token reaches the board only through the hosted `/mcp`, which is 060's.
 
 The tests in the acceptance criteria prove it across `HttpBoard` and the real server. This
 task adds no code path that writes plan text without going through 045's helper.
@@ -323,23 +357,34 @@ task adds no code path that writes plan text without going through 045's helper.
 
 - `docs/seam-contract.md`: a new entry under the next free D number, "Task 055's
   cross-cutting choices", in the four-part shape. It records:
-  - where the proxy lives, and that it holds only a port and handles;
-  - `RunHandles` carrying the `LeaseRef`;
-  - the context of a forwarded call (lease's team, owner as actor, `Mcp` source);
-  - the grant read from the lease row;
+  - where the proxy lives, that it holds only a port, handles and a `FenceHook`, and that
+    the hosts pass `fence::on_fenced` through it;
+  - `RunHandles` carrying the `LeaseRef`, and `bind`'s `port`;
+  - the context of a forwarded call (the leased task's team, `Actor::User(owner)`, `Mcp`
+    source);
+  - the grant read from the lease row, including the D30 point 5 refinement: an
+    `implementation` lease with no `run_id` is `Grant::Strategy`;
   - the implementation-lease refusal wording;
-  - no outbox and no retry for `run_tool`, and `Conflict` handed to 053's reaction;
+  - no outbox and no retry for `run_tool`, and `Conflict` handed to the hook;
   - `RimaiaServer::scoped` behind `testing`;
-  - `RunnerConfig::home`;
+  - `RunnerConfig::home`, `managed_mcp` and `server_origin`, and who sets the last;
   - the widened loopback set and the `env` values;
-  - the `rimaia-run` collision message;
+  - the `rimaia-run` collision message, and the narrowing of D30 point 2's test to
+    handle-carrying intents;
+  - the unparseable-file warning as a log line only;
   - the residual, stated: DNS names that resolve to loopback, plugin servers, claude.ai
     connectors, and a `bypassPermissions` run reading a token out of a file (ADR-0032 point
     6's last bullet). On a connected machine, 059's token on the loopback operator endpoint
     is what holds against those.
-- D30 gets a dated one-line pointer under point 6 to that entry, for the loopback and `env`
-  widening. D31 gets one under point 7 if Scope 4's typed-method reply had to change.
+- D30 gets dated one-line pointers to that entry: under point 2 for the narrowing, under
+  point 5 for the planner's grant, and under point 6 for the loopback and `env` widening and
+  the log line. D31 gets one under point 7 if Scope 4's typed-method reply had to change.
   Nothing else in either is edited.
+- The "How to use this" table in `docs/seam-contract.md` gains a row for 055: D4 · D6 ·
+  D8 · D17 · D27 · D28 · D30 · D31 · D32 · D33 · D34, 045's entry and the new one.
+- `rimaia-runner` gains `rmcp`, with the version and client features `rimaia-core` already
+  uses, as a dev-dependency for `tests/run_proxy_http.rs`. That is not a new dependency
+  under D6 or D34.
 - `CLAUDE.md`, Gotchas: "Always strip inherited `CLAUDE_*` env vars" becomes "Always strip
   inherited `CLAUDE_*` and `RIMAIA_*` env vars", with its sentence about process identity
   extended to say that `RIMAIA_*` is credentials. Nothing else in CLAUDE.md changes. No
@@ -377,8 +422,12 @@ task adds no code path that writes plan text without going through 045's helper.
   `GrantKind`. A tool whose `run_access` is not `Refused` reaches either a `run_tools::call`
   arm or one of the two typed port methods, never both. Every other tool is refused by
   `authorize`'s own wording.
-- `BoardMethod::ALL` includes `RunTool`, and `every_lease_method_refuses_a_stale_generation`
-  covers it through both adapters without being edited.
+- `BoardMethod::ALL` includes `RunTool`. 043's exhaustive
+  `every_lease_method_refuses_a_stale_generation` gains exactly one `RunTool` arm, which
+  calls `run_tool` with a stale generation, expects `Conflict` and checks that nothing was
+  written. It passes through both adapters with no other change. 036's
+  `every_lease_method_answers_not_found_for_a_task_that_does_not_exist` gains `RunTool`, and
+  `every_board_dto_round_trips_through_json` gains a `RunToolCall`, the same way.
 - These cases are added to `crates/core/src/testing/board_contract.rs` and pass through
   `InProcessBoard` (`tests/board_port_in_process.rs`) and through `HttpBoard` against the
   real server (`crates/runner/tests/board_port_http.rs`):
@@ -386,7 +435,10 @@ task adds no code path that writes plan text without going through 045's helper.
   - `run_tool_refuses_another_task` (`update_task` naming a second task in the same team);
   - `run_tool_refuses_the_two_typed_write_backs`;
   - `run_tool_refuses_every_tool_to_an_implementation_lease`, asserting the exact message
-    from Scope 3;
+    from Scope 3, after `start_run`;
+  - `a_planner_inside_a_run_may_read_and_amend_its_own_task_before_start_run`: under a
+    fresh `implementation` claim with no `run_id`, `get_task` and `update_task` on the
+    leased task succeed. After `start_run` the same lease is refused with Scope 3's message;
   - `run_tool_under_a_lease_another_runner_holds_is_a_conflict_and_writes_nothing`;
   - `a_forwarded_write_is_the_runners_owners_and_reads_as_an_agents`: the published change
     event and the task row carry the owner as actor and `MutationSource::Mcp`;
@@ -419,10 +471,9 @@ Core tests over the in-process adapter, with a real rmcp client at a real loopba
   is `planner`.
 - `an_unreachable_board_is_an_error_the_run_can_read_and_nothing_is_written`: over an
   `HttpBoard` pointed at a closed port.
-- `a_fenced_lease_answers_conflict_and_hands_the_lease_to_the_fence_reaction`: a gated
-  `FakeCli` planner, the lease fenced with a faked clock (no `sleep`). The run's call gets
-  `Conflict`, the child is stopped through the normal cancel path, and the worktree in the
-  `TempDir` repository is kept.
+- `a_fenced_lease_answers_conflict_and_hands_the_lease_to_the_hook`: the lease is released
+  under the proxy. The run's call gets `Conflict`, and a recording `FenceHook` receives
+  exactly that `LeaseRef`, once.
 - These existing tests pass with their assertions unchanged, now through the proxy:
   `an_unknown_token_is_not_routed_at_all`, `a_token_stops_working_when_its_run_ends`,
   `a_real_client_at_a_scoped_url_is_refused_a_task_that_is_not_its_own`, and every test in
@@ -438,7 +489,13 @@ End-to-end, in `crates/runner/tests/run_proxy_http.rs`: `run_proxy::bind` forwar
   called directly with `move_task`, and with another task's id, under a valid strategy lease.
   Both are refused, and neither writes;
 - `a_forwarded_call_after_the_lease_expired_is_a_conflict`: the clock advances past 053's
-  lease lifetime without a heartbeat.
+  `LEASE_LIFETIME` without a heartbeat;
+- `a_fenced_lease_stops_the_run_and_keeps_its_worktree`: the hook is `fence::on_fenced`,
+  and a gated `FakeCli` planner's call arrives after the lease was fenced with the faked
+  clock (no `sleep`). The child is stopped through the normal cancel path, and the worktree
+  in the `TempDir` repository is kept with its commits;
+- `bind_serves_on_the_port_it_is_given_or_one_the_os_chooses`: `bind` with a free port
+  serves on it, and with `0` serves on the address `RunHandles::endpoint()` reports.
 
 **Part B: the strip**
 
@@ -479,11 +536,14 @@ End-to-end, in `crates/runner/tests/run_proxy_http.rs`: `run_proxy::bind` forwar
 - `a_mcp_json_committed_by_the_implementation_run_is_denied_to_the_review_after_it`: a real
   repository in a `TempDir`, and a `FakeCli` implementation attempt that commits a `.mcp.json`
   registering an alias of the operator endpoint. The review phase's argv denies it.
-- `an_inherited_registration_named_rimaia_run_refuses_a_run_that_carries_a_handle`: the
-  exact message from Scope 7. The fixture CLI is never invoked, no `runs` row is written, and
-  an implementation run with the same home is not refused.
-- D30 point 2's test that `claude::spell_out` emits no `mcp__rimaia-run` pattern for any
-  handle-carrying intent still passes.
+- `an_operator_registration_of_rimaia_at_the_operator_port_changes_nothing`: a home whose
+  `.claude.json` registers `rimaia` at 4517 gets exactly the argv an empty home gets.
+- `an_inherited_registration_named_rimaia_run_fails_the_review_before_it_spawns`: the
+  implementation run with that home is not refused. The review phase never invokes the
+  fixture CLI. It writes a `kind = review` row, finished `fatal`, whose `error_message` is
+  Scope 7's message exactly, and the card lands in `in_review`, flagged unreviewed.
+- D30 point 2's test that `claude::spell_out` emits no `mcp__rimaia-run` pattern passes for
+  every handle-carrying intent, as Scope 7 narrows it.
 - Every exact-string prompt test in `tests/prompt.rs` and `tests/runner_strategy.rs` passes
   with its expected string untouched.
 
@@ -498,28 +558,33 @@ End-to-end, in `crates/runner/tests/run_proxy_http.rs`: `run_proxy::bind` forwar
 **Part B: the mark, across the network**
 
 In `crates/runner/tests/run_proxy_http.rs`, with members Alice, Bob and Carol in one shared
-team. Bob's runner holds a strategy lease on Alice's task, and Carol trusts Bob:
+team. 045 runs no task assigned to someone else, so the arrangement is: Alice's task is
+unassigned, with no base instructions and no dependency, so its plan is its only piece.
+Bob's and Carol's runners are both `assigned_then_pool` with the team listed. Bob accepts
+Alice's plan revision, his runner claims `Plan` on the task, and Carol trusts Bob:
 
 - `a_plan_a_run_rewrites_through_its_handle_on_someone_elses_task_is_marked`: a forwarded
   `update_task` that changes the plan leaves `plan_updated_by = bob` and
   `plan_written_during_run = 1`.
-- `a_plan_written_with_the_owners_token_while_their_runner_holds_someone_elses_lease_is_marked`:
-  Bob's personal access token edits another of Bob's own tasks through `/api/v1` while the
-  lease is live. That revision is marked.
-- `a_laundered_plan_passes_nobody_on_trust`:
-  - Carol's runner's `claim(Next)` skips the marked task with `ConsentMissing`.
-  - Bob's own runner skips it too.
+- `a_plan_the_owner_writes_from_their_desktop_while_their_runner_holds_someone_elses_lease_is_marked`:
+  Bob's `rmd_` token (`Door::Desktop`) edits another of Bob's own tasks through `/api/v1`
+  while the lease is live. That revision is marked.
+- `a_laundered_plan_passes_nobody_on_trust`, after Bob's lease is released:
+  - Carol's runner's `claim(Next)` returns `None`, and 045's `consent::status` for her
+    runner reports the plan piece `Missing`: the skip is `ConsentMissing`, not a race.
+  - Bob's own runner gets the same two answers.
   - After Bob accepts exactly that revision, Bob's runner claims it.
 - `a_run_on_its_owners_own_task_writes_unmarked`.
 
 **Records**
 
-- The seam entry, the D30 pointer (and the D31 pointer if it applies), and the CLAUDE.md line
-  from Scope 10 exist.
+- The seam entry, the D30 pointers (and the D31 pointer if it applies), the "How to use
+  this" row and the CLAUDE.md line from Scope 10 exist.
 - **Solo is unchanged.** No component under `src/` changes, and the 31 frontend test files
-  pass. Every pre-existing Rust test passes, and the only changed assertion is Scope 6's
-  marker. The full CLAUDE.md command list passes, including `cargo test` for the runner and
-  server crates.
+  pass. Every pre-existing Rust test passes. The only edits to existing tests are Scope 6's
+  marker, the `RunTool` arms in the three contract cases above, and the test configs
+  gaining Scope 7's `home` and `managed_mcp`. The full CLAUDE.md command list passes,
+  including `cargo test` for the runner and server crates.
 
 ## Notes
 
@@ -581,33 +646,33 @@ Seam entries:
 - `Caller`, `Door::Runner` and the `/api/v1` routes (046); tokens (047);
 - `crates/runner/src/board/http.rs`, `crates/server/src/runner_api.rs` and
   `crates/runner/tests/board_port_http.rs` (052);
-- the lease lifetime, the expiry sweep and the one reaction to `Conflict` (053);
-- the stored server origin and pathless repositories (052 and 054).
+- `LEASE_LIFETIME`, the expiry sweep and `fence::on_fenced` (053);
+- `runner_identity.server_url` (040) and its reader, `identity::current` (049);
+- pathless repositories (054).
 
 **What the chain provides.** 035 gives the `rimaia-run` handle, grants keyed by kind, and the
 unconditional operator-surface denial. 036 gives the port without `run_tool`. 043 gives the
 fence and generations. 045 gives the mark, so this task only has to deliver the right actor to
 it. 052 gives the HTTP adapter, the server's runner routes and the contract suite over both
 adapters. 053 gives expiry and the fenced-lease reaction. **If any of these is not where this
-file says, stop and ask.** In particular:
-
-- if 052 did not store the server's origin where a spawn can read it, `OwnEndpoints` has no
-  `server_origin`, and inventing a place for it is a D31 decision;
-- if 053's reaction to `Conflict` is not one callable function, do not write a second one in
-  the proxy.
+file says, stop and ask.** In particular, if 053's reaction to `Conflict` is not one callable
+function, do not write a second one behind the `FenceHook`.
 
 **What the next tasks expect.**
 
 - 056 expects `run_tool` never to be in the outbox.
 - 057 expects a fenced run's worktree to be kept. That is 053's reaction, reached from here
   too.
-- 058 calls `run_proxy::bind` from the headless binary, and relies on the `RIMAIA_` strip for
-  its token variable, whatever it is named.
+- 058 calls `run_proxy::bind` from the headless binary with its `mcp_port` or `0` and a
+  `FenceHook` over `fence::on_fenced`, sets `RunnerConfig::server_origin`, and relies on the
+  `RIMAIA_` strip for its token variable, whatever it is named.
 - 059 swaps the desktop's `board_port` to `HttpBoard`, and the proxy picks it up with no
-  change. It adds the operator-endpoint token that closes what the resolver cannot see, and keeps
-  `rimaia` in every `claude mcp add` line.
+  change. It sets `RunnerConfig::server_origin` once connected, adds the operator-endpoint
+  token that closes what the resolver cannot see, and keeps `rimaia` in every
+  `claude mcp add` line.
 - 060 reuses `run_tools`' body functions for the hosted `/mcp`, and must not register
-  `rimaia-run` anywhere.
+  `rimaia-run` anywhere. It carries this task's desktop-door mark test for an `rmp_` token
+  on the hosted `/mcp`, since that is the only door the token opens.
 - 064 folds Scope 10's CLAUDE.md line into its final pass.
 
 **A consequence worth knowing.** `RIMAIA_DATA_DIR` is now stripped from every run. A run that

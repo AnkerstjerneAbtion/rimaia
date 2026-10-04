@@ -174,3 +174,31 @@ member's machine (ADR-0032 point 5).
 - **Identify repositories by a local path plus a team-chosen name.** No remote parsing.
   Rejected because two members' clones of the same repository would then be two
   repositories, and dependency and eligibility rules would break at the join.
+
+## Amendment, 2026-10-04 — with the review loop, every successful phase is checked
+
+Task 057 implements point 4 and found its last paragraph unimplementable as written.
+Appended rather than edited into the body above, so that everything written against the
+original text inherits both the rule and the change to it.
+
+**The runner cannot know which phase is last.** It decides the postcondition before it
+calls `finish_run` (seam-contract D31 point 6), and only `finish_run`'s answer, `Continue`
+or `Released`, says whether the loop goes on. "Once, to the commit the whole loop ends on"
+names a commit the runner can identify only after the moment it has to decide.
+
+**So on a connected or headless runner the postcondition applies to every phase whose
+outcome is `success`**: implementation, review and fix alike. A failed, cancelled,
+interrupted or retryable phase is not checked, as before. `head_sha` on the task is still
+the commit the loop ends on, and that commit is still checked, because it is the last
+success.
+
+**This is also the reading the rest of point 4 needs.** Task 021's exit table lands a task
+whose review or fix failed in `in_review`, *because the implementation had already
+succeeded*. If that success had not been checked on the remote, an unpushable branch would
+reach `in_review` through a later phase's failure, which is exactly the outcome point 4
+exists to prevent. Checking every success means the head a teammate is handed is always
+one they can reach.
+
+**The cost is small.** A review that clears the branch leaves `HEAD` where it was, so its
+check is one `git ls-remote` and pushes nothing. A fix pushes what it committed, which the
+base instructions ask of it anyway.

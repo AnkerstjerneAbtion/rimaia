@@ -61,14 +61,14 @@ before writing code.
 
 - **After 041, `prepare` still takes a board `&ServiceContext`**, and uses it for exactly
   three reads: `fetch_task`, `repo::get` and `base_ref::resolve`. Its clone path and
-  worktree root come from 041's `Checkout` through `MachineContext`, and its branch write
+  worktree root come from 066's `Checkout` through `MachineContext`, and its branch write
   goes through `BoardPort::record_branch`. `run_task` and `plan_claimed` still hold that
   board context for one reason only, which is to pass it to `prepare`.
 
-  041's criterion "`run_task` takes no `ServiceContext`" cannot hold until this task lands,
-  because `prepare` cannot give up its board reads before `RunContext::base` exists. 041
-  carries that carve-out, and this task removes it. **After 044, 041's criterion holds as
-  written**, for `run_task` and for the planner's `plan_claimed`.
+  041's criterion "`run_task` takes no `ServiceContext`" carries a carve-out for exactly
+  this call, because `prepare` cannot give up its board reads before `RunContext::base`
+  exists. This task removes the carve-out, for `run_task` and for the planner's
+  `plan_claimed`.
 
   If 041 left `prepare` taking no board context at all, it read the dependency graph
   through some other door, and this task does not know which. If `run_task` holds a board
@@ -83,8 +83,8 @@ before writing code.
 
 ## Scope
 
-**`runs::latest_successful_head`**, in `crates/core/src/runs/mod.rs`, with the query from
-D29 point 5:
+**`runs::latest_successful_head`**, in `crates/core/src/runs/mod.rs`, with D29 point 5's
+query as its 2026-10-04 amendment states it:
 
 ```sql
 SELECT id, head_sha FROM runs
@@ -97,20 +97,16 @@ SELECT id, head_sha FROM runs
 It returns `Result<Option<SuccessfulHead>>`, where `SuccessfulHead { run_id: String,
 head_sha: String }`.
 
-- **Implementation and fix rows only.** Those are the two kinds whose job is to produce
-  commits. A succeeded review is left out. A reviewer that leaves `HEAD` alone records the
-  head it was handed, which is already the head of the implementation or fix row before
-  it, so leaving reviews out changes nothing in the clean case. A reviewer that moved
-  `HEAD` has made commits nobody reviewed. Task 021 treats that as a failed review
-  (`review_changed_branch`, "HEAD moved → Unreviewed"), but the row's `status` is still
-  `succeeded`, so without the filter a dependent would build on that reviewer's commits.
-  D29 point 5 carries this rule. A failed fix is skipped even if it committed.
+- **Implementation and fix rows only.** A succeeded review is left out, because a
+  reviewer that moved `HEAD` made commits nobody reviewed and task 021 calls that review
+  failed while its `status` stays `succeeded`. In the clean case the filter changes
+  nothing. A failed fix is skipped even if it committed. The amendment gives the full
+  argument; do not restate it in code.
 - **It returns the run's `id` as well as its `head_sha`.** Task 045 needs the run that
   produced the base, because the base commit's author is the owner of that run's runner.
 - **A blank `head_sha` is excluded in the `WHERE`, exactly like a NULL.** The sqlite3 CLI
-  is a writer (ADR-0003), and two ways to spell "absent" is one too many. Filtering blank
-  after the fetch would make the two spellings behave differently: a NULL falls through to
-  an older row, while a blank would end the search.
+  is a writer (ADR-0003). Filtered after the fetch, a blank would end the search where a
+  NULL falls through to an older row.
 - `ORDER BY attempt`, never `ended_at`, for D29 point 2's reason: `attempt` is one
   sequence per task across kinds.
 - It reads under the scoped context, like every board read after 039. It adds no
@@ -169,7 +165,7 @@ A's last successful head, which can be behind that branch's tip: the failed-fix 
 hand-commit tests below exist to prove it. **`base_ref` is the label, and `base_sha` is
 authoritative and may be behind the label's tip.** A migration that has run cannot be
 edited, so the refined meaning is written where readers will find it: in `base_ref.rs`'s
-module doc, and in D29 point 5, which already says so.
+module doc, and in D29's 2026-10-04 amendment, which already says so.
 
 **The warning.** The sentence for a chosen dependency is unchanged, with `base_ref` as the
 label:
@@ -217,7 +213,7 @@ uses the base it was handed:
 
 - **`worktree::prepare` takes no board `ServiceContext`.** It reads the task and the
   repository from the `RunContext` it is given, the base from `RunContext::base`, and the
-  checkout from `MachineContext` as 041 left it. Its branch write stays
+  checkout from `MachineContext` as 066 left it. Its branch write stays
   `BoardPort::record_branch`. `fetch_task`, `repo::get` and `base_ref::resolve` are no
   longer called from `prepare`, and `run_task` and `plan_claimed` drop the board context
   they held only for it.
@@ -397,7 +393,7 @@ context argument. They do not each build a `RunContext` by hand:
       full;
     - leaves no worktree directory and no `rimaia/…` branch;
     - leaves B's `tasks.branch` NULL, and writes no `worktrees` row for B in the runner
-      store (041 moved the path there, so `tasks.worktree_path` is no longer evidence of
+      store (066 moved the path there, so `tasks.worktree_path` is no longer evidence of
       anything).
   - `a_dependency_that_has_never_run_cannot_be_a_base` asserts the "has no successful run
     to build on" sentence exactly.
@@ -457,9 +453,10 @@ context argument. They do not each build a `RunContext` by hand:
 mode). ADR-0008's amendment points 2, 3 and 4. ADR-0017's review exits, for why a review
 row is not a base. Seam entries:
 
-- **D29** point 5 (the query, its kind filter, what `base_ref` means now, the required
-  test) and point 4 (a review or fix row copies its implementation row's `base_ref` and
-  `base_sha`, which is why `recorded_base_ref` stays right);
+- **D29** point 5 and its 2026-10-04 amendment (the query, its kind filter, what
+  `base_ref` means now), the required test, and point 4 (a review or fix row copies its
+  implementation row's `base_ref` and `base_sha`, which is why `recorded_base_ref` stays
+  right);
 - **D31** point 2 (`RunContext`, `StartRun`), point 4 (`preview` is advisory, and a run is
   composed from its claim), point 6 (044's field, and "`resolve` moves board-side") and
   point 7's `base_ref::resolve` row;
@@ -491,30 +488,23 @@ row is not a base. Seam entries:
 - `crates/core/src/testing/repo.rs`: `TempRepo`.
 - `docs/adr/0008-dependency-semantics-and-branch-chaining.md`.
 
-These exist only once earlier tasks on this branch have landed:
+**What earlier tasks on this branch provide**, none of it on `main`:
 
-- `crates/core/src/board/{port,types,service}.rs` and `TestContext::board()` (036);
-- `worktree::prepare`'s `base_sha` computation and `NewRun::base_sha` (033);
-- `RunKind` (035), which the query and the fix-row and review-row tests use;
-- the fix phase (021), if a test opens a fix row through the loop rather than directly
-  through `start_run`;
-- `MachineContext`, the `worktrees` rows and `BoardPort::record_branch`'s production
-  caller (041);
-- `crates/runner/tests/queue.rs` and its `a_to_b_to_c_…` test (042).
-
-**What earlier tasks provide.**
-
+- **021:** the fix phase, if a test opens a fix row through the loop rather than through
+  `start_run`.
 - **033:** `runs.head_sha`, written at every finish whenever `HEAD` resolves, for every
-  kind; `runs.base_sha` as `git merge-base <base> HEAD`, written at the open. This task
-  changes only which revision that merge-base is taken against.
-- **035:** `runs.kind`, and D29's rule that `attempt` is one sequence across kinds.
-- **036:** `RunContext`, `board::service` as the one place it is built, and `run_task`
-  taking a `Claim`.
+  kind; `runs.base_sha` as `git merge-base <base> HEAD`, written at the open, and
+  `NewRun::base_sha`. This task changes only which revision that merge-base is taken
+  against.
+- **035:** `RunKind`, and D29's rule that `attempt` is one sequence across kinds.
+- **036:** `crates/core/src/board/{port,types,service}.rs`, `RunContext` built in
+  `board::service` only, `TestContext::board()`, and `run_task` taking a `Claim`.
 - **038 and 039:** the scoped `ServiceContext`, every board read filtered by team, and a
   rebuild of `runs` that keeps `head_sha` and `base_sha`.
-- **041:** `prepare`'s signature as described under "What this task expects to find", and
-  the runner-side worktree record.
-- **042:** the loop tests' new home.
+- **041 and 066:** `MachineContext`, the runner store's `worktrees` rows, `record_branch`'s
+  production caller (066), and `prepare`'s signature as described under "What this task expects
+  to find".
+- **042:** `crates/runner/tests/queue.rs` and its `a_to_b_to_c_…` test.
 - **043:** the lease that fences the `finish_run` that records `head_sha`.
 
 **Known edges, accepted.**
