@@ -110,6 +110,36 @@ your machine. Install the matching CLI once — the version must track the `sqlx
 cargo install sqlx-cli --version 0.8.6 --no-default-features --features rustls,sqlite
 ```
 
+## Look at the UI you changed
+
+**If you changed anything under `src/`, take screenshots and look at them before you finish.**
+Passing `typecheck`, `vitest` and `build` proves the code compiles and the DOM is right; it
+proves nothing about whether the screen is legible, and jsdom has no layout engine. CI does not
+run this — it is yours to run.
+
+```bash
+npx playwright install webkit            # once per machine; npm ci downloads no browser
+npm run screenshot                       # -> .screenshots/latest/, 10 views x 2 schemes x 2 widths
+npm run screenshot -- --label before     # a named set; run it before you start, again after
+npm run screenshot -- --grep runs        # a narrowed run overwrites only what it writes
+```
+
+It renders the dev server's fixture entry (`fixtures.html`, scenarios in `src/dev/fixtures/`) in
+headless WebKit on a free port — never 1420 — with no Rust, database or `RIMAIA_DATA_DIR`.
+Files are `<scenario>--<view>--<scheme>--<width>.png`, so a before/after pair is two files to
+open. Read the PNGs; you can see images.
+
+What to look for, in **both** colour schemes and at **both** widths (1440 and 1024): contrast of
+text and badges against their surface, overflow and clipping, wrapping of long titles, and
+whether state (running, blocked, failed, dismissed) is distinguishable **without colour**. The
+`busy` scenario seeds the ugly cases on purpose. You tend to grade your own work generously:
+name what is wrong before what is right.
+
+**A new command needs a fixture row** in `src/dev/fixtures/answers.ts`, or
+`src/dev/fixtures/fixtures.test.ts` fails. A new field on a type the seed builds fails
+`npm run typecheck` until the seed follows. Writes in fixture mode change nothing; the
+screenshots are for looking at, not for diffing.
+
 ## Testing (ADR-0015)
 
 Logic-first. Vitest for the frontend, `cargo test` for Rust. **No E2E.**
