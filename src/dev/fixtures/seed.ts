@@ -10,6 +10,7 @@ import type {
   QueueStatus,
   Repository,
   ReviewDigest,
+  ReviewFinding,
   RimaiaError,
   Run,
   RunCapacity,
@@ -67,6 +68,11 @@ export interface Scenario {
   /** What `get_review_digest` answers. Empty in every scenario but the one that
    *  shows a night. */
   readonly digest: ReviewDigest;
+  /** What `list_review_findings` answers from, filtered by task and status.
+   *  Empty in every scenario but `busy`, which holds one review's two
+   *  findings, one open and one fixed, so the row exercises every field. The
+   *  review loop's own states are task 037's to seed. */
+  readonly reviewFindings: ReviewFinding[];
   /** `get_task_dependents` by task id. A task with no row falls back to the
    *  cards whose `blockingTitle` names it. */
   readonly dependents: Record<string, TaskDependent[]>;
@@ -637,6 +643,7 @@ function populated(name: ScenarioName, runningCount: number, full: boolean): Sce
     tails,
     reviews,
     ...noReviewExtras(),
+    reviewFindings: full ? reviewFindingsFor("t-review-1") : [],
     queueStatus: queueFor(tasks, "running", running),
     capacity: { mode: parallel ? "parallel" : "sequential", maxConcurrency, ceiling: 8 },
     doctor: full ? doctor() : healthyDoctor(),
@@ -747,8 +754,59 @@ function emptyDigest(): ReviewDigest {
   };
 }
 
-function noReviewExtras(): Pick<Scenario, "digest" | "dependents" | "dependencies" | "liveDiffs"> {
-  return { digest: emptyDigest(), dependents: {}, dependencies: {}, liveDiffs: {} };
+function noReviewExtras(): Pick<
+  Scenario,
+  "digest" | "dependents" | "dependencies" | "liveDiffs" | "reviewFindings"
+> {
+  return {
+    digest: emptyDigest(),
+    dependents: {},
+    dependencies: {},
+    liveDiffs: {},
+    reviewFindings: [],
+  };
+}
+
+/** One review run's report on `taskId`: an open finding about one line, and a
+ *  fixed one about the change as a whole with the fix run's resolution. */
+function reviewFindingsFor(taskId: string): ReviewFinding[] {
+  const reviewRunId = `run-review-for-${taskId}`;
+  return [
+    {
+      id: `finding-${taskId}-0`,
+      taskId,
+      reviewRunId,
+      ordinal: 0,
+      severity: "high",
+      title: "The banner hides the queue controls on narrow windows",
+      body: "Below 900px the banner overlaps the Start and Pause buttons, so a failing check also blocks the one action that would fix it.",
+      file: "src/components/DoctorBanner.tsx",
+      line: 9,
+      fingerprint: null,
+      status: "open",
+      resolution: null,
+      resolvedByRunId: null,
+      createdAt: ago(2 * HOUR),
+      resolvedAt: null,
+    },
+    {
+      id: `finding-${taskId}-1`,
+      taskId,
+      reviewRunId,
+      ordinal: 1,
+      severity: "low",
+      title: "No test covers the banner's dismissed state",
+      body: "The dismissed branch renders nothing, and nothing asserts it.",
+      file: null,
+      line: null,
+      fingerprint: null,
+      status: "fixed",
+      resolution: "Added a test that dismisses the warning and asserts the banner is gone.",
+      resolvedByRunId: `run-fix-for-${taskId}`,
+      createdAt: ago(2 * HOUR),
+      resolvedAt: ago(90 * MINUTE),
+    },
+  ];
 }
 
 /** A small change that fits the patch whole: two files, one commit. */

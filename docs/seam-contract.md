@@ -5333,6 +5333,7 @@ Six commands added before 046, as point 8 requires. The counts above describe `m
 | `get_task_dependents` | review | board | Read | 046 | ADR-0021 point 3, task 034 |
 | `get_review_digest` | review | board | Read | 046 | Rows only, no git. ADR-0021 point 3, task 034 |
 | `mark_review_digest_seen` | review | board | Write | 046 | A user setting (`review_digest_seen_through`, D28 part 4). ADR-0021 point 3, task 034 |
+| `list_review_findings` | review | board | Read | 046 | Rows only. The two findings writes have no command: only a run writes one (D30 point 5). ADR-0021 point 3, task 035 |
 
 ---
 

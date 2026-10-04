@@ -1,5 +1,5 @@
-//! The review verdicts, the two reads that inform them, and the digest marker
-//! (task 034, ADR-0006).
+//! The review verdicts, the two reads that inform them, the digest marker
+//! (task 034, ADR-0006), and the read of what review runs found (task 035).
 //!
 //! One line each over `rimaia_core::review` and `tasks::dependents_of`. Every
 //! refusal, the note's format and the digest's order are core's, so the MCP
@@ -7,7 +7,7 @@
 
 use chrono::{DateTime, Utc};
 use rimaia_core::db::Task;
-use rimaia_core::review::{self, Dependent, Digest, ReviewOutcome};
+use rimaia_core::review::{self, Dependent, Digest, FindingStatus, ReviewFinding, ReviewOutcome};
 use rimaia_core::Result;
 use tauri::State;
 
@@ -62,4 +62,17 @@ pub async fn mark_review_digest_seen(
     through: DateTime<Utc>,
 ) -> Result<DateTime<Utc>> {
     review::mark_seen(&state.context, through).await
+}
+
+/// What review runs found on `task_id`, in review order and then in the order
+/// each reviewer gave them, optionally of one status. The read only: no UI
+/// writes a finding (seam-contract D30 point 5), so the two write tools have
+/// no command.
+#[tauri::command]
+pub async fn list_review_findings(
+    state: State<'_, AppState>,
+    task_id: String,
+    status: Option<FindingStatus>,
+) -> Result<Vec<ReviewFinding>> {
+    review::findings::list(&state.context, &task_id, status).await
 }

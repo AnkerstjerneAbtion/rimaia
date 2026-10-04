@@ -9,6 +9,7 @@ import type {
   PlanPass,
   PreflightSummary,
   PruneResult,
+  ReviewFinding,
   ReviewOutcome,
   RimaiaError,
   Run,
@@ -267,6 +268,11 @@ export const ANSWERS: Record<string, Answer> = {
   get_task_dependents: (args, s) => dependentsOf(s, args.taskId),
   get_review_digest: (_args, s) => s.digest,
   mark_review_digest_seen: (args) => args.through,
+  list_review_findings: (args, s): ReviewFinding[] =>
+    s.reviewFindings.filter(
+      (finding) =>
+        finding.taskId === args.taskId && (args.status == null || finding.status === args.status),
+    ),
   set_task_run_state: (args, s) => findTask(s, args.id),
   add_task_link: unsupported("fixture mode does not edit links"),
   update_task_link: unsupported("fixture mode does not edit links"),

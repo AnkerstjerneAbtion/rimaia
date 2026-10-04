@@ -13,6 +13,7 @@ import type {
   DiffSummary,
   DoctorDismissal,
   DoctorReport,
+  FindingStatus,
   McpProbe,
   McpStatus,
   NewTaskInput,
@@ -31,6 +32,7 @@ import type {
   RemovedWorktree,
   Repository,
   ReviewDigest,
+  ReviewFinding,
   ReviewOutcome,
   RimaiaError,
   Run,
@@ -343,6 +345,18 @@ export function getTaskDependents(taskId: string): Promise<TaskDependent[]> {
 /** What the queue did since the last finished review. Render it as returned. */
 export function getReviewDigest(): Promise<ReviewDigest> {
   return call<ReviewDigest>("get_review_digest");
+}
+
+/**
+ * What review runs found on a task, oldest review first and each review's
+ * findings in the order the reviewer gave them, optionally of one status. The
+ * read only: no window writes a finding (seam-contract D30 point 5).
+ */
+export function listReviewFindings(
+  taskId: string,
+  status?: FindingStatus,
+): Promise<ReviewFinding[]> {
+  return call<ReviewFinding[]>("list_review_findings", { taskId, status: status ?? null });
 }
 
 /**

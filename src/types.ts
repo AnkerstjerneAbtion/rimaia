@@ -1680,6 +1680,41 @@ export interface DigestLoop {
   openFindings: number;
 }
 
+/** Mirrors `rimaia_core::review::FindingSeverity`. */
+export type FindingSeverity = "critical" | "high" | "medium" | "low";
+
+/** Mirrors `rimaia_core::review::FindingStatus`. */
+export type FindingStatus = "open" | "fixed" | "rejected";
+
+/**
+ * Mirrors `rimaia_core::review::ReviewFinding` (task 035, ADR-0017): what one
+ * review run found, and what a fix run did about it. Only a review run writes
+ * one and only a fix run resolves one; the window only reads them, through
+ * {@link listReviewFindings}.
+ */
+export interface ReviewFinding {
+  id: string;
+  taskId: string;
+  reviewRunId: string;
+  /** The finding's place in the report that recorded it, from 0. */
+  ordinal: number;
+  severity: FindingSeverity;
+  title: string;
+  body: string;
+  /** Repository-relative; `null` for the change as a whole. */
+  file: string | null;
+  line: number | null;
+  /** Always `null` until task 021 decides how it is computed. */
+  fingerprint: string | null;
+  status: FindingStatus;
+  /** What the fix run did, or why it declined. */
+  resolution: string | null;
+  /** `null` while open, and if the fix run's row is gone. */
+  resolvedByRunId: string | null;
+  createdAt: string;
+  resolvedAt: string | null;
+}
+
 /** Mirrors `rimaia_core::review::DigestTotals`. */
 export interface DigestTotals {
   runs: number;
