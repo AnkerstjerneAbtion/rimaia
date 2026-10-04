@@ -24,7 +24,8 @@ interface RunDetailOverlayProps {
  * commits before transcript is the whole design ... reviewing means looking
  * at the change; the transcript is for when the diff raises a question."
  * Since task 033 the diff and commits are what the run's finish recorded, not
- * the branch as it is now; see {@link RunReviewSections}.
+ * the branch as it is now; see {@link RunReviewSections}, which
+ * also renders the pull request section and is shared with the morning review.
  *
  * An overlay rather than a route: this app has "three views with no URLs, no
  * nesting and no deep links to preserve" (`App.tsx`'s own comment), so a run
@@ -217,18 +218,9 @@ export function RunDetailOverlay({ runId, onClose }: RunDetailOverlayProps) {
             taskId={detail.taskId}
             review={detail.review}
             prUrl={detail.prUrl}
+            liveDiff="fallback"
+            patch="collapsed"
           />
-
-          <section className="run-detail-section">
-            <h4>Pull request</h4>
-            {detail.prUrl ? (
-              <a href={detail.prUrl} target="_blank" rel="noreferrer">
-                {detail.prUrl}
-              </a>
-            ) : (
-              <p className="muted">No pull request opened yet.</p>
-            )}
-          </section>
 
           <section className="run-detail-section">
             <h4>Prompt</h4>

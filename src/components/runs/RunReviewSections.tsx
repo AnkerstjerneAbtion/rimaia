@@ -15,26 +15,56 @@ interface RunReviewSectionsProps {
   readonly taskId: string;
   readonly review: RunReview;
   readonly prUrl: string | null;
+  /** Whether a `not_recorded` review may ask the local `get_diff_summary` for
+   *  the branch's current state. The overlay says `fallback`; the morning
+   *  review says `none`, because it must render from the bundle on every
+   *  client, and the browser has no such command (ADR-0033 point 7). Changes
+   *  nothing for a recorded review, which never asks under either value. */
+  readonly liveDiff: "fallback" | "none";
+  /** `collapsed` keeps the patch in a closed `<details>` inside the diff
+   *  section, for an overlay with a transcript to get to. `expanded` puts it
+   *  in a section of its own after the pull request, in ADR-0013's order. */
+  readonly patch: "collapsed" | "expanded";
 }
 
 /**
- * The diff and commits sections of the run detail overlay, rendered from what
- * the run's finish recorded (task 033, ADR-0033 point 7) rather than from the
- * branch as it is now.
+ * The diff, commits and pull request sections of a run's review, rendered from
+ * what the run's finish recorded (task 033, ADR-0033 point 7) rather than from
+ * the branch as it is now. One renderer for the run detail overlay and the
+ * morning review (task 017), so the two cannot show the same bundle two ways.
  *
- * Two `<section>`s rather than one, so ADR-0013's order — outcome, diff,
- * commits, PR, prompt, transcript — stays the overlay's own headings.
+ * Separate `<section>`s rather than one, so ADR-0013's order — outcome, diff,
+ * commits, PR, prompt, transcript — stays the callers' own headings.
  *
  * **The one live fallback.** A `not_recorded` row (a run from before bundles,
- * one in flight, one a crash closed, one whose capture failed) asks the local
- * `get_diff_summary` command for the branch's current state, and says that is
- * what it is showing. It lives here, in the desktop view that has a machine
- * behind it, and never in `get_run`, which every client reads. A recorded row
+ * one in flight, one a crash closed, one whose capture failed) may ask the
+ * local `get_diff_summary` command for the branch's current state, and says that
+ * is what it is showing — but only when `liveDiff` is `fallback`. A recorded row
  * never asks: what it shows must not change because the branch did.
  */
-export function RunReviewSections({ taskId, review, prUrl }: RunReviewSectionsProps) {
+export function RunReviewSections({
+  taskId,
+  review,
+  prUrl,
+  liveDiff,
+  patch,
+}: RunReviewSectionsProps) {
   if (review.source === "not_recorded") {
-    return <LiveFallback taskId={taskId} />;
+    return liveDiff === "fallback" ? (
+      <LiveFallback taskId={taskId} prUrl={prUrl} />
+    ) : (
+      <>
+        <section className="run-detail-section">
+          <h4>Diff summary</h4>
+          <p className="muted">No diff was recorded for this run.</p>
+        </section>
+        <section className="run-detail-section">
+          <h4>Commits</h4>
+          <p className="muted">None recorded.</p>
+        </section>
+        <PullRequestSection prUrl={prUrl} />
+      </>
+    );
   }
   if (review.bundle === null) {
     return (
@@ -47,46 +77,72 @@ export function RunReviewSections({ taskId, review, prUrl }: RunReviewSectionsPr
           <h4>Commits</h4>
           <p className="muted">None.</p>
         </section>
+        <PullRequestSection prUrl={prUrl} />
       </>
     );
   }
-  return <RecordedBundle bundle={review.bundle} prUrl={prUrl} />;
+  return <RecordedBundle bundle={review.bundle} prUrl={prUrl} patch={patch} />;
 }
 
-function RecordedBundle({ bundle, prUrl }: { bundle: StoredBundle; prUrl: string | null }) {
+function PullRequestSection({ prUrl }: { prUrl: string | null }) {
+  return (
+    <section className="run-detail-section">
+      <h4>Pull request</h4>
+      {prUrl ? (
+        <a href={prUrl} target="_blank" rel="noreferrer">
+          {prUrl}
+        </a>
+      ) : (
+        <p className="muted">No pull request opened yet.</p>
+      )}
+    </section>
+  );
+}
+
+function RecordedBundle({
+  bundle,
+  prUrl,
+  patch,
+}: {
+  bundle: StoredBundle;
+  prUrl: string | null;
+  patch: "collapsed" | "expanded";
+}) {
   const included = bundle.files.filter((file) => file.patch === "included").length;
+  const pruned = bundle.patchPrunedAt !== null;
+  const truncatedNote = !pruned && bundle.patchTruncated && (
+    <p className="muted run-detail-review-note">
+      The patch holds {included} of {bundle.files.length}{" "}
+      {bundle.files.length === 1 ? "file" : "files"}; the whole diff was{" "}
+      {formatBytes(bundle.patchBytes)}.{" "}
+      {prUrl ? (
+        <>
+          The rest is on the{" "}
+          <a href={prUrl} target="_blank" rel="noreferrer">
+            pull request
+          </a>
+          .
+        </>
+      ) : (
+        "The rest was not stored. It is on the branch."
+      )}
+    </p>
+  );
+  const prunedNote = pruned && (
+    <p className="muted run-detail-review-note">
+      The patch was pruned on {formatDate(bundle.patchPrunedAt as string)}. The file list and
+      commits are kept.
+    </p>
+  );
   return (
     <>
       <section className="run-detail-section">
         <h4>Diff summary</h4>
         <p>{totals(bundle.diff)}</p>
-        {bundle.patchPrunedAt !== null ? (
-          <p className="muted run-detail-review-note">
-            The patch was pruned on {formatDate(bundle.patchPrunedAt)}. The file list and
-            commits are kept.
-          </p>
-        ) : (
-          bundle.patchTruncated && (
-            <p className="muted run-detail-review-note">
-              The patch holds {included} of {bundle.files.length}{" "}
-              {bundle.files.length === 1 ? "file" : "files"}; the whole diff was{" "}
-              {formatBytes(bundle.patchBytes)}.{" "}
-              {prUrl ? (
-                <>
-                  The rest is on the{" "}
-                  <a href={prUrl} target="_blank" rel="noreferrer">
-                    pull request
-                  </a>
-                  .
-                </>
-              ) : (
-                "The rest was not stored."
-              )}
-            </p>
-          )
-        )}
+        {patch === "collapsed" && prunedNote}
+        {patch === "collapsed" && truncatedNote}
         <FileList files={bundle.files} />
-        {bundle.patch && (
+        {patch === "collapsed" && bundle.patch && (
           <details className="run-detail-patch">
             <summary>Patch</summary>
             <pre className="run-detail-patch-text">{bundle.patch}</pre>
@@ -97,6 +153,20 @@ function RecordedBundle({ bundle, prUrl }: { bundle: StoredBundle; prUrl: string
         <h4>Commits</h4>
         <CommitList commits={bundle.commits} empty="No commits on this branch." />
       </section>
+      <PullRequestSection prUrl={prUrl} />
+      {/* Task 037 slots the review findings here, after the pull request and
+          before the patch: findings are read with the PR link, not below a
+          screenful of diff. Nothing renders in this place until then. */}
+      {patch === "expanded" && (bundle.patch || prunedNote || truncatedNote) && (
+        <section className="run-detail-section">
+          <h4>Patch</h4>
+          {bundle.patch && (
+            <pre className="run-detail-patch-text run-detail-patch-expanded">{bundle.patch}</pre>
+          )}
+          {prunedNote}
+          {truncatedNote}
+        </section>
+      )}
     </>
   );
 }
@@ -106,7 +176,7 @@ type Fallback =
   | { state: "read"; summary: DiffSummary }
   | { state: "unreadable" };
 
-function LiveFallback({ taskId }: { taskId: string }) {
+function LiveFallback({ taskId, prUrl }: { taskId: string; prUrl: string | null }) {
   const [fallback, setFallback] = useState<Fallback>({ state: "loading" });
 
   useEffect(() => {
@@ -143,6 +213,7 @@ function LiveFallback({ taskId }: { taskId: string }) {
           <h4>Commits</h4>
           <p className="muted">None recorded.</p>
         </section>
+        <PullRequestSection prUrl={prUrl} />
       </>
     );
   }
@@ -170,6 +241,7 @@ function LiveFallback({ taskId }: { taskId: string }) {
           <CommitList commits={fallback.summary.commits} empty="No commits on this branch yet." />
         )}
       </section>
+      <PullRequestSection prUrl={prUrl} />
     </>
   );
 }
