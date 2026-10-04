@@ -44,6 +44,8 @@ function run(overrides: Partial<Run> = {}): Run {
     outputTokens: null,
     cacheReadTokens: null,
     cacheCreationTokens: null,
+    headSha: null,
+    baseSha: null,
     ...overrides,
   };
 }
@@ -87,7 +89,7 @@ describe("RunHistorySection", () => {
         expect((args as { runId: string }).runId).toBe("run-1");
         return {
           ...run(),
-          diff: { taskId: "task-1", branch: null, baseRef: "main", diff: { filesChanged: 0, insertions: 0, deletions: 0 }, files: [], commits: [] },
+          review: { source: "recorded", bundle: null },
           logAvailable: true,
         };
       }
@@ -115,7 +117,7 @@ describe("RunHistorySection", () => {
       if (command === "get_run") {
         return {
           ...run(),
-          diff: { taskId: "task-1", branch: null, baseRef: "main", diff: { filesChanged: 0, insertions: 0, deletions: 0 }, files: [], commits: [] },
+          review: { source: "recorded", bundle: null },
           logAvailable: false,
         };
       }

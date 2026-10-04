@@ -14,9 +14,9 @@
 //! already returns — the run this crate just started **is** the task's most
 //! recent attempt for as long as the in-flight registry refuses a
 //! second concurrent one. Task 015's [`get_run`] below is a different read:
-//! *any* attempt by id, with the branch's diff and commits alongside it
-//! (ADR-0013), for a history list that shows every attempt rather than only
-//! the last one.
+//! *any* attempt by id, with what its branch carried when it ended alongside
+//! it (ADR-0013, task 033), for a history list that shows every attempt rather
+//! than only the last one.
 
 use std::path::Path;
 
@@ -302,8 +302,9 @@ pub async fn list_runs(
     .await
 }
 
-/// One run's full detail: its own outcome, the branch's diff and commits
-/// (ADR-0013's ordering), and whether its transcript file still resolves.
+/// One run's full detail: its own outcome, the review its finish recorded
+/// (ADR-0013's ordering), and whether its transcript file still resolves. A
+/// board read: it runs no git (seam-contract D32's appendix).
 #[tauri::command]
 pub async fn get_run(state: State<'_, AppState>, run_id: String) -> Result<RunDetail> {
     runs::get_run(&state.context, &run_id).await

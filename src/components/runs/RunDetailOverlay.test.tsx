@@ -1,10 +1,10 @@
-import { render, screen } from "@testing-library/react";
+import { render, screen, within } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { invoke } from "@tauri-apps/api/core";
 
 import { RunDetailOverlay } from "./RunDetailOverlay";
-import type { RunDetail } from "../../types";
+import type { RunDetail, StoredBundle } from "../../types";
 
 // Mocked at the Tauri seam — see `StorageSection.test.tsx`'s comment for why.
 vi.mock("@tauri-apps/api/core", () => ({
@@ -12,6 +12,50 @@ vi.mock("@tauri-apps/api/core", () => ({
 }));
 
 const mockInvoke = vi.mocked(invoke);
+
+const PATCH = "diff --git a/src/lib.rs b/src/lib.rs\n+pub fn parse() {}\n";
+
+function bundle(overrides: Partial<StoredBundle> = {}): StoredBundle {
+  return {
+    diff: { filesChanged: 2, insertions: 10, deletions: 3 },
+    files: [
+      { path: "src/lib.rs", insertions: 8, deletions: 1, patch: "included" },
+      { path: "logo.png", insertions: null, deletions: null, patch: "binary" },
+    ],
+    commits: [
+      {
+        sha: "1111111111111111111111111111111111111111",
+        shortSha: "1111111",
+        subject: "Add the parser",
+        author: "Rimaia Test",
+        committedAt: "2026-08-20T11:04:00Z",
+      },
+    ],
+    patch: PATCH,
+    patchBytes: 1200,
+    patchTruncated: false,
+    patchPrunedAt: null,
+    createdAt: "2026-08-20T11:05:00Z",
+    ...overrides,
+  };
+}
+
+/** Answers `get_run` with `detail` and fails anything unexpected, recording
+ *  every command so a test can assert `get_diff_summary` was never asked. */
+function answering(detail: RunDetail, diffSummary?: () => Promise<unknown>) {
+  mockInvoke.mockImplementation(async (command) => {
+    if (command === "get_run") return detail;
+    if (command === "read_run_transcript_page") {
+      return { entries: [], offset: 0, totalLines: 0 };
+    }
+    if (command === "get_diff_summary" && diffSummary) return diffSummary();
+    throw new Error(`unexpected command: ${command}`);
+  });
+}
+
+function invoked(command: string): boolean {
+  return mockInvoke.mock.calls.some(([name]) => name === command);
+}
 
 function runDetail(overrides: Partial<RunDetail> = {}): RunDetail {
   return {
@@ -38,25 +82,9 @@ function runDetail(overrides: Partial<RunDetail> = {}): RunDetail {
     outputTokens: null,
     cacheReadTokens: null,
     cacheCreationTokens: null,
-    diff: {
-      taskId: "task-1",
-      branch: "rimaia/task-1-add-the-parser",
-      baseRef: "main",
-      diff: { filesChanged: 2, insertions: 10, deletions: 3 },
-      files: [
-        { path: "src/lib.rs", insertions: 8, deletions: 1 },
-        { path: "logo.png", insertions: null, deletions: null },
-      ],
-      commits: [
-        {
-          sha: "1111111111111111111111111111111111111111",
-          shortSha: "1111111",
-          subject: "Add the parser",
-          author: "Rimaia Test",
-          committedAt: "2026-08-20T11:04:00Z",
-        },
-      ],
-    },
+    headSha: "2222222222222222222222222222222222222222",
+    baseSha: "0000000000000000000000000000000000000000",
+    review: { source: "recorded", bundle: bundle() },
     logAvailable: true,
     ...overrides,
   };
@@ -83,7 +111,7 @@ describe("RunDetailOverlay", () => {
     expect(screen.getByText("$0.1234")).toBeInTheDocument();
     expect(screen.getByText(/2 files changed \(\+10 \/ -3\)/)).toBeInTheDocument();
     expect(screen.getByText("src/lib.rs")).toBeInTheDocument();
-    expect(screen.getByText("binary")).toBeInTheDocument();
+    expect(screen.getByText("not in patch: binary")).toBeInTheDocument();
     expect(screen.getByText(/Add the parser/)).toBeInTheDocument();
     expect(screen.getByRole("link", { name: /pull\/42/ })).toHaveAttribute(
       "href",
@@ -96,6 +124,187 @@ describe("RunDetailOverlay", () => {
     expect(
       screen.getAllByRole("heading", { level: 4 }).map((heading) => heading.textContent),
     ).toEqual(["Outcome", "Diff summary", "Commits", "Pull request", "Prompt", "Transcript"]);
+  });
+
+  // Task 033: a recorded review is the run's own record. Asking git for the
+  // branch's current state would let it change because the branch did.
+  it("never asks for the live diff when the review was recorded", async () => {
+    answering(runDetail());
+
+    render(<RunDetailOverlay runId="run-1" onClose={() => {}} />);
+
+    expect(await screen.findByText("src/lib.rs")).toBeInTheDocument();
+    expect(invoked("get_diff_summary")).toBe(false);
+  });
+
+  it("keeps the patch collapsed until it is asked for", async () => {
+    answering(runDetail());
+
+    render(<RunDetailOverlay runId="run-1" onClose={() => {}} />);
+
+    const summary = await screen.findByText("Patch");
+    const details = summary.closest("details");
+    expect(details).not.toBeNull();
+    expect(details?.open).toBe(false);
+    expect(details?.querySelector("pre")?.textContent).toBe(PATCH);
+  });
+
+  it("says why each file the patch left out is missing", async () => {
+    answering(
+      runDetail({
+        review: {
+          source: "recorded",
+          bundle: bundle({
+            diff: { filesChanged: 4, insertions: 9, deletions: 1 },
+            files: [
+              { path: "package-lock.json", insertions: 9000, deletions: 0, patch: "too_large" },
+              { path: "logo.png", insertions: null, deletions: null, patch: "binary" },
+              { path: "latin1.txt", insertions: 2, deletions: 0, patch: "not_utf8" },
+              { path: "src/lib.rs", insertions: 8, deletions: 1, patch: "included" },
+            ],
+            patchTruncated: true,
+          }),
+        },
+      }),
+    );
+
+    render(<RunDetailOverlay runId="run-1" onClose={() => {}} />);
+
+    const row = async (path: string) => (await screen.findByText(path)).closest("li");
+    expect(await row("package-lock.json")).toHaveTextContent("not in patch: too large");
+    expect(await row("logo.png")).toHaveTextContent("not in patch: binary");
+    expect(await row("latin1.txt")).toHaveTextContent("not in patch: not UTF-8 text");
+    expect(await row("src/lib.rs")).not.toHaveTextContent("not in patch");
+  });
+
+  it("points a truncated patch at the pull request for the rest", async () => {
+    answering(
+      runDetail({
+        review: {
+          source: "recorded",
+          bundle: bundle({
+            files: [
+              { path: "a.txt", insertions: 9000, deletions: 0, patch: "too_large" },
+              { path: "src/lib.rs", insertions: 8, deletions: 1, patch: "included" },
+            ],
+            patchBytes: 2_400_000,
+            patchTruncated: true,
+          }),
+        },
+      }),
+    );
+
+    render(<RunDetailOverlay runId="run-1" onClose={() => {}} />);
+
+    const note = await screen.findByText(/The patch holds 1 of 2 files/);
+    expect(note).toHaveTextContent("the whole diff was 2.3 MB");
+    expect(within(note).getByRole("link", { name: "pull request" })).toHaveAttribute(
+      "href",
+      "https://github.com/abtion/rimaia/pull/42",
+    );
+  });
+
+  it("says a truncated patch's rest was not stored when there is no pull request", async () => {
+    answering(
+      runDetail({
+        prUrl: null,
+        review: {
+          source: "recorded",
+          bundle: bundle({
+            files: [
+              { path: "a.txt", insertions: 9000, deletions: 0, patch: "too_large" },
+              { path: "src/lib.rs", insertions: 8, deletions: 1, patch: "included" },
+            ],
+            patchTruncated: true,
+          }),
+        },
+      }),
+    );
+
+    render(<RunDetailOverlay runId="run-1" onClose={() => {}} />);
+
+    const note = await screen.findByText(/The patch holds 1 of 2 files/);
+    expect(note).toHaveTextContent("The rest was not stored.");
+    expect(within(note).queryByRole("link")).not.toBeInTheDocument();
+  });
+
+  it("keeps the file list and commits of a pruned patch and says when it went", async () => {
+    answering(
+      runDetail({
+        review: {
+          source: "recorded",
+          bundle: bundle({ patch: null, patchPrunedAt: "2026-09-20T12:00:00Z" }),
+        },
+      }),
+    );
+
+    render(<RunDetailOverlay runId="run-1" onClose={() => {}} />);
+
+    expect(await screen.findByText(/The patch was pruned on/)).toBeInTheDocument();
+    expect(screen.getByText("src/lib.rs")).toBeInTheDocument();
+    expect(screen.getByText(/Add the parser/)).toBeInTheDocument();
+    expect(screen.queryByText("Patch")).not.toBeInTheDocument();
+  });
+
+  it("says a recorded run with no commits on its branch left nothing to review", async () => {
+    answering(runDetail({ review: { source: "recorded", bundle: null } }));
+
+    render(<RunDetailOverlay runId="run-1" onClose={() => {}} />);
+
+    expect(
+      await screen.findByText("This run ended with no commits on its branch."),
+    ).toBeInTheDocument();
+    expect(invoked("get_diff_summary")).toBe(false);
+  });
+
+  it("labels the live diff of a run that recorded nothing as the branch's current state", async () => {
+    answering(runDetail({ review: { source: "not_recorded" }, headSha: null }), async () => ({
+      taskId: "task-1",
+      branch: "rimaia/task-1-add-the-parser",
+      baseRef: "main",
+      diff: { filesChanged: 1, insertions: 5, deletions: 0 },
+      files: [{ path: "src/live.rs", insertions: 5, deletions: 0 }],
+      commits: [
+        {
+          sha: "3333333333333333333333333333333333333333",
+          shortSha: "3333333",
+          subject: "Commit made since",
+          author: "Rimaia Test",
+          committedAt: "2026-08-21T09:00:00Z",
+        },
+      ],
+    }));
+
+    render(<RunDetailOverlay runId="run-1" onClose={() => {}} />);
+
+    expect(
+      await screen.findByText(
+        "No diff was recorded for this run. This is the branch’s current state, not what this run left.",
+      ),
+    ).toBeInTheDocument();
+    expect(await screen.findByText("src/live.rs")).toBeInTheDocument();
+    expect(screen.getByText(/Commit made since/)).toBeInTheDocument();
+    expect(mockInvoke).toHaveBeenCalledWith("get_diff_summary", { taskId: "task-1" });
+  });
+
+  it("renders one line for the diff when the branch of an unrecorded run cannot be read", async () => {
+    answering(runDetail({ review: { source: "not_recorded" }, headSha: null }), async () => {
+      throw { code: "invalid", message: "the repository has been moved or deleted" };
+    });
+
+    render(<RunDetailOverlay runId="run-1" onClose={() => {}} />);
+
+    const line = await screen.findByText(
+      "No diff was recorded for this run, and its branch can no longer be read.",
+    );
+    const section = line.closest("section");
+    expect(section?.querySelectorAll("p")).toHaveLength(1);
+    expect(section?.querySelector("ul")).toBeNull();
+    // The rest of the overlay is unaffected, and the failure is no banner.
+    expect(screen.getByText("Succeeded")).toBeInTheDocument();
+    expect(screen.getByText("Implement the parser.")).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Transcript" })).toBeInTheDocument();
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
   });
 
   // Both callers mount it inside their own layout — `RunHistorySection`
@@ -197,6 +406,11 @@ describe("RunDetailOverlay", () => {
 
     expect(await screen.findByText("Succeeded")).toBeInTheDocument();
     expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+    // Still six sections in ADR-0013's order: the overlay's grid places them
+    // by position, and a missing one would move the prompt into the rail.
+    expect(
+      screen.getAllByRole("heading", { level: 4 }).map((heading) => heading.textContent),
+    ).toEqual(["Outcome", "Diff summary", "Commits", "Pull request", "Prompt", "Transcript"]);
   });
 
   it("shows a no-pull-request placeholder when none was opened", async () => {

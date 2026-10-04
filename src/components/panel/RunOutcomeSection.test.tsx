@@ -45,6 +45,8 @@ function run(overrides: Partial<Run> = {}): Run {
     outputTokens: null,
     cacheReadTokens: null,
     cacheCreationTokens: null,
+    headSha: null,
+    baseSha: null,
     ...overrides,
   };
 }

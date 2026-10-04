@@ -123,6 +123,8 @@ function taskDetailFor(taskId: string, overrides: Partial<TaskDetail> = {}): Tas
       outputTokens: null,
       cacheReadTokens: null,
       cacheCreationTokens: null,
+      headSha: null,
+      baseSha: null,
     },
     ...overrides,
   };
@@ -153,6 +155,8 @@ function runListEntry(overrides: Partial<RunListEntry> = {}): RunListEntry {
     outputTokens: null,
     cacheReadTokens: null,
     cacheCreationTokens: null,
+    headSha: null,
+    baseSha: null,
     taskTitle: "Wire up the board",
     repositoryId: "repo-1",
     repositoryName: "rimaia",
@@ -236,6 +240,8 @@ function mockBackend({
           outputTokens: null,
           cacheReadTokens: null,
           cacheCreationTokens: null,
+          headSha: null,
+          baseSha: null,
         },
       };
     }
@@ -741,6 +747,8 @@ describe("RunsView", () => {
               outputTokens: null,
               cacheReadTokens: null,
               cacheCreationTokens: null,
+              headSha: null,
+              baseSha: null,
             },
           });
         }
@@ -797,6 +805,8 @@ describe("RunsView", () => {
               outputTokens: null,
               cacheReadTokens: null,
               cacheCreationTokens: null,
+              headSha: null,
+              baseSha: null,
             },
           });
         }
@@ -885,6 +895,8 @@ describe("RunsView", () => {
         outputTokens: null,
         cacheReadTokens: null,
         cacheCreationTokens: null,
+        headSha: null,
+        baseSha: null,
       };
 
       // Resolved out of dispatch order: task-2's call (dispatched second)

@@ -481,6 +481,14 @@ export interface Run {
   outputTokens: number | null;
   cacheReadTokens: number | null;
   cacheCreationTokens: number | null;
+  /** The commit the worktree's HEAD was on when the run ended (ADR-0033 point
+   *  4, task 033). `null` means not recorded (seam-contract D18): a run from
+   *  before task 033, one still in flight, one a crash closed, or one whose
+   *  worktree could not be read at the finish. */
+  headSha: string | null;
+  /** What `baseRef` resolved to for this attempt — the worktree's fork point.
+   *  `null` on the same terms as `headSha`. */
+  baseSha: string | null;
 }
 
 /**
@@ -1283,14 +1291,64 @@ export interface RunFilterInput {
  * Mirrors `rimaia_core::runs::RunDetail` — what a run detail view opens on,
  * in ADR-0013's order: the run's own outcome (status, exit class, duration,
  * turn count, cost, attempt — all on the flattened {@link Run} fields), then
- * `diff` (files changed, insertions, deletions, the per-file breakdown, and
- * the commits), then the PR link (`prUrl`) and the exact prompt (`prompt`) —
- * already on {@link Run}. The transcript itself is read separately, page by
+ * `review` (what the branch carried when the run ended: totals, per-file
+ * breakdown, commits and the capped patch), then the PR link (`prUrl`) and
+ * the exact prompt (`prompt`) — already on {@link Run}. The transcript itself is read separately, page by
  * page, through {@link readRunTranscriptPage}.
  */
 export interface RunDetail extends Run {
-  diff: DiffSummary;
+  review: RunReview;
   logAvailable: boolean;
+}
+
+/**
+ * Mirrors `rimaia_core::runs::RunReview` (task 033): what the run's row says
+ * its branch carried when the run ended. `get_run` runs no git for either
+ * variant.
+ *
+ * - `recorded` with a `bundle`: written at this run's finish.
+ * - `recorded` with `bundle: null`: the recorded commits say the branch
+ *   carried nothing — `headSha` equals `baseSha`.
+ * - `not_recorded`: nothing on the row says. The run predates task 033, is
+ *   still in flight, was closed by a crash, or its capture failed. Only the
+ *   desktop overlay may then ask the local `getDiffSummary` for the branch's
+ *   *current* state, and it must say so.
+ */
+export type RunReview =
+  | { source: "recorded"; bundle: StoredBundle | null }
+  | { source: "not_recorded" };
+
+/** Mirrors `rimaia_core::runs::bundle::PatchInclusion` — whether one file's
+ *  section is in the stored patch, and if not, why. */
+export type PatchInclusion = "included" | "too_large" | "not_utf8" | "binary";
+
+/** Mirrors `rimaia_core::runs::bundle::BundleFile` — {@link FileDiffStat}'s
+ *  three fields plus whether its section is in the stored patch. */
+export interface BundleFile {
+  path: string;
+  insertions: number | null;
+  deletions: number | null;
+  patch: PatchInclusion;
+}
+
+/**
+ * Mirrors `rimaia_core::runs::bundle::StoredBundle` — a review bundle as a
+ * read returns it (ADR-0033 point 7). The patch holds whole files only, up to
+ * a 512 KiB cap; `patchBytes` is the whole diff before the cap.
+ */
+export interface StoredBundle {
+  diff: DiffStat;
+  /** Every changed file, in git's order, whether or not it is in the patch. */
+  files: BundleFile[];
+  /** Newest first. */
+  commits: CommitSummary[];
+  /** `null` once pruned (ADR-0036 point 6). */
+  patch: string | null;
+  patchBytes: number;
+  /** True iff the cap left at least one file out. */
+  patchTruncated: boolean;
+  patchPrunedAt: string | null;
+  createdAt: string;
 }
 
 /** Mirrors `rimaia_core::runs::transcript::TranscriptBlock` — one block

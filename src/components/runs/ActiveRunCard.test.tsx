@@ -84,6 +84,8 @@ function taskDetail(overrides: Partial<TaskDetail> = {}): TaskDetail {
       outputTokens: null,
       cacheReadTokens: null,
       cacheCreationTokens: null,
+      headSha: null,
+      baseSha: null,
     },
     ...overrides,
   };

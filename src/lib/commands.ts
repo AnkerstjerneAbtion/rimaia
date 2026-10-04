@@ -538,11 +538,13 @@ export function getWorktreeStatus(taskId: string): Promise<WorktreeStatus> {
 }
 
 /**
- * The diff and the commits a run detail view opens with (task 015,
- * ADR-0013): files changed, insertions, deletions, the per-file breakdown,
- * and the commit list. Scoped to the branch, not to one attempt — every
- * attempt of a task shares one branch, so this is the same summary
- * regardless of which run's detail view fetched it.
+ * The task's branch as it is **now**, read live from git: files changed,
+ * insertions, deletions, the per-file breakdown, and the commit list. A local
+ * command (seam-contract D32): it needs the machine that holds the clone.
+ *
+ * Since task 033 a run's own diff is the review its finish recorded, on
+ * {@link getRun}. This is only the run detail overlay's fallback for a run
+ * that recorded nothing, labelled there as the branch's current state.
  */
 export function getDiffSummary(taskId: string): Promise<DiffSummary> {
   return call<DiffSummary>("get_diff_summary", { taskId });
@@ -723,9 +725,9 @@ export function listRuns(filter: RunFilterInput = {}): Promise<RunListEntry[]> {
 }
 
 /**
- * One run's full detail: its own outcome, the branch's diff and commits
+ * One run's full detail: its own outcome, the review its finish recorded
  * (ADR-0013's ordering), the exact prompt it received, and whether its
- * transcript file still resolves.
+ * transcript file still resolves. A board read that runs no git (task 033).
  */
 export function getRun(runId: string): Promise<RunDetail> {
   return call<RunDetail>("get_run", { runId });

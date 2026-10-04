@@ -11,8 +11,10 @@ import type {
   Run,
   RunCapacity,
   RunListEntry,
+  RunReview,
   RunStatus,
   RunTail,
+  StoredBundle,
   TaskSummary,
 } from "../../types";
 import { FIXTURE_NOW, FIXTURE_SENTINEL } from "./constants";
@@ -46,6 +48,9 @@ export interface Scenario {
   readonly runs: RunListEntry[];
   /** One canned `runs:tail` payload per running run. */
   readonly tails: RunTail[];
+  /** What `get_run` answers as each run's review, by run id. A run with no
+   *  entry reads as `not_recorded`, like a row from before task 033. */
+  readonly reviews: Record<string, RunReview>;
   readonly queueStatus: QueueStatus;
   readonly capacity: RunCapacity;
   readonly doctor: DoctorReport;
@@ -202,6 +207,8 @@ function runFor(
     outputTokens: 14_880,
     cacheReadTokens: 1_204_331,
     cacheCreationTokens: 58_113,
+    headSha: null,
+    baseSha: null,
     taskTitle: taskSummary.title,
     repositoryId: taskSummary.repositoryId,
     repositoryName,
@@ -572,6 +579,21 @@ function populated(name: ScenarioName, runningCount: number, full: boolean): Sce
     return tailFor(run as RunListEntry, index);
   });
 
+  // Task 033: every finished, successful run in the busy picture recorded a
+  // bundle, and it is the truncated kind, so the run detail screenshot shows
+  // the per-file markers and the pointer to the pull request.
+  const reviews: Record<string, RunReview> = {};
+  if (full) {
+    for (const run of runs) {
+      if (run.status === "succeeded" && run.endedAt) {
+        const bundle = truncatedBundle(run.endedAt);
+        reviews[run.id] = { source: "recorded", bundle };
+        run.headSha = bundle.commits[0].sha;
+        run.baseSha = "c0ffee00c0ffee00c0ffee00c0ffee00c0ffee00";
+      }
+    }
+  }
+
   const parallel = runningCount >= 2;
   const maxConcurrency = parallel ? Math.max(runningCount, 3) : 1;
   return {
@@ -581,11 +603,87 @@ function populated(name: ScenarioName, runningCount: number, full: boolean): Sce
     tasks,
     runs,
     tails,
+    reviews,
     queueStatus: queueFor(tasks, "running", running),
     capacity: { mode: parallel ? "parallel" : "sequential", maxConcurrency, ceiling: 8 },
     doctor: full ? doctor() : healthyDoctor(),
     analytics: analytics(full),
     runsReadError: null,
+  };
+}
+
+/** A recorded bundle whose regenerated lockfile outgrew the patch cap, beside
+ *  a binary screenshot and the source change a reviewer actually wants. */
+function truncatedBundle(createdAt: string): StoredBundle {
+  const source = [
+    "diff --git a/src/components/DoctorBanner.tsx b/src/components/DoctorBanner.tsx",
+    "new file mode 100644",
+    "index 0000000..4be1c2a",
+    "--- /dev/null",
+    "+++ b/src/components/DoctorBanner.tsx",
+    "@@ -0,0 +1,12 @@",
+    '+import type { DoctorReport } from "../types";',
+    "+",
+    "+/** One calm line above every view while a check is failing. */",
+    "+export function DoctorBanner({ report }: { report: DoctorReport }) {",
+    '+  const failing = report.results.filter((result) => result.status === "fail");',
+    "+  if (failing.length === 0) return null;",
+    "+  return (",
+    '+    <p className="doctor-banner" role="status">',
+    "+      {failing.length} setup check{failing.length === 1 ? \"\" : \"s\"} need attention.",
+    "+    </p>",
+    "+  );",
+    "+}",
+    "diff --git a/src/App.tsx b/src/App.tsx",
+    "index 9d1e0f3..a7c4b21 100644",
+    "--- a/src/App.tsx",
+    "+++ b/src/App.tsx",
+    "@@ -41,6 +41,7 @@ export function App() {",
+    "   return (",
+    '     <div className="app">',
+    "       <Sidebar view={view} onNavigate={setView} />",
+    "+      <DoctorBanner report={doctor} />",
+    "       <main>{content}</main>",
+    "     </div>",
+    "   );",
+    "",
+  ].join("\n");
+  return {
+    diff: { filesChanged: 4, insertions: 9_431, deletions: 2_180 },
+    files: [
+      { path: "package-lock.json", insertions: 9_412, deletions: 2_179, patch: "too_large" },
+      { path: "docs/doctor-banner.png", insertions: null, deletions: null, patch: "binary" },
+      { path: "src/App.tsx", insertions: 1, deletions: 0, patch: "included" },
+      { path: "src/components/DoctorBanner.tsx", insertions: 12, deletions: 0, patch: "included" },
+    ],
+    commits: [
+      {
+        sha: "9f2c1d47a8e3b5f60c1d2e3f4a5b6c7d8e9f0a1b",
+        shortSha: "9f2c1d4",
+        subject: "Mount the doctor banner above every view",
+        author: "Rimaia",
+        committedAt: createdAt,
+      },
+      {
+        sha: "4be1c2a9d8e7f6a5b4c3d2e1f0a9b8c7d6e5f4a3",
+        shortSha: "4be1c2a",
+        subject: "Add the doctor banner component",
+        author: "Rimaia",
+        committedAt: createdAt,
+      },
+      {
+        sha: "1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b",
+        shortSha: "1a2b3c4",
+        subject: "Bump the lockfile for the icon package",
+        author: "Rimaia",
+        committedAt: createdAt,
+      },
+    ],
+    patch: source,
+    patchBytes: 1_948_312,
+    patchTruncated: true,
+    patchPrunedAt: null,
+    createdAt,
   };
 }
 
@@ -607,6 +705,7 @@ function empty(name: ScenarioName, onboardingDismissed: boolean, withRepository:
     tasks: [],
     runs: [],
     tails: [],
+    reviews: {},
     queueStatus: queueFor([], "paused", []),
     capacity: { mode: "sequential", maxConcurrency: 1, ceiling: 8 },
     doctor: healthyDoctor(),

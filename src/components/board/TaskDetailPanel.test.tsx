@@ -171,6 +171,8 @@ describe("TaskDetailPanel", () => {
             outputTokens: null,
             cacheReadTokens: null,
             cacheCreationTokens: null,
+            headSha: null,
+            baseSha: null,
           },
         });
       }
@@ -249,6 +251,8 @@ describe("TaskDetailPanel", () => {
             outputTokens: null,
             cacheReadTokens: null,
             cacheCreationTokens: null,
+            headSha: null,
+            baseSha: null,
           },
         });
       }

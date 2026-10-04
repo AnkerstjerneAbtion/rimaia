@@ -1036,16 +1036,30 @@
 }
 
 @media (min-width: 1100px) {
+  /* Four rows for the rail (outcome, diff, commits, PR) and a flexible fifth.
+     The prompt sits beside the outcome and the transcript spans the rest, so
+     the reading column starts at the top. Without explicit rows, auto-placement
+     put the prompt in the row *after* the rail's last section and left the
+     right column empty beside the whole rail. The transcript's span ends on the
+     flexible row, so its height lands there instead of stretching the gaps
+     between the rail's sections. */
   .run-detail-body {
     grid-template-columns: minmax(0, 24rem) minmax(0, 1fr);
+    grid-template-rows: auto auto auto auto 1fr;
   }
 
   .run-detail-body > .run-detail-section:nth-child(-n + 4) {
     grid-column: 1;
   }
 
-  .run-detail-body > .run-detail-section:nth-child(n + 5) {
+  .run-detail-body > .run-detail-section:nth-child(5) {
     grid-column: 2;
+    grid-row: 1;
+  }
+
+  .run-detail-body > .run-detail-section:nth-child(n + 6) {
+    grid-column: 2;
+    grid-row: 2 / span 4;
   }
 }
 
@@ -1145,6 +1159,51 @@
   color: var(--text-2);
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
+}
+
+/* A line about where the diff came from, or what the cap left out (task 033).
+   Quiet, and sat between the totals and the file list it qualifies. */
+.run-detail-section > .run-detail-review-note {
+  margin-top: var(--space-1);
+  font-size: var(--font-size-sm);
+}
+
+/* Why a file is missing from the stored patch. Beside the line counts rather
+   than instead of them, so the file still reads as a change. */
+.run-detail-patch-marker {
+  font-style: italic;
+}
+
+.run-detail-patch-marker:not(:last-child) {
+  margin-right: var(--space-2);
+}
+
+.run-detail-patch {
+  margin-top: var(--space-3);
+  font-size: var(--font-size-sm);
+}
+
+.run-detail-patch summary {
+  cursor: pointer;
+  color: var(--text-2);
+  font-weight: var(--font-weight-semibold);
+}
+
+/* Plain preformatted text: highlighting and per-file navigation are task
+   017's. Scrolls inside itself so a 512 KiB patch cannot push the prompt and
+   the transcript off the end of the overlay. */
+.run-detail-patch-text {
+  margin: var(--space-2) 0 0;
+  padding: var(--space-3) var(--space-4);
+  border-radius: var(--radius-sm);
+  background: var(--surface-0);
+  color: var(--text-1);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: var(--font-size-xs);
+  line-height: var(--line-height-relaxed);
+  white-space: pre;
+  overflow: auto;
+  max-height: 32rem;
 }
 
 /* The prompt this run was actually given. Monospace and recessed, at the

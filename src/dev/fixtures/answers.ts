@@ -299,14 +299,9 @@ export const ANSWERS: Record<string, Answer> = {
     if (!entry) refuse("not_found", `fixture mode has no run \`${String(args.runId)}\``);
     return {
       ...plainRun(entry),
-      diff: {
-        taskId: entry.taskId,
-        branch: null,
-        baseRef: "main",
-        diff: NO_DIFF,
-        files: [],
-        commits: [],
-      },
+      // A run the seed recorded nothing for reads as a row from before task
+      // 033, and the overlay then asks `get_diff_summary` below.
+      review: s.reviews[entry.id] ?? { source: "not_recorded" },
       logAvailable: entry.logAvailable,
     };
   },

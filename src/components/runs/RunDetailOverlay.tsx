@@ -10,6 +10,7 @@ import {
 import { EXIT_CLASS_LABELS, formatCostUsd } from "../panel/RunOutcomeSection";
 import type { RimaiaError, RunDetail, TranscriptSummary } from "../../types";
 import { ErrorBanner } from "../ErrorBanner";
+import { RunReviewSections } from "./RunReviewSections";
 import { TranscriptViewer } from "./TranscriptViewer";
 
 interface RunDetailOverlayProps {
@@ -22,6 +23,8 @@ interface RunDetailOverlayProps {
  * commits, PR link, the exact prompt, then the transcript — "diff and
  * commits before transcript is the whole design ... reviewing means looking
  * at the change; the transcript is for when the diff raises a question."
+ * Since task 033 the diff and commits are what the run's finish recorded, not
+ * the branch as it is now; see {@link RunReviewSections}.
  *
  * An overlay rather than a route: this app has "three views with no URLs, no
  * nesting and no deep links to preserve" (`App.tsx`'s own comment), so a run
@@ -210,51 +213,11 @@ export function RunDetailOverlay({ runId, onClose }: RunDetailOverlayProps) {
             </dl>
           </section>
 
-          <section className="run-detail-section">
-            <h4>Diff summary</h4>
-            <p>
-              {detail.diff.diff.filesChanged} {detail.diff.diff.filesChanged === 1 ? "file" : "files"}{" "}
-              changed (+{detail.diff.diff.insertions} / -{detail.diff.diff.deletions})
-            </p>
-            {detail.diff.files.length > 0 && (
-              <ul className="run-detail-file-list">
-                {detail.diff.files.map((file) => (
-                  <li key={file.path}>
-                    <code>{file.path}</code>
-                    {file.insertions == null ? (
-                      <span className="muted">binary</span>
-                    ) : (
-                      <span className="run-detail-diffstat">
-                        +{file.insertions} / -{file.deletions}
-                      </span>
-                    )}
-                  </li>
-                ))}
-              </ul>
-            )}
-          </section>
-
-          <section className="run-detail-section">
-            <h4>Commits</h4>
-            {detail.diff.commits.length === 0 ? (
-              <p className="muted">No commits on this branch yet.</p>
-            ) : (
-              <ul className="run-detail-commit-list">
-                {detail.diff.commits.map((commit) => (
-                  <li key={commit.sha}>
-                    {/* One flex item per column, not a text node between two
-                        elements: an anonymous flex item cannot be aligned or
-                        truncated, and the author has to sit against the right
-                        edge however long the subject is. */}
-                    <span>
-                      <code>{commit.shortSha}</code> {commit.subject}
-                    </span>
-                    <span className="run-detail-diffstat">{commit.author}</span>
-                  </li>
-                ))}
-              </ul>
-            )}
-          </section>
+          <RunReviewSections
+            taskId={detail.taskId}
+            review={detail.review}
+            prUrl={detail.prUrl}
+          />
 
           <section className="run-detail-section">
             <h4>Pull request</h4>
