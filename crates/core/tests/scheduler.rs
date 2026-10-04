@@ -1525,6 +1525,7 @@ async fn reopening_after_a_crash_shows_one_interrupted_task_and_leaves_the_rest_
             session_id: "0b6d3e2e-0000-4000-8000-00000000c0de".to_string(),
             prompt: "implement the plan".to_string(),
             base_ref: None,
+            base_sha: None,
         },
     )
     .await
@@ -1680,6 +1681,7 @@ async fn reconciling_a_task_another_repair_already_settled_still_closes_its_run(
             session_id: "0b6d3e2e-0000-4000-8000-00000000feed".to_string(),
             prompt: "implement the plan".to_string(),
             base_ref: None,
+            base_sha: None,
         },
     )
     .await
@@ -1781,6 +1783,7 @@ async fn a_launch_offers_a_crashed_run_for_resume_and_starts_nothing_until_the_q
             // caught, so the base they were built on is not what this test
             // is about.
             base_ref: None,
+            base_sha: None,
         },
     )
     .await
@@ -2977,6 +2980,7 @@ async fn a_schedule_firing_tonight_does_not_resume_a_run_last_night_crashed_on()
             // caught, so the base they were built on is not what this test
             // is about.
             base_ref: None,
+            base_sha: None,
         },
     )
     .await
@@ -3065,6 +3069,7 @@ async fn a_schedule_that_does_open_a_window_resumes_exactly_what_start_would() {
             // caught, so the base they were built on is not what this test
             // is about.
             base_ref: None,
+            base_sha: None,
         },
     )
     .await

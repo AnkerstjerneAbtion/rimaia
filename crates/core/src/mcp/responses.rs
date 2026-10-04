@@ -1219,6 +1219,8 @@ mod tests {
             output_tokens: None,
             cache_read_tokens: None,
             cache_creation_tokens: None,
+            head_sha: None,
+            base_sha: None,
         });
 
         let wire = serde_json::to_value(&view).expect("a DTO must always serialize");

@@ -54,11 +54,13 @@ async fn a_fresh_database_gets_every_table_the_schema_declares() {
 
     // Read off ADR-0003's table list, not off the migration file, so this fails the way
     // an acceptance criterion should: by naming what is missing or extra, not by echoing
-    // the SQL back at itself.
+    // the SQL back at itself. `review_bundles` is ADR-0033 point 7's, added by task 033
+    // as seam-contract D28 part 6 declares it.
     assert_eq!(
         tables,
         vec![
             "repositories",
+            "review_bundles",
             "runs",
             "schedules",
             "settings",
@@ -404,9 +406,10 @@ async fn a_run_round_trips_every_field_exactly() {
             id, task_id, attempt, status, session_id, prompt, started_at, ended_at,
             exit_class, error_message, num_turns, cost_usd, log_path, pr_url, resume_after,
             base_ref, model, effort, run_environment,
-            input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens
+            input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens,
+            head_sha, base_sha
          ) VALUES (?1, ?2, 2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14,
-                   ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22)",
+                   ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24)",
         id,
         task_id,
         RunStatus::Failed,
@@ -429,6 +432,8 @@ async fn a_run_round_trips_every_field_exactly() {
         1949_i64,
         163_145_i64,
         11_819_i64,
+        "2222222222222222222222222222222222222222",
+        "1111111111111111111111111111111111111111",
     )
     .execute(&pool)
     .await
@@ -462,6 +467,8 @@ async fn a_run_round_trips_every_field_exactly() {
             output_tokens: Some(1949),
             cache_read_tokens: Some(163_145),
             cache_creation_tokens: Some(11_819),
+            head_sha: Some("2222222222222222222222222222222222222222".to_string()),
+            base_sha: Some("1111111111111111111111111111111111111111".to_string()),
         }
     );
 }
@@ -526,6 +533,8 @@ async fn a_run_round_trips_while_still_in_flight() {
             output_tokens: None,
             cache_read_tokens: None,
             cache_creation_tokens: None,
+            head_sha: None,
+            base_sha: None,
         }
     );
 }
@@ -1409,7 +1418,7 @@ async fn fetch_run(pool: &SqlitePool, id: &str) -> Run {
             exit_class AS "exit_class: ExitClass", error_message, num_turns, cost_usd, log_path,
             pr_url, resume_after AS "resume_after: DateTime<Utc>", base_ref,
             model, effort, run_environment, input_tokens, output_tokens,
-            cache_read_tokens, cache_creation_tokens
+            cache_read_tokens, cache_creation_tokens, head_sha, base_sha
            FROM runs WHERE id = ?1"#,
         id,
     )

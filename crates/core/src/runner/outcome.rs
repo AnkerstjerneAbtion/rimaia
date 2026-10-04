@@ -43,6 +43,7 @@ use crate::runner::events::{
     transcript_path, ContentBlock, EndReason, EventStream, ResultEvent, RunEvent, TokenUsage,
     UsageReport,
 };
+use crate::runs::bundle::RunCapture;
 use crate::tasks::{move_task_to_bottom, set_run_state};
 
 // ---------------------------------------------------------------------------
@@ -628,6 +629,11 @@ pub struct NewRun {
     /// landed have nothing in it; a caller with no worktree has nothing to say
     /// here and says nothing.
     pub base_ref: Option<String>,
+    /// What `base_ref` resolved to: the worktree's fork point, as
+    /// `worktree::prepare` computed it for this attempt (task 033). Written at
+    /// the open beside `base_ref`, for the same reason. `None` when it could
+    /// not be computed, which reads as "not recorded" (seam-contract D18).
+    pub base_sha: Option<String>,
 }
 
 /// Opens the `runs` row for an attempt that is about to start.
@@ -678,11 +684,14 @@ pub async fn start_run(ctx: &ServiceContext, paths: &AppPaths, new_run: NewRun) 
     // ADR-0008's amendment of 2026-09-02 makes it a property of what the
     // attempt was spawned against, which is known before the process starts and
     // does not survive the run failing. A run that dies without a `result`
-    // event still leaves a review able to say what it was building on.
+    // event still leaves a review able to say what it was building on. Its
+    // `base_sha` rides along: it is what that name resolved to, at the same
+    // moment.
     sqlx::query!(
         r#"INSERT INTO runs
-            (id, task_id, attempt, status, session_id, prompt, started_at, log_path, base_ref)
-           VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)"#,
+            (id, task_id, attempt, status, session_id, prompt, started_at, log_path, base_ref,
+             base_sha)
+           VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)"#,
         id,
         new_run.task_id,
         attempt,
@@ -692,6 +701,7 @@ pub async fn start_run(ctx: &ServiceContext, paths: &AppPaths, new_run: NewRun) 
         started_at,
         log_path,
         new_run.base_ref,
+        new_run.base_sha,
     )
     .execute(&mut *tx)
     .await?;
@@ -718,7 +728,24 @@ pub async fn start_run(ctx: &ServiceContext, paths: &AppPaths, new_run: NewRun) 
 ///
 /// Refuses a run that already ended: finalising twice would run the task-side
 /// transitions again from a state they no longer apply to.
-pub async fn finish_run(ctx: &ServiceContext, run_id: &str, outcome: &RunOutcome) -> Result<Run> {
+///
+/// # What the worktree was left as (task 033)
+///
+/// `capture` is what the runner measured in the worktree before calling this:
+/// the head commit, and the review bundle when the branch carries commits. Both
+/// are written in the transaction that closes the row, so this module stays
+/// the only writer of `runs` and becomes the only writer of `review_bundles`
+/// (ADR-0006). No new change event: the `runs` one below already covers the
+/// write (seam-contract D2).
+///
+/// A bundle is a record, not a postcondition. A capture that measured nothing
+/// changes nothing about the outcome, the class or the task's transition.
+pub async fn finish_run(
+    ctx: &ServiceContext,
+    run_id: &str,
+    outcome: &RunOutcome,
+    capture: &RunCapture,
+) -> Result<Run> {
     let ended_at = ctx.clock.now();
 
     let mut tx = ctx.pool.begin().await?;
@@ -750,8 +777,8 @@ pub async fn finish_run(ctx: &ServiceContext, run_id: &str, outcome: &RunOutcome
                   model = ?8, effort = ?9, run_environment = ?10,
                   input_tokens = ?11, output_tokens = ?12,
                   cache_read_tokens = ?13, cache_creation_tokens = ?14,
-                  resume_after = ?15
-            WHERE id = ?16"#,
+                  resume_after = ?15, head_sha = ?16
+            WHERE id = ?17"#,
         ended_at,
         outcome.status,
         outcome.exit_class,
@@ -767,10 +794,13 @@ pub async fn finish_run(ctx: &ServiceContext, run_id: &str, outcome: &RunOutcome
         outcome.usage.cache_read_tokens,
         outcome.usage.cache_creation_tokens,
         outcome.resume_after,
+        capture.head_sha,
         run_id,
     )
     .execute(&mut *tx)
     .await?;
+
+    insert_bundle(&mut tx, run_id, capture, ended_at).await?;
 
     tx.commit().await?;
 
@@ -780,6 +810,59 @@ pub async fn finish_run(ctx: &ServiceContext, run_id: &str, outcome: &RunOutcome
     apply_to_task(ctx, &run.task_id, outcome).await?;
 
     fetch_run_row(&ctx.pool, run_id).await
+}
+
+/// Inserts `capture`'s bundle, when it has one and a head commit to anchor it.
+///
+/// `worktree::bundle::capture` never produces a bundle without a `head_sha`,
+/// but task 036 builds a [`RunCapture`] from a runner's message, and a bundle
+/// that names no commit describes nothing the row can be checked against. It
+/// is dropped with a warning — never stored, and never a failed finish.
+async fn insert_bundle(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    run_id: &str,
+    capture: &RunCapture,
+    created_at: DateTime<Utc>,
+) -> Result<()> {
+    let Some(bundle) = &capture.bundle else {
+        return Ok(());
+    };
+    if capture.head_sha.is_none() {
+        tracing::warn!(
+            %run_id,
+            "a review bundle arrived without a head commit; dropping it",
+        );
+        return Ok(());
+    }
+
+    // Only through the serde types: these columns are a storage format, and
+    // `runs::bundle`'s header says what renaming a field costs.
+    let files = serde_json::to_string(&bundle.files).map_err(|error| {
+        Error::internal(format!("could not encode the bundle's files: {error}"))
+    })?;
+    let commits = serde_json::to_string(&bundle.commits).map_err(|error| {
+        Error::internal(format!("could not encode the bundle's commits: {error}"))
+    })?;
+
+    sqlx::query!(
+        r#"INSERT INTO review_bundles
+            (run_id, files_changed, insertions, deletions, files, commits, patch,
+             patch_bytes, patch_truncated, created_at)
+           VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)"#,
+        run_id,
+        bundle.diff.files_changed,
+        bundle.diff.insertions,
+        bundle.diff.deletions,
+        files,
+        commits,
+        bundle.patch,
+        bundle.patch_bytes,
+        bundle.patch_truncated,
+        created_at,
+    )
+    .execute(&mut **tx)
+    .await?;
+    Ok(())
 }
 
 /// Where the task lands, per ADR-0011's action column.
@@ -870,7 +953,7 @@ where
             exit_class AS "exit_class: ExitClass", error_message, num_turns, cost_usd, log_path,
             pr_url, resume_after AS "resume_after: DateTime<Utc>", base_ref,
             model, effort, run_environment, input_tokens, output_tokens,
-            cache_read_tokens, cache_creation_tokens
+            cache_read_tokens, cache_creation_tokens, head_sha, base_sha
            FROM runs WHERE id = ?1"#,
         id,
     )

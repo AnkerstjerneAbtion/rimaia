@@ -14,6 +14,7 @@ use rimaia_core::db::{BoardColumn, ExitClass, RunState, RunStatus, StrategyMode}
 use rimaia_core::repo::{self, NewRepository};
 use rimaia_core::runner::events::TokenUsage;
 use rimaia_core::runner::outcome::{finish_run, start_run, NewRun, RunOutcome, SpawnedAs};
+use rimaia_core::runs::bundle::RunCapture;
 use rimaia_core::runs::{self, PruneCriterion};
 use rimaia_core::tasks::{self, NewTask, TaskPatch};
 use rimaia_core::testing::{TempRepo, TestContext};
@@ -97,6 +98,7 @@ impl Fixture {
                 session_id: "session".to_string(),
                 prompt: "a prompt".to_string(),
                 base_ref: None,
+                base_sha: None,
             },
         )
         .await
@@ -137,6 +139,7 @@ impl Fixture {
                 },
                 usage: TokenUsage::default(),
             },
+            &RunCapture::default(),
         )
         .await
         .expect("close the run row");
@@ -463,6 +466,7 @@ async fn the_longest_run_and_the_median_are_measured_rather_than_averaged() {
                 session_id: "session".to_string(),
                 prompt: "a prompt".to_string(),
                 base_ref: None,
+                base_sha: None,
             },
         )
         .await
@@ -484,6 +488,7 @@ async fn the_longest_run_and_the_median_are_measured_rather_than_averaged() {
                 spawned_as: SpawnedAs::default(),
                 usage: TokenUsage::default(),
             },
+            &RunCapture::default(),
         )
         .await
         .expect("close the run row");

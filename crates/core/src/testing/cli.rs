@@ -225,6 +225,36 @@ impl FakeCli {
         );
     }
 
+    /// Appends a line reading `message` to `path` in the worktree it was
+    /// started in, commits that file on `message`, and then replays `fixture`.
+    ///
+    /// [`commits_on_attempt`](Self::commits_on_attempt)'s sibling for task 033,
+    /// whose subject is the diff a run leaves: an empty commit has none, and a
+    /// review bundle of an empty diff would prove nothing about the patch.
+    /// Appending rather than overwriting, so two attempts that name the same
+    /// path each leave a line of their own. `path` is relative to the worktree
+    /// and must not need a directory created.
+    pub fn commits_a_file_on_attempt(
+        &self,
+        task_id: &str,
+        attempt: usize,
+        path: &str,
+        message: &str,
+        fixture: &str,
+        code: i32,
+    ) {
+        self.write_plan(
+            &format!("{task_id}-{attempt}"),
+            &[
+                "commit_file".to_string(),
+                fixture_path(fixture).display().to_string(),
+                code.to_string(),
+                message.to_string(),
+                path.to_string(),
+            ],
+        );
+    }
+
     /// Replays the first `head` lines of `fixture` for `task_id`, then waits
     /// for the returned gate file to appear before replaying the rest.
     ///
@@ -589,6 +619,14 @@ impl FakeCli {
                ;;\n\
              commit)\n\
                git commit --allow-empty -q -m \"$three\" >&2\n\
+               cat \"$one\"\n\
+               printf 'end %s\\n' \"$task\" >> \"$dir/spawns\"\n\
+               exit \"$two\"\n\
+               ;;\n\
+             commit_file)\n\
+               printf '%s\\n' \"$three\" >> \"$four\"\n\
+               git add -- \"$four\" >&2\n\
+               git commit -q -m \"$three\" >&2\n\
                cat \"$one\"\n\
                printf 'end %s\\n' \"$task\" >> \"$dir/spawns\"\n\
                exit \"$two\"\n\

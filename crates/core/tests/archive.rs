@@ -717,6 +717,7 @@ impl Fixture {
                 session_id: "session".to_string(),
                 prompt: "the composed prompt".to_string(),
                 base_ref: None,
+                base_sha: None,
             },
         )
         .await

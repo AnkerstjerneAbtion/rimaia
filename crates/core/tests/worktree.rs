@@ -504,6 +504,7 @@ async fn the_resolved_base_is_recorded_on_the_run() {
             session_id: "0b6d3e2e-0000-4000-8000-00000000ba5e".to_string(),
             prompt: "implement the plan".to_string(),
             base_ref: Some(b_worktree.base_ref.clone()),
+            base_sha: b_worktree.base_sha.clone(),
         },
     )
     .await

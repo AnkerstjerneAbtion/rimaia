@@ -35,6 +35,7 @@ use rimaia_core::runner::outcome::{
 };
 use rimaia_core::runner::prompt::compose_prompt;
 use rimaia_core::runner::provider::{AgentProvider, ClaudeProvider};
+use rimaia_core::runs::bundle::RunCapture;
 use rimaia_core::tasks::{self, NewTask};
 use rimaia_core::testing::fixtures::{all_fixtures, fixture_lines};
 use rimaia_core::testing::TestContext;
@@ -788,6 +789,7 @@ async fn a_run_against_a_task_that_does_not_exist_is_refused_by_name() {
             session_id: SESSION_ID.to_string(),
             prompt: "do the thing".to_string(),
             base_ref: None,
+            base_sha: None,
         },
     )
     .await
@@ -1039,9 +1041,14 @@ async fn finishing_a_run_twice_is_refused_rather_than_replaying_the_task_transit
     let outcome = Replay::of("success").outcome();
     fixture.finish(&run.id, &outcome).await;
 
-    let error = finish_run(&fixture.harness.context, &run.id, &outcome)
-        .await
-        .expect_err("a run ends once");
+    let error = finish_run(
+        &fixture.harness.context,
+        &run.id,
+        &outcome,
+        &RunCapture::default(),
+    )
+    .await
+    .expect_err("a run ends once");
 
     assert_eq!(error.code(), ErrorCode::Invalid);
     assert_eq!(
@@ -1515,6 +1522,7 @@ impl RunFixture {
                 session_id: SESSION_ID.to_string(),
                 prompt: prompt.to_string(),
                 base_ref: None,
+                base_sha: None,
             },
         )
         .await
@@ -1522,9 +1530,14 @@ impl RunFixture {
     }
 
     async fn finish(&mut self, run_id: &str, outcome: &RunOutcome) -> rimaia_core::db::Run {
-        finish_run(&self.harness.context, run_id, outcome)
-            .await
-            .expect("close a run row")
+        finish_run(
+            &self.harness.context,
+            run_id,
+            outcome,
+            &RunCapture::default(),
+        )
+        .await
+        .expect("close a run row")
     }
 
     async fn reread(&self, run_id: &str) -> rimaia_core::db::Run {

@@ -690,6 +690,19 @@ pub struct Run {
     pub output_tokens: Option<i64>,
     pub cache_read_tokens: Option<i64>,
     pub cache_creation_tokens: Option<i64>,
+    /// The commit the worktree's `HEAD` was on when the run ended (ADR-0033
+    /// point 4), written by `finish_run` from what the runner measured. Recorded
+    /// whether or not the attempt committed anything, because a review commits
+    /// nothing and its `head_sha` is still the commit it cleared (D29 point 5).
+    ///
+    /// NULL means not recorded (seam-contract D18): a run from before task 033,
+    /// one still in flight, one a crash closed, or one whose worktree could not
+    /// be read at the finish. Never backfilled.
+    pub head_sha: Option<String>,
+    /// What [`base_ref`](Self::base_ref) resolved to for this attempt: the
+    /// fork point `git merge-base <base_ref> HEAD` in the worktree, written at
+    /// the open beside `base_ref`. NULL on the same terms as `head_sha`.
+    pub base_sha: Option<String>,
 }
 
 /// A named run configuration (ADR-0010).

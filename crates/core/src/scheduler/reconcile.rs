@@ -73,6 +73,7 @@ use crate::db::{ExitClass, RunState, RunStatus};
 use crate::error::Result;
 use crate::runner::events::TokenUsage;
 use crate::runner::outcome::{finish_run, RunOutcome, SpawnedAs};
+use crate::runs::bundle::RunCapture;
 use crate::scheduler::attempts::{self, Ending};
 use crate::scheduler::retry;
 use crate::startup::ReconciliationReport;
@@ -189,7 +190,11 @@ async fn reconcile_one(ctx: &ServiceContext, task_id: &str) -> Result<()> {
         // outcome recorded and only the task stale — `finish_run`'s own
         // ordering argument, and the recoverable direction.
         let outcome = interrupted_after(ctx, task_id, &run_id).await;
-        if let Err(error) = finish_run(ctx, &run_id, &outcome).await {
+        // Records nothing about the worktree: an interrupted row stays
+        // `NotRecorded`, and the attempt that resumes it records its own.
+        // Capturing here would put git on the board side of the port task 036
+        // draws, for a row whose resumed attempt records a bundle anyway.
+        if let Err(error) = finish_run(ctx, &run_id, &outcome, &RunCapture::default()).await {
             // The `runs` row is already written when this can fail; what failed
             // is the task-side transition, which `settle` takes from wherever
             // the task actually is.

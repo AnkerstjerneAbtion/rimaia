@@ -44,6 +44,7 @@
 //! inside it.
 
 mod base_ref;
+pub mod bundle;
 pub mod cleanup;
 mod git;
 mod naming;
@@ -89,10 +90,23 @@ pub struct Worktree {
     /// the runner calls, and a warning produced during an unattended run has
     /// nowhere else to be logged.
     pub dependency_warning: Option<String>,
+    /// Where this worktree's branch forked from [`base_ref`](Self::base_ref):
+    /// `git merge-base <base_ref> HEAD`, run in the worktree (task 033).
+    ///
+    /// On a fresh worktree that is the base's tip. On a resumed one it is the
+    /// fork point against the base *this attempt* resolved, not wherever that
+    /// base has moved since — which is what ADR-0033 point 5 means by "exactly
+    /// what the run started from", and why it is computed on the idempotent
+    /// path too. `None`, with a warning logged, when git cannot answer; a
+    /// missing fork point never fails a start.
+    pub base_sha: Option<String>,
 }
 
 /// Files changed, insertions and deletions — ADR-0013's "git diff summary".
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+///
+/// Also part of a stored review bundle's columns, and its field names are a
+/// storage format: see [`crate::runs::bundle`] before renaming one.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DiffStat {
     pub files_changed: i64,
@@ -155,7 +169,11 @@ pub struct WorktreeStatus {
 /// `insertions`/`deletions` are `None` for a binary file, which `git diff
 /// --numstat` reports as `-` in both columns — a fact distinct from "zero
 /// lines changed", which is why this is not simply `0`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+///
+/// Its field names are a storage format as well as a wire one, because a
+/// review bundle's `files` column mirrors them: see [`crate::runs::bundle`]
+/// before renaming one.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct FileDiffStat {
     pub path: String,
@@ -164,7 +182,10 @@ pub struct FileDiffStat {
 }
 
 /// One commit on a task's branch, as the review view lists it (ADR-0013).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+///
+/// Stored as JSON in a review bundle's `commits` column, so its field names are
+/// a storage format: see [`crate::runs::bundle`] before renaming one.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CommitSummary {
     pub sha: String,
@@ -280,9 +301,10 @@ pub async fn prepare(ctx: &ServiceContext, task_id: &str) -> Result<Worktree> {
         tracing::warn!(task_id = %task.id, %base_ref, "{warning}");
     }
 
-    if let Some(existing) =
+    if let Some(mut existing) =
         existing_worktree(&location, &task, &base_ref, resolved.warning.clone()).await?
     {
+        existing.base_sha = fork_point(Path::new(&existing.path), &base_ref).await;
         return Ok(existing);
     }
 
@@ -324,6 +346,7 @@ pub async fn prepare(ctx: &ServiceContext, task_id: &str) -> Result<Worktree> {
     )
     .await?;
 
+    let base_sha = fork_point(&path, &base_ref).await;
     let path = path_to_string(&path)?;
     write_worktree_columns(ctx, &task.id, Some(&branch), Some(&path)).await?;
 
@@ -334,7 +357,29 @@ pub async fn prepare(ctx: &ServiceContext, task_id: &str) -> Result<Worktree> {
         branch,
         base_ref,
         dependency_warning: resolved.warning,
+        base_sha,
     })
+}
+
+/// [`Worktree::base_sha`]: where the branch checked out at `worktree` forked
+/// from `base_ref`, or `None` with a warning when git cannot say.
+///
+/// Never an error, because nothing about starting a run depends on it: it is a
+/// record for the review bundle and for task 044's chaining, and a run that
+/// cannot record its fork point still has work to do.
+async fn fork_point(worktree: &Path, base_ref: &str) -> Option<String> {
+    match git::merge_base_with_head(worktree, base_ref).await {
+        Ok(sha) => Some(sha),
+        Err(error) => {
+            tracing::warn!(
+                worktree = %worktree.display(),
+                %base_ref,
+                %error,
+                "could not compute the fork point; this run will record no base_sha",
+            );
+            None
+        }
+    }
 }
 
 /// Everything the task detail panel needs about a worktree, computed fresh
@@ -676,6 +721,9 @@ async fn existing_worktree(
         branch,
         base_ref: base_ref.to_string(),
         dependency_warning,
+        // Filled by `prepare`, which is the only caller and the one that
+        // decides what a missing answer means.
+        base_sha: None,
     }))
 }
 

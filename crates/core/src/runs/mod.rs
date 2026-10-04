@@ -3,13 +3,33 @@
 //!
 //! This module is reads (and, for [`prune_logs`], deletes on disk) — it is
 //! not a third writer of the `runs` table, and **it deletes no rows at all**
-//! (ADR-0022 part 2). [`crate::runner::outcome`] is
-//! still the only thing that inserts or updates a row (ADR-0006), and the
-//! diff and commits a run detail view opens with are
-//! [`crate::worktree::diff_summary`]'s, re-read fresh rather than duplicated
-//! here: every attempt of a task shares one branch (ADR-0005), so there is
-//! one diff to show regardless of which attempt a reviewer opened, and it is
-//! the branch's current state, not a snapshot frozen at that attempt's end.
+//! (ADR-0022 part 2). [`crate::runner::outcome`] is still the only thing that
+//! inserts or updates a row (ADR-0006), and the only writer of
+//! `review_bundles` too.
+//!
+//! # A run detail shows what the run left, not what the branch is now
+//!
+//! Task 015 decided the opposite: the detail view re-read
+//! [`crate::worktree::diff_summary`] on every open, on the argument that every
+//! attempt shares one branch and so there is one diff to show. Task 033
+//! reverses that on purpose, under ADR-0033 point 7. The branch's current state
+//! answers a question about today, it fails once the worktree, the branch or
+//! the clone has moved, and it takes the run's outcome, prompt and transcript
+//! down with it when it does. And a board other machines read cannot run git at
+//! all.
+//!
+//! So [`get_run`] runs **no git, for any row**. It returns the review bundle
+//! the run's finish recorded ([`bundle`]), or [`RunReview::NotRecorded`] when
+//! there is none. What is left of the old behaviour is a fallback in the one
+//! view that has a machine behind it — the desktop overlay asks the local
+//! `get_diff_summary` command for a `NotRecorded` row and labels the answer as
+//! the branch's current state — and none of it is in this module.
+//!
+//! The bundle's `files` and `commits` are stored as JSON in `TEXT` columns,
+//! with the wire's camelCase keys (`shortSha`, `committedAt`), and parsed with
+//! `serde_json`: the workspace `sqlx` has no `json` feature, the choice
+//! `tasks::strategy` records for the same reason. See [`bundle`]'s header on
+//! why those keys are a storage format.
 //!
 //! # "Marked, not trusted" without a new column
 //!
@@ -35,6 +55,7 @@
 //! reason — see [`crate::tasks::service::TaskSummary`]'s own hand-rolled impl
 //! for the precedent of mixing a derived one with extra joined columns).
 
+pub mod bundle;
 pub mod transcript;
 
 use std::path::{Path, PathBuf};
@@ -48,7 +69,8 @@ use crate::context::ServiceContext;
 use crate::db::{Run, RunStatus};
 use crate::error::{Error, Result};
 use crate::paths::AppPaths;
-use crate::worktree::{self, DiffSummary};
+use crate::worktree::{CommitSummary, DiffStat};
+use bundle::{BundleFile, StoredBundle};
 
 // ---------------------------------------------------------------------------
 // Listing — per task, and the global filtered view
@@ -180,39 +202,143 @@ pub async fn list_runs_for_task(ctx: &ServiceContext, task_id: &str) -> Result<V
 // ---------------------------------------------------------------------------
 
 /// What a run detail view opens on, in ADR-0013's order: the run's own
-/// outcome (on [`run`](Self::run)), then the branch's diff and commits, then
-/// the PR link (`run.pr_url`) and the exact prompt (`run.prompt`) — all
-/// already on the row. The transcript itself is read separately, page by
-/// page, through [`transcript::read_page`]; a 50MB file has no business
-/// riding along on this struct.
+/// outcome (on [`run`](Self::run)), then what its branch carried
+/// ([`review`](Self::review)), then the PR link (`run.pr_url`) and the exact
+/// prompt (`run.prompt`) — all already on the row. The transcript itself is
+/// read separately, page by page, through [`transcript::read_page`]; a 50MB
+/// file has no business riding along on this struct.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RunDetail {
     #[serde(flatten)]
     pub run: Run,
-    pub diff: DiffSummary,
+    pub review: RunReview,
     pub log_available: bool,
 }
 
-/// The full detail read for one run.
+/// What a run's row says its branch carried when the run ended.
+///
+/// Decided from the recorded shas and the bundle row together, never from a
+/// missing bundle row alone: seam-contract D18 makes NULL "not recorded",
+/// never a claim. See [`review_for`].
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(tag = "source", rename_all = "snake_case")]
+pub enum RunReview {
+    /// Written at this run's finish. `bundle: None` means the recorded shas say the
+    /// branch carried nothing: `head_sha` equals `base_sha`.
+    Recorded { bundle: Option<StoredBundle> },
+    /// Nothing on the row says what the branch carried: the run predates task 033, is
+    /// still in flight, was closed by a crash, or its capture failed.
+    NotRecorded,
+}
+
+/// The full detail read for one run. Runs no git — see this module's header.
+///
+/// One indexed `SELECT` by `run_id` on top of the row read, and nothing that
+/// needs the worktree, the branch or the clone: a row whose repository has
+/// moved reads exactly as well as one whose has not.
 pub async fn get_run(ctx: &ServiceContext, run_id: &str) -> Result<RunDetail> {
     let run = fetch_run(ctx, run_id).await?;
-    let diff = worktree::diff_summary(ctx, &run.task_id).await?;
+    let bundle = fetch_bundle(ctx, run_id).await?;
+    let review = review_for(&run, bundle);
     let log_available = log_file_exists(&run.log_path).await;
 
     Ok(RunDetail {
         run,
-        diff,
+        review,
         log_available,
     })
 }
 
 /// The bare row, for a caller that needs only `log_path` (or another single
-/// column) and would otherwise pay for [`get_run`]'s `diff_summary` git calls
-/// just to discard the result — the Tauri shell's transcript and "open raw
+/// column) and would otherwise pay for [`get_run`]'s bundle read and transcript
+/// check just to discard them — the Tauri shell's transcript and "open raw
 /// log" commands are exactly this caller.
 pub async fn get_run_row(ctx: &ServiceContext, run_id: &str) -> Result<Run> {
     fetch_run(ctx, run_id).await
+}
+
+/// Which [`RunReview`] a row and its bundle row add up to:
+///
+/// - a `review_bundles` row exists: `Recorded` with that bundle;
+/// - no row, and `head_sha` and `base_sha` are both set and equal: `Recorded`
+///   with `bundle: None`, the one case where "no commits on its branch" was
+///   measured;
+/// - anything else: `NotRecorded`. Both set and different with no row is a
+///   bundle that could not be built, or a head that is an ancestor of
+///   `base_sha` (a branch reset backwards). Nothing on the row tells the two
+///   apart, and `NotRecorded` is the reading that is never false.
+fn review_for(run: &Run, bundle: Option<StoredBundle>) -> RunReview {
+    if let Some(bundle) = bundle {
+        return RunReview::Recorded {
+            bundle: Some(bundle),
+        };
+    }
+    match (run.head_sha.as_deref(), run.base_sha.as_deref()) {
+        (Some(head), Some(base)) if head == base => RunReview::Recorded { bundle: None },
+        _ => RunReview::NotRecorded,
+    }
+}
+
+/// One `review_bundles` row as SQLite holds it, before its JSON is parsed.
+#[derive(FromRow)]
+struct BundleRow {
+    files_changed: i64,
+    insertions: i64,
+    deletions: i64,
+    files: String,
+    commits: String,
+    patch: Option<String>,
+    patch_bytes: i64,
+    patch_truncated: bool,
+    patch_pruned_at: Option<DateTime<Utc>>,
+    created_at: DateTime<Utc>,
+}
+
+/// `run_id`'s stored bundle, if its finish wrote one.
+///
+/// A row whose JSON does not parse is an `internal` error (seam-contract D8),
+/// never an empty list: only [`bundle`]'s serde types write those columns, so a
+/// parse failure is a bug, and reading it as "no files" would be a false claim
+/// about the run.
+async fn fetch_bundle(ctx: &ServiceContext, run_id: &str) -> Result<Option<StoredBundle>> {
+    let row = sqlx::query_as::<_, BundleRow>(
+        "SELECT files_changed, insertions, deletions, files, commits, patch, patch_bytes,
+                patch_truncated, patch_pruned_at, created_at
+           FROM review_bundles WHERE run_id = ?1",
+    )
+    .bind(run_id)
+    .fetch_optional(&ctx.pool)
+    .await?;
+
+    let Some(row) = row else {
+        return Ok(None);
+    };
+    let files: Vec<BundleFile> = serde_json::from_str(&row.files).map_err(|error| {
+        Error::internal(format!(
+            "run {run_id}'s stored review bundle has unreadable files: {error}"
+        ))
+    })?;
+    let commits: Vec<CommitSummary> = serde_json::from_str(&row.commits).map_err(|error| {
+        Error::internal(format!(
+            "run {run_id}'s stored review bundle has unreadable commits: {error}"
+        ))
+    })?;
+
+    Ok(Some(StoredBundle {
+        diff: DiffStat {
+            files_changed: row.files_changed,
+            insertions: row.insertions,
+            deletions: row.deletions,
+        },
+        files,
+        commits,
+        patch: row.patch,
+        patch_bytes: row.patch_bytes,
+        patch_truncated: row.patch_truncated,
+        patch_pruned_at: row.patch_pruned_at,
+        created_at: row.created_at,
+    }))
 }
 
 /// The transcript path to hand the OS file manager for `run_id`, refusing
@@ -337,7 +463,9 @@ const STRATEGY_TRANSCRIPT_FLOOR: chrono::Duration = chrono::Duration::hours(1);
 /// `runs` row untouched.
 ///
 /// The row survives on purpose. A pruned run's outcome, diff and commits are
-/// still real history — only its evidence file is gone — and its
+/// still real history — only its evidence file is gone, and its review bundle
+/// stays whole (ADR-0022 point 2 keeps records; ADR-0036 point 6's patch
+/// pruning is the server's, task 056's) — and its
 /// `log_path` no longer resolving is exactly the "log unavailable" state
 /// [`get_run`] already renders rather than errors on. Pruning is simply the
 /// deliberate, user-requested version of the same condition startup
@@ -550,16 +678,14 @@ mod tests {
 
     /// A registered repository whose `path` points nowhere, seeded directly —
     /// the same shortcut [`crate::tasks::service`]'s own `seed_repository`
-    /// takes, and safe for exactly the tests that take it: the listing and
-    /// pruning reads below are pure SQLite and never invoke git, so
-    /// `repo::register` would drag a real checkout into a test that never
-    /// looks at one.
+    /// takes, and safe for every test here: the listing, detail and pruning
+    /// reads are pure SQLite and never invoke git (task 033 took the last git
+    /// call out of [`get_run`]), so `repo::register` would drag a real checkout
+    /// into a test that never looks at one.
     ///
-    /// [`get_run`] is *not* one of those tests. It calls
-    /// [`worktree::diff_summary`], which runs git against this path, so those
-    /// tests use [`seed_repository_at`] with a real [`TempRepo`] instead —
-    /// `CLAUDE.md`'s "never fake git" rule, which a path git rightly refuses
-    /// is the other side of.
+    /// The few tests that still use [`seed_repository_at`] with a real
+    /// [`TempRepo`] do so to prove exactly that: a branch with real commits on
+    /// it is *not* what [`get_run`] reports.
     async fn seed_repository(ctx: &ServiceContext, name: &str) -> String {
         seed_repository_at(ctx, name, &format!("/tmp/{name}")).await
     }
@@ -791,16 +917,7 @@ mod tests {
         // pruning reaches "marked, not trusted" deliberately rather than by
         // accident.
         let h = TestContext::new().await;
-        // A real repository, because the read-back below goes through
-        // `get_run`, which runs git against its path — and the point of the
-        // read-back is that *everything except the log* is intact.
-        let source = TempRepo::init();
-        let repository_id = seed_repository_at(
-            &h.context,
-            "repo",
-            source.path().to_str().expect("temp path is UTF-8"),
-        )
-        .await;
+        let repository_id = seed_repository(&h.context, "repo").await;
         let task_id = seed_task(&h.context, &repository_id, "a task").await;
 
         let dir = tempfile::tempdir().expect("temp dir");
@@ -1042,17 +1159,10 @@ mod tests {
     #[tokio::test]
     async fn get_run_reports_the_log_as_unavailable_when_the_file_is_gone() {
         let h = TestContext::new().await;
-        // A real repository, because `get_run` runs git against its path —
-        // this is the acceptance criterion "a run whose log file was deleted
-        // shows a clear 'log unavailable' state rather than erroring", and it
-        // only means anything if everything *except* the log is intact.
-        let source = TempRepo::init();
-        let repository_id = seed_repository_at(
-            &h.context,
-            "repo",
-            source.path().to_str().expect("temp path is UTF-8"),
-        )
-        .await;
+        // The acceptance criterion "a run whose log file was deleted shows a
+        // clear 'log unavailable' state rather than erroring" — and only the
+        // log: everything else on the detail is intact.
+        let repository_id = seed_repository(&h.context, "repo").await;
         let task_id = seed_task(&h.context, &repository_id, "a task").await;
         let run_id = seed_run(
             &h.context,
@@ -1073,11 +1183,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn get_run_carries_the_branchs_real_diff_and_commits_beside_the_log() {
-        // ADR-0013's ordering in one read: the diff and the commits come
-        // first, and they are git's, not a stored snapshot. Asserted against a
-        // real repository with one real commit on the task's branch — a mocked
-        // git would only prove the mock works (`CLAUDE.md`).
+    async fn get_run_reports_what_the_row_recorded_and_never_what_the_branch_holds_now() {
+        // Task 033 reversed task 015's decision on purpose (ADR-0033 point 7):
+        // the detail is the run's own record, not the branch's current state.
+        // The branch here has a real commit on it, and a row that recorded
+        // nothing must still read as `NotRecorded` — a live `git diff` would
+        // have found the commit.
         let h = TestContext::new().await;
         let source = TempRepo::init().branch("rimaia/a-task").commit(
             "src/parser.rs",
@@ -1112,19 +1223,21 @@ mod tests {
         let detail = get_run(&h.context, &run_id).await.expect("get_run");
 
         assert!(detail.log_available);
-        assert_eq!(detail.diff.diff.files_changed, 1);
-        assert_eq!(detail.diff.diff.insertions, 1);
+        assert_eq!(detail.review, RunReview::NotRecorded);
+    }
+
+    #[test]
+    fn a_run_detail_names_its_review_source_on_the_wire() {
+        // `src/types.ts` discriminates on `source`; a key spelled any other way
+        // would typecheck on both sides and render nothing.
         assert_eq!(
-            detail
-                .diff
-                .files
-                .iter()
-                .map(|file| file.path.as_str())
-                .collect::<Vec<_>>(),
-            vec!["src/parser.rs"]
+            serde_json::to_value(RunReview::NotRecorded).expect("serialize"),
+            serde_json::json!({ "source": "not_recorded" })
         );
-        assert_eq!(detail.diff.commits.len(), 1);
-        assert_eq!(detail.diff.commits[0].subject, "Add the parser");
+        assert_eq!(
+            serde_json::to_value(RunReview::Recorded { bundle: None }).expect("serialize"),
+            serde_json::json!({ "source": "recorded", "bundle": null })
+        );
     }
 
     #[tokio::test]

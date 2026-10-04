@@ -947,6 +947,7 @@ pub async fn run_task(
             // the worktree `prepare` just resolved rather than resolved again,
             // so the row records the base the branch really has.
             base_ref: Some(worktree.base_ref.clone()),
+            base_sha: worktree.base_sha.clone(),
         },
     )
     .await
@@ -970,7 +971,22 @@ pub async fn run_task(
         credentials: &credentials,
     };
 
-    match execute(ctx, paths, config, attempt).await {
+    let executed = execute(ctx, paths, config, attempt).await;
+
+    // What the worktree was left as, measured before either `finish_run` below
+    // and for every outcome — failed and cancelled included, because a failed
+    // run's partial work is exactly what a morning review opens to decide what
+    // to do next (task 033).
+    //
+    // The worktree is guaranteed to still be here. The child's process group
+    // is dead, so nothing is still committing; and the task is still
+    // `running`, which seam-contract D20's first guard — the one with no
+    // override — makes every removal path refuse. A capture that fails anyway
+    // has logged why and returned what it could.
+    let capture =
+        worktree::bundle::capture(Path::new(&worktree.path), worktree.base_sha.as_deref()).await;
+
+    match executed {
         Ok(mut outcome) => {
             // ADR-0011's policy, applied at the one call site every starter
             // passes through — the queue, "Run now", "Retry now", and whatever
@@ -989,14 +1005,14 @@ pub async fn run_task(
                 resume_after = outcome.resume_after.map(|at| at.to_rfc3339()),
                 "run finished",
             );
-            finish_run(ctx, &run.id, &outcome).await
+            finish_run(ctx, &run.id, &outcome, &capture).await
         }
         // Spawning or supervision itself failed. The row exists, so it is closed
         // as fatal rather than left open — an unfinished `runs` row and a task
         // stuck `running` are the same defect from two tables.
         Err(error) => {
             let outcome = runner_fatal(error.to_string());
-            if let Err(nested) = finish_run(ctx, &run.id, &outcome).await {
+            if let Err(nested) = finish_run(ctx, &run.id, &outcome, &capture).await {
                 tracing::error!(run_id = %run.id, %nested, "could not record a failed run");
             }
             Err(error)
