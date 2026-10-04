@@ -11,7 +11,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 
 use chrono::{DateTime, Duration, SecondsFormat, Utc};
 use serde::Serialize;
-use sqlx::{FromRow, SqliteConnection};
+use sqlx::SqliteConnection;
 
 use crate::context::ServiceContext;
 use crate::db::{settings, BoardColumn, RunState, RunStatus};
@@ -178,7 +178,7 @@ pub async fn mark_seen(ctx: &ServiceContext, through: DateTime<Utc>) -> Result<D
 }
 
 /// The window's rows, as the digest reads them.
-#[derive(Debug, FromRow)]
+#[derive(Debug)]
 struct WindowRun {
     id: String,
     task_id: String,
@@ -206,17 +206,21 @@ pub async fn digest(ctx: &ServiceContext) -> Result<Digest> {
         .await?
         .unwrap_or(until - DIGEST_DEFAULT_WINDOW);
 
-    let rows: Vec<WindowRun> = sqlx::query_as(
-        "SELECT r.id, r.task_id, r.attempt, r.status, r.started_at, r.ended_at,
-                r.cost_usd, r.error_message, r.pr_url
-           FROM runs r JOIN tasks t ON t.id = r.task_id
-          WHERE t.archived_at IS NULL
-            AND (r.status = 'running'
-                 OR (r.ended_at IS NOT NULL AND r.ended_at > ?1 AND r.ended_at <= ?2))
-          ORDER BY r.task_id, r.attempt",
+    let rows = sqlx::query_as!(
+        WindowRun,
+        r#"SELECT r.id AS "id!", r.task_id, r.attempt,
+                  r.status AS "status: RunStatus",
+                  r.started_at AS "started_at: DateTime<Utc>",
+                  r.ended_at AS "ended_at: DateTime<Utc>",
+                  r.cost_usd, r.error_message, r.pr_url
+             FROM runs r JOIN tasks t ON t.id = r.task_id
+            WHERE t.archived_at IS NULL
+              AND (r.status = 'running'
+                   OR (r.ended_at IS NOT NULL AND r.ended_at > ?1 AND r.ended_at <= ?2))
+            ORDER BY r.task_id, r.attempt"#,
+        since,
+        until,
     )
-    .bind(since)
-    .bind(until)
     .fetch_all(&ctx.pool)
     .await?;
 
