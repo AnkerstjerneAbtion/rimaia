@@ -94,7 +94,7 @@ describe("columnStats", () => {
   }
 
   function lastRun(exitClass: ExitClass): NonNullable<Card["lastRun"]> {
-    return { status: "failed", exitClass, endedAt: "2026-08-20T11:30:00Z", resumeAfter: null };
+    return { kind: "implementation", status: "failed", exitClass, endedAt: "2026-08-20T11:30:00Z", resumeAfter: null };
   }
 
   it("says nothing about a column where nothing is happening", () => {

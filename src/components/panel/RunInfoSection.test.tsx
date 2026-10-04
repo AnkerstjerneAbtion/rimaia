@@ -9,6 +9,7 @@ function run(overrides: Partial<Run> = {}): Run {
     id: "run-1",
     taskId: "task-1",
     attempt: 1,
+    kind: "implementation",
     status: "succeeded",
     sessionId: "session-1",
     prompt: "prompt",

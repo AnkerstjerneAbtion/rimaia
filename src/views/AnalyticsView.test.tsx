@@ -32,6 +32,8 @@ function analytics(overrides: Partial<Analytics> = {}): Analytics {
     strategies: [],
     plannerSpendUsd: 0,
     implementationSpendUsd: 0,
+    reviewLoopSpendUsd: 0,
+    reviewLoopOutcomes: { succeeded: 0, failed: 0, cancelled: 0, interrupted: 0, running: 0 },
     subscriptionMonthlyUsd: null,
     ...overrides,
   };

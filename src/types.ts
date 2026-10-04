@@ -151,7 +151,10 @@ export interface LongestRun {
  */
 export interface Analytics {
   period: { from: string | null; to: string | null };
+  /** Implementation runs only (seam-contract D29 point 7): a review's
+   *  `succeeded` says the reviewer ran, not that the work was good. */
   outcomes: RunOutcomes;
+  /** Every kind. Always `implementationSpendUsd + reviewLoopSpendUsd`. */
   spendUsd: number;
   spendByDay: DaySpend[];
   runsWithoutCost: number;
@@ -160,14 +163,20 @@ export interface Analytics {
   tasksCompleted: number;
   /** Total spend over completed tasks — failed attempts included. */
   costPerCompletedTaskUsd: number | null;
+  /** Implementation runs only. */
   medianDurationSeconds: number | null;
   longestRun: LongestRun | null;
   /** Summed run duration, not wall-clock: parallel runs each contribute. */
   unattendedHours: number;
   models: ModelUse[];
+  /** Implementation runs only. */
   strategies: StrategyUse[];
   plannerSpendUsd: number;
   implementationSpendUsd: number;
+  /** What review and fix runs cost (ADR-0017's loop). */
+  reviewLoopSpendUsd: number;
+  /** How review and fix runs ended, kept apart from `outcomes`. */
+  reviewLoopOutcomes: RunOutcomes;
   /** The user's own figure. `null` means the comparison is not drawn — never
    *  that the subscription is free. */
   subscriptionMonthlyUsd: number | null;
@@ -392,6 +401,10 @@ export type StrategyOrigin = "task" | "repository" | "global" | "claude_code";
  *  one attempt, as the Runs view queries it. */
 export type RunStatus = "running" | "succeeded" | "failed" | "cancelled" | "interrupted";
 
+/** Mirrors `rimaia_core::db::RunKind` (ADR-0017, seam-contract D29). What a
+ *  run was for. There is no `"strategy"`: the planner writes no row. */
+export type RunKind = "implementation" | "review" | "fix";
+
 /** Mirrors `rimaia_core::db::ExitClass` (ADR-0011). Why a run stopped. */
 export type ExitClass = "success" | "usage_limit" | "transient" | "interrupted" | "fatal" | "cancelled";
 
@@ -452,7 +465,12 @@ export interface TaskLink {
 export interface Run {
   id: string;
   taskId: string;
+  /** The row's position in the task's history, one sequence across every
+   *  kind (seam-contract D29 point 2). */
   attempt: number;
+  /** What the run was for. Rows from before kinds existed read as
+   *  `"implementation"`, which is what they were. */
+  kind: RunKind;
   status: RunStatus;
   sessionId: string;
   /** The composed prompt verbatim (ADR-0009). */
@@ -530,11 +548,13 @@ export interface TaskDetail extends Task, EffectiveStrategyFields {
 }
 
 /**
- * Mirrors `rimaia_core::tasks::LastRunSummary` — the four fields of a `Run`
+ * Mirrors `rimaia_core::tasks::LastRunSummary` — the five fields of a `Run`
  * a card draws, not the row. `interrupted` reaches the board through
  * `exitClass` and nowhere else (seam-contract D9).
  */
 export interface LastRunSummary {
+  /** The newest row's kind, of any kind (seam-contract D29 point 4). */
+  kind: RunKind;
   status: RunStatus;
   exitClass: ExitClass | null;
   /** `null` while the attempt is still in flight. */
@@ -1281,6 +1301,8 @@ export interface RunListEntry extends Run {
 export interface RunFilterInput {
   repositoryId?: string;
   status?: RunStatus;
+  /** What the runs were for; left out, every kind. */
+  kind?: RunKind;
   /** Matches a run started at or after this instant (RFC 3339). */
   since?: string;
   /** Matches a run started at or before this instant (RFC 3339). */
@@ -1642,6 +1664,20 @@ export interface DigestEntry {
   prUrl: string | null;
   blockingTitle: string | null;
   skipReason: SkipReason | null;
+  /** The kind of the newest row the outcome is taken from; `null` for an
+   *  entry with no row in the window. */
+  lastRunKind: RunKind | null;
+  /** Where the task's review loop stands; `null` when it has none. */
+  reviewLoop: DigestLoop | null;
+}
+
+/** Mirrors `rimaia_core::review::DigestLoop`: a task's review loop, derived
+ *  from its rows and never stored (seam-contract D29 point 8). */
+export interface DigestLoop {
+  /** Review runs after the task's newest implementation run. */
+  reviewsSinceImplementation: number;
+  /** The task's open findings, of every loop. */
+  openFindings: number;
 }
 
 /** Mirrors `rimaia_core::review::DigestTotals`. */

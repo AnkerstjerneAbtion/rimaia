@@ -187,6 +187,9 @@ function lastRun(
   resumeAfter: string | null = null,
 ): NonNullable<TaskSummary["lastRun"]> {
   return {
+    // Every seeded row is an implementation run; the review loop's states
+    // are task 037's to seed.
+    kind: "implementation",
     status,
     exitClass,
     endedAt: endedAgo === null ? null : ago(endedAgo),
@@ -211,6 +214,7 @@ function runFor(
     id: `run-${String(runCounter).padStart(3, "0")}`,
     taskId: taskSummary.id,
     attempt: 1,
+    kind: "implementation",
     status,
     sessionId: `session-${runCounter}`,
     prompt: `Implement: ${taskSummary.title}`,
@@ -355,6 +359,8 @@ function analytics(withData: boolean): Analytics {
       strategies: [],
       plannerSpendUsd: 0,
       implementationSpendUsd: 0,
+      reviewLoopSpendUsd: 0,
+      reviewLoopOutcomes: { succeeded: 0, failed: 0, cancelled: 0, interrupted: 0, running: 0 },
       subscriptionMonthlyUsd: null,
     };
   }
@@ -392,6 +398,8 @@ function analytics(withData: boolean): Analytics {
     ],
     plannerSpendUsd: 3.4,
     implementationSpendUsd: 39.02,
+    reviewLoopSpendUsd: 0,
+    reviewLoopOutcomes: { succeeded: 0, failed: 0, cancelled: 0, interrupted: 0, running: 0 },
     subscriptionMonthlyUsd: 200,
   };
 }
@@ -980,6 +988,8 @@ function reviewDigestScenario(): Scenario {
     errorMessage: null,
     prUrl: null,
     blockingTitle: null,
+    lastRunKind: outcome === "blocked" || outcome === "skipped" ? null : "implementation",
+    reviewLoop: null,
     skipReason: null,
     ...overrides,
   });

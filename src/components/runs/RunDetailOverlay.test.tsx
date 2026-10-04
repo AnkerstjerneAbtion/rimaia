@@ -62,6 +62,7 @@ function runDetail(overrides: Partial<RunDetail> = {}): RunDetail {
     id: "run-1",
     taskId: "task-1",
     attempt: 2,
+    kind: "implementation",
     status: "succeeded",
     sessionId: "session-1",
     prompt: "Implement the parser.",

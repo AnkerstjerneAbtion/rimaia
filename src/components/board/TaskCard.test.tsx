@@ -403,7 +403,7 @@ describe("TaskCard", () => {
     renderCard({
       task: {
         ...task({ runState: "failed" }),
-        lastRun: { status: "interrupted", exitClass: "interrupted", endedAt: "2026-08-20T11:50:00Z", resumeAfter: null },
+        lastRun: { kind: "implementation", status: "interrupted", exitClass: "interrupted", endedAt: "2026-08-20T11:50:00Z", resumeAfter: null },
       },
     });
     await screen.findByRole("button", { name: "Run now" });
