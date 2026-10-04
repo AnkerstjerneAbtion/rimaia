@@ -1084,12 +1084,18 @@ mod end_to_end {
             !is_ancestor(&fresh, &rejected_commit, "HEAD"),
             "the new branch does not contain the rejected commit"
         );
-        let prompt = cli.stdin(&id, 2);
-        assert!(
-            prompt.ends_with(&format!(
-                "# Extra instructions\n\n{REJECTED}\nWrong approach."
-            )),
-            "the prompt ends with the rejected block, got: {prompt}"
+        let base = settings::base_instructions(&f.ctx().pool)
+            .await
+            .expect("base");
+        assert_eq!(
+            cli.stdin(&id, 2),
+            format!(
+                "# Base instructions\n\n{base}\n\n# Task context\n\n- Title: Write the notes\n\
+                 - Repository: {repository}\n- Branch: {branch}-2\n- Base ref: main\n\n\
+                 # Plan\n\n1. Write the notes\n\n# Extra instructions\n\n\
+                 {REJECTED}\nWrong approach.",
+                repository = f.repository_name,
+            )
         );
     }
 
