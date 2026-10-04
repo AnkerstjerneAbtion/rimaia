@@ -20,7 +20,22 @@ interface Capture {
   /** A Runs-history row to open, by its task title, once the view is up — the
    *  run detail overlay has no sidebar entry of its own. */
   open?: string;
+  /** Keys pressed once the view is up, in order — only non-mutating ones: the
+   *  script never triggers a write (`Enter`, `j`, `r` and `c` qualify; `a`,
+   *  `o`, `w` and the note's send do not). */
+  keys?: string[];
 }
+
+/** What shows that a key has taken effect, so the next one is not pressed
+ *  into a view that has not rendered it. */
+const KEY_RESULT: Record<string, string> = {
+  Enter: ".review-queue",
+  j: ".review-task",
+  r: ".review-note-step",
+  c: ".review-note-step",
+};
+
+const REVIEW = { sidebar: "Review", view: "review" };
 
 const BOARD = { sidebar: "Board", landmark: ".board-view" };
 const RUNS = { sidebar: "Runs", landmark: ".runs-view" };
@@ -44,6 +59,14 @@ const CAPTURES: Capture[] = [
   { scenario: "empty", view: "runs", ...RUNS },
   { scenario: "welcome", view: "welcome", sidebar: null, landmark: ".welcome-view" },
   { scenario: "error", view: "runs", ...RUNS },
+  // Task 017: the morning review, one scenario per state.
+  { scenario: "review-digest", ...REVIEW, landmark: ".review-entries" },
+  { scenario: "review-truncated", ...REVIEW, keys: ["Enter"], landmark: ".review-task-body" },
+  { scenario: "review-pruned", ...REVIEW, keys: ["Enter"], landmark: ".review-task-body" },
+  { scenario: "review-no-commits", ...REVIEW, keys: ["Enter"], landmark: ".review-task-body" },
+  { scenario: "review-not-recorded", ...REVIEW, keys: ["Enter"], landmark: ".review-task-body" },
+  { scenario: "review-chain", ...REVIEW, keys: ["Enter", "r"], landmark: ".review-note-step" },
+  { scenario: "review-empty", ...REVIEW, keys: ["Enter"], landmark: ".review-empty" },
 ];
 
 for (const capture of CAPTURES) {
@@ -72,6 +95,12 @@ for (const capture of CAPTURES) {
       }
       if (capture.open) {
         await page.locator(".runs-history-open", { hasText: capture.open }).click();
+      }
+      for (const key of capture.keys ?? []) {
+        // Let the view's own reads finish before a key is pressed into it.
+        await page.waitForFunction((flag) => (window as never)[flag] === true, SETTLED_FLAG);
+        await page.keyboard.press(key);
+        await expect(page.locator(KEY_RESULT[key])).toBeVisible();
       }
       await expect(page.locator(capture.landmark)).toBeVisible();
       // No fixed wait stands in for either: the flag is the fixture transports'

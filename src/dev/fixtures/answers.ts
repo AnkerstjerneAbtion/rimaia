@@ -9,7 +9,6 @@ import type {
   PlanPass,
   PreflightSummary,
   PruneResult,
-  ReviewDigest,
   ReviewOutcome,
   RimaiaError,
   Run,
@@ -28,7 +27,6 @@ import type {
   WorktreeInventory,
   WorktreeStatus,
 } from "../../types";
-import { FIXTURE_NOW } from "./constants";
 import type { Scenario } from "./seed";
 
 /**
@@ -61,38 +59,14 @@ function findTask(scenario: Scenario, id: unknown): TaskSummary {
   return found;
 }
 
-const DAY_MS = 24 * 60 * 60 * 1000;
-
-/** The digest no scenario can contradict: nothing ended in the 24-hour window
- *  that ends at {@link FIXTURE_NOW}. 017 gives this row per-scenario answers. */
-const EMPTY_DIGEST: ReviewDigest = {
-  since: new Date(Date.parse(FIXTURE_NOW) - DAY_MS).toISOString(),
-  until: FIXTURE_NOW,
-  entries: [],
-  totals: {
-    runs: 0,
-    runSeconds: 0,
-    spanSeconds: null,
-    costUsd: 0,
-    runsWithoutCost: 0,
-    counts: {
-      failed: 0,
-      blocked: 0,
-      waiting_retry: 0,
-      interrupted: 0,
-      cancelled: 0,
-      running: 0,
-      completed: 0,
-      skipped: 0,
-    },
-  },
-};
-
-/** The seeded tasks that a card names as blocked by `task`. The seed carries no
- *  edges, only each card's `blockingTitle`, and no seeded run records a commit,
- *  so nothing can have built on anything. */
+/** The scenario's own answer where it has one (the review scenarios do), else
+ *  the seeded tasks a card names as blocked by `task`. Beyond those the seed
+ *  carries no edges, only each card's `blockingTitle`, and no run there records
+ *  a commit, so nothing can have built on anything. */
 function dependentsOf(scenario: Scenario, id: unknown): TaskDependent[] {
   const task = findTask(scenario, id);
+  const seeded = scenario.dependents[task.id];
+  if (seeded) return seeded;
   return scenario.tasks
     .filter((candidate) => candidate.blockingTitle === task.title)
     .map((candidate) => ({
@@ -148,7 +122,7 @@ function detailOf(scenario: Scenario, id: unknown): TaskDetail {
   return {
     ...summary,
     links: [],
-    dependsOn: [],
+    dependsOn: scenario.dependencies[summary.id] ?? [],
     lastRun: run ? plainRun(run) : null,
   };
 }
@@ -291,7 +265,7 @@ export const ANSWERS: Record<string, Answer> = {
   reject_task: (args, s) => sentBack(s, args.taskId, REJECTED_BLOCK, true),
   request_task_changes: (args, s) => sentBack(s, args.taskId, CHANGES_REQUESTED_BLOCK, false),
   get_task_dependents: (args, s) => dependentsOf(s, args.taskId),
-  get_review_digest: () => EMPTY_DIGEST,
+  get_review_digest: (_args, s) => s.digest,
   mark_review_digest_seen: (args) => args.through,
   set_task_run_state: (args, s) => findTask(s, args.id),
   add_task_link: unsupported("fixture mode does not edit links"),
@@ -345,14 +319,15 @@ export const ANSWERS: Record<string, Answer> = {
     commitCount: 0,
     diff: NO_DIFF,
   }),
-  get_diff_summary: (args): DiffSummary => ({
-    taskId: String(args.taskId),
-    branch: null,
-    baseRef: "main",
-    diff: NO_DIFF,
-    files: [],
-    commits: [],
-  }),
+  get_diff_summary: (args, s): DiffSummary =>
+    s.liveDiffs[String(args.taskId)] ?? {
+      taskId: String(args.taskId),
+      branch: null,
+      baseRef: "main",
+      diff: NO_DIFF,
+      files: [],
+      commits: [],
+    },
   reveal_task_worktree: done,
   list_open_in_targets: () => [
     { target: "vs_code", label: "VS Code" },

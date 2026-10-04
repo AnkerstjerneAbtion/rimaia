@@ -183,9 +183,15 @@ compared by opening two files rather than by hunting.
   | `empty` | board, runs |
   | `welcome` | welcome |
   | `error` | runs |
+  | `review-digest` | review (task 017: the overnight digest) |
+  | `review-truncated`, `review-pruned`, `review-no-commits`, `review-not-recorded`, `review-empty` | review, after the key `Enter` (task 017: the queue, opened on the state each is named for) |
+  | `review-chain` | review, after the keys `Enter r` (task 017: the reject note step, open) |
 
-  That is 11 captures per project and 44 per run (10 and 40 until task 033 added
-  `run-detail`).
+  That is 18 captures per project and 72 per run (10 and 40 until task 033 added
+  `run-detail`, 11 and 44 until task 017 added the review states). A row may carry
+  a key sequence, pressed after the sidebar click and before the capture; only keys
+  that write nothing appear in one (`Enter`, `j`, `r` and `c`, never `a`, `o`, `w`
+  or the note's send).
 - **File names:** `.screenshots/<label>/<scenario>--<view>--<scheme>--<width>.png`, e.g.
   `.screenshots/latest/busy--board--dark--1440.png`. The label is `latest` unless
   `npm run screenshot -- --label before` names another; a label beginning with `.` is refused,

@@ -86,26 +86,100 @@ describe("fixture answers", () => {
     expect(await transports.command("list_tasks", { filter: {} })).toEqual(before);
   });
 
-  it("answers an empty review digest in every scenario", async () => {
+  it("answers an empty review digest in every scenario but the one that shows a night", async () => {
     for (const name of SCENARIO_NAMES) {
       const transports = createFixtureTransports(buildScenario(name));
       const digest = (await transports.command("get_review_digest")) as ReviewDigest;
 
+      expect(Object.keys(digest.totals.counts).sort()).toEqual([
+        "blocked",
+        "cancelled",
+        "completed",
+        "failed",
+        "interrupted",
+        "running",
+        "skipped",
+        "waiting_retry",
+      ]);
+      if (name === "review-digest") continue;
       expect([name, digest.entries]).toEqual([name, []]);
-      expect(Object.keys(digest.totals.counts).sort()).toEqual(
-        [
-          "blocked",
-          "cancelled",
-          "completed",
-          "failed",
-          "interrupted",
-          "running",
-          "skipped",
-          "waiting_retry",
-        ],
-      );
       expect(Object.values(digest.totals.counts).every((count) => count === 0)).toBe(true);
     }
+  });
+
+  it("seeds a night led by a failure and a blocked chain, with a skipped entry and a run with no cost", async () => {
+    const transports = createFixtureTransports(buildScenario("review-digest"));
+    const digest = (await transports.command("get_review_digest")) as ReviewDigest;
+
+    expect(digest.entries.map((entry) => entry.outcome).slice(0, 3)).toEqual([
+      "failed",
+      "blocked",
+      "blocked",
+    ]);
+    expect(digest.entries.some((entry) => entry.outcome === "skipped")).toBe(true);
+    expect(digest.entries.some((entry) => entry.runs > 0 && entry.costUsd === null)).toBe(true);
+    expect(digest.totals.runs).toBeGreaterThan(0);
+  });
+
+  it("puts the task each review scenario is named for first in board order", async () => {
+    const expected: Record<string, string> = {
+      "review-truncated": "truncated",
+      "review-pruned": "pruned",
+      "review-no-commits": "none",
+      "review-not-recorded": "not_recorded",
+    };
+    for (const name of Object.keys(expected)) {
+      const scenario = buildScenario(name as ScenarioName);
+      const transports = createFixtureTransports(scenario);
+      const tasks = (await transports.command("list_tasks", { filter: {} })) as Array<{
+        id: string;
+        column: string;
+      }>;
+      const first = tasks.find((task) => task.column === "in_review");
+      const detail = (await transports.command("get_task", { id: first?.id })) as {
+        lastRun: { id: string };
+      };
+      const run = (await transports.command("get_run", { runId: detail.lastRun.id })) as {
+        review: { source: string; bundle?: { patchTruncated: boolean; patchPrunedAt: string | null } | null };
+      };
+      const shown =
+        run.review.source === "not_recorded"
+          ? "not_recorded"
+          : run.review.bundle === null
+            ? "none"
+            : run.review.bundle?.patchPrunedAt
+              ? "pruned"
+              : run.review.bundle?.patchTruncated
+                ? "truncated"
+                : "whole";
+      expect([name, shown]).toEqual([name, expected[name]]);
+    }
+  });
+
+  it("seeds three dependents, one built on it and one archived, and one dependency for review-chain", async () => {
+    const transports = createFixtureTransports(buildScenario("review-chain"));
+    const tasks = (await transports.command("list_tasks", { filter: {} })) as Array<{
+      id: string;
+      column: string;
+    }>;
+    const first = tasks.find((task) => task.column === "in_review")?.id;
+    const dependents = (await transports.command("get_task_dependents", {
+      taskId: first,
+    })) as Array<{ builtOn: boolean; archivedAt: string | null }>;
+    const detail = (await transports.command("get_task", { id: first })) as { dependsOn: string[] };
+
+    expect(dependents).toHaveLength(3);
+    expect(dependents.filter((dependent) => dependent.builtOn)).toHaveLength(1);
+    expect(dependents.filter((dependent) => dependent.archivedAt !== null)).toHaveLength(1);
+    expect(detail.dependsOn).toHaveLength(1);
+  });
+
+  it("seeds an empty review queue for review-empty", async () => {
+    const transports = createFixtureTransports(buildScenario("review-empty"));
+    const tasks = (await transports.command("list_tasks", { filter: {} })) as Array<{
+      column: string;
+    }>;
+    expect(tasks.some((task) => task.column === "in_review")).toBe(false);
   });
 
   it("rejects a command with no row instead of hanging", async () => {

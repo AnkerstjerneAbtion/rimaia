@@ -2,11 +2,14 @@ import type {
   Analytics,
   AppInfo,
   BoardColumn,
+  DiffSummary,
+  DigestEntry,
   DoctorCheckResult,
   DoctorReport,
   QueueEntry,
   QueueStatus,
   Repository,
+  ReviewDigest,
   RimaiaError,
   Run,
   RunCapacity,
@@ -15,6 +18,7 @@ import type {
   RunStatus,
   RunTail,
   StoredBundle,
+  TaskDependent,
   TaskSummary,
 } from "../../types";
 import { FIXTURE_NOW, FIXTURE_SENTINEL } from "./constants";
@@ -36,6 +40,15 @@ export const SCENARIO_NAMES = [
   "empty",
   "welcome",
   "error",
+  // Task 017: one per state of the morning review, so each is one click (and a
+  // key sequence) away for the screenshot script.
+  "review-digest",
+  "review-truncated",
+  "review-pruned",
+  "review-no-commits",
+  "review-not-recorded",
+  "review-chain",
+  "review-empty",
 ] as const;
 export type ScenarioName = (typeof SCENARIO_NAMES)[number];
 
@@ -51,6 +64,17 @@ export interface Scenario {
   /** What `get_run` answers as each run's review, by run id. A run with no
    *  entry reads as `not_recorded`, like a row from before task 033. */
   readonly reviews: Record<string, RunReview>;
+  /** What `get_review_digest` answers. Empty in every scenario but the one that
+   *  shows a night. */
+  readonly digest: ReviewDigest;
+  /** `get_task_dependents` by task id. A task with no row falls back to the
+   *  cards whose `blockingTitle` names it. */
+  readonly dependents: Record<string, TaskDependent[]>;
+  /** `get_task`'s `dependsOn` by task id. */
+  readonly dependencies: Record<string, string[]>;
+  /** What the local `get_diff_summary` answers, by task id: the branch as it is
+   *  now, which the morning review must never show for a not-recorded run. */
+  readonly liveDiffs: Record<string, DiffSummary>;
   readonly queueStatus: QueueStatus;
   readonly capacity: RunCapacity;
   readonly doctor: DoctorReport;
@@ -604,6 +628,7 @@ function populated(name: ScenarioName, runningCount: number, full: boolean): Sce
     runs,
     tails,
     reviews,
+    ...noReviewExtras(),
     queueStatus: queueFor(tasks, "running", running),
     capacity: { mode: parallel ? "parallel" : "sequential", maxConcurrency, ceiling: 8 },
     doctor: full ? doctor() : healthyDoctor(),
@@ -687,6 +712,342 @@ function truncatedBundle(createdAt: string): StoredBundle {
   };
 }
 
+/** The digest no scenario but `review-digest` can contradict: nothing ended in
+ *  the 24-hour window that ends at {@link FIXTURE_NOW}. */
+function emptyDigest(): ReviewDigest {
+  return {
+    since: ago(DAY),
+    until: FIXTURE_NOW,
+    entries: [],
+    totals: {
+      runs: 0,
+      runSeconds: 0,
+      spanSeconds: null,
+      costUsd: 0,
+      runsWithoutCost: 0,
+      counts: {
+        failed: 0,
+        blocked: 0,
+        waiting_retry: 0,
+        interrupted: 0,
+        cancelled: 0,
+        running: 0,
+        completed: 0,
+        skipped: 0,
+      },
+    },
+  };
+}
+
+function noReviewExtras(): Pick<Scenario, "digest" | "dependents" | "dependencies" | "liveDiffs"> {
+  return { digest: emptyDigest(), dependents: {}, dependencies: {}, liveDiffs: {} };
+}
+
+/** A small change that fits the patch whole: two files, one commit. */
+function smallBundle(createdAt: string, subject: string): StoredBundle {
+  const patch = [
+    "diff --git a/src/lib/board.ts b/src/lib/board.ts",
+    "index 3c1d9aa..e07b5c2 100644",
+    "--- a/src/lib/board.ts",
+    "+++ b/src/lib/board.ts",
+    "@@ -88,7 +88,8 @@ export function groupIntoColumns<T extends BoardCard>(tasks: readonly T[]) {",
+    "   for (const column of BOARD_COLUMNS) {",
+    "-    grouped[column].sort(compareBoardOrder);",
+    "+    // Each repository's cards stay together: a position is only comparable inside one.",
+    "+    grouped[column].sort(compareBoardOrder);",
+    "   }",
+    "   return grouped;",
+    " }",
+    "diff --git a/src/lib/board.test.ts b/src/lib/board.test.ts",
+    "index 91f0b3d..2a6e4f8 100644",
+    "--- a/src/lib/board.test.ts",
+    "+++ b/src/lib/board.test.ts",
+    "@@ -12,3 +12,9 @@ describe(\"groupIntoColumns\", () => {",
+    "+  it(\"keeps one repository's cards together\", () => {",
+    "+    const grouped = groupIntoColumns([card(\"a\", 1, \"x\"), card(\"b\", 2, \"y\"), card(\"c\", 3, \"x\")]);",
+    "+    expect(grouped.ready.map((c) => c.id)).toEqual([\"a\", \"c\", \"b\"]);",
+    "+  });",
+    "",
+  ].join("\n");
+  return {
+    diff: { filesChanged: 2, insertions: 8, deletions: 1 },
+    files: [
+      { path: "src/lib/board.ts", insertions: 2, deletions: 1, patch: "included" },
+      { path: "src/lib/board.test.ts", insertions: 6, deletions: 0, patch: "included" },
+    ],
+    commits: [
+      {
+        sha: "7d3e5f60a1b2c3d4e5f60718293a4b5c6d7e8f90",
+        shortSha: "7d3e5f6",
+        subject,
+        author: "Rimaia",
+        committedAt: createdAt,
+      },
+    ],
+    patch,
+    patchBytes: patch.length,
+    patchTruncated: false,
+    patchPrunedAt: null,
+    createdAt,
+  };
+}
+
+/** The same kind of change once the patch has aged out (ADR-0036 point 6): the
+ *  file list and commits are kept, the patch is not. */
+function prunedBundle(createdAt: string): StoredBundle {
+  return {
+    ...smallBundle(createdAt, "Keep each repository's cards together"),
+    patch: null,
+    patchPrunedAt: ago(2 * DAY),
+  };
+}
+
+interface ReviewSpec {
+  readonly id: string;
+  readonly title: string;
+  /** What `get_run` answers for the task's newest run; `"none"` is a card
+   *  dragged into review by hand, which has no run at all. */
+  readonly review: RunReview | "none";
+  readonly pr?: boolean;
+}
+
+function reviewTask(spec: ReviewSpec, index: number): TaskSummary {
+  const base = task({
+    id: spec.id,
+    title: spec.title,
+    column: "in_review",
+    lastRun: spec.review === "none" ? null : lastRun("succeeded", "success", (3 + index) * HOUR),
+  });
+  return { ...base, branch: `rimaia/${spec.id}`, worktreePath: `/worktrees/rimaia-app/${spec.id}` };
+}
+
+/** The tasks around the reviewed ones, so the board is not only the queue. */
+function reviewSurroundings(): TaskSummary[] {
+  return [
+    task({ id: "t-ready-01", title: IDLE_READY_TITLES[0] }),
+    task({ id: "t-ready-02", title: IDLE_READY_TITLES[1] }),
+    task({
+      id: "t-done-1",
+      title: "Record the first unattended run's findings",
+      column: "done",
+      lastRun: lastRun("succeeded", "success", 2 * DAY),
+    }),
+  ];
+}
+
+interface ReviewBoardOptions {
+  readonly dependents?: Record<string, TaskDependent[]>;
+  readonly dependencies?: Record<string, string[]>;
+  readonly liveDiffs?: Record<string, DiffSummary>;
+}
+
+/** A board whose `in_review` column holds `specs`, the first of them first in
+ *  board order — so the queue opens on the state the scenario is named for. */
+function reviewBoard(
+  name: ScenarioName,
+  specs: ReviewSpec[],
+  options: ReviewBoardOptions = {},
+): Scenario {
+  positionCounter = 0;
+  runCounter = 0;
+  const reviewed = specs.map(reviewTask);
+  const tasks = [...reviewed, ...reviewSurroundings()];
+
+  const runs: RunListEntry[] = [];
+  const reviews: Record<string, RunReview> = {};
+  specs.forEach((spec, index) => {
+    if (spec.review === "none") return;
+    const summary = reviewed[index];
+    const run = runFor(summary, "rimaia-app", (3 + index) * HOUR + 40 * MINUTE, {
+      prUrl: spec.pr === false ? null : `https://github.com/example/rimaia-app/pull/${210 + index}`,
+    });
+    runs.push(run);
+    if (spec.review.source === "recorded") {
+      reviews[run.id] = spec.review;
+      if (spec.review.bundle) {
+        run.headSha = spec.review.bundle.commits[0].sha;
+        run.baseSha = "c0ffee00c0ffee00c0ffee00c0ffee00c0ffee00";
+      } else {
+        run.headSha = run.baseSha = "c0ffee00c0ffee00c0ffee00c0ffee00c0ffee00";
+      }
+    }
+  });
+
+  return {
+    name,
+    appInfo: appInfo(true),
+    repositories: repositories(),
+    tasks,
+    runs,
+    tails: [],
+    reviews,
+    ...noReviewExtras(),
+    dependents: options.dependents ?? {},
+    dependencies: options.dependencies ?? {},
+    liveDiffs: options.liveDiffs ?? {},
+    queueStatus: queueFor(tasks, "paused", []),
+    capacity: { mode: "sequential", maxConcurrency: 1, ceiling: 8 },
+    doctor: healthyDoctor(),
+    analytics: analytics(false),
+    runsReadError: null,
+  };
+}
+
+const QUEUE_TAIL: ReviewSpec[] = [
+  {
+    id: "t-review-2",
+    title: "Show the queue plan on the Runs view",
+    review: { source: "recorded", bundle: smallBundle(ago(4 * HOUR), "Show the queue plan") },
+  },
+  {
+    id: "t-review-3",
+    title: "Let the board filter by run state",
+    review: { source: "recorded", bundle: null },
+  },
+];
+
+function reviewChain(): Scenario {
+  const reviewed: ReviewSpec = {
+    id: "t-review-1",
+    title: "Introduce semantic status tokens for success, warning and danger across both themes",
+    review: {
+      source: "recorded",
+      bundle: smallBundle(ago(3 * HOUR), "Add the semantic status tokens"),
+    },
+  };
+  const dependent = (
+    id: string,
+    title: string,
+    overrides: Partial<TaskDependent> = {},
+  ): TaskDependent => ({
+    id,
+    title,
+    column: "ready",
+    runState: "blocked",
+    archivedAt: null,
+    builtOn: false,
+    ...overrides,
+  });
+  return reviewBoard("review-chain", [reviewed, ...QUEUE_TAIL], {
+    dependencies: { [reviewed.id]: ["t-done-1"] },
+    dependents: {
+      [reviewed.id]: [
+        dependent("t-dep-1", "Wire the new status colours into the run history list", {
+          builtOn: true,
+          column: "in_review",
+          runState: "idle",
+        }),
+        dependent("t-dep-2", "Give the digest outcomes the same dot and word as the board"),
+        dependent("t-dep-3", "Retire the legacy badge pairs", {
+          column: "not_ready",
+          runState: "idle",
+          archivedAt: ago(DAY),
+        }),
+      ],
+    },
+  });
+}
+
+function reviewDigestScenario(): Scenario {
+  const base = reviewBoard("review-digest", [
+    {
+      id: "t-review-1",
+      title: "Add the doctor banner to every view",
+      review: { source: "recorded", bundle: smallBundle(ago(3 * HOUR), "Add the doctor banner") },
+    },
+    {
+      id: "t-review-2",
+      title: "Show the queue plan on the Runs view",
+      review: { source: "recorded", bundle: smallBundle(ago(4 * HOUR), "Show the queue plan") },
+    },
+  ]);
+  const failedTitle = "Migrate the analytics page to the shared period selector";
+  const entry = (
+    taskId: string,
+    title: string,
+    outcome: DigestEntry["outcome"],
+    overrides: Partial<DigestEntry> = {},
+  ): DigestEntry => ({
+    taskId,
+    title,
+    repositoryId: REPO_APP,
+    column: outcome === "completed" ? "in_review" : "ready",
+    outcome,
+    runs: 0,
+    runSeconds: null,
+    costUsd: null,
+    lastRunId: null,
+    errorMessage: null,
+    prUrl: null,
+    blockingTitle: null,
+    skipReason: null,
+    ...overrides,
+  });
+  return {
+    ...base,
+    digest: {
+      since: ago(11 * HOUR),
+      until: FIXTURE_NOW,
+      entries: [
+        entry("t-failed", failedTitle, "failed", {
+          runs: 2,
+          runSeconds: 2_460,
+          costUsd: 3.18,
+          errorMessage: "The agent stopped after repeated tool failures.",
+        }),
+        entry("t-blocked-1", "Wire the new status colours into the run history list", "blocked", {
+          blockingTitle: failedTitle,
+        }),
+        entry("t-blocked-2", "Retire the legacy badge styles", "blocked", {
+          blockingTitle: failedTitle,
+        }),
+        entry("t-waiting", "Cache the repository lookup between board renders", "waiting_retry", {
+          runs: 1,
+          runSeconds: 1_860,
+          costUsd: 1.12,
+        }),
+        entry("t-cancelled", "Prototype drag handles for the dependency editor", "cancelled", {
+          runs: 1,
+          runSeconds: 540,
+          costUsd: 0.46,
+        }),
+        entry("t-review-1", "Add the doctor banner to every view", "completed", {
+          runs: 1,
+          runSeconds: 1_980,
+          costUsd: 2.48,
+        }),
+        // The run whose cost was never recorded: "not recorded", never $0.00.
+        entry("t-review-2", "Show the queue plan on the Runs view", "completed", {
+          runs: 1,
+          runSeconds: 1_560,
+          costUsd: null,
+        }),
+        entry("t-skipped", "Refresh the marketing site footer", "skipped", {
+          repositoryId: REPO_SITE,
+          skipReason: "unattended_runs_not_allowed",
+        }),
+      ],
+      totals: {
+        runs: 6,
+        runSeconds: 8_400,
+        spanSeconds: 27_000,
+        costUsd: 7.24,
+        runsWithoutCost: 1,
+        counts: {
+          failed: 1,
+          blocked: 2,
+          waiting_retry: 1,
+          interrupted: 0,
+          cancelled: 1,
+          running: 0,
+          completed: 2,
+          skipped: 1,
+        },
+      },
+    },
+  };
+}
+
 function appInfo(onboardingDismissed: boolean): AppInfo {
   return {
     appVersion: "0.1.0",
@@ -706,6 +1067,7 @@ function empty(name: ScenarioName, onboardingDismissed: boolean, withRepository:
     runs: [],
     tails: [],
     reviews: {},
+    ...noReviewExtras(),
     queueStatus: queueFor([], "paused", []),
     capacity: { mode: "sequential", maxConcurrency: 1, ceiling: 8 },
     doctor: healthyDoctor(),
@@ -716,6 +1078,65 @@ function empty(name: ScenarioName, onboardingDismissed: boolean, withRepository:
 
 export function buildScenario(name: ScenarioName): Scenario {
   switch (name) {
+    case "review-digest":
+      return reviewDigestScenario();
+    case "review-truncated":
+      return reviewBoard(name, [
+        {
+          id: "t-review-1",
+          title: "Add the doctor banner to every view",
+          review: { source: "recorded", bundle: truncatedBundle(ago(3 * HOUR)) },
+        },
+        ...QUEUE_TAIL,
+      ]);
+    case "review-pruned":
+      return reviewBoard(name, [
+        {
+          id: "t-review-1",
+          title: "Keep each repository's cards together in the board order",
+          review: { source: "recorded", bundle: prunedBundle(ago(3 * HOUR)) },
+        },
+        ...QUEUE_TAIL,
+      ]);
+    case "review-no-commits":
+      return reviewBoard(name, [
+        {
+          id: "t-review-1",
+          title: "Check the welcome screen against the new doctor wording",
+          review: { source: "recorded", bundle: null },
+        },
+        ...QUEUE_TAIL.slice(0, 1),
+      ]);
+    case "review-not-recorded":
+      return reviewBoard(
+        name,
+        [
+          {
+            id: "t-review-1",
+            title: "Persist the board's repository filter across restarts",
+            review: { source: "not_recorded" },
+          },
+          ...QUEUE_TAIL,
+        ],
+        {
+          // What the branch holds now. The morning review never asks for it,
+          // and the screenshot is the proof: none of these names appear.
+          liveDiffs: {
+            "t-review-1": {
+              taskId: "t-review-1",
+              branch: "rimaia/t-review-1",
+              baseRef: "main",
+              diff: { filesChanged: 1, insertions: 30, deletions: 2 },
+              files: [{ path: "src/live-branch-only.ts", insertions: 30, deletions: 2 }],
+              commits: [],
+            },
+          },
+        },
+      );
+    case "review-chain":
+      return reviewChain();
+    case "review-empty":
+      return reviewBoard(name, []);
     case "busy":
       return populated(name, 3, true);
     case "one-run":
