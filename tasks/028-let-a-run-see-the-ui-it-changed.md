@@ -178,13 +178,14 @@ compared by opening two files rather than by hunting.
 
   | Scenario | Views |
   | --- | --- |
-  | `busy` | board, runs, analytics, settings (its doctor section) |
+  | `busy` | board, runs, run-detail (task 033), analytics, settings (its doctor section) |
   | `one-run`, `two-runs` | runs |
   | `empty` | board, runs |
   | `welcome` | welcome |
   | `error` | runs |
 
-  That is 11 captures per project and 44 per run.
+  That is 11 captures per project and 44 per run (10 and 40 until task 033 added
+  `run-detail`).
 - **File names:** `.screenshots/<label>/<scenario>--<view>--<scheme>--<width>.png`, e.g.
   `.screenshots/latest/busy--board--dark--1440.png`. The label is `latest` unless
   `npm run screenshot -- --label before` names another; a label beginning with `.` is refused,

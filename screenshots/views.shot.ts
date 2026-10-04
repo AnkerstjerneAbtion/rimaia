@@ -17,6 +17,9 @@ interface Capture {
   sidebar: string | null;
   /** Visible once the view has rendered. */
   landmark: string;
+  /** A Runs-history row to open, by its task title, once the view is up — the
+   *  run detail overlay has no sidebar entry of its own. */
+  open?: string;
 }
 
 const BOARD = { sidebar: "Board", landmark: ".board-view" };
@@ -25,6 +28,14 @@ const RUNS = { sidebar: "Runs", landmark: ".runs-view" };
 const CAPTURES: Capture[] = [
   { scenario: "busy", view: "board", ...BOARD },
   { scenario: "busy", view: "runs", ...RUNS },
+  // Task 033: a finished run whose finish recorded a truncated bundle.
+  {
+    scenario: "busy",
+    view: "run-detail",
+    sidebar: "Runs",
+    landmark: ".run-detail-body",
+    open: "Add the doctor banner to every view",
+  },
   { scenario: "busy", view: "analytics", sidebar: "Analytics", landmark: ".analytics-view" },
   { scenario: "busy", view: "settings", sidebar: "Settings", landmark: "#settings-doctor" },
   { scenario: "one-run", view: "runs", ...RUNS },
@@ -58,6 +69,9 @@ for (const capture of CAPTURES) {
       await expect(page.locator(".app .sidebar")).toBeVisible();
       if (capture.sidebar) {
         await page.getByRole("button", { name: new RegExp(`^${capture.sidebar}`) }).click();
+      }
+      if (capture.open) {
+        await page.locator(".runs-history-open", { hasText: capture.open }).click();
       }
       await expect(page.locator(capture.landmark)).toBeVisible();
       // No fixed wait stands in for either: the flag is the fixture transports'
