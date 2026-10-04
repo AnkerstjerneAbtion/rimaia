@@ -20,6 +20,7 @@ import { sortableKeyboardCoordinates } from "@dnd-kit/sortable";
 import { archiveTasks, createTask, toRimaiaError } from "../../lib/commands";
 import { BOARD_COLUMNS, visibleColumns } from "../../lib/board";
 import { describeArchiveReport } from "../../lib/archive";
+import { isEditableTarget } from "../../lib/keyboard";
 import type { BoardCard, BoardColumns } from "../../lib/board";
 import type { BoardColumn, RimaiaError, Task, TaskSummary } from "../../types";
 import { useRepositories, useTasks } from "../../hooks/useTasks";
@@ -204,20 +205,6 @@ export function rangeBetween(
 
   const [start, end] = from <= to ? [from, to] : [to, from];
   return list.slice(start, end + 1).map((card) => card.id);
-}
-
-/** `n` and `/` must not fire while the user is typing anywhere editable —
- *  task 005's own wording for the plan textarea, generalised to every
- *  editable surface so it keeps holding once stage 3 adds one. */
-export function isEditableTarget(target: EventTarget | null): boolean {
-  if (!(target instanceof HTMLElement)) return false;
-  if (target.tagName === "INPUT" || target.tagName === "TEXTAREA") return true;
-  // `isContentEditable` is the spec-correct check (it accounts for
-  // inheritance from an ancestor), but jsdom implements neither it nor the
-  // `contentEditable` IDL setter — the attribute is checked directly too, so
-  // this holds in a real browser and in a test that can only set the
-  // attribute.
-  return target.isContentEditable || target.getAttribute("contenteditable") === "true";
 }
 
 // ---------------------------------------------------------------------------

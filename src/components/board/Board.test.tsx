@@ -9,7 +9,6 @@ import {
   Board,
   describeDragEntity,
   findCard,
-  isEditableTarget,
   nextFocusTarget,
   rangeBetween,
   resolveDrop,
@@ -270,24 +269,6 @@ describe("rangeBetween", () => {
   it("returns null for an id the board does not hold", () => {
     expect(rangeBetween(columns, "a", "ghost")).toBeNull();
     expect(rangeBetween(columns, "ghost", "a")).toBeNull();
-  });
-});
-
-describe("isEditableTarget", () => {
-  it("treats inputs, textareas and contenteditable elements as typing surfaces", () => {
-    expect(isEditableTarget(document.createElement("input"))).toBe(true);
-    expect(isEditableTarget(document.createElement("textarea"))).toBe(true);
-    // jsdom implements neither `contentEditable`'s setter nor
-    // `isContentEditable` at all (a documented jsdom gap) - the attribute is
-    // what `isEditableTarget` falls back to, and what a test can set.
-    const editable = document.createElement("div");
-    editable.setAttribute("contenteditable", "true");
-    expect(isEditableTarget(editable)).toBe(true);
-  });
-
-  it("does not treat a plain element, or null, as a typing surface", () => {
-    expect(isEditableTarget(document.createElement("div"))).toBe(false);
-    expect(isEditableTarget(null)).toBe(false);
   });
 });
 
