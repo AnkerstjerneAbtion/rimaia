@@ -44,7 +44,7 @@ reviewable in the app afterwards.
 | 31 | [033](033-record-the-commit-a-run-ended-on-and-a-review-bundle.md) | Record the commit a run ended on, and a review bundle | v0.4 | 015, 030 | #34 |
 | 32 | [034](034-review-actions-on-every-door.md) | Review actions on every door | v0.4 | 033 | #34 |
 | 33 | [017](017-morning-review-flow.md) | Morning review flow | v0.4 | 033, 034 | #34 |
-| 34 | [035](035-runs-have-a-kind-and-review-findings-have-a-home.md) | Runs have a kind, and review findings have a home | v0.4 | 033, 034 | — |
+| 34 | [035](035-runs-have-a-kind-and-review-findings-have-a-home.md) | Runs have a kind, and review findings have a home | v0.4 | 033, 034 | #34 |
 | 35 | [036](036-a-board-port-between-the-runner-and-the-board.md) | A board port between the runner and the board | v0.4 | 035 | — |
 | 36 | [021](021-review-and-fix-loop.md) | Review-and-fix loop | v0.4 | 035, 036 | — |
 | 37 | [037](037-the-review-loop-in-the-interface.md) | The review loop in the interface | v0.4 | 021 | — |
