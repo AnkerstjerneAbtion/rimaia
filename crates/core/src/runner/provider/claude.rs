@@ -711,13 +711,25 @@ fn user_from_value(raw: &Value) -> UserEvent {
 /// The guess is exactly as load-bearing as it always was. What changed is that
 /// it is now one provider's guess about one wire format, instead of a shape
 /// imposed on every future provider (ADR-0026).
+///
+/// **Two words now mean "carry on".** Task 035's recordings were made with the
+/// weekly window past its warning threshold, and carry `"allowed_warning"` on
+/// runs that completed. Reading it as a wall would hold the queue until the
+/// window resets, days away, whenever a run died without its `result`
+/// (ADR-0011's 2026-10-05 amendment). Every other word is still a wall.
 fn usage_from_value(raw: &Value) -> UsageWindow {
     let info = raw.get("rate_limit_info").unwrap_or(&Value::Null);
 
     UsageWindow {
         state: match text(info, "status").as_deref() {
             None => UsageState::Unknown,
-            Some(status) if status.eq_ignore_ascii_case(RATE_LIMIT_ALLOWED) => UsageState::Allowed,
+            Some(status)
+                if RATE_LIMIT_ALLOWED
+                    .iter()
+                    .any(|allowed| status.eq_ignore_ascii_case(allowed)) =>
+            {
+                UsageState::Allowed
+            }
             Some(_) => UsageState::Exhausted,
         },
         // Absolute, always: `resetsAt` is epoch seconds. An epoch outside the
@@ -732,8 +744,10 @@ fn usage_from_value(raw: &Value) -> UsageWindow {
     }
 }
 
-/// The one `rate_limit_info.status` any recording has ever carried.
-const RATE_LIMIT_ALLOWED: &str = "allowed";
+/// The two `rate_limit_info.status` words the recordings carry, both on runs
+/// that went on to complete: `allowed`, and `allowed_warning` once a window is
+/// past its warning threshold.
+const RATE_LIMIT_ALLOWED: [&str; 2] = ["allowed", "allowed_warning"];
 
 /// The terminal vocabulary `spike/FINDINGS.md` §5 measured against Claude Code
 /// 2.1.234, mapped onto Rimaia's.
@@ -1021,13 +1035,15 @@ mod tests {
             assert_eq!(window.state, UsageState::Exhausted, "{status:?}");
         }
 
-        // And the one word the corpus does prove still means "carry on".
-        let RunEvent::Usage(allowed) =
-            parse(r#"{"type":"rate_limit_event","rate_limit_info":{"status":"allowed"}}"#)
-        else {
-            panic!("expected a usage event");
-        };
-        assert_eq!(allowed.state, UsageState::Allowed);
+        // And the two words the corpus does prove still mean "carry on".
+        for status in ["allowed", "allowed_warning"] {
+            let RunEvent::Usage(allowed) = parse(&format!(
+                r#"{{"type":"rate_limit_event","rate_limit_info":{{"status":"{status}"}}}}"#
+            )) else {
+                panic!("expected a usage event");
+            };
+            assert_eq!(allowed.state, UsageState::Allowed, "{status:?}");
+        }
 
         // A window this provider could not read at all is `Unknown`, which is
         // not a wall (ADR-0026 point 8).

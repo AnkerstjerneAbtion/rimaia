@@ -684,3 +684,17 @@ old server name: a review grant served as `rimaia` is exactly the trap this task
 close. Land the halves as separate runs of commits (Scope, top), so the diff reads as two
 reviews. Do not stop at a line count; the only stops are the ones named above (the two
 fixture outcomes D30 does not cover, and a missing column).
+
+### Decision taken during implementation, 2026-10-05: `allowed_warning` is allowed
+
+The new recordings carry `rate_limit_event` with `status: "allowed_warning"` (the account was
+past the weekly warning threshold). `provider/claude.rs` treats any status other than
+`"allowed"` as a usage limit, so a run that died without a `result` past the threshold would
+hold the whole queue until the window resets. The operator chose to fix it inside this task:
+
+1. Test first: a classifier test over a recording with `allowed_warning` fails as a usage limit.
+2. Map `"allowed_warning"` to Allowed in Claude's usage parser. `the_rate_limit_event_every_run_emits_is_not_a_usage_limit`
+   accepts both non-limit statuses.
+3. Note both statuses in `crates/core/tests/fixtures/cli/README.md`, and append a dated
+   amendment to ADR-0011 stating that `allowed_warning` is not a limit.
+4. Then commit the two recordings and their tests.
