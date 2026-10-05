@@ -266,8 +266,8 @@ async fn the_init_event_reports_the_isolation_that_was_actually_applied() {
 async fn the_usage_limit_signal_is_read_from_its_own_fields_rather_than_grepped() {
     // ADR-0011's amendment: a typed event on every run, early and unprompted —
     // not an error message to pattern-match. The state is `Allowed` because
-    // `"allowed"` is the one status the corpus contains; see this file's header
-    // and `spike/FINDINGS.md` §4 for why nothing else is asserted by value.
+    // this recording says `"allowed"`; see this file's header and
+    // `spike/FINDINGS.md` §4 for why no wall is asserted by value.
     let replay = Replay::of("success").await;
     let usage = replay
         .stream

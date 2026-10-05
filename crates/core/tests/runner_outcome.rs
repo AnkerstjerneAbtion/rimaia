@@ -11,7 +11,8 @@
 //!
 //! **No fabricated `usage_limit` payload.** `spike/FINDINGS.md` §4 records that
 //! the `rate_limit_event` when `rate_limit_info.status` is not `"allowed"` was
-//! never observed, and there is no fixture for it. So the tests below assert the
+//! never observed, and there is no fixture for it. Task 035's recordings since
+//! carry `"allowed_warning"`, on runs that completed, which is still not a wall. So the tests below assert the
 //! *predicate* the whole corpus proves — the field names, and "the status is not
 //! allowed" — using values written to look invented, because a plausible-looking
 //! guess is what would turn into a contract nobody checked.
@@ -342,11 +343,13 @@ const SYNTHESIZED_USAGE_LIMITS: [&str; 2] = ["usage-limit", "usage-limit-no-rese
 
 #[test]
 fn the_rate_limit_event_every_run_emits_is_not_a_usage_limit() {
-    // Every real recording carries `"status":"allowed"` early and unprompted.
-    // Reading that as a limit would fail every run in the corpus, which is the
-    // mistake this test exists to keep failing loudly. The two synthesized
-    // fixtures are carved out because they are the *other* branch — they exist
-    // precisely to carry a status that is not `allowed`.
+    // Every real recording carries a `rate_limit_event` early and unprompted,
+    // with `"status":"allowed"`, or `"allowed_warning"` when the window was past
+    // its warning threshold (the two `run-scoped-server-*` recordings). Reading
+    // either as a limit would fail runs that completed, which is the mistake
+    // this test exists to keep failing loudly. The two synthesized fixtures are
+    // carved out because they are the *other* branch — they exist precisely to
+    // carry a status that is not one of these.
     for name in all_fixtures() {
         if SYNTHESIZED_USAGE_LIMITS.contains(&name.as_str()) {
             continue;
@@ -356,10 +359,31 @@ fn the_rate_limit_event_every_run_emits_is_not_a_usage_limit() {
         assert_eq!(
             replay.usage.as_ref().map(|usage| usage.window.state),
             Some(UsageState::Allowed),
-            "{name}: the corpus proves exactly one status value"
+            "{name}: both statuses the corpus proves mean \"carry on\""
         );
         assert_ne!(replay.class(), ExitClass::UsageLimit, "{name}");
     }
+}
+
+#[test]
+fn a_run_past_the_warning_threshold_that_dies_without_a_result_is_not_a_usage_limit() {
+    // `run-scoped-server-name.jsonl` was recorded with the weekly window at 86%,
+    // past its warning threshold, so its `rate_limit_event` says
+    // `allowed_warning`. The run itself completed. Had it died before its
+    // `result`, the window would be the only signal left, and reading that word
+    // as a wall would hold the whole queue until the window resets, days away,
+    // for a run the account was still allowed to make (ADR-0011's 2026-10-05
+    // amendment).
+    let mut replay = Replay::of("run-scoped-server-name");
+    assert_eq!(replay.class(), ExitClass::Success);
+
+    replay.result = None;
+
+    assert_eq!(
+        replay.usage.as_ref().map(|usage| usage.window.state),
+        Some(UsageState::Allowed),
+    );
+    assert_eq!(replay.class(), ExitClass::Transient);
 }
 
 #[test]

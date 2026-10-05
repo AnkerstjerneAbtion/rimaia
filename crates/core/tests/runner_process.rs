@@ -256,6 +256,185 @@ fn no_intent_ever_denies_the_run_scoped_server() {
     );
 }
 
+// ---------------------------------------------------------------------------
+// Two CLI facts the run-scoped name rests on (seam-contract D30 point 8)
+//
+// Read off recordings rather than assumed, as CLAUDE.md asks of CLI behaviour.
+// Both were made with two stdio stand-ins registered, `rimaia` and
+// `rimaia-run`; `tests/fixtures/cli/README.md` gives the argv and what each
+// stand-in listed and answered.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn the_bare_server_rule_denies_its_own_server_and_not_rimaia_run() {
+    // `--disallowedTools mcp__rimaia` alone, under `bypassPermissions` and with
+    // no `--allowedTools`: an unlisted call would be approved, so whatever the
+    // first server lost, the bare rule took, and whatever the second kept, the
+    // rule did not match as a prefix.
+    let stream = Recorded::of("run-scoped-server-name");
+
+    let init = stream.init();
+    assert_eq!(init["permissionMode"], "bypassPermissions");
+    assert_eq!(
+        stream.connected_servers(),
+        vec!["rimaia".to_string(), "rimaia-run".to_string()],
+        "both stand-ins connected, so a missing tool is the rule's doing",
+    );
+    assert_eq!(
+        stream.mcp_tools(),
+        vec!["mcp__rimaia-run__set_task_strategy".to_string()],
+        "the bare rule took every `rimaia` tool and left `rimaia-run`'s",
+    );
+
+    // Asked for by name, the operator's tool is not there to be called.
+    assert_eq!(
+        stream.tool_result_text("ToolSearch", "\"select:mcp__rimaia__get_task\""),
+        Some("No matching deferred tools found".to_string()),
+    );
+    assert!(
+        !stream
+            .tool_calls()
+            .iter()
+            .any(|name| name == "mcp__rimaia__get_task"),
+        "a denied tool is never called",
+    );
+
+    // And the run-scoped one is, and is answered.
+    assert_eq!(
+        stream.tool_result_text("mcp__rimaia-run__set_task_strategy", ""),
+        Some("ok: rimaia-run answered set_task_strategy".to_string()),
+    );
+    let result = stream.result();
+    assert_eq!(result["subtype"], "success");
+    assert_eq!(result["permission_denials"], serde_json::json!([]));
+
+    // Exact match, so the bare entry stays in what every run is denied.
+    let denied = claude::spell_out(&[ForbiddenOperation::RimaiaToolSurface]);
+    assert_eq!(denied.first().map(String::as_str), Some("mcp__rimaia"));
+}
+
+#[test]
+fn an_allowed_tool_at_a_hyphenated_server_is_callable_under_accept_edits() {
+    // The planner's shape: `acceptEdits`, which refuses an unallowed MCP call
+    // (`strategy-proposal.jsonl`'s section of the README), with
+    // `--allowedTools mcp__rimaia-run__set_task_strategy`. A success shows the
+    // allow rule matches the hyphenated server segment, so the respelled
+    // planner can still answer.
+    let stream = Recorded::of("run-scoped-server-allowed");
+
+    assert_eq!(stream.init()["permissionMode"], "acceptEdits");
+    assert_eq!(
+        stream.tool_calls(),
+        vec![
+            "ToolSearch".to_string(),
+            "mcp__rimaia-run__set_task_strategy".to_string()
+        ],
+    );
+    assert_eq!(
+        stream.tool_result_text("mcp__rimaia-run__set_task_strategy", ""),
+        Some("ok: rimaia-run answered set_task_strategy".to_string()),
+    );
+    let result = stream.result();
+    assert_eq!(result["subtype"], "success");
+    assert_eq!(result["permission_denials"], serde_json::json!([]));
+}
+
+/// A recording, parsed line by line into raw JSON: these tests read what the
+/// CLI printed, not what Rimaia's parser makes of it.
+struct Recorded {
+    events: Vec<serde_json::Value>,
+}
+
+impl Recorded {
+    fn of(name: &str) -> Self {
+        Self {
+            events: fixture_lines(name)
+                .map(|line| serde_json::from_str(&line).expect("a recorded line is JSON"))
+                .collect(),
+        }
+    }
+
+    fn init(&self) -> &serde_json::Value {
+        self.events
+            .iter()
+            .find(|event| event["type"] == "system" && event["subtype"] == "init")
+            .expect("an init event")
+    }
+
+    fn result(&self) -> &serde_json::Value {
+        self.events
+            .iter()
+            .find(|event| event["type"] == "result")
+            .expect("a result event")
+    }
+
+    fn connected_servers(&self) -> Vec<String> {
+        let mut names: Vec<String> = self.init()["mcp_servers"]
+            .as_array()
+            .expect("mcp_servers")
+            .iter()
+            .filter(|server| server["status"] == "connected")
+            .filter_map(|server| server["name"].as_str().map(str::to_string))
+            .collect();
+        names.sort();
+        names
+    }
+
+    fn mcp_tools(&self) -> Vec<String> {
+        self.init()["tools"]
+            .as_array()
+            .expect("tools")
+            .iter()
+            .filter_map(|tool| tool.as_str())
+            .filter(|tool| tool.starts_with("mcp__"))
+            .map(str::to_string)
+            .collect()
+    }
+
+    fn blocks(&self, role: &str) -> Vec<&serde_json::Value> {
+        self.events
+            .iter()
+            .filter(|event| event["type"] == role)
+            .filter_map(|event| event["message"]["content"].as_array())
+            .flatten()
+            .collect()
+    }
+
+    /// Every tool the run called, in order.
+    fn tool_calls(&self) -> Vec<String> {
+        self.blocks("assistant")
+            .into_iter()
+            .filter(|block| block["type"] == "tool_use")
+            .filter_map(|block| block["name"].as_str().map(str::to_string))
+            .collect()
+    }
+
+    /// The text of the result answering the first call to `tool` whose input
+    /// mentions `input_contains`, with its error flag required to be unset.
+    fn tool_result_text(&self, tool: &str, input_contains: &str) -> Option<String> {
+        let call = self.blocks("assistant").into_iter().find(|block| {
+            block["type"] == "tool_use"
+                && block["name"] == tool
+                && block["input"].to_string().contains(input_contains)
+        })?;
+        let answer = self
+            .blocks("user")
+            .into_iter()
+            .find(|block| block["type"] == "tool_result" && block["tool_use_id"] == call["id"])?;
+        assert_ne!(
+            answer["is_error"], true,
+            "{tool} was answered with an error"
+        );
+        match &answer["content"] {
+            serde_json::Value::String(text) => Some(text.clone()),
+            serde_json::Value::Array(parts) => parts
+                .iter()
+                .find_map(|part| part["text"].as_str().map(str::to_string)),
+            _ => None,
+        }
+    }
+}
+
 #[test]
 fn a_tool_handle_normalises_the_server_segment_the_way_the_cli_does() {
     // D30 point 3: an operator-chosen server name with a character outside
