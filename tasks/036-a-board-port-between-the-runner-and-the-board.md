@@ -6,6 +6,7 @@ status: ready
 depends_on: ["035"]
 adrs: ["0027", "0031", "0015", "0011", "0006"]
 size: L
+landed: "#34"
 ---
 
 # A board port between the runner and the board
