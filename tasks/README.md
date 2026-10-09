@@ -48,7 +48,7 @@ reviewable in the app afterwards.
 | 35 | [036](036-a-board-port-between-the-runner-and-the-board.md) | A board port between the runner and the board | v0.4 | 035 | #34 |
 | 36 | [021](021-review-and-fix-loop.md) | Review-and-fix loop | v0.4 | 035, 036 | #34 |
 | 37 | [037](037-the-review-loop-in-the-interface.md) | The review loop in the interface | v0.4 | 021 | #34 |
-| 38 | [038](038-team-mode-schema-and-a-scoped-service-context.md) | Team-mode schema, solo identity, and a scoped service context | v0.5 | 021, 036 | — |
+| 38 | [038](038-team-mode-schema-and-a-scoped-service-context.md) | Team-mode schema, solo identity, and a scoped service context | v0.5 | 021, 036 | [#34](https://github.com/AnkerstjerneAbtion/rimaia/pull/34) |
 | 39 | [039](039-every-board-service-filters-by-team.md) | Every board service filters by team | v0.5 | 038 | — |
 | 40 | [040](040-the-runner-store.md) | The runner store | v0.5 | 039 | — |
 | 41 | [041](041-machine-state-moves-to-the-runner.md) | Machine state moves to the runner | v0.5 | 040 | — |

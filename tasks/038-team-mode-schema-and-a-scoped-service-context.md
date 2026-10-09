@@ -6,6 +6,7 @@ status: ready
 depends_on: ["021", "036"]
 adrs: ["0028", "0029", "0030", "0031", "0034", "0035", "0019", "0018"]
 size: L
+landed: "#34"
 ---
 
 # Team-mode schema, solo identity, and a scoped service context
