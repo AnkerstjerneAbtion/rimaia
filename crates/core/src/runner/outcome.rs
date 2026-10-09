@@ -33,6 +33,7 @@
 //! value, so the predicate is *not allowed*" included.
 
 use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
 
 use crate::context::ServiceContext;
 use crate::db::{new_id, BoardColumn, ExitClass, Run, RunKind, RunState, RunStatus};
@@ -209,7 +210,8 @@ fn is_success(result: &ResultEvent) -> bool {
 /// The metrics are **extracted, never derived**: `spike/FINDINGS.md` §6 found
 /// `num_turns`, `total_cost_usd`, `duration_ms`, `usage`, `modelUsage` and
 /// `permission_denials` already on the terminal event.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct RunOutcome {
     pub exit_class: ExitClass,
     /// The coarser lifecycle the Runs view queries. See [`status_for`].
@@ -262,7 +264,8 @@ pub struct RunOutcome {
 /// planner or a human (ADR-0016) and `run_environment` was a setting when the run
 /// started. Seam-contract D18: every `None` here reaches the column as NULL and
 /// means *not recorded*.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct SpawnedAs {
     /// The model the run actually used. Preferring the `init` event over the
     /// invocation is deliberate: the flag may have been absent (the CLI's own
@@ -654,7 +657,21 @@ pub struct NewRun {
 /// `log_path` is computed rather than passed, because ADR-0013 makes it a pure
 /// function of the task and run ids and the run id is minted here.
 pub async fn start_run(ctx: &ServiceContext, paths: &AppPaths, new_run: NewRun) -> Result<Run> {
-    let id = new_id();
+    insert_run(ctx, paths, new_id(), new_run).await
+}
+
+/// [`start_run`] under an id the caller already holds.
+///
+/// The board port's `start_run` is reported under the id the runner minted
+/// (seam-contract D10, D31 point 4), so the row cannot mint its own there.
+/// Both doors reach this one insert, which is what keeps this module the only
+/// writer of `runs`.
+pub(crate) async fn insert_run(
+    ctx: &ServiceContext,
+    paths: &AppPaths,
+    id: String,
+    new_run: NewRun,
+) -> Result<Run> {
     let log_path = transcript_path(paths, &new_run.task_id, &id)
         .to_string_lossy()
         .into_owned();

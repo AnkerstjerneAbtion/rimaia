@@ -12,9 +12,12 @@ use std::sync::Arc;
 use chrono::{DateTime, Utc};
 use tokio::sync::broadcast::Receiver;
 
+use crate::board::{BoardPort, InProcessBoard};
 use crate::context::ServiceContext;
 use crate::db::MutationSource;
 use crate::events::ChangeEvent;
+use crate::paths::AppPaths;
+use crate::runner::RunnerConfig;
 use crate::testing::{test_pool, TestClock};
 
 /// Where a [`TestContext`]'s clock starts unless the test says otherwise.
@@ -65,6 +68,22 @@ impl TestContext {
             changes,
             clock,
         }
+    }
+
+    /// The board port over this test's own context (seam-contract D31 point
+    /// 8), so what a test arranges through `context` is what the runner reads
+    /// through the port.
+    ///
+    /// The provider comes from `config` rather than being a parameter of its
+    /// own: a board built for another provider than the runner it serves hands
+    /// the planner the wrong catalogue, and nothing fails loudly (task 036's
+    /// Traps). Taking it from the config is what makes that unwritable here.
+    pub fn board(&self, paths: &AppPaths, config: &RunnerConfig) -> Arc<dyn BoardPort> {
+        Arc::new(InProcessBoard::new(
+            self.context.clone(),
+            paths.clone(),
+            config.provider.clone(),
+        ))
     }
 }
 

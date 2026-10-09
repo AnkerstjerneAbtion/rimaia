@@ -29,6 +29,8 @@
 //! Compiled only under the `testing` feature, which `cargo test -p rimaia-core`
 //! turns on through the crate's self-referencing dev-dependency.
 
+pub mod board;
+pub mod board_contract;
 pub mod cli;
 pub mod clock;
 pub mod context;

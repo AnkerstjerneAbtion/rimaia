@@ -45,7 +45,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use chrono::{DateTime, Duration, Utc};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::clock::Clock;
@@ -395,7 +395,8 @@ pub enum EndReason {
 /// Every field is `Option`, and seam-contract D18 is the reason: a run that dies
 /// before its `result` never learns these, and `None` must survive to the column
 /// as NULL rather than being flattened to a zero that reads as a measurement.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct TokenUsage {
     pub input_tokens: Option<i64>,
     pub output_tokens: Option<i64>,
@@ -579,7 +580,7 @@ impl StderrLog {
 // ---------------------------------------------------------------------------
 
 /// A tool call the agent made.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ToolCall {
     /// The `tool_use_id`, so the matching `tool_result` can close it out.
@@ -642,7 +643,7 @@ pub enum Activity {
 ///
 /// **Never the source of truth for anything persisted.** The transcript file is
 /// (ADR-0013) and the `runs` row is; if this and the row disagree, the row wins.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RunTail {
     pub run_id: RunId,
@@ -858,6 +859,9 @@ pub struct EventStream {
     /// live tail. Empty for every repository without a credential, which is the
     /// common case and costs one `is_empty` per line.
     redactor: Redactor,
+    /// Where tail snapshots go instead of [`ServiceContext::publish_tail`],
+    /// when somebody asked. See [`forwarding_tail`](Self::forwarding_tail).
+    tail_outbox: Option<std::sync::mpsc::Sender<RunTail>>,
 }
 
 impl EventStream {
@@ -884,6 +888,7 @@ impl EventStream {
             redactor: Redactor::none(),
             malformed_lines: 0,
             denied_tool_calls: 0,
+            tail_outbox: None,
         })
     }
 
@@ -915,6 +920,19 @@ impl EventStream {
     /// caller means [`Redactor::none`] — which is what `create` already gives.
     pub fn redacting(mut self, redactor: Redactor) -> Self {
         self.redactor = redactor;
+        self
+    }
+
+    /// Hands every tail snapshot to `outbox` instead of publishing it on the
+    /// context's D14 channel.
+    ///
+    /// For the runner, whose tail reaches the board through the board port
+    /// (seam-contract D31 point 7): the stream holds no reference to a board,
+    /// so whoever drives it drains `outbox` and passes each snapshot on. A
+    /// builder in the style of [`driven_by`](Self::driven_by), so every caller
+    /// that says nothing keeps publishing where it always did.
+    pub fn forwarding_tail(mut self, outbox: std::sync::mpsc::Sender<RunTail>) -> Self {
+        self.tail_outbox = Some(outbox);
         self
     }
 
@@ -972,7 +990,15 @@ impl EventStream {
         }
 
         if self.progress.observe(&event) {
-            self.context.publish_tail(self.progress.tail());
+            let tail = self.progress.tail();
+            match &self.tail_outbox {
+                // A receiver that has gone is a watcher that stopped watching,
+                // which a dropped tail message costs nothing for (D14).
+                Some(outbox) => {
+                    let _ = outbox.send(tail);
+                }
+                None => self.context.publish_tail(tail),
+            }
         }
 
         Ok(Some(event))

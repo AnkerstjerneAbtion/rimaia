@@ -16,7 +16,7 @@
 use std::collections::HashMap;
 
 use chrono::{DateTime, Utc};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use sqlx::sqlite::SqliteRow;
 use sqlx::{FromRow, Row, SqliteConnection, SqlitePool};
 
@@ -39,7 +39,7 @@ use crate::tasks::types::{NewTask, Patch, TaskFilter, TaskPatch};
 ///
 /// `#[serde(flatten)]` on `task` so the wire shape is the task's own fields
 /// plus these three, not a nested object the frontend has to reach into.
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TaskDetail {
     #[serde(flatten)]

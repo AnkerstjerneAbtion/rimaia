@@ -173,7 +173,8 @@ pub const DEFAULT_MAX_TURNS: u32 = 300;
 ///
 /// Task 008 only ever produces [`Manual`](RunTrigger::Manual) — the queue is
 /// task 009 — but both arms exist now so that 009 adds a *caller*, not a mode.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub enum RunTrigger {
     /// Started by the scheduler, unattended.
     Queued,

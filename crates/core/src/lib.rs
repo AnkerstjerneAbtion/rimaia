@@ -12,6 +12,7 @@
 
 pub mod analytics;
 pub mod archive;
+pub mod board;
 pub mod clock;
 pub mod context;
 pub mod credentials;

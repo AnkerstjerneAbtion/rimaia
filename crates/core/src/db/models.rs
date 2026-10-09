@@ -449,7 +449,7 @@ impl MutationSource {
 /// and startup reconciliation trusts the filesystem where the two disagree. Which
 /// is also why there is no `remote_url` — `git remote get-url` answers it every
 /// time and a cached copy can only go stale.
-#[derive(Debug, Clone, PartialEq, Serialize, sqlx::FromRow)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, sqlx::FromRow)]
 #[serde(rename_all = "camelCase")]
 pub struct Repository {
     pub id: String,
@@ -574,7 +574,7 @@ pub struct Setting {
 ///
 /// It carries everything an agent needs to work with no further conversation, and
 /// everything the user needs to review the result the next morning.
-#[derive(Debug, Clone, PartialEq, Serialize, sqlx::FromRow)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, sqlx::FromRow)]
 #[serde(rename_all = "camelCase")]
 pub struct Task {
     pub id: String,
@@ -634,7 +634,7 @@ pub struct Task {
 
 /// One external reference on a task — an Asana task, a GitHub issue, a doc
 /// (ADR-0007).
-#[derive(Debug, Clone, PartialEq, Serialize, sqlx::FromRow)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, sqlx::FromRow)]
 #[serde(rename_all = "camelCase")]
 pub struct TaskLink {
     pub id: String,
@@ -668,7 +668,7 @@ pub struct TaskDependency {
 ///
 /// The event stream itself is a JSONL file at [`log_path`](Run::log_path), which is
 /// how ADR-0013 keeps megabytes of transcript out of every board query.
-#[derive(Debug, Clone, PartialEq, Serialize, sqlx::FromRow)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, sqlx::FromRow)]
 #[serde(rename_all = "camelCase")]
 pub struct Run {
     pub id: String,

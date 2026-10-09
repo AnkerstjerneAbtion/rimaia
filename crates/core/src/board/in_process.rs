@@ -1,0 +1,123 @@
+//! Solo's board adapter: the port, answered in this process (seam-contract D31
+//! point 9).
+//!
+//! Every method is one call into [`service`](super::service). Nothing here
+//! decides anything, so task 052's HTTP adapter and this one cannot come to
+//! disagree about a rule: they reach the same function.
+
+use std::sync::Arc;
+
+use crate::context::ServiceContext;
+use crate::db::MutationSource;
+use crate::paths::AppPaths;
+use crate::review::findings::NewReviewFinding;
+use crate::runner::events::RunTail;
+use crate::runner::provider::AgentProvider;
+use crate::tasks::strategy::StrategyPlan;
+
+use super::port::{BoardFuture, BoardPort};
+use super::service;
+use super::types::{
+    Claim, ClaimTarget, FinishReceipt, FinishRun, Heartbeat, LeaseRef, RunContext, StartRun,
+    TranscriptAck, TranscriptChunk,
+};
+
+/// The board, in process.
+///
+/// `provider` is read only to build [`RunContext::catalogue`], and it must be
+/// the provider of the [`RunnerConfig`](crate::runner::RunnerConfig) this board
+/// serves: a board built for another one would hand the planner the wrong
+/// catalogue, and nothing would fail loudly. `src-tauri` builds both from one
+/// value, and `TestContext::board` takes it from the config.
+pub struct InProcessBoard {
+    ctx: ServiceContext,
+    paths: AppPaths,
+    provider: Arc<dyn AgentProvider>,
+}
+
+impl InProcessBoard {
+    /// Re-sources `ctx` to [`MutationSource::System`]: a report comes from the
+    /// runner, whoever pressed the button, and the claim's trigger records
+    /// which button it was (D31 point 9).
+    pub fn new(ctx: ServiceContext, paths: AppPaths, provider: Arc<dyn AgentProvider>) -> Self {
+        Self {
+            ctx: ctx.with_source(MutationSource::System),
+            paths,
+            provider,
+        }
+    }
+}
+
+impl BoardPort for InProcessBoard {
+    fn preview<'a>(&'a self, task_id: &'a str) -> BoardFuture<'a, RunContext> {
+        Box::pin(service::preview(&self.ctx, self.provider.as_ref(), task_id))
+    }
+
+    fn claim<'a>(&'a self, target: ClaimTarget) -> BoardFuture<'a, Option<Claim>> {
+        Box::pin(service::claim(&self.ctx, self.provider.as_ref(), target))
+    }
+
+    fn heartbeat<'a>(&'a self, held: &'a [LeaseRef]) -> BoardFuture<'a, Heartbeat> {
+        Box::pin(async move { Ok(service::heartbeat(held)) })
+    }
+
+    fn run_context<'a>(&'a self, lease: &'a LeaseRef) -> BoardFuture<'a, RunContext> {
+        Box::pin(service::run_context(
+            &self.ctx,
+            self.provider.as_ref(),
+            lease,
+        ))
+    }
+
+    fn record_branch<'a>(&'a self, lease: &'a LeaseRef, branch: &'a str) -> BoardFuture<'a, ()> {
+        Box::pin(service::record_branch(&self.ctx, lease, branch))
+    }
+
+    fn start_run<'a>(&'a self, lease: &'a LeaseRef, run: StartRun) -> BoardFuture<'a, ()> {
+        Box::pin(service::start_run(&self.ctx, &self.paths, lease, run))
+    }
+
+    fn append_transcript<'a>(
+        &'a self,
+        lease: &'a LeaseRef,
+        chunk: TranscriptChunk,
+    ) -> BoardFuture<'a, TranscriptAck> {
+        Box::pin(service::append_transcript(&self.ctx, lease, chunk))
+    }
+
+    fn publish_tail(&self, lease: &LeaseRef, tail: RunTail) {
+        service::publish_tail(&self.ctx, lease, tail);
+    }
+
+    fn finish_run<'a>(
+        &'a self,
+        lease: &'a LeaseRef,
+        run_id: &'a str,
+        finish: FinishRun,
+    ) -> BoardFuture<'a, FinishReceipt> {
+        Box::pin(service::finish_run(&self.ctx, lease, run_id, finish))
+    }
+
+    fn release<'a>(&'a self, lease: &'a LeaseRef) -> BoardFuture<'a, ()> {
+        Box::pin(service::release(&self.ctx, lease))
+    }
+
+    fn record_strategy<'a>(
+        &'a self,
+        lease: &'a LeaseRef,
+        plan: StrategyPlan,
+    ) -> BoardFuture<'a, ()> {
+        Box::pin(service::record_strategy(&self.ctx, lease, plan))
+    }
+
+    fn record_review_findings<'a>(
+        &'a self,
+        lease: &'a LeaseRef,
+        run_id: &'a str,
+        findings: Vec<NewReviewFinding>,
+    ) -> BoardFuture<'a, ()> {
+        Box::pin(service::record_review_findings(
+            &self.ctx, lease, run_id, findings,
+        ))
+    }
+}

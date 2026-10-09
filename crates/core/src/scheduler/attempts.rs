@@ -45,6 +45,7 @@
 //! comes off the rows.
 
 use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
 
 use crate::context::ServiceContext;
 use crate::db::{ExitClass, RunKind};
@@ -92,7 +93,8 @@ pub async fn history(
 ///
 /// The retry path resumes **the kind that was waiting**, so the kind travels
 /// with the session rather than being assumed.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ResumePoint {
     pub kind: RunKind,
     pub session_id: String,
