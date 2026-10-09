@@ -429,6 +429,7 @@ mod tests {
             effective_model: None,
             effective_effort: None,
             effective_origin: StrategyOrigin::ClaudeCode,
+            review_loop: None,
         }
     }
 

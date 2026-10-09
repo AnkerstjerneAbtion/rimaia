@@ -33,6 +33,8 @@
 //! absent, which is off: D17.2's tolerance rule, and it keeps a typo from
 //! enabling a spend.
 
+use std::collections::HashMap;
+
 use serde::{Deserialize, Serialize};
 use sqlx::SqlitePool;
 
@@ -343,6 +345,65 @@ pub async fn repository_config(pool: &SqlitePool, repository_id: &str) -> Result
     let stored =
         stored.ok_or_else(|| Error::not_found(format!("no repository with id {repository_id}")))?;
     Ok(ReviewConfig::from_stored(stored.as_deref()))
+}
+
+/// [`repository_config`] for the listed repositories, keyed by id, in one
+/// read: the board's form (task 037). A repository that does not exist has no
+/// entry, which reads as nothing set.
+pub async fn repository_configs_for(
+    pool: &SqlitePool,
+    repository_ids: &[String],
+) -> Result<HashMap<String, ReviewConfig>> {
+    let ids = ids_as_json(repository_ids)?;
+    let rows = sqlx::query!(
+        r#"SELECT id AS "id!", review_config
+             FROM repositories
+            WHERE id IN (SELECT value FROM json_each(?1))"#,
+        ids,
+    )
+    .fetch_all(pool)
+    .await?;
+    Ok(rows
+        .into_iter()
+        .map(|row| {
+            (
+                row.id,
+                ReviewConfig::from_stored(row.review_config.as_deref()),
+            )
+        })
+        .collect())
+}
+
+/// The listed tasks' own [`ReviewConfig`]s, keyed by id, in one read: the
+/// board's form of [`task_review`], without the instructions a card has no use
+/// for (task 037).
+pub async fn task_configs_for(
+    pool: &SqlitePool,
+    task_ids: &[String],
+) -> Result<HashMap<String, ReviewConfig>> {
+    let ids = ids_as_json(task_ids)?;
+    let rows = sqlx::query!(
+        r#"SELECT id AS "id!", review_config
+             FROM tasks
+            WHERE id IN (SELECT value FROM json_each(?1))"#,
+        ids,
+    )
+    .fetch_all(pool)
+    .await?;
+    Ok(rows
+        .into_iter()
+        .map(|row| {
+            (
+                row.id,
+                ReviewConfig::from_stored(row.review_config.as_deref()),
+            )
+        })
+        .collect())
+}
+
+fn ids_as_json(ids: &[String]) -> Result<String> {
+    serde_json::to_string(ids)
+        .map_err(|error| Error::internal(format!("ids did not serialize: {error}")))
 }
 
 pub async fn task_review(pool: &SqlitePool, task_id: &str) -> Result<TaskReview> {

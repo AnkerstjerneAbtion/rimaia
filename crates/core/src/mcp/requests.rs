@@ -160,6 +160,13 @@ pub struct ListReviewFindingsRequest {
     pub status: Option<FindingStatus>,
 }
 
+/// `get_review_history`: one task's review loops.
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct GetReviewHistoryRequest {
+    pub task_id: String,
+}
+
 /// `set_review_settings`: the global review instructions and configuration
 /// (task 021).
 ///

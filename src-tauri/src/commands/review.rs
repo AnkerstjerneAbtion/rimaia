@@ -11,7 +11,7 @@ use chrono::{DateTime, Utc};
 use rimaia_core::db::Task;
 use rimaia_core::review::{self, Dependent, Digest, FindingStatus, ReviewFinding, ReviewOutcome};
 use rimaia_core::review_loop::config::{self as review_config, ReviewSettings, TaskReview};
-use rimaia_core::review_loop::ReviewConfig;
+use rimaia_core::review_loop::{self, ReviewConfig, ReviewHistory};
 use rimaia_core::Result;
 use serde_json::Value;
 use tauri::State;
@@ -80,6 +80,18 @@ pub async fn list_review_findings(
     status: Option<FindingStatus>,
 ) -> Result<Vec<ReviewFinding>> {
     review::findings::list(&state.context, &task_id, status).await
+}
+
+/// Every loop the task has had, with each review's findings, what the fix after
+/// it resolved, and the loop's verdict and open counts. Grouping, what blocks
+/// and the ping-pong lists are core's: the view renders this as it is returned
+/// (task 037).
+#[tauri::command]
+pub async fn get_review_history(
+    state: State<'_, AppState>,
+    task_id: String,
+) -> Result<ReviewHistory> {
+    review_loop::history(&state.context, &task_id).await
 }
 
 /// The global review instructions and loop configuration.

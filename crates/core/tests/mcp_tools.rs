@@ -15,12 +15,12 @@ use rimaia_core::db::{
     settings, BoardColumn, MutationSource, RunKind, StrategyMode, StrategySource,
 };
 use rimaia_core::mcp::requests::{
-    ArchiveTaskRequest, ArchiveTasksRequest, GetTaskRequest, ListReviewFindingsRequest,
-    ListTasksRequest, MoveTaskRequest, RemoveTaskLinkRequest, ReviewNoteRequest,
-    SetRepositoryOnArchiveRequest, SetRepositoryReviewConfigRequest, SetReviewSettingsRequest,
-    SetTaskDependenciesRequest, SetTaskReviewRequest, UpdateTaskRequest,
+    ArchiveTaskRequest, ArchiveTasksRequest, GetReviewHistoryRequest, GetTaskRequest,
+    ListReviewFindingsRequest, ListTasksRequest, MoveTaskRequest, RemoveTaskLinkRequest,
+    ReviewNoteRequest, SetRepositoryOnArchiveRequest, SetRepositoryReviewConfigRequest,
+    SetReviewSettingsRequest, SetTaskDependenciesRequest, SetTaskReviewRequest, UpdateTaskRequest,
 };
-use rimaia_core::mcp::responses::{ReviewFindingView, TaskListView, TaskView};
+use rimaia_core::mcp::responses::{ReviewFindingView, ReviewHistoryView, TaskListView, TaskView};
 use rimaia_core::mcp::RimaiaServer;
 use rimaia_core::review::{self, FindingSeverity, NewReviewFinding};
 use rimaia_core::review_loop::config as review_config;
@@ -887,6 +887,130 @@ async fn list_review_findings_answers_the_same_over_mcp_and_the_tauri_command() 
         .await
         .expect("filtered by status");
     assert_eq!(open.findings, vec![]);
+}
+
+#[tokio::test]
+async fn the_operator_reads_a_tasks_review_history_with_every_finding_status() {
+    // ADR-0021's parity, task 037: `commands::review::get_review_history` is
+    // one line over `review_loop::history`, so the tool must answer with the
+    // same loops, in its own spelling, and say for every finding whether it
+    // blocks.
+    let h = TestContext::new().await;
+    let repository_id = seed_repository(&h.context.pool, "rimaia", "/tmp/rimaia").await;
+    let task = create_task(&h, &repository_id, "Reviewed").await;
+    let row = |kind, session, head| {
+        testing::runs::seed_row(
+            &h.context,
+            &task.id,
+            testing::runs::SeededRow::succeeded(kind, session, head),
+        )
+    };
+    let finding = |review: String, ordinal, severity, title: &'static str, resolved| {
+        let (status, resolution, by) = match resolved {
+            Some((status, reason, fix)) => (status, Some(reason), Some(fix)),
+            None => (review::FindingStatus::Open, None, None),
+        };
+        let h = &h;
+        let task_id = task.id.clone();
+        async move {
+            testing::runs::seed_finding(
+                &h.context,
+                &task_id,
+                testing::runs::SeededFinding {
+                    review_run_id: &review,
+                    ordinal,
+                    severity,
+                    title,
+                    status,
+                    resolution,
+                    resolved_by_run_id: by.as_deref(),
+                },
+            )
+            .await
+        }
+    };
+    row(RunKind::Implementation, "impl", "a").await;
+    let first = row(RunKind::Review, "r1", "a").await;
+    let fix = row(RunKind::Fix, "f1", "b").await;
+    finding(
+        first.clone(),
+        0,
+        FindingSeverity::High,
+        "Fixed one",
+        Some((review::FindingStatus::Fixed, "Done.", fix.clone())),
+    )
+    .await;
+    finding(
+        first.clone(),
+        1,
+        FindingSeverity::High,
+        "Rejected one",
+        Some((
+            review::FindingStatus::Rejected,
+            "The caller guarantees it.",
+            fix.clone(),
+        )),
+    )
+    .await;
+    let second = row(RunKind::Review, "r2", "b").await;
+    finding(second.clone(), 0, FindingSeverity::High, "Open one", None).await;
+    finding(second, 1, FindingSeverity::Low, "Advisory one", None).await;
+
+    let history = rimaia_core::review_loop::history(&h.context, &task.id)
+        .await
+        .expect("the window's read");
+    let Json(over_mcp) = server(&h)
+        .get_review_history(Parameters(request::<GetReviewHistoryRequest>(
+            json!({ "task_id": task.id }),
+        )))
+        .await
+        .expect("the operator reads the history");
+
+    assert_eq!(over_mcp, ReviewHistoryView::from(history));
+    let wire = serde_json::to_value(&over_mcp).expect("the view serializes");
+    let newest = &wire["loops"][0];
+    assert_eq!(newest["earlier"], json!(false));
+    assert_eq!(newest["fixes_spent"], json!(1));
+    assert_eq!(newest["verdict"], json!("findings_remain"));
+    assert_eq!(newest["open_blocking"], json!(1));
+    assert_eq!(newest["open_advisory"], json!(1));
+
+    let first_round = &newest["rounds"][0];
+    let statuses: Vec<(&Value, &Value, &Value)> = first_round["findings"]
+        .as_array()
+        .expect("the first review's findings")
+        .iter()
+        .map(|f| (&f["title"], &f["status"], &f["resolution"]))
+        .collect();
+    assert_eq!(
+        statuses,
+        vec![
+            (&json!("Fixed one"), &json!("fixed"), &json!("Done.")),
+            (
+                &json!("Rejected one"),
+                &json!("rejected"),
+                &json!("The caller guarantees it.")
+            ),
+        ]
+    );
+    assert_eq!(
+        first_round["fix"]["resolved"].as_array().map(Vec::len),
+        Some(2)
+    );
+    let second_round = &newest["rounds"][1];
+    let blocking: Vec<(&Value, &Value, &Value)> = second_round["findings"]
+        .as_array()
+        .expect("the second review's findings")
+        .iter()
+        .map(|f| (&f["title"], &f["status"], &f["blocking"]))
+        .collect();
+    assert_eq!(
+        blocking,
+        vec![
+            (&json!("Open one"), &json!("open"), &json!(true)),
+            (&json!("Advisory one"), &json!("open"), &json!(false)),
+        ]
+    );
 }
 
 #[tokio::test]

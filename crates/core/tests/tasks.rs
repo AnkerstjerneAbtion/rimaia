@@ -13,13 +13,18 @@
 
 use chrono::{DateTime, Utc};
 use pretty_assertions::assert_eq;
-use rimaia_core::db::{BoardColumn, ExitClass, MutationSource, RunKind, RunState, RunStatus};
+use rimaia_core::db::{
+    settings, BoardColumn, ExitClass, MutationSource, RunKind, RunState, RunStatus,
+};
 use rimaia_core::mcp::requests::GetTaskRequest;
 use rimaia_core::mcp::RimaiaServer;
+use rimaia_core::review::{FindingSeverity, FindingStatus};
+use rimaia_core::review_loop::{config as review_config, UnreviewedReason, Verdict};
 use rimaia_core::tasks::{
     self, LastRunSummary, NewTask, NewTaskLink, Patch, TaskFilter, TaskLinkPatch, TaskPatch,
     TaskSummary,
 };
+use rimaia_core::testing::runs::{SeededFinding, SeededRow};
 use rimaia_core::testing::{self, TestContext};
 use rimaia_core::{ChangeEvent, Clock, ErrorCode};
 use rmcp::handler::server::wrapper::{Json, Parameters};
@@ -1787,6 +1792,462 @@ async fn reordering_links_places_one_between_two_others() {
 // ---------------------------------------------------------------------------
 // Fixtures
 // ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// The summary carries the review loop (task 037, seam-contract D12)
+// ---------------------------------------------------------------------------
+
+/// The loop is on for everyone, the way the global checkbox turns it on.
+async fn turn_the_loop_on_globally(h: &TestContext) {
+    settings::set(
+        &h.context,
+        review_config::REVIEW_CONFIG,
+        r#"{"enabled":"on_cost_acknowledged"}"#,
+    )
+    .await
+    .expect("turn the loop on");
+}
+
+async fn add_row(h: &TestContext, task: &str, kind: RunKind, session: &str, head: &str) -> String {
+    testing::runs::seed_row(&h.context, task, SeededRow::succeeded(kind, session, head)).await
+}
+
+async fn add_finding(
+    h: &TestContext,
+    task: &str,
+    review: &str,
+    ordinal: i64,
+    severity: FindingSeverity,
+    title: &str,
+    resolved: Option<(FindingStatus, &str)>,
+) {
+    let (status, resolved_by) = match resolved {
+        Some((status, fix)) => (status, Some(fix)),
+        None => (FindingStatus::Open, None),
+    };
+    testing::runs::seed_finding(
+        &h.context,
+        task,
+        SeededFinding {
+            review_run_id: review,
+            ordinal,
+            severity,
+            title,
+            status,
+            resolution: (status != FindingStatus::Open).then_some("Done."),
+            resolved_by_run_id: resolved_by,
+        },
+    )
+    .await;
+}
+
+/// One task per verdict a loop can end in, each built the way 021's rows land.
+/// Returned by name so a test can ask for the one it means.
+async fn tasks_in_every_verdict(
+    h: &TestContext,
+    repository_id: &str,
+) -> Vec<(&'static str, String)> {
+    let mut made = Vec::new();
+    let make = |name: &'static str| {
+        let h = &h;
+        async move {
+            let task = create_ready(h, repository_id, name, "plan").await;
+            (name, task.id)
+        }
+    };
+
+    // Reviewed once, nothing found.
+    let (name, clean) = make("clean once").await;
+    add_row(h, &clean, RunKind::Implementation, "impl", "a").await;
+    add_row(h, &clean, RunKind::Review, "r1", "a").await;
+    made.push((name, clean));
+
+    // Two fixes, then a clean review.
+    let (name, fixed) = make("clean after two fixes").await;
+    add_row(h, &fixed, RunKind::Implementation, "impl", "a").await;
+    let r1 = add_row(h, &fixed, RunKind::Review, "r1", "a").await;
+    let f1 = add_row(h, &fixed, RunKind::Fix, "f1", "b").await;
+    add_finding(
+        h,
+        &fixed,
+        &r1,
+        0,
+        FindingSeverity::High,
+        "First",
+        Some((FindingStatus::Fixed, &f1)),
+    )
+    .await;
+    let r2 = add_row(h, &fixed, RunKind::Review, "r2", "b").await;
+    let f2 = add_row(h, &fixed, RunKind::Fix, "f2", "c").await;
+    add_finding(
+        h,
+        &fixed,
+        &r2,
+        0,
+        FindingSeverity::High,
+        "Second",
+        Some((FindingStatus::Fixed, &f2)),
+    )
+    .await;
+    add_row(h, &fixed, RunKind::Review, "r3", "c").await;
+    made.push((name, fixed));
+
+    // Three blocking findings left, and one advisory.
+    let (name, remain) = make("findings remain").await;
+    add_row(h, &remain, RunKind::Implementation, "impl", "a").await;
+    let r1 = add_row(h, &remain, RunKind::Review, "r1", "a").await;
+    for (ordinal, title) in ["One", "Two", "Three"].into_iter().enumerate() {
+        add_finding(
+            h,
+            &remain,
+            &r1,
+            ordinal as i64,
+            FindingSeverity::High,
+            title,
+            None,
+        )
+        .await;
+    }
+    add_finding(h, &remain, &r1, 3, FindingSeverity::Low, "Nit", None).await;
+    made.push((name, remain));
+
+    let (name, failed) = make("review failed").await;
+    add_row(h, &failed, RunKind::Implementation, "impl", "a").await;
+    testing::runs::seed_row(
+        &h.context,
+        &failed,
+        SeededRow {
+            status: RunStatus::Failed,
+            exit_class: Some(ExitClass::Fatal),
+            recorded: false,
+            ..SeededRow::succeeded(RunKind::Review, "r1", "a")
+        },
+    )
+    .await;
+    made.push((name, failed));
+
+    let (name, silent) = make("nothing recorded").await;
+    add_row(h, &silent, RunKind::Implementation, "impl", "a").await;
+    testing::runs::seed_row(
+        &h.context,
+        &silent,
+        SeededRow {
+            recorded: false,
+            ..SeededRow::succeeded(RunKind::Review, "r1", "a")
+        },
+    )
+    .await;
+    made.push((name, silent));
+
+    let (name, moved) = make("review changed branch").await;
+    add_row(h, &moved, RunKind::Implementation, "impl", "a").await;
+    add_row(h, &moved, RunKind::Review, "r1", "z").await;
+    made.push((name, moved));
+
+    let (name, unreviewed_fix) = make("fix not reviewed").await;
+    add_row(h, &unreviewed_fix, RunKind::Implementation, "impl", "a").await;
+    add_row(h, &unreviewed_fix, RunKind::Review, "r1", "a").await;
+    add_row(h, &unreviewed_fix, RunKind::Fix, "f1", "b").await;
+    made.push((name, unreviewed_fix));
+
+    let (name, not_reviewed) = make("not reviewed").await;
+    add_row(h, &not_reviewed, RunKind::Implementation, "impl", "a").await;
+    made.push((name, not_reviewed));
+
+    // A finding the fix marked fixed, raised again by the next review.
+    let (name, circles) = make("going in circles").await;
+    add_row(h, &circles, RunKind::Implementation, "impl", "a").await;
+    let r1 = add_row(h, &circles, RunKind::Review, "r1", "a").await;
+    let f1 = add_row(h, &circles, RunKind::Fix, "f1", "b").await;
+    add_finding(
+        h,
+        &circles,
+        &r1,
+        0,
+        FindingSeverity::High,
+        "Same",
+        Some((FindingStatus::Fixed, &f1)),
+    )
+    .await;
+    let r2 = add_row(h, &circles, RunKind::Review, "r2", "b").await;
+    add_finding(h, &circles, &r2, 0, FindingSeverity::High, "Same", None).await;
+    made.push((name, circles));
+
+    made
+}
+
+#[tokio::test]
+async fn the_board_summary_and_get_task_agree_on_the_review_loop() {
+    let h = TestContext::new().await;
+    turn_the_loop_on_globally(&h).await;
+    let repository_id = seed_repository(&h.context.pool).await;
+    let made = tasks_in_every_verdict(&h, &repository_id).await;
+
+    for (name, id) in &made {
+        let on_the_card = list_one(&h, &repository_id, id).await.review_loop;
+        let in_the_panel = tasks::get_task(&h.context, id)
+            .await
+            .expect("read the task")
+            .review_loop;
+        assert_eq!(on_the_card, in_the_panel, "{name}");
+    }
+
+    let verdicts: Vec<(&str, Verdict)> = {
+        let mut seen = Vec::new();
+        for (name, id) in &made {
+            let summary = list_one(&h, &repository_id, id)
+                .await
+                .review_loop
+                .expect("every task here has a loop");
+            seen.push((*name, summary.verdict));
+        }
+        seen
+    };
+    assert_eq!(
+        verdicts,
+        vec![
+            ("clean once", Verdict::Clean),
+            ("clean after two fixes", Verdict::Clean),
+            (
+                "findings remain",
+                Verdict::FindingsRemain { open_blocking: 3 }
+            ),
+            (
+                "review failed",
+                Verdict::Unreviewed {
+                    reason: UnreviewedReason::ReviewFailed
+                }
+            ),
+            (
+                "nothing recorded",
+                Verdict::Unreviewed {
+                    reason: UnreviewedReason::NothingRecorded
+                }
+            ),
+            (
+                "review changed branch",
+                Verdict::Unreviewed {
+                    reason: UnreviewedReason::ReviewChangedBranch
+                }
+            ),
+            (
+                "fix not reviewed",
+                Verdict::Unreviewed {
+                    reason: UnreviewedReason::FixNotReviewed
+                }
+            ),
+            (
+                "not reviewed",
+                Verdict::Unreviewed {
+                    reason: UnreviewedReason::NotReviewed
+                }
+            ),
+            (
+                "going in circles",
+                Verdict::FindingsRemain { open_blocking: 1 }
+            ),
+        ]
+    );
+
+    let remain = list_one(&h, &repository_id, &made[2].1)
+        .await
+        .review_loop
+        .expect("a loop");
+    assert_eq!(
+        (remain.open_blocking, remain.open_advisory),
+        (3, 1),
+        "the nit is counted apart from what blocks"
+    );
+    let fixed = list_one(&h, &repository_id, &made[1].1)
+        .await
+        .review_loop
+        .expect("a loop");
+    assert_eq!((fixed.fixes_spent, fixed.reviews), (2, 3));
+    let circles = list_one(&h, &repository_id, &made[8].1)
+        .await
+        .review_loop
+        .expect("a loop");
+    assert!(circles.ping_pong);
+}
+
+#[tokio::test]
+async fn a_task_with_the_loop_off_and_no_loop_rows_has_no_review_loop_on_the_card() {
+    let h = TestContext::new().await;
+    let repository_id = seed_repository(&h.context.pool).await;
+    let task = create_ready(&h, &repository_id, "plain", "plan").await;
+    add_row(&h, &task.id, RunKind::Implementation, "impl", "a").await;
+
+    let card = list_one(&h, &repository_id, &task.id).await;
+
+    assert_eq!(card.review_loop, None);
+    assert_eq!(
+        tasks::get_task(&h.context, &task.id)
+            .await
+            .expect("read the task")
+            .review_loop,
+        None
+    );
+}
+
+#[tokio::test]
+async fn a_task_whose_loop_turned_on_after_it_was_implemented_reads_not_reviewed() {
+    let h = TestContext::new().await;
+    let repository_id = seed_repository(&h.context.pool).await;
+    let task = create_ready(&h, &repository_id, "implemented before", "plan").await;
+    add_row(&h, &task.id, RunKind::Implementation, "impl", "a").await;
+    assert_eq!(
+        list_one(&h, &repository_id, &task.id).await.review_loop,
+        None
+    );
+
+    turn_the_loop_on_globally(&h).await;
+
+    let summary = list_one(&h, &repository_id, &task.id)
+        .await
+        .review_loop
+        .expect("the loop is on and nothing reviewed the work");
+    assert_eq!(
+        summary.verdict,
+        Verdict::Unreviewed {
+            reason: UnreviewedReason::NotReviewed
+        }
+    );
+    assert_eq!((summary.reviews, summary.fixes_spent), (0, 0));
+}
+
+#[tokio::test]
+async fn a_loop_on_task_that_was_never_implemented_has_no_verdict_on_the_card() {
+    let h = TestContext::new().await;
+    turn_the_loop_on_globally(&h).await;
+    let repository_id = seed_repository(&h.context.pool).await;
+    let task = create_ready(&h, &repository_id, "waiting its turn", "plan").await;
+
+    assert_eq!(
+        list_one(&h, &repository_id, &task.id).await.review_loop,
+        None
+    );
+}
+
+#[tokio::test]
+async fn a_board_mixing_tasks_with_and_without_loops_keeps_each_tasks_own_summary() {
+    // A batched read keyed by the wrong id would hand one task's findings to
+    // its neighbour, so the three differ in every number the summary carries.
+    let h = TestContext::new().await;
+    turn_the_loop_on_globally(&h).await;
+    let repository_id = seed_repository(&h.context.pool).await;
+
+    let two = create_ready(&h, &repository_id, "two open", "plan").await;
+    add_row(&h, &two.id, RunKind::Implementation, "impl", "a").await;
+    let review = add_row(&h, &two.id, RunKind::Review, "r1", "a").await;
+    for (ordinal, title) in ["One", "Two"].into_iter().enumerate() {
+        add_finding(
+            &h,
+            &two.id,
+            &review,
+            ordinal as i64,
+            FindingSeverity::High,
+            title,
+            None,
+        )
+        .await;
+    }
+
+    let none = create_ready(&h, &repository_id, "no rows", "plan").await;
+
+    let one = create_ready(&h, &repository_id, "one open", "plan").await;
+    add_row(&h, &one.id, RunKind::Implementation, "impl", "a").await;
+    let review = add_row(&h, &one.id, RunKind::Review, "r1", "a").await;
+    add_finding(
+        &h,
+        &one.id,
+        &review,
+        0,
+        FindingSeverity::Critical,
+        "Only",
+        None,
+    )
+    .await;
+
+    let board = tasks::list_tasks(&h.context, TaskFilter::default())
+        .await
+        .expect("the board");
+    let loop_of = |id: &str| {
+        board
+            .iter()
+            .find(|summary| summary.task.id == id)
+            .expect("on the board")
+            .review_loop
+            .as_ref()
+            .map(|summary| summary.verdict)
+    };
+
+    assert_eq!(
+        loop_of(&two.id),
+        Some(Verdict::FindingsRemain { open_blocking: 2 })
+    );
+    assert_eq!(loop_of(&none.id), None);
+    assert_eq!(
+        loop_of(&one.id),
+        Some(Verdict::FindingsRemain { open_blocking: 1 })
+    );
+}
+
+#[tokio::test]
+async fn a_board_across_repositories_reads_each_repositorys_review_config_once() {
+    // Two repositories with different configuration, a task override on top,
+    // and the loop off globally: each card resolves against its own levels. The
+    // reads are one statement per table whatever the repository count (see
+    // `review_loop::board`), so what this pins is that the batch is keyed by
+    // the right repository and the right task. SQLite exposes no statement
+    // count to a test, and sqlx logs from its worker thread, so the count
+    // itself is for a reviewer to check in the diff.
+    let h = TestContext::new().await;
+    let on = seed_repository(&h.context.pool).await;
+    let off = seed_repository(&h.context.pool).await;
+    let provider = rimaia_core::runner::provider::ClaudeProvider;
+    review_config::set_repository_review_config(
+        &h.context,
+        &provider,
+        &on,
+        serde_json::json!({ "enabled": "on_cost_acknowledged", "max_review_loops": 4 }),
+    )
+    .await
+    .expect("turn the loop on for one repository");
+
+    let in_on = create_ready(&h, &on, "in the repository that is on", "plan").await;
+    let overridden = create_ready(&h, &on, "overridden to off", "plan").await;
+    let in_off = create_ready(&h, &off, "in the repository that is off", "plan").await;
+    for task in [&in_on, &overridden, &in_off] {
+        add_row(&h, &task.id, RunKind::Implementation, "impl", "a").await;
+    }
+    review_config::set_task_review(
+        &h.context,
+        &provider,
+        &overridden.id,
+        None,
+        serde_json::json!({ "enabled": "off" }),
+    )
+    .await
+    .expect("a task singled out as off");
+
+    let board = tasks::list_tasks(&h.context, TaskFilter::default())
+        .await
+        .expect("the board");
+    let loop_of = |id: &str| {
+        board
+            .iter()
+            .find(|summary| summary.task.id == id)
+            .expect("on the board")
+            .review_loop
+            .clone()
+    };
+
+    let summary = loop_of(&in_on.id).expect("its repository turned the loop on");
+    assert!(summary.enabled);
+    assert_eq!(summary.max_review_loops, 4, "the repository's own value");
+    assert_eq!(loop_of(&overridden.id), None, "the task's own off wins");
+    assert_eq!(loop_of(&in_off.id), None, "nothing turned it on there");
+}
 
 /// Creates a task already in `ready`, with a non-blank plan, so tests that
 /// are not themselves about `create_task` do not have to restate its rules.

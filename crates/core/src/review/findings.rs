@@ -454,6 +454,86 @@ pub async fn loop_rows_on_the_board(ctx: &ServiceContext) -> Result<HashMap<Stri
     Ok(by_task)
 }
 
+/// [`loop_rows`] for the listed tasks, keyed by task id, in one read: what a
+/// board read needs to give every card its loop summary (task 037).
+///
+/// `task_ids` travel as one JSON array bound once, so the statement is the
+/// same text for one task or five hundred and never meets SQLite's cap on
+/// bound parameters. A task with no rows has no entry.
+pub async fn loop_rows_for(
+    ctx: &ServiceContext,
+    task_ids: &[String],
+) -> Result<HashMap<String, Vec<LoopRow>>> {
+    let ids = ids_as_json(task_ids)?;
+    let rows = sqlx::query!(
+        r#"SELECT task_id AS "task_id!", id AS "id!", kind AS "kind!: RunKind", attempt,
+                  status AS "status!: RunStatus", exit_class AS "exit_class: ExitClass",
+                  session_id AS "session_id!", head_sha,
+                  findings_recorded_at IS NOT NULL AS "findings_recorded!: bool"
+             FROM runs
+            WHERE task_id IN (SELECT value FROM json_each(?1))
+            ORDER BY task_id, attempt"#,
+        ids,
+    )
+    .fetch_all(&ctx.pool)
+    .await?;
+
+    let mut by_task: HashMap<String, Vec<LoopRow>> = HashMap::new();
+    for row in rows {
+        by_task.entry(row.task_id).or_default().push(LoopRow {
+            id: row.id,
+            kind: row.kind,
+            attempt: row.attempt,
+            status: row.status,
+            exit_class: row.exit_class,
+            session_id: row.session_id,
+            head_sha: row.head_sha,
+            findings_recorded: row.findings_recorded,
+        });
+    }
+    Ok(by_task)
+}
+
+/// [`list`] for the listed tasks, keyed by task id and in each task's own
+/// review order, in one read (task 037). Shaped like [`loop_rows_for`], for
+/// the same reasons.
+pub async fn list_for(
+    ctx: &ServiceContext,
+    task_ids: &[String],
+) -> Result<HashMap<String, Vec<ReviewFinding>>> {
+    let ids = ids_as_json(task_ids)?;
+    let findings = sqlx::query_as!(
+        ReviewFinding,
+        r#"SELECT f.id AS "id!", f.task_id, f.review_run_id, f.ordinal,
+                  f.severity AS "severity: FindingSeverity", f.title, f.body, f.file, f.line,
+                  f.fingerprint, f.status AS "status: FindingStatus", f.resolution,
+                  f.resolved_by_run_id,
+                  f.created_at AS "created_at: DateTime<Utc>",
+                  f.resolved_at AS "resolved_at: DateTime<Utc>"
+             FROM review_findings f
+             JOIN runs r ON r.id = f.review_run_id
+            WHERE f.task_id IN (SELECT value FROM json_each(?1))
+            ORDER BY f.task_id, r.attempt, f.ordinal"#,
+        ids,
+    )
+    .fetch_all(&ctx.pool)
+    .await?;
+
+    let mut by_task: HashMap<String, Vec<ReviewFinding>> = HashMap::new();
+    for finding in findings {
+        by_task
+            .entry(finding.task_id.clone())
+            .or_default()
+            .push(finding);
+    }
+    Ok(by_task)
+}
+
+fn ids_as_json(ids: &[String]) -> Result<String> {
+    serde_json::to_string(ids)
+        .map_err(|error| Error::internal(format!("task ids did not serialize: {error}")))
+}
+
 /// When `review_run_id` recorded its findings: set means the review called,
 /// `None` means it did not (D30 point 7). Never inferred from a count of rows,
 /// because a clean review's call writes none.

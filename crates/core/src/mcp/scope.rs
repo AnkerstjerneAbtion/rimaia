@@ -256,6 +256,11 @@ pub enum Tool {
     SetReviewSettings,
     SetRepositoryReviewConfig,
     SetTaskReview,
+
+    // Task 037. The operator's read of a task's review loops. Refused to a
+    // run, as `ListReviewFindings` is: a fix run is handed its findings in its
+    // prompt, and a review's history is not its own to read.
+    GetReviewHistory,
 }
 
 /// What a [`RunScope::Run`] may do with one tool — ADR-0006's amendment table,
@@ -272,7 +277,7 @@ pub enum RunAccess {
 
 impl Tool {
     /// Every tool with a recorded decision, so a test can walk the table.
-    pub const ALL: [Tool; 61] = [
+    pub const ALL: [Tool; 62] = [
         Tool::AddTaskLink,
         Tool::CreateTask,
         Tool::GetBaseInstructions,
@@ -334,6 +339,7 @@ impl Tool {
         Tool::SetReviewSettings,
         Tool::SetRepositoryReviewConfig,
         Tool::SetTaskReview,
+        Tool::GetReviewHistory,
     ];
 
     /// The wired name — what `tools/list` advertises and what the ADR table
@@ -401,6 +407,7 @@ impl Tool {
             Tool::SetReviewSettings => "set_review_settings",
             Tool::SetRepositoryReviewConfig => "set_repository_review_config",
             Tool::SetTaskReview => "set_task_review",
+            Tool::GetReviewHistory => "get_review_history",
         }
     }
 
@@ -458,6 +465,11 @@ impl Tool {
             // handed its findings in its prompt (task 021) and does not go
             // looking for them.
             Tool::ListReviewFindings => RunAccess::Refused,
+
+            // Task 037, D30's "everything else" row again: the history is the
+            // operator's read of what the loop could not fix, and it holds
+            // every finding of every loop, not only the run's own.
+            Tool::GetReviewHistory => RunAccess::Refused,
 
             // Neither takes a task, and a run has a legitimate use for both:
             // the standing instructions it is working under, and the names of

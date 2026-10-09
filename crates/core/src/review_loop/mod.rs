@@ -32,6 +32,7 @@
 //! [`history`]'s builders are pure too, so a view can call them per card over
 //! one batched read without copying a rule (task 037).
 
+pub mod board;
 pub mod config;
 pub mod decide;
 pub mod history;
@@ -51,7 +52,7 @@ pub use config::{
 };
 pub use decide::{decide, Closed, Decision, Landing};
 pub use history::{
-    phases, summary, verdict, FixRound, LoopHistory, PhaseSummary, ReviewHistory,
+    phases, summary, verdict, FixRound, HistoryFinding, LoopHistory, PhaseSummary, ReviewHistory,
     ReviewLoopSummary, ReviewRound, UnreviewedReason, Verdict,
 };
 
@@ -206,6 +207,23 @@ pub fn open_blocking<'f>(
             review.contains_run(&finding.review_run_id)
                 && finding.status == FindingStatus::Open
                 && finding.severity.is_at_least(threshold)
+        })
+        .collect()
+}
+
+/// The findings `review` raised that are still open and sit below
+/// `threshold`: raised, and advisory because they did not start a fix.
+pub fn open_advisory<'f>(
+    findings: &'f [ReviewFinding],
+    review: &Phase<'_>,
+    threshold: crate::review::FindingSeverity,
+) -> Vec<&'f ReviewFinding> {
+    findings
+        .iter()
+        .filter(|finding| {
+            review.contains_run(&finding.review_run_id)
+                && finding.status == FindingStatus::Open
+                && !finding.severity.is_at_least(threshold)
         })
         .collect()
 }

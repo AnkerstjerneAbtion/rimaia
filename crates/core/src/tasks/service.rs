@@ -115,6 +115,11 @@ pub struct TaskSummary {
     pub effective_model: Option<String>,
     pub effective_effort: Option<String>,
     pub effective_origin: StrategyOrigin,
+    /// Where the task's review loop stands, built by the same pure function
+    /// [`get_task`] calls (seam-contract D12's 2026-10-10 amendment), so the
+    /// card and the panel cannot disagree about a loop. `None` when the loop
+    /// never touched the task.
+    pub review_loop: Option<ReviewLoopSummary>,
 }
 
 /// What a card shows about a task's most recent run, of any kind.
@@ -186,6 +191,7 @@ impl<'r> FromRow<'r, SqliteRow> for TaskSummary {
             effective_model: None,
             effective_effort: None,
             effective_origin: StrategyOrigin::ClaudeCode,
+            review_loop: None,
         })
     }
 }
@@ -430,7 +436,31 @@ pub async fn list_tasks(ctx: &ServiceContext, filter: TaskFilter) -> Result<Vec<
 
     let mut summaries = query.fetch_all(&ctx.pool).await?;
     apply_effective_strategy(ctx, &mut summaries).await?;
+    apply_review_loops(ctx, &mut summaries).await?;
     Ok(summaries)
+}
+
+/// Fills every card's review loop after the board read.
+///
+/// A fixed number of statements however many cards and repositories there
+/// are: [`review_loop::board::summaries`] loads everything the verdict reads
+/// for all of them at once. This is deliberately not
+/// [`apply_effective_strategy`]'s shape, which asks for each distinct
+/// repository's defaults separately.
+async fn apply_review_loops(ctx: &ServiceContext, summaries: &mut [TaskSummary]) -> Result<()> {
+    let wanted: Vec<review_loop::board::BoardTask<'_>> = summaries
+        .iter()
+        .map(|summary| review_loop::board::BoardTask {
+            task_id: &summary.task.id,
+            repository_id: &summary.task.repository_id,
+        })
+        .collect();
+    let mut loops = review_loop::board::summaries(ctx, &wanted).await?;
+    drop(wanted);
+    for summary in summaries.iter_mut() {
+        summary.review_loop = loops.remove(&summary.task.id);
+    }
+    Ok(())
 }
 
 /// Fills every card's effective model and effort after the board read.
@@ -1570,6 +1600,7 @@ mod tests {
             effective_model: Some("sonnet".to_string()),
             effective_effort: Some("high".to_string()),
             effective_origin: StrategyOrigin::Repository,
+            review_loop: None,
         };
 
         let wire = serde_json::to_value(&summary).expect("a DTO must always serialize");
@@ -1636,6 +1667,7 @@ mod tests {
             effective_model: None,
             effective_effort: None,
             effective_origin: StrategyOrigin::ClaudeCode,
+            review_loop: None,
         };
 
         let wire = serde_json::to_value(&summary).expect("a DTO must always serialize");
@@ -1976,6 +2008,7 @@ mod tests {
             effective_model: None,
             effective_effort: None,
             effective_origin: StrategyOrigin::ClaudeCode,
+            review_loop: None,
         }
     }
 }

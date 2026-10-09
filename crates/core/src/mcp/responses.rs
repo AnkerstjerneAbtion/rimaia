@@ -30,7 +30,10 @@ use crate::review::{
     Dependent, Digest, DigestEntry, DigestLoop, DigestOutcome, DigestTotals, FindingSeverity,
     FindingStatus, ReviewFinding, ReviewOutcome,
 };
-use crate::review_loop::{ReviewConfig, ReviewLoopSummary, UnreviewedReason, Verdict};
+use crate::review_loop::{
+    HistoryFinding, LoopHistory, PhaseSummary, ReviewConfig, ReviewHistory, ReviewLoopSummary,
+    ReviewRound, UnreviewedReason, Verdict,
+};
 use crate::runner::strategy::{PlanOutcome, PlanPass, PlanResult};
 use crate::schedule::{PreflightSummary, ScheduleView as CoreScheduleView};
 use crate::scheduler::RunCapacity;
@@ -151,20 +154,28 @@ pub struct ReviewLoopView {
     /// Why, when the verdict is `unreviewed`.
     pub unreviewed_reason: Option<UnreviewedReason>,
     pub open_blocking: u32,
+    /// Open findings below the blocking severity: raised, and not worth a fix.
+    pub open_advisory: u32,
     /// A review after a fix raised a finding the fix had fixed, or a new
     /// blocking one. A signal that the loop may be going in circles, not a
     /// verdict.
     pub ping_pong: bool,
 }
 
+/// A verdict as this surface spells it: a word, and why when it is
+/// `unreviewed`.
+fn verdict_parts(verdict: Verdict) -> (&'static str, Option<UnreviewedReason>) {
+    match verdict {
+        Verdict::None => ("none", None),
+        Verdict::Clean => ("clean", None),
+        Verdict::FindingsRemain { .. } => ("findings_remain", None),
+        Verdict::Unreviewed { reason } => ("unreviewed", Some(reason)),
+    }
+}
+
 impl From<ReviewLoopSummary> for ReviewLoopView {
     fn from(summary: ReviewLoopSummary) -> Self {
-        let (verdict, unreviewed_reason) = match summary.verdict {
-            Verdict::None => ("none", None),
-            Verdict::Clean => ("clean", None),
-            Verdict::FindingsRemain { .. } => ("findings_remain", None),
-            Verdict::Unreviewed { reason } => ("unreviewed", Some(reason)),
-        };
+        let (verdict, unreviewed_reason) = verdict_parts(summary.verdict);
         Self {
             enabled: summary.enabled,
             max_review_loops: summary.max_review_loops,
@@ -173,6 +184,7 @@ impl From<ReviewLoopSummary> for ReviewLoopView {
             verdict,
             unreviewed_reason,
             open_blocking: summary.open_blocking,
+            open_advisory: summary.open_advisory,
             ping_pong: summary.ping_pong,
         }
     }
@@ -1280,6 +1292,134 @@ impl From<Vec<ReviewFinding>> for ReviewFindingsView {
     }
 }
 
+/// One finding in a review history: the stored row, and whether it blocks
+/// against the task's effective `blocking_severity`, decided in core.
+#[derive(Debug, Clone, PartialEq, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub struct HistoryFindingView {
+    #[serde(flatten)]
+    pub finding: ReviewFindingView,
+    pub blocking: bool,
+}
+
+impl From<HistoryFinding> for HistoryFindingView {
+    fn from(finding: HistoryFinding) -> Self {
+        Self {
+            blocking: finding.blocking,
+            finding: finding.finding.into(),
+        }
+    }
+}
+
+/// One phase of a loop: an implementation, a review or a fix.
+#[derive(Debug, Clone, PartialEq, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub struct PhaseView {
+    pub kind: RunKind,
+    /// Oldest first; more than one when the phase was resumed after a limit.
+    pub run_ids: Vec<String>,
+    pub status: RunStatus,
+    pub exit_class: Option<ExitClass>,
+}
+
+impl From<PhaseSummary> for PhaseView {
+    fn from(phase: PhaseSummary) -> Self {
+        Self {
+            kind: phase.kind,
+            run_ids: phase.run_ids,
+            status: phase.status,
+            exit_class: phase.exit_class,
+        }
+    }
+}
+
+/// A fix, and the findings its rows resolved.
+#[derive(Debug, Clone, PartialEq, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub struct FixRoundView {
+    pub phase: PhaseView,
+    pub resolved: Vec<HistoryFindingView>,
+}
+
+/// One review, the fix that followed it and the ping-pong lists.
+#[derive(Debug, Clone, PartialEq, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub struct ReviewRoundView {
+    pub review: Option<PhaseView>,
+    pub findings: Vec<HistoryFindingView>,
+    pub fix: Option<FixRoundView>,
+    /// Findings a fix had marked fixed that this review raised again.
+    pub regressed: Vec<HistoryFindingView>,
+    /// Blocking findings the review before it did not raise.
+    pub new_after_fix: Vec<HistoryFindingView>,
+    pub ping_pong: bool,
+}
+
+/// One loop: an implementation and the rounds after it.
+#[derive(Debug, Clone, PartialEq, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub struct LoopHistoryView {
+    /// Before a re-run implementation: not the loop the verdict is about.
+    pub earlier: bool,
+    pub implementation: PhaseView,
+    pub rounds: Vec<ReviewRoundView>,
+    pub fixes_spent: u32,
+    /// `none`, `clean`, `findings_remain` or `unreviewed`.
+    pub verdict: &'static str,
+    /// Why, when the verdict is `unreviewed`.
+    pub unreviewed_reason: Option<UnreviewedReason>,
+    pub open_blocking: u32,
+    pub open_advisory: u32,
+}
+
+impl From<ReviewRound> for ReviewRoundView {
+    fn from(round: ReviewRound) -> Self {
+        let findings = |list: Vec<HistoryFinding>| list.into_iter().map(Into::into).collect();
+        Self {
+            review: round.review.map(Into::into),
+            findings: findings(round.findings),
+            fix: round.fix.map(|fix| FixRoundView {
+                phase: fix.phase.into(),
+                resolved: findings(fix.resolved),
+            }),
+            regressed: findings(round.regressed),
+            new_after_fix: findings(round.new_after_fix),
+            ping_pong: round.ping_pong,
+        }
+    }
+}
+
+impl From<LoopHistory> for LoopHistoryView {
+    fn from(one: LoopHistory) -> Self {
+        let (verdict, unreviewed_reason) = verdict_parts(one.verdict);
+        Self {
+            earlier: one.earlier,
+            implementation: one.implementation.into(),
+            rounds: one.rounds.into_iter().map(Into::into).collect(),
+            fixes_spent: one.fixes_spent,
+            verdict,
+            unreviewed_reason,
+            open_blocking: one.open_blocking,
+            open_advisory: one.open_advisory,
+        }
+    }
+}
+
+/// `get_review_history`: every loop the task has had, oldest first.
+#[derive(Debug, Clone, PartialEq, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub struct ReviewHistoryView {
+    pub loops: Vec<LoopHistoryView>,
+}
+
+impl From<ReviewHistory> for ReviewHistoryView {
+    fn from(history: ReviewHistory) -> Self {
+        Self {
+            loops: history.loops.into_iter().map(Into::into).collect(),
+        }
+    }
+}
+
 /// `reject_task` and `request_task_changes`.
 #[derive(Debug, Clone, PartialEq, Serialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
@@ -1491,6 +1631,7 @@ mod tests {
                     reason: UnreviewedReason::NothingRecorded,
                 },
                 open_blocking: 0,
+                open_advisory: 0,
                 ping_pong: false,
             }),
         });
@@ -1510,6 +1651,7 @@ mod tests {
                 "verdict": "unreviewed",
                 "unreviewed_reason": "nothing_recorded",
                 "open_blocking": 0,
+                "open_advisory": 0,
                 "ping_pong": false,
             })
         );
@@ -1569,6 +1711,7 @@ mod tests {
             effective_model: Some("opus".to_string()),
             effective_effort: Some("high".to_string()),
             effective_origin: StrategyOrigin::Repository,
+            review_loop: None,
         });
 
         let wire = serde_json::to_value(&item).expect("a DTO must always serialize");
@@ -1597,6 +1740,7 @@ mod tests {
             effective_model: None,
             effective_effort: None,
             effective_origin: StrategyOrigin::ClaudeCode,
+            review_loop: None,
         });
 
         assert!(!item.has_plan);

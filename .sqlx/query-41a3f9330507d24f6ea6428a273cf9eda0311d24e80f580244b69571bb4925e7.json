@@ -1,0 +1,68 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT task_id AS \"task_id!\", id AS \"id!\", kind AS \"kind!: RunKind\", attempt,\n                  status AS \"status!: RunStatus\", exit_class AS \"exit_class: ExitClass\",\n                  session_id AS \"session_id!\", head_sha,\n                  findings_recorded_at IS NOT NULL AS \"findings_recorded!: bool\"\n             FROM runs\n            WHERE task_id IN (SELECT value FROM json_each(?1))\n            ORDER BY task_id, attempt",
+  "describe": {
+    "columns": [
+      {
+        "name": "task_id!",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "id!",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "kind!: RunKind",
+        "ordinal": 2,
+        "type_info": "Text"
+      },
+      {
+        "name": "attempt",
+        "ordinal": 3,
+        "type_info": "Integer"
+      },
+      {
+        "name": "status!: RunStatus",
+        "ordinal": 4,
+        "type_info": "Text"
+      },
+      {
+        "name": "exit_class: ExitClass",
+        "ordinal": 5,
+        "type_info": "Text"
+      },
+      {
+        "name": "session_id!",
+        "ordinal": 6,
+        "type_info": "Text"
+      },
+      {
+        "name": "head_sha",
+        "ordinal": 7,
+        "type_info": "Text"
+      },
+      {
+        "name": "findings_recorded!: bool",
+        "ordinal": 8,
+        "type_info": "Null"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      true,
+      false,
+      true,
+      null
+    ]
+  },
+  "hash": "41a3f9330507d24f6ea6428a273cf9eda0311d24e80f580244b69571bb4925e7"
+}

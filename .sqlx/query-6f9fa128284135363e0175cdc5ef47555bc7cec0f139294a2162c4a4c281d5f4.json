@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT id AS \"id!\", review_config\n             FROM repositories\n            WHERE id IN (SELECT value FROM json_each(?1))",
+  "describe": {
+    "columns": [
+      {
+        "name": "id!",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "review_config",
+        "ordinal": 1,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      true
+    ]
+  },
+  "hash": "6f9fa128284135363e0175cdc5ef47555bc7cec0f139294a2162c4a4c281d5f4"
+}

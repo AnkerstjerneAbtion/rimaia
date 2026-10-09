@@ -24,6 +24,7 @@
 //! absorbed by it.
 
 use std::collections::HashSet;
+use std::ops::Deref;
 
 use serde::{Deserialize, Serialize};
 
@@ -31,8 +32,8 @@ use crate::db::{ExitClass, RunKind, RunStatus};
 use crate::review::findings::{FindingStatus, ReviewFinding};
 
 use super::{
-    current_loop, is_carried_over, loops, open_blocking, EffectiveReviewConfig, Loop, LoopRow,
-    Phase,
+    current_loop, is_carried_over, loops, open_advisory, open_blocking, EffectiveReviewConfig,
+    Loop, LoopRow, Phase,
 };
 
 /// Why a loop did not end clean.
@@ -96,7 +97,42 @@ pub struct ReviewLoopSummary {
     pub reviews: u32,
     pub verdict: Verdict,
     pub open_blocking: u32,
+    /// Open findings of the newest review that sit below `blocking_severity`:
+    /// raised, and not worth a fix. Zero unless the verdict is `Clean` or
+    /// `FindingsRemain`, for the reason `open_blocking` is.
+    pub open_advisory: u32,
     pub ping_pong: bool,
+}
+
+/// A stored finding and whether it blocks, as the history carries it.
+///
+/// `blocking` is the configuration's rule applied here, in core, so a view
+/// that marks a finding advisory never compares severities itself (task 037).
+/// It describes the finding against the *current* effective
+/// `blocking_severity`, like every other figure the history derives.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HistoryFinding {
+    #[serde(flatten)]
+    pub finding: ReviewFinding,
+    pub blocking: bool,
+}
+
+impl HistoryFinding {
+    fn new(finding: &ReviewFinding, config: &EffectiveReviewConfig) -> Self {
+        Self {
+            blocking: finding.severity.is_at_least(config.blocking_severity),
+            finding: finding.clone(),
+        }
+    }
+}
+
+impl Deref for HistoryFinding {
+    type Target = ReviewFinding;
+
+    fn deref(&self) -> &ReviewFinding {
+        &self.finding
+    }
 }
 
 /// One phase, as a history reads it.
@@ -117,7 +153,7 @@ pub struct PhaseSummary {
 pub struct FixRound {
     pub phase: PhaseSummary,
     /// The findings its rows resolved, fixed or rejected.
-    pub resolved: Vec<ReviewFinding>,
+    pub resolved: Vec<HistoryFinding>,
 }
 
 /// One review, the fix that followed it, and the ping-pong lists.
@@ -126,10 +162,10 @@ pub struct FixRound {
 pub struct ReviewRound {
     /// `None` only for a fix with no review before it, which no loop writes.
     pub review: Option<PhaseSummary>,
-    pub findings: Vec<ReviewFinding>,
+    pub findings: Vec<HistoryFinding>,
     pub fix: Option<FixRound>,
-    pub regressed: Vec<ReviewFinding>,
-    pub new_after_fix: Vec<ReviewFinding>,
+    pub regressed: Vec<HistoryFinding>,
+    pub new_after_fix: Vec<HistoryFinding>,
     pub ping_pong: bool,
 }
 
@@ -141,6 +177,16 @@ pub struct LoopHistory {
     pub earlier: bool,
     pub implementation: PhaseSummary,
     pub rounds: Vec<ReviewRound>,
+    /// Fix phases this loop spent.
+    pub fixes_spent: u32,
+    /// What this loop says about its branch, by the rule [`verdict`] applies
+    /// to the newest one. An earlier loop that never got a review reads
+    /// [`Verdict::None`]: whether it would have been reviewed is not a
+    /// question the configuration of today answers about the past.
+    pub verdict: Verdict,
+    /// As [`ReviewLoopSummary`]'s, for this loop.
+    pub open_blocking: u32,
+    pub open_advisory: u32,
 }
 
 /// Every loop the task has had, oldest first.
@@ -161,11 +207,22 @@ pub fn verdict(
     findings: &[ReviewFinding],
     config: &EffectiveReviewConfig,
 ) -> Verdict {
-    let Some(current) = current_loop(rows) else {
-        return Verdict::None;
-    };
-    let Some(last) = current.phases.last() else {
-        return if current.implementation.succeeded() && config.enabled {
+    match current_loop(rows) {
+        Some(current) => loop_verdict(&current, true, findings, config),
+        None => Verdict::None,
+    }
+}
+
+/// [`verdict`] for one loop. `newest` is whether the configuration may speak
+/// for it: only the newest loop can still be reviewed.
+fn loop_verdict(
+    one: &Loop<'_>,
+    newest: bool,
+    findings: &[ReviewFinding],
+    config: &EffectiveReviewConfig,
+) -> Verdict {
+    let Some(last) = one.phases.last() else {
+        return if newest && one.implementation.succeeded() && config.enabled {
             Verdict::Unreviewed {
                 reason: UnreviewedReason::NotReviewed,
             }
@@ -197,6 +254,23 @@ pub fn verdict(
     Verdict::Unreviewed { reason }
 }
 
+/// The open blocking and open advisory findings a loop's verdict stands on:
+/// its newest review's, when the verdict is about that review at all.
+fn open_counts(
+    one: &Loop<'_>,
+    verdict: Verdict,
+    findings: &[ReviewFinding],
+    config: &EffectiveReviewConfig,
+) -> (u32, u32) {
+    match (verdict, one.phases.last()) {
+        (Verdict::Clean | Verdict::FindingsRemain { .. }, Some(review)) => (
+            count(open_blocking(findings, review, config.blocking_severity).len()),
+            count(open_advisory(findings, review, config.blocking_severity).len()),
+        ),
+        _ => (0, 0),
+    }
+}
+
 /// The card's summary, or `None` when the verdict is
 /// [`None`](Verdict::None): a task the loop never touched carries nothing.
 pub fn summary(
@@ -209,10 +283,7 @@ pub fn summary(
         return None;
     }
     let current = current_loop(rows)?;
-    let open_blocking = match verdict {
-        Verdict::FindingsRemain { open_blocking } => open_blocking,
-        _ => 0,
-    };
+    let (open_blocking, open_advisory) = open_counts(&current, verdict, findings, config);
     let ping_pong = rounds(&current, findings, config)
         .iter()
         .any(|round| round.ping_pong);
@@ -224,6 +295,7 @@ pub fn summary(
         reviews: current.reviews(),
         verdict,
         open_blocking,
+        open_advisory,
         ping_pong,
     })
 }
@@ -246,10 +318,18 @@ pub fn phases(
         loops: all
             .iter()
             .enumerate()
-            .map(|(index, one)| LoopHistory {
-                earlier: index < newest,
-                implementation: phase_summary(&one.implementation),
-                rounds: rounds(one, findings, config),
+            .map(|(index, one)| {
+                let verdict = loop_verdict(one, index == newest, findings, config);
+                let (open_blocking, open_advisory) = open_counts(one, verdict, findings, config);
+                LoopHistory {
+                    earlier: index < newest,
+                    implementation: phase_summary(&one.implementation),
+                    rounds: rounds(one, findings, config),
+                    fixes_spent: one.fixes_spent(),
+                    verdict,
+                    open_blocking,
+                    open_advisory,
+                }
             })
             .collect(),
     }
@@ -265,7 +345,7 @@ fn rounds(
         match phase.kind {
             RunKind::Review => rounds.push(ReviewRound {
                 review: Some(phase_summary(phase)),
-                findings: raised_by(findings, phase),
+                findings: raised_by(findings, phase, config),
                 fix: None,
                 regressed: Vec::new(),
                 new_after_fix: Vec::new(),
@@ -282,7 +362,7 @@ fn rounds(
                                 .as_deref()
                                 .is_some_and(|run| phase.contains_run(run))
                         })
-                        .cloned()
+                        .map(|finding| HistoryFinding::new(finding, config))
                         .collect(),
                 };
                 match rounds.last_mut() {
@@ -351,11 +431,15 @@ fn rounds(
     rounds
 }
 
-fn raised_by(findings: &[ReviewFinding], review: &Phase<'_>) -> Vec<ReviewFinding> {
+fn raised_by(
+    findings: &[ReviewFinding],
+    review: &Phase<'_>,
+    config: &EffectiveReviewConfig,
+) -> Vec<HistoryFinding> {
     findings
         .iter()
         .filter(|finding| review.contains_run(&finding.review_run_id))
-        .cloned()
+        .map(|finding| HistoryFinding::new(finding, config))
         .collect()
 }
 
@@ -550,6 +634,92 @@ mod tests {
         );
         assert_eq!(history.loops[0].rounds.len(), 2);
         assert!(history.loops[1].rounds.is_empty());
+    }
+
+    #[test]
+    fn a_finding_below_the_blocking_severity_is_advisory_and_counted_apart() {
+        let rows = two_reviews();
+        let findings = [
+            found(
+                "b",
+                "run-4",
+                FindingSeverity::High,
+                "Blocks",
+                FindingStatus::Open,
+                None,
+            ),
+            found(
+                "n",
+                "run-4",
+                FindingSeverity::Low,
+                "Nit",
+                FindingStatus::Open,
+                None,
+            ),
+        ];
+
+        let summary = summary(&rows, &findings, &on()).expect("a loop");
+        assert_eq!((summary.open_blocking, summary.open_advisory), (1, 1));
+
+        let history = phases(&rows, &findings, &on());
+        let flags: Vec<(&str, bool)> = history.loops[0].rounds[1]
+            .findings
+            .iter()
+            .map(|finding| (finding.id.as_str(), finding.blocking))
+            .collect();
+        assert_eq!(flags, vec![("b", true), ("n", false)]);
+        let newest = &history.loops[0];
+        assert_eq!((newest.open_blocking, newest.open_advisory), (1, 1));
+
+        let only_a_nit = &findings[1..];
+        let summary = super::summary(&rows, only_a_nit, &on()).expect("a loop");
+        assert_eq!(summary.verdict, Verdict::Clean);
+        assert_eq!((summary.open_blocking, summary.open_advisory), (0, 1));
+    }
+
+    #[test]
+    fn what_blocks_follows_the_effective_blocking_severity() {
+        let rows = two_reviews();
+        let findings = [found(
+            "n",
+            "run-4",
+            FindingSeverity::Low,
+            "Nit",
+            FindingStatus::Open,
+            None,
+        )];
+        let strict = EffectiveReviewConfig {
+            blocking_severity: FindingSeverity::Low,
+            ..on()
+        };
+
+        let history = phases(&rows, &findings, &strict);
+
+        assert!(history.loops[0].rounds[1].findings[0].blocking);
+        assert_eq!(history.loops[0].open_blocking, 1);
+        assert_eq!(history.loops[0].open_advisory, 0);
+    }
+
+    #[test]
+    fn each_loop_carries_its_own_verdict_and_fixes() {
+        let mut rows = two_reviews();
+        rows.push(row(5, RunKind::Implementation, "impl-2", "c"));
+
+        let history = phases(&rows, &[], &on());
+
+        assert_eq!(history.loops[0].verdict, Verdict::Clean);
+        assert_eq!(history.loops[0].fixes_spent, 1);
+        assert_eq!(
+            history.loops[1].verdict,
+            Verdict::Unreviewed {
+                reason: UnreviewedReason::NotReviewed
+            },
+            "the newest loop reads the configuration"
+        );
+        assert_eq!(history.loops[1].fixes_spent, 0);
+
+        let off = phases(&rows, &[], &EffectiveReviewConfig::default());
+        assert_eq!(off.loops[1].verdict, Verdict::None);
     }
 
     #[test]

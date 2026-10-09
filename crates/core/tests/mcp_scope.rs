@@ -14,15 +14,16 @@
 
 use rimaia_core::db::{BoardColumn, MutationSource, RunKind, ScheduleMode};
 use rimaia_core::mcp::requests::{
-    ArchiveTaskRequest, CreateTaskRequest, DoctorDismissalRequest, GetStrategyDefaultsRequest,
-    GetTaskRequest, ListReviewFindingsRequest, ListTasksRequest, MarkReviewDigestSeenRequest,
-    MoveTaskRequest, PlanSelectionRequest, RecordReviewFindingsRequest,
-    ResolveReviewFindingRequest, ReviewNoteRequest, ScheduleConfigRequest, ScheduleRequest,
-    SetMaxConcurrencyRequest, SetRepositoryMaxConcurrencyRequest, SetRepositoryReviewConfigRequest,
-    SetReviewSettingsRequest, SetScheduleEnabledRequest, SetScheduleModeRequest,
-    SetStrategyApprovalRequest, SetStrategyCatalogueRequest, SetStrategyDefaultsRequest,
-    SetTaskDependenciesRequest, SetTaskReviewRequest, SetTaskStrategyRequest, TaskStrategyRequest,
-    UpdateScheduleRequest, UpdateTaskRequest,
+    ArchiveTaskRequest, CreateTaskRequest, DoctorDismissalRequest, GetReviewHistoryRequest,
+    GetStrategyDefaultsRequest, GetTaskRequest, ListReviewFindingsRequest, ListTasksRequest,
+    MarkReviewDigestSeenRequest, MoveTaskRequest, PlanSelectionRequest,
+    RecordReviewFindingsRequest, ResolveReviewFindingRequest, ReviewNoteRequest,
+    ScheduleConfigRequest, ScheduleRequest, SetMaxConcurrencyRequest,
+    SetRepositoryMaxConcurrencyRequest, SetRepositoryReviewConfigRequest, SetReviewSettingsRequest,
+    SetScheduleEnabledRequest, SetScheduleModeRequest, SetStrategyApprovalRequest,
+    SetStrategyCatalogueRequest, SetStrategyDefaultsRequest, SetTaskDependenciesRequest,
+    SetTaskReviewRequest, SetTaskStrategyRequest, TaskStrategyRequest, UpdateScheduleRequest,
+    UpdateTaskRequest,
 };
 use rimaia_core::mcp::responses::{
     DoctorDismissalsView, DoctorReportView, PreflightView, ScheduleDeletedView, ScheduleListView,
@@ -142,6 +143,7 @@ fn expected_access(tool: Tool, kind: GrantKind) -> RunAccess {
         // D30's "everything else" row: a fix run is handed its findings in its
         // prompt (task 021) and does not go looking for them.
         Tool::ListReviewFindings => RunAccess::Refused,
+        Tool::GetReviewHistory => RunAccess::Refused,
 
             Tool::CreateTask
             | Tool::ListTasks
@@ -2117,6 +2119,31 @@ async fn the_review_configuration_is_refused_to_every_grant() {
         Default::default(),
         "nothing was written"
     );
+}
+
+#[tokio::test]
+async fn getting_review_history_is_refused_to_every_run_grant() {
+    // D30's "everything else" row (task 037): the history holds every finding
+    // of every loop, and a run is handed what it needs in its prompt. Refused
+    // on its own task, before anything is read.
+    let h = TestContext::new().await;
+    let repository_id = seed_repository(&h.context.pool, "rimaia", "/tmp/rimaia").await;
+    let task = create_task(&h, &repository_id, "Mine").await;
+
+    for grant in every_grant() {
+        let server = scoped_as(&h, &task.id, grant);
+
+        assert_refusal(
+            &as_result(
+                server
+                    .get_review_history(Parameters(request::<GetReviewHistoryRequest>(
+                        json!({ "task_id": task.id }),
+                    )))
+                    .await,
+            ),
+            &not_available("get_review_history", &task.id),
+        );
+    }
 }
 
 #[tokio::test]

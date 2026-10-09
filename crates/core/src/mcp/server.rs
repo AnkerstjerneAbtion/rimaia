@@ -34,25 +34,26 @@ use crate::doctor;
 use crate::mcp::error::ToolError;
 use crate::mcp::requests::{
     AddTaskLinkRequest, AnalyticsRequest, ArchiveTaskRequest, ArchiveTasksRequest, ClearableField,
-    CreateTaskRequest, DoctorDismissalRequest, GetStrategyDefaultsRequest, GetTaskRequest,
-    ListReviewFindingsRequest, ListTasksRequest, MarkReviewDigestSeenRequest, MoveTaskRequest,
-    PlanSelectionRequest, RecordReviewFindingsRequest, RemoveTaskLinkRequest, RepositoryRequest,
-    ResolveReviewFindingRequest, ReviewNoteRequest, ScheduleConfigRequest, ScheduleRequest,
-    SetMaxConcurrencyRequest, SetRepositoryMaxConcurrencyRequest, SetRepositoryOnArchiveRequest,
-    SetRepositoryReviewConfigRequest, SetReviewSettingsRequest, SetScheduleEnabledRequest,
-    SetScheduleModeRequest, SetStrategyApprovalRequest, SetStrategyCatalogueRequest,
-    SetStrategyDefaultsRequest, SetTaskDependenciesRequest, SetTaskReviewRequest,
-    SetTaskStrategyRequest, SetWorktreeAutoCleanupRequest, SubscriptionCostRequest,
-    TaskStrategyRequest, UpdateScheduleRequest, UpdateTaskRequest,
+    CreateTaskRequest, DoctorDismissalRequest, GetReviewHistoryRequest, GetStrategyDefaultsRequest,
+    GetTaskRequest, ListReviewFindingsRequest, ListTasksRequest, MarkReviewDigestSeenRequest,
+    MoveTaskRequest, PlanSelectionRequest, RecordReviewFindingsRequest, RemoveTaskLinkRequest,
+    RepositoryRequest, ResolveReviewFindingRequest, ReviewNoteRequest, ScheduleConfigRequest,
+    ScheduleRequest, SetMaxConcurrencyRequest, SetRepositoryMaxConcurrencyRequest,
+    SetRepositoryOnArchiveRequest, SetRepositoryReviewConfigRequest, SetReviewSettingsRequest,
+    SetScheduleEnabledRequest, SetScheduleModeRequest, SetStrategyApprovalRequest,
+    SetStrategyCatalogueRequest, SetStrategyDefaultsRequest, SetTaskDependenciesRequest,
+    SetTaskReviewRequest, SetTaskStrategyRequest, SetWorktreeAutoCleanupRequest,
+    SubscriptionCostRequest, TaskStrategyRequest, UpdateScheduleRequest, UpdateTaskRequest,
 };
 use crate::mcp::responses::{
     AnalyticsView, ArchiveReportView, ArchivedTaskView, BaseInstructionsView, CredentialStatusView,
     DigestMarkerView, DismissalView, DoctorDismissalsView, DoctorReportView, OnboardingView,
     PlanPassView, PlanResultView, PreflightView, RepositoryListView, RepositoryOnArchiveView,
-    RepositoryView, ReviewDigestView, ReviewFindingView, ReviewFindingsView, ReviewOutcomeView,
-    ReviewedTaskView, RunCapacityView, ScheduleDeletedView, ScheduleListView, ScheduleView,
-    StrategyApprovalView, SubscriptionCostView, TaskDependentsView, TaskListItem, TaskListView,
-    TaskView, TimezoneListView, WorktreeAutoCleanupView, WorktreeListView, WorktreeView,
+    RepositoryView, ReviewDigestView, ReviewFindingView, ReviewFindingsView, ReviewHistoryView,
+    ReviewOutcomeView, ReviewedTaskView, RunCapacityView, ScheduleDeletedView, ScheduleListView,
+    ScheduleView, StrategyApprovalView, SubscriptionCostView, TaskDependentsView, TaskListItem,
+    TaskListView, TaskView, TimezoneListView, WorktreeAutoCleanupView, WorktreeListView,
+    WorktreeView,
 };
 use crate::mcp::scope::{RunScope, Tool};
 use crate::review;
@@ -1107,6 +1108,25 @@ Call this to tell the user what the automated review raised and what became of i
     }
 
     #[tool(
+        description = "Read what a task's automated review came to: every loop the task has had, \
+oldest first and the newest last. A loop is an implementation and the rounds after it; a round is \
+a review, the findings it raised (each with `status`, its `resolution` and whether it is \
+`blocking` under the task's effective `blocking_severity`), the fix that followed and what that \
+fix resolved, and `regressed` and `new_after_fix` for the signs of a loop going in circles. Each \
+loop carries its `verdict` and its open blocking and advisory counts. Call this to tell the user \
+what the reviewer could not fix."
+    )]
+    pub async fn get_review_history(
+        &self,
+        Parameters(request): Parameters<GetReviewHistoryRequest>,
+    ) -> Result<Json<ReviewHistoryView>, ToolError> {
+        self.scope
+            .authorize(Tool::GetReviewHistory, Some(&request.task_id))?;
+        let history = review_loop::history(&self.ctx, &request.task_id).await?;
+        Ok(Json(history.into()))
+    }
+
+    #[tool(
         description = "Call this before changing the review-and-fix loop, or when the user asks how \
 automated review is set up. It reads the loop's global settings: the review instructions every \
 review run is given (often just the name of the user's own review skill or slash command), and the \
@@ -1562,7 +1582,7 @@ mod tests {
     /// capability parity a rule. What replaces a count is the property that
     /// actually matters — a registered tool with no run-scope decision cannot
     /// reach the wire.
-    const REGISTERED_TOOLS: [&str; 61] = [
+    const REGISTERED_TOOLS: [&str; 62] = [
         "accept_task_strategy",
         "add_task_link",
         "approve_task",
@@ -1578,6 +1598,7 @@ mod tests {
         "get_base_instructions",
         "get_repository_credential_status",
         "get_review_digest",
+        "get_review_history",
         "get_review_settings",
         "get_run_capacity",
         "get_strategy_approval",
