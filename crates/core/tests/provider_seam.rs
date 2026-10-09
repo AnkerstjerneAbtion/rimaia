@@ -41,9 +41,9 @@ use rimaia_core::runner::provider::{
     negotiate, AgentProvider, ClaudeProvider, ForbiddenOperation, PermissionMode, PromptStyle,
     ProviderId, RefusalAxis, RimaiaHandle, RunIntent, SessionIntent, SpawnPlan,
 };
-use rimaia_core::runner::{run_task, RunRequest, RunTrigger, RunnerConfig};
+use rimaia_core::runner::{claim_manual_start, ManualStart, RunTrigger, RunnerConfig};
 use rimaia_core::scheduler::retry::{self, RetryDecision, RetryKind, USAGE_LIMIT_FALLBACK_POLL};
-use rimaia_core::scheduler::AttemptHistory;
+use rimaia_core::scheduler::{AttemptHistory, InFlight};
 use rimaia_core::tasks::{self, NewTask};
 use rimaia_core::testing::fixtures::lines_for;
 use rimaia_core::testing::provider::{Ledger, LEDGER_HOME, LEDGER_INHERIT, TOOLS_FILE};
@@ -228,19 +228,29 @@ async fn a_provider_that_cannot_deny_a_tool_refuses_an_unattended_run() {
     // why `bypassPermissions` was granted at all, so a provider that cannot
     // express them does not get an unattended run — and the refusal lands before
     // anything is written, so there is nothing to clean up afterwards.
+    //
+    // Through the manual starter with `RunTrigger::Queued`, which no production
+    // caller does: this pins the starter's order only. The queue's half — a
+    // claim whose context no longer negotiates — is
+    // `run_task_releases_a_claim_whose_context_no_longer_negotiates`.
     let fixture = Fixture::new().await;
+    let config = fixture.ledger_config();
 
-    let error = run_task(
+    let error = claim_manual_start(
+        fixture.harness.board(&fixture.paths, &config).as_ref(),
         &fixture.harness.context,
         &fixture.paths,
-        &fixture.ledger_config(),
-        RunRequest {
+        &config,
+        &InFlight::new(),
+        ManualStart {
+            task_id: fixture.task_id.clone(),
             trigger: RunTrigger::Queued,
-            ..RunRequest::manual(&fixture.task_id)
+            continue_session: false,
         },
     )
     .await
-    .expect_err("an unattended run on a provider with no blocklist");
+    .err()
+    .expect("an unattended run on a provider with no blocklist");
 
     assert!(
         error.to_string().contains("rewriting history on a remote"),

@@ -498,6 +498,7 @@ mod end_to_end {
 
     use rimaia_core::runner::events::RunTail;
     use rimaia_core::runner::{run_task, CancelSignal, RunRequest, RunTrigger, RunnerConfig};
+    use rimaia_core::testing::board::claim_run;
     use rimaia_core::testing::{open_gate, FakeCli};
     use tokio::sync::broadcast::Receiver;
 
@@ -626,19 +627,21 @@ mod end_to_end {
         /// A queued run, the trigger every recording was captured under (see
         /// `runner_process.rs`'s header).
         async fn run(&self, cli: &FakeCli) -> rimaia_core::Result<Run> {
+            let config = RunnerConfig {
+                program: cli.program(),
+                ..RunnerConfig::default()
+            };
+            let board = self.harness.board(&self.paths, &config);
+            let claim = claim_run(board.as_ref(), &self.task_id, RunTrigger::Queued, false).await?;
             tokio::time::timeout(
                 TEST_TIMEOUT,
                 run_task(
+                    board.as_ref(),
                     self.ctx(),
                     &self.paths,
-                    &RunnerConfig {
-                        program: cli.program(),
-                        ..RunnerConfig::default()
-                    },
+                    &config,
+                    claim,
                     RunRequest {
-                        task_id: self.task_id.clone(),
-                        trigger: RunTrigger::Queued,
-                        resume: None,
                         cancel: CancelSignal::new(),
                         in_flight: None,
                     },

@@ -33,6 +33,7 @@ pub mod outcome;
 pub mod process;
 pub mod prompt;
 pub mod provider;
+pub mod start;
 pub mod strategy;
 
 pub use process::{
@@ -40,4 +41,5 @@ pub use process::{
     RunRequest, RunTrigger, RunnerConfig, DEFAULT_MAX_TURNS, MAX_TURNS,
 };
 pub use provider::{AgentProvider, ProviderId, RunIntent, SpawnPlan};
+pub use start::{claim_manual_start, ManualStart, Started};
 pub use strategy::{Resolution, STRATEGY_TRANSCRIPT_PREFIX};

@@ -112,10 +112,15 @@ pub fn passing_queue_environment() -> (TempDir, AppPaths, RunnerConfig) {
 /// **A test that actually plans must not use this** — the `claude` here is a
 /// bare name resolved on `PATH`, which is a prerequisite CI does not have
 /// (ADR-0004). Build one from [`passing_queue_environment`] instead.
+///
+/// Its board is [`Unwired`](crate::testing::board::Unwired), which refuses
+/// every call, so a test that reaches the planner through it fails with a
+/// sentence rather than planning against nothing.
 pub fn planner_access() -> crate::runner::strategy::PlannerAccess {
     crate::runner::strategy::PlannerAccess {
         paths: AppPaths::new(std::env::temp_dir().join("rimaia-placeholder-not-created")),
         runner: RunnerConfig::default(),
         in_flight: crate::scheduler::InFlight::new(),
+        board: std::sync::Arc::new(crate::testing::board::Unwired),
     }
 }

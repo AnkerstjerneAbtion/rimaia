@@ -1062,6 +1062,7 @@ mod end_to_end {
     use std::time::Duration as StdDuration;
 
     use rimaia_core::runner::{run_task, CancelSignal, RunRequest, RunTrigger, RunnerConfig};
+    use rimaia_core::testing::board::claim_run;
     use rimaia_core::testing::FakeCli;
     use rimaia_core::worktree::{self, AutoCleanup};
 
@@ -1313,19 +1314,21 @@ mod end_to_end {
 
     impl Fixture {
         async fn run(&self, cli: &FakeCli, task_id: &str) -> rimaia_core::Result<Run> {
+            let config = RunnerConfig {
+                program: cli.program(),
+                ..RunnerConfig::default()
+            };
+            let board = self.harness.board(&self.paths, &config);
+            let claim = claim_run(board.as_ref(), task_id, RunTrigger::Queued, false).await?;
             tokio::time::timeout(
                 TEST_TIMEOUT,
                 run_task(
+                    board.as_ref(),
                     self.ctx(),
                     &self.paths,
-                    &RunnerConfig {
-                        program: cli.program(),
-                        ..RunnerConfig::default()
-                    },
+                    &config,
+                    claim,
                     RunRequest {
-                        task_id: task_id.to_string(),
-                        trigger: RunTrigger::Queued,
-                        resume: None,
                         cancel: CancelSignal::new(),
                         in_flight: None,
                     },

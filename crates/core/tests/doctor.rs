@@ -601,7 +601,13 @@ async fn a_blocking_report_refuses_to_start_the_queue_and_writes_no_queue_state(
         program: root.path().join("claude-that-is-not-installed"),
         ..RunnerConfig::default()
     };
-    let (queue, _task) = scheduler::build(harness.context.clone(), paths, runner, InFlight::new());
+    let (queue, _task) = scheduler::build(
+        harness.board(&paths, &runner),
+        harness.context.clone(),
+        paths,
+        runner,
+        InFlight::new(),
+    );
 
     let refusal = queue
         .start()
@@ -654,7 +660,13 @@ async fn dismissing_every_row_still_refuses_to_start_the_queue_and_writes_no_que
             .expect("the dismissal must store");
     }
 
-    let (queue, _task) = scheduler::build(harness.context.clone(), paths, runner, InFlight::new());
+    let (queue, _task) = scheduler::build(
+        harness.board(&paths, &runner),
+        harness.context.clone(),
+        paths,
+        runner,
+        InFlight::new(),
+    );
 
     let refusal = queue
         .start()
@@ -689,6 +701,7 @@ async fn a_healthy_installation_starts_the_queue_even_with_warnings_outstanding(
         ..RunnerConfig::default()
     };
     let (queue, _task) = scheduler::build(
+        harness.board(&paths, &runner),
         harness.context.clone(),
         paths.clone(),
         runner.clone(),

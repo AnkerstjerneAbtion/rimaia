@@ -36,6 +36,7 @@ use rimaia_core::db::{BoardColumn, RunStatus};
 use rimaia_core::repo::{self, NewRepository};
 use rimaia_core::runner::{run_task, CancelSignal, RunRequest, RunTrigger, RunnerConfig};
 use rimaia_core::tasks::{self, NewTask};
+use rimaia_core::testing::board::claim_run;
 use rimaia_core::testing::credentials::MemoryStore;
 use rimaia_core::testing::fixtures::fixture_path;
 use rimaia_core::testing::{TempRepo, TestContext};
@@ -137,14 +138,16 @@ impl Fixture {
     }
 
     async fn run(&self, cli: &FakeCli) -> rimaia_core::Result<rimaia_core::db::Run> {
+        let config = self.config(cli);
+        let board = self.harness.board(&self.paths, &config);
+        let claim = claim_run(board.as_ref(), &self.task_id, RunTrigger::Queued, false).await?;
         run_task(
+            board.as_ref(),
             &self.harness.context,
             &self.paths,
-            &self.config(cli),
+            &config,
+            claim,
             RunRequest {
-                task_id: self.task_id.clone(),
-                trigger: RunTrigger::Queued,
-                resume: None,
                 cancel: CancelSignal::new(),
                 in_flight: None,
             },

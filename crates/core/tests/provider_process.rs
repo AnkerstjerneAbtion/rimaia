@@ -36,11 +36,14 @@ use rimaia_core::repo::{self, NewRepository};
 use rimaia_core::runner::events::RunTail;
 use rimaia_core::runner::provider::{ClaudeProvider, ProviderId};
 use rimaia_core::runner::{
-    run_task, AgentProvider, CancelSignal, RunRequest, RunnerConfig, STRATEGY_TRANSCRIPT_PREFIX,
+    run_task, AgentProvider, CancelSignal, RunRequest, RunTrigger, RunnerConfig,
+    STRATEGY_TRANSCRIPT_PREFIX,
 };
+use rimaia_core::scheduler;
 use rimaia_core::strategy::catalogue;
 use rimaia_core::tasks::strategy::{StrategyPlan, StrategyPlanStatus};
 use rimaia_core::tasks::{self, NewTask, TaskPatch};
+use rimaia_core::testing::board::claim_run;
 use rimaia_core::testing::fixtures::path_for;
 use rimaia_core::testing::provider::{Ledger, LedgerWithoutResume};
 use rimaia_core::testing::{FakeCli, TempRepo, TestContext};
@@ -208,10 +211,7 @@ async fn two_attempts_of_one_task_share_a_conversation_and_spend_one_budget() {
     );
     let second = tokio::time::timeout(
         TEST_TIMEOUT,
-        fixture.run_request(
-            &cli,
-            RunRequest::resuming(&fixture.task_id, &first.session_id),
-        ),
+        fixture.run_request(&cli, true, RunRequest::default()),
     )
     .await
     .expect("the run finishes")
@@ -247,6 +247,12 @@ async fn a_requeued_task_gets_a_fresh_budget_under_a_self_minting_provider() {
         .await
         .expect("the run finishes")
         .expect("the run is recorded");
+    // A stopped run waits to be retried; giving up on it is what makes it the
+    // task that "gave up last night". Run now never claimed a waiting task:
+    // only `run_task`'s own claim did, and task 036 retired it.
+    scheduler::give_up(&fixture.harness.context, &fixture.task_id)
+        .await
+        .expect("give up on the waiting task");
     let second = tokio::time::timeout(TEST_TIMEOUT, fixture.run(&cli))
         .await
         .expect("the run finishes")
@@ -269,12 +275,13 @@ async fn a_provider_that_cannot_continue_is_sent_the_composed_prompt_not_the_con
         LEDGER_KILLED,
     );
 
-    let first = tokio::time::timeout(
+    tokio::time::timeout(
         TEST_TIMEOUT,
         fixture.run_with(
             &cli,
             Arc::new(LedgerWithoutResume),
-            RunRequest::manual(&fixture.task_id),
+            false,
+            RunRequest::default(),
         ),
     )
     .await
@@ -291,7 +298,8 @@ async fn a_provider_that_cannot_continue_is_sent_the_composed_prompt_not_the_con
         fixture.run_with(
             &cli,
             Arc::new(LedgerWithoutResume),
-            RunRequest::resuming(&fixture.task_id, &first.session_id),
+            true,
+            RunRequest::default(),
         ),
     )
     .await
@@ -370,9 +378,10 @@ async fn a_second_provider_run_that_is_cancelled_still_records_the_ending_its_st
         tokio::join!(
             fixture.run_request(
                 &cli,
+                false,
                 RunRequest {
                     cancel: cancel.clone(),
-                    ..RunRequest::manual(&fixture.task_id)
+                    ..RunRequest::default()
                 },
             ),
             async {
@@ -526,28 +535,45 @@ impl Fixture {
     }
 
     async fn run(&self, cli: &FakeCli) -> rimaia_core::Result<rimaia_core::db::Run> {
-        self.run_request(cli, RunRequest::manual(&self.task_id))
-            .await
+        self.run_request(cli, false, RunRequest::default()).await
     }
 
+    /// A manual run, claimed through the board first the way every starter
+    /// claims; `continue_session` is Retry now's claim rather than Run now's.
     async fn run_request(
         &self,
         cli: &FakeCli,
+        continue_session: bool,
         request: RunRequest,
     ) -> rimaia_core::Result<rimaia_core::db::Run> {
-        self.run_with(cli, Arc::new(Ledger), request).await
+        self.run_with(cli, Arc::new(Ledger), continue_session, request)
+            .await
     }
 
     async fn run_with(
         &self,
         cli: &FakeCli,
         provider: Arc<dyn AgentProvider>,
+        continue_session: bool,
         request: RunRequest,
     ) -> rimaia_core::Result<rimaia_core::db::Run> {
+        let config = self.config(cli, provider);
+        // The board built over the runner's own provider, so the planner is
+        // handed this provider's catalogue (task 036's Traps).
+        let board = self.harness.board(&self.paths, &config);
+        let claim = claim_run(
+            board.as_ref(),
+            &self.task_id,
+            RunTrigger::Manual,
+            continue_session,
+        )
+        .await?;
         run_task(
+            board.as_ref(),
             &self.harness.context,
             &self.paths,
-            &self.config(cli, provider),
+            &config,
+            claim,
             request,
         )
         .await

@@ -56,6 +56,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use pretty_assertions::assert_eq;
+use rimaia_core::board::{BoardPort, Claim};
 use rimaia_core::db::settings;
 use rimaia_core::db::{
     BoardColumn, Repository, Run, RunState, RunStatus, StrategyMode, StrategySource, Task,
@@ -73,9 +74,7 @@ use rimaia_core::runner::provider::ClaudeProvider;
 use rimaia_core::runner::strategy::{
     self as runner_strategy, PlanOutcome, PlanPass, PlanSelection,
 };
-use rimaia_core::runner::{
-    run_task, CancelSignal, ResumeSession, RunRequest, RunTrigger, RunnerConfig,
-};
+use rimaia_core::runner::{run_task, CancelSignal, RunRequest, RunTrigger, RunnerConfig};
 use rimaia_core::scheduler::{InFlight, LeaseOwner};
 
 /// `ClaudeProvider::tool_handle` at the run-scoped handle's own server,
@@ -88,6 +87,7 @@ use rimaia_core::strategy::{self, StrategyDefaults};
 use rimaia_core::tasks::{
     self, NewTask, Patch, StrategyPlan, StrategyPlanStatus, StrategyWorkflow, TaskDetail, TaskPatch,
 };
+use rimaia_core::testing::board::claim_run;
 use rimaia_core::testing::fixtures::{fixture_lines, fixture_path};
 use rimaia_core::testing::{self, TempRepo, TestContext};
 use rimaia_core::{AppPaths, ErrorCode};
@@ -899,6 +899,10 @@ async fn a_pass_and_the_queue_cannot_start_two_processes_for_one_task() {
         .expect("the queue takes the task first");
 
     let pass = runner_strategy::plan_all(
+        fixture
+            .harness
+            .board(&fixture.paths, &fixture.config(&FakeCli::silent()))
+            .as_ref(),
         &fixture.harness.context,
         &fixture.paths,
         &fixture.config(&FakeCli::silent()),
@@ -957,6 +961,10 @@ async fn a_pass_cancelled_before_it_starts_spawns_nothing_and_says_it_was_cancel
     cancel.cancel();
 
     let pass = runner_strategy::plan_all(
+        fixture
+            .harness
+            .board(&fixture.paths, &fixture.config(&cli))
+            .as_ref(),
         &fixture.harness.context,
         &fixture.paths,
         &fixture.config(&cli),
@@ -988,6 +996,10 @@ async fn a_pass_plans_an_eligible_card_and_reports_its_model_effort_and_rational
     // rendering progress, so it may not need exclusive access to anything.
     let seen: std::sync::Mutex<Vec<(usize, usize)>> = std::sync::Mutex::new(Vec::new());
     let pass = runner_strategy::plan_all(
+        fixture
+            .harness
+            .board(&fixture.paths, &fixture.config(&cli))
+            .as_ref(),
         &fixture.harness.context,
         &fixture.paths,
         &fixture.config(&cli),
@@ -1037,6 +1049,10 @@ async fn a_pass_plans_an_eligible_card_and_reports_its_model_effort_and_rational
 /// a skip is decided before anything is spawned.
 async fn plan_selection(fixture: &StrategyFixture, selection: PlanSelection) -> PlanPass {
     runner_strategy::plan_all(
+        fixture
+            .harness
+            .board(&fixture.paths, &fixture.config(&FakeCli::silent()))
+            .as_ref(),
         &fixture.harness.context,
         &fixture.paths,
         &fixture.config(&FakeCli::silent()),
@@ -1457,36 +1473,66 @@ impl StrategyFixture {
         config: &RunnerConfig,
         cancel: &CancelSignal,
     ) -> rimaia_core::Result<Run> {
-        self.spawn(config, cancel, None).await
+        self.spawn(config, cancel, false).await
     }
 
     /// The same, continuing an earlier attempt's session — what the queue does
     /// when a `waiting_retry` deadline arrives.
+    ///
+    /// The board resumes only a task that is waiting, and resumes the newest
+    /// attempt's session, so the task is walked to `waiting_retry` first — the
+    /// state the queue finds it in — and the claim's point is checked against
+    /// the session the caller expects to continue.
     async fn resume(&self, cli: &FakeCli, session_id: &str) -> rimaia_core::Result<Run> {
-        self.spawn(
-            &self.config(cli),
-            &CancelSignal::new(),
-            Some(ResumeSession {
-                session_id: session_id.to_string(),
-            }),
-        )
-        .await
+        for state in [RunState::Queued, RunState::Running, RunState::WaitingRetry] {
+            tasks::set_run_state(&self.harness.context, &self.task_id, state)
+                .await
+                .expect("walk the task to waiting_retry");
+        }
+        let config = self.config(cli);
+        let board = self.harness.board(&self.paths, &config);
+        let claim = claim_run(board.as_ref(), &self.task_id, RunTrigger::Queued, true).await?;
+        assert_eq!(
+            claim.resume.as_ref().map(|point| point.session_id.as_str()),
+            Some(session_id),
+            "the board resumes the session the caller continues",
+        );
+        self.run_claimed(board.as_ref(), &config, &CancelSignal::new(), claim)
+            .await
     }
 
     async fn spawn(
         &self,
         config: &RunnerConfig,
         cancel: &CancelSignal,
-        resume: Option<ResumeSession>,
+        continue_session: bool,
+    ) -> rimaia_core::Result<Run> {
+        let board = self.harness.board(&self.paths, config);
+        let claim = claim_run(
+            board.as_ref(),
+            &self.task_id,
+            RunTrigger::Queued,
+            continue_session,
+        )
+        .await?;
+        self.run_claimed(board.as_ref(), config, cancel, claim)
+            .await
+    }
+
+    async fn run_claimed(
+        &self,
+        board: &dyn BoardPort,
+        config: &RunnerConfig,
+        cancel: &CancelSignal,
+        claim: Claim,
     ) -> rimaia_core::Result<Run> {
         run_task(
+            board,
             &self.harness.context,
             &self.paths,
             config,
+            claim,
             RunRequest {
-                task_id: self.task_id.clone(),
-                trigger: RunTrigger::Queued,
-                resume,
                 cancel: cancel.clone(),
                 in_flight: None,
             },

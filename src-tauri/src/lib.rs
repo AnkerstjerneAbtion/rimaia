@@ -10,6 +10,7 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
+use rimaia_core::board::{BoardPort, InProcessBoard};
 use rimaia_core::db::MutationSource;
 use rimaia_core::doctor;
 use rimaia_core::mcp::{self, McpState, RunHandles};
@@ -273,7 +274,19 @@ pub fn run() {
                 ..RunnerConfig::default()
             };
             let in_flight = InFlight::new();
+            // The one board port every door that starts a process reaches the
+            // board through (seam-contract D31 point 8): the queue, the MCP
+            // server's planner and the commands, through `AppState`. Built from
+            // the `runner` value above and nothing else, because the board's
+            // provider must be the runner's — a board built for another one
+            // would hand the planner the wrong catalogue, silently.
+            let board_port: Arc<dyn BoardPort> = Arc::new(InProcessBoard::new(
+                context.clone(),
+                paths.clone(),
+                runner.provider.clone(),
+            ));
             let (queue, queue_task) = scheduler::build(
+                Arc::clone(&board_port),
                 context.clone(),
                 paths.clone(),
                 runner.clone(),
@@ -328,6 +341,7 @@ pub fn run() {
                     paths: paths.clone(),
                     runner: runner.clone(),
                     in_flight: in_flight.clone(),
+                    board: Arc::clone(&board_port),
                 },
             ));
             let mcp_status = mcp_handle.status();
@@ -359,6 +373,7 @@ pub fn run() {
                 tails,
                 queue,
                 runner,
+                board_port,
                 run_handles,
                 mcp: std::sync::Mutex::new(mcp_handle),
                 plan_pass: std::sync::Mutex::new(None),

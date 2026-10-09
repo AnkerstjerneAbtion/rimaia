@@ -70,9 +70,12 @@ use rimaia_core::runner::provider::{
     SessionIntent,
 };
 use rimaia_core::runner::{
-    run_task, CancelSignal, PermissionMode, RunIntent, RunRequest, RunTrigger, RunnerConfig,
+    claim_manual_start, run_task, CancelSignal, ManualStart, PermissionMode, RunIntent, RunRequest,
+    RunTrigger, RunnerConfig, Started,
 };
+use rimaia_core::scheduler::InFlight;
 use rimaia_core::tasks::{self, NewTask, Patch, TaskPatch};
+use rimaia_core::testing::board::claim_run;
 use rimaia_core::testing::fixtures::{fixture_lines, fixture_path};
 use rimaia_core::testing::{TempRepo, TestContext};
 use rimaia_core::{AppPaths, ErrorCode};
@@ -853,14 +856,11 @@ async fn a_missing_claude_binary_is_refused_before_any_run_state_is_written() {
         ..RunnerConfig::default()
     };
 
-    let error = run_task(
-        &fixture.harness.context,
-        &fixture.paths,
-        &config,
-        fixture.request(),
-    )
-    .await
-    .expect_err("a run needs the CLI");
+    let error = fixture
+        .start(&config, RunTrigger::Queued)
+        .await
+        .err()
+        .expect("a run needs the CLI");
 
     assert_eq!(error.code(), ErrorCode::Invalid);
     assert!(
@@ -948,20 +948,14 @@ async fn a_cli_that_applied_a_permission_mode_nobody_asked_for_stops_the_run() {
 
     // The process itself ran fine; the refusal is Rimaia's, so it is recorded
     // the way every other failed run is rather than raised as a spawn error.
-    let run = run_task(
-        &fixture.harness.context,
-        &fixture.paths,
-        &fixture.config(&cli),
-        RunRequest {
-            task_id: fixture.task_id.clone(),
-            trigger: RunTrigger::Manual,
-            resume: None,
-            cancel: CancelSignal::new(),
-            in_flight: None,
-        },
-    )
-    .await
-    .expect("the attempt is recorded rather than lost");
+    let run = fixture
+        .run_claimed(
+            &fixture.config(&cli),
+            RunTrigger::Manual,
+            &CancelSignal::new(),
+        )
+        .await
+        .expect("the attempt is recorded rather than lost");
 
     assert_eq!(run.status, RunStatus::Failed);
     assert_eq!(run.exit_class, Some(ExitClass::Fatal));
@@ -994,20 +988,14 @@ async fn a_manual_run_against_an_init_that_echoes_accept_edits_succeeds() {
     let fixture = RunnerFixture::new().await;
     let cli = FakeCli::replaying_with_permission_mode("success", "acceptEdits", 0);
 
-    let run = run_task(
-        &fixture.harness.context,
-        &fixture.paths,
-        &fixture.config(&cli),
-        RunRequest {
-            task_id: fixture.task_id.clone(),
-            trigger: RunTrigger::Manual,
-            resume: None,
-            cancel: CancelSignal::new(),
-            in_flight: None,
-        },
-    )
-    .await
-    .expect("the manual run completes");
+    let run = fixture
+        .run_claimed(
+            &fixture.config(&cli),
+            RunTrigger::Manual,
+            &CancelSignal::new(),
+        )
+        .await
+        .expect("the manual run completes");
 
     assert_eq!(run.status, RunStatus::Succeeded);
     assert_eq!(run.exit_class, Some(ExitClass::Success));
@@ -1409,9 +1397,10 @@ async fn a_repository_that_has_not_opted_in_cannot_start_a_task() {
     let cli = FakeCli::replaying("success", 0);
 
     let error = fixture
-        .run(&cli)
+        .start(&fixture.config(&cli), RunTrigger::Manual)
         .await
-        .expect_err("an un-opted repository holds tasks but cannot run them");
+        .err()
+        .expect("an un-opted repository holds tasks but cannot run them");
 
     assert_eq!(error.code(), ErrorCode::Invalid);
     assert!(
@@ -1437,11 +1426,36 @@ async fn a_task_that_failed_last_night_can_be_started_again() {
     }
     let cli = FakeCli::replaying("success", 0);
 
-    let run = fixture.run(&cli).await.expect("the run completes");
+    let run = fixture
+        .start_and_run(&fixture.config(&cli), RunTrigger::Queued)
+        .await
+        .expect("the run completes");
 
     assert_eq!(run.attempt, 1, "last night failed before it opened a row");
     assert_eq!(fixture.task().await.run_state, RunState::Idle);
     assert_eq!(fixture.task().await.column, BoardColumn::InReview);
+}
+
+#[tokio::test]
+async fn a_manual_run_whose_worktree_cannot_be_prepared_does_not_leave_its_card_running() {
+    // Task 036's first behaviour change. A manual start claims and then spawns
+    // `run_task`, and a failure between the claim and the `runs` row used to
+    // return without giving the claim back, so the card read "running" until
+    // the next launch reconciled it. A repository whose `.git` has gone is the
+    // failure here: `worktree::prepare` cannot run `git worktree add` in it.
+    let fixture = RunnerFixture::new().await;
+    let cli = FakeCli::replaying("success", 0);
+    std::fs::remove_dir_all(fixture.repository.path().join(".git"))
+        .expect("take the repository's git directory away");
+
+    fixture
+        .start_and_run(&fixture.config(&cli), RunTrigger::Manual)
+        .await
+        .expect_err("no worktree can be prepared in a repository with no git directory");
+
+    let detail = fixture.detail().await;
+    assert_eq!(detail.task.run_state, RunState::Failed);
+    assert_eq!(detail.last_run, None, "a `runs` row was opened");
 }
 
 // ---------------------------------------------------------------------------
@@ -1774,18 +1788,74 @@ impl RunnerFixture {
         }
     }
 
-    /// A queued run — the trigger whose permission mode every recording in the
-    /// corpus was captured under. See this file's header.
-    fn request(&self) -> RunRequest {
+    /// What `run_task` is handed beside its claim.
+    fn request(&self, cancel: &CancelSignal) -> RunRequest {
         RunRequest {
-            task_id: self.task_id.clone(),
-            trigger: RunTrigger::Queued,
-            resume: None,
-            cancel: CancelSignal::new(),
+            cancel: cancel.clone(),
             // One run, so there is nothing in this repository to take turns
             // with — see `RunRequest::in_flight`.
             in_flight: None,
         }
+    }
+
+    /// The manual starter's preflight and claim, as Run now runs it.
+    async fn start(
+        &self,
+        config: &RunnerConfig,
+        trigger: RunTrigger,
+    ) -> rimaia_core::Result<Started> {
+        claim_manual_start(
+            self.harness.board(&self.paths, config).as_ref(),
+            &self.harness.context,
+            &self.paths,
+            config,
+            &InFlight::new(),
+            ManualStart {
+                task_id: self.task_id.clone(),
+                trigger,
+                continue_session: false,
+            },
+        )
+        .await
+    }
+
+    /// Run now, end to end: the starter, then `run_task` under the slot.
+    async fn start_and_run(
+        &self,
+        config: &RunnerConfig,
+        trigger: RunTrigger,
+    ) -> rimaia_core::Result<Run> {
+        let Started { slot, claim } = self.start(config, trigger).await?;
+        let board = self.harness.board(&self.paths, config);
+        run_task(
+            board.as_ref(),
+            &self.harness.context,
+            &self.paths,
+            config,
+            claim,
+            self.request(&slot.cancel_signal()),
+        )
+        .await
+    }
+
+    /// A run claimed through the board the way the queue claims, then run.
+    async fn run_claimed(
+        &self,
+        config: &RunnerConfig,
+        trigger: RunTrigger,
+        cancel: &CancelSignal,
+    ) -> rimaia_core::Result<Run> {
+        let board = self.harness.board(&self.paths, config);
+        let claim = claim_run(board.as_ref(), &self.task_id, trigger, false).await?;
+        run_task(
+            board.as_ref(),
+            &self.harness.context,
+            &self.paths,
+            config,
+            claim,
+            self.request(cancel),
+        )
+        .await
     }
 
     fn config(&self, cli: &FakeCli) -> RunnerConfig {
@@ -1795,14 +1865,11 @@ impl RunnerFixture {
         }
     }
 
+    /// A queued run — the trigger whose permission mode every recording in the
+    /// corpus was captured under. See this file's header.
     async fn run(&self, cli: &FakeCli) -> rimaia_core::Result<Run> {
-        run_task(
-            &self.harness.context,
-            &self.paths,
-            &self.config(cli),
-            self.request(),
-        )
-        .await
+        self.run_claimed(&self.config(cli), RunTrigger::Queued, &CancelSignal::new())
+            .await
     }
 
     async fn run_with(&self, cli: &FakeCli, cancel: &CancelSignal) -> rimaia_core::Result<Run> {
@@ -1814,16 +1881,7 @@ impl RunnerFixture {
         config: &RunnerConfig,
         cancel: &CancelSignal,
     ) -> rimaia_core::Result<Run> {
-        run_task(
-            &self.harness.context,
-            &self.paths,
-            config,
-            RunRequest {
-                cancel: cancel.clone(),
-                ..self.request()
-            },
-        )
-        .await
+        self.run_claimed(config, RunTrigger::Queued, cancel).await
     }
 
     fn repository_path(&self) -> String {

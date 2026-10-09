@@ -244,8 +244,9 @@ pub async fn plan_task_strategy(state: State<'_, AppState>, task_id: String) -> 
     // Awaited here so a click that cannot possibly plan anything gets an error
     // the button can render, rather than one that only reaches `tracing::error!`
     // inside a detached task nobody is watching.
+    let board = state.board_port.clone();
     let claim = runner_strategy::claim_for_planning(
-        &context,
+        board.as_ref(),
         &state.in_flight,
         &task_id,
         LeaseOwner::Manual,
@@ -256,7 +257,9 @@ pub async fn plan_task_strategy(state: State<'_, AppState>, task_id: String) -> 
     probe_cli(config.provider.as_ref(), &config.program).await?;
 
     tauri::async_runtime::spawn(async move {
-        if let Err(error) = runner_strategy::plan_claimed(&context, &paths, &config, claim).await {
+        if let Err(error) =
+            runner_strategy::plan_claimed(board.as_ref(), &context, &paths, &config, claim).await
+        {
             tracing::error!(
                 %task_id, %error,
                 "a strategy run could not be started or supervised",
@@ -305,6 +308,7 @@ pub async fn plan_tasks_strategy(
     probe_cli(state.runner.provider.as_ref(), &state.runner.program).await?;
 
     let pass = runner_strategy::plan_all(
+        state.board_port.as_ref(),
         &state.context,
         &state.paths,
         &state.runner,

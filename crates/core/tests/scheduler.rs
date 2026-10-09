@@ -1380,19 +1380,13 @@ async fn a_starter_that_claims_before_it_spawns_never_produces_a_second_process(
     // plus scheduler) never produce two processes for one task."
     //
     // The contract that makes it true is that **a starter claims before it
-    // spawns** — `runner::process::run_task` trusts a task already in
-    // `running` and no-ops its own claim, which is the arm task 008 wrote for
-    // this task ("when the scheduler exists it claims the task itself and hands
-    // this a task already claimed"). So the second starter here does what the
-    // queue does: claim, and only spawn if it won — which is now what the
-    // real shell's `commands::runs::start_task_run` does too, in exactly
-    // these two calls (`scheduler::claim`, then `run_task`), fixed after this
-    // suite's own adversarial review found the button did not yet do this and
-    // could spawn a second process for one task. `src-tauri` has no test
-    // harness of its own to drive that command directly (its dev-dependency
-    // on `rimaia-core`'s `testing` feature does not exist), so this is the
-    // closest thing to a regression test the button's own claim has — it
-    // exercises the identical core call the command now makes.
+    // spawns**, and since task 036 there is no other way to start a run:
+    // `run_task` takes the claim the board granted. So the second starter here
+    // does what the queue does — claim through the board, and only spawn if it
+    // won — which is what the shell's `commands::runs::start_task_run` does
+    // through `runner::claim_manual_start`. `src-tauri` has no test harness of
+    // its own to drive that command directly, so this is the closest thing to
+    // a regression test the button's own claim has: the same port call.
     let fixture = Fixture::new().await;
     let task_id = fixture.add_task("Alpha").await;
 
@@ -1403,20 +1397,25 @@ async fn a_starter_that_claims_before_it_spawns_never_produces_a_second_process(
         let ctx = fixture.ctx().clone();
         let paths = fixture.paths.clone();
         let runner = fixture.runner();
+        let board = fixture.harness.board(&paths, &runner);
         let task_id = task_id.clone();
         async move {
-            if scheduler::claim(&ctx, &task_id).await.expect("claim") == ClaimOutcome::Lost {
-                return None;
-            }
+            let claim = board
+                .claim(rimaia_core::board::ClaimTarget::Run {
+                    task_id,
+                    trigger: RunTrigger::Queued,
+                    continue_session: false,
+                })
+                .await
+                .expect("claim")?;
             Some(
                 run_task(
+                    board.as_ref(),
                     &ctx,
                     &paths,
                     &runner,
+                    claim,
                     RunRequest {
-                        task_id,
-                        trigger: RunTrigger::Queued,
-                        resume: None,
                         cancel: CancelSignal::new(),
                         in_flight: None,
                     },
@@ -2367,12 +2366,13 @@ async fn assert_a_wall_holds_every_other_start(mut fixture: Fixture) {
 
 #[tokio::test]
 async fn retry_now_starts_a_waiting_task_before_its_deadline() {
-    // The operator's override. This drives the two core calls the
-    // `retry_task_now` command makes — `resume_point` with
-    // `resume_as_implementation`, then `claim_retry` —
-    // for the same reason `a_starter_that_claims_before_it_spawns_never_produces_a_second_process`
+    // The operator's override. This drives the board claim the
+    // `retry_task_now` command's starter makes — `claim(Run { continue_session:
+    // true })`, which reads and checks the resume point before it takes the
+    // edge — for the same reason
+    // `a_starter_that_claims_before_it_spawns_never_produces_a_second_process`
     // does: `src-tauri` has no test harness of its own, so the closest thing to
-    // a regression test for the button is the core pair it is thin over.
+    // a regression test for the button is the core call it is thin over.
     let fixture = Fixture::new().await;
     let task_id = fixture.add_task("Alpha").await;
     fixture
@@ -2398,33 +2398,34 @@ async fn retry_now_starts_a_waiting_task_before_its_deadline() {
         .expect("a scheduled resume");
     assert!(due > fixture.harness.clock.now());
 
-    // The command's order: the resume point is read and checked before the
-    // claim, so a refused resume would have claimed nothing.
-    let point = scheduler::resume_point(fixture.ctx(), &task_id)
+    // The board reads and checks the resume point before it takes the edge,
+    // so a refused resume would have claimed nothing.
+    let board = fixture.harness.board(&fixture.paths, &fixture.runner());
+    let claim = board
+        .claim(rimaia_core::board::ClaimTarget::Run {
+            task_id: task_id.clone(),
+            // `Queued`, not the button's `Manual`: every recording in the
+            // corpus was captured under `bypassPermissions`, and the runner
+            // verifies the mode `init` echoes back against the one it asked
+            // for. See this file's header.
+            trigger: RunTrigger::Queued,
+            continue_session: true,
+        })
         .await
-        .expect("read the resume point");
-    let session = scheduler::resume_as_implementation(point)
-        .expect("an implementation resumes as one")
-        .expect("a task with attempts has one")
+        .expect("claim the waiting task")
+        .expect("nobody else holds the waiting task");
+    let session = claim
+        .resume
+        .clone()
+        .expect("a task with attempts has a point to resume")
         .session_id;
-    assert_eq!(
-        scheduler::claim_retry(fixture.ctx(), &task_id)
-            .await
-            .expect("claim the waiting task"),
-        ClaimOutcome::Claimed,
-    );
     run_task(
+        board.as_ref(),
         fixture.ctx(),
         &fixture.paths,
         &fixture.runner(),
-        RunRequest {
-            // `Queued`, not `RunRequest::resuming`'s `Manual`: every recording
-            // in the corpus was captured under `bypassPermissions`, and the
-            // runner verifies the mode `init` echoes back against the one it
-            // asked for. See this file's header.
-            trigger: RunTrigger::Queued,
-            ..RunRequest::resuming(&task_id, &session)
-        },
+        claim,
+        RunRequest::default(),
     )
     .await
     .expect("the resumed run completes");
@@ -3636,6 +3637,7 @@ impl Fixture {
     /// exactly the thing `spawn_queue` throws away.
     fn build_queue(&self, in_flight: InFlight) -> (QueueHandle, scheduler::QueueTask) {
         scheduler::build(
+            self.harness.board(&self.paths, &self.runner()),
             self.harness.context.clone(),
             self.paths.clone(),
             self.runner(),
@@ -3718,6 +3720,7 @@ impl Fixture {
     /// needs the preflight doctor to *fail*.
     fn spawn_queue_with_runner(&self, runner: RunnerConfig) -> QueueHandle {
         let (handle, task) = scheduler::build(
+            self.harness.board(&self.paths, &runner),
             self.harness.context.clone(),
             self.paths.clone(),
             runner,

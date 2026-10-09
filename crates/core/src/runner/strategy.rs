@@ -55,15 +55,17 @@
 
 use std::collections::HashSet;
 use std::path::Path;
+use std::sync::Arc;
 
+use crate::board::{BoardPort, Claim, ClaimTarget, LeaseRef, RunContext};
 use crate::context::ServiceContext;
 use crate::db::settings::RunEnvironment;
-use crate::db::{new_id, BoardColumn, ExitClass, Repository, StrategyMode, StrategySource};
-use crate::error::Result;
+use crate::db::{new_id, BoardColumn, ExitClass, Repository, StrategyMode};
+use crate::error::{Error, Result};
 use crate::mcp::{Grant, RUN_MCP_SERVER_NAME};
 use crate::paths::AppPaths;
 use crate::scheduler::{InFlight, Lease, LeaseOwner, LeaseRefused};
-use crate::strategy::{self, Catalogue, EffectiveStrategy};
+use crate::strategy::{self, EffectiveStrategy};
 use crate::tasks::strategy::{StrategyPlan, StrategyPlanRun, StrategyPlanStatus};
 use crate::tasks::{self, TaskDetail, TaskFilter, TaskSummary};
 
@@ -121,28 +123,22 @@ pub enum Resolution {
 /// blocking the queue" — and it is why the queue needs no knowledge of any of
 /// this. `Err` is reserved for a database or filesystem failure, which is the
 /// caller's problem in exactly the way it already was.
+#[allow(clippy::too_many_arguments)]
 pub async fn resolve(
+    board: &dyn BoardPort,
+    lease: &LeaseRef,
     ctx: &ServiceContext,
     paths: &AppPaths,
     config: &RunnerConfig,
-    detail: &TaskDetail,
-    repository: &Repository,
+    context: &RunContext,
     worktree: &Path,
     cancel: &CancelSignal,
 ) -> Result<Resolution> {
-    let effective = effective_for(ctx, detail, repository).await?;
-
-    if !tasks::strategy::needs_planning(&detail.task, effective.mode) {
-        return Ok(ready(detail, &effective));
+    if !tasks::strategy::needs_planning(&context.task.task, context.strategy.mode) {
+        return Ok(ready(&context.task, &context.strategy));
     }
 
-    let catalogue = strategy::catalogue::catalogue(&ctx.pool, config.provider.as_ref()).await?;
-
-    match plan(
-        ctx, paths, config, detail, repository, worktree, cancel, &catalogue,
-    )
-    .await?
-    {
+    match plan(board, lease, ctx, paths, config, context, worktree, cancel).await? {
         Planned::Wrote => {
             // Re-read rather than trusting what we sent: `set_task_strategy` is
             // the single writer, and what it *stored* — after its own
@@ -150,25 +146,23 @@ pub async fn resolve(
             // `tasks.model` and `tasks.effort` — is what the implementation run
             // must spawn with. Reading it back is also what makes the write-back
             // path real rather than assumed.
-            let detail = tasks::get_task(ctx, &detail.task.id).await?;
-            let effective = effective_for(ctx, &detail, repository).await?;
-            Ok(ready(&detail, &effective))
+            let context = board.run_context(lease).await?;
+            Ok(ready(&context.task, &context.strategy))
         }
         Planned::Failed(reason) => {
             tracing::warn!(
-                task_id = %detail.task.id,
+                task_id = %lease.task_id,
                 %reason,
                 "the strategy run did not produce a strategy; falling back to the default",
             );
-            record_failure(ctx, &detail.task.id, &reason).await;
+            record_failure(board, lease, &reason).await;
 
             // The default chain, deliberately re-read: `record_failure` has just
             // cleared the task's own model and effort, so recomputing is what
             // turns "the planner failed" into "this task runs on the default"
             // rather than on a half-written proposal.
-            let detail = tasks::get_task(ctx, &detail.task.id).await?;
-            let effective = effective_for(ctx, &detail, repository).await?;
-            Ok(ready(&detail, &effective))
+            let context = board.run_context(lease).await?;
+            Ok(ready(&context.task, &context.strategy))
         }
         Planned::Cancelled => Ok(Resolution::Cancelled),
     }
@@ -222,17 +216,22 @@ enum Planned {
     Cancelled,
 }
 
+/// One planner attempt, composed from `context`: the task as its caller read
+/// it, the catalogue for this runner's provider, and the board's limits.
 #[allow(clippy::too_many_arguments)]
 async fn plan(
+    board: &dyn BoardPort,
+    lease: &LeaseRef,
     ctx: &ServiceContext,
     paths: &AppPaths,
     config: &RunnerConfig,
-    detail: &TaskDetail,
-    repository: &Repository,
+    context: &RunContext,
     worktree: &Path,
     cancel: &CancelSignal,
-    catalogue: &Catalogue,
 ) -> Result<Planned> {
+    let detail = &context.task;
+    let repository = &context.repository;
+    let catalogue = &context.catalogue;
     let task_id = &detail.task.id;
 
     // Minted before anything is spawned and dropped when this function returns,
@@ -265,9 +264,8 @@ async fn plan(
     let home = paths.provider_home(config.provider.id(), task_id);
     let conversation = new_id();
     let intent = planner_intent(
-        ctx,
         config,
-        catalogue,
+        context,
         task_id,
         &prompt,
         worktree,
@@ -277,8 +275,7 @@ async fn plan(
             url,
             server: RUN_MCP_SERVER_NAME,
         },
-    )
-    .await?;
+    );
 
     // A provider that cannot be handed a scoped handle, cannot deny the tools
     // the planner must not have, or cannot be isolated is not a planner failure
@@ -303,6 +300,8 @@ async fn plan(
     let before = ctx.clock.now();
 
     let outcome = super::execute(
+        board,
+        lease,
         ctx,
         paths,
         config,
@@ -336,8 +335,9 @@ async fn plan(
         return Ok(Planned::Cancelled);
     }
 
-    let after = tasks::get_task(ctx, task_id).await?;
+    let after = board.run_context(lease).await?;
     let wrote = after
+        .task
         .task
         .strategy_updated_at
         .is_some_and(|stamp| stamp >= before);
@@ -353,7 +353,7 @@ async fn plan(
     // panel can say what the decision cost. A best-effort second write: the
     // proposal is already on the card and losing the receipt is not worth
     // failing a run that succeeded.
-    stamp_run_metadata(ctx, task_id, &after, &conversation, &outcome).await;
+    stamp_run_metadata(board, lease, &after.task, &conversation, &outcome).await;
 
     Ok(Planned::Wrote)
 }
@@ -376,21 +376,21 @@ async fn plan(
 /// - **Bounded by `--max-turns`** from the catalogue, so a planner in a loop
 ///   costs cents.
 #[allow(clippy::too_many_arguments)]
-async fn planner_intent<'a>(
-    ctx: &ServiceContext,
+fn planner_intent<'a>(
     config: &RunnerConfig,
-    catalogue: &Catalogue,
+    context: &RunContext,
     task_id: &str,
     prompt: &'a str,
     worktree: &'a Path,
     conversation: &'a str,
     home: &'a Path,
     handle: RimaiaHandle,
-) -> Result<RunIntent<'a>> {
+) -> RunIntent<'a> {
+    let catalogue = &context.catalogue;
     let forbidden =
-        forbidden_operations(&ctx.pool, config.provider.as_ref(), PLANNER_FORBIDDEN).await?;
+        forbidden_operations(&context.limits, config.provider.as_ref(), PLANNER_FORBIDDEN);
 
-    Ok(RunIntent {
+    RunIntent {
         session: SessionIntent::Open { conversation, home },
         permission_mode: PermissionMode::AcceptEdits,
         run_environment: RunEnvironment::StrictLocal,
@@ -426,7 +426,7 @@ async fn planner_intent<'a>(
         forbidden,
         rimaia_handle: Some(handle),
         max_turns: Some(catalogue.planner.max_turns),
-    })
+    }
 }
 
 /// Records a `failed` envelope on the card.
@@ -435,19 +435,19 @@ async fn planner_intent<'a>(
 /// something already went wrong, and failing to write the note must not turn a
 /// recoverable planner failure into a failed run. The queue carries on either
 /// way — that is the acceptance criterion.
-async fn record_failure(ctx: &ServiceContext, task_id: &str, reason: &str) {
-    let plan = StrategyPlan::failed(reason);
-    if let Err(error) =
-        tasks::strategy::set_task_strategy(ctx, task_id, plan, StrategySource::Planner).await
+async fn record_failure(board: &dyn BoardPort, lease: &LeaseRef, reason: &str) {
+    if let Err(error) = board
+        .record_strategy(lease, StrategyPlan::failed(reason))
+        .await
     {
-        tracing::error!(%task_id, %error, "could not record the strategy failure on the task");
+        tracing::error!(task_id = %lease.task_id, %error, "could not record the strategy failure on the task");
     }
 }
 
 /// Copies the planner's turns, cost and session id onto the proposal it wrote.
 async fn stamp_run_metadata(
-    ctx: &ServiceContext,
-    task_id: &str,
+    board: &dyn BoardPort,
+    lease: &LeaseRef,
     after: &TaskDetail,
     conversation: &str,
     outcome: &super::outcome::RunOutcome,
@@ -466,10 +466,8 @@ async fn stamp_run_metadata(
         error: None,
     });
 
-    if let Err(error) =
-        tasks::strategy::set_task_strategy(ctx, task_id, plan, StrategySource::Planner).await
-    {
-        tracing::warn!(%task_id, %error, "could not record what the strategy run cost");
+    if let Err(error) = board.record_strategy(lease, plan).await {
+        tracing::warn!(task_id = %lease.task_id, %error, "could not record what the strategy run cost");
     }
 }
 
@@ -489,13 +487,29 @@ async fn stamp_run_metadata(
 ///
 /// Cheap to clone: an [`AppPaths`] of two `PathBuf`s, a [`RunnerConfig`] the
 /// whole app already shares, and an [`InFlight`] that is an `Arc` inside.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct PlannerAccess {
     pub paths: AppPaths,
     pub runner: RunnerConfig,
     /// The one registry every door takes leases from — the queue, "Run now",
     /// "Plan now" and a pass.
     pub in_flight: InFlight,
+    /// Where a planner's claim and write-backs go (seam-contract D31 point 8).
+    /// Built once in `setup()` over the same provider as `runner`.
+    pub board: Arc<dyn BoardPort>,
+}
+
+impl std::fmt::Debug for PlannerAccess {
+    /// By hand because a board port is not `Debug`, and has nothing a log
+    /// line would want from it.
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("PlannerAccess")
+            .field("paths", &self.paths)
+            .field("runner", &self.runner)
+            .field("in_flight", &self.in_flight)
+            .finish_non_exhaustive()
+    }
 }
 
 /// A planner slot taken, with every refusal that can be settled before a
@@ -509,31 +523,33 @@ pub struct PlannerAccess {
 /// is the ADR-0006 defect this pair exists to avoid, and the reason the body of
 /// this used to live in `src-tauri`.
 pub struct PlannerClaim {
-    lease: Lease,
-    detail: TaskDetail,
-    repository: Repository,
+    /// D19's slot, which stays the runner's.
+    slot: Lease,
+    /// The board's `Plan` claim, and the context the planner is composed from.
+    claim: Claim,
 }
 
 impl PlannerClaim {
     pub fn task_id(&self) -> &str {
-        &self.detail.task.id
+        &self.claim.lease.task_id
     }
 
     pub fn title(&self) -> &str {
-        &self.detail.task.title
+        &self.claim.context.task.task.title
     }
 
-    /// The signal a Cancel or a queue Stop trips. Held by the lease, so it is
+    /// The signal a Cancel or a queue Stop trips. Held by the slot, so it is
     /// released the moment the claim is dropped.
     pub fn cancel_signal(&self) -> CancelSignal {
-        self.lease.cancel_signal()
+        self.slot.cancel_signal()
     }
 }
 
 /// Takes the slot for planning one task, or says why not.
 ///
-/// Everything here is read-only apart from the lease, and every refusal is one
-/// a caller can render:
+/// A preview, the slot, then the board's `Plan` claim. Everything before the
+/// claim is read-only apart from the slot, and every refusal is one a caller
+/// can render:
 ///
 /// - **Already in flight** — the same registry the queue and "Run now" take
 ///   from ([`InFlight`], seam-contract D19). This is what closes the hazard task
@@ -554,39 +570,45 @@ impl PlannerClaim {
 /// that quietly overwrote proposals the user had accepted would be the opposite
 /// of a review aid (task 023's Out of scope).
 pub async fn claim_for_planning(
-    ctx: &ServiceContext,
+    board: &dyn BoardPort,
     in_flight: &InFlight,
     task_id: &str,
     owner: LeaseOwner,
 ) -> Result<std::result::Result<PlannerClaim, PlanSkip>> {
-    let detail = tasks::get_task(ctx, task_id).await?;
-    let repository = crate::repo::get(ctx, &detail.task.repository_id).await?;
+    let preview = board.preview(task_id).await?;
+    let repository = &preview.repository;
 
-    if let Err(error) = crate::repo::ensure_unattended_runs_allowed(&repository) {
+    if let Err(error) = crate::repo::ensure_unattended_runs_allowed(repository) {
         return Ok(Err(PlanSkip::RepositoryNotOptedIn {
             repository: repository.name.clone(),
             reason: error.to_string(),
         }));
     }
 
-    let mode = effective_mode(ctx, &detail, &repository).await?;
+    let mode = preview.strategy.mode;
     if mode != StrategyMode::Planned {
         return Ok(Err(PlanSkip::NotPlanned { mode }));
     }
 
-    // Taken last, so a refusal the caller could have been told about without
-    // touching the registry does not briefly occupy a slot on its way to being
-    // reported.
-    let lease = match in_flight.acquire_unbounded(task_id, &repository.id, owner) {
-        Ok(lease) => lease,
+    // Taken after the refusals, so a refusal the caller could have been told
+    // about without touching the registry does not briefly occupy a slot on
+    // its way to being reported, and before the board's claim, which is
+    // D19's order for every door.
+    let slot = match in_flight.acquire_unbounded(task_id, &repository.id, owner) {
+        Ok(slot) => slot,
         Err(refused) => return Ok(Err(PlanSkip::InFlight(refused))),
     };
 
-    Ok(Ok(PlannerClaim {
-        lease,
-        detail,
-        repository,
-    }))
+    let claim = board
+        .claim(ClaimTarget::Plan {
+            task_id: task_id.to_string(),
+        })
+        .await?
+        // Only a task deleted since the preview loses a `Plan` claim, which
+        // takes no edge another starter could have taken first.
+        .ok_or_else(|| Error::not_found(format!("no task with id {task_id}")))?;
+
+    Ok(Ok(PlannerClaim { slot, claim }))
 }
 
 /// Runs the planner the claim was taken for, and drops the claim on the way out.
@@ -595,36 +617,56 @@ pub async fn claim_for_planning(
 /// keeps: a failure is recorded on the card and reported as
 /// [`PlanOutcome::Failed`]. `Err` is for a database or filesystem failure, which
 /// is the caller's problem in the way it already was.
+///
+/// The `Plan` claim is released on every path, after the last strategy write
+/// and before the slot drops. Before task 043 that changes nothing on the board
+/// (a strategy claim took no edge); from 043 it is what deletes the lease row.
 pub async fn plan_claimed(
+    board: &dyn BoardPort,
     ctx: &ServiceContext,
     paths: &AppPaths,
     config: &RunnerConfig,
     claim: PlannerClaim,
 ) -> Result<PlanOutcome> {
     let cancel = claim.cancel_signal();
-    let PlannerClaim {
-        lease: _lease,
-        detail,
-        repository,
-    } = claim;
-    let task_id = detail.task.id.clone();
+    let PlannerClaim { slot, claim } = claim;
+
+    let outcome = plan_under(board, ctx, paths, config, &claim, &cancel).await;
+
+    if let Err(error) = board.release(&claim.lease).await {
+        tracing::warn!(task_id = %claim.lease.task_id, %error, "could not release a planner's claim");
+    }
+    drop(slot);
+
+    outcome
+}
+
+async fn plan_under(
+    board: &dyn BoardPort,
+    ctx: &ServiceContext,
+    paths: &AppPaths,
+    config: &RunnerConfig,
+    claim: &Claim,
+    cancel: &CancelSignal,
+) -> Result<PlanOutcome> {
+    let lease = &claim.lease;
+    let task_id = &lease.task_id;
 
     // The planner reads the repository, so it needs a checkout that is not the
     // operator's (ADR-0005). `prepare` is idempotent, so a task that already has
     // one is unchanged and a task that does not gets the same worktree its
     // implementation run would have used.
-    let worktree = crate::worktree::prepare(ctx, &task_id).await?;
-    let catalogue = strategy::catalogue::catalogue(&ctx.pool, config.provider.as_ref()).await?;
+    let worktree = crate::worktree::prepare(ctx, task_id).await?;
 
     match plan(
+        board,
+        lease,
         ctx,
         paths,
         config,
-        &detail,
-        &repository,
+        &claim.context,
         Path::new(&worktree.path),
-        &cancel,
-        &catalogue,
+        cancel,
     )
     .await?
     {
@@ -632,15 +674,15 @@ pub async fn plan_claimed(
             // Read back rather than reported from here: `set_task_strategy` is
             // the single writer, and the summary a user reads before going home
             // has to be what is actually on the card.
-            let after = tasks::get_task(ctx, &task_id).await?;
+            let after = board.run_context(lease).await?;
             Ok(PlanOutcome::from_stored(
-                after.task.strategy_plan.as_deref(),
+                after.task.task.strategy_plan.as_deref(),
             ))
         }
         Planned::Cancelled => Ok(PlanOutcome::Cancelled),
         Planned::Failed(reason) => {
             tracing::warn!(%task_id, %reason, "the strategy run did not produce a strategy");
-            record_failure(ctx, &task_id, &reason).await;
+            record_failure(board, lease, &reason).await;
             Ok(PlanOutcome::Failed(reason))
         }
     }
@@ -896,7 +938,9 @@ pub async fn selected_tasks(
 /// signal, so a pass stopped mid-way leaves every proposal already written in
 /// place. There is nothing to roll back: each proposal is a committed write to
 /// its own card.
+#[allow(clippy::too_many_arguments)]
 pub async fn plan_all(
+    board: &dyn BoardPort,
     ctx: &ServiceContext,
     paths: &AppPaths,
     config: &RunnerConfig,
@@ -928,8 +972,8 @@ pub async fn plan_all(
             // `Manual`, because a pass is a person at the machine: a Stop
             // pressed on the queue must not kill a preflight they started
             // deliberately.
-            match claim_for_planning(ctx, in_flight, &task_id, LeaseOwner::Manual).await? {
-                Ok(claim) => plan_claimed(ctx, paths, config, claim).await?,
+            match claim_for_planning(board, in_flight, &task_id, LeaseOwner::Manual).await? {
+                Ok(claim) => plan_claimed(board, ctx, paths, config, claim).await?,
                 Err(skip) => PlanOutcome::Skipped(skip),
             }
         };

@@ -197,7 +197,7 @@ a task that already carries a proposal is re-planned, which is what this tool me
             .authorize(Tool::PlanTaskStrategy, Some(&request.task_id))?;
 
         let claim = runner_strategy::claim_for_planning(
-            &self.ctx,
+            self.planner.board.as_ref(),
             &self.planner.in_flight,
             &request.task_id,
             scheduler::LeaseOwner::Manual,
@@ -208,6 +208,7 @@ a task that already carries a proposal is re-planned, which is what this tool me
             Ok(claim) => {
                 let title = claim.title().to_string();
                 let outcome = runner_strategy::plan_claimed(
+                    self.planner.board.as_ref(),
                     &self.ctx,
                     &self.planner.paths,
                     &self.planner.runner,
@@ -254,6 +255,7 @@ deliberately."
         // button hands in a real one.
         let cancel = crate::runner::CancelSignal::new();
         let pass = runner_strategy::plan_all(
+            self.planner.board.as_ref(),
             &self.ctx,
             &self.planner.paths,
             &self.planner.runner,

@@ -1,6 +1,7 @@
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
 
+use rimaia_core::board::BoardPort;
 use rimaia_core::mcp::{McpHandle, RunHandles};
 use rimaia_core::runner::events::RunTail;
 use rimaia_core::runner::{CancelSignal, RunnerConfig};
@@ -73,6 +74,13 @@ pub struct AppState {
     /// disagreed about any of it would spawn measurably different processes for
     /// the same card with nothing on screen to explain the difference.
     pub runner: RunnerConfig,
+    /// The board port the commands start runs and planners through
+    /// (seam-contract D31 point 8): a clone of the one `setup()` built over
+    /// `runner`'s provider and handed to the queue and the MCP server too.
+    ///
+    /// `board_port` and not `board`, because D32 point 3 gives that name to
+    /// the solo command host.
+    pub board_port: Arc<dyn BoardPort>,
     /// Task 020's live run-scoped MCP endpoints (seam-contract D17.4).
     ///
     /// Built in `setup()` before either subsystem and handed to both:

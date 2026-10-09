@@ -206,20 +206,21 @@ use tokio::sync::broadcast::error::{RecvError, TryRecvError};
 use tokio::sync::{broadcast, watch};
 use tokio::task::JoinSet;
 
+use crate::board::{BoardPort, Claim, ClaimTarget};
 use crate::context::ServiceContext;
 use crate::db::MutationSource;
 use crate::doctor;
+use crate::error::ErrorCode;
 use crate::error::{Error, Result};
 use crate::events::ChangeEvent;
 use crate::paths::AppPaths;
 use crate::runner::{probe_cli, run_task, CancelSignal, RunRequest, RunTrigger, RunnerConfig};
 use crate::schedule::window::{self, RunWindow};
 use crate::schedule::{self, fire, preflight, Due};
-use crate::scheduler::claim::{self, ClaimOutcome};
 use crate::scheduler::inflight::{Capacity, InFlight, Lease, LeaseOwner};
 use crate::scheduler::selection::{self, QueueEntry};
 use crate::scheduler::state::{self, QueueState};
-use crate::scheduler::{attempts, capacity, pause};
+use crate::scheduler::{capacity, pause};
 
 /// The longest the loop will sleep on one deadline before re-deriving it.
 ///
@@ -308,7 +309,12 @@ pub struct QueueTask {
 /// doors, which is the precedent `RunnerConfig::run_handles` already sets: one
 /// value built in `setup()` and handed to everything that needs it, with no
 /// ordering constraint between the subsystems that take it.
+///
+/// `board` is where the queue claims, releases and has its runs report (D31
+/// point 8). The shell builds one in `setup()` over the same provider as
+/// `runner` and hands clones to everything that starts a process.
 pub fn build(
+    board: Arc<dyn BoardPort>,
     ctx: ServiceContext,
     paths: AppPaths,
     runner: RunnerConfig,
@@ -336,6 +342,7 @@ pub fn build(
         runner,
         signals,
         in_flight,
+        board,
         last_step_error: Mutex::new(None),
     });
 
@@ -997,56 +1004,54 @@ impl QueueTask {
             // `waiting_retry -> running` edge in one conditional write.
             let resuming = entry.resume_after.is_some();
 
-            // Before the claim, never after (seam-contract D29 point 3). A
-            // refused resume must have claimed nothing: refusing after the
-            // claim would leave the task `running` with no process, and
-            // `claim::release` would then move it to `failed`, throwing away
-            // the retry it was waiting for. Reading first is safe because this
-            // entry's `InFlight` slot is held: while it is, nothing else in the
-            // app can start a run of this task, so the point read here is the
-            // point the claim resumes. `None` for a retry whose rows have gone
-            // — a pruned history, a hand-edited database — which starts a
+            // The board reads the resume point before it takes the edge, never
+            // after (seam-contract D29 point 3), so a refused resume has
+            // claimed nothing: refusing after the claim would leave the task
+            // `running` with no process, and the release would then move it to
+            // `failed`, throwing away the retry it was waiting for. Reading
+            // first is safe because this entry's `InFlight` slot is held: while
+            // it is, nothing else in the app can start a run of this task, so
+            // the point read is the point the claim resumes. A retry whose rows
+            // have gone — a pruned history, a hand-edited database — starts a
             // fresh session rather than refusing, because a task with no
             // context to resume is exactly a task that should be started from
             // the top.
-            let resume = if resuming {
-                let point = attempts::resume_point(ctx, &task_id).await?;
-                match attempts::resume_as_implementation(point) {
-                    Ok(resume) => resume,
-                    Err(refusal) => {
-                        // Logged and skipped, never `?`: one entry's refusal
-                        // must not abort the step for the rest of the batch.
-                        // Not `worked` either, so a refused entry does not
-                        // make the loop spin; the next change event wakes it.
-                        tracing::warn!(%task_id, %refusal, "the run queue cannot resume this task");
-                        drop(lease);
-                        continue;
-                    }
+            let target = ClaimTarget::Run {
+                task_id: task_id.clone(),
+                // ADR-0012: the unattended path, behind the per-repository
+                // opt-in `selection` already checked.
+                trigger: RunTrigger::Queued,
+                continue_session: resuming,
+            };
+            let claim: Claim = match self.shared.board.claim(target).await {
+                Ok(Some(claim)) => claim,
+                Ok(None) => {
+                    // Somebody else has it. The board says something different
+                    // from what it said a moment ago, so the pass counts as
+                    // work and the loop will look again rather than waiting.
+                    drop(lease);
+                    worked = true;
+                    continue;
                 }
-            } else {
-                None
+                // Task 035's refusal of a review or fix waiting to be resumed.
+                // Logged and skipped, never `?`: one entry's refusal must not
+                // abort the step for the rest of the batch. Not `worked`
+                // either, so a refused entry does not make the loop spin; the
+                // next change event wakes it.
+                Err(refusal) if resuming && refusal.code() == ErrorCode::Invalid => {
+                    tracing::warn!(%task_id, %refusal, "the run queue cannot resume this task");
+                    drop(lease);
+                    continue;
+                }
+                Err(error) => return Err(error),
             };
-
-            let claimed = if resuming {
-                claim::claim_retry(ctx, &task_id).await?
-            } else {
-                claim::claim(ctx, &task_id).await?
-            };
-            if claimed == ClaimOutcome::Lost {
-                // Somebody else has it. The board says something different
-                // from what it said a moment ago, so the pass counts as work
-                // and the loop will look again rather than waiting.
-                drop(lease);
-                worked = true;
-                continue;
-            }
 
             if self.interrupted_since(&cancel).await? {
                 // Won the claim, but a Pause, a Stop or a shutdown landed
                 // while it was in flight: release what was just claimed rather
                 // than spawn a process for a queue that was told to stop
                 // before this one started.
-                claim::release(ctx, &task_id).await;
+                release(self.shared.board.as_ref(), &claim).await;
                 drop(lease);
                 break;
             }
@@ -1054,21 +1059,18 @@ impl QueueTask {
             tracing::info!(
                 %task_id,
                 title = %entry.title,
-                resuming = resume.is_some(),
+                resuming = claim.resume.is_some(),
                 "the run queue started a task",
             );
 
             runs.spawn(supervise(
+                Arc::clone(&self.shared.board),
                 ctx.clone(),
                 self.shared.paths.clone(),
                 self.shared.runner.clone(),
                 lease,
+                claim,
                 RunRequest {
-                    task_id,
-                    // ADR-0012: the unattended path, behind the per-repository
-                    // opt-in `selection` already checked.
-                    trigger: RunTrigger::Queued,
-                    resume,
                     cancel,
                     // So two runs in one repository take turns creating their
                     // worktrees rather than racing `git worktree add` against
@@ -1113,15 +1115,18 @@ impl QueueTask {
 /// writes were still landing, and the pass it woke would read a board that had
 /// not finished changing.
 async fn supervise(
+    board: Arc<dyn BoardPort>,
     ctx: ServiceContext,
     paths: AppPaths,
     runner: RunnerConfig,
     lease: Lease,
+    claim: Claim,
     request: RunRequest,
 ) {
-    let task_id = request.task_id.clone();
+    let task_id = claim.lease.task_id.clone();
+    let lease_ref = claim.lease.clone();
 
-    match run_task(&ctx, &paths, &runner, request).await {
+    match run_task(board.as_ref(), &ctx, &paths, &runner, claim, request).await {
         Ok(run) => tracing::info!(
             %task_id,
             run_id = %run.id,
@@ -1130,11 +1135,24 @@ async fn supervise(
         ),
         Err(error) => {
             tracing::error!(%task_id, %error, "a queued run could not be completed");
-            claim::release(&ctx, &task_id).await;
+            // A no-op after `run_task` has already given its claim back, which
+            // it does on every error path: the rule only acts on a task still
+            // `running`.
+            if let Err(error) = board.release(&lease_ref).await {
+                tracing::error!(%task_id, %error, "could not release a queued run that failed");
+            }
         }
     }
 
     drop(lease);
+}
+
+/// Gives back a claim the queue won and then decided not to use. Best effort,
+/// as every release is.
+async fn release(board: &dyn BoardPort, claim: &Claim) {
+    if let Err(error) = board.release(&claim.lease).await {
+        tracing::error!(task_id = %claim.lease.task_id, %error, "could not release a claim the queue did not use");
+    }
 }
 
 /// What one pass of the loop came to.
@@ -1182,6 +1200,8 @@ struct Shared {
     /// Not the queue's own map any more — the shell holds a clone of the same
     /// registry, and both doors read it. See this module's header.
     in_flight: InFlight,
+    /// Where every claim, release and run report this queue makes goes.
+    board: Arc<dyn BoardPort>,
     /// The reason the queue is not doing what the switch says, if there is one.
     /// Written only in [`QueueTask::step`] and
     /// [`QueueTask::tick_schedules`], never inside `try_step` itself.
@@ -1348,7 +1368,13 @@ mod tests {
     /// where no CLI is installed. See `testing::doctor::passing_queue_environment`.
     fn queue(harness: &TestContext) -> (TempDir, QueueHandle, QueueTask) {
         let (root, paths, runner) = crate::testing::doctor::passing_queue_environment();
-        let (handle, task) = build(harness.context.clone(), paths, runner, InFlight::new());
+        let (handle, task) = build(
+            harness.board(&paths, &runner),
+            harness.context.clone(),
+            paths,
+            runner,
+            InFlight::new(),
+        );
         (root, handle, task)
     }
 
