@@ -127,6 +127,9 @@ function taskDetailFor(taskId: string, overrides: Partial<TaskDetail> = {}): Tas
       headSha: null,
       baseSha: null,
     },
+    reviewInstructions: null,
+    reviewConfig: {},
+    reviewLoop: null,
     ...overrides,
   };
 }

@@ -97,6 +97,9 @@ export function taskDetail(id: string, overrides: Partial<TaskDetail> = {}): Tas
     links: [],
     dependsOn: [],
     lastRun: plainRun(id),
+    reviewInstructions: null,
+    reviewConfig: {},
+    reviewLoop: null,
     ...overrides,
   };
 }

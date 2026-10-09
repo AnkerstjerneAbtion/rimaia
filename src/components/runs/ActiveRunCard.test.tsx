@@ -88,6 +88,9 @@ function taskDetail(overrides: Partial<TaskDetail> = {}): TaskDetail {
       headSha: null,
       baseSha: null,
     },
+    reviewInstructions: null,
+    reviewConfig: {},
+    reviewLoop: null,
     ...overrides,
   };
 }

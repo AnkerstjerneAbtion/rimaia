@@ -125,6 +125,9 @@ function detailOf(scenario: Scenario, id: unknown): TaskDetail {
     links: [],
     dependsOn: scenario.dependencies[summary.id] ?? [],
     lastRun: run ? plainRun(run) : null,
+    reviewInstructions: null,
+    reviewConfig: {},
+    reviewLoop: null,
   };
 }
 

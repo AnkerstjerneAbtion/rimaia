@@ -58,6 +58,9 @@ function detail(overrides: Partial<TaskDetail> = {}): TaskDetail {
     effectiveModel: null,
     effectiveEffort: null,
     effectiveOrigin: "claude_code",
+    reviewInstructions: null,
+    reviewConfig: {},
+    reviewLoop: null,
     ...overrides,
   };
 }

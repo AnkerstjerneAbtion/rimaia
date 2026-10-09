@@ -545,6 +545,14 @@ export interface TaskDetail extends Task, EffectiveStrategyFields {
   /** Outgoing edges only — what this task depends on, not what depends on it. */
   dependsOn: string[];
   lastRun: Run | null;
+  /** The task's own override of the review instructions (task 021). It
+   *  replaces the global text when it says anything. */
+  reviewInstructions: string | null;
+  /** The task's own loop settings, before inheritance. Every field optional. */
+  reviewConfig: ReviewConfig;
+  /** Where the task's review loop stands, or `null` when the loop never
+   *  touched it. */
+  reviewLoop: ReviewLoopSummary | null;
 }
 
 /**
@@ -1674,7 +1682,8 @@ export interface DigestEntry {
 /** Mirrors `rimaia_core::review::DigestLoop`: a task's review loop, derived
  *  from its rows and never stored (seam-contract D29 point 8). */
 export interface DigestLoop {
-  /** Review runs after the task's newest implementation run. */
+  /** Review phases after the task's newest implementation phase: a review
+   *  resumed after a usage limit counts once (task 021). */
   reviewsSinceImplementation: number;
   /** The task's open findings, of every loop. */
   openFindings: number;
@@ -1704,7 +1713,8 @@ export interface ReviewFinding {
   /** Repository-relative; `null` for the change as a whole. */
   file: string | null;
   line: number | null;
-  /** Always `null` until task 021 decides how it is computed. */
+  /** The file and title, normalised: "the same finding again" (task 021).
+   *  `null` only on a finding recorded before it was computed. */
   fingerprint: string | null;
   status: FindingStatus;
   /** What the fix run did, or why it declined. */
@@ -1733,4 +1743,63 @@ export interface ReviewDigest {
   until: string;
   entries: DigestEntry[];
   totals: DigestTotals;
+}
+
+/** Mirrors `rimaia_core::review_loop::ReviewEnabled`. Turning the loop on is
+ *  spelled as acknowledging its cost; there is no boolean (task 021). */
+export type ReviewEnabled = "off" | "on_cost_acknowledged";
+
+/** Mirrors `rimaia_core::review_loop::FixSession`. */
+export type FixSession = "fresh" | "resume";
+
+/**
+ * Mirrors `rimaia_core::review_loop::ReviewConfig` (task 021, ADR-0017): one
+ * level's loop settings. Every field is optional, and an absent one inherits
+ * task → repository → global → built-in. The keys are `snake_case`, because
+ * this is the stored document and not a row.
+ */
+export interface ReviewConfig {
+  enabled?: ReviewEnabled;
+  /** Fix phases one loop may spend, 0 to 5. */
+  max_review_loops?: number;
+  blocking_severity?: FindingSeverity;
+  review_model?: string;
+  review_effort?: string;
+  fix_session?: FixSession;
+}
+
+/** Mirrors `rimaia_core::review_loop::ReviewSettings`. */
+export interface ReviewSettings {
+  instructions: string;
+  config: ReviewConfig;
+}
+
+/** Mirrors `rimaia_core::review_loop::UnreviewedReason`. */
+export type UnreviewedReason =
+  | "not_reviewed"
+  | "review_failed"
+  | "nothing_recorded"
+  | "review_changed_branch"
+  | "fix_not_reviewed";
+
+/** Mirrors `rimaia_core::review_loop::Verdict`. `findings_remain` and
+ *  `unreviewed` are what flags a card; it is derived, never stored. */
+export type Verdict =
+  | { verdict: "none" }
+  | { verdict: "clean" }
+  | { verdict: "findings_remain"; openBlocking: number }
+  | { verdict: "unreviewed"; reason: UnreviewedReason };
+
+/** Mirrors `rimaia_core::review_loop::ReviewLoopSummary`. */
+export interface ReviewLoopSummary {
+  /** The effective setting now. */
+  enabled: boolean;
+  maxReviewLoops: number;
+  fixesSpent: number;
+  /** Review phases in the current loop. */
+  reviews: number;
+  verdict: Verdict;
+  openBlocking: number;
+  /** A signal that the loop may be going in circles, not a verdict. */
+  pingPong: boolean;
 }
