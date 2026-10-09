@@ -1,4 +1,4 @@
-import type { BoardColumn, ExitClass, RunState } from "../types";
+import type { BoardColumn, ExitClass, RunKind, RunState } from "../types";
 
 /**
  * Board ordering, the optimistic move overlay and the derived card state —
@@ -561,6 +561,66 @@ export function cardBadge(
     case "cancelled":
       return runState;
   }
+}
+
+/** What each kind of run is called, in one place (task 037, seam-contract D29
+ *  point 2). A row reads `<Kind> · #<attempt>`; "Attempt" retired because
+ *  attempts are one sequence across kinds and a review is not an attempt at
+ *  anything. */
+export const RUN_KIND_LABELS: Record<RunKind, string> = {
+  implementation: "Implementation",
+  review: "Review",
+  fix: "Fix",
+};
+
+/** `Review · #4`: which row, and what it was for. */
+export function runLabel(kind: RunKind, attempt: number): string {
+  return `${RUN_KIND_LABELS[kind]} · #${attempt}`;
+}
+
+const IMPLEMENTATION_BADGE_LABELS: Record<CardBadge, string> = {
+  running: "Running",
+  queued: "Queued",
+  blocked: "Blocked",
+  waiting_retry: "Waiting for retry",
+  failed: "Failed",
+  interrupted: "Interrupted",
+  cancelled: "Cancelled",
+};
+
+/** The words a review or a fix row wears. `queued` and `blocked` are absent
+ *  because no row exists yet when a task is either, so they cannot depend on
+ *  one. */
+const LOOP_BADGE_LABELS: Record<"review" | "fix", Partial<Record<CardBadge, string>>> = {
+  review: {
+    running: "Reviewing",
+    waiting_retry: "Review waiting for retry",
+    interrupted: "Review interrupted",
+    failed: "Review failed",
+    cancelled: "Review cancelled",
+  },
+  fix: {
+    running: "Fixing",
+    waiting_retry: "Fix waiting for retry",
+    interrupted: "Fix interrupted",
+    failed: "Fix failed",
+    cancelled: "Fix cancelled",
+  },
+};
+
+/**
+ * The word a badge shows. `cardBadge` still returns the state key, which also
+ * feeds the `run-badge-*` class, the card rail and the column header counts;
+ * only the words depend on what the newest row was for, so a card can tell
+ * "reviewing" from "running" (seam-contract D29 point 4).
+ *
+ * Total over its inputs. A failed or cancelled review is not a card state the
+ * engine produces today (a finished loop lands in `in_review` and `idle`), but
+ * the function does not assume that stays true.
+ */
+export function badgeLabel(badge: CardBadge, kind: RunKind = "implementation"): string {
+  if (kind === "implementation") return IMPLEMENTATION_BADGE_LABELS[badge];
+  return LOOP_BADGE_LABELS[kind][badge] ?? IMPLEMENTATION_BADGE_LABELS[badge];
 }
 
 /**

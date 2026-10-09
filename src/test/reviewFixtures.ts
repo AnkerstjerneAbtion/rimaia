@@ -1,5 +1,8 @@
 import type {
   DigestEntry,
+  HistoryFinding,
+  PhaseSummary,
+  ReviewHistory,
   Repository,
   ReviewDigest,
   RunDetail,
@@ -41,6 +44,7 @@ export function taskSummary(overrides: Partial<TaskSummary> = {}): TaskSummary {
     effectiveModel: null,
     effectiveEffort: null,
     effectiveOrigin: "claude_code",
+    reviewLoop: null,
     ...overrides,
   };
 }
@@ -272,5 +276,154 @@ export function emptyDigest(): ReviewDigest {
       runsWithoutCost: 0,
       counts: { ...NO_COUNTS },
     },
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Review history (task 037)
+// ---------------------------------------------------------------------------
+
+export function phase(
+  kind: PhaseSummary["kind"],
+  attempts: number[],
+  overrides: Partial<PhaseSummary> = {},
+): PhaseSummary {
+  return {
+    kind,
+    runIds: attempts.map((attempt) => `run-${attempt}`),
+    attempts,
+    status: "succeeded",
+    exitClass: "success",
+    ...overrides,
+  };
+}
+
+export function historyFinding(
+  id: string,
+  reviewAttempt: number,
+  overrides: Partial<HistoryFinding> = {},
+): HistoryFinding {
+  return {
+    id,
+    taskId: "task-1",
+    reviewRunId: `run-${reviewAttempt}`,
+    ordinal: 0,
+    severity: "high",
+    title: `Finding ${id}`,
+    body: `Why ${id} matters.`,
+    file: "src/login.ts",
+    line: 12,
+    fingerprint: `src/login.ts|finding ${id}`,
+    status: "open",
+    resolution: null,
+    resolvedByRunId: null,
+    createdAt: "2026-10-04T08:40:00Z",
+    resolvedAt: null,
+    blocking: true,
+    carriedOver: false,
+    ...overrides,
+  };
+}
+
+/**
+ * Task 037's two-loop acceptance fixture. `attempt` is one ascending sequence
+ * per task (seam-contract D29 point 2), so the earlier loop is implementation
+ * #1, review #2 and fix #3; the newest is implementation #4, review #5 (three
+ * blocking findings), fix #6 (two fixed, one rejected with a reason), and
+ * review #7, which raises one finding that came back after #6 fixed it, one
+ * blocking finding new after the fix, one advisory finding, and one that task
+ * 021 carried over as already rejected.
+ */
+export function twoLoopHistory(): ReviewHistory {
+  const fixed = (id: string, ordinal: number, title: string) =>
+    historyFinding(id, 5, {
+      ordinal,
+      title,
+      status: "fixed",
+      resolution: "Done.",
+      resolvedByRunId: "run-6",
+    });
+  const first = fixed("f-index", 0, "Unchecked index");
+  const second = fixed("f-handle", 1, "Leaked file handle");
+  const declined = historyFinding("f-default", 5, {
+    ordinal: 2,
+    title: "Wrong default timeout",
+    status: "rejected",
+    resolution: "The caller always passes a timeout.",
+    resolvedByRunId: "run-6",
+  });
+  const cameBack = historyFinding("f-index-again", 7, {
+    ordinal: 0,
+    title: "Unchecked index",
+  });
+  const brandNew = historyFinding("f-race", 7, { ordinal: 1, title: "Race on logout" });
+  const nit = historyFinding("f-nit", 7, {
+    ordinal: 2,
+    title: "Rename the helper",
+    severity: "low",
+    blocking: false,
+  });
+  const carried = historyFinding("f-default-again", 7, {
+    ordinal: 3,
+    title: "Wrong default timeout",
+    status: "rejected",
+    resolution: "Rejected earlier as f-default: The caller always passes a timeout.",
+    carriedOver: true,
+  });
+
+  return {
+    loops: [
+      {
+        earlier: true,
+        implementation: phase("implementation", [1]),
+        rounds: [
+          {
+            review: phase("review", [2]),
+            findings: [
+              historyFinding("f-old", 2, {
+                title: "Missing migration",
+                status: "fixed",
+                resolution: "Added it.",
+                resolvedByRunId: "run-3",
+              }),
+            ],
+            fix: { phase: phase("fix", [3]), resolved: [] },
+            regressed: [],
+            newAfterFix: [],
+            pingPong: false,
+          },
+        ],
+        fixesSpent: 1,
+        verdict: { verdict: "unreviewed", reason: "fix_not_reviewed" },
+        openBlocking: 0,
+        openAdvisory: 0,
+      },
+      {
+        earlier: false,
+        implementation: phase("implementation", [4]),
+        rounds: [
+          {
+            review: phase("review", [5]),
+            findings: [first, second, declined],
+            fix: { phase: phase("fix", [6]), resolved: [first, second, declined] },
+            regressed: [],
+            newAfterFix: [],
+            pingPong: false,
+          },
+          {
+            review: phase("review", [7]),
+            findings: [cameBack, brandNew, nit, carried],
+            fix: null,
+            regressed: [cameBack],
+            newAfterFix: [brandNew],
+            pingPong: true,
+          },
+        ],
+        fixesSpent: 1,
+        verdict: { verdict: "findings_remain", openBlocking: 2 },
+        openBlocking: 2,
+        openAdvisory: 1,
+      },
+    ],
   };
 }

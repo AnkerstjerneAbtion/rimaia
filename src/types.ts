@@ -596,6 +596,11 @@ export interface TaskSummary extends Task, EffectiveStrategyFields {
    *  card names the head of the stalled chain. */
   blockingTitle: string | null;
   lastRun: LastRunSummary | null;
+  /** Where the task's review loop stands, built by the same function as
+   *  {@link TaskDetail.reviewLoop} so the card and the panel cannot disagree
+   *  (seam-contract D12's 2026-10-10 amendment). `null` when the loop never
+   *  touched the task. */
+  reviewLoop: ReviewLoopSummary | null;
 }
 
 /** What [`createTask`](./commands) sends. Mirrors `NewTaskLink`, and also
@@ -1774,6 +1779,36 @@ export interface ReviewSettings {
   config: ReviewConfig;
 }
 
+/** Mirrors `rimaia_core::review_loop::TaskReview`: one task's own override of
+ *  the review instructions and its loop settings, before any inheritance. */
+export interface TaskReview {
+  instructions: string | null;
+  config: ReviewConfig;
+}
+
+/** Mirrors `rimaia_core::review_loop::ReviewLevelName`. */
+export type ReviewLevelName = "global" | "repository" | "task";
+
+/**
+ * Mirrors `rimaia_core::review_loop::ReviewLevel` (task 037): one level's own
+ * settings next to what it inherits and what it resolves to. All three are
+ * {@link ReviewConfig}s in the stored spelling.
+ *
+ * The `Inherit (<value>)` options read `inherited`. It is the backend's
+ * resolution of the precedence chain one level up; no TypeScript here
+ * recomputes it (seam-contract D12's 2026-08-28 reason). `reviewModel` and
+ * `reviewEffort` are absent in the derived two when nothing names one, which
+ * means the task's own strategy.
+ */
+export interface ReviewLevel {
+  /** What this level stores. */
+  config: ReviewConfig;
+  /** What each field becomes if this level stops setting it. */
+  inherited: ReviewConfig;
+  /** What this level resolves to with its own settings applied. */
+  effective: ReviewConfig;
+}
+
 /** Mirrors `rimaia_core::review_loop::UnreviewedReason`. */
 export type UnreviewedReason =
   | "not_reviewed"
@@ -1800,6 +1835,76 @@ export interface ReviewLoopSummary {
   reviews: number;
   verdict: Verdict;
   openBlocking: number;
+  /** Open findings of the newest review that sit below the blocking severity:
+   *  raised, and not worth a fix. */
+  openAdvisory: number;
   /** A signal that the loop may be going in circles, not a verdict. */
   pingPong: boolean;
+}
+
+/**
+ * Mirrors `rimaia_core::review_loop::HistoryFinding` (task 037): a stored
+ * finding and whether it blocks under the task's effective
+ * `blocking_severity`. `blocking` is decided in Rust; nothing here compares
+ * severities.
+ */
+export interface HistoryFinding extends ReviewFinding {
+  blocking: boolean;
+  /** Stored `rejected` because a fix had already rejected the same finding:
+   *  no run resolved it, and its `resolution` already says "Rejected earlier
+   *  as …". */
+  carriedOver: boolean;
+}
+
+/** Mirrors `rimaia_core::review_loop::PhaseSummary`: one phase, which is more
+ *  than one run when a usage limit made the agent resume. */
+export interface PhaseSummary {
+  kind: RunKind;
+  /** Oldest first. */
+  runIds: string[];
+  /** The `attempt` of each run in {@link runIds}. */
+  attempts: number[];
+  /** The last row's. */
+  status: RunStatus;
+  exitClass: ExitClass | null;
+}
+
+/** Mirrors `rimaia_core::review_loop::FixRound`. */
+export interface FixRound {
+  phase: PhaseSummary;
+  /** The findings its rows resolved, fixed or rejected. */
+  resolved: HistoryFinding[];
+}
+
+/** Mirrors `rimaia_core::review_loop::ReviewRound`: one review, the fix after
+ *  it, and the ping-pong lists. */
+export interface ReviewRound {
+  review: PhaseSummary | null;
+  findings: HistoryFinding[];
+  fix: FixRound | null;
+  /** Findings a fix had marked fixed that this review raised again. */
+  regressed: HistoryFinding[];
+  /** Blocking findings the review before it did not raise. */
+  newAfterFix: HistoryFinding[];
+  pingPong: boolean;
+}
+
+/** Mirrors `rimaia_core::review_loop::LoopHistory`: an implementation and the
+ *  rounds after it. */
+export interface LoopHistory {
+  /** Before a re-run implementation: not the loop the verdict is about. */
+  earlier: boolean;
+  implementation: PhaseSummary;
+  rounds: ReviewRound[];
+  fixesSpent: number;
+  verdict: Verdict;
+  /** Counts of the loop's newest review, from Rust. */
+  openBlocking: number;
+  openAdvisory: number;
+}
+
+/** Mirrors `rimaia_core::review_loop::ReviewHistory`, which is rendered as
+ *  returned: grouping into loops is core's, not the view's. */
+export interface ReviewHistory {
+  loops: LoopHistory[];
 }

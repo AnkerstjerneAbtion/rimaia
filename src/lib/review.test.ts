@@ -2,15 +2,21 @@ import { describe, expect, it } from "vitest";
 
 import { sixTaskDigest, emptyDigest, taskSummary, dependent } from "../test/reviewFixtures";
 import { groupIntoColumns } from "./board";
+import type { ReviewLoopSummary, RunCostSummary, Verdict } from "../types";
 import {
+  PING_PONG_TEXT,
   affectedDependents,
   describeDeparture,
   digestAsText,
   entryFigures,
+  finishedLoop,
   formatDigestCost,
   formatSeconds,
   openingView,
   reviewCommandForKey,
+  reviewHistoryHeadText,
+  reviewLoopCostNote,
+  reviewLoopText,
   reviewQueue,
   runOutcome,
   successor,
@@ -215,6 +221,173 @@ describe("dependents", () => {
     );
     expect(describeDeparture("Add login", undefined)).toBe(
       "“Add login” is no longer on the board.",
+    );
+  });
+});
+
+function loop(verdict: Verdict, fixesSpent = 0, overrides: Partial<ReviewLoopSummary> = {}) {
+  return {
+    enabled: true,
+    maxReviewLoops: 2,
+    fixesSpent,
+    reviews: fixesSpent + 1,
+    verdict,
+    openBlocking: verdict.verdict === "findings_remain" ? verdict.openBlocking : 0,
+    openAdvisory: 0,
+    pingPong: false,
+    ...overrides,
+  } satisfies ReviewLoopSummary;
+}
+
+describe("reviewLoopText", () => {
+  it("says nothing for a task the loop never touched", () => {
+    expect(reviewLoopText(null)).toBeNull();
+    expect(reviewLoopText(undefined)).toBeNull();
+    expect(reviewLoopText(loop({ verdict: "none" }))).toBeNull();
+  });
+
+  it("counts fixes in the prefix, with the singular forms", () => {
+    const cases: Array<[ReviewLoopSummary, string]> = [
+      [loop({ verdict: "clean" }, 0), "Reviewed once · nothing blocking"],
+      [loop({ verdict: "clean" }, 2), "Reviewed after 2 fixes · nothing blocking"],
+      [loop({ verdict: "clean" }, 1), "Reviewed after 1 fix · nothing blocking"],
+      [
+        loop({ verdict: "findings_remain", openBlocking: 1 }, 0),
+        "Reviewed once · 1 blocking finding open",
+      ],
+      [
+        loop({ verdict: "findings_remain", openBlocking: 3 }, 2),
+        "Reviewed after 2 fixes · 3 blocking findings open",
+      ],
+    ];
+    for (const [summary, text] of cases) {
+      expect(reviewLoopText(summary)).toBe(text);
+    }
+  });
+
+  it("gives every reason a loop can end unreviewed its own sentence", () => {
+    const reasons = {
+      not_reviewed: "Not reviewed",
+      review_failed: "Not reviewed — the review run failed",
+      nothing_recorded: "Not reviewed — the reviewer recorded nothing",
+      review_changed_branch: "Not reviewed — the reviewer changed the branch",
+      fix_not_reviewed: "Not reviewed since the last fix",
+    } as const;
+    for (const [reason, text] of Object.entries(reasons)) {
+      const verdict = { verdict: "unreviewed", reason } as Verdict;
+      expect(reviewLoopText(loop(verdict))).toBe(text);
+    }
+  });
+
+  it("never reads like a pass", () => {
+    const everything: ReviewLoopSummary[] = [
+      loop({ verdict: "clean" }, 0),
+      loop({ verdict: "clean" }, 3),
+      loop({ verdict: "findings_remain", openBlocking: 2 }, 1),
+      loop({ verdict: "unreviewed", reason: "not_reviewed" }),
+      loop({ verdict: "unreviewed", reason: "review_failed" }),
+      loop({ verdict: "unreviewed", reason: "nothing_recorded" }),
+      loop({ verdict: "unreviewed", reason: "review_changed_branch" }),
+      loop({ verdict: "unreviewed", reason: "fix_not_reviewed" }),
+    ];
+    for (const summary of everything) {
+      const text = reviewLoopText(summary) ?? "";
+      expect(text).not.toMatch(/✓|✔|clean|passed/i);
+    }
+    expect(PING_PONG_TEXT).toBe("May be going in circles");
+  });
+});
+
+describe("finishedLoop", () => {
+  const summary = loop({ verdict: "findings_remain", openBlocking: 1 });
+
+  it("withholds the verdict while the task is queued, running or waiting for a retry", () => {
+    for (const runState of ["queued", "running", "waiting_retry"] as const) {
+      expect(finishedLoop(runState, summary), runState).toBeNull();
+    }
+  });
+
+  it("keeps it once the task has stopped moving", () => {
+    for (const runState of ["idle", "failed", "cancelled", "blocked"] as const) {
+      expect(finishedLoop(runState, summary), runState).toBe(summary);
+    }
+    expect(finishedLoop("idle", null)).toBeNull();
+  });
+});
+
+describe("reviewHistoryHeadText", () => {
+  const head = (
+    fixesSpent: number,
+    openBlocking: number,
+    openAdvisory: number,
+    verdict?: Verdict,
+  ) => ({
+    fixesSpent,
+    openBlocking,
+    openAdvisory,
+    verdict:
+      verdict ??
+      (openBlocking > 0
+        ? ({ verdict: "findings_remain", openBlocking } as const)
+        : ({ verdict: "clean" } as const)),
+  });
+
+  it("states what remains in the current loop, from core's counts", () => {
+    expect(reviewHistoryHeadText(head(2, 3, 1))).toBe(
+      "Reviewed after 2 fixes · 3 blocking findings open, 1 advisory",
+    );
+    expect(reviewHistoryHeadText(head(0, 1, 0))).toBe(
+      "Reviewed once · 1 blocking finding open",
+    );
+    expect(reviewHistoryHeadText(head(0, 0, 2))).toBe(
+      "Reviewed once · nothing blocking, 2 advisory",
+    );
+    expect(reviewHistoryHeadText(head(1, 0, 0))).toBe(
+      "Reviewed after 1 fix · nothing open",
+    );
+  });
+
+  it("uses the card's text for a loop that was not reviewed", () => {
+    expect(
+      reviewHistoryHeadText(head(1, 0, 0, { verdict: "unreviewed", reason: "fix_not_reviewed" })),
+    ).toBe("Not reviewed since the last fix");
+  });
+
+  it("has nothing to say for a loop without a verdict", () => {
+    expect(reviewHistoryHeadText(head(0, 0, 0, { verdict: "none" }))).toBeNull();
+  });
+});
+
+describe("reviewLoopCostNote", () => {
+  const measured: RunCostSummary = {
+    medianUsd: 0.84,
+    sampleSize: 12,
+    inheritCostUsd: null,
+    providerDisplayName: "Claude Code",
+  };
+
+  it("prices up to 2N + 1 sessions at the measured median", () => {
+    expect(reviewLoopCostNote(2, measured)).toBe(
+      "With up to 2 fix loops, each task runs up to 5 more sessions: a review, then a fix and another review per loop. At your median run so far ($0.84 across 12 runs), that is up to about $4.20 more per task.",
+    );
+  });
+
+  it("describes report-only mode as one review and nothing fixed", () => {
+    expect(reviewLoopCostNote(0, measured)).toBe(
+      "With no fix loops, each task runs 1 more session: a review that reports findings and fixes nothing. At your median run so far ($0.84 across 12 runs), that is about $0.84 more per task.",
+    );
+  });
+
+  it("states no figure it did not measure", () => {
+    const sentence =
+      "With up to 2 fix loops, each task runs up to 5 more sessions: a review, then a fix and another review per loop. There is no finished run with a cost yet to put a price on that.";
+    expect(reviewLoopCostNote(2, { ...measured, medianUsd: null, sampleSize: 0 })).toBe(sentence);
+    expect(reviewLoopCostNote(2, null)).toBe(sentence);
+  });
+
+  it("uses the singular for one fix loop and one run", () => {
+    expect(reviewLoopCostNote(1, { ...measured, medianUsd: 1, sampleSize: 1 })).toBe(
+      "With up to 1 fix loop, each task runs up to 3 more sessions: a review, then a fix and another review per loop. At your median run so far ($1.00 across 1 run), that is up to about $3.00 more per task.",
     );
   });
 });

@@ -6,6 +6,7 @@ import { listen } from "@tauri-apps/api/event";
 import type {
   DetectedOpenInTarget,
   ReviewDigest,
+  ReviewHistory,
   RunDetail,
   TaskDependent,
   TaskDetail,
@@ -33,6 +34,8 @@ export interface ReviewBackend {
   /** Per task: what `get_task` and its newest run's `get_run` answer. */
   details: Record<string, Partial<TaskDetail>>;
   runs: Record<string, RunDetail>;
+  /** Per task: what `get_review_history` answers; no entry is no loops. */
+  histories: Record<string, ReviewHistory>;
   dependents: Record<string, TaskDependent[]>;
   /** A command name to what it rejects with. */
   refusals: Record<string, unknown>;
@@ -58,6 +61,7 @@ export function installBackend(tasks: TaskSummary[]): ReviewBackend {
     digest: emptyDigest(),
     details: {},
     runs: {},
+    histories: {},
     dependents: {},
     refusals: {},
     setAsideBranch: "rimaia/task-1-2",
@@ -86,6 +90,8 @@ export function installBackend(tasks: TaskSummary[]): ReviewBackend {
         const runId = (args as { runId: string }).runId;
         return backend.runs[runId] ?? runDetail(runId.replace("run-for-", ""));
       }
+      case "get_review_history":
+        return backend.histories[taskId as string] ?? { loops: [] };
       case "get_task_dependents":
         return backend.dependents[taskId as string] ?? [];
       case "list_open_in_targets":

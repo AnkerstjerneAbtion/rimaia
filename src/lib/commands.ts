@@ -31,9 +31,14 @@ import type {
   RemovalAuthorizationInput,
   RemovedWorktree,
   Repository,
+  ReviewConfig,
   ReviewDigest,
   ReviewFinding,
+  ReviewHistory,
+  ReviewLevel,
+  ReviewLevelName,
   ReviewOutcome,
+  ReviewSettings,
   RimaiaError,
   Run,
   RunCapacity,
@@ -59,6 +64,7 @@ import type {
   TaskLink,
   TaskLinkPatchInput,
   TaskPatchInput,
+  TaskReview,
   TaskSummary,
   TranscriptPage,
   TranscriptSummary,
@@ -357,6 +363,63 @@ export function listReviewFindings(
   status?: FindingStatus,
 ): Promise<ReviewFinding[]> {
   return call<ReviewFinding[]>("list_review_findings", { taskId, status: status ?? null });
+}
+
+/**
+ * Every loop the task has had, oldest first: each review with its findings,
+ * the fix after it and what that fix resolved, and the ping-pong lists. Render
+ * it as returned. Grouping into loops, what blocks and the counts are core's
+ * (task 037); a window that regroups runs or recounts findings has written a
+ * second copy of a rule.
+ */
+export function getReviewHistory(taskId: string): Promise<ReviewHistory> {
+  return call<ReviewHistory>("get_review_history", { taskId });
+}
+
+/**
+ * One level of the loop's configuration next to what it inherits and what it
+ * resolves to. `id` is the repository's or the task's, and is left out for
+ * `global`.
+ */
+export function getReviewLevel(level: ReviewLevelName, id?: string): Promise<ReviewLevel> {
+  return call<ReviewLevel>("get_review_level", { level, id: id ?? null });
+}
+
+/** The global review instructions and loop configuration. */
+export function getReviewSettings(): Promise<ReviewSettings> {
+  return call<ReviewSettings>("get_review_settings");
+}
+
+/**
+ * Replaces the global review instructions and loop configuration. `enabled`
+ * can only be `"off"` or `"on_cost_acknowledged"`: the type has no `true`, and
+ * core refuses one that arrives anyway. An empty `config` clears every field.
+ */
+export function setReviewSettings(
+  instructions: string,
+  config: ReviewConfig,
+): Promise<ReviewSettings> {
+  return call<ReviewSettings>("set_review_settings", { instructions, config });
+}
+
+/** Replaces one repository's loop configuration; an empty one inherits all. */
+export function setRepositoryReviewConfig(
+  repositoryId: string,
+  config: ReviewConfig,
+): Promise<ReviewConfig> {
+  return call<ReviewConfig>("set_repository_review_config", { repositoryId, config });
+}
+
+/**
+ * Replaces one task's override of the review instructions (`null` or blank
+ * falls back to the global text) and its loop configuration.
+ */
+export function setTaskReview(
+  taskId: string,
+  reviewInstructions: string | null,
+  config: ReviewConfig,
+): Promise<TaskReview> {
+  return call<TaskReview>("set_task_review", { taskId, reviewInstructions, config });
 }
 
 /**

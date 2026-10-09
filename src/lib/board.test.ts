@@ -4,6 +4,8 @@ import type { BoardColumn, ExitClass, RunState, Task } from "../types";
 
 import {
   BOARD_COLUMNS,
+  RUN_KIND_LABELS,
+  badgeLabel,
   boardReducer,
   cardBadge,
   formatResumeAfter,
@@ -11,10 +13,11 @@ import {
   initialBoardState,
   planMove,
   relativeTime,
+  runLabel,
   settlementReproducesMove,
   visibleColumns,
 } from "./board";
-import type { BoardCard, BoardColumns, BoardState, PlannedMove } from "./board";
+import type { BoardCard, BoardColumns, BoardState, CardBadge, PlannedMove } from "./board";
 
 const REPO_A = "repo-a";
 const REPO_B = "repo-b";
@@ -642,6 +645,56 @@ describe("cardBadge", () => {
     expect(cardBadge("cancelled", null, true)).toBe("cancelled");
     expect(cardBadge("failed", null, true)).toBe("failed");
     expect(cardBadge("failed", { exitClass: "interrupted" }, true)).toBe("interrupted");
+  });
+});
+
+describe("badgeLabel", () => {
+  it("keeps today's words for an implementation row", () => {
+    const words: Record<CardBadge, string> = {
+      running: "Running",
+      queued: "Queued",
+      blocked: "Blocked",
+      waiting_retry: "Waiting for retry",
+      failed: "Failed",
+      interrupted: "Interrupted",
+      cancelled: "Cancelled",
+    };
+    for (const [badge, word] of Object.entries(words) as [CardBadge, string][]) {
+      expect(badgeLabel(badge, "implementation"), badge).toBe(word);
+      expect(badgeLabel(badge), `${badge} with no kind`).toBe(word);
+    }
+  });
+
+  it("names every state a review row can be in", () => {
+    expect(badgeLabel("running", "review")).toBe("Reviewing");
+    expect(badgeLabel("waiting_retry", "review")).toBe("Review waiting for retry");
+    expect(badgeLabel("interrupted", "review")).toBe("Review interrupted");
+    expect(badgeLabel("failed", "review")).toBe("Review failed");
+    expect(badgeLabel("cancelled", "review")).toBe("Review cancelled");
+  });
+
+  it("names every state a fix row can be in", () => {
+    expect(badgeLabel("running", "fix")).toBe("Fixing");
+    expect(badgeLabel("waiting_retry", "fix")).toBe("Fix waiting for retry");
+    expect(badgeLabel("interrupted", "fix")).toBe("Fix interrupted");
+    expect(badgeLabel("failed", "fix")).toBe("Fix failed");
+    expect(badgeLabel("cancelled", "fix")).toBe("Fix cancelled");
+  });
+
+  it("leaves queued and blocked alone, because no row exists yet", () => {
+    for (const kind of ["review", "fix"] as const) {
+      expect(badgeLabel("queued", kind)).toBe("Queued");
+      expect(badgeLabel("blocked", kind)).toBe("Blocked");
+    }
+  });
+});
+
+describe("runLabel", () => {
+  it("reads kind then number, and retires 'attempt'", () => {
+    expect(runLabel("review", 4)).toBe("Review · #4");
+    expect(runLabel("implementation", 1)).toBe("Implementation · #1");
+    expect(runLabel("fix", 6)).toBe("Fix · #6");
+    expect(Object.values(RUN_KIND_LABELS)).toEqual(["Implementation", "Review", "Fix"]);
   });
 });
 
