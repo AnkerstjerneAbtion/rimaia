@@ -3740,6 +3740,22 @@ resolved to") is read with this refinement.
 
 **Binds.** 044 (the query), 045 (reads the `id`), 061 (the same kinds in its batched read).
 
+### Amendment, 2026-10-09 — point 8 counts phases, not rows (task 021)
+
+Point 8's loop number counted review *rows* after the task's newest implementation row. A review
+that hits a usage limit and resumes is two rows, and would count as two loops. **A loop number
+counts review phases after the newest implementation phase**, a phase being a maximal run of
+contiguous rows sharing `(kind, session_id)` — point 3's budget boundary. Task 035's digest
+count, `DigestLoop::reviews_since_implementation`, is computed through the same builder
+`ReviewLoopSummary` uses (`review_loop::current_loop`), so the digest and a card cannot disagree
+about a retried review. Still derived, never stored.
+
+The same reading applies to every count ADR-0017's loop makes: the budget (fix phases), the
+witness that a review recorded (any row of its phase), and whether `HEAD` moved (across the
+phase). ADR-0017's amendment of this date states them.
+
+**Binds.** 021, 037.
+
 ---
 
 ## D30 — The run-scoped handle is served as `rimaia-run`
