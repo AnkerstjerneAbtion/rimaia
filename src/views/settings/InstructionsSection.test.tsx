@@ -48,6 +48,7 @@ function taskSummary(overrides: Partial<TaskSummary> = {}): TaskSummary {
     effectiveModel: null,
     effectiveEffort: null,
     effectiveOrigin: "claude_code",
+    reviewLoop: null,
     ...overrides,
   };
 }

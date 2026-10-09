@@ -12,6 +12,8 @@ import { LinksEditor } from "../panel/LinksEditor";
 import { PlanEditor } from "../panel/PlanEditor";
 import { RepositorySelector } from "../panel/RepositorySelector";
 import { RetrySection } from "../panel/RetrySection";
+import { ReviewLoopSection } from "../panel/ReviewLoopSection";
+import { ReviewHistorySection } from "../panel/ReviewHistorySection";
 import { RunHistorySection } from "../panel/RunHistorySection";
 import { RunInfoSection } from "../panel/RunInfoSection";
 import { RunOutcomeSection } from "../panel/RunOutcomeSection";
@@ -270,6 +272,14 @@ function TaskDetailPanelBody({
             onChanged={refreshDetail}
           />
 
+          {/* Task 037: whether and how a fresh agent reviews this task, with
+              the instructions override. Beside the strategy because both
+              decide what the task's runs are spawned with. */}
+          <ReviewLoopSection
+            taskId={task.id}
+            reviewInstructions={detailLoading ? undefined : (detail?.reviewInstructions ?? null)}
+          />
+
           <RunInfoSection
             branch={task.branch}
             worktreePath={task.worktreePath}
@@ -293,6 +303,11 @@ function TaskDetailPanelBody({
             loading={detailLoading}
             onChanged={refreshDetail}
           />
+
+          {/* Task 037: what the review loop found, loop by loop, above the
+              plain list of rows it is made of. Renders nothing for a task the
+              loop never touched. */}
+          <ReviewHistorySection taskId={task.id} />
 
           {/* Task 015's full history — every attempt, not only the last one —
               each opening the run detail overlay (outcome, diff, commits, PR,

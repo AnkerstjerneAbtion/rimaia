@@ -1,4 +1,4 @@
-import { render, screen } from "@testing-library/react";
+import { render, screen, within } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { invoke } from "@tauri-apps/api/core";
@@ -39,9 +39,9 @@ function analytics(overrides: Partial<Analytics> = {}): Analytics {
   };
 }
 
-function mockBackend(costSummary: RunCostSummary | Error) {
+function mockBackend(costSummary: RunCostSummary | Error, report: Analytics = analytics()) {
   mockInvoke.mockImplementation(async (command: string) => {
-    if (command === "get_analytics") return analytics();
+    if (command === "get_analytics") return report;
     if (command === "get_subscription_cost") return null;
     if (command === "get_run_cost_summary") {
       if (costSummary instanceof Error) throw costSummary;
@@ -80,5 +80,73 @@ describe("AnalyticsView", () => {
     expect(
       await screen.findByText(/What you pay for your agent CLI each month/),
     ).toBeInTheDocument();
+  });
+
+  describe("review loops (task 037)", () => {
+    const costSummary: RunCostSummary = {
+      medianUsd: null,
+      sampleSize: 0,
+      inheritCostUsd: null,
+      providerDisplayName: "Claude Code",
+    };
+
+    it("shows no review-loop group when the range holds no review or fix row", async () => {
+      mockBackend(costSummary);
+
+      render(<AnalyticsView />);
+
+      await screen.findByText("Spent");
+      expect(screen.queryByRole("heading", { name: "Review loops" })).toBeNull();
+    });
+
+    it("shows the group, with core's split of spend, when the range has review or fix rows", async () => {
+      mockBackend(
+        costSummary,
+        analytics({
+          spendUsd: 7.5,
+          implementationSpendUsd: 6,
+          reviewLoopSpendUsd: 1.5,
+          reviewLoopOutcomes: { succeeded: 4, failed: 1, cancelled: 0, interrupted: 0, running: 0 },
+        }),
+      );
+
+      render(<AnalyticsView />);
+
+      expect(await screen.findByRole("heading", { name: "Review loops" })).toBeInTheDocument();
+      expect(screen.getByText("Review and fix spend").nextSibling).toHaveTextContent("$1.50");
+      expect(screen.getByText("Implementation spend").nextSibling).toHaveTextContent("$6.00");
+      const group = screen.getByRole("heading", { name: "Review loops" }).closest("section");
+      expect(within(group as HTMLElement).getByText("Succeeded").nextSibling).toHaveTextContent(
+        "4",
+      );
+    });
+
+    it("shows the group for a free review too, because the row exists", async () => {
+      mockBackend(
+        costSummary,
+        analytics({
+          reviewLoopOutcomes: { succeeded: 0, failed: 0, cancelled: 0, interrupted: 0, running: 1 },
+        }),
+      );
+
+      render(<AnalyticsView />);
+
+      expect(await screen.findByRole("heading", { name: "Review loops" })).toBeInTheDocument();
+    });
+
+    it("labels the failure rate and the median as implementation runs", async () => {
+      mockBackend(
+        costSummary,
+        analytics({
+          outcomes: { succeeded: 3, failed: 1, cancelled: 0, interrupted: 0, running: 0 },
+          medianDurationSeconds: 120,
+        }),
+      );
+
+      render(<AnalyticsView />);
+
+      expect(await screen.findByText("1 failed of 4 finished implementation runs")).toBeInTheDocument();
+      expect(screen.getByText("Median implementation run")).toBeInTheDocument();
+    });
   });
 });

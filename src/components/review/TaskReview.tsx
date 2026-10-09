@@ -1,10 +1,18 @@
 import type { ReactNode } from "react";
 
 import type { ReviewTarget } from "../../hooks/useReviewTarget";
-import { relativeTime } from "../../lib/board";
-import { formatSeconds, runOutcome } from "../../lib/review";
+import { useReviewHistory } from "../../hooks/useReviewHistory";
+import { relativeTime, runLabel } from "../../lib/board";
+import {
+  PING_PONG_TEXT,
+  finishedLoop,
+  formatSeconds,
+  reviewLoopText,
+  runOutcome,
+} from "../../lib/review";
 import type { BoardColumn, TaskSummary } from "../../types";
 import { COLUMN_TITLES } from "../board/Column";
+import { OpenFindingsList } from "../findings/OpenFindingsList";
 import { formatCostUsd } from "../panel/RunOutcomeSection";
 import { RunReviewSections } from "../runs/RunReviewSections";
 
@@ -38,6 +46,11 @@ export function TaskReview({
   now,
   children,
 }: TaskReviewProps) {
+  // What the reviewer could not fix, read beside the diff it was found in
+  // (task 037). The same component the run detail overlay renders.
+  const { history } = useReviewHistory(task.id);
+  const loop = finishedLoop(task.runState, task.reviewLoop);
+
   return (
     <article className="review-task" aria-label={task.title}>
       <header className="review-task-head">
@@ -59,13 +72,14 @@ export function TaskReview({
             <p className="review-no-run">This task has no run to review.</p>
           ) : (
             <>
-              <OutcomeSection run={target.run} now={now} />
+              <OutcomeSection run={target.run} now={now} loop={loop} />
               <RunReviewSections
                 taskId={target.task.id}
                 review={target.run.review}
                 prUrl={target.run.prUrl}
                 liveDiff="none"
                 patch="expanded"
+                afterPullRequest={<OpenFindingsList history={history} />}
               />
             </>
           )}
@@ -75,8 +89,17 @@ export function TaskReview({
   );
 }
 
-function OutcomeSection({ run, now }: { run: NonNullable<ReviewTarget["run"]>; now: Date }) {
+function OutcomeSection({
+  run,
+  now,
+  loop,
+}: {
+  run: NonNullable<ReviewTarget["run"]>;
+  now: Date;
+  loop: TaskSummary["reviewLoop"];
+}) {
   const outcome = runOutcome(run);
+  const loopText = reviewLoopText(loop);
   const seconds =
     run.endedAt === null
       ? null
@@ -90,7 +113,7 @@ function OutcomeSection({ run, now }: { run: NonNullable<ReviewTarget["run"]>; n
           {outcome.label}
         </span>
         <span className="muted tabular-nums">
-          Attempt {run.attempt}
+          {runLabel(run.kind, run.attempt)}
           {run.endedAt && ` · ended ${relativeTime(run.endedAt, now)}`}
           {seconds !== null && Number.isFinite(seconds) && ` · ${formatSeconds(seconds)}`}
           {" · "}
@@ -98,6 +121,16 @@ function OutcomeSection({ run, now }: { run: NonNullable<ReviewTarget["run"]>; n
         </span>
       </p>
       {run.errorMessage && <p className="run-outcome-error">{run.errorMessage}</p>}
+      {/* The loop's verdict joins the outcome, so the reviewer starts from what
+          the automated review could not fix before scrolling to the list
+          (ADR-0017). Words only: no tick, because nothing blocking is one
+          reviewer's pass and not a verdict on the work. */}
+      {loopText && (
+        <p className="review-run-loop">
+          <span>{loopText}</span>
+          {loop?.pingPong && <span className="run-detail-loop-signal">{PING_PONG_TEXT}</span>}
+        </p>
+      )}
     </section>
   );
 }

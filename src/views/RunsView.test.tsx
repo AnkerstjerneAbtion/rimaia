@@ -1,4 +1,4 @@
-import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { invoke } from "@tauri-apps/api/core";
@@ -58,6 +58,7 @@ function taskSummary(overrides: Partial<TaskSummary> = {}): TaskSummary {
     effectiveModel: null,
     effectiveEffort: null,
     effectiveOrigin: "claude_code",
+    reviewLoop: null,
     ...overrides,
   };
 }
@@ -1012,6 +1013,78 @@ describe("RunsView", () => {
       fireEvent.change(screen.getByLabelText("Repository"), { target: { value: "repo-2" } });
 
       await waitFor(() => expect(lastFilter).toEqual({ repositoryId: "repo-2" }));
+    });
+
+    describe("kind (task 037)", () => {
+      function historyBackend(entries: RunListEntry[] = []) {
+        mockListen.mockResolvedValue(vi.fn());
+        const filters: unknown[] = [];
+        mockInvoke.mockImplementation(async (command, args) => {
+          if (command === "list_tasks") return [];
+          if (command === "list_repositories") return [repository()];
+          if (command === "get_run_environment") return "inherit";
+          if (command === "get_queue_status") return queueStatus();
+          if (command === "list_runs") {
+            filters.push((args as { filter: unknown }).filter);
+            return entries;
+          }
+          throw new Error(`unexpected command: ${command}`);
+        });
+        // What the wire would carry: an undefined field is not sent.
+        return () => JSON.parse(JSON.stringify(filters[filters.length - 1]));
+      }
+
+      it("offers every kind beside the status filter, and starts on all of them", async () => {
+        const lastFilter = historyBackend();
+        render(<RunsView />);
+        await screen.findByText("No runs match these filters.");
+
+        const control = screen.getByLabelText("Kind") as HTMLSelectElement;
+        expect(Array.from(control.options).map((option) => option.textContent)).toEqual([
+          "All kinds",
+          "Implementation",
+          "Review",
+          "Fix",
+        ]);
+        expect(lastFilter()).toEqual({});
+      });
+
+      it("asks list_runs for reviews when Review is chosen", async () => {
+        const lastFilter = historyBackend();
+        render(<RunsView />);
+        await screen.findByText("No runs match these filters.");
+
+        fireEvent.change(screen.getByLabelText("Kind"), { target: { value: "review" } });
+
+        await waitFor(() => expect(lastFilter()).toEqual({ kind: "review" }));
+      });
+
+      it("leaves kind out of the request again for All kinds", async () => {
+        const lastFilter = historyBackend();
+        render(<RunsView />);
+        await screen.findByText("No runs match these filters.");
+        fireEvent.change(screen.getByLabelText("Kind"), { target: { value: "fix" } });
+        await waitFor(() => expect(lastFilter()).toEqual({ kind: "fix" }));
+
+        fireEvent.change(screen.getByLabelText("Kind"), { target: { value: "" } });
+
+        await waitFor(() => expect(lastFilter()).toEqual({}));
+      });
+
+      it("shows each row's kind label", async () => {
+        historyBackend([
+          runListEntry({ id: "run-1", taskTitle: "Reviewed one", kind: "review", attempt: 2 }),
+          runListEntry({ id: "run-2", taskTitle: "Fixed one", kind: "fix", attempt: 3 }),
+          runListEntry({ id: "run-3", taskTitle: "Built one", kind: "implementation" }),
+        ]);
+        render(<RunsView />);
+
+        const row = async (title: string) =>
+          (await screen.findByText(title)).closest("tr") as HTMLElement;
+        expect(within(await row("Reviewed one")).getByText("Review")).toBeInTheDocument();
+        expect(within(await row("Fixed one")).getByText("Fix")).toBeInTheDocument();
+        expect(within(await row("Built one")).getByText("Implementation")).toBeInTheDocument();
+      });
     });
   });
 });

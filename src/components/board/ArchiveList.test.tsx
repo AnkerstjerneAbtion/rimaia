@@ -48,6 +48,7 @@ function card(overrides: Partial<TaskSummary> = {}): TaskSummary {
     effectiveModel: null,
     effectiveEffort: null,
     effectiveOrigin: "global",
+    reviewLoop: null,
     ...overrides,
   };
 }

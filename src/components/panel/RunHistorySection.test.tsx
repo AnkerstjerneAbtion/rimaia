@@ -69,6 +69,26 @@ describe("RunHistorySection", () => {
     expect(await screen.findByText(/No runs yet/)).toBeInTheDocument();
   });
 
+  it("labels each row by what it was for, and no longer calls it an attempt", async () => {
+    mockInvoke.mockImplementation(async (command) => {
+      if (command === "list_runs_for_task") {
+        return [
+          run({ id: "run-3", attempt: 3, kind: "fix" }),
+          run({ id: "run-2", attempt: 2, kind: "review" }),
+          run({ id: "run-1", attempt: 1 }),
+        ];
+      }
+      throw new Error(`unexpected command: ${command}`);
+    });
+
+    render(<RunHistorySection taskId="task-1" />);
+
+    expect(await screen.findByText("Fix · #3")).toBeInTheDocument();
+    expect(screen.getByText("Review · #2")).toBeInTheDocument();
+    expect(screen.getByText("Implementation · #1")).toBeInTheDocument();
+    expect(screen.queryByText(/attempt/i)).toBeNull();
+  });
+
   it("lists every attempt, newest first as list_runs_for_task orders them", async () => {
     mockInvoke.mockImplementation(async (command) => {
       if (command === "list_runs_for_task") {
@@ -79,8 +99,8 @@ describe("RunHistorySection", () => {
 
     render(<RunHistorySection taskId="task-1" />);
 
-    expect(await screen.findByText("Attempt 2")).toBeInTheDocument();
-    expect(screen.getByText("Attempt 1")).toBeInTheDocument();
+    expect(await screen.findByText("Implementation · #2")).toBeInTheDocument();
+    expect(screen.getByText("Implementation · #1")).toBeInTheDocument();
   });
 
   it("opens the run detail overlay when an attempt is clicked", async () => {
@@ -99,7 +119,7 @@ describe("RunHistorySection", () => {
 
     render(<RunHistorySection taskId="task-1" />);
 
-    fireEvent.click(await screen.findByText("Attempt 1"));
+    fireEvent.click(await screen.findByText("Implementation · #1"));
 
     expect(await screen.findByRole("dialog", { name: "Run detail" })).toBeInTheDocument();
   });
@@ -127,7 +147,7 @@ describe("RunHistorySection", () => {
 
     const { container } = render(<RunHistorySection taskId="task-1" />);
 
-    fireEvent.click(await screen.findByText("Attempt 1"));
+    fireEvent.click(await screen.findByText("Implementation · #1"));
 
     const overlay = await screen.findByRole("dialog", { name: "Run detail" });
     expect(container.querySelector(".run-history-section")).not.toContainElement(overlay);
@@ -201,6 +221,6 @@ describe("RunHistorySection", () => {
 
     listenHandlers["runs:changed"]?.({ payload: ["run-1"] });
 
-    expect(await screen.findByText("Attempt 1")).toBeInTheDocument();
+    expect(await screen.findByText("Implementation · #1")).toBeInTheDocument();
   });
 });

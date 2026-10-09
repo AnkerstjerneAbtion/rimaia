@@ -6,7 +6,13 @@ import { listen } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
 
 import { RepositoriesSection } from "./RepositoriesSection";
-import type { Repository, StrategyCatalogueView, StrategyDefaults } from "../../types";
+import type {
+  Repository,
+  ReviewConfig,
+  ReviewLevel,
+  StrategyCatalogueView,
+  StrategyDefaults,
+} from "../../types";
 
 // `commands.ts` and `events.ts` both bottom out in `@tauri-apps/api/core`'s
 // `invoke` - mocking here, rather than the wrappers, exercises the real
@@ -78,6 +84,16 @@ function catalogueView(): StrategyCatalogueView {
   };
 }
 
+function inheritingEverything(): ReviewLevel {
+  const inherited: ReviewConfig = {
+    enabled: "off",
+    max_review_loops: 2,
+    blocking_severity: "medium",
+    fix_session: "fresh",
+  };
+  return { config: {}, inherited, effective: inherited };
+}
+
 /**
  * Installs an `invoke` implementation that already answers the two reads every
  * row makes for its default strategy (task 020), and delegates everything else
@@ -93,6 +109,9 @@ function mockBackend(handler: (command: string, args?: unknown) => unknown) {
     if (command === "get_strategy_defaults") {
       return { mode: "default" } satisfies StrategyDefaults;
     }
+    // Task 037's per-row review loop level, for the same reason: every row
+    // reads it and none of the tests below are about it.
+    if (command === "get_review_level") return inheritingEverything();
     // Task 022's per-row credential read, answered here for the same reason
     // the two above are: every row makes it, and no test in this file is
     // about it.
@@ -295,6 +314,90 @@ describe("RepositoriesSection", () => {
     expect(listCalls).toBe(2);
   });
 
+  describe("the review loop (task 037)", () => {
+    function backendWithLevel(inheritedEnabled: "off" | "on_cost_acknowledged") {
+      const repo = repository();
+      let stored: ReviewConfig = {};
+      mockInvoke.mockImplementation(async (command, args) => {
+        if (command === "list_repositories") return [repo];
+        if (command === "get_repository_remote_info") return { remoteUrl: null, ghReady: null };
+        if (command === "get_strategy_catalogue") return catalogueView();
+        if (command === "get_strategy_defaults") return { mode: "default" };
+        if (command === "get_repository_credential_status") {
+          return {
+            configured: false,
+            login: null,
+            label: null,
+            addedAt: null,
+            store: { state: "absent" },
+            sshRemote: false,
+          };
+        }
+        if (command === "get_review_level") {
+          const inherited = { ...inheritingEverything().inherited, enabled: inheritedEnabled };
+          return { config: stored, inherited, effective: { ...inherited, ...stored } };
+        }
+        if (command === "set_repository_review_config") {
+          stored = (args as { config: ReviewConfig }).config;
+          return stored;
+        }
+        if (command === "get_run_cost_summary") {
+          return { medianUsd: null, sampleSize: 0, inheritCostUsd: null, providerDisplayName: "x" };
+        }
+        throw new Error(`unexpected command: ${command}`);
+      });
+    }
+
+    function sentWrites() {
+      return mockInvoke.mock.calls.filter(([name]) => name === "set_repository_review_config");
+    }
+
+    it("says what the repository inherits, from the backend's answer", async () => {
+      backendWithLevel("on_cost_acknowledged");
+      render(<RepositoriesSection />);
+
+      expect(await screen.findByLabelText("Inherit (on)")).toBeChecked();
+      expect(screen.getByRole("option", { name: "Inherit (2)" })).toBeInTheDocument();
+    });
+
+    it("writes the acknowledgement for the repository's own id, only once acknowledged", async () => {
+      backendWithLevel("off");
+      render(<RepositoriesSection />);
+
+      fireEvent.click(await screen.findByLabelText("On"));
+
+      expect(await screen.findByRole("alertdialog", { name: /turning on the review loop/i }))
+        .toBeInTheDocument();
+      expect(sentWrites()).toHaveLength(0);
+
+      fireEvent.click(screen.getByRole("button", { name: "Turn on review loop" }));
+      await waitFor(() => expect(sentWrites()).toHaveLength(1));
+      expect(sentWrites()[0][1]).toEqual({
+        repositoryId: "repo-1",
+        config: { enabled: "on_cost_acknowledged" },
+      });
+    });
+
+    it("sets and clears a field at the repository level", async () => {
+      backendWithLevel("off");
+      render(<RepositoriesSection />);
+
+      const severity = await screen.findByLabelText("Blocking severity");
+      fireEvent.change(severity, { target: { value: "low" } });
+      await waitFor(() => expect(sentWrites()).toHaveLength(1));
+      expect(sentWrites()[0][1]).toEqual({
+        repositoryId: "repo-1",
+        config: { blocking_severity: "low" },
+      });
+
+      fireEvent.change(await screen.findByLabelText("Blocking severity"), {
+        target: { value: "" },
+      });
+      await waitFor(() => expect(sentWrites()).toHaveLength(2));
+      expect(sentWrites()[1][1]).toEqual({ repositoryId: "repo-1", config: {} });
+    });
+  });
+
   it("stores a default strategy against that repository's own id and keeps it on the row", async () => {
     // ADR-0016's "a repo of small tasks can default low without touching each
     // card": the write has to name the repository, since the global key and a
@@ -419,6 +522,7 @@ describe("RepositoriesSection", () => {
       if (command === "get_repository_remote_info") return { remoteUrl: null, ghReady: null };
       if (command === "get_strategy_catalogue") return catalogueView();
       if (command === "get_strategy_defaults") return { mode: "default" };
+      if (command === "get_review_level") return inheritingEverything();
       if (command === "get_repository_credential_status") {
         return {
           configured: false,

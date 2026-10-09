@@ -7,6 +7,7 @@ import { RunDetailOverlay } from "../components/runs/RunDetailOverlay";
 import { SessionOutcomesList } from "../components/runs/SessionOutcomesList";
 import type { RunCostSummary } from "../types";
 import type { SessionOutcome } from "../components/runs/SessionOutcomesList";
+import { RUN_KIND_LABELS } from "../lib/board";
 import { environmentOverheadNote } from "../lib/runEnvironment";
 import { ErrorBanner } from "../components/ErrorBanner";
 import { EXIT_CLASS_LABELS, formatCostUsd } from "../components/panel/RunOutcomeSection";
@@ -30,6 +31,7 @@ import type {
   RimaiaError,
   RunEnvironment,
   RunFilterInput,
+  RunKind,
   RunListEntry,
   RunStatus,
   TaskSummary,
@@ -43,6 +45,9 @@ import type {
 interface HistoryFilterState {
   repositoryId: string;
   status: RunStatus | "";
+  /** What the runs were for. Empty is "All kinds", which leaves `kind` out of
+   *  the request altogether (task 037). */
+  kind: RunKind | "";
   since: string;
   until: string;
 }
@@ -50,9 +55,12 @@ interface HistoryFilterState {
 const EMPTY_HISTORY_FILTER: HistoryFilterState = {
   repositoryId: "",
   status: "",
+  kind: "",
   since: "",
   until: "",
 };
+
+const RUN_KIND_OPTIONS: RunKind[] = ["implementation", "review", "fix"];
 
 const RUN_STATUS_OPTIONS: RunStatus[] = [
   "running",
@@ -66,6 +74,7 @@ function toRunFilterInput(filter: HistoryFilterState): RunFilterInput {
   return {
     repositoryId: filter.repositoryId || undefined,
     status: filter.status || undefined,
+    kind: filter.kind || undefined,
     // A date input names a calendar day; `since` starts at its beginning and
     // `until` at the start of the *next* day, so the day the user picked is
     // included whichever field it is in rather than excluding whatever ran
@@ -545,6 +554,26 @@ export function RunsView() {
           </label>
 
           <label>
+            Kind
+            <select
+              value={historyFilter.kind}
+              onChange={(event) =>
+                setHistoryFilter((filter) => ({
+                  ...filter,
+                  kind: event.target.value as RunKind | "",
+                }))
+              }
+            >
+              <option value="">All kinds</option>
+              {RUN_KIND_OPTIONS.map((kind) => (
+                <option key={kind} value={kind}>
+                  {RUN_KIND_LABELS[kind]}
+                </option>
+              ))}
+            </select>
+          </label>
+
+          <label>
             From
             <input
               type="date"
@@ -591,6 +620,7 @@ export function RunsView() {
               <tr>
                 <th scope="col">Task</th>
                 <th scope="col">Repository</th>
+                <th scope="col">Kind</th>
                 <th scope="col">Outcome</th>
                 <th scope="col">Started</th>
                 {/* The three columns that are only comparable if their digits
@@ -624,6 +654,7 @@ export function RunsView() {
                     </button>
                   </td>
                   <td className="runs-history-repo">{entry.repositoryName}</td>
+                  <td className="runs-history-kind">{RUN_KIND_LABELS[entry.kind]}</td>
                   <td>
                     <span
                       className={

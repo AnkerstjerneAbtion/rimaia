@@ -16,7 +16,16 @@ import {
 import { SortableContext, sortableKeyboardCoordinates } from "@dnd-kit/sortable";
 
 import { TaskCard } from "./TaskCard";
-import type { DetectedOpenInTarget, QueueEntry, Repository, Task } from "../../types";
+import type {
+  DetectedOpenInTarget,
+  LastRunSummary,
+  QueueEntry,
+  Repository,
+  ReviewLoopSummary,
+  RunKind,
+  RunState,
+  Task,
+} from "../../types";
 
 // Mocked at the Tauri seam, not `lib/commands.ts`/`lib/events.ts` — see
 // `StorageSection.test.tsx`'s own comment for why. `TaskCard`'s "Run now"
@@ -169,6 +178,28 @@ function renderCard(overrides: Partial<Parameters<typeof TaskCard>[0]> = {}) {
   return props;
 }
 
+/** [`renderCard`] for a test that renders several cards in turn. */
+function renderCardWithCleanup(overrides: Partial<Parameters<typeof TaskCard>[0]> = {}) {
+  const props = {
+    task: task(),
+    repositoryName: "rimaia",
+    now: NOW,
+    selected: false,
+    onSelect: vi.fn(),
+    registerCardRef: vi.fn(),
+    onArrowNavigate: vi.fn(),
+    ...overrides,
+  };
+
+  return render(
+    <DndHarness>
+      <SortableContext items={[props.task.id]}>
+        <TaskCard {...props} />
+      </SortableContext>
+    </DndHarness>,
+  );
+}
+
 /** Clicks "Run now" once it is actually *enabled*.
  *
  *  The button is `disabled={runNow.kind !== "ready" || starting}`, and
@@ -209,6 +240,128 @@ describe("TaskCard", () => {
     renderCard({ task: task({ runState: "blocked" }) });
     await screen.findByRole("button", { name: "Run now" });
     expect(screen.getByText("Blocked")).toBeInTheDocument();
+  });
+
+  // -------------------------------------------------------------------------
+  // The review loop on the card (task 037)
+  // -------------------------------------------------------------------------
+
+  describe("the review loop", () => {
+    const remaining: ReviewLoopSummary = {
+      enabled: true,
+      maxReviewLoops: 2,
+      fixesSpent: 2,
+      reviews: 3,
+      verdict: { verdict: "findings_remain", openBlocking: 3 },
+      openBlocking: 3,
+      openAdvisory: 0,
+      pingPong: false,
+    };
+
+    function loopCard(
+      runState: RunState,
+      lastRun: LastRunSummary | null,
+      reviewLoop: ReviewLoopSummary | null = remaining,
+    ) {
+      return { ...task({ runState, column: "in_review" }), lastRun, reviewLoop };
+    }
+
+    const finished = (kind: RunKind): LastRunSummary => ({
+      kind,
+      status: "succeeded",
+      exitClass: "success",
+      endedAt: "2026-08-20T11:55:00Z",
+      resumeAfter: null,
+    });
+    const inFlight = (kind: RunKind): LastRunSummary => ({
+      kind,
+      status: "running",
+      exitClass: null,
+      endedAt: null,
+      resumeAfter: null,
+    });
+
+    it("says how the loop ended, counting fixes", async () => {
+      renderCard({ task: loopCard("idle", finished("review")) });
+      await screen.findByRole("button", { name: "Run now" });
+
+      expect(
+        screen.getByText("Reviewed after 2 fixes · 3 blocking findings open"),
+      ).toBeInTheDocument();
+    });
+
+    it("finds a loop that may be going in circles by those words", async () => {
+      renderCard({
+        task: loopCard("idle", finished("review"), { ...remaining, pingPong: true }),
+      });
+      await screen.findByRole("button", { name: "Run now" });
+
+      expect(screen.getByText("May be going in circles")).toBeInTheDocument();
+    });
+
+    it("says nothing while the task is still moving, whatever the badge reads", async () => {
+      const moving: Array<[RunState, LastRunSummary, string]> = [
+        ["queued", finished("review"), "Queued"],
+        ["running", inFlight("implementation"), "Running"],
+        ["running", inFlight("review"), "Reviewing"],
+        ["running", finished("review"), "Reviewing"],
+        ["running", inFlight("fix"), "Fixing"],
+        [
+          "waiting_retry",
+          { ...inFlight("review"), status: "failed", exitClass: "usage_limit" },
+          "Review waiting for retry",
+        ],
+      ];
+      for (const [runState, lastRun, badge] of moving) {
+        const { container, unmount } = renderCardWithCleanup({
+          task: loopCard(runState, lastRun),
+        });
+        await screen.findByText("Wire up the board");
+
+        expect(container.querySelector(".run-badge")?.textContent, badge).toMatch(
+          new RegExp(`^${badge}`),
+        );
+        expect(screen.queryByText(/blocking finding/), `${runState} ${badge}`).toBeNull();
+        expect(screen.queryByText(/going in circles/)).toBeNull();
+        unmount();
+      }
+    });
+
+    it("has no loop line for a ready task that was never implemented", async () => {
+      renderCard({ task: { ...task({ column: "ready" }), lastRun: null, reviewLoop: null } });
+      await screen.findByRole("button", { name: "Run now" });
+
+      expect(screen.queryByText(/Reviewed|Not reviewed/)).toBeNull();
+    });
+
+    it("never paints a success colour on anything inside the card", async () => {
+      const { container } = render(
+        <DndHarness>
+          <SortableContext items={["task-1"]}>
+            <TaskCard
+              task={loopCard("idle", finished("review"), {
+                ...remaining,
+                verdict: { verdict: "clean" },
+                openBlocking: 0,
+                pingPong: true,
+              })}
+              repositoryName="rimaia"
+              now={NOW}
+              selected={false}
+              onSelect={vi.fn()}
+              registerCardRef={vi.fn()}
+              onArrowNavigate={vi.fn()}
+            />
+          </SortableContext>
+        </DndHarness>,
+      );
+      await screen.findByRole("button", { name: "Run now" });
+
+      for (const element of container.querySelectorAll("*")) {
+        expect(element.getAttribute("class") ?? "", element.outerHTML).not.toMatch(/success/);
+      }
+      expect(container.textContent).not.toMatch(/✓|✔|passed|clean/i);
+    });
   });
 
   // -------------------------------------------------------------------------

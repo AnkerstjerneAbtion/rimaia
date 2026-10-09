@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import type { ReactNode } from "react";
 
 import { getDiffSummary } from "../../lib/commands";
 import { formatBytes } from "../../lib/format";
@@ -25,6 +26,10 @@ interface RunReviewSectionsProps {
    *  section, for an overlay with a transcript to get to. `expanded` puts it
    *  in a section of its own after the pull request, in ADR-0013's order. */
   readonly patch: "collapsed" | "expanded";
+  /** Rendered directly after the pull request section, before any expanded
+   *  patch: where the review loop's findings go, so they are read with the PR
+   *  link and against the diff above them (ADR-0013's order stays whole). */
+  readonly afterPullRequest?: ReactNode;
 }
 
 /**
@@ -48,10 +53,11 @@ export function RunReviewSections({
   prUrl,
   liveDiff,
   patch,
+  afterPullRequest,
 }: RunReviewSectionsProps) {
   if (review.source === "not_recorded") {
     return liveDiff === "fallback" ? (
-      <LiveFallback taskId={taskId} prUrl={prUrl} />
+      <LiveFallback taskId={taskId} prUrl={prUrl} afterPullRequest={afterPullRequest} />
     ) : (
       <>
         <section className="run-detail-section">
@@ -63,6 +69,7 @@ export function RunReviewSections({
           <p className="muted">None recorded.</p>
         </section>
         <PullRequestSection prUrl={prUrl} />
+        {afterPullRequest}
       </>
     );
   }
@@ -78,10 +85,18 @@ export function RunReviewSections({
           <p className="muted">None.</p>
         </section>
         <PullRequestSection prUrl={prUrl} />
+        {afterPullRequest}
       </>
     );
   }
-  return <RecordedBundle bundle={review.bundle} prUrl={prUrl} patch={patch} />;
+  return (
+    <RecordedBundle
+      bundle={review.bundle}
+      prUrl={prUrl}
+      patch={patch}
+      afterPullRequest={afterPullRequest}
+    />
+  );
 }
 
 function PullRequestSection({ prUrl }: { prUrl: string | null }) {
@@ -103,10 +118,12 @@ function RecordedBundle({
   bundle,
   prUrl,
   patch,
+  afterPullRequest,
 }: {
   bundle: StoredBundle;
   prUrl: string | null;
   patch: "collapsed" | "expanded";
+  afterPullRequest?: ReactNode;
 }) {
   const included = bundle.files.filter((file) => file.patch === "included").length;
   const pruned = bundle.patchPrunedAt !== null;
@@ -154,9 +171,10 @@ function RecordedBundle({
         <CommitList commits={bundle.commits} empty="No commits on this branch." />
       </section>
       <PullRequestSection prUrl={prUrl} />
-      {/* Task 037 slots the review findings here, after the pull request and
-          before the patch: findings are read with the PR link, not below a
-          screenful of diff. Nothing renders in this place until then. */}
+      {/* The review findings (task 037), after the pull request and before the
+          patch: findings are read with the PR link, not below a screenful of
+          diff. */}
+      {afterPullRequest}
       {patch === "expanded" && (bundle.patch || prunedNote || truncatedNote) && (
         <section className="run-detail-section">
           <h4>Patch</h4>
@@ -176,7 +194,15 @@ type Fallback =
   | { state: "read"; summary: DiffSummary }
   | { state: "unreadable" };
 
-function LiveFallback({ taskId, prUrl }: { taskId: string; prUrl: string | null }) {
+function LiveFallback({
+  taskId,
+  prUrl,
+  afterPullRequest,
+}: {
+  taskId: string;
+  prUrl: string | null;
+  afterPullRequest?: ReactNode;
+}) {
   const [fallback, setFallback] = useState<Fallback>({ state: "loading" });
 
   useEffect(() => {
@@ -214,6 +240,7 @@ function LiveFallback({ taskId, prUrl }: { taskId: string; prUrl: string | null 
           <p className="muted">None recorded.</p>
         </section>
         <PullRequestSection prUrl={prUrl} />
+        {afterPullRequest}
       </>
     );
   }
@@ -242,6 +269,7 @@ function LiveFallback({ taskId, prUrl }: { taskId: string; prUrl: string | null 
         )}
       </section>
       <PullRequestSection prUrl={prUrl} />
+      {afterPullRequest}
     </>
   );
 }

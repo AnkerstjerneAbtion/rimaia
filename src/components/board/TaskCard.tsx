@@ -9,6 +9,7 @@ import { useSortable } from "@dnd-kit/sortable";
 import { CSS } from "@dnd-kit/utilities";
 
 import { cardBadge, relativeTime } from "../../lib/board";
+import { PING_PONG_TEXT, finishedLoop, reviewLoopText } from "../../lib/review";
 import { getQueueStatus, listRepositories, startRun, toRimaiaError } from "../../lib/commands";
 import {
   subscribeToRepositoriesChanged,
@@ -305,7 +306,12 @@ type CardTask = Task &
   Partial<
     Pick<
       TaskSummary,
-      "linkCount" | "dependencyCount" | "lastRun" | "blockedByIncomplete" | "blockingTitle"
+      | "linkCount"
+      | "dependencyCount"
+      | "lastRun"
+      | "blockedByIncomplete"
+      | "blockingTitle"
+      | "reviewLoop"
     >
   > &
   Partial<EffectiveStrategyFields>;
@@ -368,6 +374,11 @@ function CardFace({ task, repositoryName, now }: CardFace) {
   // An inherited value is still what runs, but it is not a decision anybody
   // made about *this* card, so it recedes.
   const inherited = origin === "global" || origin === "claude_code";
+  // The loop's line is for a loop that has finished. While the task is still
+  // moving, the badge already says what is happening and a verdict would
+  // describe an unfinished pass (task 037).
+  const loop = finishedLoop(task.runState, task.reviewLoop);
+  const loopText = reviewLoopText(loop);
   const proposalWaiting =
     task.strategyMode === "planned" &&
     task.strategySource === "planner" &&
@@ -404,6 +415,12 @@ function CardFace({ task, repositoryName, now }: CardFace) {
           thing it qualifies. */}
       {blocked && task.blockingTitle && (
         <p className="task-card-blocked-by">Blocked by {task.blockingTitle}</p>
+      )}
+      {loopText && (
+        <p className="task-card-loop">
+          <span className="task-card-loop-text">{loopText}</span>
+          {loop?.pingPong && <span className="task-card-loop-signal">{PING_PONG_TEXT}</span>}
+        </p>
       )}
       {(strategy || proposalWaiting) && (
         <div className="task-card-strategy">

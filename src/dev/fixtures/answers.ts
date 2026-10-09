@@ -9,11 +9,16 @@ import type {
   PlanPass,
   PreflightSummary,
   PruneResult,
+  ReviewConfig,
   ReviewFinding,
+  ReviewHistory,
+  ReviewLevel,
   ReviewOutcome,
+  ReviewSettings,
   RimaiaError,
   Run,
   RunDetail,
+  RunFilterInput,
   RunListEntry,
   Schedule,
   ScheduleView,
@@ -22,12 +27,14 @@ import type {
   TaskDependent,
   TaskDetail,
   TaskFilterInput,
+  TaskReview,
   TaskSummary,
   TranscriptPage,
   TranscriptSummary,
   WorktreeInventory,
   WorktreeStatus,
 } from "../../types";
+import { reviewLevel } from "./seed";
 import type { Scenario } from "./seed";
 
 /**
@@ -125,9 +132,9 @@ function detailOf(scenario: Scenario, id: unknown): TaskDetail {
     links: [],
     dependsOn: scenario.dependencies[summary.id] ?? [],
     lastRun: run ? plainRun(run) : null,
-    reviewInstructions: null,
-    reviewConfig: {},
-    reviewLoop: null,
+    reviewInstructions: scenario.taskReviews[summary.id]?.instructions ?? null,
+    reviewConfig: scenario.taskReviews[summary.id]?.config ?? {},
+    reviewLoop: summary.reviewLoop,
   };
 }
 
@@ -141,6 +148,31 @@ function matchesFilter(candidate: TaskSummary, filter: TaskFilterInput): boolean
   return true;
 }
 
+
+/** One level of the review loop's configuration. The seed states the levels it
+ *  shows; a level it does not state inherits the global one and sets nothing,
+ *  which is what an untouched repository or task reads as. */
+function reviewLevelFor(args: Args, scenario: Scenario): ReviewLevel {
+  const levels = scenario.reviewLevels;
+  if (args.level === "repository") {
+    return levels.repositories[String(args.id)] ?? reviewLevel({}, levels.global.effective);
+  }
+  if (args.level === "task") {
+    return levels.tasks[String(args.id)] ?? reviewLevel({}, levels.global.effective);
+  }
+  return levels.global;
+}
+
+/** `list_runs`'s filter, applied to the seed the way core applies it: a field
+ *  left out matches everything. */
+function runsMatching(scenario: Scenario, filter: RunFilterInput): RunListEntry[] {
+  return scenario.runs.filter(
+    (run) =>
+      (!filter.repositoryId || run.repositoryId === filter.repositoryId) &&
+      (!filter.status || run.status === filter.status) &&
+      (!filter.kind || run.kind === filter.kind),
+  );
+}
 
 const CATALOGUE: StrategyCatalogueView = {
   catalogue: {
@@ -276,6 +308,19 @@ export const ANSWERS: Record<string, Answer> = {
       (finding) =>
         finding.taskId === args.taskId && (args.status == null || finding.status === args.status),
     ),
+  get_review_history: (args, s): ReviewHistory =>
+    s.reviewHistories[String(args.taskId)] ?? { loops: [] },
+  get_review_level: reviewLevelFor,
+  get_review_settings: (_args, s): ReviewSettings => s.reviewSettings,
+  set_review_settings: (args): ReviewSettings => ({
+    instructions: String(args.instructions ?? ""),
+    config: (args.config ?? {}) as ReviewConfig,
+  }),
+  set_repository_review_config: (args): ReviewConfig => (args.config ?? {}) as ReviewConfig,
+  set_task_review: (args): TaskReview => ({
+    instructions: (args.reviewInstructions ?? null) as string | null,
+    config: (args.config ?? {}) as ReviewConfig,
+  }),
   set_task_run_state: (args, s) => findTask(s, args.id),
   add_task_link: unsupported("fixture mode does not edit links"),
   update_task_link: unsupported("fixture mode does not edit links"),
@@ -358,7 +403,7 @@ export const ANSWERS: Record<string, Answer> = {
   get_run_tail: (args, s) => s.tails.find((tail) => tail.runId === args.runId) ?? null,
   list_runs_for_task: (args, s): Run[] =>
     s.runs.filter((run) => run.taskId === args.taskId).map(plainRun),
-  list_runs: (_args, s) => s.runs,
+  list_runs: (args, s) => runsMatching(s, (args.filter ?? {}) as RunFilterInput),
   get_run: (args, s): RunDetail => {
     const entry = s.runs.find((run) => run.id === args.runId);
     if (!entry) refuse("not_found", `fixture mode has no run \`${String(args.runId)}\``);

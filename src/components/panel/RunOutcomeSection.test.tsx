@@ -166,4 +166,18 @@ describe("RunOutcomeSection", () => {
 
     expect(screen.getByText("7")).toBeInTheDocument();
   });
+
+  it("names the row in its heading, so a review does not read as the implementation", () => {
+    render(<RunOutcomeSection lastRun={run({ kind: "review", attempt: 7 })} loading={false} />);
+
+    expect(
+      screen.getByRole("heading", { name: "Last run outcome — Review · #7" }),
+    ).toBeInTheDocument();
+  });
+
+  it("keeps a plain heading while there is nothing to name", () => {
+    render(<RunOutcomeSection lastRun={null} loading={false} />);
+
+    expect(screen.getByRole("heading", { name: "Last run outcome" })).toBeInTheDocument();
+  });
 });

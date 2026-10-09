@@ -1,5 +1,6 @@
 import { useState } from "react";
 
+import { runLabel } from "../../lib/board";
 import type { ExitClass, Run } from "../../types";
 
 /**
@@ -46,7 +47,14 @@ interface RunOutcomeSectionProps {
 export function RunOutcomeSection({ lastRun, loading }: RunOutcomeSectionProps) {
   return (
     <section className="task-detail-section run-outcome-section">
-      <h4>Last run outcome</h4>
+      {/* After a loop the newest row is usually a review, so the heading names
+          the row: otherwise a review's outcome reads as the implementation's
+          (task 037). */}
+      <h4>
+        {lastRun && !loading
+          ? `Last run outcome — ${runLabel(lastRun.kind, lastRun.attempt)}`
+          : "Last run outcome"}
+      </h4>
       {loading && <p className="muted">Loading…</p>}
       {!loading && !lastRun && (
         <p className="muted">No runs yet — an outcome appears here once one has finished.</p>

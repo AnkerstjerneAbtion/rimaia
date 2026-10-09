@@ -51,6 +51,7 @@ function taskSummary(overrides: Partial<TaskSummary> = {}): TaskSummary {
     effectiveModel: null,
     effectiveEffort: null,
     effectiveOrigin: "claude_code",
+    reviewLoop: null,
     ...overrides,
   };
 }
@@ -146,6 +147,33 @@ describe("ActiveRunCard", () => {
     expect(screen.getByText("Bash")).toBeInTheDocument();
     expect(screen.getByText(/npm test/)).toBeInTheDocument();
     expect(screen.getByText("Running the test suite now.")).toBeInTheDocument();
+  });
+
+  it("labels a running review as a review beside the task title", async () => {
+    mockInvoke.mockImplementation(async (command) => {
+      if (command === "get_task") return taskDetail();
+      if (command === "get_run_tail") return runTail();
+      throw new Error(`unexpected command: ${command}`);
+    });
+
+    render(
+      <ActiveRunCard
+        task={taskSummary({
+          lastRun: {
+            kind: "review",
+            status: "running",
+            exitClass: null,
+            endedAt: null,
+            resumeAfter: null,
+          },
+        })}
+        repositoryName="rimaia"
+      />,
+    );
+
+    expect(screen.getByText("Review")).toBeInTheDocument();
+    expect(screen.queryByText("Implementation")).toBeNull();
+    await waitFor(() => expect(screen.getByText("Bash")).toBeInTheDocument());
   });
 
   it("shows a starting placeholder before the run id has resolved", async () => {

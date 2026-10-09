@@ -4,7 +4,8 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { invoke } from "@tauri-apps/api/core";
 
 import { RunDetailOverlay } from "./RunDetailOverlay";
-import type { RunDetail, StoredBundle } from "../../types";
+import { twoLoopHistory } from "../../test/reviewFixtures";
+import type { ReviewHistory, RunDetail, StoredBundle } from "../../types";
 
 // Mocked at the Tauri seam — see `StorageSection.test.tsx`'s comment for why.
 vi.mock("@tauri-apps/api/core", () => ({
@@ -107,7 +108,7 @@ describe("RunDetailOverlay", () => {
 
     render(<RunDetailOverlay runId="run-1" onClose={() => {}} />);
 
-    expect(await screen.findByText("Run detail — attempt 2")).toBeInTheDocument();
+    expect(await screen.findByText("Run detail — Implementation · #2")).toBeInTheDocument();
     expect(screen.getByText("Succeeded")).toBeInTheDocument();
     expect(screen.getByText("$0.1234")).toBeInTheDocument();
     expect(screen.getByText(/2 files changed \(\+10 \/ -3\)/)).toBeInTheDocument();
@@ -426,5 +427,116 @@ describe("RunDetailOverlay", () => {
     render(<RunDetailOverlay runId="run-1" onClose={() => {}} />);
 
     expect(await screen.findByText("No pull request opened yet.")).toBeInTheDocument();
+  });
+
+  // -------------------------------------------------------------------------
+  // The review loop's findings beside the diff (task 037)
+  // -------------------------------------------------------------------------
+
+  function answeringWithHistory(detail: RunDetail, history: ReviewHistory) {
+    mockInvoke.mockImplementation(async (command) => {
+      if (command === "get_run") return detail;
+      if (command === "get_review_history") return history;
+      if (command === "read_run_transcript_page") {
+        return { entries: [], offset: 0, totalLines: 0 };
+      }
+      throw new Error(`unexpected command: ${command}`);
+    });
+  }
+
+  function titlesOfFindings(): string[] {
+    return Array.from(document.querySelectorAll(".finding-title")).map(
+      (element) => element.textContent ?? "",
+    );
+  }
+
+  it("lists the current loop's open findings for the task's newest row, blocking before advisory", async () => {
+    const history = twoLoopHistory();
+    const [cameBack, brandNew, nit] = history.loops[1].rounds[1].findings;
+    // Core hands them in the reviewer's order; the advisory one came first.
+    history.loops[1].rounds[1].findings = [nit, cameBack, brandNew];
+    answeringWithHistory(runDetail({ id: "run-7", attempt: 7, kind: "review" }), history);
+
+    render(<RunDetailOverlay runId="run-7" onClose={() => {}} />);
+
+    expect(await screen.findByRole("heading", { name: "Unresolved findings" })).toBeInTheDocument();
+    expect(titlesOfFindings()).toEqual(["Unchecked index", "Race on logout", "Rename the helper"]);
+    expect(screen.getByText("Advisory")).toBeInTheDocument();
+  });
+
+  it("puts the loop's verdict in the outcome, in the card's words", async () => {
+    answeringWithHistory(runDetail({ id: "run-7", attempt: 7, kind: "review" }), twoLoopHistory());
+
+    render(<RunDetailOverlay runId="run-7" onClose={() => {}} />);
+
+    expect(
+      await screen.findByText("Reviewed after 1 fix · 2 blocking findings open"),
+    ).toBeInTheDocument();
+    expect(screen.getByText("May be going in circles")).toBeInTheDocument();
+    expect(screen.getByText("Run detail — Review · #7")).toBeInTheDocument();
+  });
+
+  it("lists what an older review raised, with each finding's status today", async () => {
+    answeringWithHistory(runDetail({ id: "run-5", attempt: 5, kind: "review" }), twoLoopHistory());
+
+    render(<RunDetailOverlay runId="run-5" onClose={() => {}} />);
+
+    expect(
+      await screen.findByRole("heading", { name: "Findings from this review" }),
+    ).toBeInTheDocument();
+    expect(titlesOfFindings()).toEqual([
+      "Unchecked index",
+      "Leaked file handle",
+      "Wrong default timeout",
+    ]);
+    expect(screen.getAllByText("Fixed in #6")).toHaveLength(2);
+    expect(
+      screen.getByText("Rejected in #6 — The caller always passes a timeout."),
+    ).toBeInTheDocument();
+    // The verdict is about the loop as it stands, which an older row did not
+    // leave.
+    expect(screen.queryByText(/blocking findings open/)).toBeNull();
+  });
+
+  it("shows no findings for an older implementation row", async () => {
+    answeringWithHistory(runDetail({ id: "run-4", attempt: 4 }), twoLoopHistory());
+
+    render(<RunDetailOverlay runId="run-4" onClose={() => {}} />);
+
+    await screen.findByText("Run detail — Implementation · #4");
+    expect(screen.queryByRole("heading", { name: /findings/i })).toBeNull();
+  });
+
+  it("keeps the outcome with its verdict, diff, commits, PR link, findings, prompt, transcript in order", async () => {
+    answeringWithHistory(runDetail({ id: "run-7", attempt: 7, kind: "review" }), twoLoopHistory());
+
+    render(<RunDetailOverlay runId="run-7" onClose={() => {}} />);
+
+    const verdict = await screen.findByText("Reviewed after 1 fix · 2 blocking findings open");
+    const diff = screen.getByRole("heading", { name: "Diff summary" });
+    const commits = screen.getByRole("heading", { name: "Commits" });
+    const pullRequest = screen.getByRole("heading", { name: "Pull request" });
+    const findings = screen.getByRole("heading", { name: "Unresolved findings" });
+    const prompt = screen.getByRole("heading", { name: "Prompt" });
+    const transcript = screen.getByRole("heading", { name: "Transcript" });
+
+    const inOrder = [verdict, diff, commits, pullRequest, findings, prompt, transcript];
+    for (let index = 0; index < inOrder.length - 1; index += 1) {
+      expect(
+        inOrder[index].compareDocumentPosition(inOrder[index + 1]) &
+          Node.DOCUMENT_POSITION_FOLLOWING,
+        `${inOrder[index].textContent} precedes ${inOrder[index + 1].textContent}`,
+      ).toBeTruthy();
+    }
+  });
+
+  it("is unchanged for a task the loop never touched", async () => {
+    answeringWithHistory(runDetail(), { loops: [] });
+
+    render(<RunDetailOverlay runId="run-1" onClose={() => {}} />);
+
+    await screen.findByText("Run detail — Implementation · #2");
+    expect(screen.queryByText("Review loop")).toBeNull();
+    expect(screen.queryByRole("heading", { name: /findings/i })).toBeNull();
   });
 });

@@ -14,6 +14,7 @@ import {
   runDetail,
   sixTaskDigest,
   taskSummary,
+  twoLoopHistory,
 } from "../test/reviewFixtures";
 import type { RunReview } from "../types";
 import { ReviewView } from "./ReviewView";
@@ -416,6 +417,69 @@ describe("the review of one task", () => {
       ).toBeTruthy();
     }
     expect(screen.getByText(PATCH_LINE).closest("details")).toBeNull();
+  });
+
+  describe("the review loop (task 037)", () => {
+    const remaining = {
+      enabled: true,
+      maxReviewLoops: 2,
+      fixesSpent: 1,
+      reviews: 2,
+      verdict: { verdict: "findings_remain", openBlocking: 2 },
+      openBlocking: 2,
+      openAdvisory: 1,
+      pingPong: true,
+    } as const;
+
+    it("puts the verdict in the outcome and the unresolved findings after the PR link, before the patch", async () => {
+      backend.tasks[0] = taskSummary({ id: "task-a", title: "Task A", reviewLoop: remaining });
+      backend.histories["task-a"] = twoLoopHistory();
+      render(<ReviewView now={NOW} />);
+      await openQueue(user);
+
+      await screen.findByText(PATCH_LINE);
+      const verdict = await screen.findByText("Reviewed after 1 fix · 2 blocking findings open");
+      expect(screen.getByText("May be going in circles")).toBeInTheDocument();
+      const heading = (name: string) => screen.getByRole("heading", { level: 4, name });
+      const inOrder = [
+        verdict,
+        heading("Diff summary"),
+        heading("Commits"),
+        heading("Pull request"),
+        await screen.findByRole("heading", { level: 4, name: "Unresolved findings" }),
+        heading("Patch"),
+      ];
+      for (let index = 1; index < inOrder.length; index += 1) {
+        expect(
+          inOrder[index - 1].compareDocumentPosition(inOrder[index]) &
+            Node.DOCUMENT_POSITION_FOLLOWING,
+          `${inOrder[index - 1].textContent} precedes ${inOrder[index].textContent}`,
+        ).toBeTruthy();
+      }
+      expect(within(verdict.closest("section") as HTMLElement).getByText("Outcome")).toBeTruthy();
+    });
+
+    it("lists the same open findings the run detail does, blocking first", async () => {
+      backend.tasks[0] = taskSummary({ id: "task-a", title: "Task A", reviewLoop: remaining });
+      backend.histories["task-a"] = twoLoopHistory();
+      render(<ReviewView now={NOW} />);
+      await openQueue(user);
+
+      await screen.findByRole("heading", { level: 4, name: "Unresolved findings" });
+      const titles = Array.from(document.querySelectorAll(".finding-title")).map(
+        (element) => element.textContent,
+      );
+      expect(titles).toEqual(["Unchecked index", "Race on logout", "Rename the helper"]);
+    });
+
+    it("shows no loop line and no findings for a task the loop never touched", async () => {
+      render(<ReviewView now={NOW} />);
+      await openQueue(user);
+
+      await screen.findByText(PATCH_LINE);
+      expect(screen.queryByText(/Reviewed (once|after)/)).toBeNull();
+      expect(screen.queryByRole("heading", { name: /findings/i })).toBeNull();
+    });
   });
 
   it("shows Interrupted for an interrupted run while the task's run state is failed", async () => {

@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 
+import { RUN_KIND_LABELS } from "../../lib/board";
 import { cancelRun, getRunTail, getTask, toRimaiaError } from "../../lib/commands";
 import { subscribeToRunsTail, subscribeToTasksChanged } from "../../lib/events";
 import type { RimaiaError, RunTail, TaskSummary } from "../../types";
@@ -230,7 +231,15 @@ export function ActiveRunCard({ task, repositoryName }: ActiveRunCardProps) {
           </span>
           <span className="active-run-repo">{repositoryName}</span>
         </div>
-        <h3>{task.title}</h3>
+        <div className="active-run-title">
+          <h3>{task.title}</h3>
+          {/* What this row is for, so a review in flight does not read as an
+              implementation (task 037). The card's summary carries the newest
+              row's kind from the start; the resolved run is not needed. */}
+          {task.lastRun && (
+            <span className="active-run-kind">{RUN_KIND_LABELS[task.lastRun.kind]}</span>
+          )}
+        </div>
       </header>
 
       {/* Elapsed and turns as readouts rather than as `<dl class="detail-list">`

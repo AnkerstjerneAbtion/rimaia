@@ -4,6 +4,7 @@ import { DoctorSection } from "./settings/DoctorSection";
 import { InstructionsSection } from "./settings/InstructionsSection";
 import { McpSection } from "./settings/McpSection";
 import { RepositoriesSection } from "./settings/RepositoriesSection";
+import { ReviewSection } from "./settings/ReviewSection";
 import { SchedulesSection } from "./settings/SchedulesSection";
 import { StorageSection } from "./settings/StorageSection";
 import { StrategySection } from "./settings/StrategySection";
@@ -64,6 +65,7 @@ const BANDS: readonly SettingsBand[] = [
     blurb: "The prompt every task inherits, and what it is spawned with.",
     sections: [
       { id: "settings-instructions", name: "Instructions" },
+      { id: "settings-review", name: "Review" },
       { id: "settings-strategy", name: "Strategy" },
     ],
   },
@@ -144,6 +146,13 @@ export function SettingsView() {
       <SettingsBandView band={BANDS[2]}>
         <div className="settings-slot" id="settings-instructions">
           <InstructionsSection />
+        </div>
+        {/* Review sits with the instructions it extends: what a review run is
+            told is one more thing a run receives besides its own plan, and its
+            loop multiplies what every run costs, so it is read next to the
+            strategy that sets what each run is spawned with. */}
+        <div className="settings-slot" id="settings-review">
+          <ReviewSection />
         </div>
         {/* Between the instructions and the MCP server on purpose: the strategy
             decides what a run is spawned with, which reads as the next thing

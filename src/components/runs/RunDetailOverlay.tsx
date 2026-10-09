@@ -1,15 +1,25 @@
 import { useEffect, useState } from "react";
 import { createPortal } from "react-dom";
 
+import { useReviewHistory } from "../../hooks/useReviewHistory";
+import { runLabel } from "../../lib/board";
 import {
   getRun,
   revealRunLog,
   summarizeRunTranscript,
   toRimaiaError,
 } from "../../lib/commands";
+import {
+  PING_PONG_TEXT,
+  currentLoop,
+  isNewestRun,
+  loopPingPong,
+  reviewLoopText,
+} from "../../lib/review";
 import { EXIT_CLASS_LABELS, formatCostUsd } from "../panel/RunOutcomeSection";
 import type { RimaiaError, RunDetail, TranscriptSummary } from "../../types";
 import { ErrorBanner } from "../ErrorBanner";
+import { OpenFindingsList } from "../findings/OpenFindingsList";
 import { RunReviewSections } from "./RunReviewSections";
 import { TranscriptViewer } from "./TranscriptViewer";
 
@@ -53,6 +63,9 @@ export function RunDetailOverlay({ runId, onClose }: RunDetailOverlayProps) {
   const [revealing, setRevealing] = useState(false);
   const [revealError, setRevealError] = useState<RimaiaError | null>(null);
   const [copied, setCopied] = useState(false);
+  // The loop's findings and verdict belong to the task, and which task is only
+  // known once the run has loaded.
+  const { history } = useReviewHistory(detail?.taskId ?? null);
 
   useEffect(() => {
     let active = true;
@@ -112,10 +125,16 @@ export function RunDetailOverlay({ runId, onClose }: RunDetailOverlayProps) {
     }
   }
 
+  // The verdict joins the outcome of the task's newest row only: it describes
+  // the loop's current state, which an older row did not leave.
+  const loop = history && isNewestRun(history, runId) ? currentLoop(history) : null;
+  const loopText = reviewLoopText(loop);
+  const loopLine = loop && loopText ? { text: loopText, pingPong: loopPingPong(loop) } : null;
+
   return createPortal(
     <div className="run-detail-overlay" role="dialog" aria-label="Run detail">
       <div className="run-detail-overlay-header">
-        <h3>Run detail{detail ? ` — attempt ${detail.attempt}` : ""}</h3>
+        <h3>Run detail{detail ? ` — ${runLabel(detail.kind, detail.attempt)}` : ""}</h3>
         <button type="button" className="run-detail-close" onClick={onClose} aria-label="Close">
           Esc
         </button>
@@ -171,6 +190,17 @@ export function RunDetailOverlay({ runId, onClose }: RunDetailOverlayProps) {
               </div>
             </div>
             <dl className="detail-list">
+              {loopLine && (
+                <>
+                  <dt>Review loop</dt>
+                  <dd className="run-detail-loop">
+                    <span>{loopLine.text}</span>
+                    {loopLine.pingPong && (
+                      <span className="run-detail-loop-signal">{PING_PONG_TEXT}</span>
+                    )}
+                  </dd>
+                </>
+              )}
               {detail.errorMessage && (
                 <>
                   <dt>Error</dt>
@@ -220,14 +250,15 @@ export function RunDetailOverlay({ runId, onClose }: RunDetailOverlayProps) {
             prUrl={detail.prUrl}
             liveDiff="fallback"
             patch="collapsed"
+            afterPullRequest={<OpenFindingsList history={history} runId={runId} />}
           />
 
-          <section className="run-detail-section">
+          <section className="run-detail-section run-detail-prompt-section">
             <h4>Prompt</h4>
             <pre className="run-detail-prompt">{detail.prompt}</pre>
           </section>
 
-          <section className="run-detail-section">
+          <section className="run-detail-section run-detail-transcript-section">
             <h4>Transcript</h4>
             <div className="run-detail-actions">
               <button

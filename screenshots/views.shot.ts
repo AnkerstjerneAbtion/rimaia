@@ -20,10 +20,25 @@ interface Capture {
   /** A Runs-history row to open, by its task title, once the view is up — the
    *  run detail overlay has no sidebar entry of its own. */
   open?: string;
+  /** Clicks made after the sidebar click and before any keys, each naming an
+   *  element by accessible role and name — never a control that writes. Opening
+   *  a card or a run, choosing a filter and opening a confirmation are reads;
+   *  the confirmation's own button is not, and is never named here. `choose`
+   *  picks an option of a `<select>` by its label instead of clicking it. */
+  clicks?: Click[];
   /** Keys pressed once the view is up, in order — only non-mutating ones: the
    *  script never triggers a write (`Enter`, `j`, `r` and `c` qualify; `a`,
    *  `o`, `w` and the note's send do not). */
   keys?: string[];
+  /** Brings the landmark into view, with some of what precedes it, before the shot, for a section deep inside
+   *  a drawer's own scroll, which a full-page capture does not reach. */
+  reveal?: boolean;
+}
+
+interface Click {
+  role: "button" | "checkbox" | "combobox";
+  name: string | RegExp;
+  choose?: string;
 }
 
 /** What shows that a key has taken effect, so the next one is not pressed
@@ -39,6 +54,11 @@ const REVIEW = { sidebar: "Review", view: "review" };
 
 const BOARD = { sidebar: "Board", landmark: ".board-view" };
 const RUNS = { sidebar: "Runs", landmark: ".runs-view" };
+
+// Task 037: the card the review loop's panel and overlay captures open, and its
+// newest row in the panel's run history.
+const LOOP_CARD: Click = { role: "button", name: /Rework the login redirect after sign-out/ };
+const LOOP_NEWEST_RUN: Click = { role: "button", name: /^Review · #7/ };
 
 const CAPTURES: Capture[] = [
   { scenario: "busy", view: "board", ...BOARD },
@@ -67,6 +87,51 @@ const CAPTURES: Capture[] = [
   { scenario: "review-not-recorded", ...REVIEW, keys: ["Enter"], landmark: ".review-task-body" },
   { scenario: "review-chain", ...REVIEW, keys: ["Enter", "r"], landmark: ".review-note-step" },
   { scenario: "review-empty", ...REVIEW, keys: ["Enter"], landmark: ".review-empty" },
+  // Task 037: the review loop, one capture per state it adds.
+  { scenario: "review-loop", view: "board", ...BOARD },
+  {
+    scenario: "review-loop-panel",
+    view: "board",
+    ...BOARD,
+    clicks: [LOOP_CARD],
+    landmark: ".review-history-section",
+    reveal: true,
+  },
+  {
+    scenario: "review-loop-overlay",
+    view: "board",
+    ...BOARD,
+    clicks: [LOOP_CARD, LOOP_NEWEST_RUN],
+    landmark: ".run-detail-findings",
+    reveal: true,
+  },
+  {
+    scenario: "review-loop-runs",
+    view: "runs",
+    ...RUNS,
+    clicks: [{ role: "combobox", name: "Kind", choose: "Review" }],
+    landmark: ".runs-history-table",
+  },
+  {
+    scenario: "review-loop-analytics",
+    view: "analytics",
+    sidebar: "Analytics",
+    landmark: ".analytics-review-loops",
+  },
+  {
+    scenario: "review-loop-settings",
+    view: "settings",
+    sidebar: "Settings",
+    clicks: [{ role: "checkbox", name: "Review each task after it is implemented" }],
+    landmark: ".review-cost-confirm",
+  },
+  {
+    scenario: "review-loop-repository",
+    view: "settings",
+    sidebar: "Settings",
+    landmark: ".repo-review",
+    reveal: true,
+  },
 ];
 
 for (const capture of CAPTURES) {
@@ -96,13 +161,34 @@ for (const capture of CAPTURES) {
       if (capture.open) {
         await page.locator(".runs-history-open", { hasText: capture.open }).click();
       }
+      for (const click of capture.clicks ?? []) {
+        const target = page.getByRole(click.role, { name: click.name }).first();
+        if (click.choose) await target.selectOption({ label: click.choose });
+        else await target.click();
+      }
       for (const key of capture.keys ?? []) {
         // Let the view's own reads finish before a key is pressed into it.
         await page.waitForFunction((flag) => (window as never)[flag] === true, SETTLED_FLAG);
         await page.keyboard.press(key);
         await expect(page.locator(KEY_RESULT[key])).toBeVisible();
       }
-      await expect(page.locator(capture.landmark)).toBeVisible();
+      await expect(page.locator(capture.landmark).first()).toBeVisible();
+      if (capture.reveal) {
+        await page
+          .locator(capture.landmark)
+          .first()
+          .evaluate((element) => {
+            // Start-aligned, then back up a third of the window on the nearest
+            // scrolling ancestor: a drawer's sticky header would otherwise
+            // cover the head of the section the capture is about.
+            element.scrollIntoView({ block: "start" });
+            let scroller = element.parentElement;
+            while (scroller && scroller.scrollHeight <= scroller.clientHeight) {
+              scroller = scroller.parentElement;
+            }
+            scroller?.scrollBy(0, -Math.round(window.innerHeight * 0.3));
+          });
+      }
       // No fixed wait stands in for either: the flag is the fixture transports'
       // own count of answers and canned events still to be delivered.
       await page.waitForFunction((flag) => (window as never)[flag] === true, SETTLED_FLAG);

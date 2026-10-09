@@ -46,6 +46,7 @@ function summary(id: string, title: string, column: BoardColumn): TaskSummary {
     effectiveModel: null,
     effectiveEffort: null,
     effectiveOrigin: "claude_code",
+    reviewLoop: null,
   };
 }
 

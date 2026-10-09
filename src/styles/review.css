@@ -554,3 +554,212 @@
 .review-task-body .run-detail-patch-expanded {
   max-height: none;
 }
+
+/* ---------------------------------------------------------------------------
+   The review loop's findings (task 037)
+
+   One look wherever the loop is read: the task panel's history, the run detail
+   overlay and the morning review. Open, advisory, fixed and rejected are told
+   apart by their WORDS, and by the shape of the rule down the left edge, so a
+   reader who cannot separate the hues loses nothing (ADR-0024 rule 3):
+     open      a solid rule
+     advisory  a dashed rule (it raised something, and did not start a fix)
+     fixed     a dotted rule and a quieter title
+     rejected  a double rule
+   No success colour anywhere: a loop with nothing left blocking is one
+   reviewer's pass, not a verdict on the work.
+   ------------------------------------------------------------------------- */
+
+.finding-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.finding {
+  display: grid;
+  gap: var(--space-1);
+  min-width: 0;
+  padding: var(--space-1) 0 var(--space-1) var(--space-3);
+  border-left: 3px solid var(--text-2);
+}
+
+.finding-advisory {
+  border-left-style: dashed;
+}
+
+.finding-fixed {
+  border-left-style: dotted;
+}
+
+.finding-fixed .finding-title {
+  color: var(--text-2);
+}
+
+.finding-rejected {
+  border-left-style: double;
+  border-left-width: 4px;
+}
+
+.finding-head {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-2);
+  min-width: 0;
+}
+
+.finding-severity {
+  flex: none;
+  font-size: var(--font-size-xs);
+  font-weight: var(--font-weight-semibold);
+  color: var(--text-2);
+}
+
+.finding-title {
+  min-width: 0;
+  font-size: var(--font-size-sm);
+  font-weight: var(--font-weight-medium);
+  color: var(--text-1);
+  overflow-wrap: anywhere;
+}
+
+.finding-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0 var(--space-3);
+  font-size: var(--font-size-xs);
+  line-height: var(--line-height-tight);
+  color: var(--text-2);
+  overflow-wrap: anywhere;
+}
+
+.finding-status {
+  color: var(--text-1);
+}
+
+.finding-mark {
+  font-weight: var(--font-weight-medium);
+}
+
+.finding-mark-signal {
+  color: var(--text-1);
+  text-decoration: underline dashed;
+  text-underline-offset: 0.2em;
+}
+
+/* `file:line` is literal text you could copy, so it is monospace and a button
+   that copies it. */
+.finding-location {
+  justify-self: start;
+  max-width: 100%;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--text-2);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.finding-location code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: var(--font-size-xs);
+  overflow-wrap: anywhere;
+}
+
+.finding-location:hover code,
+.finding-location:focus-visible code {
+  color: var(--text-1);
+  text-decoration: underline;
+}
+
+.finding-copied {
+  margin-left: var(--space-2);
+  font-size: var(--font-size-xs);
+  color: var(--text-1);
+}
+
+.finding-details summary {
+  width: fit-content;
+  font-size: var(--font-size-xs);
+  color: var(--text-2);
+  cursor: pointer;
+}
+
+.finding-body {
+  margin: var(--space-1) 0 0;
+  font-size: var(--font-size-sm);
+  line-height: var(--line-height-normal);
+  color: var(--text-1);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+/* The task panel's history. */
+.review-history-head {
+  margin: 0 0 var(--space-3);
+  font-size: var(--font-size-sm);
+  font-weight: var(--font-weight-medium);
+  color: var(--text-1);
+}
+
+.review-history-earlier {
+  margin: var(--space-3) 0;
+}
+
+.review-history-earlier > summary {
+  font-size: var(--font-size-sm);
+  color: var(--text-2);
+  cursor: pointer;
+}
+
+.review-history-earlier .review-loop {
+  margin-top: var(--space-2);
+}
+
+.review-loop {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.review-round {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.review-round-title {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-2);
+  margin: 0;
+  font-size: var(--font-size-xs);
+  font-weight: var(--font-weight-semibold);
+  color: var(--text-1);
+}
+
+/* The verdict line, in the outcome of the overlay and of the morning review. */
+.run-detail-loop,
+.review-run-loop {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0 var(--space-3);
+  margin: 0;
+  font-size: var(--font-size-sm);
+  overflow-wrap: anywhere;
+}
+
+.review-run-loop {
+  margin-top: var(--space-2);
+  color: var(--text-1);
+}
+
+.run-detail-loop-signal {
+  font-weight: var(--font-weight-medium);
+  text-decoration: underline dashed;
+  text-underline-offset: 0.2em;
+}

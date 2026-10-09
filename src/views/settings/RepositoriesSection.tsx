@@ -10,6 +10,7 @@ import {
   removeRepository,
   setRepositoryMaxConcurrency,
   setRepositoryOnArchive,
+  setRepositoryReviewConfig,
   setRepositoryUnattendedRuns,
   setStrategyDefaults,
   toRimaiaError,
@@ -21,9 +22,12 @@ import type {
   OnArchive,
   RemoteInfo,
   Repository,
+  ReviewConfig,
   RimaiaError,
   StrategyDefaults,
 } from "../../types";
+import { ReviewConfigFields } from "../../components/ReviewConfigFields";
+import { useReviewLevel } from "../../hooks/useReviewLevel";
 import { CredentialSection } from "./CredentialSection";
 import { OnArchiveFields } from "./OnArchiveFields";
 import { StrategyDefaultsFields } from "./StrategyDefaultsFields";
@@ -476,6 +480,11 @@ export function RepositoriesSection() {
                   </div>
                 )}
 
+                {/* Task 037's review loop, one level down from Settings →
+                    Review and one up from the task: every task here inherits
+                    what is not set on its own card. */}
+                <RepositoryReview repository={repository} catalogue={catalogue} />
+
                 {/* Task 022, beside the opt-in and the default strategy for
                     the same reason both of those are here: the three answer one
                     question about this repository — what a run here may do,
@@ -515,5 +524,42 @@ export function RepositoriesSection() {
         </ul>
       )}
     </section>
+  );
+}
+
+/**
+ * One repository's review loop configuration (task 037), in the shape of
+ * `OnArchiveFields` and the strategy default beside it. Its own component so
+ * each row reads and subscribes to its own level; the section above would
+ * otherwise need a hook per repository, which a hook cannot be.
+ */
+function RepositoryReview({
+  repository,
+  catalogue,
+}: {
+  readonly repository: Repository;
+  readonly catalogue: Catalogue | null;
+}) {
+  const level = useReviewLevel("repository", repository.id);
+
+  async function save(config: ReviewConfig) {
+    await setRepositoryReviewConfig(repository.id, config);
+    await level.reload();
+  }
+
+  return (
+    <div className="repo-review">
+      <h5>Review loop</h5>
+      {level.error && <ErrorBanner error={level.error} onDismiss={level.dismissError} />}
+      {level.data && (
+        <ReviewConfigFields
+          scope="repository"
+          idPrefix={`repo-review-${repository.id}`}
+          level={level.data}
+          catalogue={catalogue}
+          onChange={save}
+        />
+      )}
+    </div>
   );
 }

@@ -6,7 +6,7 @@ import { listen } from "@tauri-apps/api/event";
 import * as commands from "../../lib/commands";
 import commandsSource from "../../lib/commands.ts?raw";
 import * as events from "../../lib/events";
-import type { ReviewDigest, RunState } from "../../types";
+import type { ReviewDigest, ReviewHistory, RunState } from "../../types";
 import { ANSWERS } from "./answers";
 import { FIXTURE_SENTINEL } from "./constants";
 import { buildScenario, SCENARIO_NAMES } from "./seed";
@@ -180,6 +180,132 @@ describe("fixture answers", () => {
       column: string;
     }>;
     expect(tasks.some((task) => task.column === "in_review")).toBe(false);
+  });
+
+  describe("the review loop scenarios (task 037)", () => {
+    const loopScenarios = SCENARIO_NAMES.filter((name) => name.startsWith("review-loop"));
+
+    it("seeds one card per verdict a real loop can end in, plus the two moving states", () => {
+      const scenario = buildScenario("review-loop");
+      const lines = scenario.tasks.map((task) => ({
+        runState: task.runState,
+        kind: task.lastRun?.kind,
+        verdict: task.reviewLoop?.verdict,
+        pingPong: task.reviewLoop?.pingPong,
+      }));
+
+      const verdicts = lines.flatMap((line) =>
+        line.verdict?.verdict === "unreviewed"
+          ? [`unreviewed:${line.verdict.reason}`]
+          : line.verdict
+            ? [line.verdict.verdict]
+            : [],
+      );
+      for (const expected of [
+        "clean",
+        "findings_remain",
+        "unreviewed:not_reviewed",
+        "unreviewed:review_failed",
+        "unreviewed:nothing_recorded",
+        "unreviewed:review_changed_branch",
+        "unreviewed:fix_not_reviewed",
+      ]) {
+        expect(verdicts, expected).toContain(expected);
+      }
+      expect(lines.some((line) => line.pingPong)).toBe(true);
+      // Reviewing, and a review waiting for its retry.
+      expect(lines).toContainEqual(expect.objectContaining({ runState: "running", kind: "review" }));
+      expect(lines).toContainEqual(
+        expect.objectContaining({ runState: "waiting_retry", kind: "review" }),
+      );
+    });
+
+    it("never seeds a state the engine cannot produce", () => {
+      // A failed or cancelled review lands in_review and idle (021's exits), so
+      // no card is `failed` or `cancelled` with a review row behind it.
+      for (const task of buildScenario("review-loop").tasks) {
+        if (task.lastRun?.kind === "implementation") continue;
+        expect(["failed", "cancelled"], task.title).not.toContain(task.runState);
+      }
+    });
+
+    it("answers a two-loop history for the card the panel opens, in one ascending sequence", async () => {
+      const transports = createFixtureTransports(buildScenario("review-loop-panel"));
+      const history = (await transports.command("get_review_history", {
+        taskId: "rl-circles",
+      })) as ReviewHistory;
+      const runs = (await transports.command("list_runs_for_task", {
+        taskId: "rl-circles",
+      })) as Array<{ id: string; attempt: number; kind: string }>;
+
+      expect(history.loops.map((loop) => loop.earlier)).toEqual([true, false]);
+      expect(runs.map((run) => [run.attempt, run.kind])).toEqual([
+        [7, "review"],
+        [6, "fix"],
+        [5, "review"],
+        [4, "implementation"],
+        [3, "fix"],
+        [2, "review"],
+        [1, "implementation"],
+      ]);
+      // Every run the history names is a row of the task.
+      const known = new Set(runs.map((run) => run.id));
+      for (const loop of history.loops) {
+        for (const id of loop.implementation.runIds) expect(known).toContain(id);
+        for (const round of loop.rounds) {
+          for (const id of round.review?.runIds ?? []) expect(known).toContain(id);
+        }
+      }
+      const findings = history.loops[1].rounds.flatMap((round) => round.findings);
+      expect(findings.some((finding) => finding.status === "open" && finding.blocking)).toBe(true);
+      expect(findings.some((finding) => finding.status === "open" && !finding.blocking)).toBe(true);
+      expect(findings.some((finding) => finding.status === "fixed")).toBe(true);
+      expect(findings.some((finding) => finding.status === "rejected" && !finding.carriedOver)).toBe(
+        true,
+      );
+      expect(findings.some((finding) => finding.carriedOver)).toBe(true);
+      expect(history.loops[1].rounds[1].regressed).toHaveLength(1);
+    });
+
+    it("filters list_runs by kind, as core does", async () => {
+      const transports = createFixtureTransports(buildScenario("review-loop-runs"));
+      const reviews = (await transports.command("list_runs", {
+        filter: { kind: "review" },
+      })) as Array<{ kind: string }>;
+
+      expect(reviews.length).toBeGreaterThan(3);
+      expect(reviews.every((run) => run.kind === "review")).toBe(true);
+    });
+
+    it("states each level's inheritance rather than resolving a chain", async () => {
+      const transports = createFixtureTransports(buildScenario("review-loop-repository"));
+      const level = (await transports.command("get_review_level", {
+        level: "repository",
+        id: "repo-rimaia-app",
+      })) as { config: object; inherited: { enabled: string; max_review_loops: number } };
+
+      expect(level.config).toEqual({ max_review_loops: 1 });
+      expect(level.inherited).toMatchObject({ enabled: "on_cost_acknowledged", max_review_loops: 3 });
+    });
+
+    it("leaves the global loop off only where the confirmation is shown", async () => {
+      const enabled = async (name: ScenarioName) => {
+        const transports = createFixtureTransports(buildScenario(name));
+        const settings = (await transports.command("get_review_settings")) as {
+          config: { enabled?: string };
+        };
+        return settings.config.enabled === "on_cost_acknowledged";
+      };
+
+      expect(await enabled("review-loop-settings")).toBe(false);
+      expect(await enabled("review-loop-repository")).toBe(true);
+      expect(loopScenarios).toHaveLength(7);
+    });
+
+    it("holds review and fix rows in the analytics, so the group appears", () => {
+      const analytics = buildScenario("review-loop-analytics").analytics;
+      expect(analytics.reviewLoopSpendUsd).toBeGreaterThan(0);
+    });
   });
 
   it("rejects a command with no row instead of hanging", async () => {

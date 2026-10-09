@@ -11,15 +11,22 @@ import type {
   Repository,
   ReviewDigest,
   ReviewFinding,
+  ReviewConfig,
+  ReviewHistory,
+  ReviewLevel,
+  ReviewLoopSummary,
+  ReviewSettings,
   RimaiaError,
   Run,
   RunCapacity,
+  RunKind,
   RunListEntry,
   RunReview,
   RunStatus,
   RunTail,
   StoredBundle,
   TaskDependent,
+  TaskReview,
   TaskSummary,
 } from "../../types";
 import { FIXTURE_NOW, FIXTURE_SENTINEL } from "./constants";
@@ -50,6 +57,15 @@ export const SCENARIO_NAMES = [
   "review-not-recorded",
   "review-chain",
   "review-empty",
+  // Task 037: the review loop's states. One seed, exported under one name per
+  // capture, so the screenshot names stay unique.
+  "review-loop",
+  "review-loop-panel",
+  "review-loop-overlay",
+  "review-loop-runs",
+  "review-loop-analytics",
+  "review-loop-settings",
+  "review-loop-repository",
 ] as const;
 export type ScenarioName = (typeof SCENARIO_NAMES)[number];
 
@@ -70,9 +86,23 @@ export interface Scenario {
   readonly digest: ReviewDigest;
   /** What `list_review_findings` answers from, filtered by task and status.
    *  Empty in every scenario but `busy`, which holds one review's two
-   *  findings, one open and one fixed, so the row exercises every field. The
-   *  review loop's own states are task 037's to seed. */
+   *  findings, one open and one fixed, so the row exercises every field. */
   readonly reviewFindings: ReviewFinding[];
+  /** What `get_review_history` answers, by task id. A task with no entry has
+   *  no loops. Only the review-loop scenarios seed any. */
+  readonly reviewHistories: Record<string, ReviewHistory>;
+  /** The global review instructions and configuration. */
+  readonly reviewSettings: ReviewSettings;
+  /** What `get_review_level` answers per level: the level's own settings, what
+   *  it inherits and what it resolves to. The seed states them; the fixture
+   *  does not resolve a precedence chain of its own. */
+  readonly reviewLevels: {
+    readonly global: ReviewLevel;
+    readonly repositories: Record<string, ReviewLevel>;
+    readonly tasks: Record<string, ReviewLevel>;
+  };
+  /** `get_task`'s review instructions and configuration, by task id. */
+  readonly taskReviews: Record<string, TaskReview>;
   /** `get_task_dependents` by task id. A task with no row falls back to the
    *  cards whose `blockingTitle` names it. */
   readonly dependents: Record<string, TaskDependent[]>;
@@ -183,6 +213,7 @@ function task(init: TaskInit): TaskSummary {
     blockedByIncomplete: Boolean(init.blockingTitle),
     blockingTitle: init.blockingTitle ?? null,
     lastRun: init.lastRun ?? null,
+    reviewLoop: null,
   };
 }
 
@@ -754,9 +785,31 @@ function emptyDigest(): ReviewDigest {
   };
 }
 
+/** What a level inherits when nothing above it says anything: the built-in
+ *  defaults (task 021). */
+export const BUILT_IN_REVIEW: ReviewConfig = {
+  enabled: "off",
+  max_review_loops: 2,
+  blocking_severity: "medium",
+  fix_session: "fresh",
+};
+
+/** A level whose own settings are `config` over `inherited`. */
+export function reviewLevel(config: ReviewConfig, inherited: ReviewConfig = BUILT_IN_REVIEW): ReviewLevel {
+  return { config, inherited, effective: { ...inherited, ...config } };
+}
+
 function noReviewExtras(): Pick<
   Scenario,
-  "digest" | "dependents" | "dependencies" | "liveDiffs" | "reviewFindings"
+  | "digest"
+  | "dependents"
+  | "dependencies"
+  | "liveDiffs"
+  | "reviewFindings"
+  | "reviewHistories"
+  | "reviewSettings"
+  | "reviewLevels"
+  | "taskReviews"
 > {
   return {
     digest: emptyDigest(),
@@ -764,6 +817,10 @@ function noReviewExtras(): Pick<
     dependencies: {},
     liveDiffs: {},
     reviewFindings: [],
+    reviewHistories: {},
+    reviewSettings: { instructions: "", config: {} },
+    reviewLevels: { global: reviewLevel({}), repositories: {}, tasks: {} },
+    taskReviews: {},
   };
 }
 
@@ -1116,6 +1173,458 @@ function reviewDigestScenario(): Scenario {
   };
 }
 
+// ---------------------------------------------------------------------------
+// The review loop (task 037)
+// ---------------------------------------------------------------------------
+
+const REVIEW_LOOP_ON: ReviewConfig = { enabled: "on_cost_acknowledged", max_review_loops: 3 };
+
+function loopSummary(overrides: Partial<ReviewLoopSummary> = {}): ReviewLoopSummary {
+  return {
+    enabled: true,
+    maxReviewLoops: 2,
+    fixesSpent: 0,
+    reviews: 1,
+    verdict: { verdict: "clean" },
+    openBlocking: 0,
+    openAdvisory: 0,
+    pingPong: false,
+    ...overrides,
+  };
+}
+
+function lastRunOf(
+  kind: RunKind,
+  status: RunStatus,
+  exitClass: NonNullable<TaskSummary["lastRun"]>["exitClass"],
+  endedAgo: number | null,
+  resumeAfter: string | null = null,
+): NonNullable<TaskSummary["lastRun"]> {
+  return { ...lastRun(status, exitClass, endedAgo, resumeAfter), kind };
+}
+
+/** One card whose loop is in the state the title names. Every one is a card a
+ *  real loop can produce: a finished loop lands in `in_review` and `idle`, so
+ *  the card has no badge and the verdict line carries it; a loop still moving
+ *  sits in `ready` with the badge and no verdict line. */
+interface LoopCard {
+  readonly id: string;
+  readonly title: string;
+  readonly last: NonNullable<TaskSummary["lastRun"]>;
+  readonly loop: ReviewLoopSummary;
+  readonly moving?: TaskSummary["runState"];
+}
+
+const LOOP_CARDS: readonly LoopCard[] = [
+  {
+    // The card the panel and overlay captures open.
+    id: "rl-circles",
+    title: "Rework the login redirect after sign-out",
+    last: lastRunOf("review", "succeeded", "success", 2 * HOUR),
+    loop: loopSummary({
+      fixesSpent: 1,
+      reviews: 2,
+      verdict: { verdict: "findings_remain", openBlocking: 2 },
+      openBlocking: 2,
+      openAdvisory: 1,
+      pingPong: true,
+    }),
+  },
+  {
+    id: "rl-clean0",
+    title: "Show the repository name on cards when the filter is All",
+    last: lastRunOf("review", "succeeded", "success", 3 * HOUR),
+    loop: loopSummary(),
+  },
+  {
+    id: "rl-clean2",
+    title: "Persist the board's repository filter across restarts",
+    last: lastRunOf("review", "succeeded", "success", 4 * HOUR),
+    loop: loopSummary({ fixesSpent: 2, reviews: 3 }),
+  },
+  {
+    id: "rl-remain1",
+    title: "Stop the sidebar tagline from truncating at 1024px",
+    last: lastRunOf("review", "succeeded", "success", 5 * HOUR),
+    loop: loopSummary({
+      verdict: { verdict: "findings_remain", openBlocking: 1 },
+      openBlocking: 1,
+    }),
+  },
+  {
+    id: "rl-remain3",
+    title: "Group the Settings index by what it changes, not by when it shipped",
+    last: lastRunOf("review", "succeeded", "success", 6 * HOUR),
+    loop: loopSummary({
+      fixesSpent: 2,
+      reviews: 3,
+      verdict: { verdict: "findings_remain", openBlocking: 3 },
+      openBlocking: 3,
+      openAdvisory: 2,
+    }),
+  },
+  {
+    id: "rl-failed",
+    title: "Add keyboard shortcuts to the task detail panel",
+    last: lastRunOf("review", "failed", "fatal", 7 * HOUR),
+    loop: loopSummary({ verdict: { verdict: "unreviewed", reason: "review_failed" } }),
+  },
+  {
+    id: "rl-silent",
+    title: "Use tabular numerals for every cost on the Runs view",
+    last: lastRunOf("review", "succeeded", "success", 8 * HOUR),
+    loop: loopSummary({ verdict: { verdict: "unreviewed", reason: "nothing_recorded" } }),
+  },
+  {
+    id: "rl-moved",
+    title: "Give the empty Runs view a sentence about what to do next",
+    last: lastRunOf("review", "succeeded", "success", 9 * HOUR),
+    loop: loopSummary({ verdict: { verdict: "unreviewed", reason: "review_changed_branch" } }),
+  },
+  {
+    id: "rl-fixlast",
+    title: "Add a Copy branch name button to the worktree section",
+    last: lastRunOf("fix", "succeeded", "success", 10 * HOUR),
+    loop: loopSummary({
+      fixesSpent: 1,
+      verdict: { verdict: "unreviewed", reason: "fix_not_reviewed" },
+    }),
+  },
+  {
+    id: "rl-later",
+    title: "Rework the archive list so restoring a card does not need a second click",
+    last: lastRunOf("implementation", "succeeded", "success", 11 * HOUR),
+    loop: loopSummary({
+      reviews: 0,
+      verdict: { verdict: "unreviewed", reason: "not_reviewed" },
+    }),
+  },
+  {
+    // In flight: the badge says what is happening and the verdict waits.
+    id: "rl-reviewing",
+    title: "Make the board column header and count survive a narrow window",
+    last: lastRunOf("review", "running", null, null),
+    loop: loopSummary({ verdict: { verdict: "unreviewed", reason: "not_reviewed" } }),
+    moving: "running",
+  },
+  {
+    id: "rl-waiting",
+    title: "Cache the repository lookup between board renders",
+    last: lastRunOf("review", "failed", "usage_limit", 25 * MINUTE, fromNow(2 * HOUR + 12 * MINUTE)),
+    loop: loopSummary({ verdict: { verdict: "unreviewed", reason: "not_reviewed" } }),
+    moving: "waiting_retry",
+  },
+];
+
+const CIRCLES = "rl-circles";
+
+/** The attempts of the task the panel opens, as one ascending sequence
+ *  (seam-contract D29 point 2): an earlier loop of implementation #1, review
+ *  #2 and fix #3, then the newest of implementation #4, review #5, fix #6 and
+ *  review #7. */
+const CIRCLES_ATTEMPTS: ReadonlyArray<readonly [number, RunKind]> = [
+  [1, "implementation"],
+  [2, "review"],
+  [3, "fix"],
+  [4, "implementation"],
+  [5, "review"],
+  [6, "fix"],
+  [7, "review"],
+];
+
+const circlesRunId = (attempt: number) => `rl-circles-run-${attempt}`;
+
+function circlesHistory(): ReviewHistory {
+  const finding = (
+    id: string,
+    reviewAttempt: number,
+    ordinal: number,
+    overrides: Partial<ReviewHistory["loops"][number]["rounds"][number]["findings"][number]>,
+  ) => ({
+    id: `rl-circles-${id}`,
+    taskId: CIRCLES,
+    reviewRunId: circlesRunId(reviewAttempt),
+    ordinal,
+    severity: "high" as const,
+    title: "",
+    body: "",
+    file: "src/auth/redirect.ts" as string | null,
+    line: 41 as number | null,
+    fingerprint: `src/auth/redirect.ts|${id}` as string | null,
+    status: "open" as const,
+    resolution: null as string | null,
+    resolvedByRunId: null as string | null,
+    createdAt: ago(5 * HOUR),
+    resolvedAt: null as string | null,
+    blocking: true,
+    carriedOver: false,
+    ...overrides,
+  });
+  const phase = (kind: RunKind, attempts: number[], status: RunStatus = "succeeded") => ({
+    kind,
+    runIds: attempts.map(circlesRunId),
+    attempts,
+    status,
+    exitClass: "success" as const,
+  });
+
+  const fixedByFirstFix = {
+    status: "fixed" as const,
+    resolution: "Validated the target against the allow-list and added a test.",
+    resolvedByRunId: circlesRunId(6),
+    resolvedAt: ago(3 * HOUR),
+  };
+  const redirect = finding("redirect", 5, 0, {
+    title: "Redirect target is not validated",
+    body: "The sign-out redirect follows whatever `returnTo` says, so a crafted link can send a signed-out user to another site.",
+    ...fixedByFirstFix,
+  });
+  const cookie = finding("cookie", 5, 1, {
+    title: "Session cookie survives sign-out",
+    body: "Sign-out clears the server session but leaves the cookie in the browser, so the next request is treated as an expired session instead of a fresh visit.",
+    file: "src/auth/session.ts",
+    line: 77,
+    ...fixedByFirstFix,
+    resolution: "Cleared the cookie on the sign-out response.",
+  });
+  const timeout = finding("timeout", 5, 2, {
+    title: "Timeout default reads 0 when unset",
+    body: "`timeoutMs` falls back to 0 when the caller omits it, which disables the timeout.",
+    file: "src/auth/config.ts",
+    line: 18,
+    status: "rejected",
+    resolution: "The caller always passes a timeout; 0 is never read.",
+    resolvedByRunId: circlesRunId(6),
+    resolvedAt: ago(3 * HOUR),
+  });
+  const redirectAgain = finding("redirect-again", 7, 0, {
+    title: "Redirect target is not validated",
+    body: "The allow-list check runs after the redirect is built, so the unvalidated target is still the one that is sent when the list is empty.",
+  });
+  const race = finding("race", 7, 1, {
+    title: "Sign-out races the token refresh",
+    body: "A refresh in flight can write a new token after sign-out has cleared the old one, signing the user back in.",
+    file: "src/auth/session.ts",
+    line: 112,
+    fingerprint: "src/auth/session.ts|race",
+  });
+  const nit = finding("nit", 7, 2, {
+    title: "Rename redirectTo to returnTo",
+    body: "The rest of the module says `returnTo`.",
+    severity: "low",
+    blocking: false,
+    fingerprint: "src/auth/redirect.ts|nit",
+  });
+  const carried = finding("timeout-again", 7, 3, {
+    title: "Timeout default reads 0 when unset",
+    body: "`timeoutMs` falls back to 0 when the caller omits it, which disables the timeout.",
+    file: "src/auth/config.ts",
+    line: 18,
+    status: "rejected",
+    resolution: "Rejected earlier as rl-circles-timeout: The caller always passes a timeout; 0 is never read.",
+    carriedOver: true,
+    resolvedAt: ago(2 * HOUR),
+  });
+
+  return {
+    loops: [
+      {
+        earlier: true,
+        implementation: phase("implementation", [1]),
+        rounds: [
+          {
+            review: phase("review", [2]),
+            findings: [
+              finding("migration", 2, 0, {
+                title: "Missing migration for the sessions table",
+                body: "The new column is read before anything creates it.",
+                file: "src-tauri/migrations/sessions.sql",
+                line: 3,
+                status: "fixed",
+                resolution: "Added the migration.",
+                resolvedByRunId: circlesRunId(3),
+                resolvedAt: ago(DAY),
+              }),
+            ],
+            fix: { phase: phase("fix", [3]), resolved: [] },
+            regressed: [],
+            newAfterFix: [],
+            pingPong: false,
+          },
+        ],
+        fixesSpent: 1,
+        verdict: { verdict: "unreviewed", reason: "fix_not_reviewed" },
+        openBlocking: 0,
+        openAdvisory: 0,
+      },
+      {
+        earlier: false,
+        implementation: phase("implementation", [4]),
+        rounds: [
+          {
+            review: phase("review", [5]),
+            findings: [redirect, cookie, timeout],
+            fix: { phase: phase("fix", [6]), resolved: [redirect, cookie, timeout] },
+            regressed: [],
+            newAfterFix: [],
+            pingPong: false,
+          },
+          {
+            review: phase("review", [7]),
+            findings: [redirectAgain, race, nit, carried],
+            fix: null,
+            regressed: [redirectAgain],
+            newAfterFix: [race],
+            pingPong: true,
+          },
+        ],
+        fixesSpent: 1,
+        verdict: { verdict: "findings_remain", openBlocking: 2 },
+        openBlocking: 2,
+        openAdvisory: 1,
+      },
+    ],
+  };
+}
+
+function reviewLoopScenario(name: ScenarioName): Scenario {
+  positionCounter = 0;
+  runCounter = 0;
+
+  const cards = LOOP_CARDS.map((card) => {
+    const base = task({
+      id: card.id,
+      title: card.title,
+      column: card.moving ? "ready" : "in_review",
+      runState: card.moving ?? "idle",
+      lastRun: card.last,
+    });
+    return {
+      ...base,
+      branch: `rimaia/${card.id}`,
+      worktreePath: `/worktrees/rimaia-app/${card.id}`,
+      reviewLoop: card.loop,
+      updatedAt: ago(2 * HOUR),
+    };
+  });
+  const surroundings = [
+    task({ id: "t-ready-01", title: IDLE_READY_TITLES[10] }),
+    task({ id: "t-ready-02", title: "Add the unattended-runs opt-in to the welcome checklist" }),
+    task({
+      id: "t-done-1",
+      title: "Record the first unattended run's findings",
+      column: "done",
+      lastRun: lastRun("succeeded", "success", 2 * DAY),
+    }),
+  ];
+  const tasks = [...cards, ...surroundings];
+  const byId = new Map(tasks.map((candidate) => [candidate.id, candidate]));
+
+  const runs: RunListEntry[] = [];
+  const reviews: Record<string, RunReview> = {};
+
+  // The panel's task: all seven rows, newest first.
+  const circles = byId.get(CIRCLES) as TaskSummary;
+  for (const [attempt, kind] of [...CIRCLES_ATTEMPTS].reverse()) {
+    const id = circlesRunId(attempt);
+    const run = runFor(circles, "rimaia-app", (30 - attempt * 3) * HOUR / 4, {
+      id,
+      attempt,
+      kind,
+      sessionId: kind === "fix" ? "session-implementation-4" : `session-${attempt}`,
+      prompt: `${kind === "implementation" ? "Implement" : kind === "review" ? "Review" : "Fix"}: ${circles.title}`,
+      costUsd: kind === "implementation" ? 2.48 : kind === "review" ? 0.62 : 0.91,
+      numTurns: kind === "implementation" ? 38 : 14,
+      prUrl: `https://github.com/example/rimaia-app/pull/${210}`,
+      status: "succeeded",
+      exitClass: "success",
+    });
+    const bundle = smallBundle(run.endedAt ?? ago(HOUR), "Validate the sign-out redirect");
+    run.headSha = bundle.commits[0].sha;
+    run.baseSha = "c0ffee00c0ffee00c0ffee00c0ffee00c0ffee00";
+    reviews[id] = { source: "recorded", bundle };
+    runs.push(run);
+  }
+
+  // One latest row per other card, agreeing with its summary.
+  let index = 0;
+  for (const card of LOOP_CARDS) {
+    if (card.id === CIRCLES) continue;
+    index += 1;
+    const summary = byId.get(card.id) as TaskSummary;
+    const run = runFor(summary, "rimaia-app", (2 + index) * HOUR + 20 * MINUTE, {
+      attempt: card.loop.fixesSpent + card.loop.reviews + 1,
+      kind: card.last.kind,
+      costUsd: card.last.kind === "implementation" ? 2.48 : 0.62,
+      prUrl: null,
+    });
+    runs.push(run);
+    if (run.status === "succeeded") {
+      const bundle = smallBundle(run.endedAt ?? ago(HOUR), "Keep each repository's cards together");
+      run.headSha = bundle.commits[0].sha;
+      reviews[run.id] = { source: "recorded", bundle };
+    }
+  }
+  runs.sort((a, b) => Date.parse(b.startedAt) - Date.parse(a.startedAt));
+
+  const reviewing = byId.get("rl-reviewing") as TaskSummary;
+  const reviewingRun = runs.find((run) => run.taskId === reviewing.id) as RunListEntry;
+  const tails = [{ ...tailFor(reviewingRun, 1), currentTool: { id: "tool-9", name: "Read", detail: "src/styles/board.css" } }];
+
+  const globalConfig: ReviewConfig = name === "review-loop-settings" ? {} : REVIEW_LOOP_ON;
+  const reviewDefaults = { ...BUILT_IN_REVIEW, ...globalConfig };
+  const repositoryApp = reviewLevel({ max_review_loops: 1 }, reviewDefaults);
+  const repositorySite = reviewLevel({}, reviewDefaults);
+  const circlesInherited = repositoryApp.effective;
+
+  const withLoops = analytics(true);
+  const reviewLoopSpendUsd = 6.84;
+  const reviewAnalytics: Analytics = {
+    ...withLoops,
+    spendUsd: withLoops.spendUsd + reviewLoopSpendUsd,
+    spendByDay: withLoops.spendByDay.map((day, position) =>
+      position === 3 ? { ...day, spendUsd: day.spendUsd + reviewLoopSpendUsd, runs: day.runs + 11 } : day,
+    ),
+    reviewLoopSpendUsd,
+    reviewLoopOutcomes: { succeeded: 11, failed: 1, cancelled: 0, interrupted: 0, running: 1 },
+  };
+
+  return {
+    name,
+    appInfo: appInfo(true),
+    repositories: repositories(),
+    tasks,
+    runs,
+    tails,
+    reviews,
+    ...noReviewExtras(),
+    reviewHistories: { [CIRCLES]: circlesHistory() },
+    reviewSettings: {
+      instructions:
+        name === "review-loop-settings" || name === "review-loop-repository"
+          ? "Run /review and report anything that would block a merge. Ignore formatting."
+          : "",
+      config: globalConfig,
+    },
+    reviewLevels: {
+      global: reviewLevel(globalConfig),
+      repositories: { [REPO_APP]: repositoryApp, [REPO_SITE]: repositorySite },
+      tasks: { [CIRCLES]: reviewLevel({ max_review_loops: 3 }, circlesInherited) },
+    },
+    taskReviews: {
+      [CIRCLES]: {
+        instructions: "Run /review, then check the redirect with /security-review.",
+        config: { max_review_loops: 3 },
+      },
+    },
+    queueStatus: queueFor(tasks, "running", [reviewing]),
+    capacity: { mode: "sequential", maxConcurrency: 1, ceiling: 8 },
+    doctor: healthyDoctor(),
+    analytics: reviewAnalytics,
+    runsReadError: null,
+  };
+}
+
 function appInfo(onboardingDismissed: boolean): AppInfo {
   return {
     appVersion: "0.1.0",
@@ -1205,6 +1714,14 @@ export function buildScenario(name: ScenarioName): Scenario {
       return reviewChain();
     case "review-empty":
       return reviewBoard(name, []);
+    case "review-loop":
+    case "review-loop-panel":
+    case "review-loop-overlay":
+    case "review-loop-runs":
+    case "review-loop-analytics":
+    case "review-loop-settings":
+    case "review-loop-repository":
+      return reviewLoopScenario(name);
     case "busy":
       return populated(name, 3, true);
     case "one-run":
