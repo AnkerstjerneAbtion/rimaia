@@ -183,6 +183,27 @@ impl FakeCli {
         );
     }
 
+    /// [`replays_on_attempt`](Self::replays_on_attempt), for a recording that
+    /// is not in the Claude corpus.
+    pub fn replays_path_on_attempt(
+        &self,
+        task_id: &str,
+        attempt: usize,
+        recording: &Path,
+        code: i32,
+    ) {
+        self.write_plan(
+            &format!("{task_id}-{attempt}"),
+            &[
+                "replay".to_string(),
+                recording.display().to_string(),
+                code.to_string(),
+                String::new(),
+                String::new(),
+            ],
+        );
+    }
+
     fn replay_plan(fixture: &str, code: i32) -> [String; 5] {
         [
             "replay".to_string(),
@@ -279,6 +300,28 @@ impl FakeCli {
         before: WorktreeAction,
         fixture: &str,
     ) {
+        self.calls_tool_on_attempt_path(
+            task_id,
+            attempt,
+            tool,
+            arguments,
+            before,
+            &fixture_path(fixture),
+        );
+    }
+
+    /// The same, for a recording that is not in the Claude corpus. The Ledger
+    /// stand-in has no `--mcp-config` to read the URL from, so it reads the
+    /// `tools.toml` its provider wrote into `LEDGER_HOME` instead.
+    pub fn calls_tool_on_attempt_path(
+        &self,
+        task_id: &str,
+        attempt: usize,
+        tool: &str,
+        arguments: serde_json::Value,
+        before: WorktreeAction,
+        recording: &Path,
+    ) {
         let call = serde_json::json!({
             "jsonrpc": "2.0",
             "id": 1,
@@ -291,7 +334,7 @@ impl FakeCli {
             &format!("{task_id}-{attempt}"),
             &[
                 "call".to_string(),
-                fixture_path(fixture).display().to_string(),
+                recording.display().to_string(),
                 "0".to_string(),
                 body.display().to_string(),
                 before.encode(),
@@ -736,7 +779,11 @@ impl FakeCli {
                if [ \"$prev\" = '--mcp-config' ]; then config=\"$arg\"; fi\n\
                prev=\"$arg\"\n\
                done\n\
+               if [ -n \"$config\" ]; then\n\
                url=$(printf '%s' \"$config\" | sed -e 's/.*\"url\":\"//' -e 's/\".*//')\n\
+               else\n\
+               url=$(sed -n 's/^url = \"\\(.*\\)\"$/\\1/p' \"$LEDGER_HOME/tools.toml\")\n\
+               fi\n\
                finding=$(sed -n 's/^- Id: `\\(.*\\)`$/\\1/p' \"$dir/stdin-$task-$attempt\" | head -n 1)\n\
                body=$(sed \"s/__FINDING_ID__/$finding/g\" \"$three\")\n\
                if [ -n \"$GH_TOKEN\" ]; then printf 'token %s\\n' \"$GH_TOKEN\" >&2; fi\n\

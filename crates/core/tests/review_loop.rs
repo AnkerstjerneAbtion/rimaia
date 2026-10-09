@@ -24,7 +24,8 @@ use rimaia_core::board::{
     RunContext, StartRun, TranscriptAck, TranscriptChunk,
 };
 use rimaia_core::credentials::{CredentialAccess, CredentialStore, Secret};
-use rimaia_core::db::{settings, BoardColumn, ExitClass, Run, RunKind, RunState, RunStatus};
+use rimaia_core::db::settings::{self, RunEnvironment};
+use rimaia_core::db::{BoardColumn, ExitClass, Run, RunKind, RunState, RunStatus};
 use rimaia_core::mcp::requests::{
     SetRepositoryReviewConfigRequest, SetReviewSettingsRequest, SetTaskReviewRequest,
 };
@@ -37,9 +38,9 @@ use rimaia_core::runner::events::{stderr_path, transcript_path, RunTail};
 use rimaia_core::runner::outcome::{start_run, NewRun};
 use rimaia_core::runner::process::DEFAULT_DISALLOWED_TOOLS;
 use rimaia_core::runner::prompt::{
-    compose_fix_resume, compose_review_resume, compose_review_system_append,
+    compose_fix_prompt, compose_fix_resume, compose_review_resume, compose_review_system_append,
 };
-use rimaia_core::runner::provider::ClaudeProvider;
+use rimaia_core::runner::provider::{ClaudeProvider, ProviderId};
 use rimaia_core::runner::{
     claim_manual_start, run_task, CancelSignal, ManualStart, RunRequest, RunTrigger, RunnerConfig,
 };
@@ -49,6 +50,8 @@ use rimaia_core::tasks::strategy::StrategyPlan;
 use rimaia_core::tasks::{self, NewTask};
 use rimaia_core::testing::board::claim_run;
 use rimaia_core::testing::credentials::MemoryStore;
+use rimaia_core::testing::fixtures::path_for;
+use rimaia_core::testing::provider::LedgerWithoutResume;
 use rimaia_core::testing::{self, FakeCli, TempRepo, TestContext, WorktreeAction};
 use rimaia_core::{AppPaths, ChangeEvent, Clock, ErrorCode, ServiceContext};
 use rmcp::handler::server::wrapper::Parameters;
@@ -62,6 +65,8 @@ const TEST_TIMEOUT: Duration = Duration::from_secs(60);
 /// handle's own server (seam-contract D30 point 1).
 const RECORD_TOOL: &str = "mcp__rimaia-run__record_review_findings";
 const RESOLVE_TOOL: &str = "mcp__rimaia-run__resolve_review_finding";
+/// The same tool in the Ledger provider's own spelling.
+const LEDGER_RESOLVE_TOOL: &str = "rimaia-run.resolve_review_finding";
 
 /// A token nothing else in the suite could produce.
 const SENTINEL: &str = "ghp_rimaia_loop_sentinel_0123456789abcdef";
@@ -1079,6 +1084,146 @@ async fn a_resumed_fix_continues_the_implementation_session_not_the_reviews() {
 }
 
 #[tokio::test]
+async fn a_resumed_fix_with_no_implementation_session_opens_a_fresh_one_and_says_so() {
+    // The local store always holds an implementation row by the time a fix
+    // runs, so a board that leaves the session out of its context is the only
+    // way to the arm. The fix is cut short by a usage limit so the store still
+    // reads as it did when the fix was composed.
+    let fixture = Fixture::new().await;
+    fixture.enable(json!({ "fix_session": "resume" })).await;
+    let task = fixture.task_id.clone();
+    fixture.reviews_on(2, vec![high("The retry never stops")]);
+    fixture.cli.replays_on_attempt(&task, 3, "usage-limit", 143);
+    let config = fixture.config();
+    let spy = Spy::new(fixture.board(&config));
+    *spy.forgets_implementation.lock().expect("the spy") = true;
+
+    fixture
+        .run_through(&spy, &config, RunRequest::default())
+        .await;
+
+    let rows = fixture.rows().await;
+    assert_eq!(
+        rows.iter().map(|row| row.kind).collect::<Vec<_>>(),
+        vec![RunKind::Implementation, RunKind::Review, RunKind::Fix]
+    );
+    let fix = &rows[2];
+    let argv = fixture.cli.argv(&task, 3);
+    assert!(!argv.iter().any(|arg| arg == "--resume"), "{argv:?}");
+    assert_eq!(value_after(&argv, "--session-id"), fix.session_id);
+    assert_ne!(
+        fix.session_id, rows[0].session_id,
+        "not the implementation's"
+    );
+    assert_ne!(fix.session_id, rows[1].session_id, "not the review's");
+
+    let context = fixture
+        .board(&config)
+        .preview(&task)
+        .await
+        .expect("the task's context");
+    let mut review = context.review.expect("the loop's context");
+    review.implementation = None;
+    let composed = compose_fix_prompt(
+        &context.base_instructions,
+        &context.task,
+        &context.repository,
+        &review,
+        RESOLVE_TOOL,
+    );
+    assert_eq!(fixture.cli.stdin(&task, 3), composed);
+    assert_eq!(fix.prompt, composed);
+
+    fixture.assert_noted(
+        fix,
+        "rimaia: fix_session is resume, and this fix opened a fresh session instead: \
+         the task has no implementation session to continue",
+    );
+}
+
+#[tokio::test]
+async fn a_resumed_fix_on_a_provider_that_cannot_continue_opens_a_fresh_one_and_says_so() {
+    // Ledger cannot deny file mutation, so an unattended review on it is
+    // refused (ADR-0012): the run is a manual one, which records the
+    // mitigation it lacks and proceeds. Its handle is its configuration home,
+    // so the implementation, which carries none, must run `inherit` and the
+    // phases, which do, `strict_local`: the spy switches between them. The fix
+    // is cut short by its usage window so the store still reads as it did
+    // when the fix was composed.
+    let fixture = Fixture::new().await;
+    fixture.enable(json!({ "fix_session": "resume" })).await;
+    let task = fixture.task_id.clone();
+    let finished = path_for(ProviderId::Ledger, "finished");
+    fixture.cli.replays_path(&task, &finished, 0);
+    fixture.cli.calls_tool_on_attempt_path(
+        &task,
+        2,
+        "record_review_findings",
+        json!({ "task_id": task, "findings": [high("The retry never stops")] }),
+        WorktreeAction::Nothing,
+        &finished,
+    );
+    fixture.cli.replays_path_on_attempt(
+        &task,
+        3,
+        &path_for(ProviderId::Ledger, "window-closed"),
+        1,
+    );
+    let config = RunnerConfig {
+        provider: Arc::new(LedgerWithoutResume),
+        program: fixture.cli.program_for(ProviderId::Ledger),
+        run_handles: fixture.handles.clone(),
+        ..RunnerConfig::default()
+    };
+    let board = fixture.board(&config);
+    let spy = Spy::new(board.clone());
+    *spy.isolates_after_first_finish.lock().expect("the spy") = Some(fixture.ctx().clone());
+    let claim = claim_run(&spy, &task, RunTrigger::Manual, false)
+        .await
+        .expect("claim the task");
+
+    fixture.run_claimed(&spy, &config, claim).await;
+
+    assert_served(&fixture.cli.tool_answer(&task, 2));
+    let rows = fixture.rows().await;
+    assert_eq!(
+        rows.iter().map(|row| row.kind).collect::<Vec<_>>(),
+        vec![RunKind::Implementation, RunKind::Review, RunKind::Fix]
+    );
+    let fix = &rows[2];
+    assert_eq!(fix.exit_class, Some(ExitClass::UsageLimit));
+    let argv = fixture.cli.argv(&task, 3);
+    assert!(!argv.iter().any(|arg| arg == "--continue"), "{argv:?}");
+    assert_ne!(
+        fix.session_id, rows[0].session_id,
+        "not the implementation's"
+    );
+    assert_ne!(fix.session_id, rows[1].session_id, "not the review's");
+
+    let context = board.preview(&task).await.expect("the task's context");
+    let review = context.review.expect("the loop's context");
+    assert!(
+        review.implementation.is_some(),
+        "there was a session to resume"
+    );
+    let composed = compose_fix_prompt(
+        &context.base_instructions,
+        &context.task,
+        &context.repository,
+        &review,
+        LEDGER_RESOLVE_TOOL,
+    );
+    assert_eq!(fixture.cli.stdin(&task, 3), composed);
+    assert_eq!(fix.prompt, composed);
+
+    fixture.assert_noted(
+        fix,
+        "rimaia: fix_session is resume, and this fix opened a fresh session instead: \
+         this provider cannot continue a session",
+    );
+}
+
+#[tokio::test]
 async fn a_retried_review_counts_once_in_the_digest_and_the_summary() {
     let fixture = Fixture::new().await;
     fixture.waits_in_a_review_on_a_usage_limit().await;
@@ -1439,6 +1584,14 @@ impl Fixture {
             .expect("read the task")
     }
 
+    /// That `note` is a whole line of `run`'s recorded stderr, which is where
+    /// the run's history shows it.
+    fn assert_noted(&self, run: &Run, note: &str) {
+        let stderr = std::fs::read_to_string(stderr_path(&self.paths, &self.task_id, &run.id))
+            .expect("the run's stderr capture");
+        assert!(stderr.lines().any(|line| line == note), "{stderr}");
+    }
+
     fn advance_past(&self, at: chrono::DateTime<chrono::Utc>) {
         let by = at - self.harness.clock.now() + TimeDelta::minutes(1);
         self.harness.clock.advance(by);
@@ -1568,6 +1721,12 @@ struct Spy {
     in_flight: Mutex<Option<InFlight>>,
     cancel_on_finish: Mutex<Option<CancelSignal>>,
     cancel_on_review_start: Mutex<Option<CancelSignal>>,
+    /// Hands out every context without the implementation's session, as a
+    /// board that does not know it would.
+    forgets_implementation: Mutex<bool>,
+    /// Switches the run environment to `strict_local` once the first run has
+    /// finished.
+    isolates_after_first_finish: Mutex<Option<ServiceContext>>,
 }
 
 impl Spy {
@@ -1579,6 +1738,8 @@ impl Spy {
             in_flight: Mutex::new(None),
             cancel_on_finish: Mutex::new(None),
             cancel_on_review_start: Mutex::new(None),
+            forgets_implementation: Mutex::new(false),
+            isolates_after_first_finish: Mutex::new(None),
         }
     }
 }
@@ -1597,7 +1758,15 @@ impl BoardPort for Spy {
     }
 
     fn run_context<'a>(&'a self, lease: &'a LeaseRef) -> BoardFuture<'a, RunContext> {
-        self.inner.run_context(lease)
+        Box::pin(async move {
+            let mut context = self.inner.run_context(lease).await?;
+            if *self.forgets_implementation.lock().expect("the spy") {
+                if let Some(review) = context.review.as_mut() {
+                    review.implementation = None;
+                }
+            }
+            Ok(context)
+        })
     }
 
     fn record_branch<'a>(&'a self, lease: &'a LeaseRef, branch: &'a str) -> BoardFuture<'a, ()> {
@@ -1658,6 +1827,14 @@ impl BoardPort for Spy {
     ) -> BoardFuture<'a, FinishReceipt> {
         Box::pin(async move {
             let receipt = self.inner.finish_run(lease, run_id, finish).await?;
+            let isolate = self
+                .isolates_after_first_finish
+                .lock()
+                .expect("the spy")
+                .take();
+            if let Some(ctx) = isolate {
+                settings::set_run_environment(&ctx, RunEnvironment::StrictLocal).await?;
+            }
             if let Some(cancel) = self.cancel_on_finish.lock().expect("the spy").take() {
                 cancel.cancel();
             }
