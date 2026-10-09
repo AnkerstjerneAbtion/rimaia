@@ -63,7 +63,7 @@ async fn a_created_task_defaults_to_not_ready_and_idle_and_publishes_its_id() {
 
     assert_eq!(
         h.changes.try_recv().expect("a publication"),
-        ChangeEvent::tasks([created.id])
+        ChangeEvent::tasks(h.solo.team_id.clone(), [created.id])
     );
 }
 
@@ -838,7 +838,7 @@ async fn update_task_only_changes_fields_the_patch_sets() {
 
     assert_eq!(
         h.changes.try_recv().expect("a publication"),
-        ChangeEvent::tasks([created.id])
+        ChangeEvent::tasks(h.solo.team_id.clone(), [created.id])
     );
 }
 
@@ -1004,7 +1004,7 @@ async fn a_task_with_no_worktree_and_no_runs_can_be_refiled_under_another_reposi
 
     assert_eq!(
         h.changes.try_recv().expect("a publication"),
-        ChangeEvent::tasks([task.id])
+        ChangeEvent::tasks(h.solo.team_id.clone(), [task.id])
     );
 }
 
@@ -1295,7 +1295,7 @@ async fn deleting_a_task_removes_its_links_and_outgoing_edges() {
 
     assert_eq!(
         h.changes.try_recv().expect("a publication"),
-        ChangeEvent::tasks([task.id])
+        ChangeEvent::tasks(h.solo.team_id.clone(), [task.id])
     );
 }
 
@@ -1369,7 +1369,7 @@ async fn moving_a_task_to_the_top_of_its_own_column_reorders_it() {
 
     assert_eq!(
         h.changes.try_recv().expect("a publication"),
-        ChangeEvent::tasks([second.id])
+        ChangeEvent::tasks(h.solo.team_id.clone(), [second.id])
     );
 }
 
@@ -1573,7 +1573,7 @@ async fn a_forced_rebalance_still_lands_the_task_between_its_neighbours() {
     // never told about.
     assert_eq!(
         h.changes.try_recv().expect("a publication"),
-        ChangeEvent::tasks([moved.id, lower.id, upper_id])
+        ChangeEvent::tasks(h.solo.team_id.clone(), [moved.id, lower.id, upper_id])
     );
 }
 
@@ -1598,7 +1598,7 @@ async fn a_legal_run_state_transition_is_written_and_published() {
     assert_eq!(updated.updated_at, h.clock.now());
     assert_eq!(
         h.changes.try_recv().expect("a publication"),
-        ChangeEvent::tasks([task.id])
+        ChangeEvent::tasks(h.solo.team_id.clone(), [task.id])
     );
 }
 
@@ -1653,7 +1653,7 @@ async fn adding_a_link_appends_it_and_publishes_the_owning_task() {
     assert_eq!(link.task_id, task.id);
     assert_eq!(
         h.changes.try_recv().expect("a publication"),
-        ChangeEvent::tasks([task.id])
+        ChangeEvent::tasks(h.solo.team_id.clone(), [task.id])
     );
 }
 
@@ -1690,7 +1690,7 @@ async fn updating_a_link_only_changes_the_patched_field() {
     assert_eq!(updated.url, "https://example.com/original");
     assert_eq!(
         h.changes.try_recv().expect("a publication"),
-        ChangeEvent::tasks([task.id])
+        ChangeEvent::tasks(h.solo.team_id.clone(), [task.id])
     );
 }
 
@@ -1723,7 +1723,7 @@ async fn removing_a_link_deletes_it_and_publishes_the_owning_task() {
     assert_eq!(remaining, 0);
     assert_eq!(
         h.changes.try_recv().expect("a publication"),
-        ChangeEvent::tasks([task.id])
+        ChangeEvent::tasks(h.solo.team_id.clone(), [task.id])
     );
 }
 
@@ -1785,7 +1785,7 @@ async fn reordering_links_places_one_between_two_others() {
     );
     assert_eq!(
         h.changes.try_recv().expect("a publication"),
-        ChangeEvent::tasks([task.id])
+        ChangeEvent::tasks(h.solo.team_id.clone(), [task.id])
     );
 }
 
@@ -2328,11 +2328,13 @@ async fn seed_worktree_path(pool: &SqlitePool, task_id: &str, worktree_path: &st
 
 async fn seed_repository(pool: &SqlitePool) -> String {
     let id = rimaia_core::db::new_id();
+    let team_id = solo_team(pool).await;
     sqlx::query!(
-        r#"INSERT INTO repositories (id, name, path, default_branch, worktree_root, allow_unattended_runs, created_at)
-           VALUES (?1, 'rimaia', '/tmp/rimaia', 'main', '/tmp/rimaia-worktrees', 0, ?2)"#,
+        r#"INSERT INTO repositories (id, team_id, name, path, default_branch, worktree_root, allow_unattended_runs, created_at)
+           VALUES (?1, ?3, 'rimaia', '/tmp/rimaia', 'main', '/tmp/rimaia-worktrees', 0, ?2)"#,
         id,
         NOW,
+        team_id,
     )
     .execute(pool)
     .await
@@ -2352,15 +2354,17 @@ async fn seed_task_at(
     position: f64,
 ) {
     let id = rimaia_core::db::new_id();
+    let team_id = solo_team(pool).await;
     sqlx::query!(
-        r#"INSERT INTO tasks (id, repository_id, title, board_column, position, run_state, created_at, updated_at)
-           VALUES (?1, ?2, ?3, ?4, ?5, 'idle', ?6, ?6)"#,
+        r#"INSERT INTO tasks (id, team_id, repository_id, title, board_column, position, run_state, created_at, updated_at)
+           VALUES (?1, ?7, ?2, ?3, ?4, ?5, 'idle', ?6, ?6)"#,
         id,
         repository_id,
         title,
         column,
         position,
         NOW,
+        team_id,
     )
     .execute(pool)
     .await
@@ -2446,4 +2450,17 @@ const NOW: &str = "2026-08-20T00:00:00+00:00";
 
 fn timestamp(rfc3339: &str) -> DateTime<Utc> {
     rfc3339.parse().expect("a literal timestamp must parse")
+}
+
+/// The solo team the board's rows belong to: the identity `TestContext`
+/// already created, or a first launch's, read through the same
+/// `identity::ensure_solo` either way.
+async fn solo_team(pool: &SqlitePool) -> String {
+    rimaia_core::identity::ensure_solo(
+        pool,
+        &rimaia_core::testing::TestClock::new(rimaia_core::testing::test_epoch()),
+    )
+    .await
+    .expect("the board's solo identity")
+    .team_id
 }

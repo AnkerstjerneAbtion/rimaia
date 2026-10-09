@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO solo_identity (singleton, team_id, user_id, runner_id, created_at)\n         VALUES (1, ?1, ?2, ?3, ?4)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 4
+    },
+    "nullable": []
+  },
+  "hash": "32312ef4d9b9b342c05a7e3bb74f0facd7234e72fbd92c392cf3eaf1517d67b9"
+}

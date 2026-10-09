@@ -21,7 +21,8 @@ use rimaia_core::db::{
     RunStatus, Schedule, ScheduleMode, Setting, StrategyMode, StrategySource, Task, TaskDependency,
     TaskLink,
 };
-use rimaia_core::testing::test_pool;
+use rimaia_core::identity::ensure_solo;
+use rimaia_core::testing::{test_epoch, test_pool, TestClock};
 use serde::Serialize;
 use sqlx::SqlitePool;
 
@@ -57,19 +58,27 @@ async fn a_fresh_database_gets_every_table_the_schema_declares() {
     // an acceptance criterion should: by naming what is missing or extra, not by echoing
     // the SQL back at itself. `review_bundles` is ADR-0033 point 7's, added by task 033
     // as seam-contract D28 part 6 declares it, and `review_findings` ADR-0017's, added
-    // by task 035 the same way.
+    // by task 035 the same way. The seven team-mode tables (`runners` through `users`)
+    // are ADR-0029, ADR-0030 and ADR-0031's, added by task 038 the same way.
     assert_eq!(
         tables,
         vec![
             "repositories",
             "review_bundles",
             "review_findings",
+            "runners",
             "runs",
             "schedules",
             "settings",
+            "solo_identity",
             "task_dependencies",
             "task_links",
             "tasks",
+            "team_memberships",
+            "team_settings",
+            "teams",
+            "user_settings",
+            "users",
         ]
     );
 }
@@ -146,10 +155,11 @@ async fn a_repository_round_trips_every_field_exactly() {
     // reads back to the same instant" rather than merely to the same second.
     let created_at: DateTime<Utc> = "2026-08-20T13:45:07.123456Z".parse().expect("rfc3339");
 
+    let team_id = solo_team(&pool).await;
     sqlx::query!(
         "INSERT INTO repositories
-            (id, name, path, default_branch, worktree_root, allow_unattended_runs, created_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            (id, team_id, name, path, default_branch, worktree_root, allow_unattended_runs, created_at)
+         VALUES (?1, ?8, ?2, ?3, ?4, ?5, ?6, ?7)",
         id,
         "rimaia",
         "/Users/someone/Code/My Projects/rimaia",
@@ -157,6 +167,7 @@ async fn a_repository_round_trips_every_field_exactly() {
         "/Users/someone/Library/Application Support/com.rimaia.app/worktrees",
         true,
         created_at,
+        team_id,
     )
     .execute(&pool)
     .await
@@ -190,11 +201,13 @@ async fn a_repository_inserted_without_allow_unattended_runs_defaults_to_false()
     let pool = test_pool().await;
     let id = new_id();
 
+    let team_id = solo_team(&pool).await;
     sqlx::query!(
-        "INSERT INTO repositories (id, name, path, default_branch, worktree_root, created_at)
-         VALUES (?1, 'rimaia', '/tmp/rimaia', 'main', '/tmp/rimaia-worktrees', ?2)",
+        "INSERT INTO repositories (id, team_id, name, path, default_branch, worktree_root, created_at)
+         VALUES (?1, ?3, 'rimaia', '/tmp/rimaia', 'main', '/tmp/rimaia-worktrees', ?2)",
         id,
         NOW,
+        team_id,
     )
     .execute(&pool)
     .await
@@ -244,12 +257,13 @@ async fn a_task_round_trips_every_field_exactly() {
     let updated_at: DateTime<Utc> = "2026-08-20T09:30:00Z".parse().expect("rfc3339");
     let strategy_updated_at: DateTime<Utc> = "2026-08-20T09:15:00Z".parse().expect("rfc3339");
 
+    let team_id = solo_team(&pool).await;
     sqlx::query!(
         "INSERT INTO tasks (
-            id, repository_id, title, plan, extra_instructions, board_column, position,
+            id, team_id, repository_id, title, plan, extra_instructions, board_column, position,
             run_state, branch, worktree_path, strategy_mode, model, effort, strategy_plan,
             strategy_source, strategy_updated_at, created_at, updated_at, source
-         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)",
+         ) VALUES (?1, ?20, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)",
         id,
         repository_id,
         "Wire the board to the store",
@@ -269,6 +283,7 @@ async fn a_task_round_trips_every_field_exactly() {
         created_at,
         updated_at,
         MutationSource::Mcp,
+        team_id,
     )
     .execute(&pool)
     .await
@@ -315,12 +330,14 @@ async fn a_task_without_a_board_column_or_run_state_is_rejected_by_the_schema() 
     let repository_id = insert_repository(&pool).await;
     let id = new_id();
 
+    let team_id = solo_team(&pool).await;
     let result = sqlx::query!(
-        "INSERT INTO tasks (id, repository_id, title, position, created_at, updated_at)
-         VALUES (?1, ?2, 'a task', 1.0, ?3, ?3)",
+        "INSERT INTO tasks (id, team_id, repository_id, title, position, created_at, updated_at)
+         VALUES (?1, ?4, ?2, 'a task', 1.0, ?3, ?3)",
         id,
         repository_id,
         NOW,
+        team_id,
     )
     .execute(&pool)
     .await;
@@ -631,11 +648,13 @@ async fn a_task_in_a_nonexistent_repository_is_rejected() {
     let pool = test_pool().await;
     let id = new_id();
 
+    let team_id = solo_team(&pool).await;
     let result = sqlx::query!(
-        "INSERT INTO tasks (id, repository_id, title, board_column, position, run_state, created_at, updated_at)
-         VALUES (?1, 'no-such-repository', 'a task', 'ready', 1.0, 'idle', ?2, ?2)",
+        "INSERT INTO tasks (id, team_id, repository_id, title, board_column, position, run_state, created_at, updated_at)
+         VALUES (?1, ?3, 'no-such-repository', 'a task', 'ready', 1.0, 'idle', ?2, ?2)",
         id,
         NOW,
+        team_id,
     )
     .execute(&pool)
     .await;
@@ -822,12 +841,14 @@ async fn an_unrecognised_board_column_is_refused() {
     let repository_id = insert_repository(&pool).await;
     let id = new_id();
 
+    let team_id = solo_team(&pool).await;
     let result = sqlx::query!(
-        "INSERT INTO tasks (id, repository_id, title, board_column, position, run_state, created_at, updated_at)
-         VALUES (?1, ?2, 'a task', 'archived', 1.0, 'idle', ?3, ?3)",
+        "INSERT INTO tasks (id, team_id, repository_id, title, board_column, position, run_state, created_at, updated_at)
+         VALUES (?1, ?4, ?2, 'a task', 'archived', 1.0, 'idle', ?3, ?3)",
         id,
         repository_id,
         NOW,
+        team_id,
     )
     .execute(&pool)
     .await;
@@ -843,12 +864,14 @@ async fn an_unrecognised_run_state_is_refused() {
     let repository_id = insert_repository(&pool).await;
     let id = new_id();
 
+    let team_id = solo_team(&pool).await;
     let result = sqlx::query!(
-        "INSERT INTO tasks (id, repository_id, title, board_column, position, run_state, created_at, updated_at)
-         VALUES (?1, ?2, 'a task', 'ready', 1.0, 'interrupted', ?3, ?3)",
+        "INSERT INTO tasks (id, team_id, repository_id, title, board_column, position, run_state, created_at, updated_at)
+         VALUES (?1, ?4, ?2, 'a task', 'ready', 1.0, 'interrupted', ?3, ?3)",
         id,
         repository_id,
         NOW,
+        team_id,
     )
     .execute(&pool)
     .await;
@@ -866,12 +889,14 @@ async fn the_source_column_rejects_a_spelling_outside_its_check() {
     let repository_id = insert_repository(&pool).await;
     let id = new_id();
 
+    let team_id = solo_team(&pool).await;
     let result = sqlx::query!(
-        "INSERT INTO tasks (id, repository_id, title, board_column, position, run_state, created_at, updated_at, source)
-         VALUES (?1, ?2, 'a task', 'ready', 1.0, 'idle', ?3, ?3, 'cli')",
+        "INSERT INTO tasks (id, team_id, repository_id, title, board_column, position, run_state, created_at, updated_at, source)
+         VALUES (?1, ?4, ?2, 'a task', 'ready', 1.0, 'idle', ?3, ?3, 'cli')",
         id,
         repository_id,
         NOW,
+        team_id,
     )
     .execute(&pool)
     .await;
@@ -905,13 +930,15 @@ async fn source_variants_round_trip_through_a_real_check_constraint() {
         MutationSource::System,
     ] {
         let id = new_id();
+        let team_id = solo_team(&pool).await;
         sqlx::query!(
-            "INSERT INTO tasks (id, repository_id, title, board_column, position, run_state, created_at, updated_at, source)
-             VALUES (?1, ?2, 'a task', 'ready', 1.0, 'idle', ?3, ?3, ?4)",
+            "INSERT INTO tasks (id, team_id, repository_id, title, board_column, position, run_state, created_at, updated_at, source)
+             VALUES (?1, ?5, ?2, 'a task', 'ready', 1.0, 'idle', ?3, ?3, ?4)",
             id,
             repository_id,
             NOW,
             source,
+            team_id,
         )
         .execute(&pool)
         .await
@@ -1335,12 +1362,14 @@ async fn a_bound_timestamp_is_stored_with_a_numeric_offset_rather_than_z() {
         let created_at: DateTime<Utc> = instant.parse().expect("rfc3339");
         let id = new_id();
 
+        let team_id = solo_team(&pool).await;
         sqlx::query!(
-            "INSERT INTO tasks (id, repository_id, title, board_column, position, run_state, created_at, updated_at)
-             VALUES (?1, ?2, 'a task', 'ready', 1.0, 'idle', ?3, ?3)",
+            "INSERT INTO tasks (id, team_id, repository_id, title, board_column, position, run_state, created_at, updated_at)
+             VALUES (?1, ?4, ?2, 'a task', 'ready', 1.0, 'idle', ?3, ?3)",
             id,
             repository_id,
             created_at,
+            team_id,
         )
         .execute(&pool)
         .await
@@ -1403,9 +1432,12 @@ async fn schema_snapshot(pool: &SqlitePool) -> Vec<SchemaEntry> {
 }
 
 async fn fetch_repository(pool: &SqlitePool, id: &str) -> Repository {
+    // `path!` and `worktree_root!`, as `repo::list` reads them: every row here
+    // has both. Task 066 retires the readers they mirror.
     sqlx::query_as!(
         Repository,
-        r#"SELECT id, name, path, default_branch, worktree_root, allow_unattended_runs,
+        r#"SELECT id, name, path AS "path!", default_branch, worktree_root AS "worktree_root!",
+            allow_unattended_runs,
             max_concurrency, created_at AS "created_at: DateTime<Utc>",
             credential_login, credential_label,
             credential_added_at AS "credential_added_at: DateTime<Utc>",
@@ -1477,13 +1509,15 @@ async fn fetch_task_dependency(
 }
 
 async fn fetch_run(pool: &SqlitePool, id: &str) -> Run {
+    // `log_path!`, as the run readers in `runner::outcome` take it: every row
+    // here has one. Task 066 retires the readers it mirrors.
     sqlx::query_as!(
         Run,
         r#"SELECT id, task_id, attempt, kind AS "kind: RunKind", status AS "status: RunStatus",
             session_id, prompt,
             started_at AS "started_at: DateTime<Utc>", ended_at AS "ended_at: DateTime<Utc>",
-            exit_class AS "exit_class: ExitClass", error_message, num_turns, cost_usd, log_path,
-            pr_url, resume_after AS "resume_after: DateTime<Utc>", base_ref,
+            exit_class AS "exit_class: ExitClass", error_message, num_turns, cost_usd,
+            log_path AS "log_path!", pr_url, resume_after AS "resume_after: DateTime<Utc>", base_ref,
             model, effort, run_environment, input_tokens, output_tokens,
             cache_read_tokens, cache_creation_tokens, head_sha, base_sha
            FROM runs WHERE id = ?1"#,
@@ -1514,12 +1548,14 @@ async fn fetch_schedule(pool: &SqlitePool, id: &str) -> Schedule {
 /// `tasks.repository_id` requires.
 async fn insert_repository(pool: &SqlitePool) -> String {
     let id = new_id();
+    let team_id = solo_team(pool).await;
     sqlx::query!(
         "INSERT INTO repositories
-            (id, name, path, default_branch, worktree_root, allow_unattended_runs, created_at)
-         VALUES (?1, 'rimaia', '/tmp/rimaia', 'main', '/tmp/rimaia-worktrees', 0, ?2)",
+            (id, team_id, name, path, default_branch, worktree_root, allow_unattended_runs, created_at)
+         VALUES (?1, ?3, 'rimaia', '/tmp/rimaia', 'main', '/tmp/rimaia-worktrees', 0, ?2)",
         id,
         NOW,
+        team_id,
     )
     .execute(pool)
     .await
@@ -1536,15 +1572,17 @@ async fn insert_task(
     run_state: RunState,
 ) -> String {
     let id = new_id();
+    let team_id = solo_team(pool).await;
     sqlx::query!(
-        "INSERT INTO tasks (id, repository_id, title, board_column, position, run_state, created_at, updated_at)
-         VALUES (?1, ?2, 'a task', ?3, 1.0, ?4, ?5, ?6)",
+        "INSERT INTO tasks (id, team_id, repository_id, title, board_column, position, run_state, created_at, updated_at)
+         VALUES (?1, ?7, ?2, 'a task', ?3, 1.0, ?4, ?5, ?6)",
         id,
         repository_id,
         column,
         run_state,
         NOW,
         NOW,
+        team_id,
     )
     .execute(pool)
     .await
@@ -1561,16 +1599,18 @@ async fn insert_task_with_strategy(
     strategy_source: Option<StrategySource>,
 ) -> String {
     let id = new_id();
+    let team_id = solo_team(pool).await;
     sqlx::query!(
         "INSERT INTO tasks
-            (id, repository_id, title, board_column, position, run_state, strategy_mode, strategy_source, created_at, updated_at)
-         VALUES (?1, ?2, 'a task', 'ready', 1.0, 'idle', ?3, ?4, ?5, ?6)",
+            (id, team_id, repository_id, title, board_column, position, run_state, strategy_mode, strategy_source, created_at, updated_at)
+         VALUES (?1, ?7, ?2, 'a task', 'ready', 1.0, 'idle', ?3, ?4, ?5, ?6)",
         id,
         repository_id,
         strategy_mode,
         strategy_source,
         NOW,
         NOW,
+        team_id,
     )
     .execute(pool)
     .await
@@ -1690,4 +1730,13 @@ fn assert_unique_violation<T: std::fmt::Debug>(result: sqlx::Result<T>) {
         error.to_string().contains("UNIQUE constraint failed"),
         "expected a UNIQUE violation, got: {error}"
     );
+}
+
+/// The solo team every row here belongs to, from the identity a first launch
+/// creates. Idempotent, so a test may ask for it once per row it writes.
+async fn solo_team(pool: &SqlitePool) -> String {
+    ensure_solo(pool, &TestClock::new(test_epoch()))
+        .await
+        .expect("a fresh board gets a solo identity")
+        .team_id
 }

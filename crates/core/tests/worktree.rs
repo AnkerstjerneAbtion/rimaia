@@ -111,7 +111,7 @@ async fn a_prepared_worktree_is_recorded_on_the_task_row_and_published() {
             .changes
             .try_recv()
             .expect("a publication is waiting"),
-        ChangeEvent::tasks([task.id.clone()])
+        ChangeEvent::tasks(f.harness.solo.team_id.clone(), [task.id.clone()])
     );
 }
 

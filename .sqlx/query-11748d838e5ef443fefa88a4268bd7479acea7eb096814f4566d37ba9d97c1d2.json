@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE repositories SET allow_unattended_runs = ?1 WHERE id = ?2 RETURNING team_id",
+  "describe": {
+    "columns": [
+      {
+        "name": "team_id",
+        "ordinal": 0,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "11748d838e5ef443fefa88a4268bd7479acea7eb096814f4566d37ba9d97c1d2"
+}

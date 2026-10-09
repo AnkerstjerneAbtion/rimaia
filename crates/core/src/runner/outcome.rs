@@ -48,7 +48,7 @@ use crate::runner::events::{
     UsageReport,
 };
 use crate::runs::bundle::RunCapture;
-use crate::tasks::{move_task_to_bottom, set_run_state};
+use crate::tasks::{move_task_to_bottom, set_run_state, team_of_task};
 
 // ---------------------------------------------------------------------------
 // What the classifier is allowed to look at
@@ -659,8 +659,12 @@ pub struct NewRun {
 ///
 /// `log_path` is computed rather than passed, because ADR-0013 makes it a pure
 /// function of the task and run ids and the run id is minted here.
+///
+/// The row names no runner: that is the board port's to record, from the
+/// runner its adapter serves (D31 point 4), and `runs.runner_id` is nullable
+/// for exactly the rows nobody reported a runner for.
 pub async fn start_run(ctx: &ServiceContext, paths: &AppPaths, new_run: NewRun) -> Result<Run> {
-    insert_run(ctx, paths, new_id(), new_run).await
+    insert_run(ctx, paths, new_id(), None, new_run).await
 }
 
 /// [`start_run`] under an id the caller already holds.
@@ -673,6 +677,7 @@ pub(crate) async fn insert_run(
     ctx: &ServiceContext,
     paths: &AppPaths,
     id: String,
+    runner_id: Option<&str>,
     new_run: NewRun,
 ) -> Result<Run> {
     let log_path = transcript_path(paths, &new_run.task_id, &id)
@@ -685,16 +690,9 @@ pub(crate) async fn insert_run(
     // The foreign key would refuse a task that does not exist, but as a
     // constraint violation nobody can read. Same sentence `tasks::get_task`
     // answers the identical question with.
-    let task_exists: i64 =
-        sqlx::query_scalar!("SELECT count(*) FROM tasks WHERE id = ?1", new_run.task_id)
-            .fetch_one(&mut *tx)
-            .await?;
-    if task_exists == 0 {
-        return Err(Error::not_found(format!(
-            "no task with id {}",
-            new_run.task_id
-        )));
-    }
+    // The task's team doubles as that check: a run belongs to its task's team
+    // (ADR-0029 point 1), and the events below name it.
+    let team_id = team_of_task(&mut *tx, &new_run.task_id).await?;
 
     // Inside the transaction, because `idx_runs_task_attempt` is UNIQUE on
     // `(task_id, attempt)`: two writers racing to claim a task must not both
@@ -717,8 +715,8 @@ pub(crate) async fn insert_run(
     sqlx::query!(
         r#"INSERT INTO runs
             (id, task_id, attempt, kind, status, session_id, prompt, started_at, log_path,
-             base_ref, base_sha)
-           VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)"#,
+             base_ref, base_sha, runner_id)
+           VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)"#,
         id,
         new_run.task_id,
         attempt,
@@ -730,6 +728,7 @@ pub(crate) async fn insert_run(
         log_path,
         new_run.base_ref,
         new_run.base_sha,
+        runner_id,
     )
     .execute(&mut *tx)
     .await?;
@@ -739,8 +738,8 @@ pub(crate) async fn insert_run(
     // Both, and after the commit (ADR-0018). The task's own id rides along
     // because a card renders its last run (seam-contract D12) — a board told
     // only about the run would keep drawing the previous attempt's badge.
-    ctx.publish(ChangeEvent::runs([id.clone()]));
-    ctx.publish(ChangeEvent::tasks([new_run.task_id.clone()]));
+    ctx.publish(ChangeEvent::runs(team_id.clone(), [id.clone()]));
+    ctx.publish(ChangeEvent::tasks(team_id, [new_run.task_id.clone()]));
 
     fetch_run_row(&ctx.pool, &id).await
 }
@@ -802,6 +801,8 @@ pub async fn finish_run_within(
 
     let mut tx = ctx.pool.begin().await?;
     let run = fetch_run_row(&mut *tx, run_id).await?;
+    // A run's team is its task's.
+    let team_id = team_of_task(&mut *tx, &run.task_id).await?;
     if run.ended_at.is_some() {
         return Err(Error::invalid(format!(
             "run {run_id} has already been finalized"
@@ -856,8 +857,8 @@ pub async fn finish_run_within(
 
     tx.commit().await?;
 
-    ctx.publish(ChangeEvent::runs([run_id.to_string()]));
-    ctx.publish(ChangeEvent::tasks([run.task_id.clone()]));
+    ctx.publish(ChangeEvent::runs(team_id.clone(), [run_id.to_string()]));
+    ctx.publish(ChangeEvent::tasks(team_id, [run.task_id.clone()]));
 
     let next = apply_to_task(ctx, &run, outcome, window_closes_at).await?;
 
@@ -1015,13 +1016,15 @@ async fn fetch_run_row<'e, E>(executor: E, id: &str) -> Result<Run>
 where
     E: sqlx::Executor<'e, Database = sqlx::Sqlite>,
 {
+    // `log_path!`: every row a solo board holds was opened by a runner on this
+    // machine, which always fills it. Task 066 retires this reader.
     sqlx::query_as!(
         Run,
         r#"SELECT id, task_id, attempt, kind AS "kind: RunKind", status AS "status: RunStatus",
             session_id, prompt,
             started_at AS "started_at: DateTime<Utc>", ended_at AS "ended_at: DateTime<Utc>",
-            exit_class AS "exit_class: ExitClass", error_message, num_turns, cost_usd, log_path,
-            pr_url, resume_after AS "resume_after: DateTime<Utc>", base_ref,
+            exit_class AS "exit_class: ExitClass", error_message, num_turns, cost_usd,
+            log_path AS "log_path!", pr_url, resume_after AS "resume_after: DateTime<Utc>", base_ref,
             model, effort, run_environment, input_tokens, output_tokens,
             cache_read_tokens, cache_creation_tokens, head_sha, base_sha
            FROM runs WHERE id = ?1"#,

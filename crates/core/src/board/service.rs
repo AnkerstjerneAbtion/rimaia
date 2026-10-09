@@ -73,6 +73,13 @@ pub async fn claim(
         Err(error) if error.code() == ErrorCode::NotFound => return Ok(None),
         Err(error) => return Err(error),
     };
+    // The lease's team is the task's own row's (D31 point 2), read with the
+    // rest, before any edge.
+    let team_id = match tasks::team_of_task(&ctx.pool, &task_id).await {
+        Ok(team_id) => team_id,
+        Err(error) if error.code() == ErrorCode::NotFound => return Ok(None),
+        Err(error) => return Err(error),
+    };
 
     let (purpose, trigger, resume) = match target {
         ClaimTarget::Run {
@@ -107,7 +114,7 @@ pub async fn claim(
     };
 
     Ok(Some(Claim {
-        lease: LeaseRef::solo(task_id),
+        lease: LeaseRef::solo(task_id, team_id),
         purpose,
         trigger,
         resume,
@@ -135,24 +142,26 @@ pub async fn record_branch(ctx: &ServiceContext, lease: &LeaseRef, branch: &str)
     ensure_task(ctx, &lease.task_id).await?;
 
     let now = ctx.clock.now();
-    sqlx::query!(
-        "UPDATE tasks SET branch = ?1, updated_at = ?2 WHERE id = ?3",
+    let team_id = sqlx::query_scalar!(
+        "UPDATE tasks SET branch = ?1, updated_at = ?2 WHERE id = ?3 RETURNING team_id",
         branch,
         now,
         lease.task_id,
     )
-    .execute(&ctx.pool)
+    .fetch_one(&ctx.pool)
     .await?;
 
-    ctx.publish(crate::ChangeEvent::tasks([lease.task_id.clone()]));
+    ctx.publish(crate::ChangeEvent::tasks(team_id, [lease.task_id.clone()]));
     Ok(())
 }
 
-/// Opens the `runs` row under the id the runner minted. In process the
-/// transcript path comes from this board's own `paths` (D31 point 4).
+/// Opens the `runs` row under the id the runner minted, naming `runner_id`,
+/// the runner the adapter serves. In process the transcript path comes from
+/// this board's own `paths` (D31 point 4).
 pub async fn start_run(
     ctx: &ServiceContext,
     paths: &AppPaths,
+    runner_id: &str,
     lease: &LeaseRef,
     run: StartRun,
 ) -> Result<()> {
@@ -162,6 +171,7 @@ pub async fn start_run(
         ctx,
         paths,
         run.run_id,
+        Some(runner_id),
         NewRun {
             task_id: lease.task_id.clone(),
             kind: run.kind,
@@ -397,6 +407,9 @@ mod tests {
 
     #[test]
     fn a_solo_heartbeat_renews_nothing_and_fences_nothing() {
-        assert_eq!(heartbeat(&[LeaseRef::solo("t")]), Heartbeat::default());
+        assert_eq!(
+            heartbeat(&[LeaseRef::solo("t", "3f2b1c00-0000-4000-8000-0000000000a1")]),
+            Heartbeat::default()
+        );
     }
 }

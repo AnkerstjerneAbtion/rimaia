@@ -1975,14 +1975,16 @@ fn message(result: &CallToolResult) -> String {
 
 async fn seed_repository(pool: &SqlitePool, name: &str, path: &str) -> String {
     let id = rimaia_core::db::new_id();
+    let team_id = solo_team(pool).await;
     sqlx::query(
-        "INSERT INTO repositories (id, name, path, default_branch, worktree_root, allow_unattended_runs, created_at)
-         VALUES (?1, ?2, ?3, 'main', '/tmp/rimaia-worktrees', 0, ?4)",
+        "INSERT INTO repositories (id, team_id, name, path, default_branch, worktree_root, allow_unattended_runs, created_at)
+         VALUES (?1, ?5, ?2, ?3, 'main', '/tmp/rimaia-worktrees', 0, ?4)",
     )
     .bind(&id)
     .bind(name)
     .bind(path)
     .bind(NOW)
+    .bind(&team_id)
     .execute(pool)
     .await
     .expect("seed a repository");
@@ -2195,4 +2197,17 @@ async fn a_fix_grant_cannot_call_record_review_findings() {
     );
 
     assert_refusal(&refused, &not_available("record_review_findings", &task.id));
+}
+
+/// The solo team the board's rows belong to: the identity `TestContext`
+/// already created, or a first launch's, read through the same
+/// `identity::ensure_solo` either way.
+async fn solo_team(pool: &SqlitePool) -> String {
+    rimaia_core::identity::ensure_solo(
+        pool,
+        &rimaia_core::testing::TestClock::new(rimaia_core::testing::test_epoch()),
+    )
+    .await
+    .expect("the board's solo identity")
+    .team_id
 }

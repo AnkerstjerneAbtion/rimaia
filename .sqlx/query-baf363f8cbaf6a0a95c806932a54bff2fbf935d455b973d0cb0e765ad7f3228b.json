@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE repositories\n         SET credential_login = ?1, credential_label = ?2, credential_added_at = ?3\n         WHERE id = ?4\n         RETURNING team_id",
+  "describe": {
+    "columns": [
+      {
+        "name": "team_id",
+        "ordinal": 0,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 4
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "baf363f8cbaf6a0a95c806932a54bff2fbf935d455b973d0cb0e765ad7f3228b"
+}

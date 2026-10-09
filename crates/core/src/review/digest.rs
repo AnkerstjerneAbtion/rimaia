@@ -184,7 +184,7 @@ pub(crate) async fn advance_marker(
 /// Marks the digest seen through `through`, which callers take from the digest
 /// they showed. Never moves the marker backwards, and refuses an instant that
 /// has not happened yet.
-#[tracing::instrument(skip_all, fields(source = ctx.source.as_str()))]
+#[tracing::instrument(skip_all, fields(source = ctx.source.as_str(), user_id = ctx.actor.as_str()))]
 pub async fn mark_seen(ctx: &ServiceContext, through: DateTime<Utc>) -> Result<DateTime<Utc>> {
     if through > ctx.clock.now() {
         return Err(Error::invalid(
@@ -192,13 +192,17 @@ pub async fn mark_seen(ctx: &ServiceContext, through: DateTime<Utc>) -> Result<D
         ));
     }
 
+    // The marker is a `settings` row, which has no team column until task 039
+    // moves it to `user_settings`: the event names the context's one team.
+    let team_id = ctx.scope.sole()?.clone();
+
     // Read and write in one transaction, so two concurrent calls cannot
     // interleave and leave the smaller value behind.
     let mut tx = ctx.pool.begin_with("BEGIN IMMEDIATE").await?;
     let stored = advance_marker(&mut tx, through).await?;
     tx.commit().await?;
 
-    ctx.publish(ChangeEvent::Settings);
+    ctx.publish(ChangeEvent::settings(team_id));
     Ok(stored)
 }
 

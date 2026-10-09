@@ -18,6 +18,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::db::{Repository, Run, RunKind};
+use crate::events::TeamId;
 use crate::review::findings::ReviewFinding;
 use crate::review_loop::EffectiveReviewConfig;
 use crate::runner::outcome::RunOutcome;
@@ -38,14 +39,20 @@ pub struct LeaseRef {
     pub task_id: String,
     /// Always `0` before task 043, which makes it strictly increasing per task.
     pub generation: i64,
+    /// The task's team, read from its row at claim (D31 point 2). The runner
+    /// store cannot join the board, so the lease carries it on every report.
+    /// Narrowing the context to it is task 039's; the server treats it as a
+    /// claim to verify, never as an input.
+    pub team_id: TeamId,
 }
 
 impl LeaseRef {
     /// The only lease solo can hold before task 043: generation `0`.
-    pub fn solo(task_id: impl Into<String>) -> Self {
+    pub fn solo(task_id: impl Into<String>, team_id: impl Into<TeamId>) -> Self {
         Self {
             task_id: task_id.into(),
             generation: 0,
+            team_id: team_id.into(),
         }
     }
 }

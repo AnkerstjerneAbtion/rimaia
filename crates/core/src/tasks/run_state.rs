@@ -39,7 +39,7 @@ use crate::context::ServiceContext;
 use crate::db::{RunState, Task};
 use crate::error::{Error, Result};
 use crate::events::ChangeEvent;
-use crate::tasks::service::fetch_task_row;
+use crate::tasks::service::{fetch_task_row, team_of_task};
 
 /// Whether ADR-0007's run-state machine allows moving from `from` to `to`.
 pub fn is_legal_run_state_transition(from: RunState, to: RunState) -> bool {
@@ -163,12 +163,13 @@ pub async fn set_run_state(ctx: &ServiceContext, id: &str, to: RunState) -> Resu
     .execute(&mut *tx)
     .await?;
 
+    let team_id = team_of_task(&mut *tx, id).await?;
     tx.commit().await?;
 
     // Publish before the read-back: the row is already committed, so a
     // failure in `fetch_task_row` below must not cost the notification for a
     // mutation that already happened (ADR-0018).
-    ctx.publish(ChangeEvent::tasks([id.to_string()]));
+    ctx.publish(ChangeEvent::tasks(team_id, [id.to_string()]));
     let updated = fetch_task_row(&ctx.pool, id).await?;
     Ok(updated)
 }

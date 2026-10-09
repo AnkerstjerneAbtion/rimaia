@@ -10,9 +10,9 @@ use std::sync::Arc;
 use chrono::TimeDelta;
 use pretty_assertions::assert_eq;
 use rimaia_core::board::{
-    BoardMethod, BoardPort, Claim, ClaimTarget, FinishReceipt, FinishRun, Heartbeat, LeasePurpose,
-    LeaseRef, NextStep, RunContext, StartRun, TeamLimits, TranscriptAck, TranscriptChunk,
-    TranscriptEnd,
+    BoardMethod, BoardPort, Claim, ClaimTarget, FinishReceipt, FinishRun, Heartbeat,
+    InProcessBoard, LeasePurpose, LeaseRef, NextStep, RunContext, StartRun, TeamLimits,
+    TranscriptAck, TranscriptChunk, TranscriptEnd,
 };
 use rimaia_core::db::{BoardColumn, ExitClass, RunKind, RunStatus};
 use rimaia_core::repo::{self, NewRepository};
@@ -23,6 +23,7 @@ use rimaia_core::runs::bundle::ReviewBundle;
 use rimaia_core::scheduler::ResumePoint;
 use rimaia_core::tasks::{self, NewTask};
 use rimaia_core::testing::board_contract::{Harness, Which};
+use rimaia_core::testing::db::insert_runner;
 use rimaia_core::testing::{TempRepo, TestClock, TestContext};
 use rimaia_core::{AppPaths, Clock, ServiceContext};
 use serde::de::DeserializeOwned;
@@ -46,8 +47,19 @@ impl Harness for InProcess {
             .expect("a data directory");
         let paths = AppPaths::new(data.path());
         let config = RunnerConfig::default();
+        // Runner A is the solo runner. Runner B is a second machine of the
+        // same user, which `runs.runner_id` needs a row for (D31 point 13).
         let a = harness.board(&paths, &config);
-        let b = harness.board(&paths, &config);
+        let second_runner = {
+            let mut conn = harness.context.pool.acquire().await.expect("a connection");
+            insert_runner(&mut conn, &harness.clock, &harness.solo.user_id, "Runner B").await
+        };
+        let b: Arc<dyn BoardPort> = Arc::new(InProcessBoard::new(
+            harness.context.clone(),
+            paths.clone(),
+            config.provider.clone(),
+            second_runner,
+        ));
 
         Self {
             harness,
@@ -182,7 +194,10 @@ async fn every_board_dto_round_trips_through_json() {
         .await
         .expect("finish");
 
-    round_trips(&LeaseRef::solo(task.id.clone()));
+    round_trips(&LeaseRef::solo(
+        task.id.clone(),
+        harness.solo.team_id.clone(),
+    ));
     round_trips(&LeasePurpose::Strategy);
     round_trips(&target);
     round_trips(&ClaimTarget::Plan { task_id: task.id });
@@ -200,7 +215,7 @@ async fn every_board_dto_round_trips_through_json() {
         disallowed_tools: Some(vec!["Bash(git push --force:*)".to_string()]),
     });
     round_trips(&Heartbeat {
-        fenced: vec![LeaseRef::solo("fenced")],
+        fenced: vec![LeaseRef::solo("fenced", harness.solo.team_id.clone())],
         cancel: vec!["cancelled".to_string()],
     });
     round_trips(&start);

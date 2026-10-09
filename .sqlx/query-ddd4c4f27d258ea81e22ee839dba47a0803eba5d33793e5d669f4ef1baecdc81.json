@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE repositories SET on_archive = ?1, on_archive_script = ?2 WHERE id = ?3\n         RETURNING team_id",
+  "describe": {
+    "columns": [
+      {
+        "name": "team_id",
+        "ordinal": 0,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "ddd4c4f27d258ea81e22ee839dba47a0803eba5d33793e5d669f4ef1baecdc81"
+}

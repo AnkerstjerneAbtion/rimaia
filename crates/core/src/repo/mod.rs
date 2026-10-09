@@ -28,7 +28,7 @@ use serde::Serialize;
 use crate::context::ServiceContext;
 use crate::db::Repository;
 use crate::error::{Error, Result};
-use crate::events::ChangeEvent;
+use crate::events::{ChangeEvent, TeamId};
 use crate::scheduler::CONCURRENCY_CEILING;
 
 /// What registering a new local repository needs.
@@ -79,10 +79,14 @@ pub struct RemoteInfo {
 /// Every registered repository, alphabetically — the order the Settings list
 /// shows them in.
 pub async fn list(ctx: &ServiceContext) -> Result<Vec<Repository>> {
+    // `path!` and `worktree_root!`: every repository a solo board holds was
+    // registered from this machine, which always fills both. Task 066 retires
+    // this reader for one that has no local paths.
     let repositories = sqlx::query_as!(
         Repository,
         r#"
-        SELECT id, name, path, default_branch, worktree_root, allow_unattended_runs,
+        SELECT id, name, path AS "path!", default_branch, worktree_root AS "worktree_root!",
+               allow_unattended_runs,
                max_concurrency, created_at AS "created_at: chrono::DateTime<chrono::Utc>",
                credential_login, credential_label,
                credential_added_at AS "credential_added_at: chrono::DateTime<chrono::Utc>",
@@ -113,10 +117,13 @@ async fn fetch_repository_row<'e, E>(executor: E, id: &str) -> Result<Repository
 where
     E: sqlx::Executor<'e, Database = sqlx::Sqlite>,
 {
+    // `path!` and `worktree_root!`, for `list`'s reason. Task 066 retires this
+    // reader.
     sqlx::query_as!(
         Repository,
         r#"
-        SELECT id, name, path, default_branch, worktree_root, allow_unattended_runs,
+        SELECT id, name, path AS "path!", default_branch, worktree_root AS "worktree_root!",
+               allow_unattended_runs,
                max_concurrency, created_at AS "created_at: chrono::DateTime<chrono::Utc>",
                credential_login, credential_label,
                credential_added_at AS "credential_added_at: chrono::DateTime<chrono::Utc>",
@@ -129,6 +136,21 @@ where
     .fetch_optional(executor)
     .await?
     .ok_or_else(|| Error::not_found(format!("no repository with id {id}")))
+}
+
+/// The team repository `id` belongs to, in the sentence
+/// [`fetch_repository_row`] uses for one that is not there.
+///
+/// What a task created in it is owned by (ADR-0029 point 1), and what an
+/// event about it names (ADR-0034 point 3).
+pub(crate) async fn team_of_repository<'e, E>(executor: E, id: &str) -> Result<TeamId>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Sqlite>,
+{
+    sqlx::query_scalar!("SELECT team_id FROM repositories WHERE id = ?1", id)
+        .fetch_optional(executor)
+        .await?
+        .ok_or_else(|| Error::not_found(format!("no repository with id {id}")))
 }
 
 /// Validates and registers a local repository.
@@ -176,16 +198,23 @@ pub async fn register(
         None => path_to_string(&worktrees_dir.join(naming::slugify(&name)))?,
     };
 
+    // A repository is the root of what a team owns, so there is no parent row
+    // to take its team from: the request has to name exactly one (ADR-0029
+    // point 5). Read before anything is written, so a scope of several teams
+    // is refused rather than half-applied.
+    let team_id = ctx.scope.sole()?.clone();
     let id = crate::db::new_id();
     let created_at = ctx.clock.now();
 
     sqlx::query!(
         r#"
         INSERT INTO repositories
-            (id, name, path, default_branch, worktree_root, allow_unattended_runs, created_at)
-        VALUES (?1, ?2, ?3, ?4, ?5, 0, ?6)
+            (id, team_id, name, path, default_branch, worktree_root, allow_unattended_runs,
+             created_at)
+        VALUES (?1, ?2, ?3, ?4, ?5, ?6, 0, ?7)
         "#,
         id,
+        team_id,
         name,
         path,
         default_branch,
@@ -198,7 +227,7 @@ pub async fn register(
     // Publish before the read-back: the row is already committed (this
     // insert runs in autocommit), so a failure in `get` below must not cost
     // the notification for a mutation that already happened (ADR-0018).
-    ctx.publish(ChangeEvent::repositories([id.clone()]));
+    ctx.publish(ChangeEvent::repositories(team_id, [id.clone()]));
     let repository = get(ctx, &id).await?;
     Ok(repository)
 }
@@ -245,11 +274,12 @@ pub async fn update(ctx: &ServiceContext, id: &str, patch: RepositoryPatch) -> R
         repository.max_concurrency = require_usable_concurrency(max_concurrency)?;
     }
 
-    sqlx::query!(
+    let team_id = sqlx::query_scalar!(
         r#"
         UPDATE repositories
         SET name = ?1, default_branch = ?2, worktree_root = ?3, max_concurrency = ?4
         WHERE id = ?5
+        RETURNING team_id
         "#,
         repository.name,
         repository.default_branch,
@@ -257,12 +287,12 @@ pub async fn update(ctx: &ServiceContext, id: &str, patch: RepositoryPatch) -> R
         repository.max_concurrency,
         id,
     )
-    .execute(&mut *tx)
+    .fetch_one(&mut *tx)
     .await?;
 
     tx.commit().await?;
 
-    ctx.publish(ChangeEvent::repositories([id.to_string()]));
+    ctx.publish(ChangeEvent::repositories(team_id, [id.to_string()]));
     Ok(repository)
 }
 
@@ -281,16 +311,16 @@ pub async fn set_allow_unattended_runs(
 ) -> Result<Repository> {
     let mut repository = get(ctx, id).await?;
 
-    sqlx::query!(
-        "UPDATE repositories SET allow_unattended_runs = ?1 WHERE id = ?2",
+    let team_id = sqlx::query_scalar!(
+        "UPDATE repositories SET allow_unattended_runs = ?1 WHERE id = ?2 RETURNING team_id",
         allow,
         id,
     )
-    .execute(&ctx.pool)
+    .fetch_one(&ctx.pool)
     .await?;
 
     repository.allow_unattended_runs = allow;
-    ctx.publish(ChangeEvent::repositories([id.to_string()]));
+    ctx.publish(ChangeEvent::repositories(team_id, [id.to_string()]));
     Ok(repository)
 }
 
@@ -408,14 +438,15 @@ pub async fn remove(ctx: &ServiceContext, id: &str) -> Result<()> {
         )));
     }
 
-    let deleted = sqlx::query!("DELETE FROM repositories WHERE id = ?1", id)
-        .execute(&mut *tx)
-        .await?
-        .rows_affected();
-
-    if deleted == 0 {
+    let Some(team_id) = sqlx::query_scalar!(
+        "DELETE FROM repositories WHERE id = ?1 RETURNING team_id",
+        id
+    )
+    .fetch_optional(&mut *tx)
+    .await?
+    else {
         return Err(Error::not_found(format!("no repository with id {id}")));
-    }
+    };
 
     // Spelled through the module that owns the key, not with a `format!` here:
     // two spellings of `strategy_default.<id>` would leak a row per removed
@@ -423,7 +454,7 @@ pub async fn remove(ctx: &ServiceContext, id: &str) -> Result<()> {
     crate::strategy::settings::delete_repository_default(&mut *tx, id).await?;
 
     tx.commit().await?;
-    ctx.publish(ChangeEvent::repositories([id.to_string()]));
+    ctx.publish(ChangeEvent::repositories(team_id, [id.to_string()]));
     Ok(())
 }
 
@@ -643,22 +674,23 @@ pub async fn set_credential_metadata(
     let mut repository = get(ctx, id).await?;
     let added_at = ctx.clock.now();
 
-    sqlx::query!(
+    let team_id = sqlx::query_scalar!(
         "UPDATE repositories
          SET credential_login = ?1, credential_label = ?2, credential_added_at = ?3
-         WHERE id = ?4",
+         WHERE id = ?4
+         RETURNING team_id",
         login,
         label,
         added_at,
         id,
     )
-    .execute(&ctx.pool)
+    .fetch_one(&ctx.pool)
     .await?;
 
     repository.credential_login = login.map(str::to_string);
     repository.credential_label = label.map(str::to_string);
     repository.credential_added_at = Some(added_at);
-    ctx.publish(ChangeEvent::repositories([id.to_string()]));
+    ctx.publish(ChangeEvent::repositories(team_id, [id.to_string()]));
     Ok(repository)
 }
 
@@ -669,19 +701,20 @@ pub async fn set_credential_metadata(
 pub async fn clear_credential_metadata(ctx: &ServiceContext, id: &str) -> Result<Repository> {
     let mut repository = get(ctx, id).await?;
 
-    sqlx::query!(
+    let team_id = sqlx::query_scalar!(
         "UPDATE repositories
          SET credential_login = NULL, credential_label = NULL, credential_added_at = NULL
-         WHERE id = ?1",
+         WHERE id = ?1
+         RETURNING team_id",
         id,
     )
-    .execute(&ctx.pool)
+    .fetch_one(&ctx.pool)
     .await?;
 
     repository.credential_login = None;
     repository.credential_label = None;
     repository.credential_added_at = None;
-    ctx.publish(ChangeEvent::repositories([id.to_string()]));
+    ctx.publish(ChangeEvent::repositories(team_id, [id.to_string()]));
     Ok(repository)
 }
 

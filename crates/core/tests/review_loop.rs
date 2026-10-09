@@ -100,19 +100,20 @@ async fn a_successful_implementation_with_the_loop_off_lands_exactly_as_before()
     assert_eq!(run.id, rows[0].id);
 
     let task = fixture.task_id.clone();
+    let team = fixture.harness.solo.team_id.clone();
     assert_eq!(
         drain(&mut fixture.harness),
         vec![
             // `worktree::prepare` records the branch it created.
-            ChangeEvent::tasks([task.clone()]),
+            ChangeEvent::tasks(team.clone(), [task.clone()]),
             // `start_run`.
-            ChangeEvent::runs([run.id.clone()]),
-            ChangeEvent::tasks([task.clone()]),
+            ChangeEvent::runs(team.clone(), [run.id.clone()]),
+            ChangeEvent::tasks(team.clone(), [task.clone()]),
             // `finish_run`: the row, then the task it lands.
-            ChangeEvent::runs([run.id.clone()]),
-            ChangeEvent::tasks([task.clone()]),
-            ChangeEvent::tasks([task.clone()]),
-            ChangeEvent::tasks([task.clone()]),
+            ChangeEvent::runs(team.clone(), [run.id.clone()]),
+            ChangeEvent::tasks(team.clone(), [task.clone()]),
+            ChangeEvent::tasks(team.clone(), [task.clone()]),
+            ChangeEvent::tasks(team.clone(), [task.clone()]),
         ],
     );
 
@@ -903,6 +904,7 @@ async fn the_task_stays_running_between_phases_and_moves_to_in_review_once() {
     let mut fixture = Fixture::new().await;
     fixture.enable(json!({})).await;
     let task = fixture.task_id.clone();
+    let team = fixture.harness.solo.team_id.clone();
     fixture.reviews_on(2, vec![]);
     let config = fixture.config();
     let spy = Spy::new(fixture.board(&config));
@@ -933,22 +935,22 @@ async fn the_task_stays_running_between_phases_and_moves_to_in_review_once() {
     assert_eq!(
         drain(&mut fixture.harness),
         vec![
-            ChangeEvent::tasks([task.clone()]),
-            ChangeEvent::runs([implementation.clone()]),
-            ChangeEvent::tasks([task.clone()]),
+            ChangeEvent::tasks(team.clone(), [task.clone()]),
+            ChangeEvent::runs(team.clone(), [implementation.clone()]),
+            ChangeEvent::tasks(team.clone(), [task.clone()]),
             // The implementation's close lands nothing: the loop continues.
-            ChangeEvent::runs([implementation.clone()]),
-            ChangeEvent::tasks([task.clone()]),
-            ChangeEvent::runs([review.clone()]),
-            ChangeEvent::tasks([task.clone()]),
+            ChangeEvent::runs(team.clone(), [implementation.clone()]),
+            ChangeEvent::tasks(team.clone(), [task.clone()]),
+            ChangeEvent::runs(team.clone(), [review.clone()]),
+            ChangeEvent::tasks(team.clone(), [task.clone()]),
             // `record_review_findings`.
-            ChangeEvent::tasks([task.clone()]),
+            ChangeEvent::tasks(team.clone(), [task.clone()]),
             // The review's close, then the one move and the one run-state
             // write the loop's exit makes.
-            ChangeEvent::runs([review.clone()]),
-            ChangeEvent::tasks([task.clone()]),
-            ChangeEvent::tasks([task.clone()]),
-            ChangeEvent::tasks([task.clone()]),
+            ChangeEvent::runs(team.clone(), [review.clone()]),
+            ChangeEvent::tasks(team.clone(), [task.clone()]),
+            ChangeEvent::tasks(team.clone(), [task.clone()]),
+            ChangeEvent::tasks(team.clone(), [task.clone()]),
         ],
     );
 }

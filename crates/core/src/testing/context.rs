@@ -13,9 +13,10 @@ use chrono::{DateTime, Utc};
 use tokio::sync::broadcast::Receiver;
 
 use crate::board::{BoardPort, InProcessBoard};
-use crate::context::ServiceContext;
+use crate::context::{ServiceContext, TeamScope};
 use crate::db::MutationSource;
 use crate::events::ChangeEvent;
+use crate::identity::{ensure_solo, SoloIdentity};
 use crate::paths::AppPaths;
 use crate::runner::RunnerConfig;
 use crate::testing::{test_pool, TestClock};
@@ -40,6 +41,10 @@ pub struct TestContext {
     /// The same instant the context's `Arc<dyn Clock>` reads — advance this and
     /// the code under test sees the new time.
     pub clock: TestClock,
+    /// The board's solo team, user and runner, from the same
+    /// [`ensure_solo`] the shell calls, so a test reads the ids rather than
+    /// querying for them.
+    pub solo: SoloIdentity,
 }
 
 impl TestContext {
@@ -53,13 +58,23 @@ impl TestContext {
     /// is an absolute time, such as a usage limit's epoch `resetsAt`.
     pub async fn starting_at(start: DateTime<Utc>) -> Self {
         let clock = TestClock::new(start);
+        let pool = test_pool().await;
+        // Through the shell's own path rather than rows written here, so every
+        // service test runs against the identity a first launch creates (D28
+        // part 3).
+        let solo = ensure_solo(&pool, &clock)
+            .await
+            .expect("a fresh board must get a solo identity");
         // `Ui` because a service test stands in for the board unless it says
         // otherwise; a test about the MCP path re-sources with `with_source`,
-        // exactly as `mcp::build` does (ADR-0019).
+        // exactly as `mcp::build` does (ADR-0019). Scoped and acting exactly as
+        // the shell's context is.
         let context = ServiceContext::new(
-            test_pool().await,
+            pool,
             Arc::new(clock.clone()),
             MutationSource::Ui,
+            TeamScope::one(solo.team_id.clone()),
+            solo.user_id.clone(),
         );
         let changes = context.subscribe();
 
@@ -67,6 +82,7 @@ impl TestContext {
             context,
             changes,
             clock,
+            solo,
         }
     }
 
@@ -83,6 +99,7 @@ impl TestContext {
             self.context.clone(),
             paths.clone(),
             config.provider.clone(),
+            self.solo.runner_id.clone(),
         ))
     }
 }
@@ -97,11 +114,13 @@ mod tests {
     async fn the_receiver_is_listening_before_the_test_calls_anything() {
         let mut harness = TestContext::new().await;
 
-        harness.context.publish(ChangeEvent::Settings);
+        harness
+            .context
+            .publish(ChangeEvent::settings(harness.solo.team_id.clone()));
 
         assert_eq!(
             harness.changes.try_recv().expect("a waiting publication"),
-            ChangeEvent::Settings
+            ChangeEvent::settings(harness.solo.team_id.clone())
         );
     }
 

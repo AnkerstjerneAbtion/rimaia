@@ -419,7 +419,7 @@ mod tests {
 
         assert_eq!(
             h.changes.try_recv().expect("a publication"),
-            crate::ChangeEvent::Settings
+            crate::ChangeEvent::settings(h.solo.team_id.clone())
         );
     }
 }

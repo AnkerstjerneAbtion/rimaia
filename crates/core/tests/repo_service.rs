@@ -58,7 +58,7 @@ async fn a_valid_repository_registers_showing_its_default_branch_and_no_remote()
 
     assert_eq!(
         h.changes.try_recv().expect("a publication is waiting"),
-        ChangeEvent::repositories([repository.id.clone()])
+        ChangeEvent::repositories(h.solo.team_id.clone(), [repository.id.clone()])
     );
 }
 
@@ -415,7 +415,7 @@ async fn updating_name_default_branch_and_worktree_root_is_readable_afterward() 
     );
     assert_eq!(
         h.changes.try_recv().expect("the update publication"),
-        ChangeEvent::repositories([repository.id])
+        ChangeEvent::repositories(h.solo.team_id.clone(), [repository.id])
     );
 }
 
@@ -461,7 +461,7 @@ async fn removing_a_repository_with_no_tasks_succeeds() {
     );
     assert_eq!(
         h.changes.try_recv().expect("the removal publication"),
-        ChangeEvent::repositories([repository.id])
+        ChangeEvent::repositories(h.solo.team_id.clone(), [repository.id])
     );
 }
 
@@ -528,7 +528,7 @@ async fn set_allow_unattended_runs_flips_the_flag_and_publishes() {
     assert!(repo::ensure_unattended_runs_allowed(&enabled).is_ok());
     assert_eq!(
         h.changes.try_recv().expect("the opt-in publication"),
-        ChangeEvent::repositories([repository.id.clone()])
+        ChangeEvent::repositories(h.solo.team_id.clone(), [repository.id.clone()])
     );
 
     let disabled = repo::set_allow_unattended_runs(&h.context, &repository.id, false)
@@ -595,10 +595,16 @@ async fn file_backed_context(db_file: &Path) -> ServiceContext {
     rimaia_core::db::migrate(&pool)
         .await
         .expect("migrate the file-backed database");
+    let clock = TestClock::new(rimaia_core::testing::test_epoch());
+    let solo = rimaia_core::identity::ensure_solo(&pool, &clock)
+        .await
+        .expect("the file-backed database's solo identity");
     ServiceContext::new(
         pool,
-        Arc::new(TestClock::new(rimaia_core::testing::test_epoch())),
+        Arc::new(clock),
         rimaia_core::db::MutationSource::Ui,
+        rimaia_core::TeamScope::one(solo.team_id),
+        solo.user_id,
     )
 }
 
@@ -607,14 +613,16 @@ async fn file_backed_context(db_file: &Path) -> ServiceContext {
 async fn insert_task(pool: &sqlx::SqlitePool, repository_id: &str) {
     let id = rimaia_core::db::new_id();
     const NOW: &str = "2026-08-20T12:00:00+00:00";
+    let team_id = solo_team(pool).await;
     sqlx::query!(
         r#"
-        INSERT INTO tasks (id, repository_id, title, board_column, position, run_state, created_at, updated_at)
-        VALUES (?1, ?2, 'a task', 'ready', 1.0, 'idle', ?3, ?3)
+        INSERT INTO tasks (id, team_id, repository_id, title, board_column, position, run_state, created_at, updated_at)
+        VALUES (?1, ?4, ?2, 'a task', 'ready', 1.0, 'idle', ?3, ?3)
         "#,
         id,
         repository_id,
         NOW,
+        team_id,
     )
     .execute(pool)
     .await
@@ -727,4 +735,17 @@ fn git<S: AsRef<OsStr>>(dir: &Path, args: &[S]) -> String {
     }
 
     String::from_utf8_lossy(&output.stdout).trim().to_owned()
+}
+
+/// The solo team the board's rows belong to: the identity `TestContext`
+/// already created, or a first launch's, read through the same
+/// `identity::ensure_solo` either way.
+async fn solo_team(pool: &sqlx::SqlitePool) -> String {
+    rimaia_core::identity::ensure_solo(
+        pool,
+        &rimaia_core::testing::TestClock::new(rimaia_core::testing::test_epoch()),
+    )
+    .await
+    .expect("the board's solo identity")
+    .team_id
 }

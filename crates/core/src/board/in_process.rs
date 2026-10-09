@@ -9,6 +9,7 @@ use std::sync::Arc;
 
 use crate::context::ServiceContext;
 use crate::db::MutationSource;
+use crate::events::RunnerId;
 use crate::paths::AppPaths;
 use crate::review::findings::NewReviewFinding;
 use crate::runner::events::RunTail;
@@ -33,17 +34,27 @@ pub struct InProcessBoard {
     ctx: ServiceContext,
     paths: AppPaths,
     provider: Arc<dyn AgentProvider>,
+    /// The runner this board serves: solo's own, from its `SoloIdentity`
+    /// (D31 point 9). It is the adapter's scope, never a request field (D31
+    /// point 3), which is why `StartRun` does not carry it.
+    runner_id: RunnerId,
 }
 
 impl InProcessBoard {
     /// Re-sources `ctx` to [`MutationSource::System`]: a report comes from the
     /// runner, whoever pressed the button, and the claim's trigger records
     /// which button it was (D31 point 9).
-    pub fn new(ctx: ServiceContext, paths: AppPaths, provider: Arc<dyn AgentProvider>) -> Self {
+    pub fn new(
+        ctx: ServiceContext,
+        paths: AppPaths,
+        provider: Arc<dyn AgentProvider>,
+        runner_id: RunnerId,
+    ) -> Self {
         Self {
             ctx: ctx.with_source(MutationSource::System),
             paths,
             provider,
+            runner_id,
         }
     }
 }
@@ -74,7 +85,13 @@ impl BoardPort for InProcessBoard {
     }
 
     fn start_run<'a>(&'a self, lease: &'a LeaseRef, run: StartRun) -> BoardFuture<'a, ()> {
-        Box::pin(service::start_run(&self.ctx, &self.paths, lease, run))
+        Box::pin(service::start_run(
+            &self.ctx,
+            &self.paths,
+            &self.runner_id,
+            lease,
+            run,
+        ))
     }
 
     fn append_transcript<'a>(

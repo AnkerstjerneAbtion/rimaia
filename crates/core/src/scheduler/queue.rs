@@ -818,8 +818,10 @@ impl QueueTask {
             self.shared.record_schedule_error(summary);
             // So the Runs view re-reads and shows it. `queue_state` was not
             // written, so nothing else on this path would have announced
-            // anything at all.
-            ctx.publish(ChangeEvent::Settings);
+            // anything at all. A machine-local fact with no team column: it
+            // names the context's one team until task 048 splits machine-local
+            // events off the team channel.
+            ctx.publish(ChangeEvent::settings(ctx.scope.sole()?.clone()));
             return Ok(Step::Worked);
         }
 
@@ -1446,9 +1448,10 @@ mod tests {
         let mut changes = harness.context.subscribe();
 
         for id in 0..3 {
-            harness
-                .context
-                .publish(ChangeEvent::tasks([id.to_string()]));
+            harness.context.publish(ChangeEvent::tasks(
+                harness.solo.team_id.clone(),
+                [id.to_string()],
+            ));
         }
         drain(&mut changes);
 

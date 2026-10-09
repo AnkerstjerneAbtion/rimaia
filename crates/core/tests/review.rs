@@ -26,7 +26,7 @@ use rimaia_core::review::{self, Dependent, Digest};
 use rimaia_core::scheduler::SkipReason;
 use rimaia_core::tasks::{self, NewTask, TaskFilter};
 use rimaia_core::testing::{test_epoch, TempRepo, TestContext};
-use rimaia_core::{AppPaths, ChangeEvent, ErrorCode, ServiceContext};
+use rimaia_core::{AppPaths, Change, ChangeEvent, ErrorCode, ServiceContext};
 use tempfile::TempDir;
 
 const CHANGES: &str =
@@ -978,13 +978,13 @@ async fn the_review_that_empties_the_queue_advances_the_marker() {
         assert_eq!(f.marker().await, Some(test_epoch()), "{verdict:?}");
         let events = f.drain_events();
         assert!(
-            events.contains(&ChangeEvent::Settings),
+            events.contains(&ChangeEvent::settings(f.harness.solo.team_id.clone())),
             "{verdict:?}: {events:?}"
         );
         assert!(
             events
                 .iter()
-                .any(|event| matches!(event, ChangeEvent::Tasks(_))),
+                .any(|event| matches!(event.change, Change::Tasks(_))),
             "{verdict:?}: {events:?}"
         );
     }
@@ -1028,7 +1028,8 @@ async fn a_review_that_leaves_tasks_in_review_does_not_advance_the_marker() {
 
         assert_eq!(f.marker().await, None, "{verdict:?}");
         assert!(
-            !f.drain_events().contains(&ChangeEvent::Settings),
+            !f.drain_events()
+                .contains(&ChangeEvent::settings(f.harness.solo.team_id.clone())),
             "{verdict:?}"
         );
     }
@@ -1466,11 +1467,14 @@ impl Fixture {
         let id = rimaia_core::db::new_id();
         sqlx::query(
             "INSERT INTO repositories
-               (id, name, path, default_branch, worktree_root, allow_unattended_runs, created_at)
-             VALUES (?1, 'unopted', '/tmp/rimaia-unopted', 'main', '/tmp/rimaia-worktrees', 0, ?2)",
+               (id, team_id, name, path, default_branch, worktree_root, allow_unattended_runs,
+                created_at)
+             VALUES (?1, ?3, 'unopted', '/tmp/rimaia-unopted', 'main', '/tmp/rimaia-worktrees', 0,
+                     ?2)",
         )
         .bind(&id)
         .bind(test_epoch())
+        .bind(&self.harness.solo.team_id)
         .execute(&self.ctx().pool)
         .await
         .expect("seed a repository");

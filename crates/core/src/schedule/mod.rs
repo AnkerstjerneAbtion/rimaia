@@ -202,6 +202,9 @@ async fn fetch(pool: &SqlitePool, id: &str) -> Result<Schedule> {
 /// immediately, for an occurrence an hour older than the row itself. The user
 /// who typed "every night at 22:00" at 23:00 meant tomorrow.
 pub async fn create(ctx: &ServiceContext, input: ScheduleInput) -> Result<Schedule> {
+    // `schedules` has no team column: until task 041 moves it to the runner,
+    // its events name the context's one team.
+    let team_id = ctx.scope.sole()?.clone();
     let input = validate(input)?;
     let id = new_id();
     let armed_at = ctx.clock.now();
@@ -228,7 +231,7 @@ pub async fn create(ctx: &ServiceContext, input: ScheduleInput) -> Result<Schedu
     .await?;
 
     let schedule = fetch(&ctx.pool, &id).await?;
-    ctx.publish(ChangeEvent::schedules([id]));
+    ctx.publish(ChangeEvent::schedules(team_id, [id]));
     Ok(schedule)
 }
 
@@ -240,6 +243,9 @@ pub async fn create(ctx: &ServiceContext, input: ScheduleInput) -> Result<Schedu
 /// that was off — which is [`set_enabled`]'s rule, applied here so the two doors
 /// cannot disagree about what enabling means.
 pub async fn update(ctx: &ServiceContext, id: &str, input: ScheduleInput) -> Result<Schedule> {
+    // `schedules` has no team column: until task 041 moves it to the runner,
+    // its events name the context's one team.
+    let team_id = ctx.scope.sole()?.clone();
     let existing = fetch(&ctx.pool, id).await?;
     let input = validate(input)?;
     let mode = input.mode.as_str();
@@ -274,7 +280,7 @@ pub async fn update(ctx: &ServiceContext, id: &str, input: ScheduleInput) -> Res
     .await?;
 
     let schedule = fetch(&ctx.pool, id).await?;
-    ctx.publish(ChangeEvent::schedules([id.to_string()]));
+    ctx.publish(ChangeEvent::schedules(team_id, [id.to_string()]));
     Ok(schedule)
 }
 
@@ -287,6 +293,9 @@ pub async fn update(ctx: &ServiceContext, id: &str, input: ScheduleInput) -> Res
 /// there is nothing to protect against — a disabled schedule is not due for
 /// anything.
 pub async fn set_enabled(ctx: &ServiceContext, id: &str, enabled: bool) -> Result<Schedule> {
+    // `schedules` has no team column: until task 041 moves it to the runner,
+    // its events name the context's one team.
+    let team_id = ctx.scope.sole()?.clone();
     let armed_at = match enabled {
         true => Some(ctx.clock.now()),
         false => fetch(&ctx.pool, id).await?.armed_at,
@@ -306,7 +315,7 @@ pub async fn set_enabled(ctx: &ServiceContext, id: &str, enabled: bool) -> Resul
     }
 
     let schedule = fetch(&ctx.pool, id).await?;
-    ctx.publish(ChangeEvent::schedules([id.to_string()]));
+    ctx.publish(ChangeEvent::schedules(team_id, [id.to_string()]));
     Ok(schedule)
 }
 
@@ -321,6 +330,9 @@ pub async fn set_enabled(ctx: &ServiceContext, id: &str, enabled: bool) -> Resul
 /// module that is not a user action, which is why it is not on the command
 /// surface at all.
 pub async fn record_fire(ctx: &ServiceContext, id: &str, now: DateTime<Utc>) -> Result<()> {
+    // `schedules` has no team column: until task 041 moves it to the runner,
+    // its events name the context's one team.
+    let team_id = ctx.scope.sole()?.clone();
     sqlx::query!(
         "UPDATE schedules SET last_fired_at = ?2 WHERE id = ?1",
         id,
@@ -328,7 +340,7 @@ pub async fn record_fire(ctx: &ServiceContext, id: &str, now: DateTime<Utc>) -> 
     )
     .execute(&ctx.pool)
     .await?;
-    ctx.publish(ChangeEvent::schedules([id.to_string()]));
+    ctx.publish(ChangeEvent::schedules(team_id, [id.to_string()]));
     Ok(())
 }
 
@@ -341,6 +353,9 @@ pub async fn record_fire(ctx: &ServiceContext, id: &str, now: DateTime<Utc>) -> 
 /// tomorrow. Closing the window is Stop's job, and the user pressing Stop is a
 /// different sentence from the user tidying up a list.
 pub async fn delete(ctx: &ServiceContext, id: &str) -> Result<()> {
+    // `schedules` has no team column: until task 041 moves it to the runner,
+    // its events name the context's one team.
+    let team_id = ctx.scope.sole()?.clone();
     let changed = sqlx::query!("DELETE FROM schedules WHERE id = ?1", id)
         .execute(&ctx.pool)
         .await?
@@ -349,7 +364,7 @@ pub async fn delete(ctx: &ServiceContext, id: &str) -> Result<()> {
         return Err(Error::not_found(format!("no schedule with id {id}")));
     }
 
-    ctx.publish(ChangeEvent::schedules([id.to_string()]));
+    ctx.publish(ChangeEvent::schedules(team_id, [id.to_string()]));
     Ok(())
 }
 
@@ -798,7 +813,7 @@ mod tests {
 
         assert_eq!(
             harness.changes.try_recv().expect("a waiting publication"),
-            ChangeEvent::schedules([created.id.clone()]),
+            ChangeEvent::schedules(harness.solo.team_id.clone(), [created.id.clone()]),
         );
     }
 

@@ -44,6 +44,7 @@ use crate::db::{new_id, ExitClass, RunKind, RunStatus};
 use crate::error::{Error, Result};
 use crate::events::ChangeEvent;
 use crate::review_loop::LoopRow;
+use crate::tasks::team_of_task;
 
 /// How much a finding matters, in D28's `CHECK` spelling.
 #[derive(
@@ -182,7 +183,14 @@ pub enum FindingResolution {
 /// Refused unless the run is a running review of `task_id` that has not
 /// recorded before, and refused for a blank title or body, or a line with no
 /// file. `findings: []` is a clean review, and still sets the witness.
-#[tracing::instrument(skip_all, fields(source = ctx.source.as_str(), task_id = %task_id))]
+#[tracing::instrument(
+    skip_all,
+    fields(
+        source = ctx.source.as_str(),
+        user_id = ctx.actor.as_str(),
+        task_id = %task_id,
+    )
+)]
 pub async fn record(
     ctx: &ServiceContext,
     task_id: &str,
@@ -281,14 +289,22 @@ pub async fn record(
     .fetch_all(&mut *tx)
     .await?;
 
+    let team_id = team_of_task(&mut *tx, task_id).await?;
     tx.commit().await?;
-    ctx.publish(ChangeEvent::tasks([task_id.to_string()]));
+    ctx.publish(ChangeEvent::tasks(team_id, [task_id.to_string()]));
     Ok(recorded)
 }
 
 /// Resolves one open finding of `task_id` from `fix_run_id`, a running fix of
 /// the same task.
-#[tracing::instrument(skip_all, fields(source = ctx.source.as_str(), task_id = %task_id))]
+#[tracing::instrument(
+    skip_all,
+    fields(
+        source = ctx.source.as_str(),
+        user_id = ctx.actor.as_str(),
+        task_id = %task_id,
+    )
+)]
 pub async fn resolve(
     ctx: &ServiceContext,
     task_id: &str,
@@ -360,8 +376,9 @@ pub async fn resolve(
     .await?;
 
     let resolved = fetch_finding(&mut tx, finding_id).await?;
+    let team_id = team_of_task(&mut *tx, task_id).await?;
     tx.commit().await?;
-    ctx.publish(ChangeEvent::tasks([task_id.to_string()]));
+    ctx.publish(ChangeEvent::tasks(team_id, [task_id.to_string()]));
     Ok(resolved)
 }
 

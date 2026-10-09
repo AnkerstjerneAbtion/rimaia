@@ -203,7 +203,10 @@ async fn a_fix_run_resolves_a_finding_and_says_what_it_did() {
     );
     assert_eq!(f.list(&task).await, vec![resolved]);
     assert!(
-        f.drain().contains(&ChangeEvent::tasks([task.clone()])),
+        f.drain().contains(&ChangeEvent::tasks(
+            f.harness.solo.team_id.clone(),
+            [task.clone()]
+        )),
         "get_task's readers hear about it",
     );
 }
@@ -594,11 +597,13 @@ impl Fixture {
         let repository_id = rimaia_core::db::new_id();
         sqlx::query(
             "INSERT INTO repositories
-               (id, name, path, default_branch, worktree_root, allow_unattended_runs, created_at)
-             VALUES (?1, 'rimaia', '/tmp/rimaia', 'main', '/tmp/rimaia-worktrees', 0, ?2)",
+               (id, team_id, name, path, default_branch, worktree_root, allow_unattended_runs,
+                created_at)
+             VALUES (?1, ?3, 'rimaia', '/tmp/rimaia', 'main', '/tmp/rimaia-worktrees', 0, ?2)",
         )
         .bind(&repository_id)
         .bind(test_epoch())
+        .bind(&harness.solo.team_id)
         .execute(&harness.context.pool)
         .await
         .expect("seed a repository");

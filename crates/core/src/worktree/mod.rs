@@ -831,19 +831,23 @@ async fn write_worktree_columns(
     worktree_path: Option<&str>,
 ) -> Result<()> {
     let now = ctx.clock.now();
-    sqlx::query!(
-        "UPDATE tasks SET branch = ?1, worktree_path = ?2, updated_at = ?3 WHERE id = ?4",
+    let team_id = sqlx::query_scalar!(
+        "UPDATE tasks SET branch = ?1, worktree_path = ?2, updated_at = ?3 WHERE id = ?4
+         RETURNING team_id",
         branch,
         worktree_path,
         now,
         task_id,
     )
-    .execute(&ctx.pool)
+    .fetch_optional(&ctx.pool)
     .await?;
 
     // After the write is committed — this runs in autocommit — never before
-    // (ADR-0018).
-    ctx.publish(ChangeEvent::tasks([task_id.to_string()]));
+    // (ADR-0018). A task that is gone wrote nothing, so there is nothing to
+    // announce and no team to name.
+    if let Some(team_id) = team_id {
+        ctx.publish(ChangeEvent::tasks(team_id, [task_id.to_string()]));
+    }
     Ok(())
 }
 

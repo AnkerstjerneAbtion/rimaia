@@ -373,10 +373,11 @@ mod tests {
 
         const NOW: &str = "2026-08-20T12:00:00+00:00";
         sqlx::query!(
-            "INSERT INTO tasks (id, repository_id, title, board_column, position, run_state, created_at, updated_at)
-             VALUES ('3f2b1c00-0000-4000-8000-00000000000a', ?1, 'Still here', 'ready', 1.0, 'idle', ?2, ?2)",
+            "INSERT INTO tasks (id, team_id, repository_id, title, board_column, position, run_state, created_at, updated_at)
+             VALUES ('3f2b1c00-0000-4000-8000-00000000000a', ?3, ?1, 'Still here', 'ready', 1.0, 'idle', ?2, ?2)",
             repository.id,
             NOW,
+            h.solo.team_id,
         )
         .execute(&h.context.pool)
         .await
@@ -520,7 +521,7 @@ mod tests {
 
         assert_eq!(
             h.changes.try_recv().expect("a publication"),
-            ChangeEvent::Settings
+            ChangeEvent::settings(h.solo.team_id.clone())
         );
     }
 }

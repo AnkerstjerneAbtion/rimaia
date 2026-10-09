@@ -44,7 +44,7 @@ use crate::error::{Error, Result};
 use crate::events::ChangeEvent;
 use crate::strategy::settings as strategy_settings;
 use crate::strategy::{effective_strategy, StrategyDefaults};
-use crate::tasks::service::fetch_task_row;
+use crate::tasks::service::{fetch_task_row, team_of_task};
 
 /// The envelope version this build writes. Stamped by
 /// [`set_task_strategy`], never taken from the caller — a proposal that
@@ -345,7 +345,12 @@ pub fn needs_planning(task: &Task, mode: StrategyMode) -> bool {
 /// to record whatever they like about their own card.
 #[tracing::instrument(
     skip_all,
-    fields(source = ctx.source.as_str(), task_id = %task_id, status = ?plan.status)
+    fields(
+        source = ctx.source.as_str(),
+        user_id = ctx.actor.as_str(),
+        task_id = %task_id,
+        status = ?plan.status,
+    )
 )]
 pub async fn set_task_strategy(
     ctx: &ServiceContext,
@@ -392,6 +397,7 @@ pub async fn set_task_strategy(
     .execute(&mut *tx)
     .await?;
 
+    let team_id = team_of_task(&mut *tx, task_id).await?;
     tx.commit().await?;
 
     // Publish before the read-back, exactly as `create_task` does and for its
@@ -399,7 +405,7 @@ pub async fn set_task_strategy(
     // the notification for a mutation that already happened (ADR-0018). It is
     // also how the panel learns a planner wrote back mid-run, which is the only
     // signal there is — the strategy run has no `runs` row to watch.
-    ctx.publish(ChangeEvent::tasks([task_id.to_string()]));
+    ctx.publish(ChangeEvent::tasks(team_id, [task_id.to_string()]));
     fetch_task_row(&ctx.pool, task_id).await
 }
 
@@ -417,7 +423,14 @@ pub async fn set_task_strategy(
 /// The proposal itself is untouched, so the panel keeps rendering the
 /// rationale and the phases after it has been accepted; what changes is who
 /// the run is executing on behalf of.
-#[tracing::instrument(skip_all, fields(source = ctx.source.as_str(), task_id = %task_id))]
+#[tracing::instrument(
+    skip_all,
+    fields(
+        source = ctx.source.as_str(),
+        user_id = ctx.actor.as_str(),
+        task_id = %task_id,
+    )
+)]
 pub async fn accept_task_strategy(ctx: &ServiceContext, task_id: &str) -> Result<Task> {
     let mut tx = ctx.pool.begin().await?;
     let current = fetch_task_row(&mut *tx, task_id).await?;
@@ -440,9 +453,10 @@ pub async fn accept_task_strategy(ctx: &ServiceContext, task_id: &str) -> Result
     .execute(&mut *tx)
     .await?;
 
+    let team_id = team_of_task(&mut *tx, task_id).await?;
     tx.commit().await?;
 
-    ctx.publish(ChangeEvent::tasks([task_id.to_string()]));
+    ctx.publish(ChangeEvent::tasks(team_id, [task_id.to_string()]));
     fetch_task_row(&ctx.pool, task_id).await
 }
 
@@ -461,7 +475,14 @@ pub async fn accept_task_strategy(ctx: &ServiceContext, task_id: &str) -> Result
 ///
 /// Idempotent: clearing a task that has nothing recorded is not an error, only
 /// a no-op with a publication.
-#[tracing::instrument(skip_all, fields(source = ctx.source.as_str(), task_id = %task_id))]
+#[tracing::instrument(
+    skip_all,
+    fields(
+        source = ctx.source.as_str(),
+        user_id = ctx.actor.as_str(),
+        task_id = %task_id,
+    )
+)]
 pub async fn clear_task_strategy(ctx: &ServiceContext, task_id: &str) -> Result<Task> {
     let mut tx = ctx.pool.begin().await?;
     fetch_task_row(&mut *tx, task_id).await?;
@@ -476,9 +497,10 @@ pub async fn clear_task_strategy(ctx: &ServiceContext, task_id: &str) -> Result<
     .execute(&mut *tx)
     .await?;
 
+    let team_id = team_of_task(&mut *tx, task_id).await?;
     tx.commit().await?;
 
-    ctx.publish(ChangeEvent::tasks([task_id.to_string()]));
+    ctx.publish(ChangeEvent::tasks(team_id, [task_id.to_string()]));
     fetch_task_row(&ctx.pool, task_id).await
 }
 

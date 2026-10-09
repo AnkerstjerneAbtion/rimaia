@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE tasks SET branch = ?1, worktree_path = ?2, updated_at = ?3 WHERE id = ?4\n         RETURNING team_id",
+  "describe": {
+    "columns": [
+      {
+        "name": "team_id",
+        "ordinal": 0,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 4
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "3d51bbb7f3e4fcaf636c2c2a34fff1a1320f95fb690194d7826d0e3fc27bfda5"
+}

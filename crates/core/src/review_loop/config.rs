@@ -538,7 +538,7 @@ pub async fn get_review_level(
 
 /// Replaces the global instructions and configuration. `config` is `null` for
 /// nothing set.
-#[tracing::instrument(skip_all, fields(source = ctx.source.as_str()))]
+#[tracing::instrument(skip_all, fields(source = ctx.source.as_str(), user_id = ctx.actor.as_str()))]
 pub async fn set_review_settings(
     ctx: &ServiceContext,
     provider: &dyn AgentProvider,
@@ -548,13 +548,16 @@ pub async fn set_review_settings(
     let config =
         ReviewConfig::from_door(config, &catalogue::catalogue(&ctx.pool, provider).await?)?;
     let stored = config.to_stored()?.unwrap_or_else(|| "{}".to_string());
+    // Both keys are `settings` rows, which have no team column until task 039
+    // moves them to `team_settings`: the event names the context's one team.
+    let team_id = ctx.scope.sole()?.clone();
 
     let mut tx = ctx.pool.begin().await?;
     settings::set_in(&mut *tx, REVIEW_INSTRUCTIONS, instructions).await?;
     settings::set_in(&mut *tx, REVIEW_CONFIG, &stored).await?;
     tx.commit().await?;
 
-    ctx.publish(ChangeEvent::Settings);
+    ctx.publish(ChangeEvent::settings(team_id));
     Ok(ReviewSettings {
         instructions: instructions.to_string(),
         config,
@@ -563,7 +566,14 @@ pub async fn set_review_settings(
 
 /// Replaces one repository's configuration. `config` is `null` to inherit
 /// everything.
-#[tracing::instrument(skip_all, fields(source = ctx.source.as_str(), repository_id = %repository_id))]
+#[tracing::instrument(
+    skip_all,
+    fields(
+        source = ctx.source.as_str(),
+        user_id = ctx.actor.as_str(),
+        repository_id = %repository_id,
+    )
+)]
 pub async fn set_repository_review_config(
     ctx: &ServiceContext,
     provider: &dyn AgentProvider,
@@ -574,20 +584,23 @@ pub async fn set_repository_review_config(
         ReviewConfig::from_door(config, &catalogue::catalogue(&ctx.pool, provider).await?)?;
     let stored = config.to_stored()?;
 
-    let updated = sqlx::query!(
-        "UPDATE repositories SET review_config = ?1 WHERE id = ?2",
+    let Some(team_id) = sqlx::query_scalar!(
+        "UPDATE repositories SET review_config = ?1 WHERE id = ?2 RETURNING team_id",
         stored,
         repository_id,
     )
-    .execute(&ctx.pool)
-    .await?;
-    if updated.rows_affected() == 0 {
+    .fetch_optional(&ctx.pool)
+    .await?
+    else {
         return Err(Error::not_found(format!(
             "no repository with id {repository_id}"
         )));
-    }
+    };
 
-    ctx.publish(ChangeEvent::repositories([repository_id.to_string()]));
+    ctx.publish(ChangeEvent::repositories(
+        team_id,
+        [repository_id.to_string()],
+    ));
     Ok(config)
 }
 
@@ -596,7 +609,14 @@ pub async fn set_repository_review_config(
 /// Not a field of `TaskPatch`: `update_task` is open to a planner's grant for
 /// its own task, and a run that could rewrite its own review settings would
 /// be marking its own homework (ADR-0021 point 4).
-#[tracing::instrument(skip_all, fields(source = ctx.source.as_str(), task_id = %task_id))]
+#[tracing::instrument(
+    skip_all,
+    fields(
+        source = ctx.source.as_str(),
+        user_id = ctx.actor.as_str(),
+        task_id = %task_id,
+    )
+)]
 pub async fn set_task_review(
     ctx: &ServiceContext,
     provider: &dyn AgentProvider,
@@ -610,21 +630,22 @@ pub async fn set_task_review(
     let instructions = instructions.filter(|text| !text.trim().is_empty());
     let now = ctx.clock.now();
 
-    let updated = sqlx::query!(
+    let Some(team_id) = sqlx::query_scalar!(
         "UPDATE tasks SET review_instructions = ?1, review_config = ?2, updated_at = ?3
-          WHERE id = ?4",
+          WHERE id = ?4
+          RETURNING team_id",
         instructions,
         stored,
         now,
         task_id,
     )
-    .execute(&ctx.pool)
-    .await?;
-    if updated.rows_affected() == 0 {
+    .fetch_optional(&ctx.pool)
+    .await?
+    else {
         return Err(Error::not_found(format!("no task with id {task_id}")));
-    }
+    };
 
-    ctx.publish(ChangeEvent::tasks([task_id.to_string()]));
+    ctx.publish(ChangeEvent::tasks(team_id, [task_id.to_string()]));
     Ok(TaskReview {
         instructions,
         config,

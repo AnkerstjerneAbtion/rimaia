@@ -10,9 +10,11 @@
 //! and the busy timeout, are shared with production rather than restated.
 
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
-use sqlx::SqlitePool;
+use sqlx::{SqliteConnection, SqlitePool};
 
+use crate::clock::Clock;
 use crate::db::{migrate, BUSY_TIMEOUT};
+use crate::events::RunnerId;
 
 /// A fresh database with every migration applied.
 ///
@@ -41,6 +43,22 @@ pub async fn test_pool() -> SqlitePool {
         .expect("migrations must apply cleanly to an empty database");
 
     pool
+}
+
+/// A second `runners` row for `user_id`, for a test that needs two machines
+/// over one board (seam-contract D31 point 13's contract harness).
+///
+/// A fixture, not a pairing service: pairing is tasks 047 and 052's, and
+/// outside this module nothing but `identity::ensure_solo` creates a runner.
+pub async fn insert_runner(
+    conn: &mut SqliteConnection,
+    clock: &dyn Clock,
+    user_id: &str,
+    label: &str,
+) -> RunnerId {
+    crate::identity::insert_runner(conn, clock, user_id, label)
+        .await
+        .expect("a runner for an existing user must insert")
 }
 
 #[cfg(test)]

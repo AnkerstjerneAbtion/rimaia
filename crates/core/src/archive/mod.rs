@@ -153,25 +153,25 @@ pub async fn set_repository_on_archive(
     };
 
     let stored = on_archive.as_str();
-    let updated = sqlx::query!(
-        "UPDATE repositories SET on_archive = ?1, on_archive_script = ?2 WHERE id = ?3",
+    let Some(team_id) = sqlx::query_scalar!(
+        "UPDATE repositories SET on_archive = ?1, on_archive_script = ?2 WHERE id = ?3
+         RETURNING team_id",
         stored,
         script,
         repository_id,
     )
-    .execute(&ctx.pool)
+    .fetch_optional(&ctx.pool)
     .await?
-    .rows_affected();
-
-    if updated == 0 {
+    else {
         return Err(Error::not_found(format!(
             "no repository with id {repository_id}"
         )));
-    }
+    };
 
-    ctx.publish(crate::events::ChangeEvent::repositories([
-        repository_id.to_string()
-    ]));
+    ctx.publish(crate::events::ChangeEvent::repositories(
+        team_id,
+        [repository_id.to_string()],
+    ));
     crate::repo::get(ctx, repository_id).await
 }
 

@@ -1,0 +1,38 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT team_id, user_id, runner_id, created_at AS \"created_at: DateTime<Utc>\"\n             FROM solo_identity\n            WHERE singleton = 1",
+  "describe": {
+    "columns": [
+      {
+        "name": "team_id",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "user_id",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "runner_id",
+        "ordinal": 2,
+        "type_info": "Text"
+      },
+      {
+        "name": "created_at: DateTime<Utc>",
+        "ordinal": 3,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "f51f1082b833c87872aa90dacee86bfe45f8abdf8dc79893126bd8abe80c4c4a"
+}

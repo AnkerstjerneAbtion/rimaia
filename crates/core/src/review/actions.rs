@@ -17,7 +17,9 @@ use crate::context::ServiceContext;
 use crate::db::{BoardColumn, RunState, Task};
 use crate::error::{Error, Result};
 use crate::events::ChangeEvent;
-use crate::tasks::service::{ensure_ready_has_a_plan, fetch_task_row, move_within, Destination};
+use crate::tasks::service::{
+    ensure_ready_has_a_plan, fetch_task_row, move_within, team_of_task, Destination,
+};
 use crate::worktree::{self, cleanup, ForceRemoval};
 
 /// What a reject or a request for changes did, as the reviewer is told.
@@ -59,7 +61,14 @@ impl Action {
 }
 
 /// `in_review` to the bottom of `done`.
-#[tracing::instrument(skip_all, fields(source = ctx.source.as_str(), task_id = %id))]
+#[tracing::instrument(
+    skip_all,
+    fields(
+        source = ctx.source.as_str(),
+        user_id = ctx.actor.as_str(),
+        task_id = %id,
+    )
+)]
 pub async fn approve(ctx: &ServiceContext, id: &str) -> Result<Task> {
     decide(ctx, id, Action::Approve, None).await?;
 
@@ -74,7 +83,14 @@ pub async fn approve(ctx: &ServiceContext, id: &str) -> Result<Task> {
 /// the branch and `tasks.branch` untouched: the next run continues on the
 /// reviewed commits. It starts a fresh session, because a queue start from
 /// `idle` always does; this is not a retry.
-#[tracing::instrument(skip_all, fields(source = ctx.source.as_str(), task_id = %id))]
+#[tracing::instrument(
+    skip_all,
+    fields(
+        source = ctx.source.as_str(),
+        user_id = ctx.actor.as_str(),
+        task_id = %id,
+    )
+)]
 pub async fn request_changes(ctx: &ServiceContext, id: &str, note: &str) -> Result<ReviewOutcome> {
     decide(ctx, id, Action::RequestChanges, Some(note)).await
 }
@@ -87,7 +103,14 @@ pub async fn request_changes(ctx: &ServiceContext, id: &str, note: &str) -> Resu
 /// done (D20 point 6). Reusing its name would have the next run push onto a
 /// remote branch holding the rejected commits and fail as a non-fast-forward in
 /// the middle of an unattended night.
-#[tracing::instrument(skip_all, fields(source = ctx.source.as_str(), task_id = %id))]
+#[tracing::instrument(
+    skip_all,
+    fields(
+        source = ctx.source.as_str(),
+        user_id = ctx.actor.as_str(),
+        task_id = %id,
+    )
+)]
 pub async fn reject(ctx: &ServiceContext, id: &str, note: &str) -> Result<ReviewOutcome> {
     decide(ctx, id, Action::Reject, Some(note)).await
 }
@@ -143,17 +166,25 @@ async fn decide(
     .fetch_one(&mut *tx)
     .await?;
     let advanced_marker = in_review == 0;
-    if advanced_marker {
+    // The digest marker is a `settings` row, which has no team column until
+    // task 039: its event names the context's one team, read before the write.
+    let marker_team = if advanced_marker {
+        let team_id = ctx.scope.sole()?.clone();
         digest::advance_marker(&mut tx, ctx.clock.now()).await?;
-    }
+        Some(team_id)
+    } else {
+        None
+    };
+    let team_id = team_of_task(&mut *tx, id).await?;
 
     tx.commit().await?;
 
     ctx.publish(ChangeEvent::tasks(
+        team_id,
         std::iter::once(id.to_string()).chain(rebalanced.into_iter().filter(|rid| rid != id)),
     ));
-    if advanced_marker {
-        ctx.publish(ChangeEvent::Settings);
+    if let Some(marker_team) = marker_team {
+        ctx.publish(ChangeEvent::settings(marker_team));
     }
 
     let set_aside_branch = (action == Action::Reject)

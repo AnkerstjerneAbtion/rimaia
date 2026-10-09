@@ -757,11 +757,14 @@ async fn a_started_run_records_its_prompt_verbatim_beside_its_transcript_path() 
 
     assert_eq!(
         fixture.harness.changes.try_recv().expect("a publication"),
-        ChangeEvent::runs([run.id])
+        ChangeEvent::runs(fixture.harness.solo.team_id.clone(), [run.id])
     );
     assert_eq!(
         fixture.harness.changes.try_recv().expect("a publication"),
-        ChangeEvent::tasks([fixture.task_id.clone()]),
+        ChangeEvent::tasks(
+            fixture.harness.solo.team_id.clone(),
+            [fixture.task_id.clone()]
+        ),
         "a card renders its last run (seam-contract D12), so the task changed too"
     );
 }
@@ -1124,18 +1127,24 @@ async fn finishing_a_run_publishes_the_run_and_the_task_it_belongs_to() {
 
     assert_eq!(
         fixture.harness.changes.try_recv().expect("the run"),
-        ChangeEvent::runs([run.id])
+        ChangeEvent::runs(fixture.harness.solo.team_id.clone(), [run.id])
     );
     // Twice for the task: once for the row this run changed, once from
     // `set_run_state`'s own publication. Both are ids, so a subscriber re-reads
     // and neither is wrong (ADR-0018).
     assert_eq!(
         fixture.harness.changes.try_recv().expect("the task"),
-        ChangeEvent::tasks([fixture.task_id.clone()])
+        ChangeEvent::tasks(
+            fixture.harness.solo.team_id.clone(),
+            [fixture.task_id.clone()]
+        )
     );
     assert_eq!(
         fixture.harness.changes.try_recv().expect("the run state"),
-        ChangeEvent::tasks([fixture.task_id.clone()])
+        ChangeEvent::tasks(
+            fixture.harness.solo.team_id.clone(),
+            [fixture.task_id.clone()]
+        )
     );
 }
 
@@ -1652,11 +1661,13 @@ impl RunFixture {
 
 async fn seed_repository(pool: &SqlitePool) -> String {
     let id = rimaia_core::db::new_id();
+    let team_id = solo_team(pool).await;
     sqlx::query!(
-        r#"INSERT INTO repositories (id, name, path, default_branch, worktree_root, allow_unattended_runs, created_at)
-           VALUES (?1, 'rimaia', '/tmp/rimaia', 'main', '/tmp/rimaia-worktrees', 1, ?2)"#,
+        r#"INSERT INTO repositories (id, team_id, name, path, default_branch, worktree_root, allow_unattended_runs, created_at)
+           VALUES (?1, ?3, 'rimaia', '/tmp/rimaia', 'main', '/tmp/rimaia-worktrees', 1, ?2)"#,
         id,
         NOW,
+        team_id,
     )
     .execute(pool)
     .await
@@ -1673,4 +1684,17 @@ fn expected_status(exit_class: ExitClass) -> RunStatus {
         ExitClass::Interrupted => RunStatus::Interrupted,
         ExitClass::UsageLimit | ExitClass::Transient | ExitClass::Fatal => RunStatus::Failed,
     }
+}
+
+/// The solo team the board's rows belong to: the identity `TestContext`
+/// already created, or a first launch's, read through the same
+/// `identity::ensure_solo` either way.
+async fn solo_team(pool: &SqlitePool) -> String {
+    rimaia_core::identity::ensure_solo(
+        pool,
+        &rimaia_core::testing::TestClock::new(rimaia_core::testing::test_epoch()),
+    )
+    .await
+    .expect("the board's solo identity")
+    .team_id
 }

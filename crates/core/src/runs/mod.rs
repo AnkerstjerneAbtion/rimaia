@@ -702,14 +702,15 @@ mod tests {
     async fn seed_repository_at(ctx: &ServiceContext, name: &str, path: &str) -> String {
         let id = new_id();
         sqlx::query(
-            "INSERT INTO repositories (id, name, path, default_branch, worktree_root,
+            "INSERT INTO repositories (id, team_id, name, path, default_branch, worktree_root,
                 allow_unattended_runs, created_at)
-             VALUES (?1, ?2, ?3, 'main', '/tmp/rimaia-worktrees', 0, ?4)",
+             VALUES (?1, ?5, ?2, ?3, 'main', '/tmp/rimaia-worktrees', 0, ?4)",
         )
         .bind(&id)
         .bind(name)
         .bind(path)
         .bind(ctx.clock.now())
+        .bind(ctx.scope.sole().expect("the harness's solo team"))
         .execute(&ctx.pool)
         .await
         .expect("seed a repository");
@@ -729,15 +730,16 @@ mod tests {
         let id = new_id();
         sqlx::query(
             "INSERT INTO tasks
-                (id, repository_id, title, board_column, position, run_state, branch,
+                (id, team_id, repository_id, title, board_column, position, run_state, branch,
                  created_at, updated_at)
-             VALUES (?1, ?2, ?3, 'ready', 1.0, 'idle', ?4, ?5, ?5)",
+             VALUES (?1, ?6, ?2, ?3, 'ready', 1.0, 'idle', ?4, ?5, ?5)",
         )
         .bind(&id)
         .bind(repository_id)
         .bind(title)
         .bind(branch)
         .bind(ctx.clock.now())
+        .bind(ctx.scope.sole().expect("the harness's solo team"))
         .execute(&ctx.pool)
         .await
         .expect("seed a task");

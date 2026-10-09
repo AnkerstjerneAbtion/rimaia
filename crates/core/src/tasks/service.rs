@@ -27,7 +27,7 @@ use crate::db::{
     StrategyMode, StrategySource, Task, TaskLink,
 };
 use crate::error::{Error, Result};
-use crate::events::ChangeEvent;
+use crate::events::{ChangeEvent, TeamId};
 use crate::review_loop::{self, ReviewConfig, ReviewLoopSummary};
 use crate::strategy::{effective_strategy, EffectiveStrategy, StrategyOrigin};
 use crate::tasks::position::{position_between, rebalance_column, rebalanced_positions, Placement};
@@ -271,7 +271,11 @@ SELECT t.*,
 /// task enters `ready` through.
 #[tracing::instrument(
     skip_all,
-    fields(source = ctx.source.as_str(), repository_id = %input.repository_id)
+    fields(
+        source = ctx.source.as_str(),
+        user_id = ctx.actor.as_str(),
+        repository_id = %input.repository_id,
+    )
 )]
 pub async fn create_task(ctx: &ServiceContext, input: NewTask) -> Result<Task> {
     validate_title(&input.title)?;
@@ -281,6 +285,12 @@ pub async fn create_task(ctx: &ServiceContext, input: NewTask) -> Result<Task> {
 
     let mut tx = ctx.pool.begin().await?;
 
+    // The repository's team, read in this transaction: a task belongs to the
+    // team its repository does (ADR-0029 point 1), never to one taken from the
+    // scope, which may name several. The composite foreign key on
+    // `(repository_id, team_id)` is the store's backstop for a writer that
+    // gets this wrong.
+    let team_id = crate::repo::team_of_repository(&mut *tx, &input.repository_id).await?;
     let (position, rebalanced_ids) =
         append_task_position(&mut tx, &input.repository_id, column).await?;
     let id = new_id();
@@ -288,10 +298,11 @@ pub async fn create_task(ctx: &ServiceContext, input: NewTask) -> Result<Task> {
 
     sqlx::query!(
         r#"INSERT INTO tasks
-            (id, repository_id, title, plan, extra_instructions, board_column, position,
-             run_state, created_at, updated_at, source)
-           VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?9, ?10)"#,
+            (id, team_id, repository_id, title, plan, extra_instructions, board_column,
+             position, run_state, created_at, updated_at, source)
+           VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?10, ?11)"#,
         id,
+        team_id,
         input.repository_id,
         input.title,
         plan,
@@ -331,6 +342,7 @@ pub async fn create_task(ctx: &ServiceContext, input: NewTask) -> Result<Task> {
     // row it renumbered, not just this one, so those ids ride along too — see
     // `rebalance_column`'s own doc comment for why a subscriber needs them.
     ctx.publish(ChangeEvent::tasks(
+        team_id,
         std::iter::once(id.clone()).chain(rebalanced_ids.into_iter().filter(|rid| rid != &id)),
     ));
     let created = fetch_task_row(&ctx.pool, &id).await?;
@@ -595,10 +607,18 @@ fn strongest_origin(effective: &EffectiveStrategy) -> StrategyOrigin {
 /// `patch.repository_id` re-files the task, and is refused once anything has
 /// tied it to the repository it is in — see
 /// [`resolve_repository_placement`] and seam-contract D13.
-#[tracing::instrument(skip_all, fields(source = ctx.source.as_str(), task_id = %id))]
+#[tracing::instrument(
+    skip_all,
+    fields(
+        source = ctx.source.as_str(),
+        user_id = ctx.actor.as_str(),
+        task_id = %id,
+    )
+)]
 pub async fn update_task(ctx: &ServiceContext, id: &str, patch: TaskPatch) -> Result<Task> {
     let mut tx = ctx.pool.begin().await?;
     let current = fetch_task_row(&mut *tx, id).await?;
+    let team_id = team_of_task(&mut *tx, id).await?;
 
     // Resolved before the patch's own columns are folded in, because it is
     // the one field whose new value depends on rows other than this task's:
@@ -658,9 +678,11 @@ pub async fn update_task(ctx: &ServiceContext, id: &str, patch: TaskPatch) -> Re
     // A reassignment that forced a rebalance in the destination column
     // renumbered other cards too, so their ids ride along the way
     // `create_task` and `move_task` send theirs.
-    ctx.publish(ChangeEvent::tasks(std::iter::once(id.to_string()).chain(
-        placement.rebalanced_ids.into_iter().filter(|rid| rid != id),
-    )));
+    ctx.publish(ChangeEvent::tasks(
+        team_id,
+        std::iter::once(id.to_string())
+            .chain(placement.rebalanced_ids.into_iter().filter(|rid| rid != id)),
+    ));
     let updated = fetch_task_row(&ctx.pool, id).await?;
     Ok(updated)
 }
@@ -675,7 +697,14 @@ pub async fn update_task(ctx: &ServiceContext, id: &str, patch: TaskPatch) -> Re
 /// outgoing dependency edges and its runs — all by the schema's `CASCADE`,
 /// exercised here through the service rather than assumed from the schema
 /// test suite in `tests/store.rs`.
-#[tracing::instrument(skip_all, fields(source = ctx.source.as_str(), task_id = %id))]
+#[tracing::instrument(
+    skip_all,
+    fields(
+        source = ctx.source.as_str(),
+        user_id = ctx.actor.as_str(),
+        task_id = %id,
+    )
+)]
 pub async fn delete_task(ctx: &ServiceContext, id: &str) -> Result<()> {
     let mut tx = ctx.pool.begin().await?;
     fetch_task_row(&mut *tx, id).await?;
@@ -708,13 +737,13 @@ pub async fn delete_task(ctx: &ServiceContext, id: &str) -> Result<()> {
         )));
     }
 
-    sqlx::query!("DELETE FROM tasks WHERE id = ?1", id)
-        .execute(&mut *tx)
+    let team_id = sqlx::query_scalar!("DELETE FROM tasks WHERE id = ?1 RETURNING team_id", id)
+        .fetch_one(&mut *tx)
         .await?;
 
     tx.commit().await?;
 
-    ctx.publish(ChangeEvent::tasks([id.to_string()]));
+    ctx.publish(ChangeEvent::tasks(team_id, [id.to_string()]));
     Ok(())
 }
 
@@ -784,7 +813,14 @@ pub struct ArchiveReport {
 /// [`scheduler::selection`](crate::scheduler::selection) has no task read of
 /// its own — it calls [`list_tasks`], whose filter defaults to excluding
 /// archived rows.
-#[tracing::instrument(skip_all, fields(source = ctx.source.as_str(), task_id = %id))]
+#[tracing::instrument(
+    skip_all,
+    fields(
+        source = ctx.source.as_str(),
+        user_id = ctx.actor.as_str(),
+        task_id = %id,
+    )
+)]
 pub async fn archive_task(ctx: &ServiceContext, id: &str) -> Result<ArchivedTask> {
     let task = fetch_task_row(&ctx.pool, id).await?;
 
@@ -814,15 +850,15 @@ pub async fn archive_task(ctx: &ServiceContext, id: &str) -> Result<ArchivedTask
     }
 
     let now = ctx.clock.now();
-    sqlx::query!(
-        "UPDATE tasks SET archived_at = ?1, updated_at = ?1 WHERE id = ?2",
+    let team_id = sqlx::query_scalar!(
+        "UPDATE tasks SET archived_at = ?1, updated_at = ?1 WHERE id = ?2 RETURNING team_id",
         now,
         id,
     )
-    .execute(&ctx.pool)
+    .fetch_one(&ctx.pool)
     .await?;
 
-    ctx.publish(ChangeEvent::tasks([id.to_string()]));
+    ctx.publish(ChangeEvent::tasks(team_id.clone(), [id.to_string()]));
 
     let cleanup = crate::archive::run_on_archive(ctx, &task).await;
     if cleanup.needs_attention() {
@@ -833,7 +869,7 @@ pub async fn archive_task(ctx: &ServiceContext, id: &str) -> Result<ArchivedTask
     // the first publish is what makes the board drop the card promptly and this
     // one only corrects what the archive list shows.
     if matches!(cleanup, OnArchiveOutcome::WorktreeRemoved { .. }) {
-        ctx.publish(ChangeEvent::tasks([id.to_string()]));
+        ctx.publish(ChangeEvent::tasks(team_id, [id.to_string()]));
     }
 
     Ok(ArchivedTask {
@@ -856,7 +892,14 @@ pub async fn archive_task(ctx: &ServiceContext, id: &str) -> Result<ArchivedTask
 /// removed and the next run recreates it, which is what
 /// [`worktree::prepare`](crate::worktree::prepare) does for any task that has
 /// none.
-#[tracing::instrument(skip_all, fields(source = ctx.source.as_str(), task_id = %id))]
+#[tracing::instrument(
+    skip_all,
+    fields(
+        source = ctx.source.as_str(),
+        user_id = ctx.actor.as_str(),
+        task_id = %id,
+    )
+)]
 pub async fn unarchive_task(ctx: &ServiceContext, id: &str) -> Result<Task> {
     let task = fetch_task_row(&ctx.pool, id).await?;
     if task.archived_at.is_none() {
@@ -864,15 +907,15 @@ pub async fn unarchive_task(ctx: &ServiceContext, id: &str) -> Result<Task> {
     }
 
     let now = ctx.clock.now();
-    sqlx::query!(
-        "UPDATE tasks SET archived_at = NULL, updated_at = ?1 WHERE id = ?2",
+    let team_id = sqlx::query_scalar!(
+        "UPDATE tasks SET archived_at = NULL, updated_at = ?1 WHERE id = ?2 RETURNING team_id",
         now,
         id,
     )
-    .execute(&ctx.pool)
+    .fetch_one(&ctx.pool)
     .await?;
 
-    ctx.publish(ChangeEvent::tasks([id.to_string()]));
+    ctx.publish(ChangeEvent::tasks(team_id, [id.to_string()]));
     fetch_task_row(&ctx.pool, id).await
 }
 
@@ -887,7 +930,14 @@ pub async fn unarchive_task(ctx: &ServiceContext, id: &str) -> Result<Task> {
 /// Order is the caller's. The board hands over the picked set, and a user
 /// reading a report of nine successes and one refusal is reading it against the
 /// order they picked in.
-#[tracing::instrument(skip_all, fields(source = ctx.source.as_str(), count = ids.len()))]
+#[tracing::instrument(
+    skip_all,
+    fields(
+        source = ctx.source.as_str(),
+        user_id = ctx.actor.as_str(),
+        count = ids.len(),
+    )
+)]
 pub async fn archive_tasks(ctx: &ServiceContext, ids: &[String]) -> Result<ArchiveReport> {
     if ids.is_empty() {
         return Err(Error::invalid("name at least one task to archive"));
@@ -937,7 +987,15 @@ pub async fn archive_tasks(ctx: &ServiceContext, ids: &[String]) -> Result<Archi
 /// Refuses to land in [`BoardColumn::Ready`] with no plan. Landing in
 /// [`BoardColumn::Done`] is always allowed from anywhere — the user is in
 /// charge of their own board.
-#[tracing::instrument(skip_all, fields(source = ctx.source.as_str(), task_id = %id, column = ?column))]
+#[tracing::instrument(
+    skip_all,
+    fields(
+        source = ctx.source.as_str(),
+        user_id = ctx.actor.as_str(),
+        task_id = %id,
+        column = ?column,
+    )
+)]
 pub async fn move_task(
     ctx: &ServiceContext,
     id: &str,
@@ -1018,12 +1076,16 @@ async fn move_into_column(
 ) -> Result<Task> {
     let mut tx = ctx.pool.begin_with("BEGIN IMMEDIATE").await?;
     let rebalanced_ids = move_within(ctx, &mut tx, id, column, destination).await?;
+    let team_id = team_of_task(&mut *tx, id).await?;
 
     tx.commit().await?;
 
     // See `create_task`'s identical comment: publish before the read-back,
-    // and name every id a forced rebalance renumbered alongside this one.
+    // and name every id a forced rebalance renumbered alongside this one. A
+    // rebalance renumbers one repository's column, so every id is this
+    // task's team's.
     ctx.publish(ChangeEvent::tasks(
+        team_id,
         std::iter::once(id.to_string()).chain(rebalanced_ids.into_iter().filter(|rid| rid != id)),
     ));
     let updated = fetch_task_row(&ctx.pool, id).await?;
@@ -1331,14 +1393,31 @@ where
     .ok_or_else(|| Error::not_found(format!("no task with id {id}")))
 }
 
+/// The team task `id` belongs to, in the sentence [`fetch_task_row`] uses for
+/// a task that is not there.
+///
+/// For a publish (ADR-0034 point 3): an event names the written row's own
+/// team, read beside the write, never one assumed from the context's scope.
+pub(crate) async fn team_of_task<'e, E>(executor: E, id: &str) -> Result<TeamId>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Sqlite>,
+{
+    sqlx::query_scalar!("SELECT team_id FROM tasks WHERE id = ?1", id)
+        .fetch_optional(executor)
+        .await?
+        .ok_or_else(|| Error::not_found(format!("no task with id {id}")))
+}
+
 async fn fetch_last_run(pool: &SqlitePool, task_id: &str) -> Result<Option<Run>> {
+    // `log_path!`: every run a solo board holds was opened on this machine,
+    // which always fills it. Task 066 retires this reader.
     let run = sqlx::query_as!(
         Run,
         r#"SELECT id, task_id, attempt, kind AS "kind: RunKind", status AS "status: RunStatus",
             session_id, prompt,
             started_at AS "started_at: DateTime<Utc>", ended_at AS "ended_at: DateTime<Utc>",
-            exit_class AS "exit_class: ExitClass", error_message, num_turns, cost_usd, log_path,
-            pr_url, resume_after AS "resume_after: DateTime<Utc>", base_ref,
+            exit_class AS "exit_class: ExitClass", error_message, num_turns, cost_usd,
+            log_path AS "log_path!", pr_url, resume_after AS "resume_after: DateTime<Utc>", base_ref,
             model, effort, run_environment, input_tokens, output_tokens,
             cache_read_tokens, cache_creation_tokens, head_sha, base_sha
            FROM runs WHERE task_id = ?1 ORDER BY attempt DESC LIMIT 1"#,
@@ -1958,14 +2037,15 @@ mod tests {
     async fn seed_repository(ctx: &ServiceContext, name: &str) -> String {
         let id = crate::db::new_id();
         sqlx::query(
-            "INSERT INTO repositories (id, name, path, default_branch, worktree_root,
+            "INSERT INTO repositories (id, team_id, name, path, default_branch, worktree_root,
                 allow_unattended_runs, created_at)
-             VALUES (?1, ?2, ?3, 'main', '/tmp/rimaia-worktrees', 0, ?4)",
+             VALUES (?1, ?5, ?2, ?3, 'main', '/tmp/rimaia-worktrees', 0, ?4)",
         )
         .bind(&id)
         .bind(name)
         .bind(format!("/tmp/{name}"))
         .bind(ctx.clock.now())
+        .bind(ctx.scope.sole().expect("the harness's solo team"))
         .execute(&ctx.pool)
         .await
         .expect("seed a repository");

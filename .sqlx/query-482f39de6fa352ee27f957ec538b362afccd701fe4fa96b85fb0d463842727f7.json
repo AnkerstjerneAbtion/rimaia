@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT team_id FROM repositories WHERE id = ?1",
+  "describe": {
+    "columns": [
+      {
+        "name": "team_id",
+        "ordinal": 0,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "482f39de6fa352ee27f957ec538b362afccd701fe4fa96b85fb0d463842727f7"
+}

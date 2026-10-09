@@ -176,7 +176,7 @@ mod tests {
 
         assert_eq!(
             harness.changes.try_recv().expect("a publication"),
-            ChangeEvent::Settings
+            ChangeEvent::settings(harness.solo.team_id.clone())
         );
     }
 }

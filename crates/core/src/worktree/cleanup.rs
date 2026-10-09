@@ -281,12 +281,15 @@ pub async fn set_auto_cleanup(ctx: &ServiceContext, value: AutoCleanup) -> Resul
 /// disk does not is still listed, with `exists: false` — it is the thing
 /// reconciliation is for, and hiding it would hide the problem.
 pub async fn inventory(ctx: &ServiceContext) -> Result<WorktreeInventory> {
+    // `repository_path!`: a task with a worktree on this machine belongs to a
+    // repository registered from it, which always has a path. Task 066 retires
+    // this reader, with the worktree paths themselves.
     let rows = sqlx::query!(
         r#"SELECT t.id AS task_id, t.title AS task_title, t.repository_id,
                   t.branch, t.worktree_path,
                   t.board_column AS "column: BoardColumn",
                   t.run_state AS "run_state: RunState",
-                  r.name AS repository_name, r.path AS repository_path,
+                  r.name AS repository_name, r.path AS "repository_path!",
                   r.default_branch
              FROM tasks t
              JOIN repositories r ON r.id = t.repository_id

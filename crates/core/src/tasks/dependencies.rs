@@ -30,8 +30,8 @@ use sqlx::SqliteConnection;
 use crate::context::ServiceContext;
 use crate::db::{BoardColumn, MutationSource, RunState, StrategyMode, StrategySource, Task};
 use crate::error::{Error, Result};
-use crate::events::ChangeEvent;
-use crate::tasks::service::fetch_task_row;
+use crate::events::{per_team, ChangeEvent};
+use crate::tasks::service::{fetch_task_row, team_of_task};
 
 /// The whole existing graph: task id -> the ids it depends on.
 type Edges = HashMap<String, Vec<String>>;
@@ -52,7 +52,12 @@ type Edges = HashMap<String, Vec<String>>;
 /// difference.
 #[tracing::instrument(
     skip_all,
-    fields(source = ctx.source.as_str(), task_id = %task_id, count = depends_on.len())
+    fields(
+        source = ctx.source.as_str(),
+        user_id = ctx.actor.as_str(),
+        task_id = %task_id,
+        count = depends_on.len(),
+    )
 )]
 pub async fn set_task_dependencies(
     ctx: &ServiceContext,
@@ -128,14 +133,24 @@ pub async fn set_task_dependencies(
     .execute(&mut *tx)
     .await?;
 
-    tx.commit().await?;
-
     // The task itself, plus every task that gained or lost an incoming edge.
     // Strictly D12 says only `task_id` changed; an id means "re-read this",
     // which is always safe, and task 011's dependency panel will want them.
-    ctx.publish(ChangeEvent::tasks(
-        std::iter::once(task_id.to_string()).chain(symmetric_difference(&previous, &requested)),
-    ));
+    // Each id's team is read beside it, in this transaction, because nothing
+    // here makes a dependency share its dependent's team: an edge across
+    // teams is announced to each team separately (ADR-0034 point 3).
+    let mut announced = Vec::new();
+    for id in
+        std::iter::once(task_id.to_string()).chain(symmetric_difference(&previous, &requested))
+    {
+        announced.push((team_of_task(&mut *tx, &id).await?, id));
+    }
+
+    tx.commit().await?;
+
+    for event in per_team(announced, ChangeEvent::tasks) {
+        ctx.publish(event);
+    }
 
     let mut stored = requested;
     stored.sort();

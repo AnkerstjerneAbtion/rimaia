@@ -819,7 +819,13 @@ pub mod cases {
     pub async fn every_lease_method_answers_not_found_for_a_task_that_does_not_exist<H: Harness>() {
         let harness = H::start().await;
         let runner = harness.runner(Which::A);
-        let nowhere = LeaseRef::solo("no-such-task");
+        let team = harness
+            .board()
+            .scope
+            .sole()
+            .expect("one board team")
+            .clone();
+        let nowhere = LeaseRef::solo("no-such-task", team);
 
         for method in BoardMethod::ALL {
             // The three lease-less methods are scoped by the runner, not by a

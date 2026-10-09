@@ -152,11 +152,14 @@ async fn missing_worktrees(pool: &SqlitePool) -> Result<Vec<String>> {
 }
 
 /// One row of the `runs` scan below: an id paired with the transcript path
-/// recorded on it. `log_path` is `NOT NULL` in the schema, so no override is
-/// needed the way [`WorktreeCandidate`] needs one.
+/// recorded on it.
+///
+/// `log_path` is nullable since task 038: a run another machine opened has no
+/// path here, its transcript lives on the board (task 056). Such a row has no
+/// local file to have lost, so it is not a missing log.
 struct RunCandidate {
     id: String,
-    log_path: String,
+    log_path: Option<String>,
 }
 
 async fn missing_run_logs(pool: &SqlitePool) -> Result<Vec<String>> {
@@ -166,7 +169,10 @@ async fn missing_run_logs(pool: &SqlitePool) -> Result<Vec<String>> {
 
     let mut missing = Vec::new();
     for candidate in candidates {
-        if path_is_missing(&candidate.log_path).await {
+        let Some(log_path) = candidate.log_path else {
+            continue;
+        };
+        if path_is_missing(&log_path).await {
             missing.push(candidate.id);
         }
     }
@@ -182,6 +188,7 @@ async fn path_is_missing(path: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::testing::TestClock;
     use pretty_assertions::assert_eq;
     use rimaia_core::testing::test_pool;
 
@@ -329,13 +336,25 @@ mod tests {
     /// eventually mixes the two in a column that sorts by them.
     const NOW: &str = "2026-08-20T12:00:00+00:00";
 
+    /// The solo team every fixture here belongs to, through the same
+    /// `ensure_solo` the shell calls. Idempotent, so each fixture may ask.
+    async fn solo_team(pool: &SqlitePool) -> String {
+        crate::identity::ensure_solo(pool, &TestClock::new(crate::testing::test_epoch()))
+            .await
+            .expect("a fresh board gets a solo identity")
+            .team_id
+    }
+
     async fn insert_repository(pool: &SqlitePool) -> String {
         let id = crate::db::new_id();
+        let team_id = solo_team(pool).await;
         sqlx::query!(
             "INSERT INTO repositories
-                (id, name, path, default_branch, worktree_root, allow_unattended_runs, created_at)
-             VALUES (?, 'rimaia', '/tmp/rimaia', 'main', '/tmp/rimaia/worktrees', 0, ?)",
+                (id, team_id, name, path, default_branch, worktree_root, allow_unattended_runs,
+                 created_at)
+             VALUES (?, ?, 'rimaia', '/tmp/rimaia', 'main', '/tmp/rimaia/worktrees', 0, ?)",
             id,
+            team_id,
             NOW,
         )
         .execute(pool)
@@ -351,12 +370,14 @@ mod tests {
         worktree_path: Option<&str>,
     ) -> String {
         let id = crate::db::new_id();
+        let team_id = solo_team(pool).await;
         sqlx::query!(
             "INSERT INTO tasks
-                (id, repository_id, title, board_column, position, run_state, worktree_path,
-                 created_at, updated_at)
-             VALUES (?, ?, 'a task', 'ready', 1.0, ?, ?, ?, ?)",
+                (id, team_id, repository_id, title, board_column, position, run_state,
+                 worktree_path, created_at, updated_at)
+             VALUES (?, ?, ?, 'a task', 'ready', 1.0, ?, ?, ?, ?)",
             id,
+            team_id,
             repository_id,
             run_state,
             worktree_path,
