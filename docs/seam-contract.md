@@ -4640,6 +4640,60 @@ composed from its claim's context. D35 point 8 is the decision. A third reader a
 
 **Binds.** 059.
 
+### Amendment, 2026-10-09 — what task 036 found building the in-process side
+
+Three refinements, each found while writing the in-process adapter. None changes the trait
+signature in point 2.
+
+**Point 4: the runner notes the usage-limit pause twice, and once before `finish_run`.**
+Point 4 has the runner raise its pause from `NextStep::Released`, after the board decided
+`resume_after`. That opens a window the old `apply_retry_policy` did not have:
+`finish_run` publishes, the publication wakes the queue, and a free slot can start another
+task into the window this run just found closed, before the pause exists. So for a
+`usage_limit` outcome whose `usage_limit_resets_at` is known, the runner calls
+`pause::note_usage_limit` at that reset **before** `finish_run`, and again at
+`resume_after` after `Released`, if there is one. `note_usage_limit` only ever lengthens
+the pause, so the second call can only move it later. Three cases follow, and all three
+are deliberate:
+
+- **The board resumes the task.** The stored pause ends at `resume_after` (the reset plus
+  this run's jitter), as it did before 036. The setting is now written twice and publishes
+  twice.
+- **The board does not resume it.** That happens when the reset outlasts the run window
+  (`GiveUp::OutlastsRunWindow`), or when the attempt history cannot be read. The pause now
+  holds until the reset, where before 036 there was none. The limit is the account's, not
+  this task's, so a task started before the reset would hit the same wall.
+- **The CLI reported no reset time** (the fallback-poll case). There is nothing to note
+  before `finish_run`, so the window remains open between the publication and the note at
+  `resume_after`. This is a named residual. Closing it would mean the runner guessing the
+  fallback poll, which is the board's decision.
+
+Tests: `a_usage_limit_holds_new_starts_before_the_board_hears_the_run_finished`,
+`the_pause_a_usage_limit_leaves_is_the_instant_the_board_chose_to_resume_at` and
+`a_usage_limit_that_outlasts_the_run_window_still_holds_new_starts_until_the_reset`, in
+`crates/core/tests/runner_board_port.rs`.
+
+**Point 7: `ClaimTarget::Next` and `FreeCapacity` arrive with 042, not 036.** Point 7 says
+"036 ships every method except `run_tool`", which read as 036 shipping every `ClaimTarget`
+variant too. Before 042 the in-process body of `Next` could only be a refusal, and a variant
+whose only behaviour is a refusal cannot be told apart from a bug. 036 ships `Run` and
+`Plan`. 042 adds `Next` and `FreeCapacity` together with the board-side selection that gives
+them a body. Adding a variant is not a trait signature change.
+
+**Point 6: `Catalogue` keeps `deny_unknown_fields`, and 052 decides it.** Point 6 says no
+DTO uses `deny_unknown_fields`. Every type in `board/types.rs` keeps that rule. One carried
+core type does not: `Catalogue`, `CatalogueEntry` and `PlannerBudget` refuse unknown keys,
+and that refusal is what turns a misspelled key in the stored setting into a warning
+(`strategy/catalogue.rs`). In process the attribute costs nothing, because both ends are one
+binary. Over HTTP it would make a newer board's catalogue unreadable to an older runner.
+052 decides between a wire mirror of the catalogue and relaxing the attribute. 036 changes
+neither, and gives the carried core types only the `Deserialize` derive, so their
+`Serialize` output, which `src/types.ts` reads, is unchanged.
+
+**Binds.** 041 (the pause moves to `runner.db`; both notes move with it), 042 (`Next`,
+`FreeCapacity`), 052 (`Catalogue` on the wire), 056 (the residual window, if the outbox
+changes when `finish_run` is heard).
+
 ---
 
 ## D32 — One command registry: board and local commands, one dispatcher, one caller
@@ -5924,7 +5978,7 @@ An implementation task reads the entries its number appears in, before writing c
 | [033](../tasks/033-record-the-commit-a-run-ended-on-and-a-review-bundle.md) | D2 · D4 · D5 · D8 · D10 · D18 · D20 · D28 · D29 · D31 · D32 · D33 · D34 |
 | [034](../tasks/034-review-actions-on-every-door.md) | D3 · D4 · D5 · D6 · D8 · D9 · D12 · D16 · D18 · D20 · D28 · D29 · D30 · D32 · D33 |
 | [035](../tasks/035-runs-have-a-kind-and-review-findings-have-a-home.md) | D2 · D4 · D5 · D6 · D8 · D10 · D12 · D16 · D17 · D18 · D19 · D23 · D27 · D28 · D29 · D30 · D31 · D32 · D33 |
-| [036](../tasks/036-a-board-port-between-the-runner-and-the-board.md) | D2 · D4 · D5 · D6 · D8 · D10 · D14 · D17 · D19 · D23 · D27 · D28 · D29 · D30 · D31 · D32 · D34 |
+| [036](../tasks/036-a-board-port-between-the-runner-and-the-board.md) | D5 · D8 · D10 · D14 · D17 · D19 · D23 · D27 · D28 · D29 · D30 · D31 · D32 · D34, and D4 and D6 as prohibitions |
 | [037](../tasks/037-the-review-loop-in-the-interface.md) | D4 · D5 · D6 · D7 · D8 · D9 · D12 · D17 · D20 · D28 · D29 · D30 · D32 · D34 |
 | [038](../tasks/038-team-mode-schema-and-a-scoped-service-context.md) | D2 · D3 · D4 · D5 · D6 · D8 · D10 · D11 · D17 · D28 · D29 · D31 · D32 · D33 · D34 |
 | [039](../tasks/039-every-board-service-filters-by-team.md) | D3 · D4 · D5 · D6 · D8 · D10 · D12 · D13 · D16 · D17 · D20 · D21 · D23 · D24 · D28 · D29 · D30 · D31 · D32 · D33 · D34 |
