@@ -5388,6 +5388,10 @@ Six commands added before 046, as point 8 requires. The counts above describe `m
 | `get_review_digest` | review | board | Read | 046 | Rows only, no git. ADR-0021 point 3, task 034 |
 | `mark_review_digest_seen` | review | board | Write | 046 | A user setting (`review_digest_seen_through`, D28 part 4). ADR-0021 point 3, task 034 |
 | `list_review_findings` | review | board | Read | 046 | Rows only. The two findings writes have no command: only a run writes one (D30 point 5). ADR-0021 point 3, task 035 |
+| `get_review_settings` | review | board | Read | 046 | A team setting (D28 point 4, ADR-0028 §2). Refused to every grant (ADR-0021 §4). ADR-0021 points 3 and 4, task 021 |
+| `set_review_settings` | review | board | Write | 046 | A team setting. Refused to every grant: a run must not enable its own loop (ADR-0021 §4). `review_model` and `review_effort` are validated against the catalogue from `BoardHost.provider`, as `set_strategy_defaults` is (D32 point 2). ADR-0021 points 3 and 4, task 021 |
+| `set_repository_review_config` | review | board | Write | 046 | As `set_review_settings`, per repository. The config is a column on `repositories`, so it is board state, not a per-checkout runner setting (ADR-0033 §1). ADR-0021 points 3 and 4, task 021 |
+| `set_task_review` | review | board | Write | 046 | As `set_review_settings`, per task. 045 makes `review_instructions` consent-gated content with a revision (ADR-0032 §3); the handler stays on the board. ADR-0021 points 3 and 4, task 021 |
 
 ---
 
