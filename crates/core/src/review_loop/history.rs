@@ -116,12 +116,17 @@ pub struct HistoryFinding {
     #[serde(flatten)]
     pub finding: ReviewFinding,
     pub blocking: bool,
+    /// Stored `rejected` because a fix had already rejected the same finding,
+    /// not because a fix rejected this one: its `resolution` already says
+    /// "Rejected earlier as ..." and no run resolved it.
+    pub carried_over: bool,
 }
 
 impl HistoryFinding {
     fn new(finding: &ReviewFinding, config: &EffectiveReviewConfig) -> Self {
         Self {
             blocking: finding.severity.is_at_least(config.blocking_severity),
+            carried_over: is_carried_over(finding),
             finding: finding.clone(),
         }
     }
@@ -142,6 +147,9 @@ pub struct PhaseSummary {
     pub kind: RunKind,
     /// Oldest first; more than one when the phase was resumed.
     pub run_ids: Vec<String>,
+    /// The `attempt` of each run in [`run_ids`](PhaseSummary::run_ids), so a
+    /// view can say `Review #4` and `Fixed in #6` without a second read.
+    pub attempts: Vec<i64>,
     /// The last row's.
     pub status: RunStatus,
     pub exit_class: Option<ExitClass>,
@@ -447,6 +455,7 @@ fn phase_summary(phase: &Phase<'_>) -> PhaseSummary {
     PhaseSummary {
         kind: phase.kind,
         run_ids: phase.run_ids(),
+        attempts: phase.rows.iter().map(|row| row.attempt).collect(),
         status: phase.last().status,
         exit_class: phase.last().exit_class,
     }
@@ -720,6 +729,51 @@ mod tests {
 
         let off = phases(&rows, &[], &EffectiveReviewConfig::default());
         assert_eq!(off.loops[1].verdict, Verdict::None);
+    }
+
+    #[test]
+    fn a_phase_names_the_attempt_of_every_row_it_spans() {
+        let rows = [
+            row(1, RunKind::Implementation, "impl", "a"),
+            recorded(row(2, RunKind::Review, "r1", "a")),
+            recorded(row(3, RunKind::Review, "r1", "a")),
+        ];
+
+        let history = phases(&rows, &[], &on());
+
+        let review = history.loops[0].rounds[0]
+            .review
+            .as_ref()
+            .expect("a review");
+        assert_eq!(review.attempts, vec![2, 3]);
+        assert_eq!(history.loops[0].implementation.attempts, vec![1]);
+    }
+
+    #[test]
+    fn a_finding_a_fix_had_already_rejected_is_marked_carried_over() {
+        let rows = two_reviews();
+        let mut carried = found(
+            "c",
+            "run-4",
+            FindingSeverity::High,
+            "Declined",
+            FindingStatus::Rejected,
+            None,
+        );
+        carried.resolution = Some("Rejected earlier as a: not a bug".to_string());
+        let own = found(
+            "o",
+            "run-2",
+            FindingSeverity::High,
+            "Declined here",
+            FindingStatus::Rejected,
+            Some("run-3"),
+        );
+
+        let history = phases(&rows, &[own, carried], &on());
+
+        assert!(!history.loops[0].rounds[0].findings[0].carried_over);
+        assert!(history.loops[0].rounds[1].findings[0].carried_over);
     }
 
     #[test]

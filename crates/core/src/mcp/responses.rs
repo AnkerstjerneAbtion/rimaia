@@ -1300,12 +1300,16 @@ pub struct HistoryFindingView {
     #[serde(flatten)]
     pub finding: ReviewFindingView,
     pub blocking: bool,
+    /// Rejected because an earlier fix had rejected the same finding, rather
+    /// than by a fix of its own.
+    pub carried_over: bool,
 }
 
 impl From<HistoryFinding> for HistoryFindingView {
     fn from(finding: HistoryFinding) -> Self {
         Self {
             blocking: finding.blocking,
+            carried_over: finding.carried_over,
             finding: finding.finding.into(),
         }
     }
@@ -1318,6 +1322,8 @@ pub struct PhaseView {
     pub kind: RunKind,
     /// Oldest first; more than one when the phase was resumed after a limit.
     pub run_ids: Vec<String>,
+    /// The `attempt` of each run in `run_ids`.
+    pub attempts: Vec<i64>,
     pub status: RunStatus,
     pub exit_class: Option<ExitClass>,
 }
@@ -1327,6 +1333,7 @@ impl From<PhaseSummary> for PhaseView {
         Self {
             kind: phase.kind,
             run_ids: phase.run_ids,
+            attempts: phase.attempts,
             status: phase.status,
             exit_class: phase.exit_class,
         }
