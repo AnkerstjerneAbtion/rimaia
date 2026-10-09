@@ -46,7 +46,7 @@ reviewable in the app afterwards.
 | 33 | [017](017-morning-review-flow.md) | Morning review flow | v0.4 | 033, 034 | #34 |
 | 34 | [035](035-runs-have-a-kind-and-review-findings-have-a-home.md) | Runs have a kind, and review findings have a home | v0.4 | 033, 034 | #34 |
 | 35 | [036](036-a-board-port-between-the-runner-and-the-board.md) | A board port between the runner and the board | v0.4 | 035 | #34 |
-| 36 | [021](021-review-and-fix-loop.md) | Review-and-fix loop | v0.4 | 035, 036 | — |
+| 36 | [021](021-review-and-fix-loop.md) | Review-and-fix loop | v0.4 | 035, 036 | #34 |
 | 37 | [037](037-the-review-loop-in-the-interface.md) | The review loop in the interface | v0.4 | 021 | — |
 | 38 | [038](038-team-mode-schema-and-a-scoped-service-context.md) | Team-mode schema, solo identity, and a scoped service context | v0.5 | 021, 036 | — |
 | 39 | [039](039-every-board-service-filters-by-team.md) | Every board service filters by team | v0.5 | 038 | — |

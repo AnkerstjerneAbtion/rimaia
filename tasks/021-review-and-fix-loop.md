@@ -6,6 +6,7 @@ status: ready
 depends_on: ["035", "036"]
 adrs: ["0017", "0016", "0021", "0009", "0011", "0012", "0004"]
 size: L
+landed: "#34"
 ---
 
 # Review-and-fix loop
