@@ -33,7 +33,7 @@
 
 use rimaia_core::schedule::window::{self, RunWindow};
 use rimaia_core::scheduler::{QueueHandle, QueueState};
-use rimaia_core::{ChangeEvent, ServiceContext};
+use rimaia_core::{Change, ChangeEvent, ServiceContext};
 use tauri::AppHandle;
 use tauri_plugin_notification::NotificationExt;
 use tokio::sync::broadcast;
@@ -63,7 +63,10 @@ pub async fn announce_run_windows(
             // Only `Settings` can carry either of these: the window and
             // `queue_state` are both `settings` rows. A task moving or a run
             // ending cannot open a window, so there is nothing to re-read.
-            Ok(ChangeEvent::Settings) => {}
+            Ok(ChangeEvent {
+                change: Change::Settings,
+                ..
+            }) => {}
             Ok(_) => continue,
             // A dropped event costs one late comparison, never a missed one:
             // the next event re-reads the same rows and still finds the

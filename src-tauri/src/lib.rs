@@ -20,7 +20,8 @@ use rimaia_core::runner::strategy::PlannerAccess;
 use rimaia_core::runner::RunnerConfig;
 use rimaia_core::scheduler::{self, InFlight};
 use rimaia_core::{
-    db, startup, worktree, AppPaths, ChangeEvent, Error, ServiceContext, SystemClock,
+    db, identity, startup, worktree, AppPaths, Change, ChangeEvent, Error, ServiceContext,
+    SystemClock, TeamScope,
 };
 use tauri::{Emitter, Manager, RunEvent};
 use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
@@ -131,6 +132,28 @@ pub fn run() {
                 return Err(err.into());
             }
 
+            // The installation's solo team, user and runner (ADR-0029 point 2,
+            // seam-contract D28 part 3): adopted by the migration above on a
+            // board that had something to adopt, created here on one that did
+            // not. After the migration, because the tables are the migration's,
+            // and before any `ServiceContext`, because its scope is what this
+            // returns. A file that belongs to a server is refused here, through
+            // the same loud path a failed migration takes (D11).
+            let solo =
+                match tauri::async_runtime::block_on(identity::ensure_solo(&pool, &SystemClock)) {
+                    Ok(solo) => solo,
+                    Err(err) => {
+                        log_startup_failure("establish the solo identity", &paths.db_file(), &err);
+                        report_startup_failure(
+                            app.handle(),
+                            "establish this computer's identity on the board",
+                            Some(&logs_dir),
+                            &err,
+                        );
+                        return Err(err.into());
+                    }
+                };
+
             // Nothing is running yet — the process that set any of this is the one
             // that just died — so whatever `survey` finds is history, not a live
             // condition. It logs its own warning when the report isn't empty and
@@ -161,7 +184,16 @@ pub fn run() {
             // through (ADR-0019). The scheduler and the MCP server are handed
             // this same context and each re-sources its own clone at
             // construction, so nothing below has to remember to pass a source.
-            let context = ServiceContext::new(pool, Arc::new(SystemClock), MutationSource::Ui);
+            // Scoped to the solo team and acting for the solo user, whom every
+            // door in solo acts for (ADR-0029 point 5, ADR-0030 point 8); the
+            // scheduler and the MCP server inherit both with their clone.
+            let context = ServiceContext::new(
+                pool,
+                Arc::new(SystemClock),
+                MutationSource::Ui,
+                TeamScope::one(solo.team_id.clone()),
+                solo.user_id.clone(),
+            );
 
             // Subscribed once, here, for the life of the app (ADR-0018): the
             // shell is the only thing that turns a `ChangeEvent` into a Tauri
@@ -280,10 +312,13 @@ pub fn run() {
             // the `runner` value above and nothing else, because the board's
             // provider must be the runner's — a board built for another one
             // would hand the planner the wrong catalogue, silently.
+            // It serves the solo runner, the one machine a solo board runs on,
+            // and records it on every run it opens (D31 point 9).
             let board_port: Arc<dyn BoardPort> = Arc::new(InProcessBoard::new(
                 context.clone(),
                 paths.clone(),
                 runner.provider.clone(),
+                solo.runner_id.clone(),
             ));
             let (queue, queue_task) = scheduler::build(
                 Arc::clone(&board_port),
@@ -368,6 +403,7 @@ pub fn run() {
 
             app.manage(AppState {
                 context,
+                solo,
                 paths,
                 in_flight,
                 tails,
@@ -843,21 +879,26 @@ async fn forward_change_events(
 ) {
     loop {
         match events.recv().await {
-            Ok(event) => emit_change_event(&app, event),
+            // The team is dropped here: solo's one window shows one team, and
+            // every Tauri event name and payload stays what it was. Filtering
+            // by team is the server's fan-out (task 048).
+            Ok(event) => emit_change_event(&app, &event.change),
             Err(RecvError::Lagged(dropped)) => {
                 tracing::warn!(
                     dropped,
                     "change-event receiver fell behind; telling every view to re-read"
                 );
-                emit_change_event(&app, ChangeEvent::tasks(Vec::<String>::new()));
-                emit_change_event(&app, ChangeEvent::repositories(Vec::<String>::new()));
-                emit_change_event(&app, ChangeEvent::runs(Vec::<String>::new()));
+                // A `Change` per variant rather than a `ChangeEvent`: "re-read
+                // everything" is not about any one team.
+                emit_change_event(&app, &Change::Tasks(Arc::from([])));
+                emit_change_event(&app, &Change::Repositories(Arc::from([])));
+                emit_change_event(&app, &Change::Runs(Arc::from([])));
                 // Not compiler-forced, unlike `emit_change_event`'s own match:
                 // a variant left out here compiles and simply stops the
                 // schedules panel refreshing after a lag, which is the quietest
                 // possible failure. Listed for that reason.
-                emit_change_event(&app, ChangeEvent::schedules(Vec::<String>::new()));
-                emit_change_event(&app, ChangeEvent::Settings);
+                emit_change_event(&app, &Change::Schedules(Arc::from([])));
+                emit_change_event(&app, &Change::Settings);
             }
             Err(RecvError::Closed) => break,
         }
@@ -867,13 +908,13 @@ async fn forward_change_events(
 /// The variant-to-event-name mapping ADR-0018's table fixes. Kept as the only
 /// place those strings appear in the shell, so a renamed event is a one-line
 /// change here rather than a search across every window and command.
-fn emit_change_event(app: &tauri::AppHandle, event: ChangeEvent) {
-    let result = match &event {
-        ChangeEvent::Tasks(ids) => app.emit("tasks:changed", ids.as_ref()),
-        ChangeEvent::Repositories(ids) => app.emit("repositories:changed", ids.as_ref()),
-        ChangeEvent::Runs(ids) => app.emit("runs:changed", ids.as_ref()),
-        ChangeEvent::Schedules(ids) => app.emit("schedules:changed", ids.as_ref()),
-        ChangeEvent::Settings => app.emit("settings:changed", ()),
+fn emit_change_event(app: &tauri::AppHandle, change: &Change) {
+    let result = match change {
+        Change::Tasks(ids) => app.emit("tasks:changed", ids.as_ref()),
+        Change::Repositories(ids) => app.emit("repositories:changed", ids.as_ref()),
+        Change::Runs(ids) => app.emit("runs:changed", ids.as_ref()),
+        Change::Schedules(ids) => app.emit("schedules:changed", ids.as_ref()),
+        Change::Settings => app.emit("settings:changed", ()),
     };
     if let Err(error) = result {
         tracing::error!(%error, "failed to forward a change event to the frontend");

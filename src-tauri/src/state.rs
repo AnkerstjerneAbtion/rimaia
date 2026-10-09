@@ -2,6 +2,7 @@ use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
 
 use rimaia_core::board::BoardPort;
+use rimaia_core::identity::SoloIdentity;
 use rimaia_core::mcp::{McpHandle, RunHandles};
 use rimaia_core::runner::events::RunTail;
 use rimaia_core::runner::{CancelSignal, RunnerConfig};
@@ -59,6 +60,11 @@ use rimaia_core::{AppPaths, ServiceContext};
 /// See each field's own doc.
 pub struct AppState {
     pub context: ServiceContext,
+    /// The installation's solo team, user and runner (seam-contract D28 part
+    /// 3), as `identity::ensure_solo` returned them at startup. `context` is
+    /// already scoped to the team and acting for the user; this keeps the
+    /// record itself, which task 046's `Caller::solo` reads (D32 point 7).
+    pub solo: SoloIdentity,
     pub paths: AppPaths,
     pub in_flight: InFlight,
     pub tails: RunTails,
