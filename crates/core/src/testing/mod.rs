@@ -7,8 +7,8 @@
 //! [`cli`] stand-in that replays them from a real child process. [`context`]
 //! assembles the first three into the [`ServiceContext`](crate::ServiceContext)
 //! a service actually takes, with a change-event receiver already listening
-//! (ADR-0018). [`runs`] closes a review or fix row, which `finish_run`
-//! refuses until task 021.
+//! (ADR-0018). [`runs`] closes a row without landing its task, for a test that
+//! arranges history.
 //!
 //! Note what is *not* faked. Git and the filesystem are real, because a mocked
 //! git only ever proves the mock works. The agent CLI is replayed from recorded

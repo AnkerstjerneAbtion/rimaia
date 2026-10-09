@@ -34,6 +34,18 @@
 //! function's own note, and ADR-0009's 2026-08-28 amendment, for why that is a
 //! missing parameter rather than an empty argument.
 //!
+//! # And the review loop's (task 021)
+//!
+//! [`compose_review_prompt`] and [`compose_review_system_append`] are the
+//! review phase's pair; like the planner's, the prompt takes no base
+//! instructions, because a reviewer that opens a pull request is a defect.
+//! [`compose_fix_prompt`] does take them, because a fix is implementation
+//! work, and [`compose_fix_continuation`] is the same fix sent into the
+//! implementation's own session. A retried review or fix gets
+//! [`compose_review_resume`] or [`compose_fix_resume`] rather than
+//! [`compose_resume_prompt`], whose "continue the task" would tell a reviewer
+//! to implement. ADR-0009's amendment of 2026-10-09 lists their sections.
+//!
 //! Everything here is pure. Nothing reads the database: task 008 loads the base
 //! instructions through [`crate::db::settings`] and passes them in, which is
 //! what keeps composition unit-testable without a pool or a process.

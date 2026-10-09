@@ -17,11 +17,13 @@ use rimaia_core::db::{
 use rimaia_core::mcp::requests::{
     ArchiveTaskRequest, ArchiveTasksRequest, GetTaskRequest, ListReviewFindingsRequest,
     ListTasksRequest, MoveTaskRequest, RemoveTaskLinkRequest, ReviewNoteRequest,
-    SetRepositoryOnArchiveRequest, SetTaskDependenciesRequest, UpdateTaskRequest,
+    SetRepositoryOnArchiveRequest, SetRepositoryReviewConfigRequest, SetReviewSettingsRequest,
+    SetTaskDependenciesRequest, SetTaskReviewRequest, UpdateTaskRequest,
 };
 use rimaia_core::mcp::responses::{ReviewFindingView, TaskListView, TaskView};
 use rimaia_core::mcp::RimaiaServer;
 use rimaia_core::review::{self, FindingSeverity, NewReviewFinding};
+use rimaia_core::review_loop::config as review_config;
 use rimaia_core::runner::outcome::{start_run, NewRun};
 use rimaia_core::strategy::{settings as strategy_settings, StrategyDefaults};
 use rimaia_core::tasks::{self, NewTask, StrategyPlan, TaskPatch};
@@ -885,6 +887,151 @@ async fn list_review_findings_answers_the_same_over_mcp_and_the_tauri_command() 
         .await
         .expect("filtered by status");
     assert_eq!(open.findings, vec![]);
+}
+
+#[tokio::test]
+async fn the_review_settings_answer_the_same_over_mcp_and_the_tauri_command() {
+    // ADR-0021's parity, task 021: `commands::review`'s four are one line each
+    // over `review_loop::config`, so the service's answer is the window's. The
+    // tools reach the same functions, so a write through either door is read
+    // back identically through the other, and a refusal reads the same.
+    let h = TestContext::new().await;
+    let repository_id = seed_repository(&h.context.pool, "rimaia", "/tmp/rimaia").await;
+    let task = create_task(&h, &repository_id, "Reviewed").await;
+    let provider = rimaia_core::runner::provider::ClaudeProvider;
+
+    let Json(written) = server(&h)
+        .set_review_settings(Parameters(request::<SetReviewSettingsRequest>(json!({
+            "instructions": "Run /review.",
+            "config": { "enabled": "on_cost_acknowledged", "max_review_loops": 1 },
+        }))))
+        .await
+        .expect("the operator configures the loop");
+    let window = review_config::get_review_settings(&h.context.pool)
+        .await
+        .expect("the window's read");
+    assert_eq!(written, window);
+    let Json(over_mcp) = server(&h)
+        .get_review_settings()
+        .await
+        .expect("the operator reads it back");
+    assert_eq!(over_mcp, window);
+
+    let from_window = review_config::set_repository_review_config(
+        &h.context,
+        &provider,
+        &repository_id,
+        json!({ "blocking_severity": "high" }),
+    )
+    .await
+    .expect("the window configures a repository");
+    let Json(from_mcp) = server(&h)
+        .set_repository_review_config(Parameters(request::<SetRepositoryReviewConfigRequest>(
+            json!({ "repository_id": repository_id, "config": { "blocking_severity": "high" } }),
+        )))
+        .await
+        .expect("the operator configures a repository");
+    assert_eq!(from_mcp, from_window);
+
+    let Json(task_review) = server(&h)
+        .set_task_review(Parameters(request::<SetTaskReviewRequest>(json!({
+            "task_id": task.id,
+            "review_instructions": "Use /strict-review.",
+            "config": { "fix_session": "resume" },
+        }))))
+        .await
+        .expect("the operator configures a task");
+    let detail = tasks::get_task(&h.context, &task.id)
+        .await
+        .expect("the window reads the task");
+    assert_eq!(detail.review_instructions, task_review.instructions);
+    assert_eq!(detail.review_config, task_review.config);
+
+    let refusal = review_config::set_task_review(
+        &h.context,
+        &provider,
+        &task.id,
+        None,
+        json!({ "max_review_loops": 6 }),
+    )
+    .await
+    .expect_err("six fixes is not bounded");
+    assert_same_refusal(
+        &refusal,
+        server(&h)
+            .set_task_review(Parameters(request::<SetTaskReviewRequest>(json!({
+                "task_id": task.id,
+                "config": { "max_review_loops": 6 },
+            }))))
+            .await,
+    );
+}
+
+#[tokio::test]
+async fn max_review_loops_above_five_is_refused() {
+    let h = TestContext::new().await;
+    let provider = rimaia_core::runner::provider::ClaudeProvider;
+
+    for loops in [0, 5] {
+        review_config::set_review_settings(
+            &h.context,
+            &provider,
+            "",
+            json!({ "max_review_loops": loops }),
+        )
+        .await
+        .expect("zero to five is bounded");
+    }
+    let refused = review_config::set_review_settings(
+        &h.context,
+        &provider,
+        "",
+        json!({ "max_review_loops": 6 }),
+    )
+    .await
+    .expect_err("six is refused");
+    assert_eq!(refused.code(), rimaia_core::ErrorCode::Invalid);
+    assert_eq!(
+        refused.to_string(),
+        "max_review_loops is at most 5; 6 fixes is not a bounded loop"
+    );
+}
+
+#[tokio::test]
+async fn a_review_model_outside_the_catalogue_is_refused() {
+    let h = TestContext::new().await;
+    let provider = rimaia_core::runner::provider::ClaudeProvider;
+    let catalogue = rimaia_core::strategy::catalogue::catalogue(&h.context.pool, &provider)
+        .await
+        .expect("the catalogue");
+    let listed_model = catalogue.models[0].id.clone();
+    let listed_effort = catalogue.efforts[0].id.clone();
+
+    review_config::set_review_settings(
+        &h.context,
+        &provider,
+        "",
+        json!({ "review_model": listed_model, "review_effort": listed_effort }),
+    )
+    .await
+    .expect("a listed model and effort are accepted");
+
+    for (field, value) in [
+        ("review_model", "gpt-nothing"),
+        ("review_effort", "ludicrous"),
+    ] {
+        let refused =
+            review_config::set_review_settings(&h.context, &provider, "", json!({ field: value }))
+                .await
+                .expect_err("not in the catalogue");
+        assert_eq!(refused.code(), rimaia_core::ErrorCode::Invalid);
+        assert!(
+            refused.to_string().starts_with(&format!(
+                "{field} \"{value}\" is not in the strategy catalogue"
+            )),
+            "{refused}"
+        );
+    }
 }
 
 #[tokio::test]

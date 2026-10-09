@@ -15,7 +15,8 @@
 //! editing a case; a case that reaches past the harness is one 052 finds out
 //! about the hard way.
 //!
-//! Each later task adds its own cases here (D31 point 13): team scoping (038,
+//! Each later task adds its own cases here (D31 point 13): the review loop's
+//! `NextStep::Continue` (021), team scoping (038,
 //! 039), fencing and generations (043), expiry (053), `run_tool` (055),
 //! resends (056).
 
@@ -37,8 +38,10 @@ use crate::db::{
 use crate::error::{ErrorCode, Result};
 use crate::repo::{self, NewRepository};
 use crate::review::findings::{self, FindingSeverity, NewReviewFinding};
+use crate::review_loop::{config as review_config, Verdict};
 use crate::runner::events::{RunTail, TokenUsage};
 use crate::runner::outcome::{self, NewRun, RunOutcome, SpawnedAs};
+use crate::runner::provider::ClaudeProvider;
 use crate::runner::RunTrigger;
 use crate::runs::{self, bundle::RunCapture};
 use crate::scheduler::ResumePoint;
@@ -88,6 +91,9 @@ macro_rules! board_contract {
             a_finish_for_another_tasks_run_is_not_found,
             a_solo_heartbeat_fences_nothing_and_cancels_nothing,
             every_lease_method_answers_not_found_for_a_task_that_does_not_exist,
+            finish_run_continues_to_a_review_when_the_loop_is_on,
+            finish_run_releases_an_implementation_when_the_loop_is_off,
+            finish_run_releases_a_clean_review_and_lands_the_task,
         );
     };
     (@cases $harness:ty; $($case:ident),* $(,)?) => {
@@ -204,6 +210,26 @@ fn finishing(outcome: RunOutcome) -> FinishRun {
         window_closes_at: None,
         transcript: TranscriptEnd::Complete { length: 0 },
     }
+}
+
+/// A finish that recorded `head` as the commit the run ended on.
+fn finishing_at(outcome: RunOutcome, head: &str) -> FinishRun {
+    FinishRun {
+        head_sha: Some(head.to_string()),
+        ..finishing(outcome)
+    }
+}
+
+/// Turns the review loop on for the whole board, through its own service.
+async fn turn_the_loop_on(board: &ServiceContext) {
+    review_config::set_review_settings(
+        board,
+        &ClaudeProvider,
+        "",
+        serde_json::json!({ "enabled": "on_cost_acknowledged" }),
+    )
+    .await
+    .expect("turn the loop on");
 }
 
 async fn claimed(runner: &dyn BoardPort, target: ClaimTarget) -> Claim {
@@ -807,5 +833,125 @@ pub mod cases {
                 .expect_err(method.as_str());
             assert_same(error.code(), ErrorCode::NotFound, method.as_str());
         }
+    }
+
+    pub async fn finish_run_continues_to_a_review_when_the_loop_is_on<H: Harness>() {
+        let harness = H::start().await;
+        let board = harness.board();
+        let arranged = Arranged::new(board).await;
+        let task_id = arranged.task(board, "Reviewed overnight").await;
+        turn_the_loop_on(board).await;
+        let runner = harness.runner(Which::A);
+        let claim = claimed(runner.as_ref(), run_target(&task_id, false)).await;
+        let run_id = new_id();
+        runner
+            .start_run(&claim.lease, starting(&run_id, RunKind::Implementation))
+            .await
+            .expect("start the implementation");
+
+        let receipt = runner
+            .finish_run(&claim.lease, &run_id, finishing_at(succeeded(), "a1"))
+            .await
+            .expect("finish it");
+
+        assert_same(
+            receipt.next,
+            NextStep::Continue {
+                kind: RunKind::Review,
+            },
+            "the board starts a review",
+        );
+        let detail = tasks::get_task(board, &task_id)
+            .await
+            .expect("read the task");
+        assert_same(detail.task.column, BoardColumn::Ready, "the column");
+        assert_same(detail.task.run_state, RunState::Running, "still running");
+    }
+
+    pub async fn finish_run_releases_an_implementation_when_the_loop_is_off<H: Harness>() {
+        let harness = H::start().await;
+        let board = harness.board();
+        let arranged = Arranged::new(board).await;
+        let task_id = arranged.task(board, "Not reviewed").await;
+        let runner = harness.runner(Which::A);
+        let claim = claimed(runner.as_ref(), run_target(&task_id, false)).await;
+        let run_id = new_id();
+        runner
+            .start_run(&claim.lease, starting(&run_id, RunKind::Implementation))
+            .await
+            .expect("start the implementation");
+
+        let receipt = runner
+            .finish_run(&claim.lease, &run_id, finishing_at(succeeded(), "a1"))
+            .await
+            .expect("finish it");
+
+        assert_same(
+            receipt.next,
+            NextStep::Released { resume_after: None },
+            "nothing follows",
+        );
+        let detail = tasks::get_task(board, &task_id)
+            .await
+            .expect("read the task");
+        assert_same(detail.task.column, BoardColumn::InReview, "the column");
+        assert_same(detail.task.run_state, RunState::Idle, "the run state");
+        assert_same(detail.review_loop, None, "the loop never touched it");
+    }
+
+    pub async fn finish_run_releases_a_clean_review_and_lands_the_task<H: Harness>() {
+        let harness = H::start().await;
+        let board = harness.board();
+        let arranged = Arranged::new(board).await;
+        let task_id = arranged.task(board, "Reviewed clean").await;
+        turn_the_loop_on(board).await;
+        let runner = harness.runner(Which::A);
+        let claim = claimed(runner.as_ref(), run_target(&task_id, false)).await;
+        let implementation = new_id();
+        runner
+            .start_run(
+                &claim.lease,
+                starting(&implementation, RunKind::Implementation),
+            )
+            .await
+            .expect("start the implementation");
+        runner
+            .finish_run(
+                &claim.lease,
+                &implementation,
+                finishing_at(succeeded(), "a1"),
+            )
+            .await
+            .expect("finish it");
+        let review = new_id();
+        runner
+            .start_run(&claim.lease, starting(&review, RunKind::Review))
+            .await
+            .expect("start the review");
+        runner
+            .record_review_findings(&claim.lease, &review, vec![])
+            .await
+            .expect("a clean review is an explicit empty call");
+
+        let receipt = runner
+            .finish_run(&claim.lease, &review, finishing_at(succeeded(), "a1"))
+            .await
+            .expect("finish the review");
+
+        assert_same(
+            receipt.next,
+            NextStep::Released { resume_after: None },
+            "the loop ends",
+        );
+        let detail = tasks::get_task(board, &task_id)
+            .await
+            .expect("read the task");
+        assert_same(detail.task.column, BoardColumn::InReview, "the column");
+        assert_same(detail.task.run_state, RunState::Idle, "the run state");
+        assert_same(
+            detail.review_loop.map(|summary| summary.verdict),
+            Some(Verdict::Clean),
+            "the verdict",
+        );
     }
 }

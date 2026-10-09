@@ -699,6 +699,32 @@ async fn removing_a_dirty_worktree_is_refused_until_the_user_confirms() {
 }
 
 #[tokio::test]
+async fn only_tracked_changes_count_as_changes_to_the_tracked_files() {
+    // Task 021's review checks: a test run leaves untracked files behind, and
+    // those must not refuse a review; an edit to a tracked file must.
+    let f = Fixture::new().await;
+    let task = f.task("Add parser").await;
+    let worktree = worktree::prepare(f.ctx(), &task.id).await.expect("prepare");
+    let path = Path::new(&worktree.path);
+    assert!(!worktree::has_tracked_changes(path).await.expect("clean"));
+
+    std::fs::write(path.join("target-output.log"), "a test run's leftovers\n")
+        .expect("leave an untracked file");
+    assert!(
+        !worktree::has_tracked_changes(path)
+            .await
+            .expect("untracked only"),
+        "an untracked file is not a change to a tracked one"
+    );
+
+    std::fs::write(path.join("README.md"), "edited without a commit\n")
+        .expect("edit a tracked file");
+    assert!(worktree::has_tracked_changes(path)
+        .await
+        .expect("a tracked edit"));
+}
+
+#[tokio::test]
 async fn removing_a_task_that_has_no_worktree_is_not_an_error() {
     let f = Fixture::new().await;
     let task = f.task("Add parser").await;

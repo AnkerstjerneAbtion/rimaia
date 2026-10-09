@@ -142,3 +142,25 @@ pub async fn set_task_review(
     )
     .await
 }
+
+#[cfg(test)]
+mod tests {
+    use rimaia_core::review_loop::ReviewConfig;
+    use rimaia_core::strategy::Catalogue;
+    use rimaia_core::ErrorCode;
+
+    /// The four setters take `config` as raw JSON, so Tauri's deserializer
+    /// accepts `"enabled": true` and core refuses it, in the sentence the MCP
+    /// tool gives. A typed `ReviewConfig` parameter would have Tauri refuse it
+    /// first, in a string the frontend cannot read as `{ code, message }`.
+    #[test]
+    fn a_command_hands_true_to_the_service_which_refuses_it() {
+        let payload: serde_json::Value = serde_json::json!({ "enabled": true });
+
+        let refused = ReviewConfig::from_door(payload, &Catalogue::default())
+            .expect_err("only the acknowledgement turns the loop on");
+
+        assert_eq!(refused.code(), ErrorCode::Invalid);
+        assert!(refused.to_string().contains("on_cost_acknowledged"));
+    }
+}

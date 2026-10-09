@@ -1,10 +1,11 @@
-//! Closing a review or fix row the way task 021's `finish_run` arms will,
-//! before they exist (task 035).
+//! Closing a row without landing its task, for a test that arranges history
+//! rather than exercising the loop (task 035).
 //!
-//! `runner::outcome::finish_run` refuses a review or fix row until task 021
-//! wires those arms (seam-contract D29 point 9), so a test that needs such a
-//! row closed writes it here, directly. Implementation rows in the same tests
-//! still go through `finish_run`; nothing here is a second way to finish one.
+//! `runner::outcome::finish_run` closes every kind since task 021 and lands
+//! the task by ADR-0017's exits. A test that needs a review or fix row closed
+//! *and* the task left where the test put it — a row in the middle of a
+//! history it is building — writes it here, directly. Nothing here is a
+//! second way to finish a run.
 //!
 //! This writes the row only. A test that needs the task waiting then calls
 //! `tasks::set_run_state(ctx, task_id, RunState::WaitingRetry)`, which is
