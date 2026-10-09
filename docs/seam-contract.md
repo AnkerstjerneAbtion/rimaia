@@ -732,6 +732,34 @@ The entry now binds 014 as well.
 The bulk read's last-run summary now says which kind of run it was. D29 states the rule and the
 query change. This entry's cost argument is unchanged.
 
+### Amendment, 2026-10-10 — the summary carries the review loop (task 037)
+
+`TaskSummary` gains `review_loop: Option<ReviewLoopSummary>`, the same field `TaskDetail`
+gained in task 021, built by the same pure function (`review_loop::history::summary`), so the
+card and the panel cannot disagree about a loop. `ReviewLoopSummary` also gains
+`open_advisory` beside `open_blocking`, and the history's findings carry a `blocking` flag, so
+no view compares severities or counts findings.
+
+The verdict is a Rust function over runs, findings and configuration, so it cannot be one
+correlated subquery in `TASK_SUMMARY_SELECT`. A SQL copy of 021's rule was refused for the
+reason the 2026-08-28 amendment gives for the strategy chain: a second implementation drifts
+from the first, and the drift would show as a card saying one thing and its panel another.
+`list_tasks` therefore runs `TASK_SUMMARY_SELECT` as before and then reads, in a fixed number of
+statements whatever the number of cards and repositories (`review_loop::board::summaries`):
+the global configuration; the listed tasks' own; their repositories'; their runs rows; their
+findings. The last four are keyed by id through one JSON array bound once (`json_each`), so
+the statement text never changes and never meets SQLite's cap on bound parameters. The runs and
+findings cover **every** listed task, not only those with loop rows, because 021's
+`not_reviewed` case is a succeeded implementation with no loop rows after it, read against
+today's configuration. The per-task resolution and verdict then run in memory.
+
+This is deliberately **not** `apply_effective_strategy`'s shape: that function calls
+`defaults_for_repository` once per distinct repository, which is N+1 over repositories, and
+the amendment above only called it cheap because settings reads are cheap. The entry's
+argument was always against fifty reads per board read, not against a second statement.
+
+The entry now binds 037 as well.
+
 ## D13 — Whether a task can change repository
 
 **Question.** Task 005's Scope lists "Title, repository selector" in the task detail panel, but
@@ -3568,7 +3596,9 @@ kinds, and what happens to `idx_runs_task_attempt`?
    - `list_runs` (the Runs view). `RunFilter` gains `kind: Option<RunKind>`, and task 037
      adds the control.
    - `list_runs_for_task` (the panel's history, grouped into loops by task 037's view from
-     the list itself).
+     the list itself). *2026-10-10 (task 037): superseded. Task 021 placed the grouping in
+     core, where its phase rule lives, and `review_loop::history` returns it; the view
+     renders `get_review_history` as returned and does not group again.*
    - `fetch_run` and everything built on it: `get_run`, `get_run_row`,
      `log_path_to_reveal`.
    - Both `SELECT`s in `prune_logs`. A kind filter here would leave review transcripts
@@ -5408,6 +5438,8 @@ Six commands added before 046, as point 8 requires. The counts above describe `m
 | `set_review_settings` | review | board | Write | 046 | A team setting. Refused to every grant: a run must not enable its own loop (ADR-0021 §4). `review_model` and `review_effort` are validated against the catalogue from `BoardHost.provider`, as `set_strategy_defaults` is (D32 point 2). ADR-0021 points 3 and 4, task 021 |
 | `set_repository_review_config` | review | board | Write | 046 | As `set_review_settings`, per repository. The config is a column on `repositories`, so it is board state, not a per-checkout runner setting (ADR-0033 §1). ADR-0021 points 3 and 4, task 021 |
 | `set_task_review` | review | board | Write | 046 | As `set_review_settings`, per task. 045 makes `review_instructions` consent-gated content with a revision (ADR-0032 §3); the handler stays on the board. ADR-0021 points 3 and 4, task 021 |
+| `get_review_history` | review | board | Read | 046 | Rows only, no git: runs and findings, grouped by core. Refused to every grant, as `list_review_findings` is (D30 point 5's "everything else" row). ADR-0021 point 3, task 037 |
+| `get_review_level` | review | board | Read | 046 | One level of the loop's configuration beside what it inherits and what it resolves to, so the interface never resolves the precedence chain itself. Refused to every grant, with the rest of the configuration (ADR-0021 §4). ADR-0021 points 3 and 4, task 037 |
 
 ---
 
