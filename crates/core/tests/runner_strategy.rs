@@ -445,6 +445,52 @@ async fn each_run_is_sent_its_own_prompt_and_the_proposal_reaches_the_implementa
 }
 
 #[tokio::test]
+async fn the_planner_prompt_names_the_branch_prepare_created() {
+    // `task_context` writes `- Branch:` into the planner's prompt, and the
+    // claim's context was read before `worktree::prepare` created the branch.
+    // So `run_task` plans from a re-read taken after the worktree exists, not
+    // from the claim.
+    let fixture = StrategyFixture::planned().await;
+    let cli = FakeCli::writing_back(&fixture.task_id);
+    let config = fixture.config(&cli);
+    let board = fixture.harness.board(&fixture.paths, &config);
+    let claim = claim_run(board.as_ref(), &fixture.task_id, RunTrigger::Queued, false)
+        .await
+        .expect("claim the task");
+    assert_eq!(
+        claim.context.task.task.branch, None,
+        "a first run's branch does not exist when it is claimed",
+    );
+
+    fixture
+        .run_claimed(board.as_ref(), &config, &CancelSignal::new(), claim)
+        .await
+        .expect("the run completes");
+
+    let detail = fixture.detail().await;
+    let branch = detail
+        .task
+        .branch
+        .clone()
+        .expect("prepare created the branch");
+    let catalogue = strategy::catalogue::catalogue(&fixture.harness.context.pool, &ClaudeProvider)
+        .await
+        .expect("the catalogue");
+    let expected = compose_strategy_prompt(
+        &detail,
+        &fixture.repository().await,
+        &catalogue,
+        SET_TASK_STRATEGY_TOOL,
+        "subagents",
+    );
+    assert!(
+        expected.contains(&format!("- Branch: {branch}\n")),
+        "the composition this test compares against names the branch: {expected}",
+    );
+    assert_eq!(cli.stdin(1), expected);
+}
+
+#[tokio::test]
 async fn a_strategy_run_opens_no_runs_row_and_borrows_the_task_s_own_worktree() {
     // Seam-contract D17.5. A `runs` row for the planner would move the card to
     // `in_review` before the work started, would make `attempt` mean "attempts,

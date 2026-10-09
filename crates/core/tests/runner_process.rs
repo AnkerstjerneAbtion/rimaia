@@ -1458,6 +1458,47 @@ async fn a_manual_run_whose_worktree_cannot_be_prepared_does_not_leave_its_card_
     assert_eq!(detail.last_run, None, "a `runs` row was opened");
 }
 
+#[tokio::test]
+async fn the_prompt_is_composed_from_the_task_as_it_reads_after_the_worktree_exists() {
+    // A claim's context is the board as it read before the claim, and for a
+    // first run that is before `worktree::prepare` created the branch the
+    // prompt names. Composing from it would tell the agent `- Branch:` nothing.
+    let fixture = RunnerFixture::new().await;
+    let cli = FakeCli::replaying("success", 0);
+    let config = fixture.config(&cli);
+    let board = fixture.harness.board(&fixture.paths, &config);
+    let claim = claim_run(board.as_ref(), &fixture.task_id, RunTrigger::Queued, false)
+        .await
+        .expect("claim the task");
+    assert_eq!(
+        claim.context.task.task.branch, None,
+        "a first run's branch does not exist when it is claimed",
+    );
+
+    run_task(
+        board.as_ref(),
+        &fixture.harness.context,
+        &fixture.paths,
+        &config,
+        claim,
+        fixture.request(&CancelSignal::new()),
+    )
+    .await
+    .expect("the run completes");
+
+    let branch = fixture
+        .task()
+        .await
+        .branch
+        .expect("prepare created the branch");
+    let expected = fixture.composed_prompt().await;
+    assert!(
+        expected.contains(&format!("- Branch: {branch}\n")),
+        "the composition this test compares against names the branch: {expected}",
+    );
+    assert_eq!(cli.child_stdin(), expected);
+}
+
 // ---------------------------------------------------------------------------
 // A stand-in for the CLI
 // ---------------------------------------------------------------------------
