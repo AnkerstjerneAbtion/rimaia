@@ -199,6 +199,13 @@ Rules:
   database every other branch reads, and every branch without that file then refuses to start
   (ADR-0023). It must be an absolute path; a relative one or an unexpanded `~` is refused at
   startup rather than guessed at.
+- **Board migrations are applied only through `db::migrate`**, which turns foreign keys off
+  around the migrator, checks `PRAGMA foreign_key_check` after, and turns them back on
+  (seam-contract D28 part 1). Never apply one to a real `rimaia.db` with `cargo sqlx migrate
+  run` or the sqlite3 CLI: with enforcement on, a table rebuild's `DROP TABLE` cascades and
+  deletes every child row. No migration file begins with `-- no-transaction`. The prepare
+  recipe above is unchanged and still works, because the rebuild's guard passes on an empty
+  `tasks`.
 - Board `position` is a fractional float; ordering is the priority mechanism. There is no
   separate priority field (ADR-0007).
 - A dependency is satisfied when its run **succeeds**, not when a human marks it done

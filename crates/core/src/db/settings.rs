@@ -7,7 +7,7 @@
 //! SQL of its own, so `inherit | strict_local` is parsed in one place instead of
 //! two.
 //!
-//! Writes publish [`ChangeEvent::Settings`] after the row is committed
+//! Writes publish [`Change::Settings`](crate::events::Change::Settings) after the row is committed
 //! (ADR-0018). The event carries no key: the whole table is a handful of rows
 //! and every consumer re-reads all of it.
 
@@ -59,6 +59,62 @@ Commit as you work, with focused commits and clear messages.
 Run the project's tests and linters before you finish.
 When the work is complete, push the branch and open a pull request describing what changed and why.
 If you cannot complete the task, stop, commit what you have, and explain what is blocking you.";
+
+/// The keys that belong to one machine rather than to a team or a person
+/// (seam-contract D28 part 4): what this computer runs, when, and how.
+///
+/// Task 038's migration leaves these out of `team_settings`, spelled in SQL as
+/// this list is spelled here, and task 040 copies them into `runner.db`.
+/// `every_settings_key_has_the_placement_the_migration_gave_it` is what keeps
+/// the two spellings from drifting.
+pub const RUNNER_KEYS: [&str; 10] = [
+    RUN_ENVIRONMENT,
+    crate::mcp::settings::MCP_PORT,
+    crate::scheduler::capacity::MAX_CONCURRENCY,
+    crate::scheduler::capacity::SCHEDULE_MODE,
+    crate::scheduler::state::QUEUE_STATE,
+    crate::schedule::window::ACTIVE_RUN_WINDOW,
+    crate::scheduler::pause::USAGE_LIMIT_PAUSE_UNTIL,
+    crate::worktree::cleanup::AUTO_CLEANUP,
+    DOCTOR_DISMISSALS,
+    ONBOARDING_DISMISSED,
+];
+
+/// The keys that belong to one person (D28 part 4, and its 2026-10-04
+/// amendment for task 034's digest marker). Task 038's migration copies them
+/// into `user_settings`.
+pub const USER_KEYS: [&str; 2] = [
+    SUBSCRIPTION_MONTHLY_USD,
+    crate::review::digest::REVIEW_DIGEST_SEEN_THROUGH,
+];
+
+/// Where a settings key lives once `settings` is split (ADR-0028 point 2).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Placement {
+    /// `team_settings`. Every key not listed elsewhere.
+    Team,
+    /// `user_settings`: one of [`USER_KEYS`].
+    User,
+    /// `runner.db` (task 040): one of [`RUNNER_KEYS`].
+    Runner,
+}
+
+/// Which table `key` belongs in.
+///
+/// Team is the exclusion, not a list, so a key nobody placed ends up with the
+/// team rather than being lost when task 065 drops `settings`. That covers
+/// `strategy_default.<repository_id>` (D17.2) without a pattern, and every key
+/// a later task adds without anyone remembering to list it; a key that
+/// belongs to a person or a machine has to be listed above.
+pub fn placement(key: &str) -> Placement {
+    if USER_KEYS.contains(&key) {
+        Placement::User
+    } else if RUNNER_KEYS.contains(&key) {
+        Placement::Runner
+    } else {
+        Placement::Team
+    }
+}
 
 /// How much of the operator's own configuration a run inherits (ADR-0004's
 /// amendment, applied by task 008).
@@ -134,10 +190,15 @@ pub async fn get(pool: &SqlitePool, key: &str) -> Result<Option<String>> {
 /// One statement, so the `execute` *is* the commit; the publication still
 /// follows it rather than preceding it, because ADR-0018's rule is about what a
 /// subscriber can read when it re-reads.
+///
+/// `settings` has no team column until task 039 moves its readers to
+/// `team_settings` and `user_settings`, so the event names the context's one
+/// team, read before the write so a scope of several is refused untouched.
 pub async fn set(ctx: &ServiceContext, key: &str, value: &str) -> Result<()> {
+    let team_id = ctx.scope.sole()?.clone();
     set_in(&ctx.pool, key, value).await?;
 
-    ctx.publish(ChangeEvent::Settings);
+    ctx.publish(ChangeEvent::settings(team_id));
     Ok(())
 }
 
@@ -145,7 +206,7 @@ pub async fn set(ctx: &ServiceContext, key: &str, value: &str) -> Result<()> {
 ///
 /// For a caller that writes a key inside a transaction it already holds — a
 /// review action advancing its digest marker with the move that earned it — and
-/// that publishes [`ChangeEvent::Settings`] itself, after its own commit.
+/// that publishes [`ChangeEvent::settings`] itself, after its own commit.
 /// Everything else goes through [`set`], so there is still one statement for a
 /// key whichever path writes it.
 pub async fn set_in<'e, E>(executor: E, key: &str, value: &str) -> Result<()>
@@ -486,7 +547,85 @@ mod tests {
 
         assert_eq!(
             h.changes.try_recv().expect("a publication"),
-            ChangeEvent::Settings
+            ChangeEvent::settings(h.solo.team_id.clone())
+        );
+    }
+
+    #[test]
+    fn every_settings_key_has_the_placement_the_migration_gave_it() {
+        // Every key constant in the crate, spelled through the module that owns
+        // it, against D28 part 4 and its 2026-10-04 amendment. A key a later
+        // task adds without listing it lands with the team by exclusion; this
+        // is where it has to be added, and where a person's or a machine's key
+        // would be caught going to the team.
+        use crate::review::digest::REVIEW_DIGEST_SEEN_THROUGH;
+        use crate::review_loop::config::{REVIEW_CONFIG, REVIEW_INSTRUCTIONS};
+        use crate::runner::process::{DISALLOWED_TOOLS, MAX_TURNS};
+        use crate::strategy::catalogue::STRATEGY_CATALOGUE;
+        use crate::strategy::settings::{
+            repository_default_key, STRATEGY_APPROVAL, STRATEGY_DEFAULT,
+        };
+
+        let per_repository = repository_default_key("3f2b1c00-0000-4000-8000-0000000000a1");
+        let expected = [
+            (BASE_INSTRUCTIONS, Placement::Team),
+            (STRATEGY_CATALOGUE, Placement::Team),
+            (STRATEGY_DEFAULT, Placement::Team),
+            (per_repository.as_str(), Placement::Team),
+            (STRATEGY_APPROVAL, Placement::Team),
+            (MAX_TURNS, Placement::Team),
+            (DISALLOWED_TOOLS, Placement::Team),
+            (REVIEW_INSTRUCTIONS, Placement::Team),
+            (REVIEW_CONFIG, Placement::Team),
+            (SUBSCRIPTION_MONTHLY_USD, Placement::User),
+            (REVIEW_DIGEST_SEEN_THROUGH, Placement::User),
+            (RUN_ENVIRONMENT, Placement::Runner),
+            (crate::mcp::settings::MCP_PORT, Placement::Runner),
+            (
+                crate::scheduler::capacity::MAX_CONCURRENCY,
+                Placement::Runner,
+            ),
+            (crate::scheduler::capacity::SCHEDULE_MODE, Placement::Runner),
+            (crate::scheduler::state::QUEUE_STATE, Placement::Runner),
+            (
+                crate::schedule::window::ACTIVE_RUN_WINDOW,
+                Placement::Runner,
+            ),
+            (
+                crate::scheduler::pause::USAGE_LIMIT_PAUSE_UNTIL,
+                Placement::Runner,
+            ),
+            (crate::worktree::cleanup::AUTO_CLEANUP, Placement::Runner),
+            (DOCTOR_DISMISSALS, Placement::Runner),
+            (ONBOARDING_DISMISSED, Placement::Runner),
+        ];
+
+        let placed: Vec<(&str, Placement)> = expected
+            .iter()
+            .map(|(key, _)| (*key, placement(key)))
+            .collect();
+        assert_eq!(placed, expected.to_vec());
+
+        // The spellings the migration's SQL lists, so a key moved between the
+        // lists here without the SQL following is a failure, not a drift.
+        assert_eq!(
+            USER_KEYS,
+            ["subscription_monthly_usd", "review_digest_seen_through"]
+        );
+        assert_eq!(
+            RUNNER_KEYS,
+            [
+                "run_environment",
+                "mcp_port",
+                "max_concurrency",
+                "schedule_mode",
+                "queue_state",
+                "active_run_window",
+                "usage_limit_pause_until",
+                "worktree_auto_cleanup",
+                "doctor_dismissals",
+                "onboarding_dismissed",
+            ]
         );
     }
 
