@@ -34,16 +34,17 @@ use crate::doctor;
 use crate::mcp::error::ToolError;
 use crate::mcp::requests::{
     AddTaskLinkRequest, AnalyticsRequest, ArchiveTaskRequest, ArchiveTasksRequest, ClearableField,
-    CreateTaskRequest, DoctorDismissalRequest, GetReviewHistoryRequest, GetStrategyDefaultsRequest,
-    GetTaskRequest, ListReviewFindingsRequest, ListTasksRequest, MarkReviewDigestSeenRequest,
-    MoveTaskRequest, PlanSelectionRequest, RecordReviewFindingsRequest, RemoveTaskLinkRequest,
-    RepositoryRequest, ResolveReviewFindingRequest, ReviewNoteRequest, ScheduleConfigRequest,
-    ScheduleRequest, SetMaxConcurrencyRequest, SetRepositoryMaxConcurrencyRequest,
-    SetRepositoryOnArchiveRequest, SetRepositoryReviewConfigRequest, SetReviewSettingsRequest,
-    SetScheduleEnabledRequest, SetScheduleModeRequest, SetStrategyApprovalRequest,
-    SetStrategyCatalogueRequest, SetStrategyDefaultsRequest, SetTaskDependenciesRequest,
-    SetTaskReviewRequest, SetTaskStrategyRequest, SetWorktreeAutoCleanupRequest,
-    SubscriptionCostRequest, TaskStrategyRequest, UpdateScheduleRequest, UpdateTaskRequest,
+    CreateTaskRequest, DoctorDismissalRequest, GetReviewHistoryRequest, GetReviewLevelRequest,
+    GetStrategyDefaultsRequest, GetTaskRequest, ListReviewFindingsRequest, ListTasksRequest,
+    MarkReviewDigestSeenRequest, MoveTaskRequest, PlanSelectionRequest,
+    RecordReviewFindingsRequest, RemoveTaskLinkRequest, RepositoryRequest,
+    ResolveReviewFindingRequest, ReviewNoteRequest, ScheduleConfigRequest, ScheduleRequest,
+    SetMaxConcurrencyRequest, SetRepositoryMaxConcurrencyRequest, SetRepositoryOnArchiveRequest,
+    SetRepositoryReviewConfigRequest, SetReviewSettingsRequest, SetScheduleEnabledRequest,
+    SetScheduleModeRequest, SetStrategyApprovalRequest, SetStrategyCatalogueRequest,
+    SetStrategyDefaultsRequest, SetTaskDependenciesRequest, SetTaskReviewRequest,
+    SetTaskStrategyRequest, SetWorktreeAutoCleanupRequest, SubscriptionCostRequest,
+    TaskStrategyRequest, UpdateScheduleRequest, UpdateTaskRequest,
 };
 use crate::mcp::responses::{
     AnalyticsView, ArchiveReportView, ArchivedTaskView, BaseInstructionsView, CredentialStatusView,
@@ -57,7 +58,7 @@ use crate::mcp::responses::{
 };
 use crate::mcp::scope::{RunScope, Tool};
 use crate::review;
-use crate::review_loop::{self, ReviewConfig, ReviewSettings, TaskReview};
+use crate::review_loop::{self, ReviewConfig, ReviewLevel, ReviewSettings, TaskReview};
 use crate::runner::prompt::TEMPLATE_VARIABLES;
 use crate::runner::strategy::{self as runner_strategy, PlanOutcome, PlanSelection, PlannerAccess};
 use crate::schedule;
@@ -1145,6 +1146,29 @@ A repository and a task can each override any field."
     }
 
     #[tool(
+        description = "Read one level of the review-and-fix loop's configuration next to what it \
+inherits. `level` is `global`, `repository` or `task`; the last two need the `id` of the \
+repository or task. `config` is what that level stores, `inherited` is what each field becomes if \
+the level stops setting it (the level above's answer), and `effective` is what the level resolves \
+to with its own settings applied. Call this to tell the user what a repository or a task would \
+actually do, rather than working the precedence out yourself."
+    )]
+    pub async fn get_review_level(
+        &self,
+        Parameters(request): Parameters<GetReviewLevelRequest>,
+    ) -> Result<Json<ReviewLevel>, ToolError> {
+        self.scope.authorize(Tool::GetReviewLevel, None)?;
+        Ok(Json(
+            review_loop::config::get_review_level(
+                &self.ctx.pool,
+                request.level,
+                request.id.as_deref(),
+            )
+            .await?,
+        ))
+    }
+
+    #[tool(
         description = "Call this when the user wants to change how every task is reviewed. It \
 replaces the review-and-fix loop's global settings: `instructions` (the text \
 every review run is given; empty for none) and `config` (see `get_review_settings`; null or {} \
@@ -1582,7 +1606,7 @@ mod tests {
     /// capability parity a rule. What replaces a count is the property that
     /// actually matters — a registered tool with no run-scope decision cannot
     /// reach the wire.
-    const REGISTERED_TOOLS: [&str; 62] = [
+    const REGISTERED_TOOLS: [&str; 63] = [
         "accept_task_strategy",
         "add_task_link",
         "approve_task",
@@ -1599,6 +1623,7 @@ mod tests {
         "get_repository_credential_status",
         "get_review_digest",
         "get_review_history",
+        "get_review_level",
         "get_review_settings",
         "get_run_capacity",
         "get_strategy_approval",

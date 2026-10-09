@@ -48,7 +48,7 @@ use crate::runs::{self, RunReview};
 
 pub use config::{
     effective, effective_instructions, EffectiveReviewConfig, FixSession, ReviewConfig,
-    ReviewEnabled, ReviewSettings, TaskReview,
+    ReviewEnabled, ReviewLevel, ReviewLevelName, ReviewSettings, TaskReview,
 };
 pub use decide::{decide, Closed, Decision, Landing};
 pub use history::{

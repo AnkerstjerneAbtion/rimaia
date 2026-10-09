@@ -15,10 +15,11 @@ use rimaia_core::db::{
     settings, BoardColumn, MutationSource, RunKind, StrategyMode, StrategySource,
 };
 use rimaia_core::mcp::requests::{
-    ArchiveTaskRequest, ArchiveTasksRequest, GetReviewHistoryRequest, GetTaskRequest,
-    ListReviewFindingsRequest, ListTasksRequest, MoveTaskRequest, RemoveTaskLinkRequest,
-    ReviewNoteRequest, SetRepositoryOnArchiveRequest, SetRepositoryReviewConfigRequest,
-    SetReviewSettingsRequest, SetTaskDependenciesRequest, SetTaskReviewRequest, UpdateTaskRequest,
+    ArchiveTaskRequest, ArchiveTasksRequest, GetReviewHistoryRequest, GetReviewLevelRequest,
+    GetTaskRequest, ListReviewFindingsRequest, ListTasksRequest, MoveTaskRequest,
+    RemoveTaskLinkRequest, ReviewNoteRequest, SetRepositoryOnArchiveRequest,
+    SetRepositoryReviewConfigRequest, SetReviewSettingsRequest, SetTaskDependenciesRequest,
+    SetTaskReviewRequest, UpdateTaskRequest,
 };
 use rimaia_core::mcp::responses::{ReviewFindingView, ReviewHistoryView, TaskListView, TaskView};
 use rimaia_core::mcp::RimaiaServer;
@@ -1011,6 +1012,125 @@ async fn the_operator_reads_a_tasks_review_history_with_every_finding_status() {
             (&json!("Advisory one"), &json!("open"), &json!(false)),
         ]
     );
+}
+
+#[tokio::test]
+async fn a_review_level_says_what_it_inherits_and_what_it_resolves_to() {
+    // Task 037: the interface offers `Inherit (<value>)` per field, so core
+    // answers it. Both doors reach `get_review_level`, and the tool must say
+    // the same thing as the service for every level.
+    let h = TestContext::new().await;
+    let provider = rimaia_core::runner::provider::ClaudeProvider;
+    let repository_id = seed_repository(&h.context.pool, "rimaia", "/tmp/rimaia").await;
+    let task = create_task(&h, &repository_id, "Levelled").await;
+    review_config::set_review_settings(
+        &h.context,
+        &provider,
+        "",
+        json!({ "enabled": "on_cost_acknowledged", "max_review_loops": 4 }),
+    )
+    .await
+    .expect("global");
+    review_config::set_repository_review_config(
+        &h.context,
+        &provider,
+        &repository_id,
+        json!({ "max_review_loops": 1, "blocking_severity": "high" }),
+    )
+    .await
+    .expect("repository");
+    review_config::set_task_review(
+        &h.context,
+        &provider,
+        &task.id,
+        None,
+        json!({ "enabled": "off" }),
+    )
+    .await
+    .expect("task");
+
+    let level = |level: &str, id: Option<&str>| {
+        let request = request::<GetReviewLevelRequest>(json!({ "level": level, "id": id }));
+        let h = &h;
+        async move {
+            let Json(over_mcp) = server(h)
+                .get_review_level(Parameters(request))
+                .await
+                .expect("the operator reads a level");
+            over_mcp
+        }
+    };
+
+    let global = level("global", None).await;
+    assert_eq!(
+        global,
+        review_config::get_review_level(
+            &h.context.pool,
+            rimaia_core::review_loop::ReviewLevelName::Global,
+            None
+        )
+        .await
+        .expect("the window's read")
+    );
+    assert_eq!(global.config.max_review_loops, Some(4));
+    assert_eq!(
+        global.inherited.max_review_loops,
+        Some(2),
+        "the built-in default"
+    );
+    assert_eq!(
+        global.inherited.enabled,
+        Some(review_config::ReviewEnabled::Off)
+    );
+
+    let repository = level("repository", Some(&repository_id)).await;
+    assert_eq!(repository.config.max_review_loops, Some(1));
+    assert_eq!(
+        repository.inherited.max_review_loops,
+        Some(4),
+        "the global's"
+    );
+    assert_eq!(
+        repository.inherited.enabled,
+        Some(review_config::ReviewEnabled::OnCostAcknowledged)
+    );
+    assert_eq!(repository.effective.max_review_loops, Some(1));
+
+    let task_level = level("task", Some(&task.id)).await;
+    assert_eq!(
+        task_level.config.enabled,
+        Some(review_config::ReviewEnabled::Off)
+    );
+    assert_eq!(
+        task_level.inherited.enabled,
+        Some(review_config::ReviewEnabled::OnCostAcknowledged),
+        "what the task becomes if it stops saying off"
+    );
+    assert_eq!(
+        task_level.inherited.max_review_loops,
+        Some(1),
+        "the repository's"
+    );
+    assert_eq!(
+        task_level.effective.enabled,
+        Some(review_config::ReviewEnabled::Off)
+    );
+    assert_eq!(
+        task_level.effective.blocking_severity,
+        Some(FindingSeverity::High)
+    );
+
+    for refused in [
+        request::<GetReviewLevelRequest>(json!({ "level": "global", "id": "x" })),
+        request::<GetReviewLevelRequest>(json!({ "level": "task" })),
+    ] {
+        let refusal = as_result(server(&h).get_review_level(Parameters(refused)).await);
+        assert_eq!(
+            refusal.is_error,
+            Some(true),
+            "a level and its id must agree"
+        );
+    }
 }
 
 #[tokio::test]

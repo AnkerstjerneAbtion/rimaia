@@ -15,8 +15,8 @@
 use rimaia_core::db::{BoardColumn, MutationSource, RunKind, ScheduleMode};
 use rimaia_core::mcp::requests::{
     ArchiveTaskRequest, CreateTaskRequest, DoctorDismissalRequest, GetReviewHistoryRequest,
-    GetStrategyDefaultsRequest, GetTaskRequest, ListReviewFindingsRequest, ListTasksRequest,
-    MarkReviewDigestSeenRequest, MoveTaskRequest, PlanSelectionRequest,
+    GetReviewLevelRequest, GetStrategyDefaultsRequest, GetTaskRequest, ListReviewFindingsRequest,
+    ListTasksRequest, MarkReviewDigestSeenRequest, MoveTaskRequest, PlanSelectionRequest,
     RecordReviewFindingsRequest, ResolveReviewFindingRequest, ReviewNoteRequest,
     ScheduleConfigRequest, ScheduleRequest, SetMaxConcurrencyRequest,
     SetRepositoryMaxConcurrencyRequest, SetRepositoryReviewConfigRequest, SetReviewSettingsRequest,
@@ -144,6 +144,7 @@ fn expected_access(tool: Tool, kind: GrantKind) -> RunAccess {
         // prompt (task 021) and does not go looking for them.
         Tool::ListReviewFindings => RunAccess::Refused,
         Tool::GetReviewHistory => RunAccess::Refused,
+        Tool::GetReviewLevel => RunAccess::Refused,
 
             Tool::CreateTask
             | Tool::ListTasks
@@ -2076,6 +2077,16 @@ async fn the_review_configuration_is_refused_to_every_grant() {
         assert_refusal(
             &as_result(server.get_review_settings().await),
             &not_available("get_review_settings", &task.id),
+        );
+        assert_refusal(
+            &as_result(
+                server
+                    .get_review_level(Parameters(request::<GetReviewLevelRequest>(
+                        json!({ "level": "task", "id": task.id }),
+                    )))
+                    .await,
+            ),
+            &not_available("get_review_level", &task.id),
         );
         assert_refusal(
             &as_result(

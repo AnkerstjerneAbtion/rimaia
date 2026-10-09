@@ -434,6 +434,108 @@ pub async fn resolve(pool: &SqlitePool, task_id: &str, repository_id: &str) -> R
     })
 }
 
+/// Which level of the precedence chain a read is about.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ReviewLevelName {
+    Global,
+    Repository,
+    Task,
+}
+
+/// One level's own settings next to what it inherits and what it resolves to
+/// (task 037).
+///
+/// The interface offers `Inherit (<value>)` per field, and the value is the
+/// chain's answer one level up. It has to come from here because the
+/// precedence chain is a rule (ADR-0017), and a TypeScript copy of it would be
+/// a second implementation free to disagree with the one the runner obeys.
+/// All three are [`ReviewConfig`]s, so one spelling serves both doors: the
+/// two derived ones have every field a level can decide filled in, and leave
+/// `review_model` and `review_effort` absent when nothing names one, which is
+/// "the task's own strategy".
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ReviewLevel {
+    /// What this level stores, before any inheritance.
+    pub config: ReviewConfig,
+    /// What the level above resolves to: what each field becomes if this
+    /// level stops setting it.
+    pub inherited: ReviewConfig,
+    /// What this level resolves to with its own settings applied.
+    pub effective: ReviewConfig,
+}
+
+impl From<&EffectiveReviewConfig> for ReviewConfig {
+    fn from(effective: &EffectiveReviewConfig) -> Self {
+        ReviewConfig {
+            enabled: Some(if effective.enabled {
+                ReviewEnabled::OnCostAcknowledged
+            } else {
+                ReviewEnabled::Off
+            }),
+            max_review_loops: Some(effective.max_review_loops),
+            blocking_severity: Some(effective.blocking_severity),
+            review_model: effective.review_model.clone(),
+            review_effort: effective.review_effort.clone(),
+            fix_session: Some(effective.fix_session),
+        }
+    }
+}
+
+/// `level`'s own settings, what it inherits and what it resolves to. `id` is
+/// the repository's or the task's, and refused for the global level.
+pub async fn get_review_level(
+    pool: &SqlitePool,
+    level: ReviewLevelName,
+    id: Option<&str>,
+) -> Result<ReviewLevel> {
+    let nothing = ReviewConfig::default();
+    let global = global_config(pool).await?;
+    let (own, above) = match (level, id) {
+        (ReviewLevelName::Global, None) => {
+            (global.clone(), effective(&nothing, &nothing, &nothing))
+        }
+        (ReviewLevelName::Global, Some(_)) => {
+            return Err(Error::invalid(
+                "the global review level takes no id; name a repository or a task for those",
+            ))
+        }
+        (ReviewLevelName::Repository, Some(id)) => (
+            repository_config(pool, id).await?,
+            effective(&nothing, &nothing, &global),
+        ),
+        (ReviewLevelName::Task, Some(id)) => {
+            let repository_id =
+                sqlx::query_scalar!("SELECT repository_id FROM tasks WHERE id = ?1", id)
+                    .fetch_optional(pool)
+                    .await?
+                    .ok_or_else(|| Error::not_found(format!("no task with id {id}")))?;
+            let repository = repository_config(pool, &repository_id).await?;
+            (
+                task_review(pool, id).await?.config,
+                effective(&nothing, &repository, &global),
+            )
+        }
+        (ReviewLevelName::Repository | ReviewLevelName::Task, None) => {
+            return Err(Error::invalid(
+                "a repository or task review level needs the id of the repository or task",
+            ))
+        }
+    };
+
+    // The level resolves its own settings over exactly what it inherits, so
+    // re-running the chain with this level on top of the inherited document
+    // is the same answer `effective` gives for the whole chain.
+    let inherited = ReviewConfig::from(&above);
+    let effective = ReviewConfig::from(&effective(&own, &inherited, &nothing));
+    Ok(ReviewLevel {
+        config: own,
+        inherited,
+        effective,
+    })
+}
+
 /// Replaces the global instructions and configuration. `config` is `null` for
 /// nothing set.
 #[tracing::instrument(skip_all, fields(source = ctx.source.as_str()))]

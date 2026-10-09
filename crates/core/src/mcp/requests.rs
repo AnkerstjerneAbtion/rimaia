@@ -167,6 +167,17 @@ pub struct GetReviewHistoryRequest {
     pub task_id: String,
 }
 
+/// `get_review_level`: one level of the review loop's configuration, next to
+/// what it inherits.
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct GetReviewLevelRequest {
+    pub level: crate::review_loop::ReviewLevelName,
+    /// The repository's or the task's id; absent for `global`.
+    #[serde(default)]
+    pub id: Option<String>,
+}
+
 /// `set_review_settings`: the global review instructions and configuration
 /// (task 021).
 ///

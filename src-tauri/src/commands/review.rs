@@ -10,7 +10,9 @@
 use chrono::{DateTime, Utc};
 use rimaia_core::db::Task;
 use rimaia_core::review::{self, Dependent, Digest, FindingStatus, ReviewFinding, ReviewOutcome};
-use rimaia_core::review_loop::config::{self as review_config, ReviewSettings, TaskReview};
+use rimaia_core::review_loop::config::{
+    self as review_config, ReviewLevel, ReviewLevelName, ReviewSettings, TaskReview,
+};
 use rimaia_core::review_loop::{self, ReviewConfig, ReviewHistory};
 use rimaia_core::Result;
 use serde_json::Value;
@@ -92,6 +94,19 @@ pub async fn get_review_history(
     task_id: String,
 ) -> Result<ReviewHistory> {
     review_loop::history(&state.context, &task_id).await
+}
+
+/// One level of the loop's configuration next to what it inherits and what it
+/// resolves to, so the interface can say `Inherit (<value>)` without working
+/// the precedence out itself (task 037). `id` is the repository's or the
+/// task's, and absent for `global`.
+#[tauri::command]
+pub async fn get_review_level(
+    state: State<'_, AppState>,
+    level: ReviewLevelName,
+    id: Option<String>,
+) -> Result<ReviewLevel> {
+    review_config::get_review_level(&state.context.pool, level, id.as_deref()).await
 }
 
 /// The global review instructions and loop configuration.
