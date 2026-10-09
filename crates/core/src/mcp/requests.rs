@@ -160,6 +160,48 @@ pub struct ListReviewFindingsRequest {
     pub status: Option<FindingStatus>,
 }
 
+/// `set_review_settings`: the global review instructions and configuration
+/// (task 021).
+///
+/// `config` is raw JSON rather than `ReviewConfig`, so the service refuses
+/// `"enabled": true` in its own sentence instead of a deserializer refusing it
+/// in another, and every door says the same thing.
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct SetReviewSettingsRequest {
+    /// Empty for none.
+    #[serde(default)]
+    pub instructions: String,
+    /// A ReviewConfig document, or null for nothing set.
+    #[serde(default)]
+    pub config: serde_json::Value,
+}
+
+/// `set_repository_review_config`.
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct SetRepositoryReviewConfigRequest {
+    pub repository_id: String,
+    /// A ReviewConfig document, or null to inherit everything.
+    #[serde(default)]
+    pub config: serde_json::Value,
+}
+
+/// `set_task_review`. Not part of `update_task`, which a planner's grant may
+/// call on its own task (task 021).
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct SetTaskReviewRequest {
+    pub task_id: String,
+    /// Replaces the global review instructions for this task. Absent or
+    /// blank uses the global ones.
+    #[serde(default)]
+    pub review_instructions: Option<String>,
+    /// A ReviewConfig document, or null to inherit everything.
+    #[serde(default)]
+    pub config: serde_json::Value,
+}
+
 /// `mark_review_digest_seen`: the digest's own `until`.
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]

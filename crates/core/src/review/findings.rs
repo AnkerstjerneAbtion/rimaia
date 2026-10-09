@@ -20,19 +20,30 @@
 //! review records only from a running review of the task it names, and a fix
 //! resolves only from a running fix of the finding's own task.
 //!
-//! # `fingerprint` is written NULL
+//! # The fingerprint, and a rejection that stands (task 021)
 //!
-//! It is 021's key for "the same finding again", and how it is computed and
-//! matched is 021's decision. A reviewer never supplies it: a finding that says
-//! which earlier finding it repeats is a reviewer grading its own novelty.
+//! [`fingerprint`] is "the same finding again": the file and the title,
+//! normalised, and never the line, because a fix moves lines. [`record`] is
+//! the one writer of `review_findings`, so it is computed there and nowhere
+//! else. A reviewer never supplies it: a finding that says which earlier
+//! finding it repeats is a reviewer grading its own novelty.
+//!
+//! A finding whose fingerprint matches one a fix run already rejected on the
+//! same task is stored `rejected`, pointing at that rejection, rather than
+//! raised again as new. It is kept rather than dropped, so the history shows
+//! that the reviewer raised it again, and it never blocks and never reaches a
+//! fixer (ADR-0017's amendment of 2026-10-09).
+
+use std::collections::HashMap;
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::context::ServiceContext;
-use crate::db::{new_id, RunKind, RunStatus};
+use crate::db::{new_id, ExitClass, RunKind, RunStatus};
 use crate::error::{Error, Result};
 use crate::events::ChangeEvent;
+use crate::review_loop::LoopRow;
 
 /// How much a finding matters, in D28's `CHECK` spelling.
 #[derive(
@@ -54,6 +65,24 @@ pub enum FindingSeverity {
     High,
     Medium,
     Low,
+}
+
+impl FindingSeverity {
+    /// Whether this severity meets `threshold`, ordered
+    /// `critical > high > medium > low`: what "blocking" means against a
+    /// loop's `blocking_severity` (ADR-0017).
+    pub const fn is_at_least(self, threshold: FindingSeverity) -> bool {
+        self.rank() >= threshold.rank()
+    }
+
+    const fn rank(self) -> u8 {
+        match self {
+            FindingSeverity::Critical => 3,
+            FindingSeverity::High => 2,
+            FindingSeverity::Medium => 1,
+            FindingSeverity::Low => 0,
+        }
+    }
 }
 
 /// Where a finding stands, in D28's `CHECK` spelling.
@@ -104,7 +133,10 @@ pub struct NewReviewFinding {
 }
 
 /// One stored finding.
-#[derive(Debug, Clone, PartialEq, Serialize)]
+///
+/// `Deserialize` because a fix phase is composed from the findings the board
+/// hands over in its `RunContext` (seam-contract D31 point 6).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ReviewFinding {
     pub id: String,
@@ -119,7 +151,8 @@ pub struct ReviewFinding {
     pub body: String,
     pub file: Option<String>,
     pub line: Option<i64>,
-    /// Always `None` until task 021 decides how it is computed.
+    /// [`fingerprint`] of the file and title. `None` only on a row recorded
+    /// before task 021 computed it.
     pub fingerprint: Option<String>,
     pub status: FindingStatus,
     /// What the fix run did, or why it declined. Set by [`resolve`].
@@ -190,11 +223,24 @@ pub async fn record(
     for (ordinal, finding) in findings.iter().enumerate() {
         let id = new_id();
         let ordinal = ordinal as i64;
+        let fingerprint = fingerprint(finding.file.as_deref(), &finding.title);
+        let (status, resolution, resolved_at) =
+            match standing_rejection(&mut tx, task_id, &fingerprint).await? {
+                Some(rejection) => (
+                    FindingStatus::Rejected,
+                    Some(format!(
+                        "Rejected earlier as {}: {}",
+                        rejection.id, rejection.reason
+                    )),
+                    Some(now),
+                ),
+                None => (FindingStatus::Open, None, None),
+            };
         sqlx::query!(
             r#"INSERT INTO review_findings
                 (id, task_id, review_run_id, ordinal, severity, title, body, file, line,
-                 fingerprint, status, created_at)
-               VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, NULL, ?10, ?11)"#,
+                 fingerprint, status, resolution, created_at, resolved_at)
+               VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)"#,
             id,
             task_id,
             review_run_id,
@@ -204,8 +250,11 @@ pub async fn record(
             finding.body,
             finding.file,
             finding.line,
-            FindingStatus::Open,
+            fingerprint,
+            status,
+            resolution,
             now,
+            resolved_at,
         )
         .execute(&mut *tx)
         .await?;
@@ -343,6 +392,68 @@ pub async fn list(
     Ok(findings)
 }
 
+/// `task_id`'s rows as the review loop reads them, oldest first, every kind
+/// (task 021).
+///
+/// Here rather than in `review_loop`, because it reads
+/// `findings_recorded_at` and this module stays that column's one reader: a
+/// phase has recorded when any of its rows has it set (D30 point 7).
+pub async fn loop_rows(ctx: &ServiceContext, task_id: &str) -> Result<Vec<LoopRow>> {
+    let rows = sqlx::query!(
+        r#"SELECT id AS "id!", kind AS "kind!: RunKind", attempt, status AS "status!: RunStatus",
+                  exit_class AS "exit_class: ExitClass", session_id AS "session_id!",
+                  head_sha, findings_recorded_at IS NOT NULL AS "findings_recorded!: bool"
+             FROM runs WHERE task_id = ?1 ORDER BY attempt"#,
+        task_id,
+    )
+    .fetch_all(&ctx.pool)
+    .await?;
+    Ok(rows
+        .into_iter()
+        .map(|row| LoopRow {
+            id: row.id,
+            kind: row.kind,
+            attempt: row.attempt,
+            status: row.status,
+            exit_class: row.exit_class,
+            session_id: row.session_id,
+            head_sha: row.head_sha,
+            findings_recorded: row.findings_recorded,
+        })
+        .collect())
+}
+
+/// [`loop_rows`] for every task still on the board, keyed by task id, in one
+/// read: the digest's batched form.
+pub async fn loop_rows_on_the_board(ctx: &ServiceContext) -> Result<HashMap<String, Vec<LoopRow>>> {
+    let rows = sqlx::query!(
+        r#"SELECT r.task_id AS "task_id!", r.id AS "id!", r.kind AS "kind!: RunKind", r.attempt,
+                  r.status AS "status!: RunStatus", r.exit_class AS "exit_class: ExitClass",
+                  r.session_id AS "session_id!", r.head_sha,
+                  r.findings_recorded_at IS NOT NULL AS "findings_recorded!: bool"
+             FROM runs r JOIN tasks t ON t.id = r.task_id
+            WHERE t.archived_at IS NULL
+            ORDER BY r.task_id, r.attempt"#,
+    )
+    .fetch_all(&ctx.pool)
+    .await?;
+
+    let mut by_task: HashMap<String, Vec<LoopRow>> = HashMap::new();
+    for row in rows {
+        by_task.entry(row.task_id).or_default().push(LoopRow {
+            id: row.id,
+            kind: row.kind,
+            attempt: row.attempt,
+            status: row.status,
+            exit_class: row.exit_class,
+            session_id: row.session_id,
+            head_sha: row.head_sha,
+            findings_recorded: row.findings_recorded,
+        });
+    }
+    Ok(by_task)
+}
+
 /// When `review_run_id` recorded its findings: set means the review called,
 /// `None` means it did not (D30 point 7). Never inferred from a count of rows,
 /// because a clean review's call writes none.
@@ -359,6 +470,62 @@ pub async fn recorded_at(
     .await?
     .ok_or_else(|| Error::not_found(format!("no run with id {review_run_id}")))?;
     Ok(row.findings_recorded_at)
+}
+
+/// "The same finding again": the file and the title, each normalised, joined
+/// by `|`. The line is left out on purpose, because a fix moves lines. A
+/// finding about the change as a whole has an empty file half.
+///
+/// A normalised string rather than a hash (seam-contract D6: no new
+/// dependency), so a row stays legible in the `sqlite3` CLI.
+pub fn fingerprint(file: Option<&str>, title: &str) -> String {
+    format!(
+        "{}|{}",
+        normalise(file.unwrap_or_default()),
+        normalise(title)
+    )
+}
+
+/// Trimmed, lowercased, and every run of whitespace collapsed to one space.
+fn normalise(text: &str) -> String {
+    text.split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_lowercase()
+}
+
+/// A fix run's rejection a new finding repeats.
+struct Rejection {
+    id: String,
+    reason: String,
+}
+
+/// The first rejection on `task_id` with this fingerprint, if any.
+///
+/// The first, in review order, because a finding carried over from it is
+/// itself stored `rejected`; pointing at the carry-over would nest one "Rejected
+/// earlier as" inside another, where the original names the fixer's reason.
+async fn standing_rejection(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    task_id: &str,
+    fingerprint: &str,
+) -> Result<Option<Rejection>> {
+    let row = sqlx::query!(
+        r#"SELECT f.id AS "id!", f.resolution AS "resolution!"
+             FROM review_findings f
+             JOIN runs r ON r.id = f.review_run_id
+            WHERE f.task_id = ?1 AND f.fingerprint = ?2 AND f.status = 'rejected'
+            ORDER BY r.attempt, f.ordinal
+            LIMIT 1"#,
+        task_id,
+        fingerprint,
+    )
+    .fetch_optional(&mut **tx)
+    .await?;
+    Ok(row.map(|row| Rejection {
+        id: row.id,
+        reason: row.resolution,
+    }))
 }
 
 fn validate_finding(index: usize, finding: &NewReviewFinding) -> Result<()> {

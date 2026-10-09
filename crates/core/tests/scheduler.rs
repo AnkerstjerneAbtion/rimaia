@@ -66,7 +66,7 @@ use rimaia_core::scheduler::{
 use rimaia_core::startup;
 use rimaia_core::tasks::{self, NewTask, TaskFilter, TaskSummary};
 use rimaia_core::testing::{self, open_gate as open, FakeCli, TempRepo, TestContext};
-use rimaia_core::{AppPaths, ChangeEvent, Clock, ErrorCode, ServiceContext};
+use rimaia_core::{AppPaths, ChangeEvent, Clock, ServiceContext};
 use tempfile::TempDir;
 use tokio::sync::broadcast::Receiver;
 
@@ -2632,44 +2632,38 @@ async fn a_waiting_review_resumes_as_a_review_and_not_as_an_implementation() {
         .last_run
         .expect("the review row");
 
-    // The resume point says what was waiting, and the one function that turns
-    // it into an implementation resume refuses it.
+    // The resume point says what was waiting, and the claim carries it.
     let point = scheduler::resume_point(fixture.ctx(), &reviewed)
         .await
         .expect("read the resume point")
         .expect("a task with runs");
     assert_eq!(point.kind, RunKind::Review);
     assert_eq!(point.session_id, "review-session");
-    let refusal = scheduler::resume_as_implementation(Some(point))
-        .expect_err("a review is not resumed as an implementation");
-    assert_eq!(refusal.code(), ErrorCode::Invalid);
-    assert_eq!(
-        refusal.to_string(),
-        "a review run cannot be resumed yet: review and fix runs arrive with task 021",
-    );
 
-    // One queue pass with room for both: the refused entry is skipped, and the
-    // other task's implementation run still starts.
+    // One queue pass with room for both. The review resumes as a review (task
+    // 021): this one has no worktree to review, so it is recorded as a review
+    // row on its own session and refused before it spawns, and lands the task
+    // in review rather than resuming it as an implementation.
     fixture.set_parallel(2).await;
     let mut changes = fixture.ctx().subscribe();
     let queue = fixture.spawn_queue();
     queue.start().await.expect("start the queue");
     wait_until_in_review(&fixture, &mut changes, &ready).await;
+    wait_until_in_review(&fixture, &mut changes, &reviewed).await;
 
     assert_eq!(fixture.cli.attempts(&ready), 1);
     assert_eq!(
         fixture.cli.attempts(&reviewed),
         0,
-        "no child for the review"
+        "no child for a review with nothing to review"
     );
     let after = fixture.detail(&reviewed).await;
-    assert_eq!(after.task.run_state, RunState::WaitingRetry);
-    assert_eq!(
-        after.last_run.as_ref(),
-        Some(&before),
-        "the review row and its resume_after are untouched",
-    );
-    assert_eq!(before.resume_after, Some(due));
+    assert_eq!(after.task.run_state, RunState::Idle);
+    let resumed = after.last_run.expect("the resumed review's row");
+    assert_eq!(resumed.kind, RunKind::Review);
+    assert_eq!(resumed.session_id, "review-session");
+    assert_eq!(resumed.attempt, before.attempt + 1);
+    assert_eq!(resumed.exit_class, Some(ExitClass::Fatal));
 
     queue.shutdown();
 }
@@ -2728,7 +2722,8 @@ async fn finish_implementation(
     .expect("close an implementation row");
 }
 
-/// Closes a review or fix row, which `finish_run` refuses until task 021.
+/// Closes a review or fix row without landing its task, for a test that
+/// arranges history rather than exercising the loop.
 async fn close_loop_row(fixture: &Fixture, run_id: &str, status: RunStatus, class: ExitClass) {
     testing::runs::close_run(fixture.ctx(), run_id, status, class, None).await;
 }

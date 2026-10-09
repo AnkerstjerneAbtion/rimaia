@@ -35,11 +35,14 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
+use crate::board::NextStep;
 use crate::context::ServiceContext;
 use crate::db::{new_id, BoardColumn, ExitClass, Run, RunKind, RunState, RunStatus};
 use crate::error::{Error, Result};
 use crate::events::ChangeEvent;
 use crate::paths::AppPaths;
+use crate::review::findings;
+use crate::review_loop::{self, Closed, Landing};
 use crate::runner::events::{
     transcript_path, ContentBlock, EndReason, EventStream, ResultEvent, RunEvent, TokenUsage,
     UsageReport,
@@ -742,7 +745,22 @@ pub(crate) async fn insert_run(
     fetch_run_row(&ctx.pool, &id).await
 }
 
-/// Closes the `runs` row and applies the outcome to the task.
+/// Closes the `runs` row and applies the outcome to the task, with no run
+/// window: [`finish_run_within`] for a caller that has none to report, which
+/// is reconcile and every test that closes a row by hand.
+pub async fn finish_run(
+    ctx: &ServiceContext,
+    run_id: &str,
+    outcome: &RunOutcome,
+    capture: &RunCapture,
+) -> Result<Run> {
+    Ok(finish_run_within(ctx, run_id, outcome, capture, None)
+        .await?
+        .0)
+}
+
+/// Closes the `runs` row and applies the outcome to the task, answering what
+/// happens next.
 ///
 /// Three transactions rather than one, and the order is the point: the row is
 /// written **first**, so a crash between them leaves the outcome recorded and
@@ -756,12 +774,11 @@ pub(crate) async fn insert_run(
 ///
 /// # What the row was for decides what closing it means (D29 point 9)
 ///
-/// The kind is read off the row, never taken from the caller, and dispatched on
-/// **before anything is written**. Only the implementation arm exists yet. What
-/// a finished review or fix does to the task is ADR-0017's and task 021's, and
-/// until then both refuse without touching the row or the task. Refusing after
-/// the `UPDATE` instead would commit a closed row and leave the task `running`
-/// with no process and no retry deadline.
+/// The kind is read off the row, never taken from the caller. Every kind
+/// closes the same way; what it means for the task is the task-side step's,
+/// [`apply_to_task`], which is where ADR-0017's loop is decided (task 021).
+/// `window_closes_at` is the runner's run window, which bounds whether a loop
+/// starts another phase; reconcile has none, and its outcome never continues.
 ///
 /// # What the worktree was left as (task 033)
 ///
@@ -774,12 +791,13 @@ pub(crate) async fn insert_run(
 ///
 /// A bundle is a record, not a postcondition. A capture that measured nothing
 /// changes nothing about the outcome, the class or the task's transition.
-pub async fn finish_run(
+pub async fn finish_run_within(
     ctx: &ServiceContext,
     run_id: &str,
     outcome: &RunOutcome,
     capture: &RunCapture,
-) -> Result<Run> {
+    window_closes_at: Option<DateTime<Utc>>,
+) -> Result<(Run, NextStep)> {
     let ended_at = ctx.clock.now();
 
     let mut tx = ctx.pool.begin().await?;
@@ -788,12 +806,6 @@ pub async fn finish_run(
         return Err(Error::invalid(format!(
             "run {run_id} has already been finalized"
         )));
-    }
-    match run.kind {
-        RunKind::Implementation => {}
-        RunKind::Review | RunKind::Fix => {
-            return Err(kind_not_wired_yet(run.kind, "finished"));
-        }
     }
 
     let pr_url = outcome.pr_url.as_deref();
@@ -847,26 +859,9 @@ pub async fn finish_run(
     ctx.publish(ChangeEvent::runs([run_id.to_string()]));
     ctx.publish(ChangeEvent::tasks([run.task_id.clone()]));
 
-    apply_to_task(ctx, &run.task_id, outcome).await?;
+    let next = apply_to_task(ctx, &run, outcome, window_closes_at).await?;
 
-    fetch_run_row(&ctx.pool, run_id).await
-}
-
-/// The refusal every review or fix arm returns until task 021 wires it.
-///
-/// One sentence for both places that meet such a row — a resume and a finish —
-/// so they cannot drift apart. `Error::invalid` rather than a new code
-/// (seam-contract D8): before 021 nothing writes a review or fix row, so only a
-/// test or a hand-edited board reaches it.
-pub(crate) fn kind_not_wired_yet(kind: RunKind, action: &str) -> Error {
-    let kind = match kind {
-        RunKind::Implementation => "an implementation",
-        RunKind::Review => "a review",
-        RunKind::Fix => "a fix",
-    };
-    Error::invalid(format!(
-        "{kind} run cannot be {action} yet: review and fix runs arrive with task 021"
-    ))
+    Ok((fetch_run_row(&ctx.pool, run_id).await?, next))
 }
 
 /// Inserts `capture`'s bundle, when it has one and a head commit to anchor it.
@@ -922,57 +917,74 @@ async fn insert_bundle(
     Ok(())
 }
 
-/// Where the task lands, per ADR-0011's action column.
+/// Where the task lands, and what happens next: ADR-0011's action column for
+/// an implementation that failed, ADR-0017's exits for everything else.
 ///
-/// Only `success` also moves the card — that is task 008's scope, and it is the
-/// board's whole promise: work that finished is waiting to be reviewed. The
-/// other five leave the card where it is, because ADR-0007's failure rule keeps
-/// a failed task in `ready` and shows the failure on it.
+/// One decision, [`review_loop::decide`], for every kind and every path that
+/// closes a row, reconcile's included. The configuration, the rows and the
+/// findings are read **here**, after the row's `UPDATE` committed, so the
+/// closed row is among them and a setting changed mid-loop takes effect at
+/// this boundary. Reads only, until the landing: a decision to continue
+/// writes nothing to the task, which stays `running` in its column.
 ///
-/// Every class transitions *out* of `running`. A task left `running` with no
-/// process is a state nothing can recover from and a badge that lies.
+/// # The class alone was never enough
 ///
-/// # The class alone is not enough any more
-///
-/// Task 008 routed on `exit_class` and put all three retryable classes in
-/// `waiting_retry`, which was right while nothing resumed a waiting task —
-/// naming the state was the whole of what it could do. Now a retryable class
-/// means two different things depending on whether the budget is spent:
+/// A retryable class means two different things depending on whether the
+/// budget is spent:
 ///
 /// ```text
 /// usage_limit | transient | interrupted, resume_after.is_some() => waiting_retry
-/// usage_limit | transient | interrupted, otherwise             => failed
+/// usage_limit | transient | interrupted, otherwise             => failed (an implementation)
+///                                                              => in_review (a review or fix)
 /// ```
 ///
 /// The `otherwise` arm is what makes "transient retries stop at the cap and the
-/// task lands in `failed` with the reason" true. Without it a task that had
-/// exhausted its five attempts would sit in `waiting_retry` with no deadline —
-/// invisible to a morning review that ADR-0007 wants a failure to interrupt,
-/// and skipped forever by the queue's own selection. The *reason* is still on
-/// the run's `exit_class` and `error_message`, never on `run_state`
-/// (seam-contract D9's two dimensions).
-async fn apply_to_task(ctx: &ServiceContext, task_id: &str, outcome: &RunOutcome) -> Result<()> {
-    if outcome.exit_class == ExitClass::Success {
-        move_to_in_review(ctx, task_id).await?;
-    }
+/// task lands in `failed` with the reason" true for an implementation. A review
+/// or fix lands in `in_review` instead, because the implementation before it
+/// had already succeeded. The *reason* is still on the run's `exit_class` and
+/// `error_message`, never on `run_state` (seam-contract D9's two dimensions).
+async fn apply_to_task(
+    ctx: &ServiceContext,
+    run: &Run,
+    outcome: &RunOutcome,
+    window_closes_at: Option<DateTime<Utc>>,
+) -> Result<NextStep> {
+    let task = crate::tasks::service::fetch_task_row(&ctx.pool, &run.task_id).await?;
+    let resolved = review_loop::config::resolve(&ctx.pool, &task.id, &task.repository_id).await?;
+    let rows = findings::loop_rows(ctx, &task.id).await?;
+    let all = findings::list(ctx, &task.id, None).await?;
 
-    let run_state = match outcome.exit_class {
-        ExitClass::Success => RunState::Idle,
+    let decision = review_loop::decide(
+        &resolved.config,
+        &rows,
+        &all,
+        Closed {
+            kind: run.kind,
+            exit_class: outcome.exit_class,
+            resume_after: outcome.resume_after,
+        },
+        window_closes_at,
+        ctx.clock.now(),
+    );
+
+    match decision.landing {
+        Landing::Stays => {}
+        Landing::InReview => {
+            move_to_in_review(ctx, &task.id).await?;
+            set_run_state(ctx, &task.id, RunState::Idle).await?;
+        }
+        Landing::WaitingRetry => {
+            set_run_state(ctx, &task.id, RunState::WaitingRetry).await?;
+        }
         // ADR-0011 for `fatal` ("no retry... run_state = failed"), and ADR-0010
         // for a cancelled run: cancel-one on a *running* task "goes to `failed`
         // with `cancelled` reason". `Running -> Cancelled` is illegal by design;
         // the reason lives on the run's `exit_class`, not on `run_state`.
-        ExitClass::Fatal | ExitClass::Cancelled => RunState::Failed,
-        ExitClass::UsageLimit | ExitClass::Transient | ExitClass::Interrupted => {
-            match outcome.resume_after {
-                Some(_) => RunState::WaitingRetry,
-                None => RunState::Failed,
-            }
+        Landing::Failed => {
+            set_run_state(ctx, &task.id, RunState::Failed).await?;
         }
-    };
-
-    set_run_state(ctx, task_id, run_state).await?;
-    Ok(())
+    }
+    Ok(decision.next)
 }
 
 /// Appends the task to the bottom of `in_review`.

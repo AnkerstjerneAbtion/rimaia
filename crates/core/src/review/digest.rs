@@ -23,6 +23,8 @@ use crate::db::{settings, BoardColumn, RunKind, RunState, RunStatus};
 use crate::error::{Error, Result};
 use crate::events::ChangeEvent;
 use crate::repo;
+use crate::review::findings;
+use crate::review_loop;
 use crate::scheduler::selection::{skip_reason, SkipReason};
 use crate::tasks::dependencies::compare_dependency_order;
 use crate::tasks::{list_tasks, TaskFilter, TaskSummary};
@@ -102,8 +104,8 @@ pub struct DigestEntry {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DigestLoop {
-    /// Review rows after the task's newest implementation row: which loop the
-    /// task is on.
+    /// Review phases after the task's newest implementation phase: which loop
+    /// the task is on. A review resumed after a usage limit counts once.
     pub reviews_since_implementation: u32,
     /// The task's `open` findings, of every loop.
     pub open_findings: u32,
@@ -362,39 +364,44 @@ fn run_backed_entry(summary: &TaskSummary, rows: &[&WindowRun]) -> DigestEntry {
 /// Every unarchived task with a review loop to report, keyed by task id.
 ///
 /// Over the task's whole history rather than the window: which loop a task is
-/// on does not depend on when the reviewer last looked. One query for the
-/// digest, not one per entry.
+/// on does not depend on when the reviewer last looked. Two reads for the
+/// digest, not two per entry. The loop number counts review **phases** after
+/// the newest implementation phase (D29 point 8 as task 021 amends it), through
+/// the same builder `ReviewLoopSummary` uses, so the two cannot disagree about
+/// a review that hit a limit and resumed.
 async fn review_loops(ctx: &ServiceContext) -> Result<HashMap<String, DigestLoop>> {
-    let rows = sqlx::query!(
-        r#"SELECT id AS "task_id!", reviews AS "reviews!: i64", open AS "open!: i64"
-             FROM (SELECT t.id,
-                          (SELECT count(*) FROM runs r
-                            WHERE r.task_id = t.id AND r.kind = 'review'
-                              AND r.attempt > coalesce(
-                                  (SELECT max(i.attempt) FROM runs i
-                                    WHERE i.task_id = t.id AND i.kind = 'implementation'),
-                                  0)) AS reviews,
-                          (SELECT count(*) FROM review_findings f
-                            WHERE f.task_id = t.id AND f.status = 'open') AS open
-                     FROM tasks t
-                    WHERE t.archived_at IS NULL)
-            WHERE reviews > 0 OR open > 0"#,
+    let rows_by_task = findings::loop_rows_on_the_board(ctx).await?;
+    let open = sqlx::query!(
+        r#"SELECT f.task_id AS "task_id!", count(*) AS "open!: i64"
+             FROM review_findings f JOIN tasks t ON t.id = f.task_id
+            WHERE t.archived_at IS NULL AND f.status = 'open'
+            GROUP BY f.task_id"#,
     )
     .fetch_all(&ctx.pool)
     .await?;
-
-    Ok(rows
+    let open: HashMap<String, u32> = open
         .into_iter()
-        .map(|row| {
-            (
-                row.task_id,
+        .map(|row| (row.task_id, u32::try_from(row.open).unwrap_or(u32::MAX)))
+        .collect();
+
+    let mut loops = HashMap::new();
+    for task_id in rows_by_task.keys().chain(open.keys()) {
+        let reviews = rows_by_task
+            .get(task_id)
+            .and_then(|rows| review_loop::current_loop(rows))
+            .map_or(0, |current| current.reviews());
+        let open_findings = open.get(task_id).copied().unwrap_or(0);
+        if reviews > 0 || open_findings > 0 {
+            loops.insert(
+                task_id.clone(),
                 DigestLoop {
-                    reviews_since_implementation: u32::try_from(row.reviews).unwrap_or(u32::MAX),
-                    open_findings: u32::try_from(row.open).unwrap_or(u32::MAX),
+                    reviews_since_implementation: reviews,
+                    open_findings,
                 },
-            )
-        })
-        .collect())
+            );
+        }
+    }
+    Ok(loops)
 }
 
 /// A `ready` task the night did not touch, and why not. `skip_reason` is called,

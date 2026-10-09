@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT review_config FROM repositories WHERE id = ?1",
+  "describe": {
+    "columns": [
+      {
+        "name": "review_config",
+        "ordinal": 0,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      true
+    ]
+  },
+  "hash": "541f1871f499d39f7a90e3a6e81af10198edf6973554d750e4bd8158beb43626"
+}

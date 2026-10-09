@@ -69,8 +69,8 @@ use tokio::process::{Child, Command};
 use tokio::sync::watch;
 
 use crate::board::{
-    BoardPort, Claim, FinishRun, LeaseRef, NextStep, RunContext, StartRun, TeamLimits,
-    TranscriptEnd,
+    BoardPort, Claim, FinishReceipt, FinishRun, ImplementationBase, LeaseRef, NextStep, RunContext,
+    StartRun, TeamLimits, TranscriptEnd,
 };
 use crate::context::ServiceContext;
 use crate::credentials::inject::ChildEnvironment;
@@ -79,21 +79,25 @@ use crate::db::settings::{self, RunEnvironment};
 use crate::db::Repository;
 use crate::db::{new_id, ExitClass, Run, RunKind, RunStatus};
 use crate::error::{Error, Result};
-use crate::mcp::RunHandles;
+use crate::mcp::{Grant, RunGrant, RunHandles, Tool, RUN_MCP_SERVER_NAME};
 use crate::paths::AppPaths;
 use crate::repo;
+use crate::review_loop::FixSession;
 use crate::runner::events::{
     transcript_path, EventStream, InitEvent, RunEvent, RunTail, TokenUsage,
 };
-use crate::runner::outcome::{
-    kind_not_wired_yet, PullRequestWatch, RunOutcome, SpawnedAs, Termination,
+use crate::runner::outcome::{PullRequestWatch, RunOutcome, SpawnedAs, Termination};
+use crate::runner::prompt::{
+    compose_fix_continuation, compose_fix_prompt, compose_fix_resume, compose_prompt,
+    compose_resume_prompt, compose_review_prompt, compose_review_resume,
+    compose_review_system_append, compose_system_append,
 };
-use crate::runner::prompt::{compose_prompt, compose_resume_prompt, compose_system_append};
 use crate::runner::provider::{
-    self, claude, AgentProvider, ForbiddenOperation, PromptStyle, RunIntent, RunPlan,
+    self, claude, AgentProvider, ForbiddenOperation, PromptStyle, RimaiaHandle, RunIntent, RunPlan,
     SessionIntent, SpawnPlan,
 };
 use crate::runner::strategy;
+use crate::runs::bundle::RunCapture;
 use crate::scheduler::{pause, InFlight, ResumePoint};
 use crate::worktree::{self, Worktree};
 
@@ -587,19 +591,6 @@ impl Default for RunnerConfig {
     }
 }
 
-/// The session a retry continues (ADR-0011: "retries resume, they do not
-/// restart").
-///
-/// A one-field struct rather than a bare `Option<String>`, because "some
-/// string" is exactly what a caller could get wrong here and the consequence is
-/// not a compile error: a run id, a task id or a stale session would all spawn
-/// happily and start a *new* conversation under an old name, throwing away the
-/// context the resume exists to keep.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ResumeSession {
-    pub session_id: String,
-}
-
 /// What [`run_task`] is handed beside its claim: the two things that belong to
 /// the process supervising the run rather than to the board.
 ///
@@ -649,6 +640,11 @@ pub struct Attempt<'a> {
     /// changes nothing at all — which is what makes adopting this feature safe
     /// one repository at a time.
     pub credentials: &'a ChildEnvironment,
+    /// Facts about this attempt the runner decided before it spawned, written
+    /// to its transcript's stderr beside the unenforced mitigations, so a
+    /// morning reviewer reads them on the run (task 021's fix that could not
+    /// resume a session is one).
+    pub notes: &'a [String],
 }
 
 // ---------------------------------------------------------------------------
@@ -720,7 +716,8 @@ pub(crate) fn implementation_intent<'a>(
     }
 }
 
-/// Runs one claimed task end to end: prepare, plan, spawn, stream, report.
+/// Runs one claimed task end to end: the implementation, and then whatever
+/// review and fix phases the board asks for (ADR-0017), under the one claim.
 ///
 /// **Every error after the claim gives it back.** The board's `release` moves
 /// a task still `running` to `failed`, and keeps a verdict already written, so
@@ -728,6 +725,77 @@ pub(crate) fn implementation_intent<'a>(
 /// process behind it. Before task 036 the manual starters claimed and then
 /// called this, and every `?` ahead of the `runs` row stranded the card until
 /// the next launch reconciled it.
+///
+/// # One loop, one spawn per iteration (task 021)
+///
+/// It enters at the claim's resume kind when the claim carries a resume, and
+/// at implementation otherwise. Each phase ends in `finish_run`, and the board
+/// answers: [`NextStep::Released`] ends the loop, and
+/// [`NextStep::Continue`] names the next phase's kind. **The runner never
+/// counts loops and never chooses to continue**: a runner that did would be a
+/// second copy of ADR-0017's budget, on a machine the board does not control
+/// (seam-contract D31's Why). D19's slot and the claim are held across every
+/// phase and released once, by the caller, when this returns.
+///
+/// Between phases nothing ends through a bare `release`, which would move the
+/// task to `failed` and throw away a succeeded implementation. A review or fix
+/// that cannot start is recorded as a row of its kind and closed through
+/// `finish_run` — see [`Phases::unspawned`] — and only a row that cannot be
+/// written falls back to `release`. That, and a crash between a `Continue` and
+/// the next `start_run`, are the named residual (ADR-0017's 2026-10-09
+/// amendment): the board could not be written, or nothing was alive to write
+/// it.
+#[tracing::instrument(skip_all, fields(task_id = %claim.lease.task_id))]
+pub async fn run_task(
+    board: &dyn BoardPort,
+    ctx: &ServiceContext,
+    paths: &AppPaths,
+    config: &RunnerConfig,
+    claim: Claim,
+    request: RunRequest,
+) -> Result<Run> {
+    let Claim {
+        lease,
+        trigger,
+        resume,
+        context,
+        ..
+    } = claim;
+    let phases = Phases {
+        board,
+        ctx,
+        paths,
+        config,
+        lease: &lease,
+        trigger,
+        request: &request,
+    };
+
+    let mut receipt = match resume {
+        Some(ResumePoint {
+            kind: kind @ (RunKind::Review | RunKind::Fix),
+            session_id,
+        }) => {
+            // A review or fix resumes as itself (D29 point 3), into the
+            // worktree its implementation left; nothing is prepared again.
+            let base = context
+                .review
+                .as_ref()
+                .and_then(|review| review.implementation.clone());
+            phases.run(kind, Some(session_id), base).await?
+        }
+        resume => {
+            run_implementation(&phases, resume.map(|point| point.session_id), &context).await?
+        }
+    };
+
+    while let NextStep::Continue { kind } = receipt.next {
+        receipt = phases.run(kind, None, None).await?;
+    }
+    Ok(receipt.run)
+}
+
+/// An implementation phase, from the claim to the board's answer.
 ///
 /// The order of the steps is the part worth reading:
 ///
@@ -749,39 +817,32 @@ pub(crate) fn implementation_intent<'a>(
 ///    from.
 /// 5. **The board decides how it ended.** The runner reports the outcome and
 ///    the facts only it can know, and the board answers with the next step.
-#[tracing::instrument(skip_all, fields(task_id = %claim.lease.task_id))]
-pub async fn run_task(
-    board: &dyn BoardPort,
-    ctx: &ServiceContext,
-    paths: &AppPaths,
-    config: &RunnerConfig,
-    claim: Claim,
-    request: RunRequest,
-) -> Result<Run> {
-    let Claim {
+async fn run_implementation(
+    phases: &Phases<'_>,
+    resumed: Option<String>,
+    context: &RunContext,
+) -> Result<FinishReceipt> {
+    let Phases {
+        board,
+        ctx,
+        paths,
+        config,
         lease,
         trigger,
-        resume,
-        context,
-        ..
-    } = claim;
+        request,
+    } = *phases;
     let task_id = lease.task_id.clone();
 
-    // The kind the board resumes travels with the session (D29 point 3). The
-    // board refused review and fix points before it took the edge, so meeting
-    // one here means a board that skipped that check: refused rather than
-    // resumed as an implementation, which is the silent failure D29 prevents.
-    let resumed = released(board, &lease, resumed_session(resume)).await?;
     released(
         board,
-        &lease,
+        lease,
         repo::ensure_unattended_runs_allowed(&context.repository),
     )
     .await?;
     // Runner-owned, and read once, so the run is negotiated against the same
     // value it is then spawned with.
     let run_environment =
-        released(board, &lease, settings::run_environment(&ctx.pool).await).await?;
+        released(board, lease, settings::run_environment(&ctx.pool).await).await?;
 
     // Rimaia's conversation id, minted before anything exists so a resume works
     // even against a provider whose child dies before announcing itself
@@ -791,7 +852,7 @@ pub async fn run_task(
     let conversation = resumed.clone().unwrap_or_else(new_id);
     let home = paths.provider_home(config.provider.id(), &task_id);
     let mut intent = implementation_intent(
-        &context,
+        context,
         config,
         trigger,
         run_environment,
@@ -800,7 +861,7 @@ pub async fn run_task(
 
     let plan = released(
         board,
-        &lease,
+        lease,
         provider::negotiate(config.provider.capabilities(), &intent).map_err(Error::from),
     )
     .await?;
@@ -810,7 +871,7 @@ pub async fn run_task(
 
     let version = released(
         board,
-        &lease,
+        lease,
         probe_cli(config.provider.as_ref(), &config.program).await,
     )
     .await?;
@@ -823,7 +884,7 @@ pub async fn run_task(
 
     let worktree = released(
         board,
-        &lease,
+        lease,
         prepare_worktree(
             ctx,
             request.in_flight.as_ref(),
@@ -834,7 +895,7 @@ pub async fn run_task(
     )
     .await?;
 
-    let context = released(board, &lease, board.run_context(&lease).await).await?;
+    let context = released(board, lease, board.run_context(lease).await).await?;
 
     // **A resume does not run the planner again**, and this is the easiest
     // thing in the retry loop to get wrong by omission. `strategy::resolve`
@@ -856,7 +917,7 @@ pub async fn run_task(
     } else {
         let resolved = strategy::resolve(
             board,
-            &lease,
+            lease,
             ctx,
             paths,
             config,
@@ -866,7 +927,7 @@ pub async fn run_task(
         )
         .await;
 
-        match released(board, &lease, resolved).await? {
+        match released(board, lease, resolved).await? {
             strategy::Resolution::Ready {
                 model,
                 effort,
@@ -876,7 +937,7 @@ pub async fn run_task(
             // run the very thing the user just cancelled, so the claim goes
             // back and nothing else happens.
             strategy::Resolution::Cancelled => {
-                give_back(board, &lease).await;
+                give_back(board, lease).await;
                 return Err(Error::invalid(format!(
                     "\"{}\" was cancelled while its strategy was being planned",
                     context.task.task.title,
@@ -888,7 +949,7 @@ pub async fn run_task(
     // Re-read once more: a planner that wrote a proposal changed this row, and
     // the prompt has to carry what the card now says rather than what it said
     // before the planner ran.
-    let context = released(board, &lease, board.run_context(&lease).await).await?;
+    let context = released(board, lease, board.run_context(lease).await).await?;
     let detail = &context.task;
     let repository = &context.repository;
 
@@ -926,7 +987,7 @@ pub async fn run_task(
     // recorded for a process that never started.
     let credentials = released(
         board,
-        &lease,
+        lease,
         repository_credentials(config, repository).await,
     )
     .await?;
@@ -936,7 +997,7 @@ pub async fn run_task(
     let run_id = new_id();
     let started = board
         .start_run(
-            &lease,
+            lease,
             StartRun {
                 run_id: run_id.clone(),
                 kind: RunKind::Implementation,
@@ -950,7 +1011,7 @@ pub async fn run_task(
             },
         )
         .await;
-    released(board, &lease, started).await?;
+    released(board, lease, started).await?;
 
     let attempt = Attempt {
         task_id: &task_id,
@@ -959,111 +1020,586 @@ pub async fn run_task(
         plan: &plan,
         cancel: &request.cancel,
         credentials: &credentials,
+        notes: &[],
     };
 
-    let executed = execute(board, &lease, ctx, paths, config, attempt).await;
+    let executed = execute(board, lease, ctx, paths, config, attempt).await;
+    phases
+        .finish(
+            &run_id,
+            Path::new(&worktree.path),
+            worktree.base_sha.as_deref(),
+            executed,
+        )
+        .await
+}
 
-    // What the worktree was left as, measured before the finish below and for
-    // every outcome — failed and cancelled included, because a failed run's
-    // partial work is exactly what a morning review opens to decide what to do
-    // next (task 033).
-    //
-    // The worktree is guaranteed to still be here. The child's process group
-    // is dead, so nothing is still committing; and the task is still
-    // `running`, which seam-contract D20's first guard — the one with no
-    // override — makes every removal path refuse. A capture that fails anyway
-    // has logged why and returned what it could.
-    let capture =
-        worktree::bundle::capture(Path::new(&worktree.path), worktree.base_sha.as_deref()).await;
-    let transcript = TranscriptEnd::Complete {
-        length: transcript_length(paths, &task_id, &run_id),
-    };
+/// What every phase of one claimed task shares.
+#[derive(Clone, Copy)]
+struct Phases<'a> {
+    board: &'a dyn BoardPort,
+    ctx: &'a ServiceContext,
+    paths: &'a AppPaths,
+    config: &'a RunnerConfig,
+    lease: &'a LeaseRef,
+    /// The claim's trigger, which decides every phase's posture (ADR-0012,
+    /// ADR-0031 point 7).
+    trigger: RunTrigger,
+    request: &'a RunRequest,
+}
 
-    match executed {
-        Ok(outcome) => {
-            let usage_limited = outcome.exit_class == ExitClass::UsageLimit;
+/// The row a review or fix phase will be recorded as, whether or not it
+/// spawns.
+struct Pending {
+    kind: RunKind,
+    session_id: String,
+    /// The implementation's base, which every loop row copies (D29 point 4).
+    base: Option<ImplementationBase>,
+}
 
-            // Before the board hears the run finished. `finish_run` publishes,
-            // the publication wakes the queue, and a free slot would otherwise
-            // start another task into the window this run just found closed.
-            // The limit is the account's, not this task's, so the hold is right
-            // whatever the board then decides about *this* task. Without a
-            // reported reset there is nothing to hold until, and that window
-            // stays open (the D31 amendment of 2026-10-09).
-            if usage_limited {
-                if let Some(reset) = outcome.usage_limit_resets_at {
-                    hold_new_starts_until(ctx, &task_id, &run_id, reset).await;
-                }
-            }
+/// A review or fix phase, ready to spawn. Owns everything its intent borrows.
+struct Prepared {
+    run_id: String,
+    worktree: PathBuf,
+    home: PathBuf,
+    continuing: bool,
+    permission_mode: PermissionMode,
+    run_environment: RunEnvironment,
+    system_append: String,
+    prompt: String,
+    model: Option<String>,
+    effort: Option<String>,
+    max_turns: Option<u32>,
+    forbidden: Vec<ForbiddenOperation>,
+    required_tools: Vec<&'static str>,
+    handle: RimaiaHandle,
+    plan: RunPlan,
+    credentials: ChildEnvironment,
+    /// Facts recorded on the row's transcript, such as a fix that could not
+    /// resume the implementation's session.
+    notes: Vec<String>,
+    /// Held for its `Drop`, which revokes the token when the phase ends.
+    _grant: RunGrant,
+}
 
-            let exit_class = outcome.exit_class;
-            let turns = outcome.num_turns;
-            let cost_usd = outcome.cost_usd;
-            let receipt = board
-                .finish_run(
-                    &lease,
-                    &run_id,
-                    FinishRun {
-                        outcome,
-                        head_sha: capture.head_sha,
-                        bundle: capture.bundle,
-                        window_closes_at: run_window_closes_at(ctx, &task_id, &run_id).await,
-                        transcript,
-                    },
-                )
-                .await?;
-
-            let NextStep::Released { resume_after } = receipt.next;
-            tracing::info!(
-                %task_id,
-                %run_id,
-                exit_class = ?exit_class,
-                turns,
-                cost_usd,
-                resume_after = resume_after.map(|at| at.to_rfc3339()),
-                "run finished",
-            );
-
-            // ADR-0011's global pause, at the instant the board chose to resume
-            // this task rather than the raw reported reset, so the queue does
-            // not wake a minute of jitter before the task it is waiting for is
-            // due. `note_usage_limit` only ever lengthens the pause.
-            if usage_limited {
-                if let Some(until) = resume_after {
-                    hold_new_starts_until(ctx, &task_id, &run_id, until).await;
-                }
-            }
-
-            Ok(receipt.run)
-        }
-        // Spawning or supervision itself failed. The row exists, so it is closed
-        // as fatal rather than left open — an unfinished `runs` row and a task
-        // stuck `running` are the same defect from two tables.
-        Err(error) => {
-            let finish = FinishRun {
-                outcome: runner_fatal(error.to_string()),
-                head_sha: capture.head_sha,
-                bundle: capture.bundle,
-                window_closes_at: None,
-                transcript,
-            };
-            if let Err(nested) = board.finish_run(&lease, &run_id, finish).await {
-                tracing::error!(%run_id, %nested, "could not record a failed run");
-            }
-            Err(error)
+impl Prepared {
+    fn intent<'a>(&'a self, conversation: &'a str) -> RunIntent<'a> {
+        RunIntent {
+            session: session_intent(self.continuing, conversation, &self.home),
+            permission_mode: self.permission_mode,
+            run_environment: self.run_environment,
+            system_append: self.system_append.clone(),
+            prompt: &self.prompt,
+            model: self.model.clone(),
+            effort: self.effort.clone(),
+            max_turns: self.max_turns,
+            workspace: &self.worktree,
+            forbidden: self.forbidden.clone(),
+            required_tools: self.required_tools.clone(),
+            rimaia_handle: Some(self.handle.clone()),
         }
     }
 }
 
-/// The session a claim's resume point continues, for an implementation run.
-fn resumed_session(resume: Option<ResumePoint>) -> Result<Option<String>> {
-    match resume {
-        None => Ok(None),
-        Some(ResumePoint {
-            kind: RunKind::Implementation,
-            session_id,
-        }) => Ok(Some(session_id)),
-        Some(ResumePoint { kind, .. }) => Err(kind_not_wired_yet(kind, "resumed")),
+impl Phases<'_> {
+    /// One review or fix phase: composed from a fresh `run_context`, spawned
+    /// through the implementation's own `plan_spawn` and [`execute`] path, so
+    /// D25's credentials and redaction, D27.5's identity strip and the
+    /// operator-surface denial apply to every phase without a second copy.
+    ///
+    /// `resumed` is the session a retry continues; `base` the implementation's
+    /// base when the caller already has it, so a phase refused before the
+    /// board can be read still records it.
+    async fn run(
+        &self,
+        kind: RunKind,
+        resumed: Option<String>,
+        base: Option<ImplementationBase>,
+    ) -> Result<FinishReceipt> {
+        let mut pending = Pending {
+            kind,
+            session_id: resumed.clone().unwrap_or_else(new_id),
+            base,
+        };
+
+        if self.request.cancel.is_cancelled() {
+            return self.unspawned(&pending, cancelled_before_spawn()).await;
+        }
+        let prepared = match self.prepare(&mut pending, resumed.is_some()).await {
+            Ok(prepared) => prepared,
+            Err(refusal) => return self.unspawned(&pending, runner_fatal(refusal)).await,
+        };
+        if self.request.cancel.is_cancelled() {
+            return self.unspawned(&pending, cancelled_before_spawn()).await;
+        }
+
+        let intent = prepared.intent(&pending.session_id);
+        let started = self
+            .board
+            .start_run(
+                self.lease,
+                StartRun {
+                    run_id: prepared.run_id.clone(),
+                    kind,
+                    session_id: pending.session_id.clone(),
+                    prompt: prepared.prompt.clone(),
+                    base_ref: pending.base.as_ref().and_then(|base| base.base_ref.clone()),
+                    base_sha: pending.base.as_ref().and_then(|base| base.base_sha.clone()),
+                },
+            )
+            .await;
+        released(self.board, self.lease, started).await?;
+
+        let attempt = Attempt {
+            task_id: &self.lease.task_id,
+            run_id: &prepared.run_id,
+            intent: &intent,
+            plan: &prepared.plan,
+            cancel: &self.request.cancel,
+            credentials: &prepared.credentials,
+            notes: &prepared.notes,
+        };
+        let mut executed = execute(
+            self.board,
+            self.lease,
+            self.ctx,
+            self.paths,
+            self.config,
+            attempt,
+        )
+        .await;
+
+        // A shell can edit what `AnyFileMutation` does not cover. A review
+        // that left tracked changes behind would otherwise land clean on a
+        // dirty worktree, and the next fix would commit the reviewer's edits
+        // as its own. Untracked files are ignored: a test run leaves them.
+        if kind == RunKind::Review {
+            if let Ok(outcome) = &mut executed {
+                match worktree::has_tracked_changes(&prepared.worktree).await {
+                    Ok(false) => {}
+                    Ok(true) => override_as_fatal(
+                        outcome,
+                        "The review changed the worktree without committing.".to_string(),
+                    ),
+                    Err(error) => override_as_fatal(
+                        outcome,
+                        format!("The worktree could not be checked after the review: {error}"),
+                    ),
+                }
+            }
+        }
+
+        let base_sha = pending
+            .base
+            .as_ref()
+            .and_then(|base| base.base_sha.as_deref());
+        self.finish(&prepared.run_id, &prepared.worktree, base_sha, executed)
+            .await
+    }
+
+    /// Everything that can refuse a phase before it spawns, in one place, so
+    /// each refusal becomes the same recorded row. `Err` is the refusal's
+    /// sentence.
+    async fn prepare(
+        &self,
+        pending: &mut Pending,
+        resumed: bool,
+    ) -> std::result::Result<Prepared, String> {
+        let kind = pending.kind;
+        let noun = phase_noun(kind);
+        let config = self.config;
+        let task_id = &self.lease.task_id;
+
+        let context = self
+            .board
+            .run_context(self.lease)
+            .await
+            .map_err(|error| format!("The {noun} could not read its task: {error}"))?;
+        let review = context.review.clone().ok_or_else(|| {
+            format!("The board sent no review context, so the {noun} could not be composed.")
+        })?;
+        if review.implementation.is_some() {
+            pending.base = review.implementation.clone();
+        }
+
+        let run_environment = settings::run_environment(&self.ctx.pool)
+            .await
+            .map_err(|error| error.to_string())?;
+        repo::ensure_unattended_runs_allowed(&context.repository)
+            .map_err(|error| error.to_string())?;
+
+        let worktree = context
+            .task
+            .task
+            .worktree_path
+            .as_deref()
+            .map(PathBuf::from)
+            .filter(|path| path.is_dir())
+            .ok_or_else(|| {
+                format!(
+                    "The task's worktree is gone, so there is nothing for the {noun} to work on."
+                )
+            })?;
+
+        // The reviewer judges commits. Refused rather than reviewed, because a
+        // review of a dirty worktree cannot tell its own edits from the
+        // implementation's.
+        if kind == RunKind::Review {
+            match worktree::has_tracked_changes(&worktree).await {
+                Ok(false) => {}
+                Ok(true) => {
+                    return Err(
+                        "The worktree has uncommitted changes to tracked files, and a \
+                                review judges commits, so the review was not started."
+                            .to_string(),
+                    )
+                }
+                Err(error) => {
+                    return Err(format!(
+                        "The worktree could not be checked before the review: {error}"
+                    ))
+                }
+            }
+        }
+
+        // Minted before the grant, which names it: what a review records or
+        // a fix resolves is attributed to this run and to no id a request
+        // could name (D30 point 5).
+        let run_id = new_id();
+        let (grant, tool) = match kind {
+            RunKind::Review => (
+                Grant::Review {
+                    run_id: run_id.clone(),
+                },
+                Tool::RecordReviewFindings,
+            ),
+            _ => (
+                Grant::Fix {
+                    run_id: run_id.clone(),
+                },
+                Tool::ResolveReviewFinding,
+            ),
+        };
+        let grant = config.run_handles.grant(task_id, grant);
+        let url = config.run_handles.endpoint_for(&grant).ok_or_else(|| {
+            format!(
+                "The {noun} needs Rimaia's MCP server, which is not listening (see Settings → MCP)."
+            )
+        })?;
+        let tool_name = config
+            .provider
+            .tool_handle(RUN_MCP_SERVER_NAME, tool.as_str());
+
+        // A review always opens a fresh session: that is the mechanism
+        // (ADR-0017). A fix resumes only the newest implementation's session,
+        // never through `resume_point` (D29 point 3), and falls back to a
+        // fresh one with a note when there is none, or the provider cannot.
+        let mut notes = Vec::new();
+        let mut continuing = resumed;
+        let mut from_implementation = false;
+        if kind == RunKind::Fix && !resumed && review.config.fix_session == FixSession::Resume {
+            let can_continue = config.provider.capabilities().session.can_continue();
+            match review.implementation.as_ref() {
+                Some(base) if can_continue => {
+                    pending.session_id = base.session_id.clone();
+                    continuing = true;
+                    from_implementation = true;
+                }
+                _ => notes.push(format!(
+                    "rimaia: fix_session is resume, and this fix opened a fresh session instead: {}",
+                    if can_continue {
+                        "the task has no implementation session to continue"
+                    } else {
+                        "this provider cannot continue a session"
+                    }
+                )),
+            }
+        }
+
+        let (model, effort, forbidden, system_append) = match kind {
+            RunKind::Review => (
+                review
+                    .config
+                    .review_model
+                    .clone()
+                    .or_else(|| context.strategy.model.clone()),
+                review
+                    .config
+                    .review_effort
+                    .clone()
+                    .or_else(|| context.strategy.effort.clone()),
+                forbidden_operations(
+                    &context.limits,
+                    config.provider.as_ref(),
+                    [ForbiddenOperation::AnyFileMutation],
+                ),
+                compose_review_system_append(&tool_name),
+            ),
+            _ => (
+                context.strategy.model.clone(),
+                context.strategy.effort.clone(),
+                forbidden_operations(&context.limits, config.provider.as_ref(), []),
+                compose_system_append(&context.task, &context.repository),
+            ),
+        };
+
+        let mut prepared = Prepared {
+            run_id,
+            home: self.paths.provider_home(config.provider.id(), task_id),
+            worktree,
+            continuing,
+            permission_mode: self.trigger.permission_mode(),
+            run_environment,
+            system_append,
+            prompt: String::new(),
+            model,
+            effort,
+            max_turns: config.max_turns.or(Some(context.limits.max_turns)),
+            forbidden,
+            required_tools: vec![tool.as_str()],
+            handle: RimaiaHandle {
+                url,
+                server: RUN_MCP_SERVER_NAME,
+            },
+            plan: RunPlan {
+                prompt_style: PromptStyle::Composed,
+                verify_posture: true,
+                unenforced: Vec::new(),
+                warnings: Vec::new(),
+            },
+            credentials: ChildEnvironment::ambient(),
+            notes,
+            _grant: grant,
+        };
+
+        let plan = provider::negotiate(
+            config.provider.capabilities(),
+            &prepared.intent(&pending.session_id),
+        )
+        .map_err(|refusal| refusal.message)?;
+        for warning in &plan.warnings {
+            tracing::warn!(%task_id, provider = %config.provider.id(), warning, "the provider could not honour part of this phase");
+        }
+
+        let detail = &context.task;
+        let repository = &context.repository;
+        prepared.prompt = match (kind, plan.prompt_style) {
+            (RunKind::Review, PromptStyle::Continuation) => {
+                compose_review_resume(detail, &tool_name, review.phase_recorded)
+            }
+            (RunKind::Review, PromptStyle::Composed) => {
+                compose_review_prompt(detail, repository, &review, &tool_name)
+            }
+            (_, PromptStyle::Continuation) if from_implementation => {
+                compose_fix_continuation(detail, &review, &tool_name)
+            }
+            (_, PromptStyle::Continuation) => compose_fix_resume(detail, &tool_name),
+            (_, PromptStyle::Composed) => compose_fix_prompt(
+                &context.base_instructions,
+                detail,
+                repository,
+                &review,
+                &tool_name,
+            ),
+        };
+        prepared.plan = plan;
+
+        prepared.credentials = repository_credentials(config, repository)
+            .await
+            .map_err(|error| error.to_string())?;
+        probe_cli(config.provider.as_ref(), &config.program)
+            .await
+            .map_err(|error| error.to_string())?;
+
+        Ok(prepared)
+    }
+
+    /// Records a phase that never spawned as a row of its kind, and closes it
+    /// through `finish_run`, so the exit table lands the task and the history
+    /// shows why (ADR-0017's 2026-10-09 amendment).
+    ///
+    /// The row gets an empty transcript at its `log_path`, so
+    /// `startup::missing_run_logs` does not report it on every launch. Only a
+    /// row that cannot be written falls back to `release`.
+    async fn unspawned(&self, pending: &Pending, outcome: RunOutcome) -> Result<FinishReceipt> {
+        let run_id = new_id();
+        let task_id = &self.lease.task_id;
+        tracing::warn!(
+            %task_id,
+            %run_id,
+            kind = ?pending.kind,
+            reason = outcome.error_message.as_deref().unwrap_or("cancelled"),
+            "a loop phase ended before it spawned",
+        );
+
+        let started = self
+            .board
+            .start_run(
+                self.lease,
+                StartRun {
+                    run_id: run_id.clone(),
+                    kind: pending.kind,
+                    session_id: pending.session_id.clone(),
+                    prompt: String::new(),
+                    base_ref: pending.base.as_ref().and_then(|base| base.base_ref.clone()),
+                    base_sha: pending.base.as_ref().and_then(|base| base.base_sha.clone()),
+                },
+            )
+            .await;
+        released(self.board, self.lease, started).await?;
+
+        let transcript = transcript_path(self.paths, task_id, &run_id);
+        let written = transcript
+            .parent()
+            .map_or(Ok(()), std::fs::create_dir_all)
+            .and_then(|()| std::fs::write(&transcript, b""));
+        if let Err(error) = written {
+            tracing::warn!(%run_id, %error, "could not write an unspawned row's empty transcript");
+        }
+
+        let finished = self
+            .finish_reported(
+                &run_id,
+                outcome,
+                RunCapture::default(),
+                TranscriptEnd::Complete { length: 0 },
+            )
+            .await;
+        released(self.board, self.lease, finished).await
+    }
+
+    /// Measures the worktree and reports how a spawned phase ended.
+    ///
+    /// What the worktree was left as is measured for every outcome — failed
+    /// and cancelled included, because a failed run's partial work is exactly
+    /// what a morning review opens to decide what to do next (task 033). The
+    /// worktree is guaranteed to still be here: the child's process group is
+    /// dead, and the task is still `running`, which seam-contract D20's first
+    /// guard makes every removal path refuse.
+    async fn finish(
+        &self,
+        run_id: &str,
+        worktree: &Path,
+        base_sha: Option<&str>,
+        executed: Result<RunOutcome>,
+    ) -> Result<FinishReceipt> {
+        let capture = worktree::bundle::capture(worktree, base_sha).await;
+        let transcript = TranscriptEnd::Complete {
+            length: transcript_length(self.paths, &self.lease.task_id, run_id),
+        };
+
+        match executed {
+            Ok(outcome) => {
+                self.finish_reported(run_id, outcome, capture, transcript)
+                    .await
+            }
+            // Spawning or supervision itself failed. The row exists, so it is
+            // closed as fatal rather than left open — an unfinished `runs` row
+            // and a task stuck `running` are the same defect from two tables.
+            Err(error) => {
+                let finish = FinishRun {
+                    outcome: runner_fatal(error.to_string()),
+                    head_sha: capture.head_sha,
+                    bundle: capture.bundle,
+                    window_closes_at: None,
+                    transcript,
+                };
+                if let Err(nested) = self.board.finish_run(self.lease, run_id, finish).await {
+                    tracing::error!(%run_id, %nested, "could not record a failed run");
+                }
+                Err(error)
+            }
+        }
+    }
+
+    /// Reports an outcome, holding ADR-0011's usage-limit pause on either side
+    /// of the board's answer.
+    async fn finish_reported(
+        &self,
+        run_id: &str,
+        outcome: RunOutcome,
+        capture: RunCapture,
+        transcript: TranscriptEnd,
+    ) -> Result<FinishReceipt> {
+        let task_id = &self.lease.task_id;
+        let usage_limited = outcome.exit_class == ExitClass::UsageLimit;
+
+        // Before the board hears the run finished. `finish_run` publishes, the
+        // publication wakes the queue, and a free slot would otherwise start
+        // another task into the window this run just found closed. The limit
+        // is the account's, not this task's, so the hold is right whatever the
+        // board then decides about *this* task. Without a reported reset there
+        // is nothing to hold until, and that window stays open (the D31
+        // amendment of 2026-10-09).
+        if usage_limited {
+            if let Some(reset) = outcome.usage_limit_resets_at {
+                hold_new_starts_until(self.ctx, task_id, run_id, reset).await;
+            }
+        }
+
+        let exit_class = outcome.exit_class;
+        let turns = outcome.num_turns;
+        let cost_usd = outcome.cost_usd;
+        let receipt = self
+            .board
+            .finish_run(
+                self.lease,
+                run_id,
+                FinishRun {
+                    outcome,
+                    head_sha: capture.head_sha,
+                    bundle: capture.bundle,
+                    window_closes_at: run_window_closes_at(self.ctx, task_id, run_id).await,
+                    transcript,
+                },
+            )
+            .await?;
+
+        let resume_after = match receipt.next {
+            NextStep::Released { resume_after } => resume_after,
+            NextStep::Continue { .. } => None,
+        };
+        tracing::info!(
+            %task_id,
+            %run_id,
+            kind = ?receipt.run.kind,
+            exit_class = ?exit_class,
+            turns,
+            cost_usd,
+            resume_after = resume_after.map(|at| at.to_rfc3339()),
+            next = ?receipt.next,
+            "run finished",
+        );
+
+        // ADR-0011's global pause, at the instant the board chose to resume
+        // this task rather than the raw reported reset, so the queue does not
+        // wake a minute of jitter before the task it is waiting for is due.
+        // `note_usage_limit` only ever lengthens the pause.
+        if usage_limited {
+            if let Some(until) = resume_after {
+                hold_new_starts_until(self.ctx, task_id, run_id, until).await;
+            }
+        }
+
+        Ok(receipt)
+    }
+}
+
+fn phase_noun(kind: RunKind) -> &'static str {
+    match kind {
+        RunKind::Implementation => "implementation",
+        RunKind::Review => "review",
+        RunKind::Fix => "fix",
+    }
+}
+
+/// A Cancel that arrived while no process was running, between two phases.
+fn cancelled_before_spawn() -> RunOutcome {
+    RunOutcome {
+        exit_class: ExitClass::Cancelled,
+        status: RunStatus::Cancelled,
+        error_message: Some("the run was cancelled before this phase started".to_string()),
+        ..runner_fatal(String::new())
     }
 }
 
@@ -1270,6 +1806,13 @@ pub async fn execute(
         tracing::warn!(run_id = %attempt.run_id, note, "a mitigation was not enforced");
         if let Err(error) = stream.observe_stderr(&note) {
             tracing::warn!(run_id = %attempt.run_id, %error, "could not record an unenforced mitigation");
+        }
+    }
+
+    for note in attempt.notes {
+        tracing::warn!(run_id = %attempt.run_id, note, "a fact about this attempt");
+        if let Err(error) = stream.observe_stderr(note) {
+            tracing::warn!(run_id = %attempt.run_id, %error, "could not record a note on the run");
         }
     }
 

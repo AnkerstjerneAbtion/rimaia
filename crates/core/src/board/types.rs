@@ -18,12 +18,15 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::db::{Repository, Run, RunKind};
+use crate::review::findings::ReviewFinding;
+use crate::review_loop::EffectiveReviewConfig;
 use crate::runner::outcome::RunOutcome;
 use crate::runner::RunTrigger;
-use crate::runs::bundle::ReviewBundle;
+use crate::runs::bundle::{BundleFile, ReviewBundle};
 use crate::scheduler::ResumePoint;
 use crate::strategy::{Catalogue, EffectiveStrategy};
 use crate::tasks::TaskDetail;
+use crate::worktree::DiffStat;
 
 /// Names one lease, never what it is for (D31 point 3).
 ///
@@ -55,6 +58,17 @@ pub enum LeasePurpose {
     Strategy,
     Review,
     Fix,
+}
+
+impl From<RunKind> for LeasePurpose {
+    /// A lease opened for a `runs` row is for that row's kind (D29 point 1).
+    fn from(kind: RunKind) -> Self {
+        match kind {
+            RunKind::Implementation => LeasePurpose::Implementation,
+            RunKind::Review => LeasePurpose::Review,
+            RunKind::Fix => LeasePurpose::Fix,
+        }
+    }
 }
 
 /// What a runner asks the board to let it start (D31 point 4).
@@ -105,6 +119,54 @@ pub struct RunContext {
     /// For the provider of the runner the adapter was built for.
     pub catalogue: Catalogue,
     pub limits: TeamLimits,
+    /// What a review or fix phase is composed from (task 021). `None` only
+    /// from a board that predates the loop.
+    #[serde(default)]
+    pub review: Option<ReviewContext>,
+}
+
+/// What a review or fix phase is composed from, read board-side under the
+/// lease (seam-contract D31 point 6, task 021).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReviewContext {
+    /// The task's override when it says something, the global text otherwise,
+    /// template variables unexpanded. Empty when neither is set.
+    pub instructions: String,
+    pub config: EffectiveReviewConfig,
+    /// The newest review's open blocking findings: what a fix is composed
+    /// from, and nothing else.
+    pub open_blocking: Vec<ReviewFinding>,
+    /// Findings a fix run rejected, with its reason, so a reviewer does not
+    /// raise them again.
+    pub rejected: Vec<ReviewFinding>,
+    /// The newest implementation row's session and base. Every review and fix
+    /// row records the same base (D29 point 4), and a fix that resumes
+    /// continues this session, never the review's (D29 point 3).
+    pub implementation: Option<ImplementationBase>,
+    /// The newest row's head commit and the bundle it recorded.
+    pub head_sha: Option<String>,
+    pub change: Option<ChangeSummary>,
+    /// Whether the review phase the newest row belongs to has already
+    /// recorded, which decides which resume prompt it is sent.
+    pub phase_recorded: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImplementationBase {
+    pub session_id: String,
+    pub base_ref: Option<String>,
+    pub base_sha: Option<String>,
+}
+
+/// A recorded bundle without its patch: the review is told the size and the
+/// files, and reads the patch from the worktree, where it is never truncated.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChangeSummary {
+    pub diff: DiffStat,
+    pub files: Vec<BundleFile>,
 }
 
 /// The board's half of what bounds a run. The runner applies it.
@@ -187,13 +249,17 @@ pub struct FinishReceipt {
     pub next: NextStep,
 }
 
-/// What happens after a finish. Task 021 adds `Continue`.
+/// What happens after a finish.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", rename_all_fields = "camelCase")]
 pub enum NextStep {
     /// The lease ended with the finish. `resume_after` is when the board will
     /// try the task again, or `None` when nothing follows.
     Released { resume_after: Option<DateTime<Utc>> },
+    /// The lease is kept, and the next phase is a `start_run` of `kind` under
+    /// it (ADR-0017, task 021). The board decided it in the same step that
+    /// closed the row; the runner never chooses to continue.
+    Continue { kind: RunKind },
 }
 
 /// One variant per [`BoardPort`](super::BoardPort) method.

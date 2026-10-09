@@ -50,8 +50,6 @@ use serde::{Deserialize, Serialize};
 use crate::context::ServiceContext;
 use crate::db::{ExitClass, RunKind};
 use crate::error::Result;
-use crate::runner::outcome::kind_not_wired_yet;
-use crate::runner::ResumeSession;
 use crate::scheduler::retry::AttemptHistory;
 
 /// The facts about the attempt that just ended which its own row cannot yet
@@ -115,26 +113,6 @@ pub async fn resume_point(ctx: &ServiceContext, task_id: &str) -> Result<Option<
             kind: row.kind,
             session_id: row.session_id,
         }))
-}
-
-/// The resume an implementation run can make of `point`, decided **before**
-/// anything is claimed.
-///
-/// An implementation point becomes today's [`ResumeSession`], and no point
-/// stays none. A review or fix point is refused: resuming a reviewer as an
-/// implementer is the silent failure D29 exists to prevent, and task 021 is
-/// what wires those arms. This is the one place that refusal is spelled for a
-/// resume. Both callers apply it before `claim_retry`, so a refused resume has
-/// claimed nothing and leaves the task `waiting_retry` as it was.
-pub fn resume_as_implementation(point: Option<ResumePoint>) -> Result<Option<ResumeSession>> {
-    match point {
-        None => Ok(None),
-        Some(ResumePoint {
-            kind: RunKind::Implementation,
-            session_id,
-        }) => Ok(Some(ResumeSession { session_id })),
-        Some(ResumePoint { kind, .. }) => Err(kind_not_wired_yet(kind, "resumed")),
-    }
 }
 
 /// Newest row first, of every kind. The order is what makes "count backwards
@@ -276,36 +254,6 @@ mod tests {
 
         assert_eq!(history.attempts_in_session, 1);
         assert_eq!(history.transient_attempts, 1);
-    }
-
-    #[test]
-    fn only_an_implementation_point_resumes_as_an_implementation() {
-        assert_eq!(
-            resume_as_implementation(None).expect("nothing to resume"),
-            None
-        );
-        assert_eq!(
-            resume_as_implementation(Some(ResumePoint {
-                kind: RunKind::Implementation,
-                session_id: SESSION.to_string(),
-            }))
-            .expect("an implementation resumes"),
-            Some(ResumeSession {
-                session_id: SESSION.to_string(),
-            }),
-        );
-        for kind in [RunKind::Review, RunKind::Fix] {
-            let refusal = resume_as_implementation(Some(ResumePoint {
-                kind,
-                session_id: SESSION.to_string(),
-            }))
-            .expect_err("a review or fix is not resumed as an implementation");
-            assert!(
-                matches!(refusal, crate::error::Error::Invalid { .. }),
-                "{refusal:?}"
-            );
-            assert!(refusal.to_string().contains("task 021"), "{refusal}");
-        }
     }
 
     #[test]

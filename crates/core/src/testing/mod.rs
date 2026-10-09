@@ -42,7 +42,7 @@ pub mod provider;
 pub mod repo;
 pub mod runs;
 
-pub use cli::{open_gate, FakeCli};
+pub use cli::{open_gate, FakeCli, WorktreeAction};
 pub use clock::TestClock;
 pub use context::{test_epoch, TestContext};
 pub use db::test_pool;

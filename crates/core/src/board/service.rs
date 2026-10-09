@@ -20,6 +20,7 @@ use crate::db::{settings, StrategySource};
 use crate::error::{Error, ErrorCode, Result};
 use crate::paths::AppPaths;
 use crate::review::findings::{self, NewReviewFinding};
+use crate::review_loop;
 use crate::runner::events::RunTail;
 use crate::runner::outcome::{self, NewRun, RunOutcome};
 use crate::runner::process::{self, DISALLOWED_TOOLS};
@@ -34,8 +35,8 @@ use crate::tasks;
 use crate::tasks::strategy::{set_task_strategy, StrategyPlan};
 
 use super::types::{
-    Claim, ClaimTarget, FinishReceipt, FinishRun, Heartbeat, LeasePurpose, LeaseRef, NextStep,
-    RunContext, StartRun, TeamLimits, TranscriptAck, TranscriptChunk,
+    Claim, ClaimTarget, FinishReceipt, FinishRun, Heartbeat, LeasePurpose, LeaseRef, RunContext,
+    StartRun, TeamLimits, TranscriptAck, TranscriptChunk,
 };
 
 /// The context a claim of `task_id` would carry. Writes nothing.
@@ -50,8 +51,8 @@ pub async fn preview(
 /// Today's claim routes, **reads first, edges last**.
 ///
 /// Everything that can refuse is read before either edge is taken, so a
-/// refusal writes nothing: the context, and for a retry the point it resumes
-/// with task 035's refusal of a review or fix point applied. Reading the point
+/// refusal writes nothing: the context, and for a retry the point it resumes,
+/// of whatever kind was waiting (task 021). Reading the point
 /// before the edge is safe because every caller holds D19's slot, so nothing
 /// else in the process can start a run of this task in between. Nothing is
 /// read after the edges; a read a later task adds there must release on `Err`.
@@ -89,14 +90,16 @@ pub async fn claim(
             continue_session: true,
             ..
         } => {
+            // A review or fix resumes as itself (D29 point 3): the kind
+            // travels on the point, and the lease's purpose is that kind.
             let point = attempts::resume_point(ctx, &task_id).await?;
-            // Only for its refusal: an implementation point is carried on the
-            // claim as the point it is, kind and all.
-            attempts::resume_as_implementation(point.clone())?;
             if edges::claim_retry(ctx, &task_id).await? == ClaimOutcome::Lost {
                 return Ok(None);
             }
-            (LeasePurpose::Implementation, trigger, point)
+            let purpose = point
+                .as_ref()
+                .map_or(LeasePurpose::Implementation, |point| point.kind.into());
+            (purpose, trigger, point)
         }
         // D17's planner: a lease and nothing else. No `run_state` edge, because
         // a planner that took one would need `Running -> Running` later.
@@ -191,13 +194,15 @@ pub fn publish_tail(ctx: &ServiceContext, _lease: &LeaseRef, tail: RunTail) {
     ctx.publish_tail(tail);
 }
 
-/// Closes the run and lands the task, deciding `resume_after` here.
+/// Closes the run and lands the task, deciding `resume_after` here, and
+/// whether a review loop continues (ADR-0017).
 ///
 /// A runner that chose its own retry time would be a second copy of
 /// ADR-0011's table on a machine the board does not control, so one that sends
 /// it is refused. The decision is the one `runner::process` used to make
 /// before task 036, minus the usage-limit pause: that is runner-owned state,
-/// and the runner raises it from the [`NextStep`] this answers.
+/// and the runner raises it from the [`NextStep`](super::NextStep) this answers. The loop's
+/// next step is the task-side step's answer, `review_loop::decide`.
 pub async fn finish_run(
     ctx: &ServiceContext,
     lease: &LeaseRef,
@@ -226,14 +231,16 @@ pub async fn finish_run(
     outcome.resume_after =
         decide_resume_after(ctx, &lease.task_id, run_id, &outcome, window_closes_at).await;
 
-    let run = outcome::finish_run(ctx, run_id, &outcome, &RunCapture { head_sha, bundle }).await?;
+    let (run, next) = outcome::finish_run_within(
+        ctx,
+        run_id,
+        &outcome,
+        &RunCapture { head_sha, bundle },
+        window_closes_at,
+    )
+    .await?;
 
-    Ok(FinishReceipt {
-        run,
-        next: NextStep::Released {
-            resume_after: outcome.resume_after,
-        },
-    })
+    Ok(FinishReceipt { run, next })
 }
 
 /// When — or whether — this task is tried again (ADR-0011).
@@ -326,6 +333,9 @@ async fn read_context(
         disallowed_tools: stored_disallowed_tools(ctx).await?,
     };
 
+    let resolved = review_loop::config::resolve(&ctx.pool, task_id, &repository.id).await?;
+    let review = review_loop::context(ctx, task_id, resolved).await?;
+
     Ok(RunContext {
         task,
         repository,
@@ -333,6 +343,7 @@ async fn read_context(
         strategy,
         catalogue,
         limits,
+        review: Some(review),
     })
 }
 

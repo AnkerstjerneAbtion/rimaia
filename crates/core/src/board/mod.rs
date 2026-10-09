@@ -20,6 +20,7 @@ pub mod types;
 pub use in_process::InProcessBoard;
 pub use port::{BoardFuture, BoardPort};
 pub use types::{
-    BoardMethod, Claim, ClaimTarget, FinishReceipt, FinishRun, Heartbeat, LeasePurpose, LeaseRef,
-    NextStep, RunContext, StartRun, TeamLimits, TranscriptAck, TranscriptChunk, TranscriptEnd,
+    BoardMethod, ChangeSummary, Claim, ClaimTarget, FinishReceipt, FinishRun, Heartbeat,
+    ImplementationBase, LeasePurpose, LeaseRef, NextStep, ReviewContext, RunContext, StartRun,
+    TeamLimits, TranscriptAck, TranscriptChunk, TranscriptEnd,
 };

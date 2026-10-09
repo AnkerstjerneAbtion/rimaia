@@ -249,6 +249,13 @@ pub enum Tool {
     RecordReviewFindings,
     ResolveReviewFinding,
     ListReviewFindings,
+
+    // Task 021. The review loop's configuration, at three levels. All four
+    // are refused to a run — see `run_access`.
+    GetReviewSettings,
+    SetReviewSettings,
+    SetRepositoryReviewConfig,
+    SetTaskReview,
 }
 
 /// What a [`RunScope::Run`] may do with one tool — ADR-0006's amendment table,
@@ -265,7 +272,7 @@ pub enum RunAccess {
 
 impl Tool {
     /// Every tool with a recorded decision, so a test can walk the table.
-    pub const ALL: [Tool; 57] = [
+    pub const ALL: [Tool; 61] = [
         Tool::AddTaskLink,
         Tool::CreateTask,
         Tool::GetBaseInstructions,
@@ -323,6 +330,10 @@ impl Tool {
         Tool::RecordReviewFindings,
         Tool::ResolveReviewFinding,
         Tool::ListReviewFindings,
+        Tool::GetReviewSettings,
+        Tool::SetReviewSettings,
+        Tool::SetRepositoryReviewConfig,
+        Tool::SetTaskReview,
     ];
 
     /// The wired name — what `tools/list` advertises and what the ADR table
@@ -386,6 +397,10 @@ impl Tool {
             Tool::RecordReviewFindings => "record_review_findings",
             Tool::ResolveReviewFinding => "resolve_review_finding",
             Tool::ListReviewFindings => "list_review_findings",
+            Tool::GetReviewSettings => "get_review_settings",
+            Tool::SetReviewSettings => "set_review_settings",
+            Tool::SetRepositoryReviewConfig => "set_repository_review_config",
+            Tool::SetTaskReview => "set_task_review",
         }
     }
 
@@ -611,6 +626,17 @@ impl Tool {
             | Tool::GetTaskDependents
             | Tool::GetReviewDigest
             | Tool::MarkReviewDigestSeen => RunAccess::Refused,
+
+            // Task 021, and ADR-0021 point 4's "reconfigures the installation"
+            // at three levels. A run that could enable its own loop would be
+            // spending on its own authority, and a fixer that could rewrite its
+            // own review instructions would be marking its own homework. The
+            // read goes with the writes: a run has no use for the answer but
+            // deciding whether a write is worth attempting.
+            Tool::GetReviewSettings
+            | Tool::SetReviewSettings
+            | Tool::SetRepositoryReviewConfig
+            | Tool::SetTaskReview => RunAccess::Refused,
         }
     }
 }

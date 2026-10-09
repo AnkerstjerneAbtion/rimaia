@@ -30,6 +30,7 @@ use crate::review::{
     Dependent, Digest, DigestEntry, DigestLoop, DigestOutcome, DigestTotals, FindingSeverity,
     FindingStatus, ReviewFinding, ReviewOutcome,
 };
+use crate::review_loop::{ReviewConfig, ReviewLoopSummary, UnreviewedReason, Verdict};
 use crate::runner::strategy::{PlanOutcome, PlanPass, PlanResult};
 use crate::schedule::{PreflightSummary, ScheduleView as CoreScheduleView};
 use crate::scheduler::RunCapacity;
@@ -125,6 +126,56 @@ pub struct TaskView {
     pub links: Vec<TaskLinkView>,
     pub depends_on: Vec<String>,
     pub last_run: Option<RunView>,
+    /// The task's own override of the review instructions, and its own loop
+    /// settings, before any inheritance (task 021).
+    pub review_instructions: Option<String>,
+    pub review_config: ReviewConfig,
+    /// Where the task's review loop stands, or absent when the loop never
+    /// touched it.
+    pub review_loop: Option<ReviewLoopView>,
+}
+
+/// [`ReviewLoopSummary`] in this surface's spelling (D16.1).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub struct ReviewLoopView {
+    /// The effective setting now.
+    pub enabled: bool,
+    pub max_review_loops: u32,
+    pub fixes_spent: u32,
+    /// Review phases in the current loop.
+    pub reviews: u32,
+    /// `none`, `clean`, `findings_remain` or `unreviewed`. The last two are
+    /// what flags a card.
+    pub verdict: &'static str,
+    /// Why, when the verdict is `unreviewed`.
+    pub unreviewed_reason: Option<UnreviewedReason>,
+    pub open_blocking: u32,
+    /// A review after a fix raised a finding the fix had fixed, or a new
+    /// blocking one. A signal that the loop may be going in circles, not a
+    /// verdict.
+    pub ping_pong: bool,
+}
+
+impl From<ReviewLoopSummary> for ReviewLoopView {
+    fn from(summary: ReviewLoopSummary) -> Self {
+        let (verdict, unreviewed_reason) = match summary.verdict {
+            Verdict::None => ("none", None),
+            Verdict::Clean => ("clean", None),
+            Verdict::FindingsRemain { .. } => ("findings_remain", None),
+            Verdict::Unreviewed { reason } => ("unreviewed", Some(reason)),
+        };
+        Self {
+            enabled: summary.enabled,
+            max_review_loops: summary.max_review_loops,
+            fixes_spent: summary.fixes_spent,
+            reviews: summary.reviews,
+            verdict,
+            unreviewed_reason,
+            open_blocking: summary.open_blocking,
+            ping_pong: summary.ping_pong,
+        }
+    }
 }
 
 impl From<TaskDetail> for TaskView {
@@ -145,6 +196,9 @@ impl From<TaskDetail> for TaskView {
             effective_model: _,
             effective_effort: _,
             effective_origin: _,
+            review_instructions,
+            review_config,
+            review_loop,
         } = detail;
 
         Self {
@@ -169,6 +223,9 @@ impl From<TaskDetail> for TaskView {
             links: links.into_iter().map(TaskLinkView::from).collect(),
             depends_on,
             last_run: last_run.map(RunView::from),
+            review_instructions,
+            review_config,
+            review_loop: review_loop.map(ReviewLoopView::from),
         }
     }
 }
@@ -1420,9 +1477,42 @@ mod tests {
             effective_model: Some("opus".to_string()),
             effective_effort: Some("high".to_string()),
             effective_origin: StrategyOrigin::Repository,
+            review_instructions: Some("Run /review".to_string()),
+            review_config: crate::review_loop::ReviewConfig {
+                max_review_loops: Some(1),
+                ..crate::review_loop::ReviewConfig::default()
+            },
+            review_loop: Some(ReviewLoopSummary {
+                enabled: true,
+                max_review_loops: 1,
+                fixes_spent: 1,
+                reviews: 2,
+                verdict: Verdict::Unreviewed {
+                    reason: UnreviewedReason::NothingRecorded,
+                },
+                open_blocking: 0,
+                ping_pong: false,
+            }),
         });
 
         let wire = serde_json::to_value(&view).expect("a DTO must always serialize");
+
+        // The loop's fields (task 021), in this surface's spelling.
+        assert_eq!(wire["review_instructions"], json!("Run /review"));
+        assert_eq!(wire["review_config"], json!({ "max_review_loops": 1 }));
+        assert_eq!(
+            wire["review_loop"],
+            json!({
+                "enabled": true,
+                "max_review_loops": 1,
+                "fixes_spent": 1,
+                "reviews": 2,
+                "verdict": "unreviewed",
+                "unreviewed_reason": "nothing_recorded",
+                "open_blocking": 0,
+                "ping_pong": false,
+            })
+        );
 
         // snake_case, in both directions, and unlike the row's own camelCase
         // (seam-contract D16).

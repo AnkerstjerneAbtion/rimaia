@@ -39,8 +39,9 @@ use crate::mcp::requests::{
     PlanSelectionRequest, RecordReviewFindingsRequest, RemoveTaskLinkRequest, RepositoryRequest,
     ResolveReviewFindingRequest, ReviewNoteRequest, ScheduleConfigRequest, ScheduleRequest,
     SetMaxConcurrencyRequest, SetRepositoryMaxConcurrencyRequest, SetRepositoryOnArchiveRequest,
-    SetScheduleEnabledRequest, SetScheduleModeRequest, SetStrategyApprovalRequest,
-    SetStrategyCatalogueRequest, SetStrategyDefaultsRequest, SetTaskDependenciesRequest,
+    SetRepositoryReviewConfigRequest, SetReviewSettingsRequest, SetScheduleEnabledRequest,
+    SetScheduleModeRequest, SetStrategyApprovalRequest, SetStrategyCatalogueRequest,
+    SetStrategyDefaultsRequest, SetTaskDependenciesRequest, SetTaskReviewRequest,
     SetTaskStrategyRequest, SetWorktreeAutoCleanupRequest, SubscriptionCostRequest,
     TaskStrategyRequest, UpdateScheduleRequest, UpdateTaskRequest,
 };
@@ -55,6 +56,7 @@ use crate::mcp::responses::{
 };
 use crate::mcp::scope::{RunScope, Tool};
 use crate::review;
+use crate::review_loop::{self, ReviewConfig, ReviewSettings, TaskReview};
 use crate::runner::prompt::TEMPLATE_VARIABLES;
 use crate::runner::strategy::{self as runner_strategy, PlanOutcome, PlanSelection, PlannerAccess};
 use crate::schedule;
@@ -1105,6 +1107,98 @@ Call this to tell the user what the automated review raised and what became of i
     }
 
     #[tool(
+        description = "Call this before changing the review-and-fix loop, or when the user asks how \
+automated review is set up. It reads the loop's global settings: the review instructions every \
+review run is given (often just the name of the user's own review skill or slash command), and the \
+loop's configuration. In the configuration every field is optional and an absent one inherits: \
+`enabled` (`off` or `on_cost_acknowledged`; absent is off), `max_review_loops` (how many fix \
+phases one loop may spend, 0 to 5, default 2), `blocking_severity` (the least severity that \
+starts a fix: `critical`, `high`, `medium` or `low`; default `medium`), `review_model` and \
+`review_effort` (absent means the task's own strategy) and `fix_session` (`fresh` or `resume`). \
+A repository and a task can each override any field."
+    )]
+    pub async fn get_review_settings(&self) -> Result<Json<ReviewSettings>, ToolError> {
+        self.scope.authorize(Tool::GetReviewSettings, None)?;
+        Ok(Json(
+            review_loop::config::get_review_settings(&self.ctx.pool).await?,
+        ))
+    }
+
+    #[tool(
+        description = "Call this when the user wants to change how every task is reviewed. It \
+replaces the review-and-fix loop's global settings: `instructions` (the text \
+every review run is given; empty for none) and `config` (see `get_review_settings`; null or {} \
+for nothing set). The loop multiplies what every task costs, so turning it on is spelled \
+`\"enabled\": \"on_cost_acknowledged\"` and nothing else: confirm the cost with the user before you \
+send it. `true` or `\"on\"` is refused, as is a `max_review_loops` above 5 or a model or effort \
+that is not in the strategy catalogue."
+    )]
+    pub async fn set_review_settings(
+        &self,
+        Parameters(request): Parameters<SetReviewSettingsRequest>,
+    ) -> Result<Json<ReviewSettings>, ToolError> {
+        self.scope.authorize(Tool::SetReviewSettings, None)?;
+        Ok(Json(
+            review_loop::config::set_review_settings(
+                &self.ctx,
+                self.doctor.provider.as_ref(),
+                &request.instructions,
+                request.config,
+            )
+            .await?,
+        ))
+    }
+
+    #[tool(
+        description = "Call this when the user wants one repository reviewed differently. It \
+replaces that repository's review-and-fix loop configuration, which overrides \
+the global one field by field (see `get_review_settings`; null or {} inherits everything). Turning \
+the loop on is spelled `\"enabled\": \"on_cost_acknowledged\"`; confirm the cost with the user first."
+    )]
+    pub async fn set_repository_review_config(
+        &self,
+        Parameters(request): Parameters<SetRepositoryReviewConfigRequest>,
+    ) -> Result<Json<ReviewConfig>, ToolError> {
+        self.scope
+            .authorize(Tool::SetRepositoryReviewConfig, None)?;
+        Ok(Json(
+            review_loop::config::set_repository_review_config(
+                &self.ctx,
+                self.doctor.provider.as_ref(),
+                &request.repository_id,
+                request.config,
+            )
+            .await?,
+        ))
+    }
+
+    #[tool(
+        description = "Call this when the user wants one task reviewed differently. It replaces \
+that task's review settings: `review_instructions`, which REPLACES the \
+global review instructions for this task when it says anything (omit it or send blank to use the \
+global ones), and `config`, which overrides the repository's and the global configuration field by \
+field (see `get_review_settings`). Turning the loop on is spelled \
+`\"enabled\": \"on_cost_acknowledged\"`; confirm the cost with the user first."
+    )]
+    pub async fn set_task_review(
+        &self,
+        Parameters(request): Parameters<SetTaskReviewRequest>,
+    ) -> Result<Json<TaskReview>, ToolError> {
+        self.scope
+            .authorize(Tool::SetTaskReview, Some(&request.task_id))?;
+        Ok(Json(
+            review_loop::config::set_task_review(
+                &self.ctx,
+                self.doctor.provider.as_ref(),
+                &request.task_id,
+                request.review_instructions,
+                request.config,
+            )
+            .await?,
+        ))
+    }
+
+    #[tool(
         description = "Call this to choose what archiving a task in one repository cleans up: `none` leaves \
 everything alone, `remove_worktree` deletes the task's checkout using Rimaia's own guards (it \
 refuses a dirty or unpushed worktree and never deletes a branch), and `script` runs an executable \
@@ -1468,7 +1562,7 @@ mod tests {
     /// capability parity a rule. What replaces a count is the property that
     /// actually matters — a registered tool with no run-scope decision cannot
     /// reach the wire.
-    const REGISTERED_TOOLS: [&str; 57] = [
+    const REGISTERED_TOOLS: [&str; 61] = [
         "accept_task_strategy",
         "add_task_link",
         "approve_task",
@@ -1484,6 +1578,7 @@ mod tests {
         "get_base_instructions",
         "get_repository_credential_status",
         "get_review_digest",
+        "get_review_settings",
         "get_run_capacity",
         "get_strategy_approval",
         "get_strategy_catalogue",
@@ -1514,6 +1609,8 @@ mod tests {
         "set_max_concurrency",
         "set_repository_max_concurrency",
         "set_repository_on_archive",
+        "set_repository_review_config",
+        "set_review_settings",
         "set_schedule_enabled",
         "set_schedule_mode",
         "set_strategy_approval",
@@ -1521,6 +1618,7 @@ mod tests {
         "set_strategy_defaults",
         "set_subscription_cost",
         "set_task_dependencies",
+        "set_task_review",
         "set_task_strategy",
         "set_worktree_auto_cleanup",
         "unarchive_task",

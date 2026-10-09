@@ -24,6 +24,7 @@ use pretty_assertions::assert_eq;
 use rimaia_core::db::{
     BoardColumn, MutationSource, Repository, RunState, StrategyMode, Task, TaskLink,
 };
+use rimaia_core::review_loop::ReviewConfig;
 use rimaia_core::runner::prompt::{
     compose_prompt, compose_resume_prompt, compose_strategy_prompt, compose_strategy_system_append,
     compose_system_append, StrategyGuidance,
@@ -877,6 +878,11 @@ fn task() -> TaskDetail {
         effective_model: None,
         effective_effort: None,
         effective_origin: StrategyOrigin::ClaudeCode,
+        // Composition reads the review settings off `ReviewContext`, which the
+        // board resolves; the task's own fields are what a door wrote.
+        review_instructions: None,
+        review_config: ReviewConfig::default(),
+        review_loop: None,
     }
 }
 

@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT review_instructions, review_config FROM tasks WHERE id = ?1",
+  "describe": {
+    "columns": [
+      {
+        "name": "review_instructions",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "review_config",
+        "ordinal": 1,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      true,
+      true
+    ]
+  },
+  "hash": "9416f02729ccbe8c0c8da4fd078e671ef27e54d7dee94d940c15013742af6408"
+}

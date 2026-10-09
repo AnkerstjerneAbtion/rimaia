@@ -318,6 +318,7 @@ async fn plan(
             // login while the run after it refused would be two answers to one
             // question about the same repository.
             credentials: &credentials,
+            notes: &[],
         },
     )
     .await;

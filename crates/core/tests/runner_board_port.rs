@@ -4,8 +4,8 @@
 //!
 //! `board_port_in_process.rs` holds the port's own contract. This file holds
 //! the behaviour that moved when the runner started reaching the board only
-//! through it: the manual starter's lost races, a refused resume that must
-//! write nothing, a claim the runner refuses after taking it, and the
+//! through it: the manual starter's lost races, a resume claimed as the kind
+//! that was waiting, a claim the runner refuses after taking it, and the
 //! usage-limit pause the runner raises around `finish_run`.
 //!
 //! The CLI is `testing::FakeCli` replaying recorded streams, git runs against
@@ -20,8 +20,8 @@ use std::time::Duration;
 use chrono::{DateTime, TimeDelta, Utc};
 use pretty_assertions::assert_eq;
 use rimaia_core::board::{
-    BoardFuture, BoardPort, Claim, ClaimTarget, FinishReceipt, FinishRun, Heartbeat, LeaseRef,
-    RunContext, StartRun, TranscriptAck, TranscriptChunk,
+    BoardFuture, BoardPort, Claim, ClaimTarget, FinishReceipt, FinishRun, Heartbeat, LeasePurpose,
+    LeaseRef, RunContext, StartRun, TranscriptAck, TranscriptChunk,
 };
 use rimaia_core::db::{BoardColumn, ExitClass, Run, RunKind, RunState, RunStatus, ScheduleMode};
 use rimaia_core::repo::{self, NewRepository};
@@ -34,7 +34,7 @@ use rimaia_core::runner::{
 };
 use rimaia_core::schedule::window::{self, RunWindow};
 use rimaia_core::scheduler::retry::{self, USAGE_LIMIT_MAX_JITTER};
-use rimaia_core::scheduler::{self, pause, InFlight};
+use rimaia_core::scheduler::{self, pause, InFlight, ResumePoint};
 use rimaia_core::tasks::strategy::StrategyPlan;
 use rimaia_core::tasks::{self, NewTask};
 use rimaia_core::testing::board::claim_run;
@@ -120,11 +120,9 @@ async fn a_lost_retry_start_answers_with_todays_sentence() {
 }
 
 #[tokio::test]
-async fn a_retry_claim_for_a_waiting_review_writes_nothing() {
-    // Task 035's refusal, now the board's: a review waiting to be resumed is
-    // not resumed as an implementation, and the refusal lands before either
-    // edge, so the task keeps the retry it was waiting for. Task 021 replaces
-    // this with a review that resumes as a review.
+async fn a_retry_claim_for_a_waiting_review_claims_it_as_a_review() {
+    // Task 035 refused this claim; task 021 resumes a review as a review. The
+    // point carries the kind, and the lease is for it (D29 points 1 and 3).
     let fixture = Fixture::new().await;
     let ctx = fixture.ctx();
     for state in [RunState::Queued, RunState::Running] {
@@ -159,10 +157,9 @@ async fn a_retry_claim_for_a_waiting_review_writes_nothing() {
     tasks::set_run_state(ctx, &fixture.task_id, RunState::WaitingRetry)
         .await
         .expect("the review is waiting to be retried");
-    let before = fixture.detail().await;
 
     let config = fixture.config();
-    let refusal = fixture
+    let claim = fixture
         .board(&config)
         .claim(ClaimTarget::Run {
             task_id: fixture.task_id.clone(),
@@ -170,20 +167,18 @@ async fn a_retry_claim_for_a_waiting_review_writes_nothing() {
             continue_session: true,
         })
         .await
-        .expect_err("a review is not resumed as an implementation");
+        .expect("a review is resumed")
+        .expect("nobody else holds the task");
 
-    assert_eq!(refusal.code(), ErrorCode::Invalid);
     assert_eq!(
-        refusal.to_string(),
-        "a review run cannot be resumed yet: review and fix runs arrive with task 021",
+        claim.resume,
+        Some(ResumePoint {
+            kind: RunKind::Review,
+            session_id: "review-session".to_string(),
+        })
     );
-    let after = fixture.detail().await;
-    assert_eq!(after.task.run_state, RunState::WaitingRetry);
-    assert_eq!(
-        after, before,
-        "the task, its review row and resume_after are untouched"
-    );
-    assert_eq!(after.last_run.and_then(|run| run.resume_after), Some(due));
+    assert_eq!(claim.purpose, LeasePurpose::Review);
+    assert_eq!(fixture.detail().await.task.run_state, RunState::Running);
 }
 
 // ---------------------------------------------------------------------------

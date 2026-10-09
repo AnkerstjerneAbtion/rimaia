@@ -1083,48 +1083,32 @@ async fn finishing_a_run_twice_is_refused_rather_than_replaying_the_task_transit
 }
 
 #[tokio::test]
-async fn finish_run_refuses_a_review_row_and_writes_nothing() {
-    // D29 point 9: the kind is read off the row and dispatched on before the
-    // `UPDATE`. Until task 021 wires the review and fix arms, closing such a row
-    // here would commit it closed and leave the task `running` with nothing to
-    // resume it, so both refuse and touch neither the row nor the task.
+async fn a_finished_review_or_fix_row_closes_and_lands_its_task_in_review() {
+    // D29 point 9: the kind is read off the row, and since task 021 a review
+    // or fix closes like any other row. With the loop off, the task lands
+    // where ADR-0017's exits put a loop that ended: in review, idle — and
+    // never `failed`, because the implementation before it had succeeded.
     for kind in [RunKind::Review, RunKind::Fix] {
         let mut fixture = RunFixture::new().await;
         let task_id = fixture.task_id.clone();
         let run = fixture
             .start_kind(&task_id, kind, "review the branch")
             .await;
-        let before = fixture.task().await;
 
-        let error = finish_run(
+        let closed = finish_run(
             &fixture.harness.context,
             &run.id,
             &Replay::of("success").outcome(),
             &RunCapture::default(),
         )
         .await
-        .expect_err("a review or fix row is not finished here before task 021");
+        .expect("a review or fix row closes");
 
-        assert_eq!(error.code(), ErrorCode::Invalid, "{kind:?}");
-        let article = if kind == RunKind::Review {
-            "a review"
-        } else {
-            "a fix"
-        };
-        assert_eq!(
-            error.to_string(),
-            format!(
-                "{article} run cannot be finished yet: review and fix runs arrive with task 021"
-            ),
-        );
-        let after = fixture.reread(&run.id).await;
-        assert_eq!(
-            after, run,
-            "the row is still open, exactly as it was opened"
-        );
-        assert_eq!(after.kind, kind);
-        assert_eq!(fixture.task().await, before, "{kind:?}");
-        assert_eq!(before.run_state, RunState::Running);
+        assert_eq!(closed.kind, kind);
+        assert_eq!(closed.status, RunStatus::Succeeded, "{kind:?}");
+        let task = fixture.task().await;
+        assert_eq!(task.column, BoardColumn::InReview, "{kind:?}");
+        assert_eq!(task.run_state, RunState::Idle, "{kind:?}");
     }
 }
 

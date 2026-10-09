@@ -276,6 +276,15 @@ pub(super) async fn is_dirty(worktree: &Path) -> Result<bool> {
     Ok(dirty_file_count(worktree).await? > 0)
 }
 
+/// Whether a tracked file has uncommitted changes, staged or not. Untracked
+/// files are ignored, which is the one difference from [`is_dirty`]: a review
+/// phase's checks (task 021) judge what a reviewer changed, and a test run
+/// leaves untracked files behind as a matter of course.
+pub(super) async fn has_tracked_changes(worktree: &Path) -> Result<bool> {
+    let stdout = checked(worktree, &["status", "--porcelain", "--untracked-files=no"]).await?;
+    Ok(stdout.lines().any(|line| !line.is_empty()))
+}
+
 /// How many paths [`is_dirty`] is answering "yes" about.
 ///
 /// A count rather than a bool because task 016's refusal has to *name* what it

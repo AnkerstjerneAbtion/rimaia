@@ -37,8 +37,8 @@ pub mod start;
 pub mod strategy;
 
 pub use process::{
-    execute, max_turns, probe_cli, run_task, Attempt, CancelSignal, PermissionMode, ResumeSession,
-    RunRequest, RunTrigger, RunnerConfig, DEFAULT_MAX_TURNS, MAX_TURNS,
+    execute, max_turns, probe_cli, run_task, Attempt, CancelSignal, PermissionMode, RunRequest,
+    RunTrigger, RunnerConfig, DEFAULT_MAX_TURNS, MAX_TURNS,
 };
 pub use provider::{AgentProvider, ProviderId, RunIntent, SpawnPlan};
 pub use start::{claim_manual_start, ManualStart, Started};

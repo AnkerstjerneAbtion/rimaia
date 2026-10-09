@@ -210,7 +210,6 @@ use crate::board::{BoardPort, Claim, ClaimTarget};
 use crate::context::ServiceContext;
 use crate::db::MutationSource;
 use crate::doctor;
-use crate::error::ErrorCode;
 use crate::error::{Error, Result};
 use crate::events::ChangeEvent;
 use crate::paths::AppPaths;
@@ -1004,18 +1003,16 @@ impl QueueTask {
             // `waiting_retry -> running` edge in one conditional write.
             let resuming = entry.resume_after.is_some();
 
-            // The board reads the resume point before it takes the edge, never
-            // after (seam-contract D29 point 3), so a refused resume has
-            // claimed nothing: refusing after the claim would leave the task
-            // `running` with no process, and the release would then move it to
-            // `failed`, throwing away the retry it was waiting for. Reading
-            // first is safe because this entry's `InFlight` slot is held: while
-            // it is, nothing else in the app can start a run of this task, so
-            // the point read is the point the claim resumes. A retry whose rows
-            // have gone — a pruned history, a hand-edited database — starts a
-            // fresh session rather than refusing, because a task with no
-            // context to resume is exactly a task that should be started from
-            // the top.
+            // The board reads the resume point before it takes the edge
+            // (seam-contract D29 point 3), and the claim carries it, kind and
+            // all: a review or fix waiting on a usage limit resumes as itself
+            // (task 021). Reading first is safe because this entry's
+            // `InFlight` slot is held: while it is, nothing else in the app
+            // can start a run of this task, so the point read is the point the
+            // claim resumes. A retry whose rows have gone — a pruned history, a
+            // hand-edited database — starts a fresh session, because a task
+            // with no context to resume is exactly a task that should be
+            // started from the top.
             let target = ClaimTarget::Run {
                 task_id: task_id.clone(),
                 // ADR-0012: the unattended path, behind the per-repository
@@ -1031,16 +1028,6 @@ impl QueueTask {
                     // work and the loop will look again rather than waiting.
                     drop(lease);
                     worked = true;
-                    continue;
-                }
-                // Task 035's refusal of a review or fix waiting to be resumed.
-                // Logged and skipped, never `?`: one entry's refusal must not
-                // abort the step for the rest of the batch. Not `worked`
-                // either, so a refused entry does not make the loop spin; the
-                // next change event wakes it.
-                Err(refusal) if resuming && refusal.code() == ErrorCode::Invalid => {
-                    tracing::warn!(%task_id, %refusal, "the run queue cannot resume this task");
-                    drop(lease);
                     continue;
                 }
                 Err(error) => return Err(error),

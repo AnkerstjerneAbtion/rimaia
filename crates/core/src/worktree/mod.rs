@@ -382,6 +382,16 @@ async fn fork_point(worktree: &Path, base_ref: &str) -> Option<String> {
     }
 }
 
+/// Whether a tracked file in the worktree at `path` has uncommitted changes.
+///
+/// Untracked files do not count, because a test run leaves them. The review
+/// phase checks this before it spawns and after it exits (task 021): a shell
+/// can edit what a file-mutation denial does not cover, and a review that
+/// left edits behind is not a review.
+pub async fn has_tracked_changes(path: &Path) -> Result<bool> {
+    git::has_tracked_changes(path).await
+}
+
 /// Everything the task detail panel needs about a worktree, computed fresh
 /// from git.
 pub async fn status(ctx: &ServiceContext, task_id: &str) -> Result<WorktreeStatus> {

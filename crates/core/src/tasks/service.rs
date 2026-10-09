@@ -28,6 +28,7 @@ use crate::db::{
 };
 use crate::error::{Error, Result};
 use crate::events::ChangeEvent;
+use crate::review_loop::{self, ReviewConfig, ReviewLoopSummary};
 use crate::strategy::{effective_strategy, EffectiveStrategy, StrategyOrigin};
 use crate::tasks::position::{position_between, rebalance_column, rebalanced_positions, Placement};
 use crate::tasks::strategy::{defaults_for_repository, ResolvedDefaults};
@@ -56,6 +57,17 @@ pub struct TaskDetail {
     pub effective_model: Option<String>,
     pub effective_effort: Option<String>,
     pub effective_origin: StrategyOrigin,
+    /// The task's own override of the review instructions, and its own loop
+    /// settings, before any inheritance (task 021). Written only by
+    /// `review_loop::config::set_task_review`, never through `TaskPatch`.
+    #[serde(default)]
+    pub review_instructions: Option<String>,
+    #[serde(default)]
+    pub review_config: ReviewConfig,
+    /// Where the task's review loop stands, or `None` when the loop never
+    /// touched it (ADR-0017).
+    #[serde(default)]
+    pub review_loop: Option<ReviewLoopSummary>,
 }
 
 /// One card's worth of a task: every column of the row, plus the two counts
@@ -348,6 +360,9 @@ pub async fn get_task(ctx: &ServiceContext, id: &str) -> Result<TaskDetail> {
     let effective = effective_strategy(&task, &defaults.repository, &defaults.global);
     let effective_origin = strongest_origin(&effective);
 
+    let review = review_loop::config::resolve(&ctx.pool, id, &task.repository_id).await?;
+    let review_loop = review_loop::summary_for(ctx, id, &review.config).await?;
+
     Ok(TaskDetail {
         task,
         links,
@@ -356,6 +371,9 @@ pub async fn get_task(ctx: &ServiceContext, id: &str) -> Result<TaskDetail> {
         effective_model: effective.model,
         effective_effort: effective.effort,
         effective_origin,
+        review_instructions: review.task.instructions,
+        review_config: review.task.config,
+        review_loop,
     })
 }
 

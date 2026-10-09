@@ -414,9 +414,21 @@ async fn findings_list_in_review_order_then_in_the_order_the_reviewer_gave_them(
         ]
     );
     assert!(listed.iter().all(|found| found.created_at == test_epoch()));
-    assert!(
-        listed.iter().all(|found| found.fingerprint.is_none()),
-        "a reviewer never supplies a fingerprint"
+    // Computed by the store from the file and title, never supplied by the
+    // reviewer (task 021).
+    let prints: Vec<Option<&str>> = listed
+        .iter()
+        .map(|found| found.fingerprint.as_deref())
+        .collect();
+    assert_eq!(
+        prints,
+        vec![
+            Some("|zeta"),
+            Some("src/a.rs|alpha"),
+            Some("|mu"),
+            Some("|beta"),
+            Some("|omega"),
+        ]
     );
 
     let open = findings::list(f.ctx(), &task, Some(FindingStatus::Open))
@@ -427,6 +439,91 @@ async fn findings_list_in_review_order_then_in_the_order_the_reviewer_gave_them(
         .await
         .expect("list the fixed ones");
     assert_eq!(fixed, vec![]);
+}
+
+#[test]
+fn fingerprint_ignores_line_case_and_whitespace() {
+    // The line is left out because a fix moves lines; case and whitespace
+    // because a second reviewer phrases the same title its own way.
+    assert_eq!(
+        findings::fingerprint(Some("  src/Retry.rs "), "The retry\n never   STOPS "),
+        "src/retry.rs|the retry never stops",
+    );
+    assert_eq!(
+        findings::fingerprint(Some("src/retry.rs"), "The retry never stops"),
+        findings::fingerprint(Some("src/retry.rs"), "the RETRY never stops"),
+    );
+    assert_eq!(
+        findings::fingerprint(None, "About the whole change"),
+        "|about the whole change",
+        "a finding with no file has an empty file half",
+    );
+    assert_ne!(
+        findings::fingerprint(Some("src/a.rs"), "Same title"),
+        findings::fingerprint(Some("src/b.rs"), "Same title"),
+    );
+}
+
+#[tokio::test]
+async fn a_finding_a_fix_rejected_is_stored_rejected_when_raised_again() {
+    let f = Fixture::new().await;
+    let task = f.task("Reviewed twice").await;
+    let first = f.open(&task, RunKind::Review).await;
+    let raised = findings::record(
+        f.ctx(),
+        &task,
+        &first,
+        vec![NewReviewFinding {
+            line: Some(12),
+            ..finding("Unchecked unwrap", Some("src/lib.rs"))
+        }],
+    )
+    .await
+    .expect("the first review");
+    f.close(&first).await;
+    let fix = f.open(&task, RunKind::Fix).await;
+    findings::resolve(
+        f.ctx(),
+        &task,
+        &raised[0].id,
+        &fix,
+        FindingResolution::Rejected {
+            reason: "The list is never empty here.".to_string(),
+        },
+    )
+    .await
+    .expect("the fixer rejects it");
+    f.close(&fix).await;
+
+    // The same finding, on another line and in another case.
+    let second = f.open(&task, RunKind::Review).await;
+    let again = findings::record(
+        f.ctx(),
+        &task,
+        &second,
+        vec![
+            NewReviewFinding {
+                line: Some(40),
+                ..finding("UNCHECKED  unwrap", Some("src/lib.rs"))
+            },
+            finding("Something new", None),
+        ],
+    )
+    .await
+    .expect("the second review");
+
+    assert_eq!(again[0].status, FindingStatus::Rejected);
+    assert_eq!(
+        again[0].resolution,
+        Some(format!(
+            "Rejected earlier as {}: The list is never empty here.",
+            raised[0].id
+        ))
+    );
+    assert_eq!(again[0].resolved_by_run_id, None, "no fix run resolved it");
+    assert_eq!(again[0].resolved_at, Some(test_epoch()));
+    assert_eq!(again[1].status, FindingStatus::Open);
+    assert_eq!(again[1].resolution, None);
 }
 
 #[tokio::test]

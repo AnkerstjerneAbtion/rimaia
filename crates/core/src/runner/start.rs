@@ -48,9 +48,9 @@ pub struct Started {
 /// So every refusal before it leaves the task exactly as it was (task 008's
 /// "refused before any run state is written", ADR-0026's for a provider that
 /// cannot honour an unattended run). A claim lost to another starter is
-/// answered in the sentence each button has always given. Task 035's refusal
-/// of a review or fix waiting to be resumed arrives as the claim's error and
-/// is returned as it is.
+/// answered in the sentence each button has always given. A review or fix
+/// waiting to be resumed is claimed like any retry, and `run_task` enters the
+/// loop at that kind (task 021).
 pub async fn claim_manual_start(
     board: &dyn BoardPort,
     ctx: &ServiceContext,

@@ -18,10 +18,11 @@ use rimaia_core::mcp::requests::{
     GetTaskRequest, ListReviewFindingsRequest, ListTasksRequest, MarkReviewDigestSeenRequest,
     MoveTaskRequest, PlanSelectionRequest, RecordReviewFindingsRequest,
     ResolveReviewFindingRequest, ReviewNoteRequest, ScheduleConfigRequest, ScheduleRequest,
-    SetMaxConcurrencyRequest, SetRepositoryMaxConcurrencyRequest, SetScheduleEnabledRequest,
-    SetScheduleModeRequest, SetStrategyApprovalRequest, SetStrategyCatalogueRequest,
-    SetStrategyDefaultsRequest, SetTaskDependenciesRequest, SetTaskStrategyRequest,
-    TaskStrategyRequest, UpdateScheduleRequest, UpdateTaskRequest,
+    SetMaxConcurrencyRequest, SetRepositoryMaxConcurrencyRequest, SetRepositoryReviewConfigRequest,
+    SetReviewSettingsRequest, SetScheduleEnabledRequest, SetScheduleModeRequest,
+    SetStrategyApprovalRequest, SetStrategyCatalogueRequest, SetStrategyDefaultsRequest,
+    SetTaskDependenciesRequest, SetTaskReviewRequest, SetTaskStrategyRequest, TaskStrategyRequest,
+    UpdateScheduleRequest, UpdateTaskRequest,
 };
 use rimaia_core::mcp::responses::{
     DoctorDismissalsView, DoctorReportView, PreflightView, ScheduleDeletedView, ScheduleListView,
@@ -246,6 +247,13 @@ fn expected_access(tool: Tool, kind: GrantKind) -> RunAccess {
             | Tool::GetTaskDependents
             | Tool::GetReviewDigest
             | Tool::MarkReviewDigestSeen => RunAccess::Refused,
+            // Task 021. The loop's configuration reconfigures the installation
+            // (ADR-0021 point 4): a run enabling its own loop would spend on its
+            // own authority. See `the_review_configuration_is_refused_to_every_grant`.
+            Tool::GetReviewSettings
+            | Tool::SetReviewSettings
+            | Tool::SetRepositoryReviewConfig
+            | Tool::SetTaskReview => RunAccess::Refused,
     }
 }
 
@@ -2047,4 +2055,106 @@ fn review_tools_are_refused_to_a_run() {
             assert!(run.authorize(tool, None).is_err(), "{}", tool.as_str());
         }
     }
+}
+
+#[tokio::test]
+async fn the_review_configuration_is_refused_to_every_grant() {
+    // A run that could turn its own loop on would be spending on its own
+    // authority, and a fixer that could rewrite its own review instructions
+    // would be marking its own homework (ADR-0021 point 4, task 021). Refused on
+    // its own task, before anything is read or written.
+    let h = TestContext::new().await;
+    let repository_id = seed_repository(&h.context.pool, "rimaia", "/tmp/rimaia").await;
+    let task = create_task(&h, &repository_id, "Mine").await;
+    let on = json!({ "enabled": "on_cost_acknowledged" });
+
+    for grant in every_grant() {
+        let server = scoped_as(&h, &task.id, grant);
+
+        assert_refusal(
+            &as_result(server.get_review_settings().await),
+            &not_available("get_review_settings", &task.id),
+        );
+        assert_refusal(
+            &as_result(
+                server
+                    .set_review_settings(Parameters(request::<SetReviewSettingsRequest>(
+                        json!({ "instructions": "", "config": on }),
+                    )))
+                    .await,
+            ),
+            &not_available("set_review_settings", &task.id),
+        );
+        assert_refusal(
+            &as_result(
+                server
+                    .set_repository_review_config(Parameters(request::<
+                        SetRepositoryReviewConfigRequest,
+                    >(
+                        json!({ "repository_id": repository_id, "config": on }),
+                    )))
+                    .await,
+            ),
+            &not_available("set_repository_review_config", &task.id),
+        );
+        assert_refusal(
+            &as_result(
+                server
+                    .set_task_review(Parameters(request::<SetTaskReviewRequest>(
+                        json!({ "task_id": task.id, "config": on }),
+                    )))
+                    .await,
+            ),
+            &not_available("set_task_review", &task.id),
+        );
+    }
+
+    let after = tasks::get_task(&h.context, &task.id)
+        .await
+        .expect("read the task");
+    assert_eq!(
+        after.review_config,
+        Default::default(),
+        "nothing was written"
+    );
+}
+
+#[tokio::test]
+async fn a_review_grant_cannot_call_resolve_review_finding() {
+    let h = TestContext::new().await;
+    let repository_id = seed_repository(&h.context.pool, "rimaia", "/tmp/rimaia").await;
+    let task = create_task(&h, &repository_id, "Reviewed").await;
+    let review_run = open_run(&h, &task.id, RunKind::Review).await;
+    let server = scoped_as(&h, &task.id, Grant::Review { run_id: review_run });
+
+    let refused = as_result(
+        server
+            .resolve_review_finding(Parameters(request::<ResolveReviewFindingRequest>(json!({
+                "task_id": task.id,
+                "finding_id": "any",
+                "status": "fixed",
+            }))))
+            .await,
+    );
+
+    assert_refusal(&refused, &not_available("resolve_review_finding", &task.id));
+}
+
+#[tokio::test]
+async fn a_fix_grant_cannot_call_record_review_findings() {
+    let h = TestContext::new().await;
+    let repository_id = seed_repository(&h.context.pool, "rimaia", "/tmp/rimaia").await;
+    let task = create_task(&h, &repository_id, "Fixed").await;
+    let fix_run = open_run(&h, &task.id, RunKind::Fix).await;
+    let server = scoped_as(&h, &task.id, Grant::Fix { run_id: fix_run });
+
+    let refused = as_result(
+        server
+            .record_review_findings(Parameters(request::<RecordReviewFindingsRequest>(
+                json!({ "task_id": task.id, "findings": [] }),
+            )))
+            .await,
+    );
+
+    assert_refusal(&refused, &not_available("record_review_findings", &task.id));
 }
