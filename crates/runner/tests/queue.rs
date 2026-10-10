@@ -318,6 +318,62 @@ async fn a_to_b_to_c_run_in_dependency_order_in_one_queue_pass() {
         recorded_base_ref(&fixture, &c).await,
         fixture.task(&b).await.branch,
     );
+    // And the commit each was built on is its dependency's successful head
+    // (ADR-0033 point 5): `base_sha` is the authoritative half of the record.
+    let (_, a_head) = recorded_shas(&fixture, &a).await;
+    let (b_base, b_head) = recorded_shas(&fixture, &b).await;
+    let (c_base, _) = recorded_shas(&fixture, &c).await;
+    assert!(a_head.is_some() && b_head.is_some(), "both heads recorded");
+    assert_eq!(b_base, a_head, "B is built on A's head");
+    assert_eq!(c_base, b_head, "C is built on B's head");
+
+    queue.shutdown();
+}
+
+#[tokio::test]
+async fn a_hand_finished_dependency_still_unblocks_and_its_dependent_builds_on_the_default_branch()
+{
+    // ADR-0008 amendment point 2: satisfaction is the column, and only the
+    // column. A was finished by hand and has no run, so it is no base
+    // (ADR-0033 point 5) — but it still unblocks B, which builds on the
+    // default branch.
+    let fixture = Fixture::new().await;
+    let b = fixture.add_task("Bravo").await;
+    let a = fixture.add_task("Alpha").await;
+    tasks::set_task_dependencies(fixture.ctx(), &b, std::slice::from_ref(&a))
+        .await
+        .expect("B depends on A");
+    tasks::move_task_to_bottom(fixture.ctx(), &a, BoardColumn::Done)
+        .await
+        .expect("drag A to done");
+
+    let plan = scheduler::selection::plan(fixture.ctx(), &fixture.consented().await)
+        .await
+        .expect("the queue's own plan");
+    assert_eq!(
+        plan.iter()
+            .map(|entry| (entry.task_id.clone(), entry.skip))
+            .collect::<Vec<_>>(),
+        vec![(b.clone(), None)],
+        "B is claimable, not skipped as DependencyNotSatisfied",
+    );
+
+    let mut changes = fixture.ctx().subscribe();
+    let queue = fixture.spawn_queue();
+    queue.start().await.expect("start the queue");
+
+    wait_until(&fixture, &mut changes, "B to reach in_review", |board| {
+        board
+            .iter()
+            .any(|task| task.task.id == b && task.task.column == BoardColumn::InReview)
+    })
+    .await;
+
+    assert_eq!(fixture.cli.started(), vec![b.clone()]);
+    assert_eq!(
+        recorded_base_ref(&fixture, &b).await.as_deref(),
+        Some("main")
+    );
 
     queue.shutdown();
 }
@@ -4394,6 +4450,17 @@ async fn recorded_base_ref(fixture: &Fixture, task_id: &str) -> Option<String> {
     .await
     .expect("read the run's base ref")
     .flatten()
+}
+
+/// The newest row's `base_sha` and `head_sha`.
+async fn recorded_shas(fixture: &Fixture, task_id: &str) -> (Option<String>, Option<String>) {
+    sqlx::query_as::<_, (Option<String>, Option<String>)>(
+        "SELECT base_sha, head_sha FROM runs WHERE task_id = ?1 ORDER BY attempt DESC LIMIT 1",
+    )
+    .bind(task_id)
+    .fetch_one(&fixture.ctx().pool)
+    .await
+    .expect("read the run's commits")
 }
 
 // ---------------------------------------------------------------------------
