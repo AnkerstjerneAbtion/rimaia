@@ -268,7 +268,8 @@ token for the second member.
 
 **7. The runner re-checks before every spawn (point 4).** 042 lists only consented
 checkouts in `repositories`, and leaves the re-check to this task. Its test
-`the_queue_offers_the_board_only_consented_repositories` stays 042's. At the last point
+`the_queue_offers_the_board_only_consented_repositories` is built by 042, in
+`crates/runner/tests/queue.rs`, and stays 042's. At the last point
 before the agent process starts, after composition and `prepare`, in the process that
 spawns it, the runner reads `checkouts.unattended_consent` (066) and its strategy ceiling again, and
 calls `ceiling::judge` on the phase's strategy from the context. It spawns with that result

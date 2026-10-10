@@ -1292,6 +1292,37 @@ that hazard. It is fixed by there being one registry, not by a new check.
 
 **Binds.** 009, 012, 014, 020, 023.
 
+### Amendment, 2026-10-10 — the slot is `LocalSlot`, and the loop takes it after the claim (task 042)
+
+Two changes, both about which half owns what.
+
+- **The rename.** `Lease` is `LocalSlot`, `LeaseOwner` is `SlotOwner` and `LeaseRefused`
+  is `SlotRefused`, everywhere: `scheduler::inflight`, the manual starter, the planner, the
+  MCP server's Plan now, the runner loop, the shell and every test. The method names
+  (`acquire`, `acquire_unbounded`, `cancel_owned_by`, `releases`) and `PlannerClaim`'s shape
+  are unchanged. From here on "lease" means only the board's (`LeaseRef`, `LeasePurpose`,
+  task 043's `runner_leases`), because from 043 the loop holds a slot and a lease at once
+  and a diff that confused the two would compile. Point 2's "A `Lease` is RAII" now reads
+  "a `LocalSlot` is RAII"; point 4's `LeaseOwner::Queue` is `SlotOwner::Queue`.
+- **The runner loop takes its slot after the claim** (`rimaia_runner::queue`). The queue's
+  old header said the slot came *before* the claim "so a Pause pressed mid-claim has
+  something to act on". Under `ClaimTarget::Next` the board picks the task, so the loop
+  cannot take a slot for it until the claim returns. What closed the mid-claim window was
+  never the slot: it is the re-check of the switch and the shutdown signal after every
+  await. A Stop that lands during the probe writes `paused` and cancels nothing, because
+  nothing is held yet, and the re-check after the probe ends the pass before any claim. One
+  that lands during the claim is found by the re-check after it, and the claim is released.
+  The three `…_mid_claim_…` tests now hold the version probe instead of a slot and assert
+  what they always asserted. A slot refused after a won claim falls back to
+  `acquire_unbounded` for a capacity refusal (a Run now took the slot after the view was
+  built; the board decided on the capacity the runner reported) and releases for
+  `AlreadyInFlight` or the ceiling.
+
+  **Manual starts keep task 036's order** (`preview`, slot, `claim(Run)`), because a person
+  named the task.
+
+**Binds.** 042, 043, 052, 053.
+
 ---
 
 ## D21 — Where "how many runs at once" lives, and what it hands task 013
@@ -1515,6 +1546,38 @@ both spellings. The variant now carries an explicit `#[serde(rename = "github_cl
 `every_check_serializes_with_the_spelling_its_accessor_returns` pins the agreement for all eight.
 
 **Binds.** 018, 027.
+
+### Amendment, 2026-10-10 — the loop's probe is memoised, and the gate's tests moved (task 042)
+
+Point 2 keeps the doctor out of the loop and left one per-step check, `probe_cli`. Before
+task 042 the loop knew from its own plan read whether anything was startable and probed
+only before a non-empty batch. Under `ClaimTarget::Next` the board decides that, and the
+loop cannot know before it claims, so a probe per pass would be the per-change spawn point
+2 argues against. So:
+
+- **The probe runs at most once per `DEADLINE_CAP` of clock time on a pass with a free
+  slot.** The loop keeps the last answer, success or failure, with the instant on the
+  injected clock it was taken, and reuses it until the cap has passed. `QueueHandle::start`,
+  `resume` and a schedule's fire forget it, because the doctor they run has just asked the
+  same question. With free capacity, a board change costs at most one `--version` spawn a
+  minute whether or not anything is ready. A pass that is switched off, held by a usage
+  limit or full spawns nothing and asks the board for nothing.
+- **What that costs is bounded and stated.** A `claude` removed while the queue runs is
+  noticed within the same minute, and one claimed task can fail at spawn before it is:
+  `run_task` probes again before it spawns, and the failure is that run's.
+- Point 1's refusal moved crates with the loop, unchanged. Its three tests,
+  `a_blocking_report_refuses_to_start_the_queue_and_writes_no_queue_state`,
+  `dismissing_every_row_still_refuses_to_start_the_queue_and_writes_no_queue_state` (027's
+  amendment above names it) and `a_healthy_installation_starts_the_queue_even_with_warnings_outstanding`,
+  are now in `crates/runner/tests/queue_preflight.rs`, with the same names and
+  assertions.
+
+Tests: `a_queue_that_cannot_start_anything_spawns_no_probe`,
+`an_idle_board_costs_at_most_one_probe_per_deadline_cap` and
+`a_missing_binary_is_found_before_the_queue_claims_anything`, in
+`crates/runner/tests/queue.rs`.
+
+**Binds.** 042, 053, 058.
 
 ---
 
@@ -3584,6 +3647,33 @@ same commit), 045 (decides what a removal records, since a deleted row has no re
 carry; its columns go in `set_team_in`), 051 (its owner check goes in `set_team_in` and covers
 both of its branches), 065 (drops the legacy `settings` table that 039 leaves unread).
 
+### Amendment, 2026-10-10 — the runner's two limit keys (task 042)
+
+Part 4's runner row gains `max_turns` and `disallowed_tools`, as the runner's stricter
+override of the team keys of the same names (ADR-0028 point 2). They are **never adopted**:
+they stay out of `db::settings::RUNNER_KEYS`, `runner_placed` and task 040's adoption step,
+because the board's legacy `settings` holds the *team's* values under those names, and
+copying them would make the team's value the runner's override, against this part's "the
+runner's stricter override starts out absent". Both are absent by default, and absent
+means no override. They are read by one typed accessor beside the rule that combines them,
+`runner::limits::runner_limits(&MachineContext)` (D3), straight off the machine store,
+because the placement table is keyed by name and places these names with the team. A
+`max_turns` that is unparseable or `0` warns and reads as absent, never as `0` and never as
+the team's value; the blocklist is one pattern per line. There is no command, MCP tool or
+UI: they are set in the `sqlite3` CLI (ADR-0003), and a control is task 061's.
+
+The effective value is the stricter of the two, and only `runner::limits::{effective,
+planner_max_turns}` combine them: the lower turn budget, and the team's blocklist (ADR-0012
+point 3's defaults when it is unset, an explicitly empty list included as empty, D27's
+`ProviderRule` tagging) followed by the runner's rules not already present, then the
+caller's own operations and the operator surface. The team half is read only where
+`board::service` builds `TeamLimits`.
+
+Test: `a_fresh_adoption_leaves_both_runner_limit_keys_absent`
+(`crates/runner/tests/adoption.rs`).
+
+**Binds.** 042, 061.
+
 ---
 
 ## D29 — Runs have a kind, and every reader of `runs` says which kinds it means
@@ -5013,6 +5103,57 @@ build on one shape:
 
 **Binds.** 042, 043, 045, 046, 048, 054, 056, 059, 065.
 
+### Amendment, 2026-10-10 — `ClaimTarget::Next` and the runner loop (task 042)
+
+What task 042 pinned building `Next`'s body and moving the loop.
+
+- **Point 2, the fields.**
+  - `repositories` lists the repositories the runner has a checkout of *and* has given
+    unattended consent for (`checkouts.unattended_consent`, read through `MachineContext`).
+    Before task 045 that list is the whole opt-in: a repository is opted in exactly when the
+    runner listed it, and a repository not in it is skipped as `UnattendedRunsNotAllowed`.
+    Listing only consented checkouts keeps the board from offering a task the runner would
+    refuse after the claim, a `release` into `failed`. The team ceiling is not read here;
+    045 adds it beside this check, with its personal-team exemption.
+  - `capacity` is what the runner has *free*, already net of its own in-flight runs. A
+    `per_repository` of one means one more run, never a cap the board subtracts from again,
+    and a listed repository missing from `per_repository` has no free slot.
+    `scheduler::view::for_runner` is the one builder: `capacity::resolve` (D24's window
+    override included) minus `InFlight::counts()`. The loop, the Runs view's plan and a
+    schedule's preview all plan over its repositories.
+  - `wait` is a `std::time::Duration`, serialised as integer milliseconds (`"wait": 0`). In
+    process the body tries once, waits on `ServiceContext::subscribe` and
+    `Clock::sleep_until` until a change event or the deadline, tries again, and returns
+    `None` once the deadline has passed with nothing claimed.
+  - The body is `board::service::claim`'s: `selection::plan` over the listed repositories,
+    `selection::first_startable` against the capacity, then today's two routes, a lost race
+    moving to the next entry. A `Next` claim returns at most one `Claim`, with trigger
+    `Queued`.
+- **Point 4, `wait: ZERO` and the deadline's solo source.** The solo loop always sends a zero
+  `wait`. A waiting claim carries the free capacity of the moment it started and would sleep
+  through a slot freed in another repository; dropping it to ask again is unsafe before 043,
+  because the claim's two edges are two transactions and a claim dropped between or after
+  them strands its task. So the loop keeps its own wake sources and each claim is a
+  non-blocking try. A `Next` that found nothing carries no deadline, so a pass that ends
+  idle asks the board for the earliest `resume_after` itself (`rimaia_runner::queue::solo`'s
+  `SoloBoard::next_deadline`, judged at the instant the board was last asked, so a retry
+  that came due between the claim and that read wakes the loop at once). The long poll, a
+  `wait` above zero from a production caller, the clamp, the `earliest_due` wake and
+  cancelling a claim that has not committed are 053's.
+- **Point 8.** The loop is `rimaia_runner::queue`, and `build` is
+  `rimaia_runner::queue::build(machine, board, changes, solo, in_flight, paths, runner)`:
+  the `MachineContext`, the port, the board's change receiver, `SoloBoard` and the slot
+  registry. It takes no bare board `ServiceContext`; the four board reads it still makes
+  without the port (the deadline above, the Runs view's plan, the doctor and the fire-time
+  preflight log) and the context `run_task` keeps for `worktree::prepare` until 044 are
+  `SoloBoard`'s, in the one file 058 and 059 replace. `rimaia_core::scheduler::queue` is
+  gone and nothing re-exports it.
+- **Point 13.** 042 owns the `Next` cases, its race included:
+  `two_runners_claiming_next_for_one_task_get_exactly_one_claim`. 043's "two runners racing
+  for one claim" case is the lease form of that one.
+
+**Binds.** 043, 045, 052, 053, 058, 059.
+
 ---
 
 ## D32 — One command registry: board and local commands, one dispatcher, one caller
@@ -6322,7 +6463,7 @@ An implementation task reads the entries its number appears in, before writing c
 | [039](../tasks/039-every-board-service-filters-by-team.md) | D3 · D4 · D5 · D6 · D8 · D10 · D12 · D13 · D16 · D17 · D20 · D21 · D23 · D24 · D28 · D29 · D30 · D31 · D32 · D33 · D34 |
 | [040](../tasks/040-the-runner-store.md) | D3 · D4 · D5 · D6 · D8 · D10 · D11 · D28 · D33 · D34 |
 | [041](../tasks/041-machine-state-moves-to-the-runner.md) | D3 · D4 · D5 · D6 · D7 · D8 · D10 · D11 · D12 · D13 · D15 · D16 · D17 · D19 · D20 · D21 · D22 · D23 · D24 · D25 · D26 · D28 · D29 · D30 · D31 · D32 · D33 · D34 |
-| [042](../tasks/042-split-the-scheduler.md) | D3 · D4 · D6 · D15 · D19 · D21 · D22 · D23 · D24 · D27 · D28 · D29 · D31 · D32 · D33 · D34 |
+| [042](../tasks/042-split-the-scheduler.md) | D3 · D15 · D19 · D21 · D22 · D23 · D24 · D27 · D28 · D29 · D31 · D32 · D33, and D4, D6 and D34 as prohibitions |
 | [043](../tasks/043-runner-leases.md) | D4 · D6 · D8 · D9 · D10 · D11 · D14 · D15 · D17 · D19 · D21 · D23 · D27 · D28 · D29 · D30 · D31 · D32 · D33 |
 | [044](../tasks/044-branch-from-the-dependencys-commit.md) | D4 · D5 · D8 · D18 · D20 · D28 · D29 · D31 · D32 · D33 |
 | [045](../tasks/045-consent-and-eligibility.md) | D2 · D3 · D4 · D6 · D8 · D10 · D12 · D16 · D17 · D21 · D23 · D27 · D28 · D29 · D30 · D31 · D32 · D33 · D34 |

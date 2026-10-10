@@ -209,6 +209,10 @@ Rules:
   ~3.6× per run, so surface per-run cost near the toggle.
 - **Always strip inherited `CLAUDE_*` env vars**, regardless of that setting.
   `CLAUDE_CODE_SESSION_ID` and friends are process identity, not user config.
+- **`max_turns` and `disallowed_tools` have a team value and a runner value.** The
+  effective value is the stricter of the two (ADR-0028 point 2): the lower turn budget, and
+  the team's blocklist plus whatever the runner adds. A run is never built from either half
+  alone; `runner::limits::effective` and `planner_max_turns` are the only place they meet.
 - **Classify runs on `result.terminal_reason` + `subtype`**, not on exit code alone. A
   SIGTERM-killed run still emits a `result` and exits 143.
 - Usage limits arrive as a typed `rate_limit_event` with an epoch `resetsAt`, on every
