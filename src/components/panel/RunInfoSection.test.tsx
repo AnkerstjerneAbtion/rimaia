@@ -9,6 +9,7 @@ function run(overrides: Partial<Run> = {}): Run {
     id: "run-1",
     taskId: "task-1",
     attempt: 1,
+    kind: "implementation",
     status: "succeeded",
     sessionId: "session-1",
     prompt: "prompt",
@@ -18,7 +19,6 @@ function run(overrides: Partial<Run> = {}): Run {
     errorMessage: null,
     numTurns: 3,
     costUsd: 0.1,
-    logPath: "/tmp/run.jsonl",
     prUrl: null,
     resumeAfter: null,
     baseRef: null,
@@ -29,6 +29,8 @@ function run(overrides: Partial<Run> = {}): Run {
     outputTokens: null,
     cacheReadTokens: null,
     cacheCreationTokens: null,
+    headSha: null,
+    baseSha: null,
     ...overrides,
   };
 }
@@ -36,7 +38,7 @@ function run(overrides: Partial<Run> = {}): Run {
 describe("RunInfoSection", () => {
   it("renders the deliberate empty case for every field, not a blank, before task 007/008 land", () => {
     render(
-      <RunInfoSection branch={null} worktreePath={null} lastRun={null} loading={false} />,
+      <RunInfoSection branch={null} worktreePath={null} notSetUp={false} lastRun={null} loading={false} />,
     );
 
     expect(screen.getByText(/Not created yet — the first run creates it/)).toBeInTheDocument();
@@ -49,6 +51,7 @@ describe("RunInfoSection", () => {
       <RunInfoSection
         branch="rimaia/task-1"
         worktreePath="/data/worktrees/task-1"
+        notSetUp={false}
         lastRun={null}
         loading={false}
       />,
@@ -58,11 +61,28 @@ describe("RunInfoSection", () => {
     expect(screen.getByText("/data/worktrees/task-1")).toBeInTheDocument();
   });
 
+  it("says the worktree cannot be here when the repository is not set up on this computer", () => {
+    render(
+      <RunInfoSection
+        branch="rimaia/task-1"
+        worktreePath={null}
+        notSetUp
+        lastRun={null}
+        loading={false}
+      />,
+    );
+
+    expect(screen.getByText("Not set up on this computer.")).toBeInTheDocument();
+    expect(screen.queryByText("Not created yet.")).not.toBeInTheDocument();
+    expect(screen.getByText("rimaia/task-1")).toBeInTheDocument();
+  });
+
   it("renders the last run's outcome", () => {
     render(
       <RunInfoSection
         branch={null}
         worktreePath={null}
+        notSetUp={false}
         lastRun={run({ status: "failed" })}
         loading={false}
       />,
@@ -72,7 +92,7 @@ describe("RunInfoSection", () => {
   });
 
   it("shows a loading state instead of the empty copy while detail is unresolved", () => {
-    render(<RunInfoSection branch={null} worktreePath={null} lastRun={null} loading />);
+    render(<RunInfoSection branch={null} worktreePath={null} notSetUp={false} lastRun={null} loading />);
 
     expect(screen.getByText("Loading…")).toBeInTheDocument();
     expect(screen.queryByText(/No runs yet/)).not.toBeInTheDocument();

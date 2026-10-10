@@ -1,8 +1,9 @@
 //! `run_state`: the machine's half of ADR-0007's two dimensions, and the one
 //! path that writes it.
 //!
-//! [`set_run_state`] is that path. Nothing else in this crate issues an
-//! `UPDATE tasks SET run_state = ...` — `startup::survey`'s own module docs
+//! [`set_run_state`], and [`transition`], the conditional write beneath it
+//! that a lease transaction takes its edges through, are that path. Nothing
+//! else in this crate issues an `UPDATE tasks SET run_state = ...` — `startup::survey`'s own module docs
 //! say so explicitly, naming this function as the one allowed to make a
 //! transition, because a second writer of `run_state` is the exact bug
 //! ADR-0006 names: the same invariant enforced in two places eventually
@@ -35,11 +36,14 @@
 //! place to change it — not a second switch statement somewhere that
 //! disagrees with it.
 
-use crate::context::ServiceContext;
+use sqlx::SqliteConnection;
+
+use crate::clock::Clock;
+use crate::context::{ScopedTx, ServiceContext};
 use crate::db::{RunState, Task};
 use crate::error::{Error, Result};
 use crate::events::ChangeEvent;
-use crate::tasks::service::fetch_task_row;
+use crate::tasks::service::{fetch_task_row, task_row, team_of_task};
 
 /// Whether ADR-0007's run-state machine allows moving from `from` to `to`.
 pub fn is_legal_run_state_transition(from: RunState, to: RunState) -> bool {
@@ -127,7 +131,9 @@ pub fn is_legal_run_state_transition(from: RunState, to: RunState) -> bool {
 /// Runs inside one transaction so the read of the current state and the
 /// write of the new one cannot interleave with a concurrent caller: two
 /// writers racing to transition the same task must not both succeed from a
-/// state that was only true for one of them.
+/// state that was only true for one of them. The write itself is
+/// [`transition`] from the value it read, so this and a lease transaction
+/// share one conditional `UPDATE`.
 ///
 /// `BEGIN IMMEDIATE` rather than a plain (deferred) `BEGIN`: on the
 /// production pool — more than one connection, unlike the single-connection
@@ -136,14 +142,38 @@ pub fn is_legal_run_state_transition(from: RunState, to: RunState) -> bool {
 /// later `UPDATE` would fail to upgrade with `SQLITE_BUSY_SNAPSHOT`, a
 /// conflict SQLite's busy handler does not retry. That left `busy_timeout`
 /// never applying and the loser reading a raw "database is locked" instead of
-/// the transition refusal `scheduler::claim`'s own `lost_the_race` exists to
-/// recognise — measured at 598 of 600 losers on a ten-connection pool.
-/// Taking the write lock up front makes a second caller wait for it, which
-/// *is* covered by `busy_timeout`, so it always reaches its own read seeing
-/// whatever the first writer already committed rather than racing it.
+/// the transition refusal a claimer exists to recognise — measured at 598 of
+/// 600 losers on a ten-connection pool. Taking the write lock up front makes
+/// a second caller wait for it, which *is* covered by `busy_timeout`, so it
+/// always reaches its own read seeing whatever the first writer already
+/// committed rather than racing it.
 pub async fn set_run_state(ctx: &ServiceContext, id: &str, to: RunState) -> Result<Task> {
-    let mut tx = ctx.pool.begin_with("BEGIN IMMEDIATE").await?;
-    let current = fetch_task_row(&mut *tx, id).await?;
+    let mut tx = ctx.begin_immediate().await?;
+    set_within(&mut tx, ctx.clock.as_ref(), id, to).await?;
+    let team_id = team_of_task(&mut tx, id).await?;
+    tx.commit().await?;
+
+    // Publish before the read-back: the row is already committed, so a
+    // failure in `fetch_task_row` below must not cost the notification for a
+    // mutation that already happened (ADR-0018).
+    ctx.publish(ChangeEvent::tasks(team_id, [id.to_string()]));
+    let updated = task_row(ctx, id).await?;
+    Ok(updated)
+}
+
+/// [`set_run_state`]'s read and write, inside a transaction the caller holds,
+/// commits and publishes for.
+///
+/// For a write that has to land with others or not at all: a finished run
+/// lands its task, deletes its lease and pins it in one transaction
+/// (`board::lease`). The refusal is `set_run_state`'s, word for word.
+pub(crate) async fn set_within(
+    tx: &mut ScopedTx,
+    clock: &dyn Clock,
+    id: &str,
+    to: RunState,
+) -> Result<()> {
+    let current = fetch_task_row(tx, id).await?;
 
     if !is_legal_run_state_transition(current.run_state, to) {
         return Err(Error::invalid(format!(
@@ -153,24 +183,52 @@ pub async fn set_run_state(ctx: &ServiceContext, id: &str, to: RunState) -> Resu
         )));
     }
 
-    let now = ctx.clock.now();
-    sqlx::query!(
-        "UPDATE tasks SET run_state = ?1, updated_at = ?2 WHERE id = ?3",
+    transition(tx, clock, id, current.run_state, to).await?;
+    Ok(())
+}
+
+/// Moves a task from `from` to `to`, **only if it is still in `from`**, and
+/// answers whether a row moved.
+///
+/// The conditional write `scheduler/claim.rs` asked for twice: the expected
+/// state is in the `WHERE`, so a caller that read the row earlier in its own
+/// transaction, or chose the edge from a board read, cannot move a task that
+/// has since left that state. `false` is that race lost, or a task that does
+/// not exist; nothing was written either way.
+///
+/// It runs inside the caller's transaction and never commits or publishes:
+/// the caller does both, after its own commit, with whatever else the
+/// transaction wrote. An edge ADR-0007's machine does not have is an error and
+/// writes nothing, so a caller cannot use this to skip the table.
+///
+/// This file stays the only one that writes `run_state` (ADR-0006).
+pub async fn transition(
+    conn: &mut SqliteConnection,
+    clock: &dyn Clock,
+    id: &str,
+    from: RunState,
+    to: RunState,
+) -> Result<bool> {
+    if !is_legal_run_state_transition(from, to) {
+        return Err(Error::invalid(format!(
+            "cannot move task {id} from run state \"{from}\" to \"{to}\": not a legal transition",
+            from = run_state_spelling(from),
+            to = run_state_spelling(to),
+        )));
+    }
+
+    let now = clock.now();
+    let moved = sqlx::query!(
+        "UPDATE tasks SET run_state = ?1, updated_at = ?2 WHERE id = ?3 AND run_state = ?4",
         to,
         now,
         id,
+        from,
     )
-    .execute(&mut *tx)
-    .await?;
-
-    tx.commit().await?;
-
-    // Publish before the read-back: the row is already committed, so a
-    // failure in `fetch_task_row` below must not cost the notification for a
-    // mutation that already happened (ADR-0018).
-    ctx.publish(ChangeEvent::tasks([id.to_string()]));
-    let updated = fetch_task_row(&ctx.pool, id).await?;
-    Ok(updated)
+    .execute(&mut *conn)
+    .await?
+    .rows_affected();
+    Ok(moved == 1)
 }
 
 /// The schema's own spelling for one `run_state` value — for an error
@@ -195,6 +253,7 @@ pub fn run_state_spelling(state: RunState) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::testing::TestContext;
     use pretty_assertions::assert_eq;
 
     /// ADR-0015 names `set_run_state` — every legal and illegal transition —
@@ -279,5 +338,142 @@ mod tests {
             RunState::Running,
             RunState::Cancelled
         ));
+    }
+
+    // -----------------------------------------------------------------------
+    // `transition`, the conditional write, against a real database
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn a_transition_from_the_state_the_task_is_in_moves_it_and_answers_true() {
+        let h = TestContext::new().await;
+        let id = seed_task(&h).await;
+        h.clock.advance(chrono::Duration::seconds(30));
+
+        let mut conn = h.context.pool.acquire().await.expect("a connection");
+        let moved = transition(&mut conn, &h.clock, &id, RunState::Idle, RunState::Queued)
+            .await
+            .expect("idle -> queued is legal");
+        drop(conn);
+
+        assert!(moved);
+        assert_eq!(
+            row(&h, &id).await,
+            (RunState::Queued, h.clock.now()),
+            "moved, and stamped now",
+        );
+    }
+
+    #[tokio::test]
+    async fn a_transition_from_a_state_the_task_has_left_moves_nothing_and_answers_false() {
+        let h = TestContext::new().await;
+        let id = seed_task(&h).await;
+        for state in [RunState::Queued, RunState::Running, RunState::Failed] {
+            set_run_state(&h.context, &id, state)
+                .await
+                .unwrap_or_else(|error| panic!("walk to {state:?}: {error}"));
+        }
+        let before = row(&h, &id).await;
+        h.clock.advance(chrono::Duration::seconds(30));
+
+        // Idle -> Queued is a legal edge; the task is simply no longer idle.
+        let mut conn = h.context.pool.acquire().await.expect("a connection");
+        let moved = transition(&mut conn, &h.clock, &id, RunState::Idle, RunState::Queued)
+            .await
+            .expect("a lost race is an answer, not an error");
+        drop(conn);
+
+        assert!(!moved);
+        assert_eq!(row(&h, &id).await, before, "nothing was written");
+        assert_eq!(before.0, RunState::Failed);
+    }
+
+    #[tokio::test]
+    async fn a_transition_naming_a_task_that_does_not_exist_answers_false() {
+        let h = TestContext::new().await;
+
+        let mut conn = h.context.pool.acquire().await.expect("a connection");
+        let moved = transition(
+            &mut conn,
+            &h.clock,
+            "no-such-task",
+            RunState::Idle,
+            RunState::Queued,
+        )
+        .await
+        .expect("a missing row is an answer, not an error");
+
+        assert!(!moved);
+    }
+
+    #[tokio::test]
+    async fn an_illegal_transition_is_refused_before_any_write() {
+        // The task *is* idle, so the conditional `UPDATE` would match it: only
+        // the table check standing in front of it keeps it from writing.
+        let h = TestContext::new().await;
+        let id = seed_task(&h).await;
+        let before = row(&h, &id).await;
+        h.clock.advance(chrono::Duration::seconds(30));
+
+        let mut conn = h.context.pool.acquire().await.expect("a connection");
+        let error = transition(&mut conn, &h.clock, &id, RunState::Idle, RunState::Running)
+            .await
+            .expect_err("idle -> running skips queued");
+        drop(conn);
+
+        assert_eq!(error.code(), crate::ErrorCode::Invalid);
+        assert_eq!(
+            error.to_string(),
+            format!(
+                "cannot move task {id} from run state \"idle\" to \"running\": not a legal transition"
+            ),
+        );
+        assert_eq!(
+            row(&h, &id).await,
+            before,
+            "run_state and updated_at unchanged"
+        );
+        assert_eq!(before.0, RunState::Idle);
+    }
+
+    /// An idle task in a repository seeded directly: this module's subject is
+    /// `run_state`, and `repo::register` would drag a real checkout into it.
+    async fn seed_task(h: &TestContext) -> String {
+        let repository_id = crate::db::new_id();
+        sqlx::query(
+            "INSERT INTO repositories (id, team_id, name, default_branch, created_at)
+             VALUES (?1, ?2, 'rimaia', 'main', ?3)",
+        )
+        .bind(&repository_id)
+        .bind(h.context.scope.sole().expect("the harness's solo team"))
+        .bind(h.clock.now())
+        .execute(&h.context.pool)
+        .await
+        .expect("seed a repository");
+
+        let task = crate::tasks::create_task(
+            &h.context,
+            crate::tasks::NewTask {
+                repository_id,
+                title: "Move me".to_string(),
+                plan: None,
+                extra_instructions: None,
+                column: None,
+                links: vec![],
+            },
+        )
+        .await
+        .expect("create a task");
+        assert_eq!(task.run_state, RunState::Idle);
+        task.id
+    }
+
+    /// The two columns a transition writes, read straight off the row.
+    async fn row(h: &TestContext, id: &str) -> (RunState, chrono::DateTime<chrono::Utc>) {
+        let task = crate::tasks::get_task(&h.context, id)
+            .await
+            .expect("read the task")
+            .task;
+        (task.run_state, task.updated_at)
     }
 }

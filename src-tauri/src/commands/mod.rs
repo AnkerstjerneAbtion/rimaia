@@ -7,10 +7,12 @@
 
 pub mod analytics;
 pub mod app;
+pub mod consent;
 pub mod doctor;
 pub mod mcp;
 pub mod queue;
 pub mod repositories;
+pub mod review;
 pub mod runs;
 pub mod schedules;
 pub mod settings;

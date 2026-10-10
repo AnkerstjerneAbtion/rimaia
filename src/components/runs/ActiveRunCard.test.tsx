@@ -30,7 +30,6 @@ function taskSummary(overrides: Partial<TaskSummary> = {}): TaskSummary {
     position: 0,
     runState: "running",
     branch: "rimaia/task-1",
-    worktreePath: "/data/worktrees/repo/task-1",
     strategyMode: "default",
     model: null,
     effort: null,
@@ -45,12 +44,13 @@ function taskSummary(overrides: Partial<TaskSummary> = {}): TaskSummary {
     dependencyCount: 0,
     blockedByIncomplete: false,
     blockingTitle: null,
-    lastRun: { status: "running", exitClass: null, endedAt: null, resumeAfter: null },
+    lastRun: { kind: "implementation", status: "running", exitClass: null, endedAt: null, resumeAfter: null },
     // Nothing configured anywhere, which is what a card with no strategy
     // shows: the badge renders nothing rather than "undefined".
     effectiveModel: null,
     effectiveEffort: null,
     effectiveOrigin: "claude_code",
+    reviewLoop: null,
     ...overrides,
   };
 }
@@ -64,6 +64,7 @@ function taskDetail(overrides: Partial<TaskDetail> = {}): TaskDetail {
       id: "run-1",
       taskId: "task-1",
       attempt: 1,
+      kind: "implementation",
       status: "running",
       sessionId: "session-1",
       prompt: "prompt",
@@ -73,7 +74,6 @@ function taskDetail(overrides: Partial<TaskDetail> = {}): TaskDetail {
       errorMessage: null,
       numTurns: null,
       costUsd: null,
-      logPath: "/data/runs/task-1/run-1.jsonl",
       prUrl: null,
       resumeAfter: null,
       baseRef: null,
@@ -84,7 +84,12 @@ function taskDetail(overrides: Partial<TaskDetail> = {}): TaskDetail {
       outputTokens: null,
       cacheReadTokens: null,
       cacheCreationTokens: null,
+      headSha: null,
+      baseSha: null,
     },
+    reviewInstructions: null,
+    reviewConfig: {},
+    reviewLoop: null,
     ...overrides,
   };
 }
@@ -140,6 +145,33 @@ describe("ActiveRunCard", () => {
     expect(screen.getByText("Bash")).toBeInTheDocument();
     expect(screen.getByText(/npm test/)).toBeInTheDocument();
     expect(screen.getByText("Running the test suite now.")).toBeInTheDocument();
+  });
+
+  it("labels a running review as a review beside the task title", async () => {
+    mockInvoke.mockImplementation(async (command) => {
+      if (command === "get_task") return taskDetail();
+      if (command === "get_run_tail") return runTail();
+      throw new Error(`unexpected command: ${command}`);
+    });
+
+    render(
+      <ActiveRunCard
+        task={taskSummary({
+          lastRun: {
+            kind: "review",
+            status: "running",
+            exitClass: null,
+            endedAt: null,
+            resumeAfter: null,
+          },
+        })}
+        repositoryName="rimaia"
+      />,
+    );
+
+    expect(screen.getByText("Review")).toBeInTheDocument();
+    expect(screen.queryByText("Implementation")).toBeNull();
+    await waitFor(() => expect(screen.getByText("Bash")).toBeInTheDocument());
   });
 
   it("shows a starting placeholder before the run id has resolved", async () => {

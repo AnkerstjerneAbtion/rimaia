@@ -29,14 +29,20 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use pretty_assertions::assert_eq;
-use rimaia_core::db::{BoardColumn, Repository, RunState, Task};
+use rimaia_core::db::{BoardColumn, MutationSource, Repository, RunState, Task};
+use rimaia_core::mcp::requests::{ArchiveTaskRequest, MoveTaskRequest};
+use rimaia_core::mcp::RimaiaServer;
 use rimaia_core::repo::{self, NewRepository};
+use rimaia_core::review;
 use rimaia_core::tasks::{self, NewTask};
-use rimaia_core::testing::{TempRepo, TestContext};
+use rimaia_core::testing::{self, TempRepo, TestContext};
 use rimaia_core::worktree::{
     self, AutoCleanup, BranchDisposition, ForceRemoval, RemovalAuthorization,
 };
 use rimaia_core::ServiceContext;
+use rmcp::handler::server::wrapper::Parameters;
+use serde::de::DeserializeOwned;
+use serde_json::json;
 
 /// The last component of every fixture's `worktree_root`. The space is
 /// load-bearing — see the module docs.
@@ -50,9 +56,11 @@ const WORKTREE_ROOT_DIR: &str = "my repo";
 async fn the_inventory_reports_a_worktrees_size_branch_and_merged_state() {
     let f = Fixture::new().await;
     let task = f.task("Add the parser").await;
-    let worktree = worktree::prepare(f.ctx(), &task.id).await.expect("prepare");
+    let worktree = f.harness.prepare_worktree(&task.id).await.expect("prepare");
 
-    let inventory = worktree::inventory(f.ctx()).await.expect("inventory");
+    let inventory = worktree::inventory(f.ctx(), f.machine())
+        .await
+        .expect("inventory");
 
     assert_eq!(inventory.entries.len(), 1);
     let entry = &inventory.entries[0];
@@ -87,12 +95,14 @@ async fn the_inventory_counts_uncommitted_and_unpushed_work_separately() {
     // was never pushed.
     let f = Fixture::new().await;
     let task = f.task("Add the parser").await;
-    let worktree = worktree::prepare(f.ctx(), &task.id).await.expect("prepare");
+    let worktree = f.harness.prepare_worktree(&task.id).await.expect("prepare");
     let checkout = PathBuf::from(&worktree.path);
     commit_in(&checkout, "parser.rs", "// parser\n", "Add the parser");
     std::fs::write(checkout.join("scratch.txt"), "notes\n").expect("write an uncommitted file");
 
-    let inventory = worktree::inventory(f.ctx()).await.expect("inventory");
+    let inventory = worktree::inventory(f.ctx(), f.machine())
+        .await
+        .expect("inventory");
     let entry = &inventory.entries[0];
 
     assert_eq!(entry.uncommitted_changes, 1);
@@ -108,7 +118,9 @@ async fn a_task_with_no_worktree_is_not_in_the_inventory_at_all() {
     let f = Fixture::new().await;
     f.task("Never run").await;
 
-    let inventory = worktree::inventory(f.ctx()).await.expect("inventory");
+    let inventory = worktree::inventory(f.ctx(), f.machine())
+        .await
+        .expect("inventory");
 
     assert!(inventory.entries.is_empty());
     assert_eq!(inventory.total_bytes, 0);
@@ -118,10 +130,12 @@ async fn a_task_with_no_worktree_is_not_in_the_inventory_at_all() {
 async fn a_running_task_is_listed_as_live_so_the_button_can_be_disabled() {
     let f = Fixture::new().await;
     let task = f.task("Add the parser").await;
-    worktree::prepare(f.ctx(), &task.id).await.expect("prepare");
+    f.harness.prepare_worktree(&task.id).await.expect("prepare");
     f.set_run_state(&task.id, RunState::Running).await;
 
-    let inventory = worktree::inventory(f.ctx()).await.expect("inventory");
+    let inventory = worktree::inventory(f.ctx(), f.machine())
+        .await
+        .expect("inventory");
 
     assert!(inventory.entries[0].live);
     assert_eq!(inventory.entries[0].run_state, RunState::Running);
@@ -141,19 +155,24 @@ async fn cleanup_frees_the_expected_disk_and_leaves_no_stale_worktree_entries() 
     // filesystem.
     let f = Fixture::new().await;
     let task = f.task("Add the parser").await;
-    let worktree = worktree::prepare(f.ctx(), &task.id).await.expect("prepare");
+    let worktree = f.harness.prepare_worktree(&task.id).await.expect("prepare");
     let checkout = PathBuf::from(&worktree.path);
 
-    let promised = worktree::inventory(f.ctx())
+    let promised = worktree::inventory(f.ctx(), f.machine())
         .await
         .expect("inventory")
         .entries[0]
         .size_bytes;
     assert_eq!(f.linked_worktrees().len(), 1);
 
-    let removed = worktree::remove_worktree(f.ctx(), &task.id, RemovalAuthorization::default())
-        .await
-        .expect("a clean, pushed-up-to-date worktree removes without any force");
+    let removed = worktree::remove_worktree(
+        f.ctx(),
+        f.machine(),
+        &task.id,
+        RemovalAuthorization::default(),
+    )
+    .await
+    .expect("a clean, pushed-up-to-date worktree removes without any force");
 
     assert_eq!(removed.bytes_freed, promised);
     assert_eq!(removed.branch_deleted, None);
@@ -163,14 +182,14 @@ async fn cleanup_frees_the_expected_disk_and_leaves_no_stale_worktree_entries() 
         "and so is git's administrative record of it",
     );
     assert_eq!(
-        worktree::inventory(f.ctx())
+        worktree::inventory(f.ctx(), f.machine())
             .await
             .expect("inventory")
             .total_bytes,
         0,
         "the reported total agrees with what was actually freed",
     );
-    assert_eq!(f.reload(&task.id).await.worktree_path, None);
+    assert_eq!(f.harness.worktree_path(&task.id).await, None);
 }
 
 #[tokio::test]
@@ -180,9 +199,14 @@ async fn removing_a_worktree_for_a_task_that_has_none_is_not_an_error() {
     let f = Fixture::new().await;
     let task = f.task("Never run").await;
 
-    let removed = worktree::remove_worktree(f.ctx(), &task.id, RemovalAuthorization::default())
-        .await
-        .expect("nothing to remove is not a failure");
+    let removed = worktree::remove_worktree(
+        f.ctx(),
+        f.machine(),
+        &task.id,
+        RemovalAuthorization::default(),
+    )
+    .await
+    .expect("nothing to remove is not a failure");
 
     assert_eq!(removed.bytes_freed, 0);
 }
@@ -196,15 +220,20 @@ async fn a_worktree_with_uncommitted_changes_is_refused_until_forced_and_the_cou
 ) {
     let f = Fixture::new().await;
     let task = f.task("Add the parser").await;
-    let worktree = worktree::prepare(f.ctx(), &task.id).await.expect("prepare");
+    let worktree = f.harness.prepare_worktree(&task.id).await.expect("prepare");
     let checkout = PathBuf::from(&worktree.path);
     std::fs::write(checkout.join("first.txt"), "one\n").expect("write");
     std::fs::write(checkout.join("second.txt"), "two\n").expect("write");
     std::fs::write(checkout.join("third.txt"), "three\n").expect("write");
 
-    let refusal = worktree::remove_worktree(f.ctx(), &task.id, RemovalAuthorization::default())
-        .await
-        .expect_err("uncommitted work is refused");
+    let refusal = worktree::remove_worktree(
+        f.ctx(),
+        f.machine(),
+        &task.id,
+        RemovalAuthorization::default(),
+    )
+    .await
+    .expect_err("uncommitted work is refused");
 
     let message = refusal.to_string();
     assert!(
@@ -217,6 +246,7 @@ async fn a_worktree_with_uncommitted_changes_is_refused_until_forced_and_the_cou
     // Forced, and only forced, it goes.
     worktree::remove_worktree(
         f.ctx(),
+        f.machine(),
         &task.id,
         RemovalAuthorization {
             uncommitted_changes: ForceRemoval::ConfirmedByUser,
@@ -237,12 +267,17 @@ async fn one_uncommitted_change_is_refused_in_the_singular() {
     // their work.
     let f = Fixture::new().await;
     let task = f.task("Add the parser").await;
-    let worktree = worktree::prepare(f.ctx(), &task.id).await.expect("prepare");
+    let worktree = f.harness.prepare_worktree(&task.id).await.expect("prepare");
     std::fs::write(PathBuf::from(&worktree.path).join("only.txt"), "one\n").expect("write");
 
-    let refusal = worktree::remove_worktree(f.ctx(), &task.id, RemovalAuthorization::default())
-        .await
-        .expect_err("uncommitted work is refused");
+    let refusal = worktree::remove_worktree(
+        f.ctx(),
+        f.machine(),
+        &task.id,
+        RemovalAuthorization::default(),
+    )
+    .await
+    .expect_err("uncommitted work is refused");
 
     let message = refusal.to_string();
     assert!(message.contains("1 uncommitted change in"), "{message}");
@@ -253,13 +288,18 @@ async fn one_uncommitted_change_is_refused_in_the_singular() {
 async fn a_worktree_with_unpushed_commits_is_refused_until_forced() {
     let f = Fixture::with_source(TempRepo::init().with_remote()).await;
     let task = f.task("Add the parser").await;
-    let worktree = worktree::prepare(f.ctx(), &task.id).await.expect("prepare");
+    let worktree = f.harness.prepare_worktree(&task.id).await.expect("prepare");
     let checkout = PathBuf::from(&worktree.path);
     commit_in(&checkout, "parser.rs", "// parser\n", "Add the parser");
 
-    let refusal = worktree::remove_worktree(f.ctx(), &task.id, RemovalAuthorization::default())
-        .await
-        .expect_err("a commit no remote has is refused");
+    let refusal = worktree::remove_worktree(
+        f.ctx(),
+        f.machine(),
+        &task.id,
+        RemovalAuthorization::default(),
+    )
+    .await
+    .expect_err("a commit no remote has is refused");
 
     let message = refusal.to_string();
     assert!(message.contains("1 commit on"), "{message}");
@@ -268,6 +308,7 @@ async fn a_worktree_with_unpushed_commits_is_refused_until_forced() {
 
     worktree::remove_worktree(
         f.ctx(),
+        f.machine(),
         &task.id,
         RemovalAuthorization {
             unpushed_commits: ForceRemoval::ConfirmedByUser,
@@ -291,14 +332,19 @@ async fn a_pushed_branch_needs_no_force_at_all() {
     // is enough.
     let f = Fixture::with_source(TempRepo::init().with_remote()).await;
     let task = f.task("Add the parser").await;
-    let worktree = worktree::prepare(f.ctx(), &task.id).await.expect("prepare");
+    let worktree = f.harness.prepare_worktree(&task.id).await.expect("prepare");
     let checkout = PathBuf::from(&worktree.path);
     commit_in(&checkout, "parser.rs", "// parser\n", "Add the parser");
     git(&checkout, &["push", "origin", &worktree.branch]);
 
-    worktree::remove_worktree(f.ctx(), &task.id, RemovalAuthorization::default())
-        .await
-        .expect("nothing here exists in only one place");
+    worktree::remove_worktree(
+        f.ctx(),
+        f.machine(),
+        &task.id,
+        RemovalAuthorization::default(),
+    )
+    .await
+    .expect("nothing here exists in only one place");
 
     assert!(!checkout.exists());
 }
@@ -311,11 +357,12 @@ async fn a_running_task_keeps_its_worktree_even_when_forced() {
     // idea.
     let f = Fixture::new().await;
     let task = f.task("Add the parser").await;
-    let worktree = worktree::prepare(f.ctx(), &task.id).await.expect("prepare");
+    let worktree = f.harness.prepare_worktree(&task.id).await.expect("prepare");
     f.set_run_state(&task.id, RunState::Running).await;
 
     let refusal = worktree::remove_worktree(
         f.ctx(),
+        f.machine(),
         &task.id,
         RemovalAuthorization {
             uncommitted_changes: ForceRemoval::ConfirmedByUser,
@@ -341,12 +388,13 @@ async fn a_waiting_retry_task_keeps_its_worktree_even_when_forced() {
     // same reason.
     let f = Fixture::new().await;
     let task = f.task("Add the parser").await;
-    let worktree = worktree::prepare(f.ctx(), &task.id).await.expect("prepare");
+    let worktree = f.harness.prepare_worktree(&task.id).await.expect("prepare");
     f.set_run_state(&task.id, RunState::Running).await;
     f.set_run_state(&task.id, RunState::WaitingRetry).await;
 
     let refusal = worktree::remove_worktree(
         f.ctx(),
+        f.machine(),
         &task.id,
         RemovalAuthorization {
             uncommitted_changes: ForceRemoval::ConfirmedByUser,
@@ -373,13 +421,14 @@ async fn an_unmerged_branch_survives_a_worktree_removal_that_did_not_ask_for_it(
     // work" — with no separate moment at which anybody said so.
     let f = Fixture::with_source(TempRepo::init().with_remote()).await;
     let task = f.task("Add the parser").await;
-    let worktree = worktree::prepare(f.ctx(), &task.id).await.expect("prepare");
+    let worktree = f.harness.prepare_worktree(&task.id).await.expect("prepare");
     let checkout = PathBuf::from(&worktree.path);
     commit_in(&checkout, "parser.rs", "// parser\n", "Add the parser");
     let tip = git(&checkout, &["rev-parse", "HEAD"]);
 
     worktree::remove_worktree(
         f.ctx(),
+        f.machine(),
         &task.id,
         RemovalAuthorization {
             unpushed_commits: ForceRemoval::ConfirmedByUser,
@@ -414,7 +463,7 @@ async fn deleting_an_unmerged_branch_is_refused_without_the_second_confirmation(
     // worktree, which this call has already given.
     let f = Fixture::with_source(TempRepo::init().with_remote()).await;
     let task = f.task("Add the parser").await;
-    let worktree = worktree::prepare(f.ctx(), &task.id).await.expect("prepare");
+    let worktree = f.harness.prepare_worktree(&task.id).await.expect("prepare");
     commit_in(
         &PathBuf::from(&worktree.path),
         "parser.rs",
@@ -424,6 +473,7 @@ async fn deleting_an_unmerged_branch_is_refused_without_the_second_confirmation(
 
     let refusal = worktree::remove_worktree(
         f.ctx(),
+        f.machine(),
         &task.id,
         RemovalAuthorization {
             unpushed_commits: ForceRemoval::ConfirmedByUser,
@@ -448,10 +498,11 @@ async fn deleting_an_unmerged_branch_is_refused_without_the_second_confirmation(
 async fn a_merged_branch_is_deleted_when_the_caller_asked_for_that() {
     let f = Fixture::new().await;
     let task = f.task("Add the parser").await;
-    let worktree = worktree::prepare(f.ctx(), &task.id).await.expect("prepare");
+    let worktree = f.harness.prepare_worktree(&task.id).await.expect("prepare");
 
     let removed = worktree::remove_worktree(
         f.ctx(),
+        f.machine(),
         &task.id,
         RemovalAuthorization {
             branch: BranchDisposition::DeleteIfMerged,
@@ -473,7 +524,7 @@ async fn a_merged_branch_is_deleted_when_the_caller_asked_for_that() {
 async fn an_unmerged_branch_goes_only_on_the_confirmation_named_for_it() {
     let f = Fixture::with_source(TempRepo::init().with_remote()).await;
     let task = f.task("Add the parser").await;
-    let worktree = worktree::prepare(f.ctx(), &task.id).await.expect("prepare");
+    let worktree = f.harness.prepare_worktree(&task.id).await.expect("prepare");
     commit_in(
         &PathBuf::from(&worktree.path),
         "parser.rs",
@@ -483,6 +534,7 @@ async fn an_unmerged_branch_goes_only_on_the_confirmation_named_for_it() {
 
     let removed = worktree::remove_worktree(
         f.ctx(),
+        f.machine(),
         &task.id,
         RemovalAuthorization {
             unpushed_commits: ForceRemoval::ConfirmedByUser,
@@ -509,15 +561,19 @@ async fn cleaning_up_done_tasks_leaves_every_other_column_alone() {
     let f = Fixture::new().await;
     let finished = f.task("Add the parser").await;
     let still_going = f.task("Wire the board").await;
-    let finished_tree = worktree::prepare(f.ctx(), &finished.id)
+    let finished_tree = f
+        .harness
+        .prepare_worktree(&finished.id)
         .await
         .expect("prepare");
-    let other_tree = worktree::prepare(f.ctx(), &still_going.id)
+    let other_tree = f
+        .harness
+        .prepare_worktree(&still_going.id)
         .await
         .expect("prepare");
     f.move_to_done(&finished.id).await;
 
-    let report = worktree::remove_done_worktrees(f.ctx())
+    let report = worktree::remove_done_worktrees(f.ctx(), f.machine())
         .await
         .expect("cleanup");
 
@@ -540,10 +596,14 @@ async fn a_bulk_cleanup_reports_what_it_refused_instead_of_stopping_at_it() {
     let f = Fixture::new().await;
     let clean = f.task("Add the parser").await;
     let dirty = f.task("Wire the board").await;
-    let clean_tree = worktree::prepare(f.ctx(), &clean.id)
+    let clean_tree = f
+        .harness
+        .prepare_worktree(&clean.id)
         .await
         .expect("prepare");
-    let dirty_tree = worktree::prepare(f.ctx(), &dirty.id)
+    let dirty_tree = f
+        .harness
+        .prepare_worktree(&dirty.id)
         .await
         .expect("prepare");
     std::fs::write(
@@ -554,7 +614,7 @@ async fn a_bulk_cleanup_reports_what_it_refused_instead_of_stopping_at_it() {
     f.move_to_done(&clean.id).await;
     f.move_to_done(&dirty.id).await;
 
-    let report = worktree::remove_done_worktrees(f.ctx())
+    let report = worktree::remove_done_worktrees(f.ctx(), f.machine())
         .await
         .expect("cleanup");
 
@@ -579,10 +639,10 @@ async fn a_bulk_cleanup_never_deletes_a_branch_even_a_merged_one() {
     // never something they granted by asking for disk back.
     let f = Fixture::new().await;
     let task = f.task("Add the parser").await;
-    let worktree = worktree::prepare(f.ctx(), &task.id).await.expect("prepare");
+    let worktree = f.harness.prepare_worktree(&task.id).await.expect("prepare");
     f.move_to_done(&task.id).await;
 
-    let report = worktree::remove_done_worktrees(f.ctx())
+    let report = worktree::remove_done_worktrees(f.ctx(), f.machine())
         .await
         .expect("cleanup");
 
@@ -595,10 +655,14 @@ async fn cleaning_up_merged_branches_spares_one_with_commits_of_its_own() {
     let f = Fixture::with_source(TempRepo::init().with_remote()).await;
     let merged = f.task("Add the parser").await;
     let diverged = f.task("Wire the board").await;
-    let merged_tree = worktree::prepare(f.ctx(), &merged.id)
+    let merged_tree = f
+        .harness
+        .prepare_worktree(&merged.id)
         .await
         .expect("prepare");
-    let diverged_tree = worktree::prepare(f.ctx(), &diverged.id)
+    let diverged_tree = f
+        .harness
+        .prepare_worktree(&diverged.id)
         .await
         .expect("prepare");
     commit_in(
@@ -608,7 +672,7 @@ async fn cleaning_up_merged_branches_spares_one_with_commits_of_its_own() {
         "Wire the board",
     );
 
-    let report = worktree::remove_merged_worktrees(f.ctx())
+    let report = worktree::remove_merged_worktrees(f.ctx(), f.machine())
         .await
         .expect("cleanup");
 
@@ -632,7 +696,7 @@ async fn auto_cleanup_is_off_by_default() {
     let f = Fixture::new().await;
 
     assert_eq!(
-        worktree::auto_cleanup(&f.ctx().pool)
+        worktree::auto_cleanup(f.machine())
             .await
             .expect("read the policy"),
         AutoCleanup::Off
@@ -643,7 +707,7 @@ async fn auto_cleanup_is_off_by_default() {
 async fn moving_a_task_to_done_keeps_its_worktree_while_the_policy_is_off() {
     let f = Fixture::new().await;
     let task = f.task("Add the parser").await;
-    let worktree = worktree::prepare(f.ctx(), &task.id).await.expect("prepare");
+    let worktree = f.harness.prepare_worktree(&task.id).await.expect("prepare");
 
     f.move_to_done(&task.id).await;
 
@@ -652,7 +716,7 @@ async fn moving_a_task_to_done_keeps_its_worktree_while_the_policy_is_off() {
         "off by default means the default board move deletes nothing",
     );
     assert_eq!(
-        f.reload(&task.id).await.worktree_path.as_deref(),
+        f.harness.worktree_path(&task.id).await.as_deref(),
         Some(worktree.path.as_str())
     );
 }
@@ -660,11 +724,11 @@ async fn moving_a_task_to_done_keeps_its_worktree_while_the_policy_is_off() {
 #[tokio::test]
 async fn enabling_the_policy_removes_the_worktree_when_the_card_reaches_done() {
     let f = Fixture::new().await;
-    worktree::set_auto_cleanup(f.ctx(), AutoCleanup::OnDoneAcknowledged)
+    worktree::set_auto_cleanup(f.machine(), AutoCleanup::OnDoneAcknowledged)
         .await
         .expect("enable auto cleanup");
     let task = f.task("Add the parser").await;
-    let worktree = worktree::prepare(f.ctx(), &task.id).await.expect("prepare");
+    let worktree = f.harness.prepare_worktree(&task.id).await.expect("prepare");
 
     f.move_to_done(&task.id).await;
 
@@ -673,7 +737,7 @@ async fn enabling_the_policy_removes_the_worktree_when_the_card_reaches_done() {
         f.linked_worktrees().is_empty(),
         "git's administrative record goes too, the same as a manual removal",
     );
-    assert_eq!(f.reload(&task.id).await.worktree_path, None);
+    assert_eq!(f.harness.worktree_path(&task.id).await, None);
 }
 
 #[tokio::test]
@@ -683,11 +747,11 @@ async fn auto_removal_never_deletes_a_branch_and_never_forces() {
     // otherwise be overriding. Both halves are asserted at once: the dirty
     // worktree survives (no force), and so does its branch.
     let f = Fixture::new().await;
-    worktree::set_auto_cleanup(f.ctx(), AutoCleanup::OnDoneAcknowledged)
+    worktree::set_auto_cleanup(f.machine(), AutoCleanup::OnDoneAcknowledged)
         .await
         .expect("enable auto cleanup");
     let task = f.task("Add the parser").await;
-    let worktree = worktree::prepare(f.ctx(), &task.id).await.expect("prepare");
+    let worktree = f.harness.prepare_worktree(&task.id).await.expect("prepare");
     let checkout = PathBuf::from(&worktree.path);
     std::fs::write(checkout.join("scratch.txt"), "notes\n").expect("write an uncommitted file");
 
@@ -723,17 +787,170 @@ async fn automatic_removal_leaves_a_running_task_alone() {
     // it could plausibly be bypassed: nobody is watching, and the card is
     // moving for some other reason.
     let f = Fixture::new().await;
-    worktree::set_auto_cleanup(f.ctx(), AutoCleanup::OnDoneAcknowledged)
+    worktree::set_auto_cleanup(f.machine(), AutoCleanup::OnDoneAcknowledged)
         .await
         .expect("enable auto cleanup");
     let task = f.task("Add the parser").await;
-    let worktree = worktree::prepare(f.ctx(), &task.id).await.expect("prepare");
+    let worktree = f.harness.prepare_worktree(&task.id).await.expect("prepare");
     f.set_run_state(&task.id, RunState::Running).await;
 
     f.move_to_done(&task.id).await;
 
     assert!(PathBuf::from(&worktree.path).exists());
     assert_eq!(f.linked_worktrees().len(), 1);
+}
+
+// ---------------------------------------------------------------------------
+// The removal is this machine's reaction (task 041)
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn moving_to_done_removes_the_worktree_through_the_command_and_the_mcp_tool() {
+    // The policy is a runner key and the worktree is on this machine, so the
+    // board service reacts only when it is handed the machine. The command
+    // hands it the shell's; the MCP tool hands it its `LocalTools`' machine.
+    // One function behind both doors (ADR-0006).
+    let f = Fixture::new().await;
+    worktree::set_auto_cleanup(f.machine(), AutoCleanup::OnDoneAcknowledged)
+        .await
+        .expect("enable auto cleanup");
+    let by_command = f.task("Moved by the command").await;
+    let by_tool = f.task("Moved by the tool").await;
+    let command_worktree = f
+        .harness
+        .prepare_worktree(&by_command.id)
+        .await
+        .expect("prepare");
+    let tool_worktree = f
+        .harness
+        .prepare_worktree(&by_tool.id)
+        .await
+        .expect("prepare");
+
+    // What `commands::tasks::move_task` calls.
+    f.move_to_done(&by_command.id).await;
+    f.server()
+        .move_task(Parameters(request::<MoveTaskRequest>(json!({
+            "task_id": by_tool.id,
+            "column": "done",
+        }))))
+        .await
+        .expect("the tool moves the card");
+
+    for (task, worktree) in [(&by_command, &command_worktree), (&by_tool, &tool_worktree)] {
+        assert!(!PathBuf::from(&worktree.path).exists(), "{}", task.title);
+        assert_eq!(
+            f.harness.worktree_path(&task.id).await,
+            None,
+            "{}",
+            task.title
+        );
+    }
+    assert!(f.linked_worktrees().is_empty());
+}
+
+#[tokio::test]
+async fn approving_removes_the_worktree_through_the_command_and_the_mcp_tool() {
+    let f = Fixture::new().await;
+    worktree::set_auto_cleanup(f.machine(), AutoCleanup::OnDoneAcknowledged)
+        .await
+        .expect("enable auto cleanup");
+    let by_command = f.task("Approved by the command").await;
+    let by_tool = f.task("Approved by the tool").await;
+    let command_worktree = f
+        .harness
+        .prepare_worktree(&by_command.id)
+        .await
+        .expect("prepare");
+    let tool_worktree = f
+        .harness
+        .prepare_worktree(&by_tool.id)
+        .await
+        .expect("prepare");
+    f.move_to_review(&by_command.id).await;
+    f.move_to_review(&by_tool.id).await;
+
+    // What `commands::review::approve_task` calls.
+    review::approve(f.ctx(), Some(f.machine()), &by_command.id)
+        .await
+        .expect("the command approves");
+    f.server()
+        .approve_task(Parameters(request::<ArchiveTaskRequest>(json!({
+            "task_id": by_tool.id,
+        }))))
+        .await
+        .expect("the tool approves");
+
+    for (task, worktree) in [(&by_command, &command_worktree), (&by_tool, &tool_worktree)] {
+        assert_eq!(
+            f.reload(&task.id).await.column,
+            BoardColumn::Done,
+            "{}",
+            task.title
+        );
+        assert!(!PathBuf::from(&worktree.path).exists(), "{}", task.title);
+        assert_eq!(
+            f.harness.worktree_path(&task.id).await,
+            None,
+            "{}",
+            task.title
+        );
+    }
+}
+
+#[tokio::test]
+async fn without_a_machine_moving_to_done_and_approving_leave_the_worktree() {
+    // A server's call until task 054: the board write alone, with the policy
+    // on and nothing on this machine touched.
+    let f = Fixture::new().await;
+    worktree::set_auto_cleanup(f.machine(), AutoCleanup::OnDoneAcknowledged)
+        .await
+        .expect("enable auto cleanup");
+    let moved = f.task("Moved with no machine").await;
+    let approved = f.task("Approved with no machine").await;
+    let moved_worktree = f
+        .harness
+        .prepare_worktree(&moved.id)
+        .await
+        .expect("prepare");
+    let approved_worktree = f
+        .harness
+        .prepare_worktree(&approved.id)
+        .await
+        .expect("prepare");
+    f.move_to_review(&approved.id).await;
+
+    let after = f.bottom_of(BoardColumn::Done, &moved.id).await;
+    tasks::move_task(
+        f.ctx(),
+        None,
+        &moved.id,
+        BoardColumn::Done,
+        None,
+        after.as_deref(),
+    )
+    .await
+    .expect("the move is the board write alone");
+    review::approve(f.ctx(), None, &approved.id)
+        .await
+        .expect("the approval is the board write alone");
+
+    for (task, worktree) in [(&moved, &moved_worktree), (&approved, &approved_worktree)] {
+        assert_eq!(
+            f.reload(&task.id).await.column,
+            BoardColumn::Done,
+            "{}",
+            task.title
+        );
+        assert!(PathBuf::from(&worktree.path).exists(), "{}", task.title);
+        assert_eq!(
+            f.harness.worktree_path(&task.id).await.as_deref(),
+            Some(worktree.path.as_str()),
+            "{}",
+            task.title
+        );
+    }
+    assert_eq!(f.linked_worktrees().len(), 2);
 }
 
 // ---------------------------------------------------------------------------
@@ -750,10 +967,12 @@ async fn a_worktree_directory_deleted_outside_the_app_is_reconciled_at_startup()
     // stays wrong until they restart.
     let f = Fixture::new().await;
     let task = f.task("Add the parser").await;
-    let worktree = worktree::prepare(f.ctx(), &task.id).await.expect("prepare");
+    let worktree = f.harness.prepare_worktree(&task.id).await.expect("prepare");
     std::fs::remove_dir_all(&worktree.path).expect("delete the worktree behind the app's back");
 
-    let before = worktree::inventory(f.ctx()).await.expect("inventory");
+    let before = worktree::inventory(f.ctx(), f.machine())
+        .await
+        .expect("inventory");
     assert_eq!(before.entries.len(), 1);
     assert!(
         !before.entries[0].exists,
@@ -762,7 +981,8 @@ async fn a_worktree_directory_deleted_outside_the_app_is_reconciled_at_startup()
     assert_eq!(before.entries[0].size_bytes, 0);
     assert_eq!(before.total_bytes, 0);
 
-    let reconciled = worktree::reconcile(f.ctx(), std::slice::from_ref(&task.id)).await;
+    let reconciled =
+        worktree::reconcile(f.ctx(), f.machine(), std::slice::from_ref(&task.id)).await;
 
     assert_eq!(reconciled.len(), 1);
     assert_eq!(reconciled[0].cleared_path, worktree.path);
@@ -772,7 +992,7 @@ async fn a_worktree_directory_deleted_outside_the_app_is_reconciled_at_startup()
         "the branch outlived the directory and still holds whatever was committed",
     );
     assert!(
-        worktree::inventory(f.ctx())
+        worktree::inventory(f.ctx(), f.machine())
             .await
             .expect("inventory")
             .entries
@@ -792,14 +1012,19 @@ async fn a_worktree_whose_directory_vanished_is_removable_without_any_force() {
     // would fail rather than refuse.
     let f = Fixture::new().await;
     let task = f.task("Add the parser").await;
-    let worktree = worktree::prepare(f.ctx(), &task.id).await.expect("prepare");
+    let worktree = f.harness.prepare_worktree(&task.id).await.expect("prepare");
     std::fs::remove_dir_all(&worktree.path).expect("delete the worktree");
 
-    worktree::remove_worktree(f.ctx(), &task.id, RemovalAuthorization::default())
-        .await
-        .expect("a directory that is already gone removes cleanly");
+    worktree::remove_worktree(
+        f.ctx(),
+        f.machine(),
+        &task.id,
+        RemovalAuthorization::default(),
+    )
+    .await
+    .expect("a directory that is already gone removes cleanly");
 
-    assert_eq!(f.reload(&task.id).await.worktree_path, None);
+    assert_eq!(f.harness.worktree_path(&task.id).await, None);
     assert!(f.linked_worktrees().is_empty());
 }
 
@@ -829,6 +1054,7 @@ impl Fixture {
         let harness = TestContext::new().await;
         let repository = repo::register(
             &harness.context,
+            harness.machine(),
             worktrees.path(),
             NewRepository {
                 path: source
@@ -853,6 +1079,12 @@ impl Fixture {
 
     fn ctx(&self) -> &ServiceContext {
         &self.harness.context
+    }
+
+    /// This machine, as the shell hands it to the board services that react on
+    /// it (task 041).
+    fn machine(&self) -> &rimaia_core::machine::MachineContext {
+        self.harness.machine()
     }
 
     async fn task(&self, title: &str) -> Task {
@@ -891,6 +1123,7 @@ impl Fixture {
         let after = self.bottom_of(BoardColumn::Done, task_id).await;
         tasks::move_task(
             self.ctx(),
+            Some(self.machine()),
             task_id,
             BoardColumn::Done,
             None,
@@ -917,10 +1150,37 @@ impl Fixture {
         .rfind(|id| id != excluding)
     }
 
+    /// Into `in_review`, where a verdict can be given, as a finished run
+    /// would leave it.
+    async fn move_to_review(&self, task_id: &str) {
+        let after = self.bottom_of(BoardColumn::InReview, task_id).await;
+        tasks::move_task(
+            self.ctx(),
+            Some(self.machine()),
+            task_id,
+            BoardColumn::InReview,
+            None,
+            after.as_deref(),
+        )
+        .await
+        .expect("move the task to review");
+    }
+
+    /// The operator's MCP server over this fixture's board and machine, as
+    /// the shell builds it.
+    fn server(&self) -> RimaiaServer {
+        RimaiaServer::new(
+            self.ctx().with_source(MutationSource::Mcp),
+            testing::doctor::provider(),
+            Some(testing::doctor::local_tools(self.machine())),
+        )
+    }
+
     async fn move_back_to_ready(&self, task_id: &str) {
         let after = self.bottom_of(BoardColumn::Ready, task_id).await;
         tasks::move_task(
             self.ctx(),
+            Some(self.machine()),
             task_id,
             BoardColumn::Ready,
             None,
@@ -1005,4 +1265,9 @@ fn git<S: AsRef<OsStr>>(dir: &Path, args: &[S]) -> String {
     }
 
     String::from_utf8_lossy(&output.stdout).trim().to_owned()
+}
+
+/// An MCP request DTO from the JSON a client would send.
+fn request<T: DeserializeOwned>(value: serde_json::Value) -> T {
+    serde_json::from_value(value).expect("a well-formed request")
 }

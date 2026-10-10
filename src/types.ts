@@ -5,6 +5,9 @@ export type ErrorCode =
   | "io"
   | "not_found"
   | "invalid"
+  /** A report made under a lease that is no longer current (ADR-0031). No solo
+   *  path produces it; it is here so the union mirrors the enum. */
+  | "conflict"
   | "internal";
 
 /** Mirrors the payload `rimaia_core::Error` serializes to. */
@@ -31,10 +34,10 @@ export interface AppInfo {
 /**
  * `welcome` is deliberately **not** in `Sidebar`'s `VIEWS` array: it is a
  * destination the app can *start* on and that Settings can send you to, not a
- * permanent nav item. Task 001's no-router decision still holds — four views,
+ * permanent nav item. Task 001's no-router decision still holds — five views,
  * no URLs, no nesting, nothing to deep-link.
  */
-export type View = "board" | "runs" | "analytics" | "settings" | "welcome";
+export type View = "board" | "review" | "runs" | "analytics" | "settings" | "welcome";
 
 // ---------------------------------------------------------------------------
 // The preflight doctor (task 018) — mirrors `rimaia_core::doctor`.
@@ -151,7 +154,10 @@ export interface LongestRun {
  */
 export interface Analytics {
   period: { from: string | null; to: string | null };
+  /** Implementation runs only (seam-contract D29 point 7): a review's
+   *  `succeeded` says the reviewer ran, not that the work was good. */
   outcomes: RunOutcomes;
+  /** Every kind. Always `implementationSpendUsd + reviewLoopSpendUsd`. */
   spendUsd: number;
   spendByDay: DaySpend[];
   runsWithoutCost: number;
@@ -160,14 +166,20 @@ export interface Analytics {
   tasksCompleted: number;
   /** Total spend over completed tasks — failed attempts included. */
   costPerCompletedTaskUsd: number | null;
+  /** Implementation runs only. */
   medianDurationSeconds: number | null;
   longestRun: LongestRun | null;
   /** Summed run duration, not wall-clock: parallel runs each contribute. */
   unattendedHours: number;
   models: ModelUse[];
+  /** Implementation runs only. */
   strategies: StrategyUse[];
   plannerSpendUsd: number;
   implementationSpendUsd: number;
+  /** What review and fix runs cost (ADR-0017's loop). */
+  reviewLoopSpendUsd: number;
+  /** How review and fix runs ended, kept apart from `outcomes`. */
+  reviewLoopOutcomes: RunOutcomes;
   /** The user's own figure. `null` means the comparison is not drawn — never
    *  that the subscription is free. */
   subscriptionMonthlyUsd: number | null;
@@ -284,22 +296,34 @@ export interface DetectedOpenInTarget {
 // `rimaia_core::repo::RemoteInfo`.
 // ---------------------------------------------------------------------------
 
-/** Mirrors `rimaia_core::db::Repository`. */
+/** Mirrors `rimaia_core::db::Repository`: the board's half only. Everything
+ *  true of one machine's clone is its {@link CheckoutView} (task 066), so no
+ *  board DTO carries an absolute path. */
 export interface Repository {
   id: string;
   name: string;
-  path: string;
   defaultBranch: string;
+  /** RFC 3339 UTC, as sqlx writes it — see the module note above `RimaiaError`. */
+  createdAt: string;
+}
+
+/**
+ * Mirrors `rimaia_core::machine::CheckoutView`: this computer's clone of one
+ * repository, from `list_checkouts` (task 066). A repository with no checkout
+ * is not set up on this computer, which is a legitimate state, not an error.
+ */
+export interface CheckoutView {
+  repositoryId: string;
+  /** Where the clone is on this computer. */
+  path: string;
   worktreeRoot: string;
-  /** ADR-0012's per-repository opt-in to unattended runs. */
-  allowUnattendedRuns: boolean;
   /** ADR-0010's per-repository cap: how many runs this repository will hold at
    *  once. `1` unless the user opted out, and the opt-out is deliberate —
    *  worktree isolation makes two agents in one repository safe for git and
    *  does nothing about ports, test databases and lockfiles. */
   maxConcurrency: number;
-  /** RFC 3339 UTC, as sqlx writes it — see the module note above `RimaiaError`. */
-  createdAt: string;
+  /** This computer's consent to unattended runs (ADR-0012, ADR-0032 point 4). */
+  unattendedConsent: boolean;
   /** What archiving a task in this repository cleans up (ADR-0025 point 4).
    *  One slot, three states — a script and the built-in worktree removal are
    *  mutually exclusive by construction, not by a rule the form enforces. */
@@ -307,6 +331,12 @@ export interface Repository {
   /** The executable `"script"` names, canonicalized. `null` for every other
    *  mode. */
   onArchiveScript: string | null;
+}
+
+/** One task's worktree on this computer, from `list_local_worktrees`. */
+export interface LocalWorktree {
+  taskId: string;
+  path: string;
 }
 
 /** ADR-0025's cleanup slot. `"script"` means Rimaia does no cleanup of its own
@@ -339,12 +369,12 @@ export interface RegisterRepositoryInput {
 /**
  * What [`updateRepository`](./commands) sends. Mirrors `RepositoryPatch` — a
  * field left out leaves that column unchanged; there is no "clear" for any
- * of these, they are all `NOT NULL`.
+ * of these, they are all `NOT NULL`. The worktree root is this computer's,
+ * and has its own command, `setRepositoryWorktreeRoot` (task 066).
  */
 export interface UpdateRepositoryInput {
   name?: string;
   defaultBranch?: string;
-  worktreeRoot?: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -392,6 +422,10 @@ export type StrategyOrigin = "task" | "repository" | "global" | "claude_code";
  *  one attempt, as the Runs view queries it. */
 export type RunStatus = "running" | "succeeded" | "failed" | "cancelled" | "interrupted";
 
+/** Mirrors `rimaia_core::db::RunKind` (ADR-0017, seam-contract D29). What a
+ *  run was for. There is no `"strategy"`: the planner writes no row. */
+export type RunKind = "implementation" | "review" | "fix";
+
 /** Mirrors `rimaia_core::db::ExitClass` (ADR-0011). Why a run stopped. */
 export type ExitClass = "success" | "usage_limit" | "transient" | "interrupted" | "fatal" | "cancelled";
 
@@ -414,8 +448,9 @@ export interface Task {
    *  `beforeId`/`afterId` to `moveTask` and read back from the result. */
   position: number;
   runState: RunState;
+  /** Where its worktree is on this computer is not here: it is
+   *  {@link LocalWorktree}, from `list_local_worktrees` (task 066). */
   branch: string | null;
-  worktreePath: string | null;
   strategyMode: StrategyMode;
   /** What the *card* asks for. Read {@link TaskSummary.effectiveModel} to
    *  render what a run would actually spawn with: a task in resolved
@@ -436,6 +471,18 @@ export interface Task {
    *  the board" — a third axis, orthogonal to both `column` and `runState`,
    *  and deliberately not a fifth `BoardColumn`. */
   archivedAt: string | null;
+  /** Who wrote the task (task 045). `null` for a deleted account. Optional
+   *  until the interface renders it (task 061). */
+  createdBy?: string | null;
+  /** The one person whose runners run this task (ADR-0032 point 1); `null` is
+   *  the team's pool. In a personal team an unassigned task is its owner's. */
+  assigneeId?: string | null;
+  assignedBy?: string | null;
+  /** ADR-0032 point 3's revision of `plan` and `extraInstructions` together:
+   *  what an acceptance names. */
+  planRevision?: number;
+  /** Who wrote the current plan revision; `null` for a deleted account. */
+  planUpdatedBy?: string | null;
 }
 
 /** Mirrors `rimaia_core::db::TaskLink`. One `{label, url}` external reference. */
@@ -452,7 +499,12 @@ export interface TaskLink {
 export interface Run {
   id: string;
   taskId: string;
+  /** The row's position in the task's history, one sequence across every
+   *  kind (seam-contract D29 point 2). */
   attempt: number;
+  /** What the run was for. Rows from before kinds existed read as
+   *  `"implementation"`, which is what they were. */
+  kind: RunKind;
   status: RunStatus;
   sessionId: string;
   /** The composed prompt verbatim (ADR-0009). */
@@ -463,7 +515,6 @@ export interface Run {
   errorMessage: string | null;
   numTurns: number | null;
   costUsd: number | null;
-  logPath: string;
   prUrl: string | null;
   resumeAfter: string | null;
   /** The branch this attempt was created from (ADR-0008) — the repository's
@@ -481,6 +532,14 @@ export interface Run {
   outputTokens: number | null;
   cacheReadTokens: number | null;
   cacheCreationTokens: number | null;
+  /** The commit the worktree's HEAD was on when the run ended (ADR-0033 point
+   *  4, task 033). `null` means not recorded (seam-contract D18): a run from
+   *  before task 033, one still in flight, one a crash closed, or one whose
+   *  worktree could not be read at the finish. */
+  headSha: string | null;
+  /** What `baseRef` resolved to for this attempt — the worktree's fork point.
+   *  `null` on the same terms as `headSha`. */
+  baseSha: string | null;
 }
 
 /**
@@ -519,14 +578,24 @@ export interface TaskDetail extends Task, EffectiveStrategyFields {
   /** Outgoing edges only — what this task depends on, not what depends on it. */
   dependsOn: string[];
   lastRun: Run | null;
+  /** The task's own override of the review instructions (task 021). It
+   *  replaces the global text when it says anything. */
+  reviewInstructions: string | null;
+  /** The task's own loop settings, before inheritance. Every field optional. */
+  reviewConfig: ReviewConfig;
+  /** Where the task's review loop stands, or `null` when the loop never
+   *  touched it. */
+  reviewLoop: ReviewLoopSummary | null;
 }
 
 /**
- * Mirrors `rimaia_core::tasks::LastRunSummary` — the four fields of a `Run`
+ * Mirrors `rimaia_core::tasks::LastRunSummary` — the five fields of a `Run`
  * a card draws, not the row. `interrupted` reaches the board through
  * `exitClass` and nowhere else (seam-contract D9).
  */
 export interface LastRunSummary {
+  /** The newest row's kind, of any kind (seam-contract D29 point 4). */
+  kind: RunKind;
   status: RunStatus;
   exitClass: ExitClass | null;
   /** `null` while the attempt is still in flight. */
@@ -560,6 +629,11 @@ export interface TaskSummary extends Task, EffectiveStrategyFields {
    *  card names the head of the stalled chain. */
   blockingTitle: string | null;
   lastRun: LastRunSummary | null;
+  /** Where the task's review loop stands, built by the same function as
+   *  {@link TaskDetail.reviewLoop} so the card and the panel cannot disagree
+   *  (seam-contract D12's 2026-10-10 amendment). `null` when the loop never
+   *  touched the task. */
+  reviewLoop: ReviewLoopSummary | null;
 }
 
 /** What [`createTask`](./commands) sends. Mirrors `NewTaskLink`, and also
@@ -707,6 +781,19 @@ export interface RunCostSummary {
 }
 
 export type RunEnvironment = "inherit" | "strict_local";
+
+/**
+ * Mirrors `rimaia_core::consent::ceiling::StrategyCeiling` (ADR-0032 point 3,
+ * task 072): this runner's cap on what a run may spend its owner's
+ * subscription on. `null` on either half is no limit on it, which is every
+ * install that never set one. A task naming a model outside `models`, or an
+ * effort above `maxEffort`, is refused on this runner and never lowered; a
+ * task naming neither spawns with the first of `models` and with `maxEffort`.
+ */
+export interface StrategyCeiling {
+  models: string[] | null;
+  maxEffort: string | null;
+}
 
 // ---------------------------------------------------------------------------
 // Execution strategy (task 020) — mirrors `rimaia_core::strategy` and the
@@ -944,7 +1031,12 @@ export type SkipReason =
   | "dependency_not_satisfied"
   | "already_in_flight"
   | "waiting_for_retry"
-  | "needs_attention";
+  | "needs_attention"
+  // Task 045 (ADR-0032), each persisting until a person acts: reassigning the
+  // card or joining the pool, accepting or trusting, asking a team owner.
+  | "not_eligible"
+  | "consent_missing"
+  | "forbidden_by_team";
 
 /**
  * Mirrors `rimaia_core::scheduler::QueueEntry`. One `ready` task as the queue
@@ -1273,6 +1365,8 @@ export interface RunListEntry extends Run {
 export interface RunFilterInput {
   repositoryId?: string;
   status?: RunStatus;
+  /** What the runs were for; left out, every kind. */
+  kind?: RunKind;
   /** Matches a run started at or after this instant (RFC 3339). */
   since?: string;
   /** Matches a run started at or before this instant (RFC 3339). */
@@ -1283,14 +1377,64 @@ export interface RunFilterInput {
  * Mirrors `rimaia_core::runs::RunDetail` — what a run detail view opens on,
  * in ADR-0013's order: the run's own outcome (status, exit class, duration,
  * turn count, cost, attempt — all on the flattened {@link Run} fields), then
- * `diff` (files changed, insertions, deletions, the per-file breakdown, and
- * the commits), then the PR link (`prUrl`) and the exact prompt (`prompt`) —
- * already on {@link Run}. The transcript itself is read separately, page by
+ * `review` (what the branch carried when the run ended: totals, per-file
+ * breakdown, commits and the capped patch), then the PR link (`prUrl`) and
+ * the exact prompt (`prompt`) — already on {@link Run}. The transcript itself is read separately, page by
  * page, through {@link readRunTranscriptPage}.
  */
 export interface RunDetail extends Run {
-  diff: DiffSummary;
+  review: RunReview;
   logAvailable: boolean;
+}
+
+/**
+ * Mirrors `rimaia_core::runs::RunReview` (task 033): what the run's row says
+ * its branch carried when the run ended. `get_run` runs no git for either
+ * variant.
+ *
+ * - `recorded` with a `bundle`: written at this run's finish.
+ * - `recorded` with `bundle: null`: the recorded commits say the branch
+ *   carried nothing — `headSha` equals `baseSha`.
+ * - `not_recorded`: nothing on the row says. The run predates task 033, is
+ *   still in flight, was closed by a crash, or its capture failed. Only the
+ *   desktop overlay may then ask the local `getDiffSummary` for the branch's
+ *   *current* state, and it must say so.
+ */
+export type RunReview =
+  | { source: "recorded"; bundle: StoredBundle | null }
+  | { source: "not_recorded" };
+
+/** Mirrors `rimaia_core::runs::bundle::PatchInclusion` — whether one file's
+ *  section is in the stored patch, and if not, why. */
+export type PatchInclusion = "included" | "too_large" | "not_utf8" | "binary";
+
+/** Mirrors `rimaia_core::runs::bundle::BundleFile` — {@link FileDiffStat}'s
+ *  three fields plus whether its section is in the stored patch. */
+export interface BundleFile {
+  path: string;
+  insertions: number | null;
+  deletions: number | null;
+  patch: PatchInclusion;
+}
+
+/**
+ * Mirrors `rimaia_core::runs::bundle::StoredBundle` — a review bundle as a
+ * read returns it (ADR-0033 point 7). The patch holds whole files only, up to
+ * a 512 KiB cap; `patchBytes` is the whole diff before the cap.
+ */
+export interface StoredBundle {
+  diff: DiffStat;
+  /** Every changed file, in git's order, whether or not it is in the patch. */
+  files: BundleFile[];
+  /** Newest first. */
+  commits: CommitSummary[];
+  /** `null` once pruned (ADR-0036 point 6). */
+  patch: string | null;
+  patchBytes: number;
+  /** True iff the cap left at least one file out. */
+  patchTruncated: boolean;
+  patchPrunedAt: string | null;
+  createdAt: string;
 }
 
 /** Mirrors `rimaia_core::runs::transcript::TranscriptBlock` — one block
@@ -1524,4 +1668,343 @@ export interface McpProbe {
   serverName: string;
   protocolVersion: string;
   toolCount: number;
+}
+
+/**
+ * Mirrors `rimaia_core::review::Dependent`. One task that depends directly on
+ * the task under review.
+ */
+export interface TaskDependent {
+  id: string;
+  title: string;
+  column: BoardColumn;
+  runState: RunState;
+  archivedAt: string | null;
+  /** At least one of its runs started from the reviewed task's work. */
+  builtOn: boolean;
+}
+
+/**
+ * Mirrors `rimaia_core::review::ReviewOutcome`, what a reject or a request for
+ * changes answers with.
+ */
+export interface ReviewOutcome {
+  task: Task;
+  /** Every direct dependent, read before the verdict's writes. */
+  dependents: TaskDependent[];
+  /** Where the rejected work is: the branch the task had, kept in git.
+   *  `null` for a request for changes. */
+  setAsideBranch: string | null;
+}
+
+/**
+ * Mirrors `rimaia_core::review::DigestOutcome`, in the attention-first order
+ * the service returns a digest in.
+ */
+export type DigestOutcome =
+  | "failed"
+  | "blocked"
+  | "waiting_retry"
+  | "interrupted"
+  | "cancelled"
+  | "running"
+  | "completed"
+  | "skipped";
+
+/** Mirrors `rimaia_core::review::DigestEntry`. One task's night. No plan text. */
+export interface DigestEntry {
+  taskId: string;
+  title: string;
+  repositoryId: string;
+  column: BoardColumn;
+  outcome: DigestOutcome;
+  /** Rows that ended in the window; `0` for a blocked or skipped entry. */
+  runs: number;
+  runSeconds: number | null;
+  /** `null` when there are no such rows or any of them has no recorded cost. */
+  costUsd: number | null;
+  lastRunId: string | null;
+  errorMessage: string | null;
+  prUrl: string | null;
+  blockingTitle: string | null;
+  skipReason: SkipReason | null;
+  /** The kind of the newest row the outcome is taken from; `null` for an
+   *  entry with no row in the window. */
+  lastRunKind: RunKind | null;
+  /** Where the task's review loop stands; `null` when it has none. */
+  reviewLoop: DigestLoop | null;
+}
+
+/** Mirrors `rimaia_core::review::DigestLoop`: a task's review loop, derived
+ *  from its rows and never stored (seam-contract D29 point 8). */
+export interface DigestLoop {
+  /** Review phases after the task's newest implementation phase: a review
+   *  resumed after a usage limit counts once (task 021). */
+  reviewsSinceImplementation: number;
+  /** The task's open findings, of every loop. */
+  openFindings: number;
+}
+
+/** Mirrors `rimaia_core::review::FindingSeverity`. */
+export type FindingSeverity = "critical" | "high" | "medium" | "low";
+
+/** Mirrors `rimaia_core::review::FindingStatus`. */
+export type FindingStatus = "open" | "fixed" | "rejected";
+
+/**
+ * Mirrors `rimaia_core::review::ReviewFinding` (task 035, ADR-0017): what one
+ * review run found, and what a fix run did about it. Only a review run writes
+ * one and only a fix run resolves one; the window only reads them, through
+ * {@link listReviewFindings}.
+ */
+export interface ReviewFinding {
+  id: string;
+  taskId: string;
+  reviewRunId: string;
+  /** The finding's place in the report that recorded it, from 0. */
+  ordinal: number;
+  severity: FindingSeverity;
+  title: string;
+  body: string;
+  /** Repository-relative; `null` for the change as a whole. */
+  file: string | null;
+  line: number | null;
+  /** The file and title, normalised: "the same finding again" (task 021).
+   *  `null` only on a finding recorded before it was computed. */
+  fingerprint: string | null;
+  status: FindingStatus;
+  /** What the fix run did, or why it declined. */
+  resolution: string | null;
+  /** `null` while open, and if the fix run's row is gone. */
+  resolvedByRunId: string | null;
+  createdAt: string;
+  resolvedAt: string | null;
+}
+
+/** Mirrors `rimaia_core::review::DigestTotals`. */
+export interface DigestTotals {
+  runs: number;
+  runSeconds: number;
+  spanSeconds: number | null;
+  costUsd: number;
+  runsWithoutCost: number;
+  /** Entries per outcome, every outcome present. */
+  counts: Record<DigestOutcome, number>;
+}
+
+/** Mirrors `rimaia_core::review::Digest`. */
+export interface ReviewDigest {
+  since: string;
+  /** Pass this to `markReviewDigestSeen` once the digest has been shown. */
+  until: string;
+  entries: DigestEntry[];
+  totals: DigestTotals;
+}
+
+/** Mirrors `rimaia_core::review_loop::ReviewEnabled`. Turning the loop on is
+ *  spelled as acknowledging its cost; there is no boolean (task 021). */
+export type ReviewEnabled = "off" | "on_cost_acknowledged";
+
+/** Mirrors `rimaia_core::review_loop::FixSession`. */
+export type FixSession = "fresh" | "resume";
+
+/**
+ * Mirrors `rimaia_core::review_loop::ReviewConfig` (task 021, ADR-0017): one
+ * level's loop settings. Every field is optional, and an absent one inherits
+ * task → repository → global → built-in. The keys are `snake_case`, because
+ * this is the stored document and not a row.
+ */
+export interface ReviewConfig {
+  enabled?: ReviewEnabled;
+  /** Fix phases one loop may spend, 0 to 5. */
+  max_review_loops?: number;
+  blocking_severity?: FindingSeverity;
+  review_model?: string;
+  review_effort?: string;
+  fix_session?: FixSession;
+}
+
+/** Mirrors `rimaia_core::review_loop::ReviewSettings`. */
+export interface ReviewSettings {
+  instructions: string;
+  config: ReviewConfig;
+}
+
+/** Mirrors `rimaia_core::review_loop::TaskReview`: one task's own override of
+ *  the review instructions and its loop settings, before any inheritance. */
+export interface TaskReview {
+  instructions: string | null;
+  config: ReviewConfig;
+}
+
+/** Mirrors `rimaia_core::review_loop::ReviewLevelName`. */
+export type ReviewLevelName = "global" | "repository" | "task";
+
+/**
+ * Mirrors `rimaia_core::review_loop::ReviewLevel` (task 037): one level's own
+ * settings next to what it inherits and what it resolves to. All three are
+ * {@link ReviewConfig}s in the stored spelling.
+ *
+ * The `Inherit (<value>)` options read `inherited`. It is the backend's
+ * resolution of the precedence chain one level up; no TypeScript here
+ * recomputes it (seam-contract D12's 2026-08-28 reason). `reviewModel` and
+ * `reviewEffort` are absent in the derived two when nothing names one, which
+ * means the task's own strategy.
+ */
+export interface ReviewLevel {
+  /** What this level stores. */
+  config: ReviewConfig;
+  /** What each field becomes if this level stops setting it. */
+  inherited: ReviewConfig;
+  /** What this level resolves to with its own settings applied. */
+  effective: ReviewConfig;
+}
+
+/** Mirrors `rimaia_core::review_loop::UnreviewedReason`. */
+export type UnreviewedReason =
+  | "not_reviewed"
+  | "review_failed"
+  | "nothing_recorded"
+  | "review_changed_branch"
+  | "fix_not_reviewed";
+
+/** Mirrors `rimaia_core::review_loop::Verdict`. `findings_remain` and
+ *  `unreviewed` are what flags a card; it is derived, never stored. */
+export type Verdict =
+  | { verdict: "none" }
+  | { verdict: "clean" }
+  | { verdict: "findings_remain"; openBlocking: number }
+  | { verdict: "unreviewed"; reason: UnreviewedReason };
+
+/** Mirrors `rimaia_core::review_loop::ReviewLoopSummary`. */
+export interface ReviewLoopSummary {
+  /** The effective setting now. */
+  enabled: boolean;
+  maxReviewLoops: number;
+  fixesSpent: number;
+  /** Review phases in the current loop. */
+  reviews: number;
+  verdict: Verdict;
+  openBlocking: number;
+  /** Open findings of the newest review that sit below the blocking severity:
+   *  raised, and not worth a fix. */
+  openAdvisory: number;
+  /** A signal that the loop may be going in circles, not a verdict. */
+  pingPong: boolean;
+}
+
+/**
+ * Mirrors `rimaia_core::review_loop::HistoryFinding` (task 037): a stored
+ * finding and whether it blocks under the task's effective
+ * `blocking_severity`. `blocking` is decided in Rust; nothing here compares
+ * severities.
+ */
+export interface HistoryFinding extends ReviewFinding {
+  blocking: boolean;
+  /** Stored `rejected` because a fix had already rejected the same finding:
+   *  no run resolved it, and its `resolution` already says "Rejected earlier
+   *  as …". */
+  carriedOver: boolean;
+}
+
+/** Mirrors `rimaia_core::review_loop::PhaseSummary`: one phase, which is more
+ *  than one run when a usage limit made the agent resume. */
+export interface PhaseSummary {
+  kind: RunKind;
+  /** Oldest first. */
+  runIds: string[];
+  /** The `attempt` of each run in {@link runIds}. */
+  attempts: number[];
+  /** The last row's. */
+  status: RunStatus;
+  exitClass: ExitClass | null;
+}
+
+/** Mirrors `rimaia_core::review_loop::FixRound`. */
+export interface FixRound {
+  phase: PhaseSummary;
+  /** The findings its rows resolved, fixed or rejected. */
+  resolved: HistoryFinding[];
+}
+
+/** Mirrors `rimaia_core::review_loop::ReviewRound`: one review, the fix after
+ *  it, and the ping-pong lists. */
+export interface ReviewRound {
+  review: PhaseSummary | null;
+  findings: HistoryFinding[];
+  fix: FixRound | null;
+  /** Findings a fix had marked fixed that this review raised again. */
+  regressed: HistoryFinding[];
+  /** Blocking findings the review before it did not raise. */
+  newAfterFix: HistoryFinding[];
+  pingPong: boolean;
+}
+
+/** Mirrors `rimaia_core::review_loop::LoopHistory`: an implementation and the
+ *  rounds after it. */
+export interface LoopHistory {
+  /** Before a re-run implementation: not the loop the verdict is about. */
+  earlier: boolean;
+  implementation: PhaseSummary;
+  rounds: ReviewRound[];
+  fixesSpent: number;
+  verdict: Verdict;
+  /** Counts of the loop's newest review, from Rust. */
+  openBlocking: number;
+  openAdvisory: number;
+}
+
+/** Mirrors `rimaia_core::review_loop::ReviewHistory`, which is rendered as
+ *  returned: grouping into loops is core's, not the view's. */
+export interface ReviewHistory {
+  loops: LoopHistory[];
+}
+
+/**
+ * Mirrors `rimaia_core::consent::pieces::ContentKind`: the consent-gated
+ * content a run executes (ADR-0032 point 3), in the `acceptances` table's
+ * spelling.
+ */
+export type ContentKind =
+  | "plan"
+  | "task_review_instructions"
+  | "base_instructions"
+  | "review_instructions"
+  | "review_findings"
+  | "base_commit";
+
+/** Mirrors `rimaia_core::consent::EligibilityStatus`: whether a runner may take
+ *  a task at all (ADR-0032 point 2). */
+export type EligibilityStatus = "assigned" | "pool" | "assigned_to_someone_else" | "unassigned";
+
+/** Mirrors `rimaia_core::consent::TeamCeiling` (ADR-0032 point 4). A personal
+ *  team does not consult it: the runner's own consent is the whole decision. */
+export type TeamCeiling = "not_consulted" | "allowed" | "forbidden";
+
+/** Mirrors `rimaia_core::consent::pieces::MissingReason`: which sentence a
+ *  missing piece is refused with. */
+export type MissingReason = "not_accepted" | "former_member" | "written_during_run";
+
+/** Mirrors `rimaia_core::consent::MissingPiece`: one piece the runner's owner
+ *  has neither written, accepted nor trusted. */
+export interface MissingPiece {
+  kind: ContentKind;
+  taskId: string | null;
+  /** What `acceptContent` names: a decimal revision, a run id or a commit. */
+  revision: string;
+  /** `null` for a former member. */
+  authorLogin: string | null;
+  reason: MissingReason;
+}
+
+/**
+ * Mirrors `rimaia_core::consent::TaskConsent`, from `get_task_consent` (task
+ * 045): everything that decides whether one of the user's runners would take
+ * a task. No component renders it yet (task 061 does).
+ */
+export interface TaskConsent {
+  eligibility: EligibilityStatus;
+  pinnedRunnerId: string | null;
+  teamCeiling: TeamCeiling;
+  missing: MissingPiece[];
 }

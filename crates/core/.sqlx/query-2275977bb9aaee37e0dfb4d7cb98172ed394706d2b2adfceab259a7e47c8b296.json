@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT r.id AS \"id!\", r.head_sha AS \"head_sha!\"\n             FROM runs r JOIN tasks t ON t.id = r.task_id\n            WHERE r.task_id = ?1 AND t.team_id IN (SELECT value FROM json_each(?2))\n              AND r.status = 'succeeded'\n              AND r.kind IN ('implementation', 'fix')\n              AND r.head_sha IS NOT NULL AND trim(r.head_sha) <> ''\n            ORDER BY r.attempt DESC LIMIT 1",
+  "describe": {
+    "columns": [
+      {
+        "name": "id!",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "head_sha!",
+        "ordinal": 1,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      false,
+      true
+    ]
+  },
+  "hash": "2275977bb9aaee37e0dfb4d7cb98172ed394706d2b2adfceab259a7e47c8b296"
+}

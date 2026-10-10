@@ -19,10 +19,12 @@ use serde::Deserialize;
 
 use chrono::{DateTime, Utc};
 
+use crate::consent::ceiling::StrategyCeiling;
 use crate::db::settings::Dismissal;
 use crate::db::{BoardColumn, OnArchive, RunState, ScheduleMode, StrategyMode};
 use crate::doctor::Check;
 use crate::error::{Error, Result};
+use crate::review::{FindingResolution, FindingStatus, NewReviewFinding};
 use crate::runner::strategy::PlanSelection;
 use crate::schedule::ScheduleInput;
 use crate::strategy::StrategyApproval;
@@ -88,6 +90,144 @@ pub struct ListTasksRequest {
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub struct ArchiveTaskRequest {
     pub task_id: String,
+}
+
+/// `reject_task` / `request_task_changes`: a task and the note the next run reads.
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct ReviewNoteRequest {
+    pub task_id: String,
+    /// What the review found. Required, and never blank: it is the only thing
+    /// that differs between the reviewed run's input and the next run's.
+    pub note: String,
+}
+
+/// `record_review_findings`: a review run's whole report, in one call.
+///
+/// No run id: it is the grant's, never the caller's (D30 point 5), so a run
+/// cannot write under another run's id even on its own task.
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct RecordReviewFindingsRequest {
+    pub task_id: String,
+    /// Every finding, most important first, or `[]` when the review found
+    /// nothing. An empty list is still the call a clean review must make.
+    pub findings: Vec<NewReviewFinding>,
+}
+
+/// What a fix run did with a finding.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ResolvedAs {
+    Fixed,
+    Rejected,
+}
+
+/// `resolve_review_finding`: one open finding, and what the fix run did. No
+/// run id, for [`RecordReviewFindingsRequest`]'s reason.
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct ResolveReviewFindingRequest {
+    pub task_id: String,
+    pub finding_id: String,
+    pub status: ResolvedAs,
+    /// What was done, for `fixed` (optional), or why the finding was declined,
+    /// for `rejected` (required, and never blank).
+    #[serde(default)]
+    pub resolution: Option<String>,
+}
+
+impl ResolveReviewFindingRequest {
+    pub fn into_resolution(self) -> FindingResolution {
+        match self.status {
+            ResolvedAs::Fixed => FindingResolution::Fixed {
+                note: self.resolution,
+            },
+            // A missing reason becomes a blank one, which the service refuses
+            // with the same sentence as a blank reason sent on purpose.
+            ResolvedAs::Rejected => FindingResolution::Rejected {
+                reason: self.resolution.unwrap_or_default(),
+            },
+        }
+    }
+}
+
+/// `list_review_findings`: one task's findings, optionally of one status.
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct ListReviewFindingsRequest {
+    pub task_id: String,
+    #[serde(default)]
+    pub status: Option<FindingStatus>,
+}
+
+/// `get_review_history`: one task's review loops.
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct GetReviewHistoryRequest {
+    pub task_id: String,
+}
+
+/// `get_review_level`: one level of the review loop's configuration, next to
+/// what it inherits.
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct GetReviewLevelRequest {
+    pub level: crate::review_loop::ReviewLevelName,
+    /// The repository's or the task's id; absent for `global`.
+    #[serde(default)]
+    pub id: Option<String>,
+}
+
+/// `set_review_settings`: the global review instructions and configuration
+/// (task 021).
+///
+/// `config` is raw JSON rather than `ReviewConfig`, so the service refuses
+/// `"enabled": true` in its own sentence instead of a deserializer refusing it
+/// in another, and every door says the same thing.
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct SetReviewSettingsRequest {
+    /// Empty for none.
+    #[serde(default)]
+    pub instructions: String,
+    /// A ReviewConfig document, or null for nothing set.
+    #[serde(default)]
+    pub config: serde_json::Value,
+}
+
+/// `set_repository_review_config`.
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct SetRepositoryReviewConfigRequest {
+    pub repository_id: String,
+    /// A ReviewConfig document, or null to inherit everything.
+    #[serde(default)]
+    pub config: serde_json::Value,
+}
+
+/// `set_task_review`. Not part of `update_task`, which a planner's grant may
+/// call on its own task (task 021).
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct SetTaskReviewRequest {
+    pub task_id: String,
+    /// Replaces the global review instructions for this task. Absent or
+    /// blank uses the global ones.
+    #[serde(default)]
+    pub review_instructions: Option<String>,
+    /// A ReviewConfig document, or null to inherit everything.
+    #[serde(default)]
+    pub config: serde_json::Value,
+}
+
+/// `mark_review_digest_seen`: the digest's own `until`.
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct MarkReviewDigestSeenRequest {
+    /// An RFC 3339 instant, normally the `until` of the digest that was shown.
+    /// A time in the future is refused.
+    pub through: chrono::DateTime<chrono::Utc>,
 }
 
 /// `archive_tasks`: a hand-picked set, in the caller's order.
@@ -541,6 +681,32 @@ pub struct SetWorktreeAutoCleanupRequest {
     pub setting: AutoCleanup,
 }
 
+/// This runner's strategy ceiling, whole (task 072, ADR-0032 point 3). Both
+/// fields replace what is stored; an omitted one is "no limit" on that half.
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct SetStrategyCeilingRequest {
+    /// The model ids a run on this machine may spawn with, from
+    /// `get_strategy_catalogue`. The first fills a run that names no model.
+    /// Omit it, or send `null`, to allow any model.
+    #[serde(default)]
+    pub models: Option<Vec<String>>,
+    /// The most expensive effort a run may spawn with, an id from the
+    /// catalogue, which lists efforts cheapest first. It fills a run that
+    /// names no effort. Omit it, or send `null`, for no limit.
+    #[serde(default)]
+    pub max_effort: Option<String>,
+}
+
+impl From<SetStrategyCeilingRequest> for StrategyCeiling {
+    fn from(request: SetStrategyCeilingRequest) -> Self {
+        Self {
+            models: request.models,
+            max_effort: request.max_effort,
+        }
+    }
+}
+
 /// One repository, by id (task 022).
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
@@ -790,4 +956,56 @@ mod tests {
             assert!(message.contains(legal), "{legal} must be listed: {message}");
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// Assignment and consent (ADR-0032, task 045)
+// ---------------------------------------------------------------------------
+
+/// `assign_task`.
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct AssignTaskRequest {
+    pub task_id: String,
+    /// A member of the task's team, whose runners alone will run it. Null or
+    /// absent returns the task to the team's pool.
+    #[serde(default)]
+    pub assignee_id: Option<String>,
+}
+
+/// `accept_content`: one revision of one piece of content, accepted as read.
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct AcceptContentRequest {
+    pub team_id: String,
+    /// The task the content belongs to; for `base_commit`, the dependency
+    /// that made the commit. Absent exactly for `base_instructions` and
+    /// `review_instructions`, which belong to the team.
+    #[serde(default)]
+    pub task_id: Option<String>,
+    #[schemars(with = "String")]
+    pub kind: crate::consent::pieces::ContentKind,
+    /// The revision read: the decimal revision for a plan or instructions,
+    /// the run's id for findings, the commit for a base commit. Only the
+    /// current one is accepted.
+    pub revision: String,
+}
+
+/// `set_repository_unattended_ceiling`.
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct SetRepositoryUnattendedCeilingRequest {
+    pub repository_id: String,
+    /// Whether the team allows unattended runs in this repository at all.
+    pub allowed: bool,
+}
+
+/// `get_task_consent`.
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct GetTaskConsentRequest {
+    pub task_id: String,
+    /// One of the caller's own runners: what a person has accepted is
+    /// theirs to read.
+    pub runner_id: String,
 }

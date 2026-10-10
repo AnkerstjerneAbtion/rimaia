@@ -33,17 +33,25 @@
 //! value, so the predicate is *not allowed*" included.
 
 use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
 
-use crate::context::ServiceContext;
-use crate::db::{new_id, BoardColumn, ExitClass, Run, RunState, RunStatus};
+use crate::board::NextStep;
+use crate::clock::Clock;
+use crate::context::{ScopedTx, ServiceContext};
+use crate::db::{new_id, BoardColumn, ExitClass, Run, RunKind, RunState, RunStatus};
 use crate::error::{Error, Result};
-use crate::events::ChangeEvent;
+use crate::events::{ChangeEvent, TeamId};
 use crate::paths::AppPaths;
+use crate::review::findings;
+use crate::review_loop::{self, Closed, Decision, Landing};
 use crate::runner::events::{
     transcript_path, ContentBlock, EndReason, EventStream, ResultEvent, RunEvent, TokenUsage,
     UsageReport,
 };
-use crate::tasks::{move_task_to_bottom, set_run_state};
+use crate::runs::bundle::RunCapture;
+use crate::tasks::run_state::set_within;
+use crate::tasks::service::{move_within, Destination};
+use crate::tasks::team_of_task;
 
 // ---------------------------------------------------------------------------
 // What the classifier is allowed to look at
@@ -208,7 +216,8 @@ fn is_success(result: &ResultEvent) -> bool {
 /// The metrics are **extracted, never derived**: `spike/FINDINGS.md` §6 found
 /// `num_turns`, `total_cost_usd`, `duration_ms`, `usage`, `modelUsage` and
 /// `permission_denials` already on the terminal event.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct RunOutcome {
     pub exit_class: ExitClass,
     /// The coarser lifecycle the Runs view queries. See [`status_for`].
@@ -261,7 +270,8 @@ pub struct RunOutcome {
 /// planner or a human (ADR-0016) and `run_environment` was a setting when the run
 /// started. Seam-contract D18: every `None` here reaches the column as NULL and
 /// means *not recorded*.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct SpawnedAs {
     /// The model the run actually used. Preferring the `init` event over the
     /// invocation is deliberate: the flag may have been absent (the CLI's own
@@ -606,9 +616,16 @@ fn is_pull_request_number(segment: &str) -> bool {
 /// the one-line continuation rather than a second copy of the composed prompt,
 /// and a morning reviewer reading four rows sees one long prompt and three
 /// one-liners: the sequence of walls the task hit.
+///
+/// No `Default`, on purpose (seam-contract D29 point 1): [`kind`](Self::kind)
+/// has no value that is right for a caller that forgot it, and the column's
+/// own `DEFAULT` would quietly record a forgotten review as an implementation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NewRun {
     pub task_id: String,
+    /// What the run is for. Written once, here, and never updated: `finish_run`
+    /// reads it off the row and never takes it from its caller.
+    pub kind: RunKind,
     pub session_id: String,
     /// The composed prompt, verbatim, stored as a copy (ADR-0009). Task 006's
     /// "editing base instructions does not alter any already-stored run prompt"
@@ -628,40 +645,81 @@ pub struct NewRun {
     /// landed have nothing in it; a caller with no worktree has nothing to say
     /// here and says nothing.
     pub base_ref: Option<String>,
+    /// What `base_ref` resolved to: the worktree's fork point, as
+    /// `worktree::prepare` computed it for this attempt (task 033). Written at
+    /// the open beside `base_ref`, for the same reason. `None` when it could
+    /// not be computed, which reads as "not recorded" (seam-contract D18).
+    pub base_sha: Option<String>,
 }
 
 /// Opens the `runs` row for an attempt that is about to start.
 ///
 /// This module is the only writer of that table, which is the same rule
-/// [`set_run_state`] states for `tasks.run_state` and for the same ADR-0006
-/// reason. It writes the row and nothing else: putting the *task* into
+/// [`set_run_state`](crate::tasks::set_run_state) states for
+/// `tasks.run_state` and for the same ADR-0006 reason. It writes the row and nothing else: putting the *task* into
 /// `run_state = running` belongs to whoever selected it, inside the transaction
 /// ADR-0010 requires for selection.
 ///
 /// `log_path` is computed rather than passed, because ADR-0013 makes it a pure
-/// function of the task and run ids and the run id is minted here.
+/// function of the task and run ids. It is still written, as D31 point 4 says,
+/// until task 056's `transcript_key` replaces it, and nothing reads it: every
+/// reader derives the path from the ids instead (task 066).
+///
+/// The row names no runner: that is the board port's to record, from the
+/// runner its adapter serves (D31 point 4), and `runs.runner_id` is nullable
+/// for exactly the rows nobody reported a runner for.
 pub async fn start_run(ctx: &ServiceContext, paths: &AppPaths, new_run: NewRun) -> Result<Run> {
-    let id = new_id();
-    let log_path = transcript_path(paths, &new_run.task_id, &id)
+    insert_run(ctx, paths, new_id(), None, new_run).await
+}
+
+/// [`start_run`] under an id the caller already holds.
+///
+/// The board port's `start_run` is reported under the id the runner minted
+/// (seam-contract D10, D31 point 4), so the row cannot mint its own there.
+/// Both doors reach this one insert, which is what keeps this module the only
+/// writer of `runs`.
+pub(crate) async fn insert_run(
+    ctx: &ServiceContext,
+    paths: &AppPaths,
+    id: String,
+    runner_id: Option<&str>,
+    new_run: NewRun,
+) -> Result<Run> {
+    let task_id = new_run.task_id.clone();
+    let mut tx = ctx.begin().await?;
+    let team_id =
+        insert_run_within(&mut tx, ctx.clock.as_ref(), paths, &id, runner_id, new_run).await?;
+    tx.commit().await?;
+
+    publish_opened(ctx, team_id, &id, &task_id);
+    fetch_run_row(&ctx.pool, &ctx.scope.json(), &id).await
+}
+
+/// The insert behind [`insert_run`], inside a transaction the caller holds,
+/// commits and announces with [`publish_opened`]. Answers the task's team.
+///
+/// For the board port's `start_run`, which opens the row and moves its lease
+/// onto it in one transaction (task 043), so a fenced report opens nothing.
+pub(crate) async fn insert_run_within(
+    tx: &mut ScopedTx,
+    clock: &dyn Clock,
+    paths: &AppPaths,
+    id: &str,
+    runner_id: Option<&str>,
+    new_run: NewRun,
+) -> Result<TeamId> {
+    let log_path = transcript_path(paths, &new_run.task_id, id)
         .to_string_lossy()
         .into_owned();
-    let started_at = ctx.clock.now();
-
-    let mut tx = ctx.pool.begin().await?;
+    let started_at = clock.now();
 
     // The foreign key would refuse a task that does not exist, but as a
     // constraint violation nobody can read. Same sentence `tasks::get_task`
-    // answers the identical question with.
-    let task_exists: i64 =
-        sqlx::query_scalar!("SELECT count(*) FROM tasks WHERE id = ?1", new_run.task_id)
-            .fetch_one(&mut *tx)
-            .await?;
-    if task_exists == 0 {
-        return Err(Error::not_found(format!(
-            "no task with id {}",
-            new_run.task_id
-        )));
-    }
+    // answers the identical question with, and the same for a task outside the
+    // context's scope.
+    // The task's team doubles as that check: a run belongs to its task's team
+    // (ADR-0029 point 1), and the events name it.
+    let team_id = team_of_task(tx, &new_run.task_id).await?;
 
     // Inside the transaction, because `idx_runs_task_attempt` is UNIQUE on
     // `(task_id, attempt)`: two writers racing to claim a task must not both
@@ -670,7 +728,7 @@ pub async fn start_run(ctx: &ServiceContext, paths: &AppPaths, new_run: NewRun) 
         r#"SELECT max(attempt) AS "attempt: i64" FROM runs WHERE task_id = ?1"#,
         new_run.task_id,
     )
-    .fetch_one(&mut *tx)
+    .fetch_one(&mut **tx)
     .await?;
     let attempt = previous.unwrap_or(0) + 1;
 
@@ -678,51 +736,135 @@ pub async fn start_run(ctx: &ServiceContext, paths: &AppPaths, new_run: NewRun) 
     // ADR-0008's amendment of 2026-09-02 makes it a property of what the
     // attempt was spawned against, which is known before the process starts and
     // does not survive the run failing. A run that dies without a `result`
-    // event still leaves a review able to say what it was building on.
+    // event still leaves a review able to say what it was building on. Its
+    // `base_sha` rides along: it is what that name resolved to, at the same
+    // moment.
     sqlx::query!(
-        r#"INSERT INTO runs
-            (id, task_id, attempt, status, session_id, prompt, started_at, log_path, base_ref)
-           VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)"#,
+        r#"-- runs.log_path written until 056
+           INSERT INTO runs
+            (id, task_id, attempt, kind, status, session_id, prompt, started_at, log_path,
+             base_ref, base_sha, runner_id)
+           VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)"#,
         id,
         new_run.task_id,
         attempt,
+        new_run.kind,
         RunStatus::Running,
         new_run.session_id,
         new_run.prompt,
         started_at,
         log_path,
         new_run.base_ref,
+        new_run.base_sha,
+        runner_id,
     )
-    .execute(&mut *tx)
+    .execute(&mut **tx)
     .await?;
 
-    tx.commit().await?;
-
-    // Both, and after the commit (ADR-0018). The task's own id rides along
-    // because a card renders its last run (seam-contract D12) — a board told
-    // only about the run would keep drawing the previous attempt's badge.
-    ctx.publish(ChangeEvent::runs([id.clone()]));
-    ctx.publish(ChangeEvent::tasks([new_run.task_id.clone()]));
-
-    fetch_run_row(&ctx.pool, &id).await
+    Ok(team_id)
 }
 
-/// Closes the `runs` row and applies the outcome to the task.
+/// What opening a row announces, after its transaction commits.
 ///
-/// Three transactions rather than one, and the order is the point: the row is
+/// Both events (ADR-0018). The task's own id rides along because a card
+/// renders its last run (seam-contract D12) — a board told only about the run
+/// would keep drawing the previous attempt's badge.
+pub(crate) fn publish_opened(ctx: &ServiceContext, team_id: TeamId, run_id: &str, task_id: &str) {
+    ctx.publish(ChangeEvent::runs(team_id.clone(), [run_id.to_string()]));
+    ctx.publish(ChangeEvent::tasks(team_id, [task_id.to_string()]));
+}
+
+/// The row as it reads now, for a caller that wrote it inside its own
+/// transaction and has committed.
+pub(crate) async fn read_back(ctx: &ServiceContext, run_id: &str) -> Result<Run> {
+    fetch_run_row(&ctx.pool, &ctx.scope.json(), run_id).await
+}
+
+/// Closes the `runs` row and applies the outcome to the task, with no run
+/// window: [`finish_run_within`] for a caller that has none to report, which
+/// is reconcile and every test that closes a row by hand.
+pub async fn finish_run(
+    ctx: &ServiceContext,
+    run_id: &str,
+    outcome: &RunOutcome,
+    capture: &RunCapture,
+) -> Result<Run> {
+    Ok(finish_run_within(ctx, run_id, outcome, capture, None)
+        .await?
+        .0)
+}
+
+/// Closes the `runs` row and applies the outcome to the task, answering what
+/// happens next.
+///
+/// Two transactions rather than one, and the order is the point: the row is
 /// written **first**, so a crash between them leaves the outcome recorded and
 /// only the task stale, which is the recoverable direction. It cannot be one
-/// transaction because [`set_run_state`] and [`move_task_to_bottom`] own theirs — and
-/// reaching around them to write `run_state` or `board_column` directly is the
-/// exact ADR-0006 bug both of those functions exist to prevent.
+/// transaction because [`decide`] reads the closed row back over the pool,
+/// among the task's others, and an uncommitted close is invisible to it. The
+/// second transaction lands the task through the column's and the run state's
+/// own writers ([`land_within`]), never by writing either column here (ADR-0006).
 ///
 /// Refuses a run that already ended: finalising twice would run the task-side
 /// transitions again from a state they no longer apply to.
-pub async fn finish_run(ctx: &ServiceContext, run_id: &str, outcome: &RunOutcome) -> Result<Run> {
-    let ended_at = ctx.clock.now();
+///
+/// # What the row was for decides what closing it means (D29 point 9)
+///
+/// The kind is read off the row, never taken from the caller. Every kind
+/// closes the same way; what it means for the task is the task-side step's,
+/// [`decide`], which is where ADR-0017's loop is decided (task 021).
+/// `window_closes_at` is the runner's run window, which bounds whether a loop
+/// starts another phase; reconcile has none, and its outcome never continues.
+///
+/// # What the worktree was left as (task 033)
+///
+/// `capture` is what the runner measured in the worktree before calling this:
+/// the head commit, and the review bundle when the branch carries commits. Both
+/// are written in the transaction that closes the row, so this module stays
+/// the only writer of `runs` and becomes the only writer of `review_bundles`
+/// (ADR-0006). No new change event: the `runs` one below already covers the
+/// write (seam-contract D2).
+///
+/// A bundle is a record, not a postcondition. A capture that measured nothing
+/// changes nothing about the outcome, the class or the task's transition.
+pub async fn finish_run_within(
+    ctx: &ServiceContext,
+    run_id: &str,
+    outcome: &RunOutcome,
+    capture: &RunCapture,
+    window_closes_at: Option<DateTime<Utc>>,
+) -> Result<(Run, NextStep)> {
+    let mut tx = ctx.begin().await?;
+    let run = close_within(&mut tx, ctx.clock.as_ref(), run_id, outcome, capture).await?;
+    // A run's team is its task's.
+    let team_id = team_of_task(&mut tx, &run.task_id).await?;
+    tx.commit().await?;
+    publish_closed(ctx, team_id, &run);
 
-    let mut tx = ctx.pool.begin().await?;
-    let run = fetch_run_row(&mut *tx, run_id).await?;
+    let decision = decide(ctx, &run, outcome, window_closes_at).await?;
+    land(ctx, &run.task_id, decision.landing).await?;
+
+    Ok((read_back(ctx, run_id).await?, decision.next))
+}
+
+/// Closes a row inside a transaction the caller holds, commits and announces
+/// with [`publish_closed`]. Answers the row as it read **before** the close,
+/// which is what [`decide`] and the lease's landing read its kind and task
+/// from.
+///
+/// The board port's `finish_run` holds the transaction its fence read the
+/// lease in (task 043), so a fenced report closes nothing; reconcile and the
+/// tests reach it through [`finish_run_within`].
+pub(crate) async fn close_within(
+    tx: &mut ScopedTx,
+    clock: &dyn Clock,
+    run_id: &str,
+    outcome: &RunOutcome,
+    capture: &RunCapture,
+) -> Result<Run> {
+    let ended_at = clock.now();
+    let scope = tx.scope().json();
+    let run = fetch_run_row(&mut **tx, &scope, run_id).await?;
     if run.ended_at.is_some() {
         return Err(Error::invalid(format!(
             "run {run_id} has already been finalized"
@@ -750,8 +892,8 @@ pub async fn finish_run(ctx: &ServiceContext, run_id: &str, outcome: &RunOutcome
                   model = ?8, effort = ?9, run_environment = ?10,
                   input_tokens = ?11, output_tokens = ?12,
                   cache_read_tokens = ?13, cache_creation_tokens = ?14,
-                  resume_after = ?15
-            WHERE id = ?16"#,
+                  resume_after = ?15, head_sha = ?16
+            WHERE id = ?17"#,
         ended_at,
         outcome.status,
         outcome.exit_class,
@@ -767,112 +909,224 @@ pub async fn finish_run(ctx: &ServiceContext, run_id: &str, outcome: &RunOutcome
         outcome.usage.cache_read_tokens,
         outcome.usage.cache_creation_tokens,
         outcome.resume_after,
+        capture.head_sha,
         run_id,
     )
-    .execute(&mut *tx)
+    .execute(&mut **tx)
     .await?;
 
-    tx.commit().await?;
-
-    ctx.publish(ChangeEvent::runs([run_id.to_string()]));
-    ctx.publish(ChangeEvent::tasks([run.task_id.clone()]));
-
-    apply_to_task(ctx, &run.task_id, outcome).await?;
-
-    fetch_run_row(&ctx.pool, run_id).await
+    insert_bundle(tx, run_id, capture, ended_at).await?;
+    Ok(run)
 }
 
-/// Where the task lands, per ADR-0011's action column.
+/// What closing a row announces, after its transaction commits.
+pub(crate) fn publish_closed(ctx: &ServiceContext, team_id: TeamId, run: &Run) {
+    ctx.publish(ChangeEvent::runs(team_id.clone(), [run.id.clone()]));
+    ctx.publish(ChangeEvent::tasks(team_id, [run.task_id.clone()]));
+}
+
+/// Inserts `capture`'s bundle, when it has one and a head commit to anchor it.
 ///
-/// Only `success` also moves the card — that is task 008's scope, and it is the
-/// board's whole promise: work that finished is waiting to be reviewed. The
-/// other five leave the card where it is, because ADR-0007's failure rule keeps
-/// a failed task in `ready` and shows the failure on it.
+/// `worktree::bundle::capture` never produces a bundle without a `head_sha`,
+/// but task 036 builds a [`RunCapture`] from a runner's message, and a bundle
+/// that names no commit describes nothing the row can be checked against. It
+/// is dropped with a warning — never stored, and never a failed finish.
+async fn insert_bundle(
+    tx: &mut ScopedTx,
+    run_id: &str,
+    capture: &RunCapture,
+    created_at: DateTime<Utc>,
+) -> Result<()> {
+    let Some(bundle) = &capture.bundle else {
+        return Ok(());
+    };
+    if capture.head_sha.is_none() {
+        tracing::warn!(
+            %run_id,
+            "a review bundle arrived without a head commit; dropping it",
+        );
+        return Ok(());
+    }
+
+    // Only through the serde types: these columns are a storage format, and
+    // `runs::bundle`'s header says what renaming a field costs.
+    let files = serde_json::to_string(&bundle.files).map_err(|error| {
+        Error::internal(format!("could not encode the bundle's files: {error}"))
+    })?;
+    let commits = serde_json::to_string(&bundle.commits).map_err(|error| {
+        Error::internal(format!("could not encode the bundle's commits: {error}"))
+    })?;
+
+    sqlx::query!(
+        r#"INSERT INTO review_bundles
+            (run_id, files_changed, insertions, deletions, files, commits, patch,
+             patch_bytes, patch_truncated, created_at)
+           VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)"#,
+        run_id,
+        bundle.diff.files_changed,
+        bundle.diff.insertions,
+        bundle.diff.deletions,
+        files,
+        commits,
+        bundle.patch,
+        bundle.patch_bytes,
+        bundle.patch_truncated,
+        created_at,
+    )
+    .execute(&mut **tx)
+    .await?;
+    Ok(())
+}
+
+/// Where the task lands, and what happens next: ADR-0011's action column for
+/// an implementation that failed, ADR-0017's exits for everything else.
 ///
-/// Every class transitions *out* of `running`. A task left `running` with no
-/// process is a state nothing can recover from and a badge that lies.
+/// One decision, [`review_loop::decide`], for every kind and every path that
+/// closes a row, reconcile's included. The configuration, the rows and the
+/// findings are read **here**, after the row's `UPDATE` committed, so the
+/// closed row is among them and a setting changed mid-loop takes effect at
+/// this boundary. Reads only: [`land`] and [`land_within`] write what it
+/// decided, and a decision to continue writes nothing to the task, which stays
+/// `running` in its column.
 ///
-/// # The class alone is not enough any more
+/// # The class alone was never enough
 ///
-/// Task 008 routed on `exit_class` and put all three retryable classes in
-/// `waiting_retry`, which was right while nothing resumed a waiting task —
-/// naming the state was the whole of what it could do. Now a retryable class
-/// means two different things depending on whether the budget is spent:
+/// A retryable class means two different things depending on whether the
+/// budget is spent:
 ///
 /// ```text
 /// usage_limit | transient | interrupted, resume_after.is_some() => waiting_retry
-/// usage_limit | transient | interrupted, otherwise             => failed
+/// usage_limit | transient | interrupted, otherwise             => failed (an implementation)
+///                                                              => in_review (a review or fix)
 /// ```
 ///
 /// The `otherwise` arm is what makes "transient retries stop at the cap and the
-/// task lands in `failed` with the reason" true. Without it a task that had
-/// exhausted its five attempts would sit in `waiting_retry` with no deadline —
-/// invisible to a morning review that ADR-0007 wants a failure to interrupt,
-/// and skipped forever by the queue's own selection. The *reason* is still on
-/// the run's `exit_class` and `error_message`, never on `run_state`
-/// (seam-contract D9's two dimensions).
-async fn apply_to_task(ctx: &ServiceContext, task_id: &str, outcome: &RunOutcome) -> Result<()> {
-    if outcome.exit_class == ExitClass::Success {
-        move_to_in_review(ctx, task_id).await?;
+/// task lands in `failed` with the reason" true for an implementation. A review
+/// or fix lands in `in_review` instead, because the implementation before it
+/// had already succeeded. The *reason* is still on the run's `exit_class` and
+/// `error_message`, never on `run_state` (seam-contract D9's two dimensions).
+pub(crate) async fn decide(
+    ctx: &ServiceContext,
+    run: &Run,
+    outcome: &RunOutcome,
+    window_closes_at: Option<DateTime<Utc>>,
+) -> Result<Decision> {
+    let task = crate::tasks::service::task_row(ctx, &run.task_id).await?;
+    let resolved = review_loop::config::resolve(ctx, &task.id, &task.repository_id).await?;
+    let rows = findings::loop_rows(ctx, &task.id).await?;
+    let all = findings::list(ctx, &task.id, None).await?;
+
+    Ok(review_loop::decide(
+        &resolved.config,
+        &rows,
+        &all,
+        Closed {
+            kind: run.kind,
+            exit_class: outcome.exit_class,
+            resume_after: outcome.resume_after,
+        },
+        window_closes_at,
+        ctx.clock.now(),
+    ))
+}
+
+/// Lands a task where [`decide`] said, in one transaction of its own, and
+/// announces it.
+async fn land(ctx: &ServiceContext, task_id: &str, landing: Landing) -> Result<()> {
+    if landing == Landing::Stays {
+        return Ok(());
     }
-
-    let run_state = match outcome.exit_class {
-        ExitClass::Success => RunState::Idle,
-        // ADR-0011 for `fatal` ("no retry... run_state = failed"), and ADR-0010
-        // for a cancelled run: cancel-one on a *running* task "goes to `failed`
-        // with `cancelled` reason". `Running -> Cancelled` is illegal by design;
-        // the reason lives on the run's `exit_class`, not on `run_state`.
-        ExitClass::Fatal | ExitClass::Cancelled => RunState::Failed,
-        ExitClass::UsageLimit | ExitClass::Transient | ExitClass::Interrupted => {
-            match outcome.resume_after {
-                Some(_) => RunState::WaitingRetry,
-                None => RunState::Failed,
-            }
-        }
-    };
-
-    set_run_state(ctx, task_id, run_state).await?;
+    let mut tx = ctx.begin_immediate().await?;
+    let rebalanced = land_within(ctx, &mut tx, task_id, landing).await?;
+    let team_id = team_of_task(&mut tx, task_id).await?;
+    tx.commit().await?;
+    publish_landed(ctx, team_id, task_id, rebalanced);
     Ok(())
 }
 
-/// Appends the task to the bottom of `in_review`.
+/// The landing's writes, inside a transaction the caller holds, commits and
+/// announces with [`publish_landed`]. Answers the ids a forced rebalance of
+/// `in_review` renumbered.
 ///
-/// Through [`move_task_to_bottom`], which does the neighbour lookup inside the
-/// transaction that writes — seam-contract D1's rule still holds (the caller
-/// names neighbours, never a position; the arithmetic stays `position.rs`'s),
-/// it is only the *read* that moved.
+/// The column move and the run state are one transaction, so a refused
+/// transition leaves the card where it was rather than half-landed. Neither is
+/// written here directly: the move is `tasks::service`'s and the edge is
+/// `tasks::run_state`'s (ADR-0006). A lease's finish adds its own writes to
+/// the same transaction (task 043: the lease and the pin land with the task).
 ///
-/// It moved because task 012 made it wrong. This function used to run the
-/// lookup here, against the pool, and pass the id it found to `move_task`; the
-/// gap between the two was accepted in a comment as an ordering nit, on the
-/// stated grounds that a card landing in `in_review` in between would put this
-/// one second from the bottom instead of last. With two runs finishing at once
-/// the consequence is worse than that: both read the same bottom card, both
-/// compute the same midpoint against it, and both land on the same position.
-/// See `tasks::move_task_to_bottom` for the rest of the argument.
-async fn move_to_in_review(ctx: &ServiceContext, task_id: &str) -> Result<()> {
-    move_task_to_bottom(ctx, task_id, BoardColumn::InReview).await?;
-    Ok(())
+/// - `in_review`: the bottom of the column, `idle`;
+/// - `waiting_retry`: ADR-0011's wait;
+/// - `failed`: ADR-0011 for `fatal` ("no retry... run_state = failed"), and
+///   ADR-0010 for a cancelled run: cancel-one on a *running* task "goes to
+///   `failed` with `cancelled` reason". `Running -> Cancelled` is illegal by
+///   design; the reason lives on the run's `exit_class`, not on `run_state`.
+pub(crate) async fn land_within(
+    ctx: &ServiceContext,
+    tx: &mut ScopedTx,
+    task_id: &str,
+    landing: Landing,
+) -> Result<Vec<String>> {
+    let clock = ctx.clock.as_ref();
+    match landing {
+        Landing::Stays => Ok(Vec::new()),
+        Landing::InReview => {
+            // The neighbour lookup happens under the write lock, inside this
+            // transaction: two runs finishing at once must not both read the
+            // same bottom card and land on the same position (seam-contract
+            // D1's rule; see `tasks::move_task_to_bottom`).
+            let rebalanced =
+                move_within(ctx, tx, task_id, BoardColumn::InReview, Destination::Bottom).await?;
+            set_within(tx, clock, task_id, RunState::Idle).await?;
+            Ok(rebalanced)
+        }
+        Landing::WaitingRetry => {
+            set_within(tx, clock, task_id, RunState::WaitingRetry).await?;
+            Ok(Vec::new())
+        }
+        Landing::Failed => {
+            set_within(tx, clock, task_id, RunState::Failed).await?;
+            Ok(Vec::new())
+        }
+    }
+}
+
+/// What a landing announces, after its transaction commits: the task, and
+/// every id a forced rebalance renumbered alongside it.
+pub(crate) fn publish_landed(
+    ctx: &ServiceContext,
+    team_id: TeamId,
+    task_id: &str,
+    rebalanced: Vec<String>,
+) {
+    ctx.publish(ChangeEvent::tasks(
+        team_id,
+        std::iter::once(task_id.to_string())
+            .chain(rebalanced.into_iter().filter(|id| id != task_id)),
+    ));
 }
 
 /// The one place a `runs` row is read back — inside a transaction before the
 /// write that depends on it, and against the pool afterwards to hand the caller
-/// what was actually stored. Generic over the executor for the same reason
-/// `tasks::service::fetch_task_row` is.
-async fn fetch_run_row<'e, E>(executor: E, id: &str) -> Result<Run>
+/// what was actually stored. Joined to its task in `scope`
+/// ([`TeamScope::json`](crate::TeamScope::json)): a run inherits its team
+/// through its task, so another team's run is as missing as one never opened.
+async fn fetch_run_row<'e, E>(executor: E, scope: &str, id: &str) -> Result<Run>
 where
     E: sqlx::Executor<'e, Database = sqlx::Sqlite>,
 {
     sqlx::query_as!(
         Run,
-        r#"SELECT id, task_id, attempt, status AS "status: RunStatus", session_id, prompt,
-            started_at AS "started_at: DateTime<Utc>", ended_at AS "ended_at: DateTime<Utc>",
-            exit_class AS "exit_class: ExitClass", error_message, num_turns, cost_usd, log_path,
-            pr_url, resume_after AS "resume_after: DateTime<Utc>", base_ref,
-            model, effort, run_environment, input_tokens, output_tokens,
-            cache_read_tokens, cache_creation_tokens
-           FROM runs WHERE id = ?1"#,
+        r#"SELECT r.id, r.task_id, r.attempt, r.kind AS "kind: RunKind",
+            r.status AS "status: RunStatus", r.session_id, r.prompt,
+            r.started_at AS "started_at: DateTime<Utc>", r.ended_at AS "ended_at: DateTime<Utc>",
+            r.exit_class AS "exit_class: ExitClass", r.error_message, r.num_turns, r.cost_usd,
+            r.pr_url, r.resume_after AS "resume_after: DateTime<Utc>",
+            r.base_ref, r.model, r.effort, r.run_environment, r.input_tokens, r.output_tokens,
+            r.cache_read_tokens, r.cache_creation_tokens, r.head_sha, r.base_sha
+           FROM runs r JOIN tasks t ON t.id = r.task_id
+          WHERE r.id = ?1 AND t.team_id IN (SELECT value FROM json_each(?2))"#,
         id,
+        scope,
     )
     .fetch_optional(executor)
     .await?
@@ -1033,18 +1287,30 @@ pub struct RunCostSummary {
 /// sits beside a dozen runs under a dollar — and a mean would let a single
 /// outlier decide what the panel tells the user about every run they do.
 ///
+/// Every kind counts (seam-contract D29 point 6): the setup cost this median is
+/// compared against is paid once per spawned session, whatever the session was
+/// for, and leaving out short review runs would understate it.
+///
 /// Only runs that reported a cost count. A cancelled run that died before its
 /// `result` has `NULL` here, and treating that as zero would drag the answer
 /// toward nothing.
+///
+/// An aggregate over the runs of every team in the context's scope (D32's
+/// appendix), never another team's.
 pub async fn observed_run_cost(
-    pool: &sqlx::SqlitePool,
+    ctx: &ServiceContext,
     provider: &dyn crate::runner::provider::AgentProvider,
 ) -> Result<RunCostSummary> {
+    let scope = ctx.scope.json();
     let costs: Vec<f64> = sqlx::query_scalar!(
-        r#"SELECT cost_usd AS "cost_usd!: f64" FROM runs
-           WHERE cost_usd IS NOT NULL AND cost_usd > 0 ORDER BY cost_usd ASC"#,
+        r#"SELECT r.cost_usd AS "cost_usd!: f64"
+             FROM runs r JOIN tasks t ON t.id = r.task_id
+            WHERE t.team_id IN (SELECT value FROM json_each(?1))
+              AND r.cost_usd IS NOT NULL AND r.cost_usd > 0
+            ORDER BY r.cost_usd ASC"#,
+        scope,
     )
-    .fetch_all(pool)
+    .fetch_all(&ctx.pool)
     .await?;
 
     let sample_size = costs.len() as i64;

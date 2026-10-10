@@ -1,0 +1,500 @@
+//! What crosses the board port (seam-contract D31 point 2).
+//!
+//! Every type here is a wire type from the day it lands, although only the
+//! in-process adapter exists yet: task 052 sends these as JSON, and a type that
+//! could not survive that trip would be found by a runner on another machine
+//! rather than by this crate's tests. So every one derives both serde traits,
+//! spells its fields `camelCase`, and none uses `deny_unknown_fields`: a newer
+//! board's extra field must not make an older runner's reply unreadable (D31
+//! point 6). `every_board_dto_round_trips_through_json` holds that line.
+//!
+//! The core types carried inside (`TaskDetail`, `Repository`, `RunOutcome` and
+//! the rest) keep their own attributes. Their `Serialize` output is what
+//! `src/types.ts` already reads, so they gained `Deserialize` and nothing else.
+//! `Catalogue` is the one that still refuses unknown keys, deliberately; the
+//! D31 amendment of 2026-10-09 leaves that to task 052.
+
+use std::collections::BTreeMap;
+use std::time::Duration;
+
+use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
+
+use crate::consent::ceiling::StrategyCeiling;
+use crate::db::{Repository, Run, RunKind};
+use crate::events::TeamId;
+use crate::review::findings::ReviewFinding;
+use crate::review_loop::EffectiveReviewConfig;
+use crate::runner::outcome::RunOutcome;
+use crate::runner::RunTrigger;
+use crate::runs::bundle::{BundleFile, ReviewBundle};
+use crate::scheduler::ResumePoint;
+use crate::strategy::{Catalogue, EffectiveStrategy};
+use crate::tasks::TaskDetail;
+use crate::worktree::DiffStat;
+
+/// Names one lease, never what it is for (D31 point 3).
+///
+/// `LeaseRef`, named before task 042 renamed D19's in-process slot
+/// `scheduler::LocalSlot`: "lease" means only the board's lease.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LeaseRef {
+    pub task_id: String,
+    /// The task's lease generation when the claim was granted: strictly
+    /// increasing per task, and never repeated, even after a release (D31
+    /// point 3). A report under any other generation is `Conflict`.
+    pub generation: i64,
+    /// The task's team, read from its row at claim (D31 point 2). The runner
+    /// store cannot join the board, so the lease carries it on every report.
+    /// The board narrows its context to it only after checking its own scope
+    /// contains it (D31 point 13): a claim to verify, never an input.
+    pub team_id: TeamId,
+}
+
+impl LeaseRef {
+    pub fn new(task_id: impl Into<String>, generation: i64, team_id: impl Into<TeamId>) -> Self {
+        Self {
+            task_id: task_id.into(),
+            generation,
+            team_id: team_id.into(),
+        }
+    }
+}
+
+/// What a lease is for, in seam-contract D28's `CHECK` spelling, which is
+/// also how both stores hold it (`runner_leases` and `held_leases`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, sqlx::Type)]
+#[serde(rename_all = "camelCase")]
+#[sqlx(rename_all = "snake_case")]
+pub enum LeasePurpose {
+    Implementation,
+    Strategy,
+    Review,
+    Fix,
+}
+
+impl LeasePurpose {
+    /// The `CHECK` spelling, for a store that holds it as text.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            LeasePurpose::Implementation => "implementation",
+            LeasePurpose::Strategy => "strategy",
+            LeasePurpose::Review => "review",
+            LeasePurpose::Fix => "fix",
+        }
+    }
+}
+
+impl From<RunKind> for LeasePurpose {
+    /// A lease opened for a `runs` row is for that row's kind (D29 point 1).
+    fn from(kind: RunKind) -> Self {
+        match kind {
+            RunKind::Implementation => LeasePurpose::Implementation,
+            RunKind::Review => LeasePurpose::Review,
+            RunKind::Fix => LeasePurpose::Fix,
+        }
+    }
+}
+
+/// What a runner asks the board to let it start (D31 point 4).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", rename_all_fields = "camelCase")]
+pub enum ClaimTarget {
+    /// The runner loop's form (task 042): the board picks the task, by board
+    /// order, dependencies and each repository's free slots, among the
+    /// repositories the runner listed.
+    Next {
+        /// What the runner has free, already net of its own in-flight runs.
+        capacity: FreeCapacity,
+        /// The repositories this runner has a checkout of and has consented to
+        /// run unattended in. Before task 045 a repository is opted in exactly
+        /// when it is listed here.
+        repositories: Vec<String>,
+        /// How long the board may wait for something to become claimable. In
+        /// process it waits on its change channel and the injected clock; the
+        /// solo loop always sends zero (D31's 2026-10-10 amendment).
+        #[serde(with = "duration_millis")]
+        wait: Duration,
+        /// This runner's strategy ceiling (task 045), which the board cannot
+        /// read: it refuses a task whose named choice is above it, and the
+        /// runner fills from it at spawn. Left off the wire when there is
+        /// none, which is every runner before 045.
+        #[serde(default, skip_serializing_if = "StrategyCeiling::is_none")]
+        ceiling: StrategyCeiling,
+    },
+    /// Run now (`continue_session: false`), or Retry now and a due retry
+    /// (`true`). Only the second comes back with [`Claim::resume`] set.
+    Run {
+        task_id: String,
+        trigger: RunTrigger,
+        continue_session: bool,
+        #[serde(default, skip_serializing_if = "StrategyCeiling::is_none")]
+        ceiling: StrategyCeiling,
+    },
+    /// A planner: purpose `strategy`, no `runs` row and no `run_state` edge.
+    Plan {
+        task_id: String,
+        #[serde(default, skip_serializing_if = "StrategyCeiling::is_none")]
+        ceiling: StrategyCeiling,
+    },
+}
+
+/// Which named claim a [`preview`](super::BoardPort::preview) stands in
+/// for, so the preview judges what that claim would compose (task 045,
+/// seam-contract D36 point 3). `Next` has no preview: the board picks its task.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum PreviewOf {
+    /// [`ClaimTarget::Run`]: what a claim would compose now, which for a fresh
+    /// start that needs planning is the inline planner and the implementation
+    /// after it.
+    Run,
+    /// [`ClaimTarget::Plan`]: the planner alone.
+    Plan,
+}
+
+/// What a runner can still take on, sent with every
+/// [`ClaimTarget::Next`].
+///
+/// **Net, never a cap.** A `per_repository` of 1 means one more run in that
+/// repository, not a limit of one: the runner has already subtracted what it
+/// is running, so the board must not subtract again. A listed repository that
+/// is missing from `per_repository` has no free slot, the conservative reading
+/// `selection::next_batch` gives a missing key.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FreeCapacity {
+    pub total: usize,
+    pub per_repository: BTreeMap<String, usize>,
+}
+
+impl FreeCapacity {
+    /// The free slots in `repository_id`, and none for one the map does not
+    /// name.
+    pub fn for_repository(&self, repository_id: &str) -> usize {
+        self.per_repository.get(repository_id).copied().unwrap_or(0)
+    }
+}
+
+/// [`ClaimTarget::Next`]'s `wait` as integer milliseconds (`"wait": 0`), so
+/// task 052's JSON has one form rather than serde's `{ secs, nanos }`.
+mod duration_millis {
+    use std::time::Duration;
+
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    pub fn serialize<S: Serializer>(wait: &Duration, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_u64(u64::try_from(wait.as_millis()).unwrap_or(u64::MAX))
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Duration, D::Error> {
+        u64::deserialize(deserializer).map(Duration::from_millis)
+    }
+}
+
+/// A claim the board granted.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Claim {
+    pub lease: LeaseRef,
+    pub purpose: LeasePurpose,
+    /// ADR-0031 point 7's permission posture. A `Plan` claim carries
+    /// `Manual`: every door that plans is a person at the machine, and the
+    /// planner's own posture is fixed whatever this says.
+    pub trigger: RunTrigger,
+    /// What a `continue_session` claim resumes, chosen by the board (D29).
+    pub resume: Option<ResumePoint>,
+    /// The board as it read **before** the claim's edges were taken, and so
+    /// before any worktree existed for a first run. A prompt is composed from
+    /// a later [`run_context`](super::BoardPort::run_context), never from this.
+    pub context: RunContext,
+}
+
+/// Everything a runner needs from the board to compose and bound a run.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RunContext {
+    pub task: TaskDetail,
+    pub repository: Repository,
+    pub base_instructions: String,
+    /// ADR-0016's precedence chain, resolved board-side.
+    pub strategy: EffectiveStrategy,
+    /// For the provider of the runner the adapter was built for.
+    pub catalogue: Catalogue,
+    pub limits: TeamLimits,
+    /// What a review or fix phase is composed from (task 021). `None` only
+    /// from a board that predates the loop.
+    #[serde(default)]
+    pub review: Option<ReviewContext>,
+    /// What the task's worktree is created from, decided board-side (D31
+    /// point 6, task 044). A run records the base its claim carried, never a
+    /// later read's: the dependency graph can change in between.
+    pub base: RunBase,
+    /// Who wrote the plan revision a run executes and whose machine runs it
+    /// (ADR-0032 point 7, task 045), filled board-side from the lease's
+    /// runner. `None` in a personal team, where every author and the
+    /// machine's owner are one person, and from a context read without a
+    /// runner.
+    #[serde(default)]
+    pub authorship: Option<RunAuthorship>,
+}
+
+/// The two facts ADR-0032 point 7 has the agent told, in `# Task context`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RunAuthorship {
+    pub plan_revision: i64,
+    /// The author's login; `None` for a deleted account.
+    pub plan_author: Option<String>,
+    /// The runner's owner's login.
+    pub runner_owner: String,
+    pub runner_label: String,
+}
+
+/// What a task's worktree branches from (ADR-0033 point 5, ADR-0008), as the
+/// board resolved it. `worktree::base_ref` owns the rule.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RunBase {
+    /// The label: what `runs.base_ref` records and the panel shows.
+    pub base_ref: String,
+    /// `None` when the base is the repository's default branch.
+    pub dependency: Option<BaseDependency>,
+    /// ADR-0008's warning, one sentence rendered verbatim (D8).
+    pub warning: Option<String>,
+}
+
+impl RunBase {
+    /// What git is handed: the dependency's commit when there is one, the
+    /// label otherwise. Never the dependency's branch name, which may have
+    /// moved past the commit its last successful run ended on.
+    pub fn revision(&self) -> &str {
+        match &self.dependency {
+            Some(dependency) => &dependency.commit,
+            None => &self.base_ref,
+        }
+    }
+}
+
+/// The dependency a base was taken from. One `Option` on [`RunBase`] rather
+/// than four, because these facts are present or absent together.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BaseDependency {
+    pub task_id: String,
+    /// For the refusal `worktree::prepare` raises when the clone lacks
+    /// [`commit`](Self::commit).
+    pub title: String,
+    /// The run whose `head_sha` is [`commit`](Self::commit).
+    pub run_id: String,
+    /// That `head_sha`, in full.
+    pub commit: String,
+}
+
+/// What a review or fix phase is composed from, read board-side under the
+/// lease (seam-contract D31 point 6, task 021).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReviewContext {
+    /// The task's override when it says something, the global text otherwise,
+    /// template variables unexpanded. Empty when neither is set.
+    pub instructions: String,
+    pub config: EffectiveReviewConfig,
+    /// The newest review's open blocking findings: what a fix is composed
+    /// from, and nothing else.
+    pub open_blocking: Vec<ReviewFinding>,
+    /// Findings a fix run rejected, with its reason, so a reviewer does not
+    /// raise them again.
+    pub rejected: Vec<ReviewFinding>,
+    /// The newest implementation row's session and base. Every review and fix
+    /// row records the same base (D29 point 4), and a fix that resumes
+    /// continues this session, never the review's (D29 point 3).
+    pub implementation: Option<ImplementationBase>,
+    /// The newest row's head commit and the bundle it recorded.
+    pub head_sha: Option<String>,
+    pub change: Option<ChangeSummary>,
+    /// Whether the review phase the newest row belongs to has already
+    /// recorded, which decides which resume prompt it is sent.
+    pub phase_recorded: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImplementationBase {
+    pub session_id: String,
+    pub base_ref: Option<String>,
+    pub base_sha: Option<String>,
+}
+
+/// A recorded bundle without its patch: the review is told the size and the
+/// files, and reads the patch from the worktree, where it is never truncated.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChangeSummary {
+    pub diff: DiffStat,
+    pub files: Vec<BundleFile>,
+}
+
+/// The board's half of what bounds a run. The runner applies it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TeamLimits {
+    /// The per-attempt turn budget (`board::service::team_max_turns`).
+    pub max_turns: u32,
+    /// The stored blocklist, one rule per entry, or `None` when nobody has set
+    /// one. `None` and `Some(vec![])` differ: the first means ADR-0012's
+    /// defaults, the second an operator who turned the blocklist off.
+    pub disallowed_tools: Option<Vec<String>>,
+}
+
+/// The board's answer to a heartbeat. In solo `fenced` is empty because
+/// nothing re-claims a solo lease from under its holder, and `cancel` is
+/// empty because a solo Cancel reaches `InFlight::cancel` directly (D31
+/// point 4).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Heartbeat {
+    pub fenced: Vec<LeaseRef>,
+    pub cancel: Vec<String>,
+}
+
+/// Opens a `runs` row under an id the runner minted (D10).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StartRun {
+    pub run_id: String,
+    pub kind: RunKind,
+    pub session_id: String,
+    pub prompt: String,
+    pub base_ref: Option<String>,
+    pub base_sha: Option<String>,
+}
+
+/// One stretch of a run's transcript, keyed by byte offset.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TranscriptChunk {
+    pub run_id: String,
+    pub offset: u64,
+    pub bytes: Vec<u8>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TranscriptAck {
+    pub stored_through: u64,
+}
+
+/// The facts a runner reports when a run ends. The board decides what they
+/// mean (D31 point 4).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FinishRun {
+    /// `resume_after` must be `None`: choosing it is the board's.
+    pub outcome: RunOutcome,
+    pub head_sha: Option<String>,
+    pub bundle: Option<ReviewBundle>,
+    /// When the runner's own run window closes, the cap ADR-0011 puts on a
+    /// retry. Runner-owned state, so it travels as a fact.
+    pub window_closes_at: Option<DateTime<Utc>>,
+    pub transcript: TranscriptEnd,
+    /// This runner's strategy ceiling, for the phase a `Continue` would
+    /// start (task 045). Read by the board only when it decides to continue.
+    #[serde(default, skip_serializing_if = "StrategyCeiling::is_none")]
+    pub ceiling: StrategyCeiling,
+}
+
+/// Where the transcript of a finished run is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", rename_all_fields = "camelCase")]
+pub enum TranscriptEnd {
+    /// Every byte up to `length` has been sent.
+    Complete { length: u64 },
+    /// The runner keeps it. Task 056 gives this its meaning; in process both
+    /// arms are acknowledged alike.
+    KeptOnRunner,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FinishReceipt {
+    pub run: Run,
+    pub next: NextStep,
+}
+
+/// What happens after a finish.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", rename_all_fields = "camelCase")]
+pub enum NextStep {
+    /// The lease ended with the finish. `resume_after` is when the board will
+    /// try the task again, or `None` when nothing follows.
+    Released { resume_after: Option<DateTime<Utc>> },
+    /// The lease is kept, and the next phase is a `start_run` of `kind` under
+    /// it (ADR-0017, task 021). The board decided it in the same step that
+    /// closed the row; the runner never chooses to continue.
+    Continue { kind: RunKind },
+}
+
+/// One variant per [`BoardPort`](super::BoardPort) method.
+///
+/// The registry task 052's routes are wired from and the contract suite
+/// iterates, so a method added without a variant fails a test rather than a
+/// reviewer's attention. `run_tool` is task 055's.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum BoardMethod {
+    Preview,
+    Claim,
+    Heartbeat,
+    RunContext,
+    RecordBranch,
+    StartRun,
+    AppendTranscript,
+    PublishTail,
+    FinishRun,
+    Release,
+    RecordStrategy,
+    RecordReviewFindings,
+}
+
+impl BoardMethod {
+    pub const ALL: [BoardMethod; 12] = [
+        Self::Preview,
+        Self::Claim,
+        Self::Heartbeat,
+        Self::RunContext,
+        Self::RecordBranch,
+        Self::StartRun,
+        Self::AppendTranscript,
+        Self::PublishTail,
+        Self::FinishRun,
+        Self::Release,
+        Self::RecordStrategy,
+        Self::RecordReviewFindings,
+    ];
+
+    /// The trait method's name, which is also task 052's route segment.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Preview => "preview",
+            Self::Claim => "claim",
+            Self::Heartbeat => "heartbeat",
+            Self::RunContext => "run_context",
+            Self::RecordBranch => "record_branch",
+            Self::StartRun => "start_run",
+            Self::AppendTranscript => "append_transcript",
+            Self::PublishTail => "publish_tail",
+            Self::FinishRun => "finish_run",
+            Self::Release => "release",
+            Self::RecordStrategy => "record_strategy",
+            Self::RecordReviewFindings => "record_review_findings",
+        }
+    }
+
+    /// Whether the method acts under a lease (D31 point 3). The other three
+    /// are scoped by the runner the adapter was built for.
+    pub const fn takes_a_lease(self) -> bool {
+        !matches!(self, Self::Preview | Self::Claim | Self::Heartbeat)
+    }
+}

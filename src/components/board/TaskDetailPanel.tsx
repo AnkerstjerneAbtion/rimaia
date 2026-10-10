@@ -1,5 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 
+import { useCheckouts } from "../../hooks/useCheckouts";
+import { useLocalWorktrees } from "../../hooks/useLocalWorktrees";
 import { getTask, toRimaiaError } from "../../lib/commands";
 import { subscribeToTasksChanged } from "../../lib/events";
 import type { Repository, RimaiaError, Task, TaskDetail } from "../../types";
@@ -12,6 +14,8 @@ import { LinksEditor } from "../panel/LinksEditor";
 import { PlanEditor } from "../panel/PlanEditor";
 import { RepositorySelector } from "../panel/RepositorySelector";
 import { RetrySection } from "../panel/RetrySection";
+import { ReviewLoopSection } from "../panel/ReviewLoopSection";
+import { ReviewHistorySection } from "../panel/ReviewHistorySection";
 import { RunHistorySection } from "../panel/RunHistorySection";
 import { RunInfoSection } from "../panel/RunInfoSection";
 import { RunOutcomeSection } from "../panel/RunOutcomeSection";
@@ -79,6 +83,12 @@ function TaskDetailPanelBody({
   const [detail, setDetail] = useState<TaskDetail | null>(null);
   const [detailError, setDetailError] = useState<RimaiaError | null>(null);
   const panelRef = useRef<HTMLElement>(null);
+  // This computer's half of the task (task 066): its repository's checkout
+  // and where its worktree is, joined by id.
+  const { checkouts, loading: checkoutsLoading, error: checkoutsError } = useCheckouts();
+  const { worktrees } = useLocalWorktrees();
+  const checkout = checkouts.get(task.repositoryId);
+  const worktreePath = worktrees.get(task.id) ?? null;
 
   // Focus follows the drawer in. Without this the panel opens *over* the
   // board while focus stays on the card behind it, so a keyboard user's next
@@ -186,7 +196,7 @@ function TaskDetailPanelBody({
                 repositoryId={task.repositoryId}
                 repositories={repositories}
                 repositoryName={repositoryName}
-                worktreePath={task.worktreePath}
+                branch={task.branch}
                 hasRuns={detail?.lastRun != null}
                 detailLoading={detailLoading}
               />
@@ -270,9 +280,18 @@ function TaskDetailPanelBody({
             onChanged={refreshDetail}
           />
 
+          {/* Task 037: whether and how a fresh agent reviews this task, with
+              the instructions override. Beside the strategy because both
+              decide what the task's runs are spawned with. */}
+          <ReviewLoopSection
+            taskId={task.id}
+            reviewInstructions={detailLoading ? undefined : (detail?.reviewInstructions ?? null)}
+          />
+
           <RunInfoSection
             branch={task.branch}
-            worktreePath={task.worktreePath}
+            worktreePath={worktreePath}
+            notSetUp={!checkoutsLoading && checkoutsError === null && checkout === undefined}
             lastRun={detail?.lastRun ?? null}
             loading={detailLoading}
           />
@@ -294,6 +313,11 @@ function TaskDetailPanelBody({
             onChanged={refreshDetail}
           />
 
+          {/* Task 037: what the review loop found, loop by loop, above the
+              plain list of rows it is made of. Renders nothing for a task the
+              loop never touched. */}
+          <ReviewHistorySection taskId={task.id} />
+
           {/* Task 015's full history — every attempt, not only the last one —
               each opening the run detail overlay (outcome, diff, commits, PR,
               prompt, transcript, in ADR-0013's order). */}
@@ -312,7 +336,7 @@ function TaskDetailPanelBody({
               still one click further away and still the harder-to-reach one. */}
           <ArchiveTaskSection
             task={task}
-            repository={repositories?.find((candidate) => candidate.id === task.repositoryId)}
+            checkout={checkout}
             onArchived={onClose}
           />
 

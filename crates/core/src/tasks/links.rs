@@ -15,21 +15,31 @@ use sqlx::SqliteConnection;
 use crate::context::ServiceContext;
 use crate::db::TaskLink;
 use crate::error::{Error, Result};
-use crate::events::ChangeEvent;
+use crate::events::{ChangeEvent, TeamId};
 use crate::tasks::position::{position_between, rebalanced_positions, Placement};
+use crate::tasks::service::{fetch_task_row, record_plan_revision};
 use crate::tasks::types::{NewTaskLink, TaskLinkPatch};
 
 /// Appends a link to the bottom of a task's link list.
-#[tracing::instrument(skip_all, fields(source = ctx.source.as_str(), task_id = %task_id))]
+#[tracing::instrument(
+    skip_all,
+    fields(
+        source = ctx.source.as_str(),
+        user_id = ctx.actor.as_str(),
+        task_id = %task_id,
+    )
+)]
 pub async fn add_task_link(
     ctx: &ServiceContext,
     task_id: &str,
     input: NewTaskLink,
 ) -> Result<TaskLink> {
     validate_link(&input.label, &input.url)?;
+    let during_run = crate::consent::written_during_run(ctx, &ctx.actor).await?;
 
-    let mut tx = ctx.pool.begin().await?;
-    ensure_task_exists(&mut tx, task_id).await?;
+    let mut tx = ctx.begin().await?;
+    fetch_task_row(&mut tx, task_id).await?;
+    let before = link_contents(&mut tx, task_id).await?;
 
     let position = append_link_position(&mut tx, task_id).await?;
     let id = crate::db::new_id();
@@ -45,15 +55,16 @@ pub async fn add_task_link(
     .execute(&mut *tx)
     .await?;
 
-    stamp_task_updated_at(ctx, &mut tx, task_id).await?;
+    revise_if_links_changed(ctx, &mut tx, task_id, before, during_run).await?;
+    let team_id = stamp_task_updated_at(ctx, &mut tx, task_id).await?;
 
     tx.commit().await?;
 
     // Publish before the read-back: the row is already committed, so a
     // failure in `fetch_link_row` below must not cost the notification for a
     // mutation that already happened (ADR-0018).
-    ctx.publish(ChangeEvent::tasks([task_id.to_string()]));
-    let link = fetch_link_row(&ctx.pool, &id).await?;
+    ctx.publish(ChangeEvent::tasks(team_id, [task_id.to_string()]));
+    let link = fetch_link_row(&ctx.pool, &ctx.scope.json(), &id).await?;
     Ok(link)
 }
 
@@ -61,14 +72,24 @@ pub async fn add_task_link(
 /// current value. Unlike [`crate::tasks::TaskPatch`], plain `Option` is
 /// enough — `label` and `url` are both `NOT NULL`, so there is no "clear"
 /// this type needs to represent.
-#[tracing::instrument(skip_all, fields(source = ctx.source.as_str(), link_id = %link_id))]
+#[tracing::instrument(
+    skip_all,
+    fields(
+        source = ctx.source.as_str(),
+        user_id = ctx.actor.as_str(),
+        link_id = %link_id,
+    )
+)]
 pub async fn update_task_link(
     ctx: &ServiceContext,
     link_id: &str,
     patch: TaskLinkPatch,
 ) -> Result<TaskLink> {
-    let mut tx = ctx.pool.begin().await?;
-    let current = fetch_link_row(&mut *tx, link_id).await?;
+    let during_run = crate::consent::written_during_run(ctx, &ctx.actor).await?;
+    let mut tx = ctx.begin().await?;
+    let scope = tx.scope().json();
+    let current = fetch_link_row(&mut *tx, &scope, link_id).await?;
+    let before = link_contents(&mut tx, &current.task_id).await?;
 
     let label = patch.label.unwrap_or(current.label);
     let url = patch.url.unwrap_or(current.url);
@@ -83,40 +104,54 @@ pub async fn update_task_link(
     .execute(&mut *tx)
     .await?;
 
-    stamp_task_updated_at(ctx, &mut tx, &current.task_id).await?;
+    revise_if_links_changed(ctx, &mut tx, &current.task_id, before, during_run).await?;
+    let team_id = stamp_task_updated_at(ctx, &mut tx, &current.task_id).await?;
 
     tx.commit().await?;
 
     // Publish before the read-back — see `add_task_link`'s identical comment.
-    ctx.publish(ChangeEvent::tasks([current.task_id]));
-    let updated = fetch_link_row(&ctx.pool, link_id).await?;
+    ctx.publish(ChangeEvent::tasks(team_id, [current.task_id]));
+    let updated = fetch_link_row(&ctx.pool, &ctx.scope.json(), link_id).await?;
     Ok(updated)
 }
 
-/// One link by its own id.
+/// One link by its own id, in the context's scope: a link inherits its team
+/// through its task (ADR-0029 point 1), so another team's link is as missing
+/// as one never added.
 ///
-/// A read, so it takes the context only for the pool and publishes nothing.
+/// A read, so it publishes nothing.
 /// Task 010 needs it: every MCP tool answers with the whole task it touched,
 /// and `remove_task_link` is handed a link id — the owning task has to be
 /// known *before* the row is deleted.
 pub async fn get_task_link(ctx: &ServiceContext, link_id: &str) -> Result<TaskLink> {
-    fetch_link_row(&ctx.pool, link_id).await
+    fetch_link_row(&ctx.pool, &ctx.scope.json(), link_id).await
 }
 
-#[tracing::instrument(skip_all, fields(source = ctx.source.as_str(), link_id = %link_id))]
+#[tracing::instrument(
+    skip_all,
+    fields(
+        source = ctx.source.as_str(),
+        user_id = ctx.actor.as_str(),
+        link_id = %link_id,
+    )
+)]
 pub async fn remove_task_link(ctx: &ServiceContext, link_id: &str) -> Result<()> {
-    let mut tx = ctx.pool.begin().await?;
-    let current = fetch_link_row(&mut *tx, link_id).await?;
+    let during_run = crate::consent::written_during_run(ctx, &ctx.actor).await?;
+    let mut tx = ctx.begin().await?;
+    let scope = tx.scope().json();
+    let current = fetch_link_row(&mut *tx, &scope, link_id).await?;
+    let before = link_contents(&mut tx, &current.task_id).await?;
 
     sqlx::query!("DELETE FROM task_links WHERE id = ?1", link_id)
         .execute(&mut *tx)
         .await?;
 
-    stamp_task_updated_at(ctx, &mut tx, &current.task_id).await?;
+    revise_if_links_changed(ctx, &mut tx, &current.task_id, before, during_run).await?;
+    let team_id = stamp_task_updated_at(ctx, &mut tx, &current.task_id).await?;
 
     tx.commit().await?;
 
-    ctx.publish(ChangeEvent::tasks([current.task_id]));
+    ctx.publish(ChangeEvent::tasks(team_id, [current.task_id]));
     Ok(())
 }
 
@@ -124,7 +159,14 @@ pub async fn remove_task_link(ctx: &ServiceContext, link_id: &str) -> Result<()>
 /// `after_id` — the same neighbour contract `move_task` uses for cards, and
 /// the same "no neighbour named is only legal when nothing else is there"
 /// rule for the same reason (see `service.rs::resolve_task_position`).
-#[tracing::instrument(skip_all, fields(source = ctx.source.as_str(), link_id = %link_id))]
+#[tracing::instrument(
+    skip_all,
+    fields(
+        source = ctx.source.as_str(),
+        user_id = ctx.actor.as_str(),
+        link_id = %link_id,
+    )
+)]
 pub async fn reorder_task_link(
     ctx: &ServiceContext,
     link_id: &str,
@@ -135,8 +177,11 @@ pub async fn reorder_task_link(
         return Err(Error::invalid("a link cannot be reordered next to itself"));
     }
 
-    let mut tx = ctx.pool.begin().await?;
-    let current = fetch_link_row(&mut *tx, link_id).await?;
+    let during_run = crate::consent::written_during_run(ctx, &ctx.actor).await?;
+    let mut tx = ctx.begin().await?;
+    let scope = tx.scope().json();
+    let current = fetch_link_row(&mut *tx, &scope, link_id).await?;
+    let before = link_contents(&mut tx, &current.task_id).await?;
 
     let position =
         resolve_link_position(&mut tx, &current.task_id, link_id, before_id, after_id).await?;
@@ -149,13 +194,14 @@ pub async fn reorder_task_link(
     .execute(&mut *tx)
     .await?;
 
-    stamp_task_updated_at(ctx, &mut tx, &current.task_id).await?;
+    revise_if_links_changed(ctx, &mut tx, &current.task_id, before, during_run).await?;
+    let team_id = stamp_task_updated_at(ctx, &mut tx, &current.task_id).await?;
 
     tx.commit().await?;
 
     // Publish before the read-back — see `add_task_link`'s identical comment.
-    ctx.publish(ChangeEvent::tasks([current.task_id]));
-    let updated = fetch_link_row(&ctx.pool, link_id).await?;
+    ctx.publish(ChangeEvent::tasks(team_id, [current.task_id]));
+    let updated = fetch_link_row(&ctx.pool, &ctx.scope.json(), link_id).await?;
     Ok(updated)
 }
 
@@ -173,12 +219,36 @@ fn validate_link(label: &str, url: &str) -> Result<()> {
     Ok(())
 }
 
-async fn ensure_task_exists(tx: &mut SqliteConnection, task_id: &str) -> Result<()> {
-    let exists: i64 = sqlx::query_scalar!("SELECT count(*) FROM tasks WHERE id = ?1", task_id)
-        .fetch_one(&mut *tx)
-        .await?;
-    if exists == 0 {
-        return Err(Error::not_found(format!("no task with id {task_id}")));
+/// A task's links as the prompt lists them: each label and url, in order.
+async fn link_contents(tx: &mut SqliteConnection, task_id: &str) -> Result<Vec<(String, String)>> {
+    let links = sqlx::query!(
+        "SELECT label, url FROM task_links WHERE task_id = ?1 ORDER BY position ASC, id ASC",
+        task_id,
+    )
+    .fetch_all(&mut *tx)
+    .await?;
+    Ok(links
+        .into_iter()
+        .map(|link| (link.label, link.url))
+        .collect())
+}
+
+/// Records a plan revision when the task's links now read differently from
+/// `before` (ADR-0032's 2026-10-10 amendment: the links are plan content).
+///
+/// Compared as the prompt lists them rather than assumed from which service
+/// ran, so an edit that stores the same label and url, or a reorder that
+/// leaves the order as it was, is not a revision and undoes nobody's
+/// acceptance.
+async fn revise_if_links_changed(
+    ctx: &ServiceContext,
+    tx: &mut SqliteConnection,
+    task_id: &str,
+    before: Vec<(String, String)>,
+    during_run: bool,
+) -> Result<()> {
+    if link_contents(&mut *tx, task_id).await? != before {
+        record_plan_revision(tx, task_id, &ctx.actor, during_run).await?;
     }
     Ok(())
 }
@@ -190,30 +260,39 @@ async fn ensure_task_exists(tx: &mut SqliteConnection, task_id: &str) -> Result<
 /// much as editing its title is — task 004's "every mutation stamps
 /// `updated_at` and emits a change event" rule applies here too, not only to
 /// the writes in `service.rs`.
+///
+/// Answers with the task's team, read from the row it stamped, which is the
+/// team the caller's event names (ADR-0034 point 3).
 async fn stamp_task_updated_at(
     ctx: &ServiceContext,
     tx: &mut SqliteConnection,
     task_id: &str,
-) -> Result<()> {
+) -> Result<TeamId> {
     let now = ctx.clock.now();
-    sqlx::query!(
-        "UPDATE tasks SET updated_at = ?1 WHERE id = ?2",
+    let team_id = sqlx::query_scalar!(
+        "UPDATE tasks SET updated_at = ?1 WHERE id = ?2 RETURNING team_id",
         now,
         task_id,
     )
-    .execute(&mut *tx)
+    .fetch_one(&mut *tx)
     .await?;
-    Ok(())
+    Ok(team_id)
 }
 
-async fn fetch_link_row<'e, E>(executor: E, id: &str) -> Result<TaskLink>
+/// A link by id, joined to its task in `scope`
+/// ([`TeamScope::json`](crate::TeamScope::json)).
+async fn fetch_link_row<'e, E>(executor: E, scope: &str, id: &str) -> Result<TaskLink>
 where
     E: sqlx::Executor<'e, Database = sqlx::Sqlite>,
 {
     sqlx::query_as!(
         TaskLink,
-        "SELECT id, task_id, label, url, position FROM task_links WHERE id = ?1",
+        "SELECT l.id, l.task_id, l.label, l.url, l.position
+           FROM task_links l
+           JOIN tasks t ON t.id = l.task_id
+          WHERE l.id = ?1 AND t.team_id IN (SELECT value FROM json_each(?2))",
         id,
+        scope,
     )
     .fetch_optional(executor)
     .await?

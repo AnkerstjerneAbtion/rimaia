@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 
+import { runLabel } from "../../lib/board";
 import { listRunsForTask, pruneRunLogs, toRimaiaError } from "../../lib/commands";
 import { subscribeToRunsChanged } from "../../lib/events";
 import { formatBytes } from "../../lib/format";
@@ -104,7 +105,7 @@ export function RunHistorySection({ taskId }: RunHistorySectionProps) {
             {runs.map((run) => (
               <li key={run.id}>
                 <button type="button" onClick={() => setSelectedRunId(run.id)}>
-                  <span>Attempt {run.attempt}</span>
+                  <span>{runLabel(run.kind, run.attempt)}</span>
                   <span
                     className={
                       run.exitClass

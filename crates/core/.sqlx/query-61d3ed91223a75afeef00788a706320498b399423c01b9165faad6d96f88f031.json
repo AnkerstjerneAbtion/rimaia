@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE tasks SET pinned_runner_id = NULL\n                  WHERE id = ?1 AND pinned_runner_id = ?2",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "61d3ed91223a75afeef00788a706320498b399423c01b9165faad6d96f88f031"
+}

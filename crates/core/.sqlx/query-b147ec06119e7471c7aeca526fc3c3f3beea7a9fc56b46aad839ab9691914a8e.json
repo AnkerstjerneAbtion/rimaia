@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT f.id AS \"id!\", f.resolution AS \"resolution!\"\n             FROM review_findings f\n             JOIN runs r ON r.id = f.review_run_id\n            WHERE f.task_id = ?1 AND f.fingerprint = ?2 AND f.status = 'rejected'\n            ORDER BY r.attempt, f.ordinal\n            LIMIT 1",
+  "describe": {
+    "columns": [
+      {
+        "name": "id!",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "resolution!",
+        "ordinal": 1,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      false,
+      true
+    ]
+  },
+  "hash": "b147ec06119e7471c7aeca526fc3c3f3beea7a9fc56b46aad839ab9691914a8e"
+}

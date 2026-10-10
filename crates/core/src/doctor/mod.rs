@@ -10,11 +10,11 @@
 //!
 //! This module runs at three moments and no others: when the window opens, when
 //! the user presses Re-check, and immediately before the queue is told to start
-//! — [`QueueHandle::start`](crate::scheduler::QueueHandle::start), which is also
+//! — `rimaia_runner::queue::QueueHandle::start`, which is also
 //! what task 013's scheduled start will call before flipping the switch.
 //!
 //! It deliberately does **not** run inside
-//! [`scheduler::queue`](crate::scheduler::queue)'s step loop. That loop wakes on
+//! `rimaia_runner::queue`'s step loop. That loop wakes on
 //! every change event, so a doctor there would be eight subprocess spawns per
 //! card drag. The one check that genuinely must happen per step is already there
 //! and stays there: `probe_cli` before the claim, for task 008's stated reason.
@@ -46,6 +46,7 @@ use serde::{Deserialize, Serialize};
 use crate::context::ServiceContext;
 use crate::db::settings::{self, Dismissal};
 use crate::error::Result;
+use crate::machine::MachineContext;
 use crate::mcp::{self, RunHandles};
 use crate::paths::AppPaths;
 use crate::repo;
@@ -335,7 +336,7 @@ impl DoctorReport {
     /// **Deliberately blind to `dismissed`**, along with [`blocking`](Self::blocking)
     /// and [`blocking_summary`](Self::blocking_summary). Task 027's dismissal is
     /// presentation; the refusal on
-    /// [`QueueHandle::start`](crate::scheduler::QueueHandle::start) is the rule
+    /// `rimaia_runner::queue::QueueHandle::start` is the rule
     /// (D22 point 1, ADR-0006), and a user who dismissed every row still meets
     /// the same refusal with the same words. `crates/core/tests/doctor.rs` and
     /// `tests/scheduler.rs` both assert it, because this is the one thing a
@@ -487,12 +488,21 @@ impl Environment {
 /// Never `Err` for a failing check — a failure is a [`CheckResult`], which is
 /// the point. The `Result` is for the two things that are not check outcomes at
 /// all: the repository list not being readable, and the port setting not being
-/// readable. Both mean the database is unavailable, which no remediation string
-/// on a panel can help with.
-pub async fn run(ctx: &ServiceContext, environment: &Environment) -> Result<DoctorReport> {
-    let repositories = repo::list(ctx).await?;
-    let configured_port = mcp::configured_port(&ctx.pool).await?;
-    let dismissals = settings::doctor_dismissals(&ctx.pool).await?;
+/// readable. Both mean a store is unavailable, which no remediation string on
+/// a panel can help with.
+///
+/// The port, the dismissals and every clone it checks are this machine's, from
+/// `machine`. The board is read through `board`, by [`repo::list`], only for
+/// each repository's name; a repository this machine has no checkout of has
+/// nothing here to check, and gets no row (task 066).
+pub async fn run(
+    machine: &MachineContext,
+    board: &ServiceContext,
+    environment: &Environment,
+) -> Result<DoctorReport> {
+    let repositories = repo::list(board).await?;
+    let configured_port = mcp::configured_port(machine).await?;
+    let dismissals = settings::doctor_dismissals(machine).await?;
     let provider = environment.provider.as_ref();
 
     let mut results = vec![
@@ -517,8 +527,11 @@ pub async fn run(ctx: &ServiceContext, environment: &Environment) -> Result<Doct
     // answer a Re-check click with two dozen simultaneous `git` processes. The
     // doctor has seconds to spend and no deadline to meet.
     for repository in &repositories {
-        results.push(checks::repository_path(repository).await?);
-        results.push(checks::github_cli(repository, &environment.programs.gh).await?);
+        let Some(checkout) = machine.store.get_checkout(&repository.id).await? else {
+            continue;
+        };
+        results.push(checks::repository_path(repository, &checkout).await?);
+        results.push(checks::github_cli(repository, &checkout, &environment.programs.gh).await?);
     }
 
     Ok(DoctorReport::new(results, dismissals))
@@ -535,11 +548,11 @@ pub async fn run(ctx: &ServiceContext, environment: &Environment) -> Result<Doct
 /// status later escapes the rule — [`CheckResult::answered_by`] applies it on
 /// every read instead, where it holds for rows written before it and rows
 /// hand-edited into the settings file alike.
-pub async fn dismiss(ctx: &ServiceContext, dismissal: Dismissal) -> Result<Vec<Dismissal>> {
-    let mut stored = settings::doctor_dismissals(&ctx.pool).await?;
+pub async fn dismiss(machine: &MachineContext, dismissal: Dismissal) -> Result<Vec<Dismissal>> {
+    let mut stored = settings::doctor_dismissals(machine).await?;
     if !stored.contains(&dismissal) {
         stored.push(dismissal);
-        settings::set_doctor_dismissals(ctx, &stored).await?;
+        settings::set_doctor_dismissals(machine, &stored).await?;
     }
     Ok(stored)
 }
@@ -549,12 +562,12 @@ pub async fn dismiss(ctx: &ServiceContext, dismissal: Dismissal) -> Result<Vec<D
 /// Removing a dismissal nothing matches is the *point* rather than a no-op
 /// worth refusing: a stale entry is exactly what Settings → Environment exists
 /// to let the user clear.
-pub async fn restore(ctx: &ServiceContext, dismissal: &Dismissal) -> Result<Vec<Dismissal>> {
-    let mut stored = settings::doctor_dismissals(&ctx.pool).await?;
+pub async fn restore(machine: &MachineContext, dismissal: &Dismissal) -> Result<Vec<Dismissal>> {
+    let mut stored = settings::doctor_dismissals(machine).await?;
     let before = stored.len();
     stored.retain(|candidate| candidate != dismissal);
     if stored.len() != before {
-        settings::set_doctor_dismissals(ctx, &stored).await?;
+        settings::set_doctor_dismissals(machine, &stored).await?;
     }
     Ok(stored)
 }

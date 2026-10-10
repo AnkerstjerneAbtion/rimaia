@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "\n        INSERT INTO repositories (id, team_id, name, default_branch, allow_unattended_runs, created_at)\n        VALUES (?1, ?3, 'rimaia', 'main', 0, ?2)\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": []
+  },
+  "hash": "b5a4af19ffa40e6ab6f4f0992744c0015234db3a1c5e63229291f7f4d315a8d8"
+}

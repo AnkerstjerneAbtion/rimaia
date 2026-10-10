@@ -16,7 +16,18 @@ import {
 import { SortableContext, sortableKeyboardCoordinates } from "@dnd-kit/sortable";
 
 import { TaskCard } from "./TaskCard";
-import type { DetectedOpenInTarget, QueueEntry, Repository, Task } from "../../types";
+import type {
+  CheckoutView,
+  DetectedOpenInTarget,
+  LocalWorktree,
+  LastRunSummary,
+  QueueEntry,
+  Repository,
+  ReviewLoopSummary,
+  RunKind,
+  RunState,
+  Task,
+} from "../../types";
 
 // Mocked at the Tauri seam, not `lib/commands.ts`/`lib/events.ts` — see
 // `StorageSection.test.tsx`'s own comment for why. `TaskCard`'s "Run now"
@@ -65,7 +76,6 @@ function task(overrides: Partial<Task> = {}): Task {
     position: 0,
     runState: "idle",
     branch: null,
-    worktreePath: null,
     strategyMode: "default",
     model: null,
     effort: null,
@@ -84,19 +94,30 @@ function repository(overrides: Partial<Repository> = {}): Repository {
   return {
     id: "repo-1",
     name: "rimaia",
-    path: "/code/rimaia",
     defaultBranch: "main",
-    worktreeRoot: "/data/worktrees/rimaia",
-    allowUnattendedRuns: true,
-    maxConcurrency: 1,
     createdAt: "2026-08-20T09:00:00Z",
+    ...overrides,
+  };
+}
+
+/** This computer's checkout of the repository: the consent "Run now" reads
+ *  (task 066). Off unless a test turns it on, as a new registration is. */
+function checkout(overrides: Partial<CheckoutView> = {}): CheckoutView {
+  return {
+    repositoryId: "repo-1",
+    path: "/code/rimaia",
+    worktreeRoot: "/data/worktrees/rimaia",
+    maxConcurrency: 1,
+    unattendedConsent: false,
     onArchive: "none",
     onArchiveScript: null,
     ...overrides,
   };
 }
 
-/** Every test's default backend: one opted-in repository, an empty queue
+const CONSENTED = [checkout({ unattendedConsent: true })];
+
+/** Every test's default backend: one repository with a checkout, an empty queue
  *  plan (task 009's `useQueueLookup` is called unconditionally, same as
  *  `useRepositoryLookup` — see both hooks' own comments), and every `listen`
  *  subscription resolves and never fires on its own — the same shape
@@ -104,11 +125,15 @@ function repository(overrides: Partial<Repository> = {}): Repository {
  *  itself calls. */
 function mockBackend({
   repositories = [repository()],
+  checkouts = [checkout()],
+  worktrees = [] as LocalWorktree[],
   queuePlan = [] as QueueEntry[],
   openInTargets = [] as DetectedOpenInTarget[],
   onOpenIn,
 }: {
   repositories?: Repository[];
+  checkouts?: CheckoutView[];
+  worktrees?: LocalWorktree[];
   queuePlan?: QueueEntry[];
   openInTargets?: DetectedOpenInTarget[];
   onOpenIn?: (args: unknown) => void;
@@ -116,6 +141,8 @@ function mockBackend({
   mockListen.mockResolvedValue(vi.fn());
   mockInvoke.mockImplementation(async (command, args) => {
     if (command === "list_repositories") return repositories;
+    if (command === "list_checkouts") return checkouts;
+    if (command === "list_local_worktrees") return worktrees;
     if (command === "get_queue_status") {
       return { state: "paused", runningTaskIds: [], plan: queuePlan };
     }
@@ -169,6 +196,28 @@ function renderCard(overrides: Partial<Parameters<typeof TaskCard>[0]> = {}) {
   return props;
 }
 
+/** [`renderCard`] for a test that renders several cards in turn. */
+function renderCardWithCleanup(overrides: Partial<Parameters<typeof TaskCard>[0]> = {}) {
+  const props = {
+    task: task(),
+    repositoryName: "rimaia",
+    now: NOW,
+    selected: false,
+    onSelect: vi.fn(),
+    registerCardRef: vi.fn(),
+    onArrowNavigate: vi.fn(),
+    ...overrides,
+  };
+
+  return render(
+    <DndHarness>
+      <SortableContext items={[props.task.id]}>
+        <TaskCard {...props} />
+      </SortableContext>
+    </DndHarness>,
+  );
+}
+
 /** Clicks "Run now" once it is actually *enabled*.
  *
  *  The button is `disabled={runNow.kind !== "ready" || starting}`, and
@@ -209,6 +258,128 @@ describe("TaskCard", () => {
     renderCard({ task: task({ runState: "blocked" }) });
     await screen.findByRole("button", { name: "Run now" });
     expect(screen.getByText("Blocked")).toBeInTheDocument();
+  });
+
+  // -------------------------------------------------------------------------
+  // The review loop on the card (task 037)
+  // -------------------------------------------------------------------------
+
+  describe("the review loop", () => {
+    const remaining: ReviewLoopSummary = {
+      enabled: true,
+      maxReviewLoops: 2,
+      fixesSpent: 2,
+      reviews: 3,
+      verdict: { verdict: "findings_remain", openBlocking: 3 },
+      openBlocking: 3,
+      openAdvisory: 0,
+      pingPong: false,
+    };
+
+    function loopCard(
+      runState: RunState,
+      lastRun: LastRunSummary | null,
+      reviewLoop: ReviewLoopSummary | null = remaining,
+    ) {
+      return { ...task({ runState, column: "in_review" }), lastRun, reviewLoop };
+    }
+
+    const finished = (kind: RunKind): LastRunSummary => ({
+      kind,
+      status: "succeeded",
+      exitClass: "success",
+      endedAt: "2026-08-20T11:55:00Z",
+      resumeAfter: null,
+    });
+    const inFlight = (kind: RunKind): LastRunSummary => ({
+      kind,
+      status: "running",
+      exitClass: null,
+      endedAt: null,
+      resumeAfter: null,
+    });
+
+    it("says how the loop ended, counting fixes", async () => {
+      renderCard({ task: loopCard("idle", finished("review")) });
+      await screen.findByRole("button", { name: "Run now" });
+
+      expect(
+        screen.getByText("Reviewed after 2 fixes · 3 blocking findings open"),
+      ).toBeInTheDocument();
+    });
+
+    it("finds a loop that may be going in circles by those words", async () => {
+      renderCard({
+        task: loopCard("idle", finished("review"), { ...remaining, pingPong: true }),
+      });
+      await screen.findByRole("button", { name: "Run now" });
+
+      expect(screen.getByText("May be going in circles")).toBeInTheDocument();
+    });
+
+    it("says nothing while the task is still moving, whatever the badge reads", async () => {
+      const moving: Array<[RunState, LastRunSummary, string]> = [
+        ["queued", finished("review"), "Queued"],
+        ["running", inFlight("implementation"), "Running"],
+        ["running", inFlight("review"), "Reviewing"],
+        ["running", finished("review"), "Reviewing"],
+        ["running", inFlight("fix"), "Fixing"],
+        [
+          "waiting_retry",
+          { ...inFlight("review"), status: "failed", exitClass: "usage_limit" },
+          "Review waiting for retry",
+        ],
+      ];
+      for (const [runState, lastRun, badge] of moving) {
+        const { container, unmount } = renderCardWithCleanup({
+          task: loopCard(runState, lastRun),
+        });
+        await screen.findByText("Wire up the board");
+
+        expect(container.querySelector(".run-badge")?.textContent, badge).toMatch(
+          new RegExp(`^${badge}`),
+        );
+        expect(screen.queryByText(/blocking finding/), `${runState} ${badge}`).toBeNull();
+        expect(screen.queryByText(/going in circles/)).toBeNull();
+        unmount();
+      }
+    });
+
+    it("has no loop line for a ready task that was never implemented", async () => {
+      renderCard({ task: { ...task({ column: "ready" }), lastRun: null, reviewLoop: null } });
+      await screen.findByRole("button", { name: "Run now" });
+
+      expect(screen.queryByText(/Reviewed|Not reviewed/)).toBeNull();
+    });
+
+    it("never paints a success colour on anything inside the card", async () => {
+      const { container } = render(
+        <DndHarness>
+          <SortableContext items={["task-1"]}>
+            <TaskCard
+              task={loopCard("idle", finished("review"), {
+                ...remaining,
+                verdict: { verdict: "clean" },
+                openBlocking: 0,
+                pingPong: true,
+              })}
+              repositoryName="rimaia"
+              now={NOW}
+              selected={false}
+              onSelect={vi.fn()}
+              registerCardRef={vi.fn()}
+              onArrowNavigate={vi.fn()}
+            />
+          </SortableContext>
+        </DndHarness>,
+      );
+      await screen.findByRole("button", { name: "Run now" });
+
+      for (const element of container.querySelectorAll("*")) {
+        expect(element.getAttribute("class") ?? "", element.outerHTML).not.toMatch(/success/);
+      }
+      expect(container.textContent).not.toMatch(/✓|✔|passed|clean/i);
+    });
   });
 
   // -------------------------------------------------------------------------
@@ -403,7 +574,7 @@ describe("TaskCard", () => {
     renderCard({
       task: {
         ...task({ runState: "failed" }),
-        lastRun: { status: "interrupted", exitClass: "interrupted", endedAt: "2026-08-20T11:50:00Z", resumeAfter: null },
+        lastRun: { kind: "implementation", status: "interrupted", exitClass: "interrupted", endedAt: "2026-08-20T11:50:00Z", resumeAfter: null },
       },
     });
     await screen.findByRole("button", { name: "Run now" });
@@ -422,14 +593,14 @@ describe("TaskCard", () => {
     // concatenation of everything inside it, "Run now" included.
 
     it("is enabled once the task's repository has opted in to unattended runs", async () => {
-      mockBackend({ repositories: [repository({ allowUnattendedRuns: true })] });
+      mockBackend({ checkouts: CONSENTED });
       renderCard();
 
       expect(await screen.findByRole("button", { name: "Run now" })).toBeEnabled();
     });
 
     it("is disabled with the reason why when the repository has not opted in", async () => {
-      mockBackend({ repositories: [repository({ allowUnattendedRuns: false, name: "rimaia" })] });
+      mockBackend({ repositories: [repository({ name: "rimaia" })], checkouts: [checkout()] });
       renderCard();
 
       expect(
@@ -438,8 +609,19 @@ describe("TaskCard", () => {
       expect(screen.getByRole("button", { name: "Run now" })).toBeDisabled();
     });
 
+    it("is disabled with the service's sentence when the repository is not set up on this computer", async () => {
+      mockBackend({ repositories: [repository({ name: "rimaia" })], checkouts: [] });
+      renderCard();
+
+      expect(
+        await screen.findByText('"rimaia" is not set up on this computer'),
+      ).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: "Run now" })).toBeDisabled();
+      expect(screen.queryByText(/has not enabled unattended agent runs/)).toBeNull();
+    });
+
     it("is disabled while the task is already running, without claiming it is the opt-in that blocks it", async () => {
-      mockBackend({ repositories: [repository({ allowUnattendedRuns: true })] });
+      mockBackend({ checkouts: CONSENTED });
       renderCard({ task: task({ runState: "running" }) });
 
       // Settles immediately — `runState` is checked before the repository
@@ -452,7 +634,9 @@ describe("TaskCard", () => {
 
     it("calls start_task_run with the task id when clicked", async () => {
       mockInvoke.mockImplementation(async (command) => {
-        if (command === "list_repositories") return [repository({ allowUnattendedRuns: true })];
+        if (command === "list_repositories") return [repository()];
+        if (command === "list_checkouts") return CONSENTED;
+        if (command === "list_local_worktrees") return [];
         if (command === "get_queue_status") return { state: "paused", runningTaskIds: [], plan: [] };
         if (command === "start_task_run") return undefined;
         throw new Error(`unexpected command: ${command}`);
@@ -469,7 +653,9 @@ describe("TaskCard", () => {
 
     it("does not open the task panel when Run now is clicked", async () => {
       mockInvoke.mockImplementation(async (command) => {
-        if (command === "list_repositories") return [repository({ allowUnattendedRuns: true })];
+        if (command === "list_repositories") return [repository()];
+        if (command === "list_checkouts") return CONSENTED;
+        if (command === "list_local_worktrees") return [];
         if (command === "get_queue_status") return { state: "paused", runningTaskIds: [], plan: [] };
         if (command === "start_task_run") return undefined;
         throw new Error(`unexpected command: ${command}`);
@@ -484,7 +670,9 @@ describe("TaskCard", () => {
 
     it("shows the backend's own rejection message when start_task_run fails", async () => {
       mockInvoke.mockImplementation(async (command) => {
-        if (command === "list_repositories") return [repository({ allowUnattendedRuns: true })];
+        if (command === "list_repositories") return [repository()];
+        if (command === "list_checkouts") return CONSENTED;
+        if (command === "list_local_worktrees") return [];
         if (command === "get_queue_status") return { state: "paused", runningTaskIds: [], plan: [] };
         if (command === "start_task_run") {
           throw { code: "invalid", message: "a run is already in progress for this task" };
@@ -501,7 +689,7 @@ describe("TaskCard", () => {
     });
 
     it("shares one list_repositories call across every mounted card", async () => {
-      mockBackend({ repositories: [repository({ allowUnattendedRuns: true })] });
+      mockBackend({ checkouts: CONSENTED });
       render(
         <DndHarness>
           <SortableContext items={["task-1", "task-2"]}>
@@ -677,7 +865,9 @@ describe("TaskCard", () => {
       let resolveFirstFetch: ((value: unknown) => void) | undefined;
       let queueStatusCalls = 0;
       mockInvoke.mockImplementation(async (command) => {
-        if (command === "list_repositories") return [repository({ allowUnattendedRuns: true })];
+        if (command === "list_repositories") return [repository()];
+        if (command === "list_checkouts") return CONSENTED;
+        if (command === "list_local_worktrees") return [];
         if (command === "get_queue_status") {
           queueStatusCalls += 1;
           if (queueStatusCalls === 1) {
@@ -708,7 +898,9 @@ describe("TaskCard", () => {
 
       // A task moving elsewhere fires while the very first fetch is still
       // outstanding — the exact window the shared queue cache used to drop.
-      taskChangedListeners[0]?.({ payload: [] });
+      // Every subscriber hears it: this computer's worktree records listen on
+      // the same event since task 066.
+      for (const listener of taskChangedListeners) listener({ payload: [] });
 
       // The first (now stale) fetch finally settles.
       resolveFirstFetch?.({ state: "paused", runningTaskIds: [], plan: [] });
@@ -839,7 +1031,8 @@ describe("TaskCard", () => {
     });
   });
   describe("Open in… (task 026)", () => {
-    const WITH_WORKTREE = { worktreePath: "/data/worktrees/my repo/task-1" };
+    // Where this computer records the card's worktree (task 066).
+    const WORKTREES: LocalWorktree[] = [{ taskId: "task-1", path: "/data/worktrees/my repo/task-1" }];
     const DETECTED: DetectedOpenInTarget[] = [
       { target: "vs_code", label: "VS Code" },
       { target: "terminal", label: "Terminal" },
@@ -860,8 +1053,8 @@ describe("TaskCard", () => {
     });
 
     it("lists exactly what the machine reported, and nothing else", async () => {
-      mockBackend({ openInTargets: DETECTED });
-      renderCard({ task: task(WITH_WORKTREE) });
+      mockBackend({ openInTargets: DETECTED, worktrees: WORKTREES });
+      renderCard();
 
       fireEvent.click(await screen.findByRole("button", { name: "Open in" }));
 
@@ -874,8 +1067,8 @@ describe("TaskCard", () => {
 
     it("opens the worktree of the card it was invoked from", async () => {
       const opened = vi.fn();
-      mockBackend({ openInTargets: DETECTED, onOpenIn: opened });
-      renderCard({ task: task(WITH_WORKTREE) });
+      mockBackend({ openInTargets: DETECTED, worktrees: WORKTREES, onOpenIn: opened });
+      renderCard();
 
       fireEvent.click(await screen.findByRole("button", { name: "Open in" }));
       fireEvent.click(screen.getByRole("menuitem", { name: "VS Code" }));
@@ -887,8 +1080,8 @@ describe("TaskCard", () => {
 
     it("neither opens the panel nor starts a run, by click or by keyboard", async () => {
       const opened = vi.fn();
-      mockBackend({ openInTargets: DETECTED, onOpenIn: opened });
-      const props = renderCard({ task: task(WITH_WORKTREE) });
+      mockBackend({ openInTargets: DETECTED, worktrees: WORKTREES, onOpenIn: opened });
+      const props = renderCard();
 
       const toggle = await screen.findByRole("button", { name: "Open in" });
       fireEvent.click(toggle);
@@ -908,6 +1101,8 @@ describe("TaskCard", () => {
       mockListen.mockResolvedValue(vi.fn());
       mockInvoke.mockImplementation(async (command) => {
         if (command === "list_repositories") return [repository()];
+        if (command === "list_checkouts") return [checkout()];
+        if (command === "list_local_worktrees") return WORKTREES;
         if (command === "get_queue_status") {
           return { state: "paused", runningTaskIds: [], plan: [] };
         }
@@ -917,7 +1112,7 @@ describe("TaskCard", () => {
         }
         throw new Error(`unexpected command: ${command}`);
       });
-      renderCard({ task: task(WITH_WORKTREE) });
+      renderCard();
 
       fireEvent.click(await screen.findByRole("button", { name: "Open in" }));
       fireEvent.click(screen.getByRole("menuitem", { name: "VS Code" }));
@@ -933,8 +1128,8 @@ describe("TaskCard", () => {
       // nothing. Awaited on the probe rather than on "Run now": before
       // detection answers there is nothing to assert about, and asserting
       // anyway is what made this pass locally and fail on CI.
-      mockBackend({ openInTargets: [] });
-      renderCard({ task: task(WITH_WORKTREE) });
+      mockBackend({ openInTargets: [], worktrees: WORKTREES });
+      renderCard();
       await waitFor(() =>
         expect(mockInvoke).toHaveBeenCalledWith("list_open_in_targets", undefined),
       );

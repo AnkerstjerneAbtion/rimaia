@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "\n                UPDATE checkouts\n                   SET path = ?2, worktree_root = ?3, max_concurrency = ?4,\n                       unattended_consent = ?5, on_archive = ?6, on_archive_script = ?7,\n                       credential_login = ?8, credential_label = ?9, credential_added_at = ?10\n                 WHERE repository_id = ?1\n                ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 10
+    },
+    "nullable": []
+  },
+  "hash": "6ecc3b5b4f59bd94fb6df9881ca7670d718bc470677ddf4a0e94706ebb5eb3f0"
+}

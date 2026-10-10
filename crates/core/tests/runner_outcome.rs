@@ -11,7 +11,8 @@
 //!
 //! **No fabricated `usage_limit` payload.** `spike/FINDINGS.md` §4 records that
 //! the `rate_limit_event` when `rate_limit_info.status` is not `"allowed"` was
-//! never observed, and there is no fixture for it. So the tests below assert the
+//! never observed, and there is no fixture for it. Task 035's recordings since
+//! carry `"allowed_warning"`, on runs that completed, which is still not a wall. So the tests below assert the
 //! *predicate* the whole corpus proves — the field names, and "the status is not
 //! allowed" — using values written to look invented, because a plausible-looking
 //! guess is what would turn into a contract nobody checked.
@@ -25,7 +26,7 @@
 
 use chrono::Duration;
 use pretty_assertions::assert_eq;
-use rimaia_core::db::{settings, BoardColumn, ExitClass, RunState, RunStatus};
+use rimaia_core::db::{settings, BoardColumn, ExitClass, RunKind, RunState, RunStatus};
 use rimaia_core::runner::events::{
     EndReason, EventStream, ResultEvent, RunEvent, UsageReport, UsageState, UsageWindow,
     WindowReopen,
@@ -35,6 +36,7 @@ use rimaia_core::runner::outcome::{
 };
 use rimaia_core::runner::prompt::compose_prompt;
 use rimaia_core::runner::provider::{AgentProvider, ClaudeProvider};
+use rimaia_core::runs::bundle::RunCapture;
 use rimaia_core::tasks::{self, NewTask};
 use rimaia_core::testing::fixtures::{all_fixtures, fixture_lines};
 use rimaia_core::testing::TestContext;
@@ -341,11 +343,13 @@ const SYNTHESIZED_USAGE_LIMITS: [&str; 2] = ["usage-limit", "usage-limit-no-rese
 
 #[test]
 fn the_rate_limit_event_every_run_emits_is_not_a_usage_limit() {
-    // Every real recording carries `"status":"allowed"` early and unprompted.
-    // Reading that as a limit would fail every run in the corpus, which is the
-    // mistake this test exists to keep failing loudly. The two synthesized
-    // fixtures are carved out because they are the *other* branch — they exist
-    // precisely to carry a status that is not `allowed`.
+    // Every real recording carries a `rate_limit_event` early and unprompted,
+    // with `"status":"allowed"`, or `"allowed_warning"` when the window was past
+    // its warning threshold (the two `run-scoped-server-*` recordings). Reading
+    // either as a limit would fail runs that completed, which is the mistake
+    // this test exists to keep failing loudly. The two synthesized fixtures are
+    // carved out because they are the *other* branch — they exist precisely to
+    // carry a status that is not one of these.
     for name in all_fixtures() {
         if SYNTHESIZED_USAGE_LIMITS.contains(&name.as_str()) {
             continue;
@@ -355,10 +359,31 @@ fn the_rate_limit_event_every_run_emits_is_not_a_usage_limit() {
         assert_eq!(
             replay.usage.as_ref().map(|usage| usage.window.state),
             Some(UsageState::Allowed),
-            "{name}: the corpus proves exactly one status value"
+            "{name}: both statuses the corpus proves mean \"carry on\""
         );
         assert_ne!(replay.class(), ExitClass::UsageLimit, "{name}");
     }
+}
+
+#[test]
+fn a_run_past_the_warning_threshold_that_dies_without_a_result_is_not_a_usage_limit() {
+    // `run-scoped-server-name.jsonl` was recorded with the weekly window at 86%,
+    // past its warning threshold, so its `rate_limit_event` says
+    // `allowed_warning`. The run itself completed. Had it died before its
+    // `result`, the window would be the only signal left, and reading that word
+    // as a wall would hold the whole queue until the window resets, days away,
+    // for a run the account was still allowed to make (ADR-0011's 2026-10-05
+    // amendment).
+    let mut replay = Replay::of("run-scoped-server-name");
+    assert_eq!(replay.class(), ExitClass::Success);
+
+    replay.result = None;
+
+    assert_eq!(
+        replay.usage.as_ref().map(|usage| usage.window.state),
+        Some(UsageState::Allowed),
+    );
+    assert_eq!(replay.class(), ExitClass::Transient);
 }
 
 #[test]
@@ -719,24 +744,32 @@ async fn a_started_run_records_its_prompt_verbatim_beside_its_transcript_path() 
     assert_eq!(run.ended_at, None);
     assert_eq!(run.exit_class, None);
     assert_eq!(run.pr_url, None);
+    let log_path: String = sqlx::query_scalar("SELECT log_path FROM runs WHERE id = ?1")
+        .bind(&run.id)
+        .fetch_one(&fixture.harness.context.pool)
+        .await
+        .expect("read the column start_run still writes");
     assert_eq!(
-        run.log_path,
+        log_path,
         fixture
             .paths
             .runs_dir()
             .join(&fixture.task_id)
             .join(format!("{}.jsonl", run.id))
             .to_string_lossy(),
-        "ADR-0013's path is a pure function of the task and run ids"
+        "ADR-0013's path is a pure function of the task and run ids, written until task 056"
     );
 
     assert_eq!(
         fixture.harness.changes.try_recv().expect("a publication"),
-        ChangeEvent::runs([run.id])
+        ChangeEvent::runs(fixture.harness.solo.team_id.clone(), [run.id])
     );
     assert_eq!(
         fixture.harness.changes.try_recv().expect("a publication"),
-        ChangeEvent::tasks([fixture.task_id.clone()]),
+        ChangeEvent::tasks(
+            fixture.harness.solo.team_id.clone(),
+            [fixture.task_id.clone()]
+        ),
         "a card renders its last run (seam-contract D12), so the task changed too"
     );
 }
@@ -785,9 +818,11 @@ async fn a_run_against_a_task_that_does_not_exist_is_refused_by_name() {
         &fixture.paths,
         NewRun {
             task_id: "3f2b1c00-0000-4000-8000-00000000dead".to_string(),
+            kind: RunKind::Implementation,
             session_id: SESSION_ID.to_string(),
             prompt: "do the thing".to_string(),
             base_ref: None,
+            base_sha: None,
         },
     )
     .await
@@ -885,6 +920,7 @@ async fn two_runs_finishing_at_once_land_on_distinct_positions_in_in_review() {
     for task_id in [&second, &third] {
         tasks::move_task(
             &fixture.harness.context,
+            None,
             task_id,
             BoardColumn::InReview,
             Some(&bottom),
@@ -1039,15 +1075,50 @@ async fn finishing_a_run_twice_is_refused_rather_than_replaying_the_task_transit
     let outcome = Replay::of("success").outcome();
     fixture.finish(&run.id, &outcome).await;
 
-    let error = finish_run(&fixture.harness.context, &run.id, &outcome)
-        .await
-        .expect_err("a run ends once");
+    let error = finish_run(
+        &fixture.harness.context,
+        &run.id,
+        &outcome,
+        &RunCapture::default(),
+    )
+    .await
+    .expect_err("a run ends once");
 
     assert_eq!(error.code(), ErrorCode::Invalid);
     assert_eq!(
         error.to_string(),
         format!("run {} has already been finalized", run.id)
     );
+}
+
+#[tokio::test]
+async fn a_finished_review_or_fix_row_closes_and_lands_its_task_in_review() {
+    // D29 point 9: the kind is read off the row, and since task 021 a review
+    // or fix closes like any other row. With the loop off, the task lands
+    // where ADR-0017's exits put a loop that ended: in review, idle — and
+    // never `failed`, because the implementation before it had succeeded.
+    for kind in [RunKind::Review, RunKind::Fix] {
+        let mut fixture = RunFixture::new().await;
+        let task_id = fixture.task_id.clone();
+        let run = fixture
+            .start_kind(&task_id, kind, "review the branch")
+            .await;
+
+        let closed = finish_run(
+            &fixture.harness.context,
+            &run.id,
+            &Replay::of("success").outcome(),
+            &RunCapture::default(),
+        )
+        .await
+        .expect("a review or fix row closes");
+
+        assert_eq!(closed.kind, kind);
+        assert_eq!(closed.status, RunStatus::Succeeded, "{kind:?}");
+        let task = fixture.task().await;
+        assert_eq!(task.column, BoardColumn::InReview, "{kind:?}");
+        assert_eq!(task.run_state, RunState::Idle, "{kind:?}");
+    }
 }
 
 #[tokio::test]
@@ -1062,18 +1133,24 @@ async fn finishing_a_run_publishes_the_run_and_the_task_it_belongs_to() {
 
     assert_eq!(
         fixture.harness.changes.try_recv().expect("the run"),
-        ChangeEvent::runs([run.id])
+        ChangeEvent::runs(fixture.harness.solo.team_id.clone(), [run.id])
     );
     // Twice for the task: once for the row this run changed, once from
     // `set_run_state`'s own publication. Both are ids, so a subscriber re-reads
     // and neither is wrong (ADR-0018).
     assert_eq!(
         fixture.harness.changes.try_recv().expect("the task"),
-        ChangeEvent::tasks([fixture.task_id.clone()])
+        ChangeEvent::tasks(
+            fixture.harness.solo.team_id.clone(),
+            [fixture.task_id.clone()]
+        )
     );
     assert_eq!(
         fixture.harness.changes.try_recv().expect("the run state"),
-        ChangeEvent::tasks([fixture.task_id.clone()])
+        ChangeEvent::tasks(
+            fixture.harness.solo.team_id.clone(),
+            [fixture.task_id.clone()]
+        )
     );
 }
 
@@ -1494,11 +1571,11 @@ impl RunFixture {
         let repository = rimaia_core::repo::get(&self.harness.context, &self.repository_id)
             .await
             .expect("read the repository");
-        let base = settings::base_instructions(&self.harness.context.pool)
+        let base = settings::base_instructions(&self.harness.context)
             .await
             .expect("read the base instructions");
 
-        compose_prompt(&base, &detail, &repository, None, "subagents")
+        compose_prompt(&base, &detail, &repository, None, None, "subagents")
     }
 
     async fn start(&mut self, prompt: &str) -> rimaia_core::db::Run {
@@ -1507,14 +1584,26 @@ impl RunFixture {
     }
 
     async fn start_for(&mut self, task_id: &str, prompt: &str) -> rimaia_core::db::Run {
+        self.start_kind(task_id, RunKind::Implementation, prompt)
+            .await
+    }
+
+    async fn start_kind(
+        &mut self,
+        task_id: &str,
+        kind: RunKind,
+        prompt: &str,
+    ) -> rimaia_core::db::Run {
         start_run(
             &self.harness.context,
             &self.paths,
             NewRun {
                 task_id: task_id.to_string(),
+                kind,
                 session_id: SESSION_ID.to_string(),
                 prompt: prompt.to_string(),
                 base_ref: None,
+                base_sha: None,
             },
         )
         .await
@@ -1522,9 +1611,14 @@ impl RunFixture {
     }
 
     async fn finish(&mut self, run_id: &str, outcome: &RunOutcome) -> rimaia_core::db::Run {
-        finish_run(&self.harness.context, run_id, outcome)
-            .await
-            .expect("close a run row")
+        finish_run(
+            &self.harness.context,
+            run_id,
+            outcome,
+            &RunCapture::default(),
+        )
+        .await
+        .expect("close a run row")
     }
 
     async fn reread(&self, run_id: &str) -> rimaia_core::db::Run {
@@ -1573,11 +1667,13 @@ impl RunFixture {
 
 async fn seed_repository(pool: &SqlitePool) -> String {
     let id = rimaia_core::db::new_id();
+    let team_id = solo_team(pool).await;
     sqlx::query!(
-        r#"INSERT INTO repositories (id, name, path, default_branch, worktree_root, allow_unattended_runs, created_at)
-           VALUES (?1, 'rimaia', '/tmp/rimaia', 'main', '/tmp/rimaia-worktrees', 1, ?2)"#,
+        r#"INSERT INTO repositories (id, team_id, name, default_branch, allow_unattended_runs, created_at)
+           VALUES (?1, ?3, 'rimaia', 'main', 1, ?2)"#,
         id,
         NOW,
+        team_id,
     )
     .execute(pool)
     .await
@@ -1594,4 +1690,17 @@ fn expected_status(exit_class: ExitClass) -> RunStatus {
         ExitClass::Interrupted => RunStatus::Interrupted,
         ExitClass::UsageLimit | ExitClass::Transient | ExitClass::Fatal => RunStatus::Failed,
     }
+}
+
+/// The solo team the board's rows belong to: the identity `TestContext`
+/// already created, or a first launch's, read through the same
+/// `identity::ensure_solo` either way.
+async fn solo_team(pool: &SqlitePool) -> String {
+    rimaia_core::identity::ensure_solo(
+        pool,
+        &rimaia_core::testing::TestClock::new(rimaia_core::testing::test_epoch()),
+    )
+    .await
+    .expect("the board's solo identity")
+    .team_id
 }

@@ -1,4 +1,4 @@
-import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { invoke } from "@tauri-apps/api/core";
@@ -37,7 +37,6 @@ function taskSummary(overrides: Partial<TaskSummary> = {}): TaskSummary {
     position: 0,
     runState: "running",
     branch: "rimaia/task-1",
-    worktreePath: "/data/worktrees/repo/task-1",
     strategyMode: "default",
     model: null,
     effort: null,
@@ -52,12 +51,13 @@ function taskSummary(overrides: Partial<TaskSummary> = {}): TaskSummary {
     dependencyCount: 0,
     blockedByIncomplete: false,
     blockingTitle: null,
-    lastRun: { status: "running", exitClass: null, endedAt: null, resumeAfter: null },
+    lastRun: { kind: "implementation", status: "running", exitClass: null, endedAt: null, resumeAfter: null },
     // Nothing configured anywhere, which is what a card with no strategy
     // shows: the badge renders nothing rather than "undefined".
     effectiveModel: null,
     effectiveEffort: null,
     effectiveOrigin: "claude_code",
+    reviewLoop: null,
     ...overrides,
   };
 }
@@ -66,14 +66,8 @@ function repository(overrides: Partial<Repository> = {}): Repository {
   return {
     id: "repo-1",
     name: "rimaia",
-    path: "/code/rimaia",
     defaultBranch: "main",
-    worktreeRoot: "/data/worktrees/rimaia",
-    allowUnattendedRuns: true,
-    maxConcurrency: 1,
     createdAt: "2026-08-20T09:00:00Z",
-    onArchive: "none",
-    onArchiveScript: null,
     ...overrides,
   };
 }
@@ -103,6 +97,7 @@ function taskDetailFor(taskId: string, overrides: Partial<TaskDetail> = {}): Tas
       id: `run-for-${taskId}`,
       taskId,
       attempt: 1,
+      kind: "implementation",
       status: "running",
       sessionId: "session-1",
       prompt: "prompt",
@@ -112,7 +107,6 @@ function taskDetailFor(taskId: string, overrides: Partial<TaskDetail> = {}): Tas
       errorMessage: null,
       numTurns: null,
       costUsd: null,
-      logPath: `/data/runs/${taskId}/run.jsonl`,
       prUrl: null,
       resumeAfter: null,
       baseRef: null,
@@ -123,7 +117,12 @@ function taskDetailFor(taskId: string, overrides: Partial<TaskDetail> = {}): Tas
       outputTokens: null,
       cacheReadTokens: null,
       cacheCreationTokens: null,
+      headSha: null,
+      baseSha: null,
     },
+    reviewInstructions: null,
+    reviewConfig: {},
+    reviewLoop: null,
     ...overrides,
   };
 }
@@ -133,6 +132,7 @@ function runListEntry(overrides: Partial<RunListEntry> = {}): RunListEntry {
     id: "run-1",
     taskId: "task-1",
     attempt: 1,
+    kind: "implementation",
     status: "succeeded",
     sessionId: "session-1",
     prompt: "prompt",
@@ -142,7 +142,6 @@ function runListEntry(overrides: Partial<RunListEntry> = {}): RunListEntry {
     errorMessage: null,
     numTurns: 4,
     costUsd: 0.05,
-    logPath: "/data/runs/task-1/run-1.jsonl",
     prUrl: null,
     resumeAfter: null,
     baseRef: null,
@@ -153,6 +152,8 @@ function runListEntry(overrides: Partial<RunListEntry> = {}): RunListEntry {
     outputTokens: null,
     cacheReadTokens: null,
     cacheCreationTokens: null,
+    headSha: null,
+    baseSha: null,
     taskTitle: "Wire up the board",
     repositoryId: "repo-1",
     repositoryName: "rimaia",
@@ -216,6 +217,7 @@ function mockBackend({
           id: `run-for-${taskId}`,
           taskId,
           attempt: 1,
+          kind: "implementation",
           status: "running",
           sessionId: "session-1",
           prompt: "prompt",
@@ -225,8 +227,7 @@ function mockBackend({
           errorMessage: null,
           numTurns: null,
           costUsd: null,
-          logPath: `/data/runs/${taskId}/run.jsonl`,
-          prUrl: null,
+              prUrl: null,
           resumeAfter: null,
           baseRef: null,
           model: null,
@@ -236,6 +237,8 @@ function mockBackend({
           outputTokens: null,
           cacheReadTokens: null,
           cacheCreationTokens: null,
+          headSha: null,
+          baseSha: null,
         },
       };
     }
@@ -721,6 +724,7 @@ describe("RunsView", () => {
               id: "run-1",
               taskId,
               attempt: 1,
+              kind: "implementation",
               status: "succeeded",
               sessionId: "session-1",
               prompt: "prompt",
@@ -730,7 +734,6 @@ describe("RunsView", () => {
               errorMessage: null,
               numTurns: 4,
               costUsd: 0.05,
-              logPath: "/data/runs/task-1/run-1.jsonl",
               prUrl: null,
               resumeAfter: null,
               baseRef: null,
@@ -741,6 +744,8 @@ describe("RunsView", () => {
               outputTokens: null,
               cacheReadTokens: null,
               cacheCreationTokens: null,
+              headSha: null,
+              baseSha: null,
             },
           });
         }
@@ -777,6 +782,7 @@ describe("RunsView", () => {
               id: "run-1",
               taskId,
               attempt: 1,
+              kind: "implementation",
               status: "succeeded",
               sessionId: "session-1",
               prompt: "prompt",
@@ -786,7 +792,6 @@ describe("RunsView", () => {
               errorMessage: null,
               numTurns: 4,
               costUsd: 0.05,
-              logPath: "/data/runs/task-1/run-1.jsonl",
               prUrl: null,
               resumeAfter: null,
               baseRef: null,
@@ -797,6 +802,8 @@ describe("RunsView", () => {
               outputTokens: null,
               cacheReadTokens: null,
               cacheCreationTokens: null,
+              headSha: null,
+              baseSha: null,
             },
           });
         }
@@ -865,6 +872,7 @@ describe("RunsView", () => {
       const sharedLastRun = {
         id: "run-shared",
         attempt: 1,
+        kind: "implementation" as const,
         status: "succeeded" as const,
         sessionId: "session-1",
         prompt: "prompt",
@@ -874,7 +882,6 @@ describe("RunsView", () => {
         errorMessage: null,
         numTurns: 4,
         costUsd: 0.05,
-        logPath: "/data/runs/run-shared.jsonl",
         prUrl: null,
         resumeAfter: null,
         baseRef: null,
@@ -885,6 +892,8 @@ describe("RunsView", () => {
         outputTokens: null,
         cacheReadTokens: null,
         cacheCreationTokens: null,
+        headSha: null,
+        baseSha: null,
       };
 
       // Resolved out of dispatch order: task-2's call (dispatched second)
@@ -991,6 +1000,78 @@ describe("RunsView", () => {
       fireEvent.change(screen.getByLabelText("Repository"), { target: { value: "repo-2" } });
 
       await waitFor(() => expect(lastFilter).toEqual({ repositoryId: "repo-2" }));
+    });
+
+    describe("kind (task 037)", () => {
+      function historyBackend(entries: RunListEntry[] = []) {
+        mockListen.mockResolvedValue(vi.fn());
+        const filters: unknown[] = [];
+        mockInvoke.mockImplementation(async (command, args) => {
+          if (command === "list_tasks") return [];
+          if (command === "list_repositories") return [repository()];
+          if (command === "get_run_environment") return "inherit";
+          if (command === "get_queue_status") return queueStatus();
+          if (command === "list_runs") {
+            filters.push((args as { filter: unknown }).filter);
+            return entries;
+          }
+          throw new Error(`unexpected command: ${command}`);
+        });
+        // What the wire would carry: an undefined field is not sent.
+        return () => JSON.parse(JSON.stringify(filters[filters.length - 1]));
+      }
+
+      it("offers every kind beside the status filter, and starts on all of them", async () => {
+        const lastFilter = historyBackend();
+        render(<RunsView />);
+        await screen.findByText("No runs match these filters.");
+
+        const control = screen.getByLabelText("Kind") as HTMLSelectElement;
+        expect(Array.from(control.options).map((option) => option.textContent)).toEqual([
+          "All kinds",
+          "Implementation",
+          "Review",
+          "Fix",
+        ]);
+        expect(lastFilter()).toEqual({});
+      });
+
+      it("asks list_runs for reviews when Review is chosen", async () => {
+        const lastFilter = historyBackend();
+        render(<RunsView />);
+        await screen.findByText("No runs match these filters.");
+
+        fireEvent.change(screen.getByLabelText("Kind"), { target: { value: "review" } });
+
+        await waitFor(() => expect(lastFilter()).toEqual({ kind: "review" }));
+      });
+
+      it("leaves kind out of the request again for All kinds", async () => {
+        const lastFilter = historyBackend();
+        render(<RunsView />);
+        await screen.findByText("No runs match these filters.");
+        fireEvent.change(screen.getByLabelText("Kind"), { target: { value: "fix" } });
+        await waitFor(() => expect(lastFilter()).toEqual({ kind: "fix" }));
+
+        fireEvent.change(screen.getByLabelText("Kind"), { target: { value: "" } });
+
+        await waitFor(() => expect(lastFilter()).toEqual({}));
+      });
+
+      it("shows each row's kind label", async () => {
+        historyBackend([
+          runListEntry({ id: "run-1", taskTitle: "Reviewed one", kind: "review", attempt: 2 }),
+          runListEntry({ id: "run-2", taskTitle: "Fixed one", kind: "fix", attempt: 3 }),
+          runListEntry({ id: "run-3", taskTitle: "Built one", kind: "implementation" }),
+        ]);
+        render(<RunsView />);
+
+        const row = async (title: string) =>
+          (await screen.findByText(title)).closest("tr") as HTMLElement;
+        expect(within(await row("Reviewed one")).getByText("Review")).toBeInTheDocument();
+        expect(within(await row("Fixed one")).getByText("Fix")).toBeInTheDocument();
+        expect(within(await row("Built one")).getByText("Implementation")).toBeInTheDocument();
+      });
     });
   });
 });

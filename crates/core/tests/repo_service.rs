@@ -18,7 +18,9 @@ use std::sync::Arc;
 
 use pretty_assertions::assert_eq;
 use rimaia_core::db::Repository;
+use rimaia_core::machine::{Checkout, CheckoutView, MachineContext};
 use rimaia_core::repo::{self, NewRepository, RepositoryPatch};
+use rimaia_core::testing::machine::MemoryMachine;
 use rimaia_core::testing::{self, TempRepo, TestClock, TestContext};
 use rimaia_core::{ChangeEvent, ServiceContext};
 
@@ -32,7 +34,7 @@ async fn a_valid_repository_registers_showing_its_default_branch_and_no_remote()
     let source = TempRepo::init();
     let worktrees_dir = scratch_dir("rimaia-worktrees-");
 
-    let repository = register(&h.context, worktrees_dir.path(), source.path())
+    let repository = register(&h.context, h.machine(), worktrees_dir.path(), source.path())
         .await
         .expect("a valid repository must register");
 
@@ -40,25 +42,26 @@ async fn a_valid_repository_registers_showing_its_default_branch_and_no_remote()
         repository.name, "work tree",
         "derived from the directory name"
     );
-    assert_eq!(repository.path, source.path().to_str().unwrap());
     assert_eq!(repository.default_branch, "main");
+    let checkout = checkout_of(&h, &repository).await;
+    assert_eq!(checkout.path, source.path().to_str().unwrap());
     assert_eq!(
-        repository.worktree_root,
+        checkout.worktree_root,
         worktrees_dir.path().join("work-tree").to_str().unwrap(),
         "the default worktree_root slugifies the derived name"
     );
     assert!(
-        !repository.allow_unattended_runs,
-        "the opt-in must default to off"
+        !checkout.unattended_consent,
+        "the consent must default to off"
     );
 
-    let remote = repo::remote_info(&repository).await.expect("remote_info");
+    let remote = repo::remote_info(&checkout).await.expect("remote_info");
     assert_eq!(remote.remote_url, None);
     assert_eq!(remote.gh_ready, None);
 
     assert_eq!(
         h.changes.try_recv().expect("a publication is waiting"),
-        ChangeEvent::repositories([repository.id.clone()])
+        ChangeEvent::repositories(h.solo.team_id.clone(), [repository.id.clone()])
     );
 }
 
@@ -74,11 +77,13 @@ async fn registering_reports_the_configured_origin_remote() {
         .unwrap()
         .to_string();
 
-    let repository = register(&h.context, worktrees_dir.path(), source.path())
+    let repository = register(&h.context, h.machine(), worktrees_dir.path(), source.path())
         .await
         .expect("register");
 
-    let remote = repo::remote_info(&repository).await.expect("remote_info");
+    let remote = repo::remote_info(&checkout_of(&h, &repository).await)
+        .await
+        .expect("remote_info");
     assert_eq!(remote.remote_url, Some(expected_remote));
     // TempRepo's origin is a bare local path, not a URL with a host, so there
     // is nothing for `gh auth status --hostname` to check — this is
@@ -95,7 +100,7 @@ async fn a_repository_whose_path_contains_a_space_round_trips_through_get_and_li
     assert!(source.path().to_string_lossy().contains(' '));
     let worktrees_dir = scratch_dir("rimaia-worktrees-");
 
-    let registered = register(&h.context, worktrees_dir.path(), source.path())
+    let registered = register(&h.context, h.machine(), worktrees_dir.path(), source.path())
         .await
         .expect("register a path containing a space");
 
@@ -121,7 +126,13 @@ async fn a_registered_repository_is_readable_after_a_fresh_pool_reopens_the_same
 
     let id = {
         let ctx = file_backed_context(&db_file).await;
-        let registered = register(&ctx, worktrees_dir.path(), source.path())
+        let machine = MachineContext {
+            store: Arc::new(MemoryMachine::new()),
+            clock: ctx.clock.clone(),
+            changes: ctx.changes.clone(),
+            event_team: ctx.scope.sole().expect("solo").clone(),
+        };
+        let registered = register(&ctx, &machine, worktrees_dir.path(), source.path())
             .await
             .expect("register");
         ctx.pool.close().await;
@@ -145,7 +156,7 @@ async fn registering_a_path_that_does_not_exist_names_that_as_the_problem() {
     let worktrees_dir = scratch_dir("rimaia-worktrees-");
     let missing = scratch_dir("rimaia-missing-").path().join("does-not-exist");
 
-    let error = register(&h.context, worktrees_dir.path(), &missing)
+    let error = register(&h.context, h.machine(), worktrees_dir.path(), &missing)
         .await
         .expect_err("a nonexistent path must be refused");
 
@@ -163,7 +174,7 @@ async fn registering_a_file_instead_of_a_directory_names_that_as_the_problem() {
     let file = dir.path().join("not-a-directory");
     std::fs::write(&file, b"just a file").expect("write a plain file");
 
-    let error = register(&h.context, worktrees_dir.path(), &file)
+    let error = register(&h.context, h.machine(), worktrees_dir.path(), &file)
         .await
         .expect_err("a file must be refused");
 
@@ -180,7 +191,7 @@ async fn registering_a_directory_that_is_not_a_git_repository_names_that_as_the_
     let plain = scratch_dir("rimaia-plain-dir-");
     let canonical = canonicalize(plain.path());
 
-    let error = register(&h.context, worktrees_dir.path(), plain.path())
+    let error = register(&h.context, h.machine(), worktrees_dir.path(), plain.path())
         .await
         .expect_err("a plain directory must be refused");
 
@@ -211,7 +222,7 @@ async fn registering_a_worktree_of_another_repository_names_that_as_the_problem(
     );
     let canonical = canonicalize(&linked);
 
-    let error = register(&h.context, worktrees_dir.path(), &linked)
+    let error = register(&h.context, h.machine(), worktrees_dir.path(), &linked)
         .await
         .expect_err("a linked worktree must be refused");
 
@@ -231,7 +242,7 @@ async fn registering_a_repository_with_no_commits_names_that_as_the_problem() {
     let empty = init_repo_on_branch("main");
     let canonical = canonicalize(empty.path());
 
-    let error = register(&h.context, worktrees_dir.path(), empty.path())
+    let error = register(&h.context, h.machine(), worktrees_dir.path(), empty.path())
         .await
         .expect_err("a repository with no commits must be refused");
 
@@ -253,7 +264,7 @@ async fn registering_a_repository_whose_default_branch_cannot_be_determined_name
     git(repo.path(), &["checkout", "--detach", "HEAD"]);
     let canonical = canonicalize(repo.path());
 
-    let error = register(&h.context, worktrees_dir.path(), repo.path())
+    let error = register(&h.context, h.machine(), worktrees_dir.path(), repo.path())
         .await
         .expect_err("an undeterminable default branch must be refused");
 
@@ -277,11 +288,11 @@ async fn registering_the_same_directory_twice_is_refused() {
     let h = TestContext::new().await;
     let source = TempRepo::init();
     let worktrees_dir = scratch_dir("rimaia-worktrees-");
-    register(&h.context, worktrees_dir.path(), source.path())
+    register(&h.context, h.machine(), worktrees_dir.path(), source.path())
         .await
         .expect("the first registration must succeed");
 
-    let error = register(&h.context, worktrees_dir.path(), source.path())
+    let error = register(&h.context, h.machine(), worktrees_dir.path(), source.path())
         .await
         .expect_err("registering the same directory twice must be refused");
 
@@ -292,6 +303,85 @@ async fn registering_the_same_directory_twice_is_refused() {
 
     let rows = repo::list(&h.context).await.expect("list");
     assert_eq!(rows.len(), 1, "the duplicate must not have been inserted");
+    let checkouts = h.machine().store.list_checkouts().await.expect("checkouts");
+    assert_eq!(checkouts.len(), 1, "nor its checkout");
+}
+
+#[tokio::test]
+async fn registering_the_same_clone_twice_is_refused_from_this_machines_checkouts() {
+    // The clone is this machine's fact since task 066, so the duplicate check
+    // reads the checkouts and never the board: a board row whose retired
+    // `path` names the clone, as every adopted install has, refuses nothing.
+    let h = TestContext::new().await;
+    let source = TempRepo::init();
+    let worktrees_dir = scratch_dir("rimaia-worktrees-");
+    let path = source.path().to_str().unwrap().to_string();
+    let team_id = h.solo.team_id.clone();
+    sqlx::query(
+        "INSERT INTO repositories (id, team_id, name, path, default_branch, created_at)
+         VALUES ('adopted-elsewhere', ?1, 'adopted', ?2, 'main', '2026-08-20T12:00:00+00:00')",
+    )
+    .bind(&team_id)
+    .bind(&path)
+    .execute(&h.context.pool)
+    .await
+    .expect("a board row naming the clone in its retired column");
+
+    let first = register(&h.context, h.machine(), worktrees_dir.path(), source.path())
+        .await
+        .expect("the board's retired column does not refuse a registration");
+
+    // A checkout of the clone already on this machine is what refuses.
+    let error = register(&h.context, h.machine(), worktrees_dir.path(), source.path())
+        .await
+        .expect_err("a second checkout of one clone is refused");
+    assert_eq!(error.to_string(), format!("{path} is already registered"));
+    assert_eq!(
+        h.machine().store.list_checkouts().await.expect("checkouts"),
+        vec![checkout_of(&h, &first).await],
+    );
+}
+
+#[tokio::test]
+async fn a_freshly_registered_repository_has_no_path_on_the_board_and_a_complete_checkout() {
+    let h = TestContext::new().await;
+    let source = TempRepo::init();
+    let worktrees_dir = scratch_dir("rimaia-worktrees-");
+
+    let repository = register(&h.context, h.machine(), worktrees_dir.path(), source.path())
+        .await
+        .expect("register");
+
+    let (path, worktree_root): (Option<String>, Option<String>) =
+        sqlx::query_as("SELECT path, worktree_root FROM repositories WHERE id = ?1")
+            .bind(&repository.id)
+            .fetch_one(&h.context.pool)
+            .await
+            .expect("read the board's retired columns");
+    assert_eq!((path, worktree_root), (None, None));
+
+    let checkout = checkout_of(&h, &repository).await;
+    assert_eq!(
+        checkout,
+        rimaia_core::machine::Checkout {
+            repository_id: repository.id.clone(),
+            path: source.path().to_str().unwrap().to_string(),
+            worktree_root: worktrees_dir
+                .path()
+                .join("work-tree")
+                .to_str()
+                .unwrap()
+                .to_string(),
+            max_concurrency: 1,
+            unattended_consent: false,
+            on_archive: rimaia_core::db::OnArchive::None,
+            on_archive_script: None,
+            credential_login: None,
+            credential_label: None,
+            credential_added_at: None,
+            created_at: repository.created_at,
+        }
+    );
 }
 
 #[tokio::test]
@@ -302,6 +392,7 @@ async fn registering_with_a_blank_name_is_refused() {
 
     let error = repo::register(
         &h.context,
+        h.machine(),
         worktrees_dir.path(),
         NewRepository {
             path: source.path().to_str().unwrap().to_string(),
@@ -331,7 +422,7 @@ async fn default_branch_prefers_origin_head_over_main_and_master() {
     git(repo.path(), &["branch", "master"]);
     point_origin_head_at(repo.path(), "trunk");
 
-    let repository = register(&h.context, worktrees_dir.path(), repo.path())
+    let repository = register(&h.context, h.machine(), worktrees_dir.path(), repo.path())
         .await
         .expect("register");
 
@@ -347,7 +438,7 @@ async fn default_branch_falls_back_to_main_when_there_is_no_origin_head() {
     git(repo.path(), &["branch", "main"]);
     git(repo.path(), &["branch", "master"]);
 
-    let repository = register(&h.context, worktrees_dir.path(), repo.path())
+    let repository = register(&h.context, h.machine(), worktrees_dir.path(), repo.path())
         .await
         .expect("register");
 
@@ -362,7 +453,7 @@ async fn default_branch_falls_back_to_master_when_there_is_no_main() {
     commit(repo.path(), "f.txt", "hello");
     git(repo.path(), &["branch", "master"]);
 
-    let repository = register(&h.context, worktrees_dir.path(), repo.path())
+    let repository = register(&h.context, h.machine(), worktrees_dir.path(), repo.path())
         .await
         .expect("register");
 
@@ -376,7 +467,7 @@ async fn default_branch_falls_back_to_the_current_branch_when_nothing_else_appli
     let repo = init_repo_on_branch("trunk");
     commit(repo.path(), "f.txt", "hello");
 
-    let repository = register(&h.context, worktrees_dir.path(), repo.path())
+    let repository = register(&h.context, h.machine(), worktrees_dir.path(), repo.path())
         .await
         .expect("register");
 
@@ -388,10 +479,10 @@ async fn default_branch_falls_back_to_the_current_branch_when_nothing_else_appli
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-async fn updating_name_default_branch_and_worktree_root_is_readable_afterward() {
+async fn updating_name_and_default_branch_is_readable_afterward() {
     let mut h = TestContext::new().await;
-    let repository = register_temp_repo(&h.context).await;
-    h.changes.try_recv().expect("the registration publication");
+    let repository = register_temp_repo(&h).await;
+    drain(&mut h);
 
     let updated = repo::update(
         &h.context,
@@ -399,8 +490,6 @@ async fn updating_name_default_branch_and_worktree_root_is_readable_afterward() 
         RepositoryPatch {
             name: Some("Renamed".to_string()),
             default_branch: Some("develop".to_string()),
-            worktree_root: Some("/tmp/somewhere-else".to_string()),
-            ..RepositoryPatch::default()
         },
     )
     .await
@@ -408,21 +497,96 @@ async fn updating_name_default_branch_and_worktree_root_is_readable_afterward() 
 
     assert_eq!(updated.name, "Renamed");
     assert_eq!(updated.default_branch, "develop");
-    assert_eq!(updated.worktree_root, "/tmp/somewhere-else");
     assert_eq!(
         repo::get(&h.context, &repository.id).await.unwrap(),
         updated
     );
     assert_eq!(
         h.changes.try_recv().expect("the update publication"),
-        ChangeEvent::repositories([repository.id])
+        ChangeEvent::repositories(h.solo.team_id.clone(), [repository.id])
     );
+}
+
+#[tokio::test]
+async fn the_worktree_root_is_set_on_the_checkout_and_returns_its_view() {
+    let mut h = TestContext::new().await;
+    let repository = register_temp_repo(&h).await;
+    drain(&mut h);
+
+    let view = repo::set_worktree_root(
+        &h.context,
+        h.machine(),
+        &repository.id,
+        "/tmp/somewhere-else".to_string(),
+    )
+    .await
+    .expect("set the worktree root");
+
+    assert_eq!(view.worktree_root, "/tmp/somewhere-else");
+    assert_eq!(view, CheckoutView::from(checkout_of(&h, &repository).await));
+    assert_eq!(
+        h.changes.try_recv().expect("the checkout publication"),
+        ChangeEvent::repositories(h.solo.team_id.clone(), [repository.id.clone()])
+    );
+
+    let error = repo::set_worktree_root(&h.context, h.machine(), &repository.id, "  ".to_string())
+        .await
+        .expect_err("a blank root is refused, as registration refuses one");
+    assert_eq!(error.to_string(), "worktree root must not be empty");
+}
+
+#[tokio::test]
+async fn the_per_repository_cap_is_set_on_the_checkout_and_returns_its_view() {
+    let h = TestContext::new().await;
+    let repository = register_temp_repo(&h).await;
+
+    let view = repo::set_max_concurrency(&h.context, h.machine(), &repository.id, 3)
+        .await
+        .expect("raise the cap");
+
+    assert_eq!(view.max_concurrency, 3);
+    assert_eq!(view, CheckoutView::from(checkout_of(&h, &repository).await));
+    let error = repo::set_max_concurrency(&h.context, h.machine(), &repository.id, 0)
+        .await
+        .expect_err("zero is spelled by withdrawing consent");
+    assert!(error.to_string().contains("turn off"), "{error}");
+}
+
+#[tokio::test]
+async fn a_repository_not_set_up_on_this_computer_refuses_every_checkout_setter() {
+    let h = TestContext::new().await;
+    let repository = register_temp_repo(&h).await;
+    h.machine()
+        .store
+        .remove_checkout(&repository.id)
+        .await
+        .expect("forget the checkout");
+    let refusal = format!("\"{}\" is not set up on this computer", repository.name);
+
+    for error in [
+        repo::set_allow_unattended_runs(&h.context, h.machine(), &repository.id, true)
+            .await
+            .expect_err("consent"),
+        repo::set_max_concurrency(&h.context, h.machine(), &repository.id, 2)
+            .await
+            .expect_err("cap"),
+        repo::set_worktree_root(
+            &h.context,
+            h.machine(),
+            &repository.id,
+            "/tmp/x".to_string(),
+        )
+        .await
+        .expect_err("root"),
+    ] {
+        assert_eq!(error.to_string(), refusal);
+    }
 }
 
 #[tokio::test]
 async fn updating_a_repository_with_a_blank_name_is_refused() {
     let h = TestContext::new().await;
-    let repository = register_temp_repo(&h.context).await;
+    let repository = register_temp_repo(&h).await;
 
     let error = repo::update(
         &h.context,
@@ -445,10 +609,10 @@ async fn updating_a_repository_with_a_blank_name_is_refused() {
 #[tokio::test]
 async fn removing_a_repository_with_no_tasks_succeeds() {
     let mut h = TestContext::new().await;
-    let repository = register_temp_repo(&h.context).await;
-    h.changes.try_recv().expect("the registration publication");
+    let repository = register_temp_repo(&h).await;
+    drain(&mut h);
 
-    repo::remove(&h.context, &repository.id)
+    repo::remove(&h.context, Some(h.machine()), &repository.id)
         .await
         .expect("removal with no referencing tasks must succeed");
 
@@ -461,18 +625,40 @@ async fn removing_a_repository_with_no_tasks_succeeds() {
     );
     assert_eq!(
         h.changes.try_recv().expect("the removal publication"),
-        ChangeEvent::repositories([repository.id])
+        ChangeEvent::repositories(h.solo.team_id.clone(), [repository.id.clone()])
     );
+    assert_eq!(
+        h.machine()
+            .store
+            .get_checkout(&repository.id)
+            .await
+            .expect("read"),
+        None,
+        "given a machine, the checkout goes with the board row",
+    );
+}
+
+#[tokio::test]
+async fn a_refused_removal_writes_nothing_in_either_store() {
+    let h = TestContext::new().await;
+    let repository = register_temp_repo(&h).await;
+    insert_task(&h.context.pool, &repository.id).await;
+
+    repo::remove(&h.context, Some(h.machine()), &repository.id)
+        .await
+        .expect_err("a task still references it");
+
+    checkout_of(&h, &repository).await;
 }
 
 #[tokio::test]
 async fn removing_a_repository_with_tasks_is_refused_and_names_the_count() {
     let h = TestContext::new().await;
-    let repository = register_temp_repo(&h.context).await;
+    let repository = register_temp_repo(&h).await;
     insert_task(&h.context.pool, &repository.id).await;
     insert_task(&h.context.pool, &repository.id).await;
 
-    let error = repo::remove(&h.context, &repository.id)
+    let error = repo::remove(&h.context, Some(h.machine()), &repository.id)
         .await
         .expect_err("removal must be refused while tasks reference it");
 
@@ -488,10 +674,10 @@ async fn removing_a_repository_with_tasks_is_refused_and_names_the_count() {
 #[tokio::test]
 async fn removing_a_repository_with_exactly_one_task_uses_the_singular_noun() {
     let h = TestContext::new().await;
-    let repository = register_temp_repo(&h.context).await;
+    let repository = register_temp_repo(&h).await;
     insert_task(&h.context.pool, &repository.id).await;
 
-    let error = repo::remove(&h.context, &repository.id)
+    let error = repo::remove(&h.context, Some(h.machine()), &repository.id)
         .await
         .expect_err("removal must be refused");
 
@@ -508,42 +694,67 @@ async fn removing_a_repository_with_exactly_one_task_uses_the_singular_noun() {
 #[tokio::test]
 async fn a_newly_registered_repository_defaults_to_no_unattended_runs() {
     let h = TestContext::new().await;
-    let repository = register_temp_repo(&h.context).await;
+    let repository = register_temp_repo(&h).await;
 
-    assert!(!repo::allows_unattended_runs(&repository));
-    assert!(repo::ensure_unattended_runs_allowed(&repository).is_err());
+    assert!(!repo::allows_unattended_runs(
+        &checkout_of(&h, &repository).await
+    ));
+    assert!(
+        repo::ensure_unattended_runs_allowed(h.machine(), &repository)
+            .await
+            .is_err()
+    );
 }
 
 #[tokio::test]
-async fn set_allow_unattended_runs_flips_the_flag_and_publishes() {
+async fn set_allow_unattended_runs_flips_the_consent_and_publishes() {
     let mut h = TestContext::new().await;
-    let repository = register_temp_repo(&h.context).await;
-    h.changes.try_recv().expect("the registration publication");
+    let repository = register_temp_repo(&h).await;
+    drain(&mut h);
 
-    let enabled = repo::set_allow_unattended_runs(&h.context, &repository.id, true)
+    let enabled = repo::set_allow_unattended_runs(&h.context, h.machine(), &repository.id, true)
         .await
-        .expect("enable the opt-in");
-    assert!(enabled.allow_unattended_runs);
-    assert!(repo::allows_unattended_runs(&enabled));
-    assert!(repo::ensure_unattended_runs_allowed(&enabled).is_ok());
+        .expect("enable the consent");
+    assert!(enabled.unattended_consent);
     assert_eq!(
-        h.changes.try_recv().expect("the opt-in publication"),
-        ChangeEvent::repositories([repository.id.clone()])
+        enabled,
+        CheckoutView::from(checkout_of(&h, &repository).await)
+    );
+    assert!(
+        repo::ensure_unattended_runs_allowed(h.machine(), &repository)
+            .await
+            .is_ok()
+    );
+    assert_eq!(
+        h.changes.try_recv().expect("the consent publication"),
+        ChangeEvent::repositories(h.solo.team_id.clone(), [repository.id.clone()])
     );
 
-    let disabled = repo::set_allow_unattended_runs(&h.context, &repository.id, false)
+    let disabled = repo::set_allow_unattended_runs(&h.context, h.machine(), &repository.id, false)
         .await
-        .expect("disable the opt-in");
-    assert!(!disabled.allow_unattended_runs);
+        .expect("disable the consent");
+    assert!(!disabled.unattended_consent);
+
+    // The consent only: the board's column is task 045's team ceiling, and
+    // nothing before 045 writes it.
+    let ceiling: bool =
+        sqlx::query_scalar("SELECT allow_unattended_runs FROM repositories WHERE id = ?1")
+            .bind(&repository.id)
+            .fetch_one(&h.context.pool)
+            .await
+            .expect("read the ceiling");
+    assert!(!ceiling);
 }
 
 #[tokio::test]
 async fn ensure_unattended_runs_allowed_names_the_repository_when_refusing() {
     let h = TestContext::new().await;
-    let mut repository = register_temp_repo(&h.context).await;
+    let mut repository = register_temp_repo(&h).await;
     repository.name = "Point of Sale".to_string();
 
-    let error = repo::ensure_unattended_runs_allowed(&repository).expect_err("must refuse");
+    let error = repo::ensure_unattended_runs_allowed(h.machine(), &repository)
+        .await
+        .expect_err("must refuse");
 
     assert_eq!(
         error.to_string(),
@@ -560,11 +771,13 @@ async fn ensure_unattended_runs_allowed_names_the_repository_when_refusing() {
 /// override — the shape most tests want.
 async fn register(
     ctx: &ServiceContext,
+    machine: &MachineContext,
     worktrees_dir: &Path,
     path: &Path,
 ) -> rimaia_core::Result<Repository> {
     repo::register(
         ctx,
+        machine,
         worktrees_dir,
         NewRepository {
             path: path.to_str().expect("test paths are UTF-8").to_string(),
@@ -577,12 +790,25 @@ async fn register(
 
 /// A fresh [`TempRepo`] registered with a throwaway `worktrees_dir` — for the
 /// many tests here whose subject is not registration itself.
-async fn register_temp_repo(ctx: &ServiceContext) -> Repository {
+async fn register_temp_repo(h: &TestContext) -> Repository {
     let source = TempRepo::init();
     let worktrees_dir = scratch_dir("rimaia-worktrees-");
-    register(ctx, worktrees_dir.path(), source.path())
+    register(&h.context, h.machine(), worktrees_dir.path(), source.path())
         .await
         .expect("register a fresh TempRepo")
+}
+
+/// This machine's checkout of `repository`, which every registration writes.
+async fn checkout_of(h: &TestContext, repository: &Repository) -> Checkout {
+    rimaia_core::machine::checkout_of(h.machine(), repository)
+        .await
+        .expect("a registered repository has a checkout")
+}
+
+/// Everything published so far: a registration announces the board row and
+/// then the checkout.
+fn drain(h: &mut TestContext) {
+    while h.changes.try_recv().is_ok() {}
 }
 
 /// A context backed by a real file on disk, for the one test that needs a
@@ -595,10 +821,16 @@ async fn file_backed_context(db_file: &Path) -> ServiceContext {
     rimaia_core::db::migrate(&pool)
         .await
         .expect("migrate the file-backed database");
+    let clock = TestClock::new(rimaia_core::testing::test_epoch());
+    let solo = rimaia_core::identity::ensure_solo(&pool, &clock)
+        .await
+        .expect("the file-backed database's solo identity");
     ServiceContext::new(
         pool,
-        Arc::new(TestClock::new(rimaia_core::testing::test_epoch())),
+        Arc::new(clock),
         rimaia_core::db::MutationSource::Ui,
+        rimaia_core::TeamScope::one(solo.team_id),
+        solo.user_id,
     )
 }
 
@@ -607,14 +839,16 @@ async fn file_backed_context(db_file: &Path) -> ServiceContext {
 async fn insert_task(pool: &sqlx::SqlitePool, repository_id: &str) {
     let id = rimaia_core::db::new_id();
     const NOW: &str = "2026-08-20T12:00:00+00:00";
+    let team_id = solo_team(pool).await;
     sqlx::query!(
         r#"
-        INSERT INTO tasks (id, repository_id, title, board_column, position, run_state, created_at, updated_at)
-        VALUES (?1, ?2, 'a task', 'ready', 1.0, 'idle', ?3, ?3)
+        INSERT INTO tasks (id, team_id, repository_id, title, board_column, position, run_state, created_at, updated_at)
+        VALUES (?1, ?4, ?2, 'a task', 'ready', 1.0, 'idle', ?3, ?3)
         "#,
         id,
         repository_id,
         NOW,
+        team_id,
     )
     .execute(pool)
     .await
@@ -727,4 +961,17 @@ fn git<S: AsRef<OsStr>>(dir: &Path, args: &[S]) -> String {
     }
 
     String::from_utf8_lossy(&output.stdout).trim().to_owned()
+}
+
+/// The solo team the board's rows belong to: the identity `TestContext`
+/// already created, or a first launch's, read through the same
+/// `identity::ensure_solo` either way.
+async fn solo_team(pool: &sqlx::SqlitePool) -> String {
+    rimaia_core::identity::ensure_solo(
+        pool,
+        &rimaia_core::testing::TestClock::new(rimaia_core::testing::test_epoch()),
+    )
+    .await
+    .expect("the board's solo identity")
+    .team_id
 }

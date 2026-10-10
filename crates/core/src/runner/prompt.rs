@@ -34,13 +34,27 @@
 //! function's own note, and ADR-0009's 2026-08-28 amendment, for why that is a
 //! missing parameter rather than an empty argument.
 //!
+//! # And the review loop's (task 021)
+//!
+//! [`compose_review_prompt`] and [`compose_review_system_append`] are the
+//! review phase's pair; like the planner's, the prompt takes no base
+//! instructions, because a reviewer that opens a pull request is a defect.
+//! [`compose_fix_prompt`] does take them, because a fix is implementation
+//! work, and [`compose_fix_continuation`] is the same fix sent into the
+//! implementation's own session. A retried review or fix gets
+//! [`compose_review_resume`] or [`compose_fix_resume`] rather than
+//! [`compose_resume_prompt`], whose "continue the task" would tell a reviewer
+//! to implement. ADR-0009's amendment of 2026-10-09 lists their sections.
+//!
 //! Everything here is pure. Nothing reads the database: task 008 loads the base
 //! instructions through [`crate::db::settings`] and passes them in, which is
 //! what keeps composition unit-testable without a pool or a process.
 
 use serde::Deserialize;
 
+use crate::board::{ReviewContext, RunAuthorship};
 use crate::db::{Repository, TaskLink};
+use crate::review::findings::{FindingSeverity, ReviewFinding};
 use crate::strategy::{Catalogue, CatalogueEntry};
 use crate::tasks::TaskDetail;
 
@@ -63,6 +77,14 @@ const YOUR_JOB_HEADING: &str = "# Your job";
 const AVAILABLE_MODELS_HEADING: &str = "# Available models";
 const AVAILABLE_EFFORTS_HEADING: &str = "# Available effort levels";
 const HOW_TO_ANSWER_HEADING: &str = "# How to answer";
+
+/// The review and fix prompts' own headings (ADR-0009's 2026-10-09
+/// amendment). The rest are shared, so a reviewer judges exactly the task an
+/// implementation run was given.
+const THE_CHANGE_HEADING: &str = "# The change";
+const REVIEW_INSTRUCTIONS_HEADING: &str = "# Review instructions";
+const ALREADY_REJECTED_HEADING: &str = "# Findings already rejected";
+const FINDINGS_TO_ADDRESS_HEADING: &str = "# Findings to address";
 
 /// A blank line between a heading and its body, and between sections.
 const SECTION_SEPARATOR: &str = "\n\n";
@@ -96,6 +118,7 @@ pub fn compose_prompt(
     base: &str,
     task: &TaskDetail,
     repo: &Repository,
+    authorship: Option<&RunAuthorship>,
     guidance: Option<&StrategyGuidance>,
     fanout_noun: &str,
 ) -> String {
@@ -110,7 +133,7 @@ pub fn compose_prompt(
     push_section(
         &mut sections,
         TASK_CONTEXT_HEADING,
-        &task_context(task, repo),
+        &task_context(task, repo, &repo.default_branch, authorship),
     );
     push_section(
         &mut sections,
@@ -160,6 +183,7 @@ pub fn compose_prompt(
 pub fn compose_strategy_prompt(
     task: &TaskDetail,
     repo: &Repository,
+    authorship: Option<&RunAuthorship>,
     catalogue: &Catalogue,
     tool: &str,
     fanout_noun: &str,
@@ -169,7 +193,7 @@ pub fn compose_strategy_prompt(
     push_section(
         &mut sections,
         TASK_CONTEXT_HEADING,
-        &task_context(task, repo),
+        &task_context(task, repo, &repo.default_branch, authorship),
     );
     push_section(
         &mut sections,
@@ -265,6 +289,362 @@ pub fn compose_resume_prompt(task: &TaskDetail) -> String {
 }
 
 // ---------------------------------------------------------------------------
+// The review loop's prompts (ADR-0017, task 021)
+// ---------------------------------------------------------------------------
+
+/// The whole prompt for a review phase (ADR-0017, ADR-0009's 2026-10-09
+/// amendment): what the job is, the task the change was for, the change
+/// itself, how to review it, what not to raise again, and the one way to
+/// answer.
+///
+/// **There is no base-instructions parameter**, for the planner's reason:
+/// base instructions say "open a pull request", and a reviewer that opens one
+/// is a defect. Composed by [`compose_prompt`]'s rules: level-1 headings,
+/// empty sections omitted with their heading, no trailing newline.
+///
+/// `# The change` names the commits and the two `git` commands that read the
+/// whole branch against its base, and never embeds the patch: the worktree
+/// holds it whole, and a capped copy would be truncated silently.
+///
+/// `tool` is the provider's spelling of `record_review_findings` at the
+/// run-scoped handle (seam-contract D30 point 1).
+pub fn compose_review_prompt(
+    task: &TaskDetail,
+    repo: &Repository,
+    authorship: Option<&RunAuthorship>,
+    review: &ReviewContext,
+    tool: &str,
+) -> String {
+    let base_ref = loop_base_ref(review, repo);
+    let mut sections = Vec::with_capacity(8);
+    push_section(&mut sections, YOUR_JOB_HEADING, REVIEW_JOB);
+    push_section(
+        &mut sections,
+        TASK_CONTEXT_HEADING,
+        &task_context(task, repo, base_ref, authorship),
+    );
+    push_section(
+        &mut sections,
+        PLAN_HEADING,
+        task.task.plan.as_deref().unwrap_or_default(),
+    );
+    push_section(
+        &mut sections,
+        EXTRA_INSTRUCTIONS_HEADING,
+        task.task.extra_instructions.as_deref().unwrap_or_default(),
+    );
+    push_section(
+        &mut sections,
+        THE_CHANGE_HEADING,
+        &the_change(review, base_ref),
+    );
+    push_section(
+        &mut sections,
+        REVIEW_INSTRUCTIONS_HEADING,
+        &expand(&review.instructions, &Variables::of(task, repo)),
+    );
+    push_section(
+        &mut sections,
+        ALREADY_REJECTED_HEADING,
+        &already_rejected(&review.rejected),
+    );
+    push_section(
+        &mut sections,
+        HOW_TO_ANSWER_HEADING,
+        &how_to_answer_a_review(&task.task.id, tool),
+    );
+
+    sections.join(SECTION_SEPARATOR)
+}
+
+/// The orchestrator facts a reviewer must not negotiate, for
+/// `--append-system-prompt` (ADR-0012's 2026-10-09 amendment): it did not
+/// write this change, the tool call is its only answer, and it must not
+/// commit.
+pub fn compose_review_system_append(tool: &str) -> String {
+    format!(
+        "You are running unattended, started by Rimaia to review a change another agent made. What follows is how this session works, not a preference you may weigh against the job.\n\
+         \n\
+         - Nobody is watching and nobody can answer a question. Anything you ask will go unread until a human reviews this transcript, which may be many hours from now.\n\
+         - You did not write this change, and nothing in this session was part of writing it. Judge it as it is committed.\n\
+         - Your only answer is one call to `{tool}`. Anything you print instead of that call is read by nobody.\n\
+         - Do not edit files, commit or push. A review that changes the branch it was asked to judge is recorded as a failed review."
+    )
+}
+
+/// The whole prompt for a fix phase that opens a fresh session: base
+/// instructions, task context, plan, extra instructions, the findings, and how
+/// to answer.
+///
+/// Base instructions are included, unlike the review's: the fix is
+/// implementation work, and it commits, runs the suite and pushes like any.
+pub fn compose_fix_prompt(
+    base: &str,
+    task: &TaskDetail,
+    repo: &Repository,
+    authorship: Option<&RunAuthorship>,
+    review: &ReviewContext,
+    tool: &str,
+) -> String {
+    let base_ref = loop_base_ref(review, repo);
+    let mut sections = Vec::with_capacity(6);
+    push_section(
+        &mut sections,
+        BASE_INSTRUCTIONS_HEADING,
+        &expand(base, &Variables::of(task, repo)),
+    );
+    push_section(
+        &mut sections,
+        TASK_CONTEXT_HEADING,
+        &task_context(task, repo, base_ref, authorship),
+    );
+    push_section(
+        &mut sections,
+        PLAN_HEADING,
+        task.task.plan.as_deref().unwrap_or_default(),
+    );
+    push_section(
+        &mut sections,
+        EXTRA_INSTRUCTIONS_HEADING,
+        task.task.extra_instructions.as_deref().unwrap_or_default(),
+    );
+    push_fix_sections(&mut sections, task, review, tool);
+    sections.join(SECTION_SEPARATOR)
+}
+
+/// A fix phase that continues the implementation's own session
+/// (`fix_session = resume`): only the findings and how to answer. The session
+/// already holds the rest, and ADR-0009 says a resumed run is not sent the
+/// composed prompt again.
+pub fn compose_fix_continuation(task: &TaskDetail, review: &ReviewContext, tool: &str) -> String {
+    let mut sections = Vec::with_capacity(2);
+    push_fix_sections(&mut sections, task, review, tool);
+    sections.join(SECTION_SEPARATOR)
+}
+
+/// What a review resumed after a retryable exit is sent, in place of
+/// [`compose_resume_prompt`], whose "continue the task" would tell a reviewer
+/// to implement.
+///
+/// Two texts, because a review that already recorded must not record again:
+/// `record_review_findings` refuses a second call from one row, not from a
+/// second row of the same phase.
+pub fn compose_review_resume(task: &TaskDetail, tool: &str, recorded: bool) -> String {
+    let title = &task.task.title;
+    if recorded {
+        format!(
+            "Continue the review of \"{title}\" from where you stopped. Your findings are already recorded — do not call {tool} again, and do not edit, commit or push. Stop once you have finished what you were doing."
+        )
+    } else {
+        format!(
+            "Continue the review of \"{title}\" from where you stopped. The change and the review instructions are earlier in this session — do not start over. Do not edit, commit or push. Finish by calling {tool} exactly once, with findings: [] if you found nothing."
+        )
+    }
+}
+
+/// What a fix resumed after a retryable exit is sent.
+pub fn compose_fix_resume(task: &TaskDetail, tool: &str) -> String {
+    format!(
+        "Continue addressing the review findings on \"{}\" from where you stopped. The findings and the instructions are earlier in this session — do not start over. Call {tool} for each finding you have not resolved yet, with fixed and what you changed, or rejected and why.",
+        task.task.title
+    )
+}
+
+/// The review's own `# Your job`. A constant, because nothing in it varies:
+/// what the change is and how to judge it are the sections below it.
+const REVIEW_JOB: &str = "You are reviewing a change another agent made for the task below. You did not write it, and you have none of the context it was written in: that is the point. A session reviewing its own work grades itself generously.
+
+Judge the change as it is committed on this branch: whether it does what the plan asks, whether it is correct, and whether anything in it would stop a careful human from merging it. Report what you find; do not fix it. A later run decides what to do about each finding, and may disagree with you.";
+
+/// The base the loop's rows record, which since task 011 can be a
+/// dependency's branch rather than the default one (seam-contract D29
+/// point 4).
+fn loop_base_ref<'a>(review: &'a ReviewContext, repo: &'a Repository) -> &'a str {
+    review
+        .implementation
+        .as_ref()
+        .and_then(|base| base.base_ref.as_deref())
+        .unwrap_or(&repo.default_branch)
+}
+
+/// `# The change`: the three commits, the bundle's size and files when one was
+/// recorded, and the two commands that read the whole branch.
+fn the_change(review: &ReviewContext, base_ref: &str) -> String {
+    let base_sha = review
+        .implementation
+        .as_ref()
+        .and_then(|base| base.base_sha.as_deref());
+    let mut lines = vec![format!("- Base ref: `{base_ref}`")];
+    if let Some(sha) = base_sha {
+        lines.push(format!("- Base commit: `{sha}`"));
+    }
+    if let Some(sha) = review.head_sha.as_deref() {
+        lines.push(format!("- Head commit: `{sha}`"));
+    }
+    let mut parts = vec![lines.join("\n")];
+
+    if let Some(change) = &review.change {
+        let diff = &change.diff;
+        parts.push(format!(
+            "{} {} changed, {} {}(+), {} {}(-):",
+            diff.files_changed,
+            plural(diff.files_changed, "file", "files"),
+            diff.insertions,
+            plural(diff.insertions, "insertion", "insertions"),
+            diff.deletions,
+            plural(diff.deletions, "deletion", "deletions"),
+        ));
+        parts.push(
+            change
+                .files
+                .iter()
+                .map(|file| match (file.insertions, file.deletions) {
+                    (Some(added), Some(removed)) => {
+                        format!("- `{}` (+{added} -{removed})", file.path)
+                    }
+                    _ => format!("- `{}` (binary)", file.path),
+                })
+                .collect::<Vec<_>>()
+                .join("\n"),
+        );
+    }
+
+    let from = base_sha.unwrap_or(base_ref);
+    let to = review.head_sha.as_deref().unwrap_or("HEAD");
+    parts.push(format!(
+        "Read the whole change against its base in this worktree:\n\
+         \n\
+         - `git log --oneline {from}..{to}`\n\
+         - `git diff {from}...{to}`"
+    ));
+    parts.join(SECTION_SEPARATOR)
+}
+
+fn plural(count: i64, one: &'static str, many: &'static str) -> &'static str {
+    if count == 1 {
+        one
+    } else {
+        many
+    }
+}
+
+/// `# Findings already rejected`: each with the fixer's reason, so a reviewer
+/// does not raise it again. A repeat is stored rejected anyway; telling the
+/// reviewer saves it the turns.
+fn already_rejected(rejected: &[ReviewFinding]) -> String {
+    rejected
+        .iter()
+        .map(|finding| {
+            format!(
+                "- **{}** ({}). Rejected: {}",
+                finding.title.trim(),
+                location(finding),
+                finding.resolution.as_deref().unwrap_or_default().trim(),
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn how_to_answer_a_review(task_id: &str, tool: &str) -> String {
+    format!(
+        "Answer by calling `{tool}` exactly once, as the last thing you do, with:\n\
+         \n\
+         - `task_id`: `{task_id}` — this task, and no other.\n\
+         - `findings`: every problem you found, most important first, or `[]` if you found nothing. A review that never calls is recorded as a failed review, never as a clean one.\n\
+         \n\
+         Each finding has:\n\
+         \n\
+         - `severity`: `critical`, `high`, `medium` or `low`.\n\
+         - `title`: one line naming the problem.\n\
+         - `body`: what is wrong, and why it matters.\n\
+         - `file`: the repository-relative path it is in. Leave it out for a finding about the change as a whole.\n\
+         - `line`: a line in that file, when there is one.\n\
+         \n\
+         Do not edit files, commit or push. Your findings are the whole of your answer."
+    )
+}
+
+/// `# Findings to address` and `# How to answer`, the two sections every fix
+/// prompt ends with.
+fn push_fix_sections(
+    sections: &mut Vec<String>,
+    task: &TaskDetail,
+    review: &ReviewContext,
+    tool: &str,
+) {
+    push_section(
+        sections,
+        FINDINGS_TO_ADDRESS_HEADING,
+        &findings_to_address(&review.open_blocking),
+    );
+    push_section(
+        sections,
+        HOW_TO_ANSWER_HEADING,
+        &how_to_answer_a_fix(&task.task.id, tool),
+    );
+}
+
+/// Each finding's id, severity, location, title and body. The id is on a line
+/// of its own, because it is what the fixer copies into its answer.
+fn findings_to_address(findings: &[ReviewFinding]) -> String {
+    findings
+        .iter()
+        .enumerate()
+        .map(|(index, finding)| {
+            format!(
+                "## {number}. {title}\n\
+                 \n\
+                 - Id: `{id}`\n\
+                 - Severity: {severity}\n\
+                 - Location: {location}\n\
+                 \n\
+                 {body}",
+                number = index + 1,
+                title = finding.title.trim(),
+                id = finding.id,
+                severity = severity(finding),
+                location = location(finding),
+                body = finding.body.trim(),
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(SECTION_SEPARATOR)
+}
+
+fn how_to_answer_a_fix(task_id: &str, tool: &str) -> String {
+    format!(
+        "A finding is advice, not an order. The reviewer did not know why the code is the way it is, and you may.\n\
+         \n\
+         For each finding above, call `{tool}` once, with:\n\
+         \n\
+         - `task_id`: `{task_id}`.\n\
+         - `finding_id`: the finding's id.\n\
+         - `status`: `fixed` once you have changed the code to address it, with `resolution` saying what you changed; or `rejected` when the finding is wrong or not worth fixing, with `resolution` saying why.\n\
+         \n\
+         Commit your changes as you go. A fresh review reads the branch as you leave it."
+    )
+}
+
+fn severity(finding: &ReviewFinding) -> &'static str {
+    match finding.severity {
+        FindingSeverity::Critical => "critical",
+        FindingSeverity::High => "high",
+        FindingSeverity::Medium => "medium",
+        FindingSeverity::Low => "low",
+    }
+}
+
+/// `` `src/lib.rs:12` ``, `` `src/lib.rs` ``, or the change as a whole.
+fn location(finding: &ReviewFinding) -> String {
+    match (finding.file.as_deref(), finding.line) {
+        (Some(file), Some(line)) => format!("`{file}:{line}`"),
+        (Some(file), None) => format!("`{file}`"),
+        (None, _) => "the change as a whole".to_string(),
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Sections
 // ---------------------------------------------------------------------------
 
@@ -276,19 +656,30 @@ fn push_section(sections: &mut Vec<String>, heading: &str, body: &str) {
     sections.push(format!("{heading}{SECTION_SEPARATOR}{body}"));
 }
 
-/// Title, repository, branch, base ref and links, as a Markdown list.
+/// Title, repository, branch, base ref, authorship and links, as a Markdown
+/// list.
 ///
 /// A line whose value does not exist is omitted rather than rendered empty: an
 /// agent told `- Branch:` with nothing after it learns less than one told
 /// nothing.
 ///
-/// **Base ref is the repository's default branch, which is true for the MVP and
-/// only for the MVP.** Task 007 resolves the real base ref — "default branch, or
-/// a dependency's branch once 011 lands" — so when ADR-0008's branch chaining
-/// arrives, the resolved ref has to reach this function instead of being
-/// inferred from `repo`, or the prompt will name a base the worktree was not cut
-/// from.
-fn task_context(task: &TaskDetail, repo: &Repository) -> String {
+/// `base_ref` is the caller's. [`compose_prompt`] and the planner pass the
+/// repository's default branch, so their exact strings are unchanged; the
+/// review and fix prompts pass the base the loop's rows recorded, which since
+/// task 011 can be a dependency's branch, so it agrees with `# The change`.
+///
+/// `authorship` is ADR-0032 point 7's two facts: who wrote the plan revision
+/// being executed, and whose machine and credentials run it. They describe
+/// the situation rather than bind the agent, so they belong here and never in
+/// `--append-system-prompt` (ADR-0009). `None` in a personal team, where
+/// every author and the machine's owner are one person, so a solo prompt is
+/// byte for byte what it was.
+fn task_context(
+    task: &TaskDetail,
+    repo: &Repository,
+    base_ref: &str,
+    authorship: Option<&RunAuthorship>,
+) -> String {
     let mut lines = vec![
         format!("- Title: {}", task.task.title),
         format!("- Repository: {}", repo.name),
@@ -296,7 +687,22 @@ fn task_context(task: &TaskDetail, repo: &Repository) -> String {
     if let Some(branch) = task.task.branch.as_deref() {
         lines.push(format!("- Branch: {branch}"));
     }
-    lines.push(format!("- Base ref: {}", repo.default_branch));
+    lines.push(format!("- Base ref: {base_ref}"));
+    if let Some(authorship) = authorship {
+        let author = match authorship.plan_author.as_deref() {
+            Some(login) => format!("@{login}"),
+            None => "a former member".to_string(),
+        };
+        let owner = &authorship.runner_owner;
+        lines.push(format!(
+            "- Plan revision: {}, written by {author}",
+            authorship.plan_revision
+        ));
+        lines.push(format!(
+            "- Running on: @{owner}'s runner \"{}\", with @{owner}'s credentials",
+            authorship.runner_label
+        ));
+    }
     if !task.links.is_empty() {
         lines.push("- Links:".to_string());
         for link in &task.links {

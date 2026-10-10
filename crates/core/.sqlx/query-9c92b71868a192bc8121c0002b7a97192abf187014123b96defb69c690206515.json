@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT ru.user_id AS \"owner?\", min(r.attempt) AS \"first!: i64\"\n             FROM runs r LEFT JOIN runners ru ON ru.id = r.runner_id\n            WHERE r.task_id = ?1 AND r.kind IN ('implementation', 'fix') AND r.attempt <= ?2\n            GROUP BY ru.user_id\n            ORDER BY 2",
+  "describe": {
+    "columns": [
+      {
+        "name": "owner?",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "first!: i64",
+        "ordinal": 1,
+        "type_info": "Null"
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      false,
+      null
+    ]
+  },
+  "hash": "9c92b71868a192bc8121c0002b7a97192abf187014123b96defb69c690206515"
+}

@@ -14,12 +14,12 @@
 //! model or effort arriving as a value flips the mode to `manual`. A command of
 //! its own would have been a second door onto a rule that has to hold at both.
 
-use rimaia_core::db::{settings, BoardColumn, Task};
+use rimaia_core::db::{BoardColumn, Task};
 use rimaia_core::runner::strategy::{
     PlanOutcome, PlanPass, PlanProgress, PlanResult, PlanSelection,
 };
-use rimaia_core::runner::{probe_cli, strategy as runner_strategy, CancelSignal};
-use rimaia_core::scheduler::LeaseOwner;
+use rimaia_core::runner::{probe_cli, strategy as runner_strategy, CancelSignal, Starter};
+use rimaia_core::scheduler::SlotOwner;
 use rimaia_core::strategy::{
     catalogue, settings as strategy_settings, Catalogue, StrategyApproval, StrategyDefaults,
 };
@@ -79,11 +79,10 @@ pub struct ProviderInfoView {
 /// an empty box the user would have to fill in from the documentation.
 #[tauri::command]
 pub async fn get_strategy_catalogue(state: State<'_, AppState>) -> Result<StrategyCatalogueView> {
-    let pool = &state.context.pool;
-    // The key constant comes from the module that owns its meaning (D3), so
-    // there is no second spelling of it here to drift from that module's own
-    // reader and writer.
-    let stored = settings::get(pool, catalogue::STRATEGY_CATALOGUE).await?;
+    // The text as stored comes from the module that owns its meaning (D3), so
+    // there is no second reader of the key here to drift from that module's
+    // own reader and writer.
+    let stored = catalogue::stored_text(&state.context).await?;
 
     let provider = state.runner.provider.as_ref();
     let default_catalogue = provider.default_catalogue();
@@ -91,7 +90,7 @@ pub async fn get_strategy_catalogue(state: State<'_, AppState>) -> Result<Strate
         .map_err(|error| Error::internal(error.to_string()))?;
 
     Ok(StrategyCatalogueView {
-        catalogue: catalogue::catalogue(pool, provider).await?,
+        catalogue: catalogue::catalogue(&state.context, provider).await?,
         json: stored.unwrap_or_else(|| default_json.clone()),
         default_json,
         provider_info: ProviderInfoView {
@@ -131,9 +130,9 @@ pub async fn get_strategy_defaults(
 ) -> Result<StrategyDefaults> {
     match repository_id.as_deref() {
         Some(repository_id) => {
-            strategy_settings::repository_default(&state.context.pool, repository_id).await
+            strategy_settings::repository_default(&state.context, repository_id).await
         }
-        None => strategy_settings::global_default(&state.context.pool).await,
+        None => strategy_settings::global_default(&state.context).await,
     }
 }
 
@@ -161,7 +160,7 @@ pub async fn set_strategy_defaults(
 /// `automatic`.
 #[tauri::command]
 pub async fn get_strategy_approval(state: State<'_, AppState>) -> Result<StrategyApproval> {
-    strategy_settings::approval(&state.context.pool).await
+    strategy_settings::approval(&state.context).await
 }
 
 /// Stores the approval setting. **Nothing reads it yet** — the gate itself lands
@@ -218,37 +217,41 @@ pub async fn clear_task_strategy(state: State<'_, AppState>, task_id: String) ->
 /// nobody is watching. Both are read-only, and the planner performs them again
 /// as part of its own contract.
 ///
-/// The in-flight lease is what a second click fails against, and it is also
+/// The in-flight slot is what a second click fails against, and it is also
 /// what makes "Plan now" and "Run now" refuse each other: they take the same
 /// registry entry, so a planner in flight cannot be joined by an implementation
 /// run in the same worktree.
 ///
 /// That registry is now `rimaia_core::scheduler::InFlight` rather than a map in
-/// `src-tauri`, and the queue takes its leases from the same value. Before
+/// `src-tauri`, and the queue takes its slots from the same value. Before
 /// that, the queue claimed on the database row and the planner claimed in the
 /// shell, so a planner and a queued run genuinely could both start for one task
 /// — the hazard task 023 names in its Notes, closed as a consequence of there
 /// being one registry rather than two.
 ///
-/// Every rule this used to hold — the opt-in, the resolved mode, the lease
+/// Every rule this used to hold — the opt-in, the resolved mode, the slot
 /// itself — is now `runner_strategy::claim_for_planning`'s, so this and the
 /// `plan_task_strategy` MCP tool are two adapters over one function (ADR-0006).
 /// The split into a claim and a run is what lets this one answer as soon as the
 /// slot is taken while the tool awaits the whole planner.
 #[tauri::command]
 pub async fn plan_task_strategy(state: State<'_, AppState>, task_id: String) -> Result<()> {
-    let context = state.context.clone();
+    let machine = state.machine.clone();
     let paths = state.paths.clone();
     let config = state.runner.clone();
 
     // Awaited here so a click that cannot possibly plan anything gets an error
     // the button can render, rather than one that only reaches `tracing::error!`
     // inside a detached task nobody is watching.
+    let board = state.board_port.clone();
+    // This machine's own runner, asked by the person at it (ADR-0031 point 7).
     let claim = runner_strategy::claim_for_planning(
-        &context,
+        Starter::at_runner(&state.context, &state.solo.runner_id),
+        board.as_ref(),
+        &state.machine,
         &state.in_flight,
         &task_id,
-        LeaseOwner::Manual,
+        SlotOwner::Manual,
     )
     .await?
     .map_err(|skip| Error::invalid(skip.message()))?;
@@ -256,7 +259,9 @@ pub async fn plan_task_strategy(state: State<'_, AppState>, task_id: String) -> 
     probe_cli(config.provider.as_ref(), &config.program).await?;
 
     tauri::async_runtime::spawn(async move {
-        if let Err(error) = runner_strategy::plan_claimed(&context, &paths, &config, claim).await {
+        if let Err(error) =
+            runner_strategy::plan_claimed(board.as_ref(), &machine, &paths, &config, claim).await
+        {
             tracing::error!(
                 %task_id, %error,
                 "a strategy run could not be started or supervised",
@@ -305,7 +310,9 @@ pub async fn plan_tasks_strategy(
     probe_cli(state.runner.provider.as_ref(), &state.runner.program).await?;
 
     let pass = runner_strategy::plan_all(
-        &state.context,
+        Starter::at_runner(&state.context, &state.solo.runner_id),
+        state.board_port.as_ref(),
+        &state.machine,
         &state.paths,
         &state.runner,
         &state.in_flight,
@@ -337,7 +344,7 @@ pub async fn plan_tasks_strategy(
 /// written in place.
 ///
 /// The planner currently running is asked to stop too — the pass's signal is
-/// the one `plan_all` checks between cards, and each card's own lease carries
+/// the one `plan_all` checks between cards, and each card's own slot carries
 /// its own. A pass that has already finished is a no-op rather than an error:
 /// the user pressed Cancel a second too late, which is not a mistake to report.
 #[tauri::command]

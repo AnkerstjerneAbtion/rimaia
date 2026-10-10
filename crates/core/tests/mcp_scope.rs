@@ -12,13 +12,18 @@
 //! keep over time: an eleventh, twelfth or thirteenth tool cannot reach the
 //! wire without someone having said what a run may do with it.
 
-use rimaia_core::db::{BoardColumn, MutationSource, ScheduleMode};
+use rimaia_core::db::{BoardColumn, MutationSource, RunKind, ScheduleMode};
 use rimaia_core::mcp::requests::{
-    CreateTaskRequest, DoctorDismissalRequest, GetStrategyDefaultsRequest, GetTaskRequest,
-    ListTasksRequest, MoveTaskRequest, PlanSelectionRequest, ScheduleConfigRequest,
-    ScheduleRequest, SetMaxConcurrencyRequest, SetRepositoryMaxConcurrencyRequest,
-    SetScheduleEnabledRequest, SetScheduleModeRequest, SetStrategyApprovalRequest,
-    SetStrategyCatalogueRequest, SetStrategyDefaultsRequest, SetTaskDependenciesRequest,
+    AcceptContentRequest, ArchiveTaskRequest, AssignTaskRequest, CreateTaskRequest,
+    DoctorDismissalRequest, GetReviewHistoryRequest, GetReviewLevelRequest,
+    GetStrategyDefaultsRequest, GetTaskConsentRequest, GetTaskRequest, ListReviewFindingsRequest,
+    ListTasksRequest, MarkReviewDigestSeenRequest, MoveTaskRequest, PlanSelectionRequest,
+    RecordReviewFindingsRequest, ResolveReviewFindingRequest, ReviewNoteRequest,
+    ScheduleConfigRequest, ScheduleRequest, SetMaxConcurrencyRequest,
+    SetRepositoryMaxConcurrencyRequest, SetRepositoryReviewConfigRequest,
+    SetRepositoryUnattendedCeilingRequest, SetReviewSettingsRequest, SetScheduleEnabledRequest,
+    SetScheduleModeRequest, SetStrategyApprovalRequest, SetStrategyCatalogueRequest,
+    SetStrategyDefaultsRequest, SetTaskDependenciesRequest, SetTaskReviewRequest,
     SetTaskStrategyRequest, TaskStrategyRequest, UpdateScheduleRequest, UpdateTaskRequest,
 };
 use rimaia_core::mcp::responses::{
@@ -26,15 +31,17 @@ use rimaia_core::mcp::responses::{
     ScheduleView, StrategyApprovalView, TaskListView, TaskView, TimezoneListView,
 };
 use rimaia_core::mcp::{
-    self, McpHandle, RimaiaServer, RunAccess, RunGrant, RunHandles, RunScope, Tool,
+    self, Grant, GrantKind, McpHandle, RimaiaServer, RunAccess, RunGrant, RunHandles, RunScope,
+    Tool,
 };
-use rimaia_core::repo;
+use rimaia_core::review;
+use rimaia_core::runner::outcome::{start_run, NewRun};
 use rimaia_core::schedule::{self, ScheduleInput};
 use rimaia_core::scheduler::{capacity, CONCURRENCY_CEILING, DEFAULT_MAX_CONCURRENCY};
 use rimaia_core::strategy::{self, Catalogue, CatalogueEntry, StrategyApproval, StrategyDefaults};
 use rimaia_core::tasks::{self, NewTask};
 use rimaia_core::testing::{self, TestContext};
-use rimaia_core::Error;
+use rimaia_core::{AppPaths, Error};
 
 use pretty_assertions::assert_eq;
 use reqwest::StatusCode;
@@ -91,33 +98,54 @@ fn every_registered_tool_has_a_run_scope_decision() {
         unregistered.is_empty(),
         "declared but never registered: {unregistered:?}"
     );
+
+    // And a decision for every grant, read off D30 point 5's table as this file
+    // spells it out. `expected_access` is an exhaustive match on the tool, so a
+    // tool added without a row there does not compile, and a row that disagrees
+    // with `Tool::run_access` for any grant fails here by name.
+    for kind in GrantKind::ALL {
+        for tool in Tool::ALL {
+            assert_eq!(
+                tool.run_access(kind),
+                expected_access(tool, kind),
+                "{} for a {kind:?} grant",
+                tool.as_str()
+            );
+        }
+    }
 }
 
-#[test]
-fn the_operator_endpoint_keeps_every_tool_it_had_before_task_020() {
-    // Task 020 adds a narrower door; it takes nothing away from the wide one.
-    // Asserted over the whole table rather than over the four a run may not
-    // call, so a future `RunAccess` variant cannot quietly start refusing the
-    // operator too.
-    for tool in Tool::ALL {
-        RunScope::Operator
-            .authorize(tool, None)
-            .unwrap_or_else(|error| panic!("{} refused for the operator: {error}", tool.as_str()));
-        RunScope::Operator
-            .authorize(tool, Some("any-task-at-all"))
-            .unwrap_or_else(|error| panic!("{} refused for the operator: {error}", tool.as_str()));
-    }
+/// D30 point 5's table, one row per tool, written out where a reviewer can
+/// read it whole rather than reconstruct it from match arms.
+fn expected_access(tool: Tool, kind: GrantKind) -> RunAccess {
+    let planner_only = match kind {
+        GrantKind::Strategy => RunAccess::OwnTaskOnly,
+        GrantKind::Review | GrantKind::Fix => RunAccess::Refused,
+    };
+    match tool {
+        // Every run reads its own card.
+        Tool::GetTask => RunAccess::OwnTaskOnly,
+        Tool::GetBaseInstructions | Tool::ListRepositories => RunAccess::Unscoped,
+        // The planner amends the card it plans (task 020). A reviewer or a
+        // fixer that could would be marking its own homework.
+        Tool::AddTaskLink | Tool::RemoveTaskLink | Tool::SetTaskStrategy | Tool::UpdateTask => {
+            planner_only
+        }
+        // Each loop run writes only its own output.
+        Tool::RecordReviewFindings => match kind {
+            GrantKind::Review => RunAccess::OwnTaskOnly,
+            GrantKind::Strategy | GrantKind::Fix => RunAccess::Refused,
+        },
+        Tool::ResolveReviewFinding => match kind {
+            GrantKind::Fix => RunAccess::OwnTaskOnly,
+            GrantKind::Strategy | GrantKind::Review => RunAccess::Refused,
+        },
+        // D30's "everything else" row: a fix run is handed its findings in its
+        // prompt (task 021) and does not go looking for them.
+        Tool::ListReviewFindings => RunAccess::Refused,
+        Tool::GetReviewHistory => RunAccess::Refused,
+        Tool::GetReviewLevel => RunAccess::Refused,
 
-    // And the table itself, so the three groups ADR-0006's amendment names are
-    // legible in one place rather than only in a match arm.
-    for tool in Tool::ALL {
-        let expected = match tool {
-            Tool::AddTaskLink
-            | Tool::GetTask
-            | Tool::RemoveTaskLink
-            | Tool::SetTaskStrategy
-            | Tool::UpdateTask => RunAccess::OwnTaskOnly,
-            Tool::GetBaseInstructions | Tool::ListRepositories => RunAccess::Unscoped,
             Tool::CreateTask
             | Tool::ListTasks
             | Tool::MoveTask
@@ -140,6 +168,9 @@ fn the_operator_endpoint_keeps_every_tool_it_had_before_task_020() {
             | Tool::SetScheduleMode
             | Tool::SetMaxConcurrency
             | Tool::SetRepositoryMaxConcurrency
+            // Task 066's: where every clone is, its cap and this runner's
+            // consent, refused with the caps it reports.
+            | Tool::ListCheckouts
             // Task 014's, and it is the first of ADR-0021 point 4's two
             // refusals rather than the second: ending a retry loop is a
             // statement about whether the work will be attempted at all, and a
@@ -215,8 +246,57 @@ fn the_operator_endpoint_keeps_every_tool_it_had_before_task_020() {
             | Tool::ArchiveTasks
             | Tool::UnarchiveTask
             | Tool::SetRepositoryOnArchive => RunAccess::Refused,
-        };
-        assert_eq!(tool.run_access(), expected, "{}", tool.as_str());
+            // Task 034 (ADR-0021 point 3). See `review_tools_are_refused_to_a_run`.
+            Tool::ApproveTask
+            | Tool::RejectTask
+            | Tool::RequestTaskChanges
+            | Tool::GetTaskDependents
+            | Tool::GetReviewDigest
+            | Tool::MarkReviewDigestSeen => RunAccess::Refused,
+            // Task 021. The loop's configuration reconfigures the installation
+            // (ADR-0021 point 4): a run enabling its own loop would spend on its
+            // own authority. See `the_review_configuration_is_refused_to_every_grant`.
+            Tool::GetReviewSettings
+            | Tool::SetReviewSettings
+            | Tool::SetRepositoryReviewConfig
+            | Tool::SetTaskReview => RunAccess::Refused,
+            // Task 045. Each speaks for a person; see
+            // `a_run_cannot_accept_through_its_handle`.
+            Tool::AssignTask
+            | Tool::AcceptContent
+            | Tool::SetRepositoryUnattendedCeiling
+            | Tool::GetTaskConsent => RunAccess::Refused,
+            // Task 072. This machine's strategy ceiling is run configuration
+            // (ADR-0021 point 4); see `a_run_cannot_read_or_change_the_strategy_ceiling`.
+            Tool::GetStrategyCeiling | Tool::SetStrategyCeiling => RunAccess::Refused,
+    }
+}
+
+#[test]
+fn the_operator_endpoint_keeps_every_tool_it_had_before_task_020() {
+    // Task 020 adds a narrower door; it takes nothing away from the wide one.
+    // Asserted over the whole table rather than over the four a run may not
+    // call, so a future `RunAccess` variant cannot quietly start refusing the
+    // operator too.
+    //
+    // The one exception is what only a run writes (D30 point 5), which
+    // `the_operator_cannot_write_a_finding` pins; it is exactly two tools, so a
+    // third cannot join it by accident.
+    let run_outputs: Vec<Tool> = Tool::ALL
+        .into_iter()
+        .filter(|tool| tool.is_run_output())
+        .collect();
+    assert_eq!(
+        run_outputs,
+        vec![Tool::RecordReviewFindings, Tool::ResolveReviewFinding]
+    );
+    for tool in Tool::ALL.into_iter().filter(|tool| !tool.is_run_output()) {
+        RunScope::Operator
+            .authorize(tool, None)
+            .unwrap_or_else(|error| panic!("{} refused for the operator: {error}", tool.as_str()));
+        RunScope::Operator
+            .authorize(tool, Some("any-task-at-all"))
+            .unwrap_or_else(|error| panic!("{} refused for the operator: {error}", tool.as_str()));
     }
 }
 
@@ -577,13 +657,13 @@ async fn nothing_adr_0021_added_is_reachable_from_a_run() {
 
     // And none of them wrote anything on the way to being refused.
     assert_eq!(
-        strategy::settings::approval(&h.context.pool)
+        strategy::settings::approval(&h.context)
             .await
             .expect("read the approval setting"),
         StrategyApproval::Automatic,
     );
     assert_eq!(
-        strategy::settings::global_default(&h.context.pool)
+        strategy::settings::global_default(&h.context)
             .await
             .expect("read the global defaults"),
         StrategyDefaults::default(),
@@ -600,6 +680,7 @@ async fn nothing_task_012_added_is_reachable_from_a_run_either() {
     // because a run cannot act on the answer.
     let h = TestContext::new().await;
     let repository_id = seed_repository(&h.context.pool, "rimaia", "/tmp/rimaia").await;
+    seed_checkout(&h, &repository_id).await;
     let mine = create_task(&h, &repository_id, "Mine").await;
     let run = scoped(&h, &mine.id);
 
@@ -639,15 +720,18 @@ async fn nothing_task_012_added_is_reachable_from_a_run_either() {
     );
 
     // And none of them wrote anything on the way to being refused.
-    let capacity = capacity::configured(&h.context.pool)
+    let capacity = capacity::configured(h.machine())
         .await
         .expect("read the capacity back");
     assert_eq!(capacity.mode, ScheduleMode::Sequential);
     assert_eq!(capacity.max_concurrency, DEFAULT_MAX_CONCURRENCY);
     assert_eq!(
-        repo::get(&h.context, &repository_id)
+        h.machine()
+            .store
+            .get_checkout(&repository_id)
             .await
-            .expect("read the repository back")
+            .expect("read the checkout back")
+            .expect("the repository has a checkout")
             .max_concurrency,
         1,
     );
@@ -667,7 +751,7 @@ async fn nothing_task_013_added_is_reachable_from_a_run_either() {
     let h = TestContext::new().await;
     let repository_id = seed_repository(&h.context.pool, "rimaia", "/tmp/rimaia").await;
     let mine = create_task(&h, &repository_id, "Mine").await;
-    let existing = schedule::create(&h.context, nightly())
+    let existing = schedule::create(h.machine(), nightly())
         .await
         .expect("a schedule the operator made");
     let run = scoped(&h, &mine.id);
@@ -736,7 +820,7 @@ async fn nothing_task_013_added_is_reachable_from_a_run_either() {
 
     // And none of them wrote anything on the way to being refused: the one
     // schedule that existed is still there, still enabled, still unedited.
-    let after = schedule::list(&h.context).await.expect("read them back");
+    let after = schedule::list(h.machine()).await.expect("read them back");
     assert_eq!(after.len(), 1);
     assert_eq!(after[0].schedule.id, existing.id);
     assert_eq!(after[0].schedule.name, "Nightly");
@@ -817,7 +901,7 @@ async fn a_run_cannot_silence_the_doctor_about_the_machine_it_is_running_on() {
 
     // And neither wrote on the way to being refused.
     assert_eq!(
-        rimaia_core::db::settings::doctor_dismissals(&h.context.pool)
+        rimaia_core::db::settings::doctor_dismissals(h.machine())
             .await
             .expect("read the key"),
         Vec::new()
@@ -832,8 +916,8 @@ async fn the_operator_dismisses_and_restores_a_doctor_warning_over_mcp() {
     let h = TestContext::new().await;
     let operator = RimaiaServer::new(
         h.context.clone(),
-        testing::doctor::environment(),
-        testing::doctor::planner_access(),
+        testing::doctor::provider(),
+        Some(testing::doctor::local_tools(h.machine())),
     );
 
     let warning = json!({
@@ -876,8 +960,8 @@ async fn the_operator_reads_and_writes_schedules_over_mcp() {
     let h = TestContext::new().await;
     let operator = RimaiaServer::new(
         h.context.clone(),
-        testing::doctor::environment(),
-        testing::doctor::planner_access(),
+        testing::doctor::provider(),
+        Some(testing::doctor::local_tools(h.machine())),
     );
 
     let created = json_of::<ScheduleView>(
@@ -978,8 +1062,8 @@ async fn a_schedule_the_operator_configures_badly_is_refused_with_the_reason() {
     let h = TestContext::new().await;
     let operator = RimaiaServer::new(
         h.context.clone(),
-        testing::doctor::environment(),
-        testing::doctor::planner_access(),
+        testing::doctor::provider(),
+        Some(testing::doctor::local_tools(h.machine())),
     );
 
     let refused = as_result(
@@ -1024,10 +1108,11 @@ async fn the_operator_reads_and_writes_the_run_capacity_over_mcp() {
     // setter that stored nothing would pass a smoke test.
     let h = TestContext::new().await;
     let repository_id = seed_repository(&h.context.pool, "rimaia", "/tmp/rimaia").await;
+    seed_checkout(&h, &repository_id).await;
     let operator = RimaiaServer::new(
         h.context.clone(),
-        testing::doctor::environment(),
-        testing::doctor::planner_access(),
+        testing::doctor::provider(),
+        Some(testing::doctor::local_tools(h.machine())),
     );
 
     let after_mode = operator
@@ -1070,6 +1155,20 @@ async fn the_operator_reads_and_writes_the_run_capacity_over_mcp() {
         .expect("raise one repository's cap")
         .0;
     assert_eq!(repository.max_concurrency, 2);
+    // This machine's checkout, in D16.1's snake case (task 066), rather than
+    // the board's `RepositoryView`, which no longer carries the cap.
+    assert_eq!(
+        serde_json::to_value(&repository).expect("serialize"),
+        json!({
+            "repository_id": repository_id,
+            "path": "/tmp/rimaia",
+            "worktree_root": "/tmp/rimaia-worktrees",
+            "max_concurrency": 2,
+            "unattended_consent": false,
+            "on_archive": "none",
+            "on_archive_script": null,
+        })
+    );
 
     // A value no form would send is refused with a sentence rather than
     // clamped — the write side of the read-tolerant/write-strict asymmetry.
@@ -1087,7 +1186,7 @@ async fn the_operator_reads_and_writes_the_run_capacity_over_mcp() {
         message(&refused),
     );
     assert_eq!(
-        capacity::configured(&h.context.pool)
+        capacity::configured(h.machine())
             .await
             .expect("read it back")
             .max_concurrency,
@@ -1105,8 +1204,8 @@ async fn the_operator_reads_and_writes_the_strategy_configuration_over_mcp() {
     let h = TestContext::new().await;
     let operator = RimaiaServer::new(
         h.context.clone(),
-        testing::doctor::environment(),
-        testing::doctor::planner_access(),
+        testing::doctor::provider(),
+        Some(testing::doctor::local_tools(h.machine())),
     );
 
     let stored: StrategyApprovalView = json_of(
@@ -1156,8 +1255,8 @@ async fn strategy_defaults_are_read_and_written_per_repository_or_globally_by_on
     let h = TestContext::new().await;
     let operator = RimaiaServer::new(
         h.context.clone(),
-        testing::doctor::environment(),
-        testing::doctor::planner_access(),
+        testing::doctor::provider(),
+        Some(testing::doctor::local_tools(h.machine())),
     );
     let repository_id = seed_repository(&h.context.pool, "rimaia", "/tmp/rimaia").await;
 
@@ -1255,8 +1354,8 @@ async fn a_proposal_is_accepted_and_cleared_over_mcp_exactly_as_the_panel_does_i
 
     let operator = RimaiaServer::new(
         h.context.clone(),
-        testing::doctor::environment(),
-        testing::doctor::planner_access(),
+        testing::doctor::provider(),
+        Some(testing::doctor::local_tools(h.machine())),
     );
 
     let accepted = ok(operator
@@ -1339,7 +1438,7 @@ async fn a_token_stops_working_when_its_run_ends() {
     );
 
     let url = {
-        let grant = handles.grant("task-1");
+        let grant = handles.grant("task-1", &h.solo.team_id, Grant::Strategy);
         let url = scoped_url(&handles, &grant);
 
         assert_eq!(
@@ -1376,7 +1475,7 @@ async fn a_real_client_at_a_scoped_url_is_refused_a_task_that_is_not_its_own() {
     let mine = create_task(&h, &repository_id, "Mine").await;
     let theirs = create_task(&h, &repository_id, "Someone else's").await;
 
-    let grant = handles.grant(&mine.id);
+    let grant = handles.grant(&mine.id, &h.solo.team_id, Grant::Strategy);
     let url = scoped_url(&handles, &grant);
     let client = ()
         .serve(StreamableHttpClientTransport::with_client(
@@ -1412,6 +1511,471 @@ async fn a_real_client_at_a_scoped_url_is_refused_a_task_that_is_not_its_own() {
 }
 
 // ---------------------------------------------------------------------------
+// What each grant may do (seam-contract D30 point 5)
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn a_run_scoped_handle_reaches_only_its_own_task() {
+    let h = TestContext::new().await;
+    let repository_id = seed_repository(&h.context.pool, "rimaia", "/tmp/rimaia").await;
+    let mine = create_task(&h, &repository_id, "Mine").await;
+    let theirs = create_task(&h, &repository_id, "Someone else's").await;
+    let review_run = open_run(&h, &mine.id, RunKind::Review).await;
+    let fix_run = open_run(&h, &mine.id, RunKind::Fix).await;
+
+    let grants = [
+        Grant::Strategy,
+        Grant::Review {
+            run_id: review_run.clone(),
+        },
+        Grant::Fix {
+            run_id: fix_run.clone(),
+        },
+    ];
+    for grant in grants {
+        let kind = grant.kind();
+        let server = scoped_as(&h, &mine.id, grant.clone());
+
+        // Another task's card is out of reach for every grant.
+        assert_refusal(
+            &as_result(
+                server
+                    .get_task(Parameters(request::<GetTaskRequest>(
+                        json!({ "task_id": theirs.id }),
+                    )))
+                    .await,
+            ),
+            &format!(
+                "this handle is scoped to task {mine}, so get_task cannot be called against task \
+                 {theirs}.",
+                mine = mine.id,
+                theirs = theirs.id,
+            ),
+        );
+
+        // And so is writing findings against another task, whatever the grant.
+        let against_theirs = as_result(
+            server
+                .record_review_findings(Parameters(request::<RecordReviewFindingsRequest>(
+                    json!({ "task_id": theirs.id, "findings": [] }),
+                )))
+                .await,
+        );
+        assert_eq!(against_theirs.is_error, Some(true), "{kind:?}");
+
+        // Every tool D30's table marks refused for this grant, through the
+        // decision point every handler starts with.
+        let scope = RunScope::Run {
+            task_id: mine.id.clone(),
+            grant: grant.clone(),
+        };
+        for tool in Tool::ALL {
+            if tool.run_access(kind) == RunAccess::Refused {
+                let refused = scope
+                    .authorize(tool, Some(&mine.id))
+                    .expect_err("a refused tool is refused on the run's own task too");
+                assert_eq!(
+                    refused.to_string(),
+                    not_available(tool.as_str(), &mine.id),
+                    "{} for a {kind:?} grant",
+                    tool.as_str()
+                );
+            }
+        }
+
+        // And through the real handlers, for task 034's six and the findings
+        // read, which every grant is refused.
+        let refusals = [
+            (
+                "approve_task",
+                as_result(
+                    server
+                        .approve_task(Parameters(request::<ArchiveTaskRequest>(
+                            json!({ "task_id": mine.id }),
+                        )))
+                        .await,
+                ),
+            ),
+            (
+                "reject_task",
+                as_result(
+                    server
+                        .reject_task(Parameters(request::<ReviewNoteRequest>(
+                            json!({ "task_id": mine.id, "note": "No." }),
+                        )))
+                        .await,
+                ),
+            ),
+            (
+                "request_task_changes",
+                as_result(
+                    server
+                        .request_task_changes(Parameters(request::<ReviewNoteRequest>(
+                            json!({ "task_id": mine.id, "note": "Again." }),
+                        )))
+                        .await,
+                ),
+            ),
+            (
+                "get_task_dependents",
+                as_result(
+                    server
+                        .get_task_dependents(Parameters(request::<ArchiveTaskRequest>(
+                            json!({ "task_id": mine.id }),
+                        )))
+                        .await,
+                ),
+            ),
+            (
+                "get_review_digest",
+                as_result(server.get_review_digest().await),
+            ),
+            (
+                "mark_review_digest_seen",
+                as_result(
+                    server
+                        .mark_review_digest_seen(Parameters(
+                            request::<MarkReviewDigestSeenRequest>(
+                                json!({ "through": "2026-08-20T00:00:00Z" }),
+                            ),
+                        ))
+                        .await,
+                ),
+            ),
+            (
+                "list_review_findings",
+                as_result(
+                    server
+                        .list_review_findings(Parameters(request::<ListReviewFindingsRequest>(
+                            json!({ "task_id": mine.id }),
+                        )))
+                        .await,
+                ),
+            ),
+        ];
+        for (tool, result) in &refusals {
+            assert_refusal(result, &not_available(tool, &mine.id));
+        }
+
+        match kind {
+            GrantKind::Review => {
+                // A review writes, on its own task, under its grant's run id —
+                // the only run id a request can never name.
+                let recorded = json_of(
+                    server
+                        .record_review_findings(Parameters(request::<RecordReviewFindingsRequest>(
+                            json!({
+                                "task_id": mine.id,
+                                "findings": [{
+                                    "severity": "high",
+                                    "title": "Unchecked index",
+                                    "body": "Panics on an empty list.",
+                                    "file": "src/lib.rs",
+                                    "line": 12,
+                                }],
+                            }),
+                        )))
+                        .await,
+                );
+                assert_eq!(recorded.findings.len(), 1);
+                assert_eq!(recorded.findings[0].review_run_id, review_run);
+            }
+            GrantKind::Fix => {
+                // A fix resolves its own task's open finding under its run id,
+                // and may not record one.
+                assert_refusal(
+                    &as_result(
+                        server
+                            .record_review_findings(Parameters(request::<
+                                RecordReviewFindingsRequest,
+                            >(
+                                json!({ "task_id": mine.id, "findings": [] }),
+                            )))
+                            .await,
+                    ),
+                    &not_available("record_review_findings", &mine.id),
+                );
+                let open = review::findings::list(&h.context, &mine.id, None)
+                    .await
+                    .expect("the review's findings");
+                let resolved = json_of(
+                    server
+                        .resolve_review_finding(Parameters(request::<ResolveReviewFindingRequest>(
+                            json!({
+                                "task_id": mine.id,
+                                "finding_id": open[0].id,
+                                "status": "fixed",
+                                "resolution": "Checked the length first.",
+                            }),
+                        )))
+                        .await,
+                );
+                assert_eq!(
+                    resolved.resolved_by_run_id.as_deref(),
+                    Some(fix_run.as_str())
+                );
+            }
+            GrantKind::Strategy => {
+                assert_refusal(
+                    &as_result(
+                        server
+                            .record_review_findings(Parameters(request::<
+                                RecordReviewFindingsRequest,
+                            >(
+                                json!({ "task_id": mine.id, "findings": [] }),
+                            )))
+                            .await,
+                    ),
+                    &not_available("record_review_findings", &mine.id),
+                );
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn the_operator_cannot_write_a_finding() {
+    // The first thing the operator's door has ever been refused: a finding the
+    // operator wrote would look exactly like a reviewer's in the morning (D30
+    // point 5). The refusal is the same `{ code, message }` as every other.
+    let h = TestContext::new().await;
+    let repository_id = seed_repository(&h.context.pool, "rimaia", "/tmp/rimaia").await;
+    let mine = create_task(&h, &repository_id, "Mine").await;
+    let operator = RimaiaServer::new(
+        h.context.with_source(MutationSource::Mcp),
+        testing::doctor::provider(),
+        Some(testing::doctor::local_tools(h.machine())),
+    );
+
+    let recorded = as_result(
+        operator
+            .record_review_findings(Parameters(request::<RecordReviewFindingsRequest>(
+                json!({ "task_id": mine.id, "findings": [] }),
+            )))
+            .await,
+    );
+    let resolved = as_result(
+        operator
+            .resolve_review_finding(Parameters(request::<ResolveReviewFindingRequest>(json!({
+                "task_id": mine.id,
+                "finding_id": "any-finding",
+                "status": "fixed",
+            }))))
+            .await,
+    );
+
+    for (tool, result) in [
+        ("record_review_findings", recorded),
+        ("resolve_review_finding", resolved),
+    ] {
+        let same_shape = Error::invalid(format!(
+            "{tool} is not available here: only the run a finding belongs to writes it, through \
+             its own run-scoped handle."
+        ));
+        assert_eq!(result.is_error, Some(true), "{tool}");
+        assert_eq!(
+            result.structured_content,
+            Some(serde_json::to_value(&same_shape).expect("the tauri boundary's payload")),
+            "{tool}"
+        );
+        assert_eq!(message(&result), same_shape.to_string());
+    }
+    let stored: i64 = sqlx::query_scalar("SELECT count(*) FROM review_findings")
+        .fetch_one(&h.context.pool)
+        .await
+        .expect("count findings");
+    assert_eq!(stored, 0);
+}
+
+#[tokio::test]
+async fn the_run_scoped_server_reports_its_own_name() {
+    // D30 point 1: the handshake names the door. A run that inherits the
+    // operator's registration sees `rimaia` there and `rimaia-run` on its own
+    // handle, which is what keeps the two apart in its tool names.
+    let h = TestContext::new().await;
+    let handles = RunHandles::default();
+    let (handle, server) = serving(&h, &handles).await;
+    let address = handle.status().bound_address.expect("a bound address");
+
+    let grant = handles.grant("task-1", &h.solo.team_id, Grant::Strategy);
+    for (url, expected) in [
+        (scoped_url(&handles, &grant), mcp::RUN_MCP_SERVER_NAME),
+        (format!("http://{address}/mcp"), mcp::MCP_SERVER_NAME),
+    ] {
+        let client = ()
+            .serve(StreamableHttpClientTransport::with_client(
+                reqwest::Client::default(),
+                StreamableHttpClientTransportConfig::with_uri(url.clone()),
+            ))
+            .await
+            .expect("the server answers `initialize`");
+        let info = client.peer_info().expect("the handshake's server info");
+        let name = info.server_info.as_ref().map(|server| server.name.as_str());
+        assert_eq!(name, Some(expected), "{url}");
+        let _ = client.cancel().await;
+    }
+    assert_eq!(mcp::RUN_MCP_SERVER_NAME, "rimaia-run");
+    assert_eq!(mcp::MCP_SERVER_NAME, "rimaia");
+
+    handle.shutdown();
+    server.await.expect("the server task ends");
+}
+
+// ---------------------------------------------------------------------------
+// Board tools in core, machine tools injected by the host (task 041)
+// ---------------------------------------------------------------------------
+
+/// The tools that inspect, reconfigure or spawn on this machine: the local
+/// router, as task 041's Scope names it, with 066's `list_checkouts` and
+/// 072's two strategy-ceiling tools.
+const LOCAL_TOOLS: [&str; 25] = [
+    "run_doctor",
+    "dismiss_onboarding",
+    "dismiss_doctor_warning",
+    "restore_doctor_warning",
+    "get_repository_credential_status",
+    "list_worktrees",
+    "get_worktree_auto_cleanup",
+    "set_worktree_auto_cleanup",
+    "set_repository_on_archive",
+    "get_run_capacity",
+    "set_schedule_mode",
+    "set_max_concurrency",
+    "set_repository_max_concurrency",
+    "list_checkouts",
+    "list_schedules",
+    "create_schedule",
+    "update_schedule",
+    "set_schedule_enabled",
+    "delete_schedule",
+    "preview_schedule_preflight",
+    "list_timezones",
+    "plan_task_strategy",
+    "plan_tasks_strategy",
+    "get_strategy_ceiling",
+    "set_strategy_ceiling",
+];
+
+/// Every tool name a client listing `url` is offered, sorted.
+async fn listed_tools(url: &str) -> Vec<String> {
+    let client = ()
+        .serve(StreamableHttpClientTransport::with_client(
+            reqwest::Client::default(),
+            StreamableHttpClientTransportConfig::with_uri(url.to_string()),
+        ))
+        .await
+        .expect("the server answers `initialize`");
+    let mut names: Vec<String> = client
+        .list_all_tools()
+        .await
+        .expect("the server lists its tools")
+        .into_iter()
+        .map(|tool| tool.name.to_string())
+        .collect();
+    let _ = client.cancel().await;
+    names.sort();
+    names
+}
+
+/// Every tool `Tool::ALL` declares, sorted, less any in `excluding`.
+fn declared_tools(excluding: &[&str]) -> Vec<String> {
+    let mut names: Vec<String> = Tool::ALL
+        .into_iter()
+        .map(|tool| tool.as_str().to_string())
+        .filter(|name| !excluding.contains(&name.as_str()))
+        .collect();
+    names.sort();
+    names
+}
+
+#[tokio::test]
+async fn a_server_without_a_machine_lists_no_machine_tool() {
+    // Task 046's server and task 060's hosted `/mcp` pass `None`: a host with
+    // no machine serves the board router alone, and a local tool is not a
+    // refusal there but a tool that does not exist.
+    let h = TestContext::new().await;
+    let (handle, server) = mcp::build(
+        h.context.clone(),
+        0,
+        RunHandles::default(),
+        testing::doctor::provider(),
+        None,
+    )
+    .await;
+    let server = tokio::spawn(server.run());
+    let url = handle.url().expect("the server is listening");
+
+    let listed = listed_tools(&url).await;
+
+    assert_eq!(
+        listed,
+        declared_tools(&LOCAL_TOOLS),
+        "exactly the board router"
+    );
+    for local in LOCAL_TOOLS {
+        assert!(
+            !listed.iter().any(|name| name == local),
+            "{local} is listed"
+        );
+    }
+
+    let client = ()
+        .serve(StreamableHttpClientTransport::with_client(
+            reqwest::Client::default(),
+            StreamableHttpClientTransportConfig::with_uri(url.clone()),
+        ))
+        .await
+        .expect("the server answers `initialize`");
+    for local in ["run_doctor", "list_schedules", "plan_task_strategy"] {
+        let error = client
+            .call_tool(CallToolRequestParams::new(local))
+            .await
+            .expect_err("a tool this server does not have is not a tool result");
+        assert!(
+            error.to_string().contains("tool not found"),
+            "{local}: an unknown-tool error, not a refusal: {error}"
+        );
+    }
+    let _ = client.cancel().await;
+
+    handle.shutdown();
+    server.await.expect("the server task ends");
+}
+
+#[tokio::test]
+async fn with_a_machine_both_doors_list_every_tool_and_a_run_is_refused_a_local_one() {
+    // The shell passes `Some` to both constructors. `tools/list` is not
+    // filtered by scope, so a run is still offered all 22, and calling one is
+    // `RunScope`'s refusal in today's sentence, never an unknown tool.
+    let h = TestContext::new().await;
+    let handles = RunHandles::default();
+    let (handle, server) = serving(&h, &handles).await;
+    let operator = handle.url().expect("the server is listening");
+    let grant = handles.grant("task-1", &h.solo.team_id, Grant::Strategy);
+    let run = scoped_url(&handles, &grant);
+
+    assert_eq!(listed_tools(&operator).await, declared_tools(&[]));
+    assert_eq!(listed_tools(&run).await, declared_tools(&[]));
+
+    let client = ()
+        .serve(StreamableHttpClientTransport::with_client(
+            reqwest::Client::default(),
+            StreamableHttpClientTransportConfig::with_uri(run.clone()),
+        ))
+        .await
+        .expect("a run's own handle answers `initialize`");
+    let refused = client
+        .call_tool(CallToolRequestParams::new("run_doctor"))
+        .await
+        .expect("a refusal is a tool result");
+    assert_refusal(&refused, &not_available("run_doctor", "task-1"));
+    let _ = client.cancel().await;
+
+    handle.shutdown();
+    server.await.expect("the server task ends");
+}
+
+// ---------------------------------------------------------------------------
 // Fixtures
 // ---------------------------------------------------------------------------
 
@@ -1419,13 +1983,57 @@ const NOW: &str = "2026-08-20T02:00:00+00:00";
 
 /// A server reached the way a run reaches it, on a context re-sourced the way
 /// `mcp::build` does it.
+///
+/// The planner's grant, which is the table every test before task 035 was
+/// written against.
 fn scoped(h: &TestContext, task_id: &str) -> RimaiaServer {
+    scoped_as(h, task_id, Grant::Strategy)
+}
+
+/// The same, holding `grant`.
+fn scoped_as(h: &TestContext, task_id: &str, grant: Grant) -> RimaiaServer {
     RimaiaServer::scoped(
         h.context.with_source(MutationSource::Mcp),
-        testing::doctor::environment(),
-        testing::doctor::planner_access(),
-        task_id,
+        testing::doctor::provider(),
+        Some(testing::doctor::local_tools(h.machine())),
+        RunScope::Run {
+            task_id: task_id.to_string(),
+            grant,
+        },
     )
+}
+
+/// A running row of `kind` on `task_id`, opened through `start_run`, the one
+/// writer. Nothing reads the transcript path, so it points nowhere.
+async fn open_run(h: &TestContext, task_id: &str, kind: RunKind) -> String {
+    start_run(
+        &h.context,
+        &AppPaths::new(std::path::Path::new("/tmp/rimaia-scope-test")),
+        NewRun {
+            task_id: task_id.to_string(),
+            kind,
+            session_id: rimaia_core::db::new_id(),
+            prompt: "a prompt".to_string(),
+            base_ref: None,
+            base_sha: None,
+        },
+    )
+    .await
+    .expect("open a run row")
+    .id
+}
+
+/// One grant of each kind, with run ids that name no row.
+fn every_grant() -> [Grant; 3] {
+    [
+        Grant::Strategy,
+        Grant::Review {
+            run_id: "a-review-run".to_string(),
+        },
+        Grant::Fix {
+            run_id: "a-fix-run".to_string(),
+        },
+    ]
 }
 
 /// A bound server on an OS-chosen port, already spawned, sharing `handles` with
@@ -1438,8 +2046,8 @@ async fn serving(
         h.context.clone(),
         0,
         handles.clone(),
-        testing::doctor::environment(),
-        testing::doctor::planner_access(),
+        testing::doctor::provider(),
+        Some(testing::doctor::local_tools(h.machine())),
     )
     .await;
     (handle, tokio::spawn(task.run()))
@@ -1552,18 +2160,33 @@ fn message(result: &CallToolResult) -> String {
 
 async fn seed_repository(pool: &SqlitePool, name: &str, path: &str) -> String {
     let id = rimaia_core::db::new_id();
+    let team_id = solo_team(pool).await;
     sqlx::query(
-        "INSERT INTO repositories (id, name, path, default_branch, worktree_root, allow_unattended_runs, created_at)
-         VALUES (?1, ?2, ?3, 'main', '/tmp/rimaia-worktrees', 0, ?4)",
+        "INSERT INTO repositories (id, team_id, name, path, default_branch, worktree_root, allow_unattended_runs, created_at)
+         VALUES (?1, ?5, ?2, ?3, 'main', '/tmp/rimaia-worktrees', 0, ?4)",
     )
     .bind(&id)
     .bind(name)
     .bind(path)
     .bind(NOW)
+    .bind(&team_id)
     .execute(pool)
     .await
     .expect("seed a repository");
     id
+}
+
+/// This machine's checkout of a seeded repository, for a tool that reads or
+/// writes one (task 066).
+async fn seed_checkout(h: &TestContext, repository_id: &str) {
+    h.machine()
+        .store
+        .insert_checkout(&testing::machine::checkout_at(
+            repository_id,
+            std::path::Path::new("/tmp/rimaia"),
+        ))
+        .await
+        .expect("seed a checkout");
 }
 
 async fn create_task(h: &TestContext, repository_id: &str, title: &str) -> rimaia_core::db::Task {
@@ -1587,8 +2210,8 @@ async fn create_task(h: &TestContext, repository_id: &str, title: &str) -> rimai
 async fn board(h: &TestContext, repository_id: &str) -> Vec<String> {
     let listed: TaskListView = match RimaiaServer::new(
         h.context.clone(),
-        testing::doctor::environment(),
-        testing::doctor::planner_access(),
+        testing::doctor::provider(),
+        Some(testing::doctor::local_tools(h.machine())),
     )
     .list_tasks(Parameters(request::<ListTasksRequest>(
         json!({ "repository_id": repository_id }),
@@ -1600,4 +2223,341 @@ async fn board(h: &TestContext, repository_id: &str) -> Vec<String> {
     };
 
     listed.tasks.into_iter().map(|task| task.id).collect()
+}
+
+#[test]
+fn review_tools_are_refused_to_a_run() {
+    // Deciding a review is a run marking its own homework (D30 point 5); the
+    // digest and dependents reads enumerate other tasks (D16.6); and the marker
+    // write reconfigures the installation (ADR-0021 point 4).
+    for grant in every_grant() {
+        let kind = grant.kind();
+        let run = RunScope::Run {
+            task_id: "its-own-task".to_string(),
+            grant,
+        };
+        for tool in [
+            Tool::ApproveTask,
+            Tool::RejectTask,
+            Tool::RequestTaskChanges,
+            Tool::GetTaskDependents,
+            Tool::GetReviewDigest,
+            Tool::MarkReviewDigestSeen,
+        ] {
+            assert_eq!(
+                tool.run_access(kind),
+                RunAccess::Refused,
+                "{}",
+                tool.as_str()
+            );
+            assert!(
+                run.authorize(tool, Some("its-own-task")).is_err(),
+                "{} reached a run",
+                tool.as_str()
+            );
+            assert!(run.authorize(tool, None).is_err(), "{}", tool.as_str());
+        }
+    }
+}
+
+#[tokio::test]
+async fn the_review_configuration_is_refused_to_every_grant() {
+    // A run that could turn its own loop on would be spending on its own
+    // authority, and a fixer that could rewrite its own review instructions
+    // would be marking its own homework (ADR-0021 point 4, task 021). Refused on
+    // its own task, before anything is read or written.
+    let h = TestContext::new().await;
+    let repository_id = seed_repository(&h.context.pool, "rimaia", "/tmp/rimaia").await;
+    let task = create_task(&h, &repository_id, "Mine").await;
+    let on = json!({ "enabled": "on_cost_acknowledged" });
+
+    for grant in every_grant() {
+        let server = scoped_as(&h, &task.id, grant);
+
+        assert_refusal(
+            &as_result(server.get_review_settings().await),
+            &not_available("get_review_settings", &task.id),
+        );
+        assert_refusal(
+            &as_result(
+                server
+                    .get_review_level(Parameters(request::<GetReviewLevelRequest>(
+                        json!({ "level": "task", "id": task.id }),
+                    )))
+                    .await,
+            ),
+            &not_available("get_review_level", &task.id),
+        );
+        assert_refusal(
+            &as_result(
+                server
+                    .set_review_settings(Parameters(request::<SetReviewSettingsRequest>(
+                        json!({ "instructions": "", "config": on }),
+                    )))
+                    .await,
+            ),
+            &not_available("set_review_settings", &task.id),
+        );
+        assert_refusal(
+            &as_result(
+                server
+                    .set_repository_review_config(Parameters(request::<
+                        SetRepositoryReviewConfigRequest,
+                    >(
+                        json!({ "repository_id": repository_id, "config": on }),
+                    )))
+                    .await,
+            ),
+            &not_available("set_repository_review_config", &task.id),
+        );
+        assert_refusal(
+            &as_result(
+                server
+                    .set_task_review(Parameters(request::<SetTaskReviewRequest>(
+                        json!({ "task_id": task.id, "config": on }),
+                    )))
+                    .await,
+            ),
+            &not_available("set_task_review", &task.id),
+        );
+    }
+
+    let after = tasks::get_task(&h.context, &task.id)
+        .await
+        .expect("read the task");
+    assert_eq!(
+        after.review_config,
+        Default::default(),
+        "nothing was written"
+    );
+}
+
+#[tokio::test]
+async fn getting_review_history_is_refused_to_every_run_grant() {
+    // D30's "everything else" row (task 037): the history holds every finding
+    // of every loop, and a run is handed what it needs in its prompt. Refused
+    // on its own task, before anything is read.
+    let h = TestContext::new().await;
+    let repository_id = seed_repository(&h.context.pool, "rimaia", "/tmp/rimaia").await;
+    let task = create_task(&h, &repository_id, "Mine").await;
+
+    for grant in every_grant() {
+        let server = scoped_as(&h, &task.id, grant);
+
+        assert_refusal(
+            &as_result(
+                server
+                    .get_review_history(Parameters(request::<GetReviewHistoryRequest>(
+                        json!({ "task_id": task.id }),
+                    )))
+                    .await,
+            ),
+            &not_available("get_review_history", &task.id),
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_review_grant_cannot_call_resolve_review_finding() {
+    let h = TestContext::new().await;
+    let repository_id = seed_repository(&h.context.pool, "rimaia", "/tmp/rimaia").await;
+    let task = create_task(&h, &repository_id, "Reviewed").await;
+    let review_run = open_run(&h, &task.id, RunKind::Review).await;
+    let server = scoped_as(&h, &task.id, Grant::Review { run_id: review_run });
+
+    let refused = as_result(
+        server
+            .resolve_review_finding(Parameters(request::<ResolveReviewFindingRequest>(json!({
+                "task_id": task.id,
+                "finding_id": "any",
+                "status": "fixed",
+            }))))
+            .await,
+    );
+
+    assert_refusal(&refused, &not_available("resolve_review_finding", &task.id));
+}
+
+#[tokio::test]
+async fn a_fix_grant_cannot_call_record_review_findings() {
+    let h = TestContext::new().await;
+    let repository_id = seed_repository(&h.context.pool, "rimaia", "/tmp/rimaia").await;
+    let task = create_task(&h, &repository_id, "Fixed").await;
+    let fix_run = open_run(&h, &task.id, RunKind::Fix).await;
+    let server = scoped_as(&h, &task.id, Grant::Fix { run_id: fix_run });
+
+    let refused = as_result(
+        server
+            .record_review_findings(Parameters(request::<RecordReviewFindingsRequest>(
+                json!({ "task_id": task.id, "findings": [] }),
+            )))
+            .await,
+    );
+
+    assert_refusal(&refused, &not_available("record_review_findings", &task.id));
+}
+
+/// The solo team the board's rows belong to: the identity `TestContext`
+/// already created, or a first launch's, read through the same
+/// `identity::ensure_solo` either way.
+async fn solo_team(pool: &SqlitePool) -> String {
+    rimaia_core::identity::ensure_solo(
+        pool,
+        &rimaia_core::testing::TestClock::new(rimaia_core::testing::test_epoch()),
+    )
+    .await
+    .expect("the board's solo identity")
+    .team_id
+}
+
+#[tokio::test]
+async fn a_run_cannot_read_or_change_the_strategy_ceiling() {
+    // Task 072. The ceiling decides what this machine's owner pays for: a run
+    // raising it would spend on its own authority, and one lowering it would
+    // refuse every later run here. Refused to every grant, through the
+    // run-scoped route a run actually reaches, before anything is read or
+    // written; the operator's door is the control.
+    let h = TestContext::new().await;
+    let handles = RunHandles::default();
+    let (handle, server) = serving(&h, &handles).await;
+    let operator = handle.url().expect("the server is listening");
+    let set = json!({ "models": ["haiku"], "max_effort": "low" });
+
+    for grant in every_grant() {
+        let granted = handles.grant("task-1", &h.solo.team_id, grant);
+        let client = ()
+            .serve(StreamableHttpClientTransport::with_client(
+                reqwest::Client::default(),
+                StreamableHttpClientTransportConfig::with_uri(scoped_url(&handles, &granted)),
+            ))
+            .await
+            .expect("a run's own handle answers `initialize`");
+        let read = client
+            .call_tool(CallToolRequestParams::new("get_strategy_ceiling"))
+            .await
+            .expect("a refusal is a tool result");
+        assert_refusal(&read, &not_available("get_strategy_ceiling", "task-1"));
+        let written = client
+            .call_tool(
+                CallToolRequestParams::new("set_strategy_ceiling")
+                    .with_arguments(set.as_object().expect("an object").clone()),
+            )
+            .await
+            .expect("a refusal is a tool result");
+        assert_refusal(&written, &not_available("set_strategy_ceiling", "task-1"));
+        let _ = client.cancel().await;
+    }
+    assert_eq!(
+        rimaia_core::consent::ceiling::strategy_ceiling(h.machine())
+            .await
+            .expect("read the ceiling"),
+        Default::default(),
+        "no run stored a ceiling"
+    );
+
+    let client = ()
+        .serve(StreamableHttpClientTransport::with_client(
+            reqwest::Client::default(),
+            StreamableHttpClientTransportConfig::with_uri(operator),
+        ))
+        .await
+        .expect("the operator's door answers `initialize`");
+    let written = client
+        .call_tool(
+            CallToolRequestParams::new("set_strategy_ceiling")
+                .with_arguments(set.as_object().expect("an object").clone()),
+        )
+        .await
+        .expect("the operator sets the ceiling");
+    assert_eq!(written.is_error, Some(false), "{written:?}");
+    let read = client
+        .call_tool(CallToolRequestParams::new("get_strategy_ceiling"))
+        .await
+        .expect("the operator reads it back");
+    assert_eq!(
+        read.structured_content,
+        Some(json!({ "models": ["haiku"], "max_effort": "low" }))
+    );
+    let _ = client.cancel().await;
+
+    handle.shutdown();
+    server.await.expect("the server task ends");
+}
+
+#[tokio::test]
+async fn a_run_cannot_accept_through_its_handle() {
+    // ADR-0032 point 6, and task 045's reason for refusing all four: a run that
+    // could accept would launder consent through its own handle, its owner
+    // accepting content the run itself wrote. Refused for every grant, on its
+    // own task, before anything is read or written; the operator's door is the
+    // control.
+    let h = TestContext::new().await;
+    let repository_id = seed_repository(&h.context.pool, "rimaia", "/tmp/rimaia").await;
+    let task = create_task(&h, &repository_id, "Mine").await;
+    let accept = || {
+        request::<AcceptContentRequest>(json!({
+            "team_id": h.solo.team_id,
+            "task_id": task.id,
+            "kind": "plan",
+            "revision": "1",
+        }))
+    };
+
+    for grant in every_grant() {
+        let server = scoped_as(&h, &task.id, grant);
+
+        assert_refusal(
+            &as_result(server.accept_content(Parameters(accept())).await),
+            &not_available("accept_content", &task.id),
+        );
+        assert_refusal(
+            &as_result(
+                server
+                    .assign_task(Parameters(request::<AssignTaskRequest>(
+                        json!({ "task_id": task.id, "assignee_id": null }),
+                    )))
+                    .await,
+            ),
+            &not_available("assign_task", &task.id),
+        );
+        assert_refusal(
+            &as_result(
+                server
+                    .set_repository_unattended_ceiling(Parameters(request::<
+                        SetRepositoryUnattendedCeilingRequest,
+                    >(
+                        json!({ "repository_id": repository_id, "allowed": true }),
+                    )))
+                    .await,
+            ),
+            &not_available("set_repository_unattended_ceiling", &task.id),
+        );
+        assert_refusal(
+            &as_result(
+                server
+                    .get_task_consent(Parameters(request::<GetTaskConsentRequest>(
+                        json!({ "task_id": task.id, "runner_id": h.solo.runner_id }),
+                    )))
+                    .await,
+            ),
+            &not_available("get_task_consent", &task.id),
+        );
+    }
+    let recorded: i64 = sqlx::query_scalar("SELECT count(*) FROM acceptances")
+        .fetch_one(&h.context.pool)
+        .await
+        .expect("count the acceptances");
+    assert_eq!(recorded, 0, "no run recorded an acceptance");
+
+    let operator = RimaiaServer::new(
+        h.context.with_source(MutationSource::Mcp),
+        testing::doctor::provider(),
+        Some(testing::doctor::local_tools(h.machine())),
+    );
+    json_of(operator.accept_content(Parameters(accept())).await);
+    let recorded: i64 = sqlx::query_scalar("SELECT count(*) FROM acceptances")
+        .fetch_one(&h.context.pool)
+        .await
+        .expect("count the acceptances");
+    assert_eq!(recorded, 1, "the operator's own door accepts");
 }

@@ -7,12 +7,16 @@ import type {
   ArchiveReport,
   AutoCleanup,
   BoardColumn,
+  CheckoutView,
   CleanupReport,
+  ContentKind,
   CredentialStatus,
   DetectedOpenInTarget,
   DiffSummary,
   DoctorDismissal,
   DoctorReport,
+  FindingStatus,
+  LocalWorktree,
   McpProbe,
   McpStatus,
   NewTaskInput,
@@ -30,6 +34,14 @@ import type {
   RemovalAuthorizationInput,
   RemovedWorktree,
   Repository,
+  ReviewConfig,
+  ReviewDigest,
+  ReviewFinding,
+  ReviewHistory,
+  ReviewLevel,
+  ReviewLevelName,
+  ReviewOutcome,
+  ReviewSettings,
   RimaiaError,
   Run,
   RunCapacity,
@@ -47,13 +59,17 @@ import type {
   SearchHit,
   StrategyApproval,
   StrategyCatalogueView,
+  StrategyCeiling,
   StrategyDefaults,
   Task,
+  TaskConsent,
+  TaskDependent,
   TaskDetail,
   TaskFilterInput,
   TaskLink,
   TaskLinkPatchInput,
   TaskPatchInput,
+  TaskReview,
   TaskSummary,
   TranscriptPage,
   TranscriptSummary,
@@ -61,6 +77,32 @@ import type {
   WorktreeInventory,
   WorktreeStatus,
 } from "../types";
+
+/**
+ * What `call` sends through: the command name and its arguments in, whatever
+ * the backend answered (or a rejection) out. Replaceable so a caller that is
+ * not the Tauri shell — fixture mode today, an HTTP client later (ADR-0034
+ * point 4) — can answer the same commands without any component knowing.
+ */
+export type CommandTransport = (
+  command: string,
+  args?: Record<string, unknown>,
+) => Promise<unknown>;
+
+// `undefined` means "Tauri's invoke", looked up at call time below. Capturing
+// `invoke` here instead would bind whatever `vi.mock` had installed at import
+// time and break every test that re-mocks it per case.
+let installedTransport: CommandTransport | undefined;
+
+/**
+ * Replace the transport `call` sends through. Called by an entry point
+ * (`src/dev/main.tsx` today), never by a component, a view or a hook.
+ */
+export function setCommandTransport(transport: CommandTransport | undefined): void {
+  installedTransport = transport;
+}
+
+const tauriTransport: CommandTransport = (command, args) => invoke<unknown>(command, args);
 
 /**
  * The only module in the frontend that imports `invoke`.
@@ -72,7 +114,7 @@ import type {
  */
 async function call<T>(command: string, args?: Record<string, unknown>): Promise<T> {
   try {
-    return await invoke<T>(command, args);
+    return (await (installedTransport ?? tauriTransport)(command, args)) as T;
   } catch (thrown) {
     throw toRimaiaError(thrown);
   }
@@ -137,10 +179,37 @@ export function updateRepository(
   return call<Repository>("update_repository", { id, patch });
 }
 
+/** This computer's clone of every repository it has one of (task 066): the
+ *  per-machine fields {@link Repository} no longer carries. A repository with
+ *  no entry is not set up on this computer. */
+export function listCheckouts(): Promise<CheckoutView[]> {
+  return call<CheckoutView[]>("list_checkouts");
+}
+
+/** Moves where this computer creates a repository's worktrees — what
+ *  `updateRepository`'s `worktreeRoot` did until task 066. */
+export function setRepositoryWorktreeRoot(
+  repositoryId: string,
+  worktreeRoot: string,
+): Promise<CheckoutView> {
+  return call<CheckoutView>("set_repository_worktree_root", { repositoryId, worktreeRoot });
+}
+
 /** The caller is responsible for the ADR-0012 confirmation dialog before
- *  passing `allow: true` — this only performs the already-agreed act. */
-export function setRepositoryUnattendedRuns(id: string, allow: boolean): Promise<Repository> {
-  return call<Repository>("set_repository_unattended_runs", { id, allow });
+ *  passing `allow: true` — this only performs the already-agreed act. Writes
+ *  this computer's consent (task 066). */
+export function setRepositoryUnattendedRuns(id: string, allow: boolean): Promise<CheckoutView> {
+  return call<CheckoutView>("set_repository_unattended_runs", { id, allow });
+}
+
+/**
+ * Sets the team ceiling: whether a shared team allows unattended runs in this
+ * repository at all (ADR-0032 point 4). Only a team owner may, and a personal
+ * team has none — this machine's consent, {@link setRepositoryUnattendedRuns},
+ * is the whole decision there.
+ */
+export function setRepositoryUnattendedCeiling(id: string, allowed: boolean): Promise<Repository> {
+  return call<Repository>("set_repository_unattended_ceiling", { id, allowed });
 }
 
 /**
@@ -157,8 +226,8 @@ export function setRepositoryOnArchive(
   id: string,
   onArchive: OnArchive,
   script: string | null,
-): Promise<Repository> {
-  return call<Repository>("set_repository_on_archive", { id, onArchive, script });
+): Promise<CheckoutView> {
+  return call<CheckoutView>("set_repository_on_archive", { id, onArchive, script });
 }
 
 /**
@@ -173,8 +242,8 @@ export function setRepositoryOnArchive(
 export function setRepositoryMaxConcurrency(
   id: string,
   maxConcurrency: number,
-): Promise<Repository> {
-  return call<Repository>("set_repository_max_concurrency", { id, maxConcurrency });
+): Promise<CheckoutView> {
+  return call<CheckoutView>("set_repository_max_concurrency", { id, maxConcurrency });
 }
 
 export function removeRepository(id: string): Promise<void> {
@@ -277,6 +346,124 @@ export function unarchiveTask(id: string): Promise<Task> {
 }
 
 /**
+ * Approves a task waiting in review: it moves to the bottom of `done`.
+ *
+ * Rejects when the task is not in review, is archived, or has a run queued,
+ * running or waiting to retry. The same refusals apply to the two verdicts
+ * below, and they come from one rule in `rimaia_core::review`.
+ */
+export function approveTask(taskId: string): Promise<Task> {
+  return call<Task>("approve_task", { taskId });
+}
+
+/**
+ * Rejects a reviewed task: back to the bottom of `ready` with `note` appended
+ * to its extra instructions, its worktree removed and its branch **set aside in
+ * git, never deleted**, so the next run starts on a fresh branch. Rejects for a
+ * blank note, and for a worktree holding uncommitted changes (there is no force).
+ */
+export function rejectTask(taskId: string, note: string): Promise<ReviewOutcome> {
+  return call<ReviewOutcome>("reject_task", { taskId, note });
+}
+
+/**
+ * Sends a reviewed task back for another round: back to the bottom of `ready`
+ * with `note` appended, its worktree and branch kept, so the next run builds
+ * on the reviewed commits. Rejects for a blank note.
+ */
+export function requestTaskChanges(taskId: string, note: string): Promise<ReviewOutcome> {
+  return call<ReviewOutcome>("request_task_changes", { taskId, note });
+}
+
+/** The tasks that depend directly on this one, and which already built on it. */
+export function getTaskDependents(taskId: string): Promise<TaskDependent[]> {
+  return call<TaskDependent[]>("get_task_dependents", { taskId });
+}
+
+/** What the queue did since the last finished review. Render it as returned. */
+export function getReviewDigest(): Promise<ReviewDigest> {
+  return call<ReviewDigest>("get_review_digest");
+}
+
+/**
+ * What review runs found on a task, oldest review first and each review's
+ * findings in the order the reviewer gave them, optionally of one status. The
+ * read only: no window writes a finding (seam-contract D30 point 5).
+ */
+export function listReviewFindings(
+  taskId: string,
+  status?: FindingStatus,
+): Promise<ReviewFinding[]> {
+  return call<ReviewFinding[]>("list_review_findings", { taskId, status: status ?? null });
+}
+
+/**
+ * Every loop the task has had, oldest first: each review with its findings,
+ * the fix after it and what that fix resolved, and the ping-pong lists. Render
+ * it as returned. Grouping into loops, what blocks and the counts are core's
+ * (task 037); a window that regroups runs or recounts findings has written a
+ * second copy of a rule.
+ */
+export function getReviewHistory(taskId: string): Promise<ReviewHistory> {
+  return call<ReviewHistory>("get_review_history", { taskId });
+}
+
+/**
+ * One level of the loop's configuration next to what it inherits and what it
+ * resolves to. `id` is the repository's or the task's, and is left out for
+ * `global`.
+ */
+export function getReviewLevel(level: ReviewLevelName, id?: string): Promise<ReviewLevel> {
+  return call<ReviewLevel>("get_review_level", { level, id: id ?? null });
+}
+
+/** The global review instructions and loop configuration. */
+export function getReviewSettings(): Promise<ReviewSettings> {
+  return call<ReviewSettings>("get_review_settings");
+}
+
+/**
+ * Replaces the global review instructions and loop configuration. `enabled`
+ * can only be `"off"` or `"on_cost_acknowledged"`: the type has no `true`, and
+ * core refuses one that arrives anyway. An empty `config` clears every field.
+ */
+export function setReviewSettings(
+  instructions: string,
+  config: ReviewConfig,
+): Promise<ReviewSettings> {
+  return call<ReviewSettings>("set_review_settings", { instructions, config });
+}
+
+/** Replaces one repository's loop configuration; an empty one inherits all. */
+export function setRepositoryReviewConfig(
+  repositoryId: string,
+  config: ReviewConfig,
+): Promise<ReviewConfig> {
+  return call<ReviewConfig>("set_repository_review_config", { repositoryId, config });
+}
+
+/**
+ * Replaces one task's override of the review instructions (`null` or blank
+ * falls back to the global text) and its loop configuration.
+ */
+export function setTaskReview(
+  taskId: string,
+  reviewInstructions: string | null,
+  config: ReviewConfig,
+): Promise<TaskReview> {
+  return call<TaskReview>("set_task_review", { taskId, reviewInstructions, config });
+}
+
+/**
+ * Marks the digest seen through `through`, normally the `until` of the digest
+ * that was shown. Never moves the marker backwards; a future instant rejects.
+ * Resolves with what is stored.
+ */
+export function markReviewDigestSeen(through: string): Promise<string> {
+  return call<string>("mark_review_digest_seen", { through });
+}
+
+/**
  * Moves a task to `column`, landing it between `beforeId` and `afterId`.
  * Naming neither is only legal when the destination column is otherwise
  * empty — see `rimaia_core::tasks::move_task`'s own doc for why this is
@@ -331,6 +518,32 @@ export function setTaskDependencies(taskId: string, dependsOn: string[]): Promis
   return call<string[]>("set_task_dependencies", { taskId, dependsOn });
 }
 
+/** Assigns a task to one member of its team, whose runners alone will run it;
+ *  `null` returns it to the team's pool (ADR-0032 point 1). */
+export function assignTask(taskId: string, assigneeId: string | null): Promise<Task> {
+  return call<Task>("assign_task", { taskId, assigneeId });
+}
+
+/**
+ * Records that the user read `revision` of one piece of content a teammate
+ * changed and accepts running it (ADR-0032 point 3). `taskId` is `null`
+ * exactly for the team's base and review instructions; for a base commit it is
+ * the dependency that made the commit. Only the current revision is accepted.
+ */
+export function acceptContent(
+  teamId: string,
+  taskId: string | null,
+  kind: ContentKind,
+  revision: string,
+): Promise<void> {
+  return call<void>("accept_content", { teamId, taskId, kind, revision });
+}
+
+/** Why one of the user's runners would or would not take a task. */
+export function getTaskConsent(taskId: string, runnerId: string): Promise<TaskConsent> {
+  return call<TaskConsent>("get_task_consent", { taskId, runnerId });
+}
+
 /** The dependencies keeping a task out of the queue, whole rows, in the order
  *  ADR-0008 picks a base branch in. Empty means nothing is blocking it. */
 export function getBlockingReason(taskId: string): Promise<Task[]> {
@@ -360,6 +573,18 @@ export async function getRunCostSummary(): Promise<RunCostSummary> {
 
 export function setRunEnvironment(value: RunEnvironment): Promise<void> {
   return call<void>("set_run_environment", { value });
+}
+
+/** This runner's strategy ceiling — see `StrategyCeiling`. A local runner
+ *  setting (seam-contract D32). */
+export function getStrategyCeiling(): Promise<StrategyCeiling> {
+  return call<StrategyCeiling>("get_strategy_ceiling");
+}
+
+/** Replaces this runner's strategy ceiling whole. The next claim and the next
+ *  spawn read it; a run already spawned keeps what it was spawned with. */
+export function setStrategyCeiling(ceiling: StrategyCeiling): Promise<void> {
+  return call<void>("set_strategy_ceiling", { ceiling });
 }
 
 /**
@@ -512,11 +737,13 @@ export function getWorktreeStatus(taskId: string): Promise<WorktreeStatus> {
 }
 
 /**
- * The diff and the commits a run detail view opens with (task 015,
- * ADR-0013): files changed, insertions, deletions, the per-file breakdown,
- * and the commit list. Scoped to the branch, not to one attempt — every
- * attempt of a task shares one branch, so this is the same summary
- * regardless of which run's detail view fetched it.
+ * The task's branch as it is **now**, read live from git: files changed,
+ * insertions, deletions, the per-file breakdown, and the commit list. A local
+ * command (seam-contract D32): it needs the machine that holds the clone.
+ *
+ * Since task 033 a run's own diff is the review its finish recorded, on
+ * {@link getRun}. This is only the run detail overlay's fallback for a run
+ * that recorded nothing, labelled there as the branch's current state.
  */
 export function getDiffSummary(taskId: string): Promise<DiffSummary> {
   return call<DiffSummary>("get_diff_summary", { taskId });
@@ -525,11 +752,17 @@ export function getDiffSummary(taskId: string): Promise<DiffSummary> {
 /**
  * Opens the task's worktree directory in the OS file manager. "Copy path"
  * needs no command — a component already has the path from
- * {@link getWorktreeStatus} or from `TaskDetail.worktreePath`, and the
+ * {@link getWorktreeStatus} or from {@link listLocalWorktrees}, and the
  * system clipboard is a browser API away.
  */
 export function revealTaskWorktree(taskId: string): Promise<void> {
   return call<void>("reveal_task_worktree", { taskId });
+}
+
+/** Every worktree this computer records (task 066): what task DTOs carried
+ *  as `worktreePath` until no board DTO held a path. Join by `taskId`. */
+export function listLocalWorktrees(): Promise<LocalWorktree[]> {
+  return call<LocalWorktree[]>("list_local_worktrees");
 }
 
 /**
@@ -697,9 +930,9 @@ export function listRuns(filter: RunFilterInput = {}): Promise<RunListEntry[]> {
 }
 
 /**
- * One run's full detail: its own outcome, the branch's diff and commits
+ * One run's full detail: its own outcome, the review its finish recorded
  * (ADR-0013's ordering), the exact prompt it received, and whether its
- * transcript file still resolves.
+ * transcript file still resolves. A board read that runs no git (task 033).
  */
 export function getRun(runId: string): Promise<RunDetail> {
   return call<RunDetail>("get_run", { runId });
@@ -737,12 +970,16 @@ export function summarizeRunTranscript(runId: string): Promise<TranscriptSummary
   return call<TranscriptSummary>("summarize_run_transcript", { runId });
 }
 
-/** Reveals `runId`'s raw JSONL transcript in the OS file manager. "Copy log
- *  path" needs no command — every caller already has `Run.logPath` from
- *  {@link getRun} or {@link listRunsForTask}, and the system clipboard is a
- *  browser API away. */
+/** Reveals `runId`'s raw JSONL transcript in the OS file manager. */
 export function revealRunLog(runId: string): Promise<void> {
   return call<void>("reveal_run_log", { runId });
+}
+
+/** Where a run's transcript is on this computer, derived from its ids
+ *  (ADR-0013): what "copy log path" copies, fetched on the action because
+ *  `Run` carries no `logPath` since task 066. */
+export function getRunLogPath(taskId: string, runId: string): Promise<string> {
+  return call<string>("get_run_log_path", { taskId, runId });
 }
 
 /** Total bytes on disk across every run's transcript, for Settings' storage

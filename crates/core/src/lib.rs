@@ -12,17 +12,23 @@
 
 pub mod analytics;
 pub mod archive;
+pub mod board;
 pub mod clock;
+pub mod consent;
 pub mod context;
 pub mod credentials;
 pub mod db;
 pub mod doctor;
 pub mod error;
 pub mod events;
+pub mod identity;
+pub mod machine;
 pub mod mcp;
 pub mod openers;
 pub mod paths;
 pub mod repo;
+pub mod review;
+pub mod review_loop;
 pub mod runner;
 pub mod runs;
 pub mod schedule;
@@ -38,7 +44,7 @@ pub mod worktree;
 pub mod testing;
 
 pub use clock::{Clock, SystemClock};
-pub use context::ServiceContext;
+pub use context::{ScopedTx, ServiceContext, TeamScope};
 pub use error::{Error, ErrorCode, Result};
-pub use events::ChangeEvent;
+pub use events::{Change, ChangeEvent};
 pub use paths::AppPaths;

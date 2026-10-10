@@ -27,7 +27,6 @@ function summary(id: string, title: string, column: BoardColumn): TaskSummary {
     position: 0,
     runState: "idle",
     branch: null,
-    worktreePath: null,
     strategyMode: "default",
     model: null,
     effort: null,
@@ -46,6 +45,7 @@ function summary(id: string, title: string, column: BoardColumn): TaskSummary {
     effectiveModel: null,
     effectiveEffort: null,
     effectiveOrigin: "claude_code",
+    reviewLoop: null,
   };
 }
 

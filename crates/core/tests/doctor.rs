@@ -37,10 +37,10 @@ use rimaia_core::db::Repository;
 use rimaia_core::doctor::{
     checks, Check, CheckResult, CheckStatus, DoctorReport, Environment, Programs,
 };
+use rimaia_core::machine::Checkout;
 use rimaia_core::paths::DATA_DIR_ENV;
 use rimaia_core::runner::provider::ClaudeProvider;
 use rimaia_core::runner::RunnerConfig;
-use rimaia_core::scheduler::{self, InFlight, QueueState};
 use rimaia_core::testing::{TempRepo, TestContext};
 use rimaia_core::AppPaths;
 use tempfile::TempDir;
@@ -81,7 +81,7 @@ fn healthy_claude(dir: &Path) -> PathBuf {
 /// --hostname` is a question that applies. [`TempRepo::with_remote`] points at a
 /// bare local path on purpose, which correctly has no host at all — good for the
 /// tests that must never touch `gh`, useless for the ones that must.
-fn repo_with_a_github_remote() -> (TempRepo, Repository) {
+fn repo_with_a_github_remote() -> (TempRepo, (Repository, Checkout)) {
     let repo = TempRepo::init();
     let status = std::process::Command::new("git")
         .current_dir(repo.path())
@@ -99,27 +99,26 @@ fn repo_with_a_github_remote() -> (TempRepo, Repository) {
     (repo, row)
 }
 
-/// A `Repository` row built directly rather than registered.
+/// A board row and this machine's checkout of it, built directly rather than
+/// registered.
 ///
-/// The per-repository checks take a row and a program path and touch no
-/// database, which is the whole reason they are shaped that way — a test of
-/// "this directory moved" has no business also exercising registration.
-fn row_for(path: &Path, name: &str) -> Repository {
-    Repository {
-        id: format!("repository-{name}"),
+/// The per-repository checks take a row, its checkout and a program path and
+/// touch no database, which is the whole reason they are shaped that way — a
+/// test of "this directory moved" has no business also exercising
+/// registration.
+fn row_for(path: &Path, name: &str) -> (Repository, Checkout) {
+    let id = format!("repository-{name}");
+    let repository = Repository {
+        id: id.clone(),
         name: name.to_string(),
-        path: path.display().to_string(),
         default_branch: "main".to_string(),
-        worktree_root: path.join("worktrees").display().to_string(),
         allow_unattended_runs: true,
-        max_concurrency: 1,
         created_at: rimaia_core::testing::test_epoch(),
-        credential_login: None,
-        credential_label: None,
-        credential_added_at: None,
-        on_archive: rimaia_core::db::OnArchive::None,
-        on_archive_script: None,
-    }
+    };
+    (
+        repository,
+        rimaia_core::testing::machine::checkout_at(&id, path),
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -377,7 +376,7 @@ async fn an_unauthenticated_gh_warns_and_names_the_repository() {
     );
     let (_repo, row) = repo_with_a_github_remote();
 
-    let result = checks::github_cli(&row, &gh)
+    let result = checks::github_cli(&row.0, &row.1, &gh)
         .await
         .expect("git must be runnable");
 
@@ -404,7 +403,7 @@ async fn a_missing_gh_is_told_apart_from_an_unauthenticated_one() {
     let absent = dir.path().join("gh-that-was-never-installed");
     let (_repo, row) = repo_with_a_github_remote();
 
-    let result = checks::github_cli(&row, &absent)
+    let result = checks::github_cli(&row.0, &row.1, &absent)
         .await
         .expect("git must be runnable");
 
@@ -425,7 +424,7 @@ async fn a_repository_with_no_remote_host_never_asks_gh_anything() {
     let repo = TempRepo::init().with_remote();
     let row = row_for(repo.path(), "local-only");
 
-    let result = checks::github_cli(&row, &gh)
+    let result = checks::github_cli(&row.0, &row.1, &gh)
         .await
         .expect("git must be runnable");
 
@@ -444,9 +443,10 @@ async fn a_repository_whose_path_has_moved_is_reported_rather_than_discovered_at
     std::fs::create_dir(&original).expect("the project directory");
     let repo = TempRepo::init();
     let row = row_for(&original, "moved-away");
+    let still_there = row_for(repo.path(), "still-there");
 
     assert_eq!(
-        checks::repository_path(&row_for(repo.path(), "still-there"))
+        checks::repository_path(&still_there.0, &still_there.1)
             .await
             .expect("git must be runnable")
             .status,
@@ -456,7 +456,7 @@ async fn a_repository_whose_path_has_moved_is_reported_rather_than_discovered_at
 
     std::fs::rename(&original, root.path().join("project-renamed")).expect("the rename");
 
-    let result = checks::repository_path(&row)
+    let result = checks::repository_path(&row.0, &row.1)
         .await
         .expect("git must be runnable");
 
@@ -477,7 +477,7 @@ async fn a_directory_that_is_no_longer_a_git_repository_is_reported_too() {
     let row = row_for(repo.path(), "de-gitted");
     std::fs::remove_dir_all(repo.path().join(".git")).expect("the .git directory");
 
-    let result = checks::repository_path(&row)
+    let result = checks::repository_path(&row.0, &row.1)
         .await
         .expect("git must be runnable");
 
@@ -586,136 +586,6 @@ fn results_are_ordered_by_check_regardless_of_the_order_they_were_collected_in()
     // returned them in.
     assert_eq!(report.results[1].repository.as_deref(), Some("b"));
     assert_eq!(report.results[2].repository.as_deref(), Some("a"));
-}
-
-#[tokio::test]
-async fn a_blocking_report_refuses_to_start_the_queue_and_writes_no_queue_state() {
-    let harness = TestContext::new().await;
-    let root = TempDir::new().expect("a temporary directory");
-    let paths = AppPaths::new(root.path());
-    paths.create_all().expect("the app directories");
-
-    // A `claude` that is not there. Everything else about this installation is
-    // fine, which is the point: one failing check is enough.
-    let runner = RunnerConfig {
-        program: root.path().join("claude-that-is-not-installed"),
-        ..RunnerConfig::default()
-    };
-    let (queue, _task) = scheduler::build(harness.context.clone(), paths, runner, InFlight::new());
-
-    let refusal = queue
-        .start()
-        .await
-        .expect_err("a blocking report must refuse the start");
-
-    assert!(
-        refusal.to_string().contains("Install Claude Code"),
-        "the refusal must carry the remediation, not just a count: {refusal}"
-    );
-    // The half-done state this ordering exists to prevent: a queue that says it
-    // is running while nothing will ever start.
-    assert_eq!(
-        scheduler::queue_state(&harness.context.pool)
-            .await
-            .expect("the queue state must be readable"),
-        QueueState::Paused,
-    );
-}
-
-#[tokio::test]
-async fn dismissing_every_row_still_refuses_to_start_the_queue_and_writes_no_queue_state() {
-    // Task 027's load-bearing test, and the reason it is written against
-    // `QueueHandle::start` rather than against the report: dismissal is
-    // presentation, the refusal is the rule (D22 point 1, ADR-0006). If a later
-    // change ever wires the dismissal set into the gate, this is what says so.
-    let harness = TestContext::new().await;
-    let root = TempDir::new().expect("a temporary directory");
-    let paths = AppPaths::new(root.path());
-    paths.create_all().expect("the app directories");
-
-    let runner = RunnerConfig {
-        program: root.path().join("claude-that-is-not-installed"),
-        ..RunnerConfig::default()
-    };
-    let environment = Environment::for_runner(paths.clone(), &runner);
-
-    // Every row on the report, not only the warnings — the point is that even
-    // an unusually determined user cannot dismiss their way past the gate.
-    let report = rimaia_core::doctor::run(&harness.context, &environment)
-        .await
-        .expect("the report must be readable");
-    assert!(
-        report.is_blocking(),
-        "this test needs a blocking environment"
-    );
-    for result in &report.results {
-        rimaia_core::doctor::dismiss(&harness.context, result.dismissal())
-            .await
-            .expect("the dismissal must store");
-    }
-
-    let (queue, _task) = scheduler::build(harness.context.clone(), paths, runner, InFlight::new());
-
-    let refusal = queue
-        .start()
-        .await
-        .expect_err("a blocking report must refuse the start, dismissed or not");
-
-    assert!(
-        refusal.to_string().contains("Install Claude Code"),
-        "the refusal must carry the same remediation it always did: {refusal}"
-    );
-    assert_eq!(
-        scheduler::queue_state(&harness.context.pool)
-            .await
-            .expect("the queue state must be readable"),
-        QueueState::Paused,
-    );
-}
-
-#[tokio::test]
-async fn a_healthy_installation_starts_the_queue_even_with_warnings_outstanding() {
-    // The other half of the refusal, and the one that would rot silently: a
-    // preflight that blocked on warnings would look identical in the test above.
-    // Here the MCP endpoint is deliberately unbound — a real `Warn` — and the
-    // queue starts anyway.
-    let harness = TestContext::new().await;
-    let root = TempDir::new().expect("a temporary directory");
-    let paths = AppPaths::new(root.path());
-    paths.create_all().expect("the app directories");
-
-    let runner = RunnerConfig {
-        program: healthy_claude(root.path()),
-        ..RunnerConfig::default()
-    };
-    let (queue, _task) = scheduler::build(
-        harness.context.clone(),
-        paths.clone(),
-        runner.clone(),
-        InFlight::new(),
-    );
-
-    let report =
-        rimaia_core::doctor::run(&harness.context, &Environment::for_runner(paths, &runner))
-            .await
-            .expect("the report must be readable");
-    assert!(
-        report
-            .results
-            .iter()
-            .any(|result| result.check == Check::McpPort && result.status == CheckStatus::Warn),
-        "this test is only meaningful while the unbound MCP port is a warning",
-    );
-    assert!(!report.is_blocking(), "{}", report.blocking_summary());
-
-    queue.start().await.expect("a warning must not refuse");
-
-    assert_eq!(
-        scheduler::queue_state(&harness.context.pool)
-            .await
-            .expect("the queue state must be readable"),
-        QueueState::Running,
-    );
 }
 
 // ---------------------------------------------------------------------------
@@ -841,25 +711,25 @@ async fn a_dismissal_survives_a_restart_and_a_recheck() {
     let harness = TestContext::new().await;
     let row = warn_about(Check::McpPort, "nothing is listening on 4517.");
 
-    let stored = rimaia_core::doctor::dismiss(&harness.context, row.dismissal())
+    let stored = rimaia_core::doctor::dismiss(harness.machine(), row.dismissal())
         .await
         .expect("the dismissal must store");
     assert_eq!(stored, vec![row.dismissal()]);
 
     // A second press of Dismiss is not a second entry.
-    let stored = rimaia_core::doctor::dismiss(&harness.context, row.dismissal())
+    let stored = rimaia_core::doctor::dismiss(harness.machine(), row.dismissal())
         .await
         .expect("dismissing twice must be idempotent");
     assert_eq!(stored, vec![row.dismissal()]);
 
     assert_eq!(
-        rimaia_core::db::settings::doctor_dismissals(&harness.context.pool)
+        rimaia_core::db::settings::doctor_dismissals(harness.machine())
             .await
             .expect("a fresh read is what a restart does"),
         vec![row.dismissal()]
     );
 
-    let cleared = rimaia_core::doctor::restore(&harness.context, &row.dismissal())
+    let cleared = rimaia_core::doctor::restore(harness.machine(), &row.dismissal())
         .await
         .expect("the dismissal must clear");
     assert_eq!(cleared, Vec::new());
@@ -867,23 +737,27 @@ async fn a_dismissal_survives_a_restart_and_a_recheck() {
 
 #[tokio::test]
 async fn a_hand_edited_dismissals_row_costs_a_warning_rather_than_a_launch() {
-    // ADR-0003 counts hand-editing the file as supported, and `settings` has no
-    // CHECK on `value`. The `run_environment` precedent: warn and fall back.
+    // ADR-0003 counts hand-editing the file as supported, and `runner_settings`
+    // has no CHECK on `value`. The `run_environment` precedent: warn and fall back.
     let harness = TestContext::new().await;
 
-    rimaia_core::db::settings::set(&harness.context, "doctor_dismissals", "not json at all")
-        .await
-        .expect("store a typo");
+    rimaia_core::testing::settings::set_runner(
+        harness.machine(),
+        "doctor_dismissals",
+        "not json at all",
+    )
+    .await
+    .expect("store a typo");
     assert_eq!(
-        rimaia_core::db::settings::doctor_dismissals(&harness.context.pool)
+        rimaia_core::db::settings::doctor_dismissals(harness.machine())
             .await
             .expect("an unreadable value must not fail the read"),
         Vec::new()
     );
 
     // One bad element, the rest intact — the two failures are different sizes.
-    rimaia_core::db::settings::set(
-        &harness.context,
+    rimaia_core::testing::settings::set_runner(
+        harness.machine(),
         "doctor_dismissals",
         r#"[{"check":"not_a_check","repository":null,"detail":"x"},
             {"check":"mcp_port","repository":null,"detail":"nothing is listening."}]"#,
@@ -891,7 +765,7 @@ async fn a_hand_edited_dismissals_row_costs_a_warning_rather_than_a_launch() {
     .await
     .expect("store a half-good value");
 
-    let read = rimaia_core::db::settings::doctor_dismissals(&harness.context.pool)
+    let read = rimaia_core::db::settings::doctor_dismissals(harness.machine())
         .await
         .expect("one bad element must not lose the rest");
     assert_eq!(read.len(), 1);
@@ -911,7 +785,7 @@ async fn the_doctor_reads_its_dismissals_from_settings_on_every_run() {
     let environment = Environment::for_runner(paths, &runner);
 
     // The unbound MCP port is a real warning on a report nothing has touched.
-    let before = rimaia_core::doctor::run(&harness.context, &environment)
+    let before = rimaia_core::doctor::run(harness.machine(), &harness.context, &environment)
         .await
         .expect("the report must be readable");
     let mcp_port = before
@@ -923,11 +797,11 @@ async fn the_doctor_reads_its_dismissals_from_settings_on_every_run() {
     assert_eq!(mcp_port.status, CheckStatus::Warn);
     assert!(!mcp_port.dismissed);
 
-    rimaia_core::doctor::dismiss(&harness.context, mcp_port.dismissal())
+    rimaia_core::doctor::dismiss(harness.machine(), mcp_port.dismissal())
         .await
         .expect("the dismissal must store");
 
-    let after = rimaia_core::doctor::run(&harness.context, &environment)
+    let after = rimaia_core::doctor::run(harness.machine(), &harness.context, &environment)
         .await
         .expect("the report must be readable");
     assert!(

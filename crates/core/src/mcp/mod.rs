@@ -19,6 +19,15 @@
 //! over the same [`ServiceContext`]; the only difference is the value of its
 //! `scope` field.
 //!
+//! # Board tools in core, machine tools injected by the host
+//!
+//! Since task 041 the server's tools are two routers. The board router needs
+//! only a `ServiceContext`; the local router holds the tools that inspect,
+//! reconfigure or spawn on this machine (ADR-0035 point 6), and is served only
+//! when [`build`] is handed a [`LocalTools`]. The shell passes `Some`, so solo
+//! serves every tool it served before; a server with no machine passes `None`
+//! and serves no machine tool at all.
+//!
 //! # Loopback is not configurable
 //!
 //! [`build`] binds `127.0.0.1` as a literal. ADR-0006 makes the *port*
@@ -62,11 +71,10 @@ use serde::Serialize;
 use tokio::net::TcpListener;
 use tokio::sync::watch;
 
-use crate::context::ServiceContext;
+use crate::context::{ServiceContext, TeamScope};
 use crate::db::MutationSource;
-use crate::doctor;
 use crate::error::{Error, Result};
-use crate::runner::strategy::PlannerAccess;
+use crate::runner::provider::AgentProvider;
 
 pub mod error;
 pub mod requests;
@@ -76,8 +84,8 @@ pub mod server;
 pub mod settings;
 
 pub use error::ToolError;
-pub use scope::{RunAccess, RunGrant, RunHandles, RunScope, Tool};
-pub use server::RimaiaServer;
+pub use scope::{Grant, GrantKind, RunAccess, RunGrant, RunHandles, RunScope, Tool};
+pub use server::{LocalTools, RimaiaServer};
 pub use settings::{configured_port, set_configured_port, MCP_PORT};
 
 use scope::RUN_ROUTE_PREFIX;
@@ -87,17 +95,28 @@ use scope::RUN_ROUTE_PREFIX;
 /// configurable and is hard-coded to loopback.
 pub const DEFAULT_PORT: u16 = 4517;
 
-/// The path the streamable-HTTP endpoint is mounted at, so
-/// `http://127.0.0.1:4517/mcp` is what a user registers.
-/// The name Rimaia registers itself under in an `--mcp-config`, and the name a
-/// tool therefore wears as `mcp__rimaia__<tool>`.
+/// The **operator** surface's name: what the operator registers with
+/// `claude mcp add`, what the handshake reports on `/mcp`, and the name the
+/// denial every spawned run carries is spelled at (`runner::process`), so a
+/// tool there wears `mcp__rimaia__<tool>`.
 ///
-/// One constant because three places have to agree: the config the runner
-/// writes, the server info the handshake returns, and the denial an
-/// implementation run carries (`runner::process`). A disagreement between the
-/// last two would be a blocklist that silently matches nothing.
+/// Never the name of a run's own handle (seam-contract D30 point 1). A run that
+/// inherits the operator's configuration holds this registration and its own
+/// handle at once, and the denial works by tool name, so the two must not share
+/// one: if they did, denying the operator surface would deny the handle too, and
+/// the only way out would be to drop the denial for exactly the runs that carry
+/// a handle.
 pub const MCP_SERVER_NAME: &str = "rimaia";
 
+/// The **run-scoped** handle's name (D30 point 1): the key of the
+/// `--mcp-config` document a run is handed, what the handshake reports on
+/// `/mcp/run/{token}`, the server segment of every `required_tools` entry, and
+/// the tool names a prompt tells a run to call. Nothing ever registers it in a
+/// user's configuration.
+pub const RUN_MCP_SERVER_NAME: &str = "rimaia-run";
+
+/// The path the streamable-HTTP endpoint is mounted at, so
+/// `http://127.0.0.1:4517/mcp` is what a user registers.
 pub const MCP_PATH: &str = "/mcp";
 
 /// Whether the server is reachable, and if not, why.
@@ -171,17 +190,15 @@ struct Routes {
 struct RunRoute {
     ctx: ServiceContext,
     handles: RunHandles,
-    /// Carried even though every doctor tool is `Refused` to a run: the scoped
-    /// server is the *same type* as the operator's, so it needs the same
-    /// fields, and the refusal comes from [`RunScope::authorize`] rather than
-    /// from the value being absent. A scope enforced by a missing field would
-    /// be a second mechanism — and the one that fails open the day someone
-    /// gives the field a default.
-    doctor: doctor::Environment,
-    /// Carried for the same reason, and with the same refusal (task 023):
-    /// `plan_task_strategy` and `plan_tasks_strategy` are `Refused` to a run,
-    /// and the refusal is `authorize`'s rather than an absent field's.
-    planner: PlannerAccess,
+    provider: Arc<dyn AgentProvider>,
+    /// Carried even though every local tool is `Refused` to a run: the scoped
+    /// server is the *same type* as the operator's and offers the same list
+    /// (`tools/list` is not filtered by scope, `scope.rs`'s header), and the
+    /// refusal comes from [`RunScope::authorize`] rather than from the tool
+    /// being absent. A scope enforced by a missing router would be a second
+    /// mechanism, and a run would read an unknown tool where today it reads
+    /// the refusal's sentence.
+    local: Option<LocalTools>,
 }
 
 struct Shared {
@@ -191,7 +208,7 @@ struct Shared {
 
 /// Binds the server and hands back the handle to keep and the task to spawn.
 ///
-/// The same split as `scheduler::build`, for the same reason: the caller owns
+/// The same split as `rimaia_runner::queue::build`, for the same reason: the caller owns
 /// the runtime, and the handle has to exist before the task does so the shell
 /// can wire a command to it inside one `setup()` hook.
 ///
@@ -207,13 +224,19 @@ struct Shared {
 /// runner, so this function can tell it where the server actually landed on
 /// every bind — including the rebind `set_mcp_port` performs at runtime. That
 /// is what makes a scoped URL truthful and what removes the ordering constraint
-/// between `scheduler::build` and this one (seam-contract D17.4).
+/// between `rimaia_runner::queue::build` and this one (seam-contract D17.4).
+///
+/// `provider` is the agent CLI whose catalogue the board tools read (see
+/// [`RimaiaServer`]'s field). `local` is this machine's tools, served on both
+/// doors when `Some`. `None` serves the board router alone: what task 046's
+/// server and task 060's hosted `/mcp` pass, where a local tool is an unknown
+/// tool.
 pub async fn build(
     ctx: ServiceContext,
     port: u16,
     handles: RunHandles,
-    doctor: doctor::Environment,
-    planner: PlannerAccess,
+    provider: Arc<dyn AgentProvider>,
+    local: Option<LocalTools>,
 ) -> (McpHandle, McpTask) {
     // Every write this server makes is an agent's, not the user's (ADR-0019).
     // Re-sourced here, once, so no handler has to remember.
@@ -239,8 +262,8 @@ pub async fn build(
                 Some(listener),
                 Some(streamable_service(
                     ctx.clone(),
-                    doctor.clone(),
-                    planner.clone(),
+                    provider.clone(),
+                    local.clone(),
                 )),
             )
         }
@@ -291,8 +314,8 @@ pub async fn build(
         run: RunRoute {
             ctx,
             handles,
-            doctor,
-            planner,
+            provider,
+            local,
         },
     });
 
@@ -397,18 +420,21 @@ async fn dispatch(
     Path(token): Path<String>,
     request: Request,
 ) -> Response {
-    let Some(RunScope::Run { task_id }) = route.handles.resolve(&token) else {
+    let Some((scope @ RunScope::Run { .. }, team_id)) = route.handles.resolve_with_team(&token)
+    else {
         // A bare 404 with no body. An unknown token and a revoked one must be
         // indistinguishable, and neither may hint that some *other* token would
         // have worked — this route is not an oracle for which runs exist.
         return StatusCode::NOT_FOUND.into_response();
     };
 
+    // Every call through the handle runs under its task's one team (ADR-0029
+    // point 5), whatever the operator's context reaches.
     scoped_service(
-        route.ctx.clone(),
-        route.doctor.clone(),
-        route.planner.clone(),
-        task_id,
+        route.ctx.with_scope(TeamScope::one(team_id)),
+        route.provider.clone(),
+        route.local.clone(),
+        scope,
     )
     .handle(request)
     .await
@@ -422,26 +448,21 @@ async fn dispatch(
 /// configuration than the other.
 pub(crate) fn streamable_service(
     ctx: ServiceContext,
-    doctor: doctor::Environment,
-    planner: PlannerAccess,
+    provider: Arc<dyn AgentProvider>,
+    local: Option<LocalTools>,
 ) -> StreamableHttpService<RimaiaServer, LocalSessionManager> {
-    service_over(move || RimaiaServer::new(ctx.clone(), doctor.clone(), planner.clone()))
+    service_over(move || RimaiaServer::new(ctx.clone(), provider.clone(), local.clone()))
 }
 
 /// The same transport, serving one run's scoped view of the same services.
 fn scoped_service(
     ctx: ServiceContext,
-    doctor: doctor::Environment,
-    planner: PlannerAccess,
-    task_id: String,
+    provider: Arc<dyn AgentProvider>,
+    local: Option<LocalTools>,
+    scope: RunScope,
 ) -> StreamableHttpService<RimaiaServer, LocalSessionManager> {
     service_over(move || {
-        RimaiaServer::scoped(
-            ctx.clone(),
-            doctor.clone(),
-            planner.clone(),
-            task_id.clone(),
-        )
+        RimaiaServer::scoped(ctx.clone(), provider.clone(), local.clone(), scope.clone())
     })
 }
 
@@ -554,8 +575,8 @@ mod tests {
             harness.context.clone(),
             0,
             RunHandles::default(),
-            crate::testing::doctor::environment(),
-            crate::testing::doctor::planner_access(),
+            Arc::new(crate::runner::provider::ClaudeProvider),
+            Some(crate::testing::doctor::local_tools(harness.machine())),
         )
         .await;
         assert_eq!(handle.status().state, McpState::Listening);
@@ -616,8 +637,8 @@ mod tests {
             harness.context.clone(),
             taken,
             handles.clone(),
-            crate::testing::doctor::environment(),
-            crate::testing::doctor::planner_access(),
+            Arc::new(crate::runner::provider::ClaudeProvider),
+            Some(crate::testing::doctor::local_tools(harness.machine())),
         )
         .await;
 

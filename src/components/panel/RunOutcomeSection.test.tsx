@@ -1,8 +1,20 @@
 import { render, screen } from "@testing-library/react";
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+
+import { invoke } from "@tauri-apps/api/core";
 
 import { RunOutcomeSection, formatCostUsd } from "./RunOutcomeSection";
 import type { ExitClass, Run } from "../../types";
+
+vi.mock("@tauri-apps/api/core", () => ({
+  invoke: vi.fn(),
+}));
+
+const mockInvoke = vi.mocked(invoke);
+
+beforeEach(() => {
+  mockInvoke.mockReset();
+});
 
 /**
  * The expected wording for each ADR-0011 exit class, spelled out here rather
@@ -25,6 +37,7 @@ function run(overrides: Partial<Run> = {}): Run {
     id: "run-1",
     taskId: "task-1",
     attempt: 1,
+    kind: "implementation",
     status: "succeeded",
     sessionId: "session-1",
     prompt: "prompt",
@@ -34,7 +47,6 @@ function run(overrides: Partial<Run> = {}): Run {
     errorMessage: null,
     numTurns: 5,
     costUsd: 0.1502925,
-    logPath: "/data/runs/task-1/run-1.jsonl",
     prUrl: null,
     resumeAfter: null,
     baseRef: null,
@@ -45,6 +57,8 @@ function run(overrides: Partial<Run> = {}): Run {
     outputTokens: null,
     cacheReadTokens: null,
     cacheCreationTokens: null,
+    headSha: null,
+    baseSha: null,
     ...overrides,
   };
 }
@@ -141,26 +155,63 @@ describe("RunOutcomeSection", () => {
     expect(screen.queryByText("Pull request")).not.toBeInTheDocument();
   });
 
-  it("shows the log path as text", () => {
-    render(<RunOutcomeSection lastRun={run({ logPath: "/data/runs/task-1/run-1.jsonl" })} loading={false} />);
-
-    expect(screen.getByText("/data/runs/task-1/run-1.jsonl")).toBeInTheDocument();
-  });
-
-  it("copies the log path to the clipboard without a backend round trip", async () => {
+  it("fetches the log path on the copy action, then copies and shows it", async () => {
+    // `Run` carries no path since task 066: it is this computer's file,
+    // derived from the run's ids by `get_run_log_path`.
+    mockInvoke.mockImplementation(async (command, args) => {
+      if (command === "get_run_log_path") {
+        expect(args).toEqual({ taskId: "task-1", runId: "run-1" });
+        return "/data/runs/task-1/run-1.jsonl";
+      }
+      throw new Error(`unexpected command: ${command}`);
+    });
     const writeText = vi.fn().mockResolvedValue(undefined);
     Object.assign(navigator, { clipboard: { writeText } });
 
-    render(<RunOutcomeSection lastRun={run({ logPath: "/data/runs/task-1/run-1.jsonl" })} loading={false} />);
+    render(<RunOutcomeSection lastRun={run()} loading={false} />);
+    expect(screen.queryByText("/data/runs/task-1/run-1.jsonl")).not.toBeInTheDocument();
     screen.getByRole("button", { name: "Copy log path" }).click();
 
     expect(await screen.findByRole("button", { name: "Copied" })).toBeInTheDocument();
     expect(writeText).toHaveBeenCalledWith("/data/runs/task-1/run-1.jsonl");
+    expect(screen.getByText("/data/runs/task-1/run-1.jsonl")).toBeInTheDocument();
+  });
+
+  it("shows the refusal when this computer cannot say where the log is", async () => {
+    mockInvoke.mockRejectedValue({
+      code: "invalid",
+      message: '"rimaia" is not set up on this computer',
+    });
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.assign(navigator, { clipboard: { writeText } });
+
+    render(<RunOutcomeSection lastRun={run()} loading={false} />);
+    screen.getByRole("button", { name: "Copy log path" }).click();
+
+    expect(
+      await screen.findByText('"rimaia" is not set up on this computer'),
+    ).toBeInTheDocument();
+    expect(writeText).not.toHaveBeenCalled();
+    expect(screen.getByRole("button", { name: "Copy log path" })).toBeInTheDocument();
   });
 
   it("shows the turn count", () => {
     render(<RunOutcomeSection lastRun={run({ numTurns: 7 })} loading={false} />);
 
     expect(screen.getByText("7")).toBeInTheDocument();
+  });
+
+  it("names the row in its heading, so a review does not read as the implementation", () => {
+    render(<RunOutcomeSection lastRun={run({ kind: "review", attempt: 7 })} loading={false} />);
+
+    expect(
+      screen.getByRole("heading", { name: "Last run outcome — Review · #7" }),
+    ).toBeInTheDocument();
+  });
+
+  it("keeps a plain heading while there is nothing to name", () => {
+    render(<RunOutcomeSection lastRun={null} loading={false} />);
+
+    expect(screen.getByRole("heading", { name: "Last run outcome" })).toBeInTheDocument();
   });
 });

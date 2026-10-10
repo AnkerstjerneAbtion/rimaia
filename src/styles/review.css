@@ -1,0 +1,765 @@
+/* The morning review (task 017): the overnight digest, and the queue walked
+   with the keyboard. Built from the vocabulary the rest of the app already has
+   — `.status-dot` and a word (ADR-0024 point 3), the `--surface-*` steps rather
+   than outlines, and the `.run-detail-*` sections the run overlay renders the
+   same bundle with, so a diff reads the same here as there.
+
+   `.muted` carries a bottom margin meant for stacked paragraphs; everything
+   below sits in a flex or grid row, so it is reset once at the top. */
+
+.review-view {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+  max-width: 84rem;
+}
+
+.review-view .muted {
+  margin: 0;
+}
+
+.review-view-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-4);
+}
+
+.review-view-head h2 {
+  margin: 0;
+  font-size: var(--font-size-xl);
+  font-weight: var(--font-weight-semibold);
+}
+
+.review-modes {
+  display: inline-flex;
+  gap: var(--space-1);
+  padding: var(--space-1);
+  border-radius: var(--radius-md);
+  background: var(--surface-1);
+}
+
+.review-modes button {
+  padding: var(--space-1) var(--space-3);
+  border-color: transparent;
+  background: transparent;
+  box-shadow: none;
+  color: var(--text-2);
+  font-size: var(--font-size-sm);
+}
+
+.review-modes button[aria-pressed="true"] {
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+/* Tone per outcome, as one custom property the dot reads through
+   `currentColor`. `skipped` and `cancelled` are the settled, hollow ones. */
+.review-outcome-failed,
+.review-outcome-interrupted {
+  --outcome-tone: var(--status-failed);
+}
+
+.review-outcome-blocked {
+  --outcome-tone: var(--status-blocked);
+}
+
+.review-outcome-waiting_retry {
+  --outcome-tone: var(--status-waiting-retry);
+}
+
+.review-outcome-running {
+  --outcome-tone: var(--status-running);
+}
+
+.review-outcome-completed {
+  --outcome-tone: var(--status-success);
+}
+
+.review-outcome-cancelled,
+.review-outcome-skipped {
+  --outcome-tone: var(--text-3);
+}
+
+.review-outcome-cancelled .status-dot,
+.review-outcome-skipped .status-dot {
+  background: transparent;
+  box-shadow: inset 0 0 0 1px currentColor;
+}
+
+/* ---------------------------------------------------------------------------
+   The digest
+   --------------------------------------------------------------------------- */
+
+.review-digest {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+  padding: var(--space-5);
+  border-radius: var(--radius-md);
+  background: var(--surface-1);
+  box-shadow: var(--shadow-sm);
+}
+
+.review-digest-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--space-4);
+  flex-wrap: wrap;
+}
+
+.review-digest-head h3 {
+  margin: 0 0 var(--space-1);
+  font-size: var(--font-size-lg);
+  font-weight: var(--font-weight-semibold);
+}
+
+.review-digest-actions {
+  display: flex;
+  gap: var(--space-2);
+}
+
+.review-digest-empty {
+  margin: 0;
+  color: var(--text-2);
+}
+
+/* The service's totals, set as readouts: the figure is the measurement and the
+   label is furniture. */
+.review-totals {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-5);
+  margin: 0;
+}
+
+.review-totals dt {
+  font-size: var(--font-size-xs);
+  color: var(--text-2);
+}
+
+.review-totals dd {
+  margin: 0;
+  font-size: var(--font-size-xl);
+  font-weight: var(--font-weight-semibold);
+  line-height: var(--line-height-tight);
+}
+
+.review-totals-note {
+  font-size: var(--font-size-sm);
+}
+
+.review-counts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2) var(--space-4);
+  margin: 0;
+  font-size: var(--font-size-sm);
+  color: var(--text-2);
+}
+
+.review-count {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.review-count .status-dot,
+.review-entry-outcome .status-dot {
+  width: 0.4375rem;
+  height: 0.4375rem;
+  color: var(--outcome-tone, var(--text-3));
+}
+
+.review-entries {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.review-entry {
+  display: grid;
+  grid-template-columns: 9.5rem minmax(0, 1fr) auto;
+  align-items: baseline;
+  gap: var(--space-4);
+  padding: var(--space-2) var(--space-3);
+  border-radius: var(--radius-sm);
+  background: var(--surface-0);
+  font-size: var(--font-size-sm);
+}
+
+.review-entry-outcome {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  font-weight: var(--font-weight-medium);
+  color: var(--text-2);
+}
+
+/* A failure keeps the one emphasis left once the fills are gone: its word in
+   the status colour, as `.run-badge-failed` does on the board. */
+.review-entry.review-outcome-failed .review-entry-outcome,
+.review-entry.review-outcome-interrupted .review-entry-outcome {
+  color: var(--status-failed);
+}
+
+.review-entry-main {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.review-entry-title {
+  color: var(--text-1);
+}
+
+.review-entry-reason,
+.review-entry-error {
+  font-size: var(--font-size-xs);
+}
+
+.review-entry-figures {
+  display: flex;
+  gap: var(--space-4);
+  font-size: var(--font-size-xs);
+  color: var(--text-2);
+  white-space: nowrap;
+}
+
+@media (max-width: 720px) {
+  .review-entry {
+    grid-template-columns: minmax(0, 1fr);
+    gap: var(--space-1);
+  }
+}
+
+/* ---------------------------------------------------------------------------
+   The legend
+   --------------------------------------------------------------------------- */
+
+.review-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-1) var(--space-4);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  font-size: var(--font-size-xs);
+  color: var(--text-2);
+}
+
+.review-view kbd {
+  padding: 0.05rem var(--space-1);
+  min-width: 1.15rem;
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
+  box-shadow: inset 0 0 0 1px var(--border-1);
+  color: var(--text-2);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: var(--font-size-xs);
+  line-height: 1.4;
+  text-align: center;
+}
+
+/* ---------------------------------------------------------------------------
+   The queue
+   --------------------------------------------------------------------------- */
+
+.review-queue {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+/* Takes focus after every action so the next key works without a click, and
+   has nothing to show for it: the surface is the page, not a control. */
+.review-surface {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+/* A programmatic focus target, not a control: the global focus ring would draw
+   a box round the whole page every time a verdict returns focus to it. */
+.review-surface:focus-visible,
+.review-digest:focus-visible {
+  outline: none;
+}
+
+.review-notice {
+  margin: 0;
+  padding: var(--space-2) var(--space-3);
+  border-radius: var(--radius-sm);
+  background: var(--surface-1);
+  color: var(--text-1);
+  font-size: var(--font-size-sm);
+}
+
+.review-notice code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+.review-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--space-3);
+  padding: var(--space-5);
+  border-radius: var(--radius-md);
+  background: var(--surface-1);
+}
+
+.review-empty p {
+  margin: 0;
+}
+
+.review-queue-layout {
+  display: grid;
+  grid-template-columns: minmax(12rem, 16rem) minmax(0, 1fr);
+  gap: var(--space-4);
+  align-items: start;
+}
+
+@media (max-width: 860px) {
+  .review-queue-layout {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+.review-queue-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.review-queue-item {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  width: 100%;
+  padding: var(--space-2) var(--space-3);
+  border-color: transparent;
+  background: var(--surface-1);
+  box-shadow: none;
+  text-align: left;
+  font-size: var(--font-size-sm);
+  overflow-wrap: anywhere;
+}
+
+.review-queue-item[aria-current="true"] {
+  background: var(--accent-soft);
+  box-shadow: inset 3px 0 0 var(--accent);
+}
+
+.review-queue-item-repo {
+  font-size: var(--font-size-xs);
+}
+
+.review-task {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  min-width: 0;
+}
+
+.review-task-head h3 {
+  margin: 0;
+  font-size: var(--font-size-lg);
+  font-weight: var(--font-weight-semibold);
+  overflow-wrap: anywhere;
+}
+
+.review-task-place {
+  margin-bottom: var(--space-1);
+  font-size: var(--font-size-xs);
+}
+
+.review-task-body {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.review-no-run {
+  margin: 0;
+  padding: var(--space-4);
+  border-radius: var(--radius-md);
+  background: var(--surface-1);
+  color: var(--text-2);
+}
+
+.review-run-outcome {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: var(--space-2) var(--space-4);
+}
+
+.review-run-state {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  font-weight: var(--font-weight-semibold);
+}
+
+.review-run-state .status-dot {
+  width: 0.4375rem;
+  height: 0.4375rem;
+}
+
+.review-run-state-running .status-dot {
+  color: var(--status-running);
+}
+
+.review-run-state-success .status-dot {
+  color: var(--status-success);
+}
+
+.review-run-state-failed {
+  color: var(--status-failed);
+}
+
+.review-run-state-failed .status-dot {
+  color: var(--status-failed);
+}
+
+.review-run-state-cancelled {
+  color: var(--text-2);
+}
+
+.review-run-state-cancelled .status-dot {
+  background: transparent;
+  box-shadow: inset 0 0 0 1px currentColor;
+}
+
+/* ADR-0008's chain, under the title: what this builds on, and what builds on
+   it. Two plain lists; the words, not the colour, carry the difference. */
+.review-chain {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2) var(--space-5);
+  margin-top: var(--space-2);
+  font-size: var(--font-size-sm);
+}
+
+.review-chain h4 {
+  margin: 0 0 var(--space-1);
+  font-size: var(--font-size-xs);
+  font-weight: var(--font-weight-semibold);
+  color: var(--text-2);
+}
+
+.review-chain ul {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.review-chain-tag {
+  margin-left: var(--space-2);
+  padding: 0 var(--space-2);
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
+  color: var(--text-2);
+  font-size: var(--font-size-xs);
+  white-space: nowrap;
+}
+
+.review-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.review-actions kbd {
+  margin-left: var(--space-1);
+}
+
+.review-actions .btn-primary kbd {
+  background: transparent;
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, currentColor 40%, transparent);
+  color: inherit;
+}
+
+.review-note-step {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  padding: var(--space-4);
+  border-radius: var(--radius-md);
+  background: var(--surface-1);
+  box-shadow: inset 3px 0 0 var(--accent);
+}
+
+.review-note-step h4 {
+  margin: 0;
+  font-size: var(--font-size-md);
+  font-weight: var(--font-weight-semibold);
+}
+
+.review-note-consequence {
+  margin: 0;
+  font-size: var(--font-size-sm);
+  color: var(--text-1);
+}
+
+.review-note-warning {
+  padding: var(--space-3);
+  border-radius: var(--radius-sm);
+  background: var(--warn-bg);
+  color: var(--warn-text);
+  font-size: var(--font-size-sm);
+}
+
+.review-note-warning p {
+  margin: 0 0 var(--space-1);
+}
+
+.review-note-warning ul {
+  margin: 0;
+  padding-left: var(--space-5);
+}
+
+.review-note-label {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  font-size: var(--font-size-sm);
+  color: var(--text-2);
+}
+
+.review-note-label textarea {
+  width: 100%;
+  resize: vertical;
+}
+
+.review-note-actions {
+  display: flex;
+  gap: var(--space-2);
+}
+
+/* The review itself reuses the run overlay's sections. In the overlay they are
+   placed by a grid; here they stack at the reading width. */
+.review-task-body .run-detail-patch-expanded {
+  max-height: none;
+}
+
+/* ---------------------------------------------------------------------------
+   The review loop's findings (task 037)
+
+   One look wherever the loop is read: the task panel's history, the run detail
+   overlay and the morning review. Open, advisory, fixed and rejected are told
+   apart by their WORDS, and by the shape of the rule down the left edge, so a
+   reader who cannot separate the hues loses nothing (ADR-0024 rule 3):
+     open      a solid rule
+     advisory  a dashed rule (it raised something, and did not start a fix)
+     fixed     a dotted rule and a quieter title
+     rejected  a double rule
+   No success colour anywhere: a loop with nothing left blocking is one
+   reviewer's pass, not a verdict on the work.
+   ------------------------------------------------------------------------- */
+
+.finding-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.finding {
+  display: grid;
+  gap: var(--space-1);
+  min-width: 0;
+  padding: var(--space-1) 0 var(--space-1) var(--space-3);
+  border-left: 3px solid var(--text-2);
+}
+
+.finding-advisory {
+  border-left-style: dashed;
+}
+
+.finding-fixed {
+  border-left-style: dotted;
+}
+
+.finding-fixed .finding-title {
+  color: var(--text-2);
+}
+
+.finding-rejected {
+  border-left-style: double;
+  border-left-width: 4px;
+}
+
+.finding-head {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-2);
+  min-width: 0;
+}
+
+.finding-severity {
+  flex: none;
+  font-size: var(--font-size-xs);
+  font-weight: var(--font-weight-semibold);
+  color: var(--text-2);
+}
+
+.finding-title {
+  min-width: 0;
+  font-size: var(--font-size-sm);
+  font-weight: var(--font-weight-medium);
+  color: var(--text-1);
+  overflow-wrap: anywhere;
+}
+
+.finding-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0 var(--space-3);
+  font-size: var(--font-size-xs);
+  line-height: var(--line-height-tight);
+  color: var(--text-2);
+  overflow-wrap: anywhere;
+}
+
+.finding-status {
+  color: var(--text-1);
+}
+
+.finding-mark {
+  font-weight: var(--font-weight-medium);
+}
+
+.finding-mark-signal {
+  color: var(--text-1);
+  text-decoration: underline dashed;
+  text-underline-offset: 0.2em;
+}
+
+/* `file:line` is literal text you could copy, so it is monospace and a button
+   that copies it. */
+.finding-location {
+  justify-self: start;
+  max-width: 100%;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--text-2);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.finding-location code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: var(--font-size-xs);
+  overflow-wrap: anywhere;
+}
+
+.finding-location:hover code,
+.finding-location:focus-visible code {
+  color: var(--text-1);
+  text-decoration: underline;
+}
+
+.finding-copied {
+  margin-left: var(--space-2);
+  font-size: var(--font-size-xs);
+  color: var(--text-1);
+}
+
+.finding-details summary {
+  width: fit-content;
+  font-size: var(--font-size-xs);
+  color: var(--text-2);
+  cursor: pointer;
+}
+
+.finding-body {
+  margin: var(--space-1) 0 0;
+  font-size: var(--font-size-sm);
+  line-height: var(--line-height-normal);
+  color: var(--text-1);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+/* The task panel's history. */
+.review-history-head {
+  margin: 0 0 var(--space-3);
+  font-size: var(--font-size-sm);
+  font-weight: var(--font-weight-medium);
+  color: var(--text-1);
+}
+
+.review-history-earlier {
+  margin: var(--space-3) 0;
+}
+
+.review-history-earlier > summary {
+  font-size: var(--font-size-sm);
+  color: var(--text-2);
+  cursor: pointer;
+}
+
+.review-history-earlier .review-loop {
+  margin-top: var(--space-2);
+}
+
+.review-loop {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.review-round {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.review-round-title {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-2);
+  margin: 0;
+  font-size: var(--font-size-xs);
+  font-weight: var(--font-weight-semibold);
+  color: var(--text-1);
+}
+
+/* The verdict line, in the outcome of the overlay and of the morning review. */
+.run-detail-loop,
+.review-run-loop {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0 var(--space-3);
+  margin: 0;
+  font-size: var(--font-size-sm);
+  overflow-wrap: anywhere;
+}
+
+.review-run-loop {
+  margin-top: var(--space-2);
+  color: var(--text-1);
+}
+
+.run-detail-loop-signal {
+  font-weight: var(--font-weight-medium);
+  text-decoration: underline dashed;
+  text-underline-offset: 0.2em;
+}

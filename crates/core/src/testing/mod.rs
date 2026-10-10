@@ -7,7 +7,8 @@
 //! [`cli`] stand-in that replays them from a real child process. [`context`]
 //! assembles the first three into the [`ServiceContext`](crate::ServiceContext)
 //! a service actually takes, with a change-event receiver already listening
-//! (ADR-0018).
+//! (ADR-0018). [`runs`] closes a row without landing its task, for a test that
+//! arranges history.
 //!
 //! Note what is *not* faked. Git and the filesystem are real, because a mocked
 //! git only ever proves the mock works. The agent CLI is replayed from recorded
@@ -28,6 +29,8 @@
 //! Compiled only under the `testing` feature, which `cargo test -p rimaia-core`
 //! turns on through the crate's self-referencing dev-dependency.
 
+pub mod board;
+pub mod board_contract;
 pub mod cli;
 pub mod clock;
 pub mod context;
@@ -35,10 +38,16 @@ pub mod credentials;
 pub mod db;
 pub mod doctor;
 pub mod fixtures;
+pub mod machine;
+pub mod machine_contract;
 pub mod provider;
 pub mod repo;
+pub mod runs;
+pub mod settings;
+pub mod shared;
+pub mod teams;
 
-pub use cli::{open_gate, FakeCli};
+pub use cli::{open_gate, FakeCli, WorktreeAction};
 pub use clock::TestClock;
 pub use context::{test_epoch, TestContext};
 pub use db::test_pool;

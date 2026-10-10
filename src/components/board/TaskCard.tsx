@@ -9,6 +9,7 @@ import { useSortable } from "@dnd-kit/sortable";
 import { CSS } from "@dnd-kit/utilities";
 
 import { cardBadge, relativeTime } from "../../lib/board";
+import { PING_PONG_TEXT, finishedLoop, reviewLoopText } from "../../lib/review";
 import { getQueueStatus, listRepositories, startRun, toRimaiaError } from "../../lib/commands";
 import {
   subscribeToRepositoriesChanged,
@@ -17,6 +18,7 @@ import {
   subscribeToTasksChanged,
 } from "../../lib/events";
 import type {
+  CheckoutView,
   EffectiveStrategyFields,
   QueueEntry,
   Repository,
@@ -29,6 +31,8 @@ import {
   parseStrategyPlan,
   strategyBadgeText,
 } from "../panel/StrategySection";
+import { useCheckouts } from "../../hooks/useCheckouts";
+import { useLocalWorktrees } from "../../hooks/useLocalWorktrees";
 import { QUEUE_SKIP_LABELS } from "../runs/QueuePlanList";
 import { OpenInMenu } from "./OpenInMenu";
 import { RunStateBadge } from "./RunStateBadge";
@@ -265,24 +269,34 @@ type RunNowState =
   | { readonly kind: "blocked"; readonly reason: string };
 
 /**
- * ADR-0012's opt-in, applied to one card. The wording mirrors
- * `repo::ensure_unattended_runs_allowed`'s own refusal (`crates/core/src/
- * repo/mod.rs`) — the same sentence a rejected `start_task_run` call would
- * carry, so a card that guessed wrong about a repository's state still shows
- * the service's own reason rather than a paraphrase of it (seam-contract D8's
- * "specificity lives in the message", applied to a disabled button instead of
- * a rejection).
+ * ADR-0012's opt-in, applied to one card: this computer's consent, off its
+ * checkout of the task's repository (task 066). The wording mirrors
+ * `repo::ensure_unattended_runs_allowed`'s own refusals (`crates/core/src/
+ * repo/mod.rs` and `machine::not_set_up`) — the same sentence a rejected
+ * `start_task_run` call would carry, so a card that guessed wrong about a
+ * repository's state still shows the service's own reason rather than a
+ * paraphrase of it (seam-contract D8's "specificity lives in the message",
+ * applied to a disabled button instead of a rejection).
+ *
+ * `checkouts` is `null` until this computer's read answers.
  */
-function runNowState(task: CardTask, repositories: ReadonlyMap<string, Repository> | null): RunNowState {
+function runNowState(
+  task: CardTask,
+  repositories: ReadonlyMap<string, Repository> | null,
+  checkouts: ReadonlyMap<string, CheckoutView> | null,
+): RunNowState {
   if (task.runState === "running" || task.runState === "queued") {
     return { kind: "running" };
   }
-  if (repositories === null) {
+  if (repositories === null || checkouts === null) {
     return { kind: "unknown" };
   }
-  const repository = repositories.get(task.repositoryId);
-  if (!repository || !repository.allowUnattendedRuns) {
-    const name = repository?.name ?? "this task's repository";
+  const name = repositories.get(task.repositoryId)?.name ?? "this task's repository";
+  const checkout = checkouts.get(task.repositoryId);
+  if (!checkout) {
+    return { kind: "blocked", reason: `"${name}" is not set up on this computer` };
+  }
+  if (!checkout.unattendedConsent) {
     return {
       kind: "blocked",
       reason: `"${name}" has not enabled unattended agent runs. Enable it in Settings → Repositories before starting tasks here.`,
@@ -305,7 +319,12 @@ type CardTask = Task &
   Partial<
     Pick<
       TaskSummary,
-      "linkCount" | "dependencyCount" | "lastRun" | "blockedByIncomplete" | "blockingTitle"
+      | "linkCount"
+      | "dependencyCount"
+      | "lastRun"
+      | "blockedByIncomplete"
+      | "blockingTitle"
+      | "reviewLoop"
     >
   > &
   Partial<EffectiveStrategyFields>;
@@ -368,6 +387,11 @@ function CardFace({ task, repositoryName, now }: CardFace) {
   // An inherited value is still what runs, but it is not a decision anybody
   // made about *this* card, so it recedes.
   const inherited = origin === "global" || origin === "claude_code";
+  // The loop's line is for a loop that has finished. While the task is still
+  // moving, the badge already says what is happening and a verdict would
+  // describe an unfinished pass (task 037).
+  const loop = finishedLoop(task.runState, task.reviewLoop);
+  const loopText = reviewLoopText(loop);
   const proposalWaiting =
     task.strategyMode === "planned" &&
     task.strategySource === "planner" &&
@@ -404,6 +428,12 @@ function CardFace({ task, repositoryName, now }: CardFace) {
           thing it qualifies. */}
       {blocked && task.blockingTitle && (
         <p className="task-card-blocked-by">Blocked by {task.blockingTitle}</p>
+      )}
+      {loopText && (
+        <p className="task-card-loop">
+          <span className="task-card-loop-text">{loopText}</span>
+          {loop?.pingPong && <span className="task-card-loop-signal">{PING_PONG_TEXT}</span>}
+        </p>
       )}
       {(strategy || proposalWaiting) && (
         <div className="task-card-strategy">
@@ -515,7 +545,14 @@ export function TaskCard({
   }
 
   const repositories = useRepositoryLookup();
-  const runNow = runNowState(task, repositories);
+  const { checkouts, loading: checkoutsLoading, error: checkoutsError } = useCheckouts();
+  const { worktrees } = useLocalWorktrees();
+  // Unknown, never "not set up", until this computer's read has answered.
+  const runNow = runNowState(
+    task,
+    repositories,
+    checkoutsLoading || checkoutsError !== null ? null : checkouts,
+  );
   const [starting, setStarting] = useState(false);
   const [runError, setRunError] = useState<RimaiaError | null>(null);
 
@@ -692,12 +729,12 @@ export function TaskCard({
             />
           </label>
         )}
-        {/* Task 026. Rendered off the card's own row — `worktree_path` is
-            already on every card (seam-contract D12), so no board read
-            changes and nothing here asks the disk. A task that has never run
-            has no worktree and shows no control at all, which is the normal
-            state of most of the board rather than something to report. */}
-        {task.worktreePath !== null && (
+        {/* Task 026. Rendered off this computer's worktree records, one
+            read shared by every card (task 066), so nothing here asks the
+            disk. A task that has never run here has no worktree and shows no
+            control at all, which is the normal state of most of the board
+            rather than something to report. */}
+        {worktrees.has(task.id) && (
           <OpenInMenu taskId={task.id} onError={setRunError} />
         )}
         {/* Task 008's "Run now", isolated from the drag/select machinery

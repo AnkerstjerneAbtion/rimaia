@@ -1,0 +1,50 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT task_id, team_id, purpose AS \"purpose: LeasePurpose\", run_id,\n                          generation, acquired_at AS \"acquired_at: DateTime<Utc>\"\n                     FROM held_leases ORDER BY task_id",
+  "describe": {
+    "columns": [
+      {
+        "name": "task_id",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "team_id",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "purpose: LeasePurpose",
+        "ordinal": 2,
+        "type_info": "Text"
+      },
+      {
+        "name": "run_id",
+        "ordinal": 3,
+        "type_info": "Text"
+      },
+      {
+        "name": "generation",
+        "ordinal": 4,
+        "type_info": "Integer"
+      },
+      {
+        "name": "acquired_at: DateTime<Utc>",
+        "ordinal": 5,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      true,
+      false,
+      false
+    ]
+  },
+  "hash": "4b7a50a1f8bf90944ce03111c61d600404c5077d44dda5ad8b61bc5a4a8f6983"
+}

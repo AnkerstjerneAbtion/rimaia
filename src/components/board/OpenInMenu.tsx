@@ -9,7 +9,8 @@ import type { DetectedOpenInTarget, RimaiaError } from "../../types";
  * actually open a worktree in.
  *
  * Rendered only for a card whose task has a worktree — the caller decides that
- * off `task.worktreePath`, and never by asking the disk. "No worktree yet" is
+ * off this computer's worktree records (`useLocalWorktrees`, task 066), and
+ * never by asking the disk. "No worktree yet" is
  * the normal state of most of the board (task 007), not a failure to report, so
  * a card without one shows no control at all rather than a disabled one.
  *
@@ -98,14 +99,35 @@ function useOpenInTargets(): {
 export function OpenInMenu({
   taskId,
   onError,
+  open: controlledOpen,
+  onOpenChange,
 }: {
   taskId: string;
   /** Rendered where `TaskCard`'s existing `runError` line is rendered. */
   onError: (error: RimaiaError | null) => void;
+  /** Lets a caller open the menu from a key (task 017's `w`). Left out, the
+   *  menu owns its own state, as on the card. When given, the first item takes
+   *  focus on opening — a key opened it, so a key must be able to pick. */
+  open?: boolean;
+  onOpenChange?: (open: boolean) => void;
 }) {
   const { targets, recheck } = useOpenInTargets();
-  const [open, setOpen] = useState(false);
+  const [ownOpen, setOwnOpen] = useState(false);
+  const open = controlledOpen ?? ownOpen;
+  const setOpen = useCallback(
+    (next: boolean) => {
+      setOwnOpen(next);
+      onOpenChange?.(next);
+    },
+    [onOpenChange],
+  );
   const root = useRef<HTMLDivElement | null>(null);
+  const opensFromKey = controlledOpen !== undefined;
+
+  useEffect(() => {
+    if (!open || !opensFromKey || targets === null || targets.length === 0) return;
+    root.current?.querySelector<HTMLButtonElement>("[role='menuitem']")?.focus();
+  }, [open, opensFromKey, targets]);
 
   // A click anywhere else closes it. Registered only while open, so a board of
   // forty cards is not forty document listeners.
@@ -116,7 +138,7 @@ export function OpenInMenu({
     }
     document.addEventListener("pointerdown", onDocumentPointerDown);
     return () => document.removeEventListener("pointerdown", onDocumentPointerDown);
-  }, [open]);
+  }, [open, setOpen]);
 
   // **Nothing until detection has answered.** `null` is "not probed yet", and
   // rendering the control on it would put an "Open in" button on the card that
@@ -174,7 +196,7 @@ export function OpenInMenu({
         className="task-card-open-in-button"
         aria-haspopup="menu"
         aria-expanded={open}
-        onClick={() => setOpen((previous) => !previous)}
+        onClick={() => setOpen(!open)}
       >
         Open in
       </button>

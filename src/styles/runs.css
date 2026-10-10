@@ -474,6 +474,27 @@
   white-space: nowrap;
 }
 
+/* The title and what the row is for (task 037). The kind is a word beside the
+   title rather than a colour, in the same quiet weight as the repository. */
+.active-run-title {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-2);
+  min-width: 0;
+}
+
+.active-run-title h3 {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.active-run-kind {
+  flex: none;
+  font-size: var(--font-size-xs);
+  font-weight: var(--font-weight-medium);
+  color: var(--text-2);
+}
+
 .active-run-header h3 {
   margin: 0;
   font-size: var(--font-size-md);
@@ -925,6 +946,13 @@
   color: var(--text-2);
 }
 
+/* What the row was for (task 037): a plain word, not an identifier. */
+.runs-history-kind {
+  font-size: var(--font-size-sm);
+  color: var(--text-2);
+  white-space: nowrap;
+}
+
 /* The row's control is the title, styled as a link rather than as a button:
    twenty bordered buttons down a table's first column is a stack of controls,
    not a list of runs. */
@@ -1036,16 +1064,35 @@
 }
 
 @media (min-width: 1100px) {
+  /* Five rows for the rail (outcome, diff, commits, PR, and the review loop's
+     findings when the task has any) and a flexible sixth. The prompt sits
+     beside the outcome and the transcript spans the rest, so the reading
+     column starts at the top. Without explicit rows, auto-placement put the
+     prompt in the row *after* the rail's last section and left the right
+     column empty beside the whole rail. The transcript's span ends on the
+     flexible row, so its height lands there instead of stretching the gaps
+     between the rail's sections.
+
+     Placement is by class rather than by `:nth-child`, because the findings
+     section is optional: a position-based rule would move the prompt into the
+     rail the moment a task grew one. */
   .run-detail-body {
     grid-template-columns: minmax(0, 24rem) minmax(0, 1fr);
+    grid-template-rows: auto auto auto auto auto 1fr;
   }
 
-  .run-detail-body > .run-detail-section:nth-child(-n + 4) {
+  .run-detail-body > .run-detail-section {
     grid-column: 1;
   }
 
-  .run-detail-body > .run-detail-section:nth-child(n + 5) {
+  .run-detail-body > .run-detail-prompt-section {
     grid-column: 2;
+    grid-row: 1;
+  }
+
+  .run-detail-body > .run-detail-transcript-section {
+    grid-column: 2;
+    grid-row: 2 / span 5;
   }
 }
 
@@ -1145,6 +1192,51 @@
   color: var(--text-2);
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
+}
+
+/* A line about where the diff came from, or what the cap left out (task 033).
+   Quiet, and sat between the totals and the file list it qualifies. */
+.run-detail-section > .run-detail-review-note {
+  margin-top: var(--space-1);
+  font-size: var(--font-size-sm);
+}
+
+/* Why a file is missing from the stored patch. Beside the line counts rather
+   than instead of them, so the file still reads as a change. */
+.run-detail-patch-marker {
+  font-style: italic;
+}
+
+.run-detail-patch-marker:not(:last-child) {
+  margin-right: var(--space-2);
+}
+
+.run-detail-patch {
+  margin-top: var(--space-3);
+  font-size: var(--font-size-sm);
+}
+
+.run-detail-patch summary {
+  cursor: pointer;
+  color: var(--text-2);
+  font-weight: var(--font-weight-semibold);
+}
+
+/* Plain preformatted text: highlighting and per-file navigation are task
+   017's. Scrolls inside itself so a 512 KiB patch cannot push the prompt and
+   the transcript off the end of the overlay. */
+.run-detail-patch-text {
+  margin: var(--space-2) 0 0;
+  padding: var(--space-3) var(--space-4);
+  border-radius: var(--radius-sm);
+  background: var(--surface-0);
+  color: var(--text-1);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: var(--font-size-xs);
+  line-height: var(--line-height-relaxed);
+  white-space: pre;
+  overflow: auto;
+  max-height: 32rem;
 }
 
 /* The prompt this run was actually given. Monospace and recessed, at the

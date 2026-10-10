@@ -41,6 +41,7 @@
 //! *task* cascades to its runs, because that is a person saying "this never
 //! happened".
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use chrono::{DateTime, Utc};
@@ -50,12 +51,14 @@ use super::{git, safety, ForceRemoval};
 use crate::context::ServiceContext;
 use crate::db::{settings, BoardColumn, RunState};
 use crate::error::{Error, Result};
+use crate::machine::{self, MachineContext};
 
-/// The `settings` key holding task 016's auto-removal policy.
+/// The runner settings key holding task 016's auto-removal policy.
 ///
 /// Owned here rather than in [`crate::db::settings`], in the shape D3 fixed and
-/// D16.2 repeated: storage goes through `settings::get`/`set`, but what the key
-/// means and what an absent one means live with the module that acts on it.
+/// D16.2 repeated: storage goes through `settings::get_runner`/`set_runner`,
+/// over this machine's store since task 041, but what the key means and what an
+/// absent one means live with the module that acts on it.
 pub const AUTO_CLEANUP: &str = "worktree_auto_cleanup";
 
 /// Whether a task reaching `done` takes its worktree with it.
@@ -172,8 +175,8 @@ pub struct WorktreeInventoryEntry {
     pub repository_name: String,
     pub column: BoardColumn,
     pub run_state: RunState,
-    /// What the row records, whether or not it still resolves — shown so the
-    /// user can go and look, including when it is gone.
+    /// What this machine's record says, whether or not it still resolves —
+    /// shown so the user can go and look, including when it is gone.
     pub path: String,
     /// The directory is on disk **and** git still lists it as a worktree on
     /// this branch. A directory git has forgotten is a directory, not a
@@ -255,43 +258,76 @@ pub struct CleanupReport {
 
 /// Whether a task reaching `done` takes its worktree with it. Absent means
 /// [`AutoCleanup::Off`].
-pub async fn auto_cleanup(pool: &sqlx::SqlitePool) -> Result<AutoCleanup> {
-    Ok(settings::get(pool, AUTO_CLEANUP)
+///
+/// This machine's own policy: the worktrees it removes are on this machine.
+pub async fn auto_cleanup(machine: &MachineContext) -> Result<AutoCleanup> {
+    Ok(settings::get_runner(machine, AUTO_CLEANUP)
         .await?
         .as_deref()
         .map(AutoCleanup::from_stored)
         .unwrap_or_default())
 }
 
-pub async fn set_auto_cleanup(ctx: &ServiceContext, value: AutoCleanup) -> Result<()> {
-    settings::set(ctx, AUTO_CLEANUP, value.as_str()).await
+pub async fn set_auto_cleanup(machine: &MachineContext, value: AutoCleanup) -> Result<()> {
+    settings::set_runner(machine, AUTO_CLEANUP, value.as_str()).await
 }
 
 // ---------------------------------------------------------------------------
 // Reading
 // ---------------------------------------------------------------------------
 
-/// Every worktree Rimaia believes it created, with what it costs and whether it
-/// is finished with.
+/// Every worktree Rimaia believes it created on this machine, with what it
+/// costs and whether it is finished with.
 ///
-/// Driven from `tasks.worktree_path` rather than from `git worktree list`: the
-/// listing would also surface worktrees the *user* made in their own
-/// repositories, and offering to delete those is exactly the kind of
-/// helpfulness this module exists not to have. A path the row records and the
+/// Driven from this machine's worktree records rather than from `git worktree
+/// list`: the listing would also surface worktrees the *user* made in their
+/// own repositories, and offering to delete those is exactly the kind of
+/// helpfulness this module exists not to have. A path the record names and the
 /// disk does not is still listed, with `exists: false` — it is the thing
 /// reconciliation is for, and hiding it would hide the problem.
-pub async fn inventory(ctx: &ServiceContext) -> Result<WorktreeInventory> {
+///
+/// A record whose task the board no longer has, or holds for another team, is
+/// not listed: it is invisible, as a deleted task's directory always was
+/// (task 066's Out of scope).
+///
+/// Entity-less, so it lists one team's worktrees (ADR-0035 point 2): a context
+/// that reaches several is refused rather than handed a merged inventory.
+pub async fn inventory(
+    ctx: &ServiceContext,
+    machine: &MachineContext,
+) -> Result<WorktreeInventory> {
+    let team_id = ctx.scope.sole()?;
+    let records: HashMap<String, machine::WorktreeRecord> = machine
+        .store
+        .list_worktrees()
+        .await?
+        .into_iter()
+        .map(|record| (record.task_id.clone(), record))
+        .collect();
+    let checkouts: HashMap<String, String> = machine
+        .store
+        .list_checkouts()
+        .await?
+        .into_iter()
+        .map(|checkout| (checkout.repository_id, checkout.path))
+        .collect();
+
+    // The board half: which of the recorded tasks this team has, and what the
+    // inventory shows about each. One statement however many records there
+    // are, keyed through one JSON array so its text never changes.
+    let task_ids = serde_json::to_string(&records.keys().collect::<Vec<_>>())
+        .map_err(|error| Error::internal(format!("could not encode task ids: {error}")))?;
     let rows = sqlx::query!(
-        r#"SELECT t.id AS task_id, t.title AS task_title, t.repository_id,
-                  t.branch, t.worktree_path,
+        r#"SELECT t.id AS task_id, t.title AS task_title, t.repository_id, t.branch,
                   t.board_column AS "column: BoardColumn",
                   t.run_state AS "run_state: RunState",
-                  r.name AS repository_name, r.path AS repository_path,
-                  r.default_branch
+                  r.name AS repository_name, r.default_branch
              FROM tasks t
              JOIN repositories r ON r.id = t.repository_id
-            WHERE t.worktree_path IS NOT NULL
-            ORDER BY r.name, t.title"#
+            WHERE t.team_id = ?1 AND t.id IN (SELECT value FROM json_each(?2))
+            ORDER BY r.name, t.title"#,
+        team_id,
+        task_ids,
     )
     .fetch_all(&ctx.pool)
     .await?;
@@ -300,24 +336,21 @@ pub async fn inventory(ctx: &ServiceContext) -> Result<WorktreeInventory> {
     let mut total_bytes = 0;
 
     for row in rows {
-        let Some(path) = row.worktree_path else {
-            // Unreachable through the `WHERE`, but the column is nullable and
-            // sqlx types it as such; skipping is cheaper than an `expect` that
-            // would turn a schema change into a panic in a read.
+        let Some(record) = records.get(&row.task_id) else {
             continue;
         };
+        let path = record.path.clone();
 
         // A repository moved off the disk must not fail the *whole* inventory —
         // the user opened Settings precisely to clean up, and one unreachable
         // repository would otherwise leave them with an error page instead of
         // the other nine worktrees. Reported as an entry with nothing measured.
-        let measured = measure_entry(
-            &row.repository_path,
-            &row.default_branch,
-            &path,
-            &row.branch,
-        )
-        .await
+        let measured = match checkouts.get(&record.repository_id) {
+            Some(repository_path) => {
+                measure_entry(repository_path, &row.default_branch, &path, &row.branch).await
+            }
+            None => Err(machine::not_set_up(&row.repository_name)),
+        }
         .unwrap_or_else(|error| {
             tracing::warn!(
                 task_id = %row.task_id,
@@ -474,14 +507,16 @@ async fn measure_tree(path: &Path) -> (u64, Option<DateTime<Utc>>) {
 /// what just happened rather than one recomputed from a second read.
 pub async fn remove_worktree(
     ctx: &ServiceContext,
+    machine: &MachineContext,
     task_id: &str,
     authorization: RemovalAuthorization,
 ) -> Result<RemovedWorktree> {
     let task = crate::tasks::get_task(ctx, task_id).await?.task;
     let repository = crate::repo::get(ctx, &task.repository_id).await?;
     let base_ref = repository.default_branch.clone();
+    let checkout = machine::checkout_of(machine, &repository).await?;
 
-    let Some(recorded) = task.worktree_path.clone() else {
+    let Some(recorded) = machine::local::worktree_path(machine, &task.id).await? else {
         // Idempotent, the way `super::remove` is: the state the caller wanted
         // is the state it is in.
         return Ok(RemovedWorktree {
@@ -492,7 +527,7 @@ pub async fn remove_worktree(
         });
     };
 
-    let repository_path = safety::resolve(Path::new(&repository.path)).await?;
+    let repository_path = safety::resolve(Path::new(&checkout.path)).await?;
     let path = safety::resolve(Path::new(&recorded)).await?;
 
     ensure_not_live(&task.id, &task.title, task.run_state)?;
@@ -518,7 +553,7 @@ pub async fn remove_worktree(
     let (bytes_freed, _) = measure_tree(&path).await;
 
     let force = authorization.uncommitted_changes;
-    super::remove(ctx, &task.id, delete_branch, force).await?;
+    super::remove(ctx, machine, &task.id, delete_branch, force).await?;
 
     Ok(RemovedWorktree {
         task_id: task.id,
@@ -534,13 +569,16 @@ pub async fn remove_worktree(
 /// a single click standing in for N individual decisions, and it may not carry
 /// more authority than the user would have granted one at a time. Anything a
 /// guard stops is reported, not skipped silently.
-pub async fn remove_done_worktrees(ctx: &ServiceContext) -> Result<CleanupReport> {
-    let inventory = inventory(ctx).await?;
+pub async fn remove_done_worktrees(
+    ctx: &ServiceContext,
+    machine: &MachineContext,
+) -> Result<CleanupReport> {
+    let inventory = inventory(ctx, machine).await?;
     let candidates = inventory
         .entries
         .iter()
         .filter(|entry| entry.column == BoardColumn::Done);
-    sweep(ctx, candidates).await
+    sweep(ctx, machine, candidates).await
 }
 
 /// Removes the worktree of every task whose branch the default branch already
@@ -548,20 +586,31 @@ pub async fn remove_done_worktrees(ctx: &ServiceContext) -> Result<CleanupReport
 ///
 /// "Merged" is [`git::is_merged`]'s conservative answer — see its doc on why a
 /// squash-merged branch reads as unmerged, and why that is the error to make.
-pub async fn remove_merged_worktrees(ctx: &ServiceContext) -> Result<CleanupReport> {
-    let inventory = inventory(ctx).await?;
+pub async fn remove_merged_worktrees(
+    ctx: &ServiceContext,
+    machine: &MachineContext,
+) -> Result<CleanupReport> {
+    let inventory = inventory(ctx, machine).await?;
     let candidates = inventory.entries.iter().filter(|entry| entry.merged);
-    sweep(ctx, candidates).await
+    sweep(ctx, machine, candidates).await
 }
 
 async fn sweep<'a>(
     ctx: &ServiceContext,
+    machine: &MachineContext,
     candidates: impl Iterator<Item = &'a WorktreeInventoryEntry>,
 ) -> Result<CleanupReport> {
     let mut report = CleanupReport::default();
 
     for entry in candidates {
-        match remove_worktree(ctx, &entry.task_id, RemovalAuthorization::default()).await {
+        match remove_worktree(
+            ctx,
+            machine,
+            &entry.task_id,
+            RemovalAuthorization::default(),
+        )
+        .await
+        {
             Ok(removed) => {
                 report.bytes_freed += removed.bytes_freed;
                 report.removed.push(removed);
@@ -577,7 +626,13 @@ async fn sweep<'a>(
     Ok(report)
 }
 
-/// Task 016's optional policy, firing from [`crate::tasks::move_task`].
+/// Task 016's optional policy, this machine's reaction to a task entering
+/// `done` through [`crate::tasks::move_task`] or a review approval.
+///
+/// It takes the machine as well as the board, because the policy is this
+/// machine's (a runner key) and the worktree is on this machine; a caller with
+/// no machine, a server, does not call it at all (task 041). The worktree is
+/// the one this machine's record names (task 066).
 ///
 /// **Best effort, and deliberately silent about failure.** The user moved a
 /// card; that move succeeded and is committed. A cleanup that a guard refused —
@@ -589,8 +644,12 @@ async fn sweep<'a>(
 /// branch always kept. An automatic action gets strictly less authority than a
 /// human clicking a button, because there is nobody to read the refusal it
 /// would otherwise be overriding.
-pub(crate) async fn auto_remove_on_done(ctx: &ServiceContext, task_id: &str) {
-    match auto_cleanup(&ctx.pool).await {
+pub(crate) async fn auto_remove_on_done(
+    ctx: &ServiceContext,
+    machine: &MachineContext,
+    task_id: &str,
+) {
+    match auto_cleanup(machine).await {
         Ok(AutoCleanup::Off) => return,
         Ok(AutoCleanup::OnDoneAcknowledged) => {}
         Err(error) => {
@@ -599,7 +658,7 @@ pub(crate) async fn auto_remove_on_done(ctx: &ServiceContext, task_id: &str) {
         }
     }
 
-    match remove_worktree(ctx, task_id, RemovalAuthorization::default()).await {
+    match remove_worktree(ctx, machine, task_id, RemovalAuthorization::default()).await {
         Ok(removed) => tracing::info!(
             %task_id,
             bytes_freed = removed.bytes_freed,
@@ -666,23 +725,39 @@ async fn ensure_committed(
     if authorization.uncommitted_changes.is_forced() {
         return Ok(());
     }
-    // Nothing on disk is nothing to lose; git is not asked, and would fail if
-    // it were.
-    if !matches!(tokio::fs::try_exists(path).await, Ok(true)) {
-        return Ok(());
-    }
-
-    let changes = git::dirty_file_count(path).await?;
+    let changes = uncommitted_change_count(path).await?;
     if changes == 0 {
         return Ok(());
     }
-    Err(Error::invalid(format!(
+    Err(Error::invalid(uncommitted_changes_sentence(
+        title,
+        changes,
+        "confirm that you want to, or commit the work first.",
+    )))
+}
+
+/// How many files in `path` differ from what git has committed.
+///
+/// Nothing on disk is nothing to lose; git is not asked, and would fail if it
+/// were. Shared with `review::actions`, whose reject has no force and so cannot
+/// use [`ensure_committed`]'s refusal, but must count the same way.
+pub(crate) async fn uncommitted_change_count(path: &Path) -> Result<i64> {
+    if !matches!(tokio::fs::try_exists(path).await, Ok(true)) {
+        return Ok(0);
+    }
+    git::dirty_file_count(path).await
+}
+
+/// The first half of every uncommitted-work refusal. `next_step` is the clause
+/// after the dash, which differs by what the caller offers: a confirmation for
+/// cleanup, none for a review's reject.
+pub(crate) fn uncommitted_changes_sentence(title: &str, changes: i64, next_step: &str) -> String {
+    format!(
         "\"{title}\" has {changes} uncommitted change{plural} in its worktree, committed nowhere \
-         else. Removing it would discard {them} for good — confirm that you want to, or commit \
-         the work first.",
+         else. Removing it would discard {them} for good — {next_step}",
         plural = if changes == 1 { "" } else { "s" },
         them = if changes == 1 { "it" } else { "them" },
-    )))
+    )
 }
 
 /// Refuses a worktree whose branch holds commits no remote has.

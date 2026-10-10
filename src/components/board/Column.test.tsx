@@ -19,7 +19,6 @@ function task(id: string): Task {
     position: 0,
     runState: "idle",
     branch: null,
-    worktreePath: null,
     strategyMode: "default",
     model: null,
     effort: null,
@@ -94,7 +93,7 @@ describe("columnStats", () => {
   }
 
   function lastRun(exitClass: ExitClass): NonNullable<Card["lastRun"]> {
-    return { status: "failed", exitClass, endedAt: "2026-08-20T11:30:00Z", resumeAfter: null };
+    return { kind: "implementation", status: "failed", exitClass, endedAt: "2026-08-20T11:30:00Z", resumeAfter: null };
   }
 
   it("says nothing about a column where nothing is happening", () => {

@@ -1,6 +1,9 @@
 import { useState } from "react";
 
-import type { ExitClass, Run } from "../../types";
+import { runLabel } from "../../lib/board";
+import { getRunLogPath, toRimaiaError } from "../../lib/commands";
+import type { ExitClass, RimaiaError, Run } from "../../types";
+import { ErrorBanner } from "../ErrorBanner";
 
 /**
  * ADR-0011's six exit classes, in the words a reviewer reads rather than the
@@ -46,7 +49,14 @@ interface RunOutcomeSectionProps {
 export function RunOutcomeSection({ lastRun, loading }: RunOutcomeSectionProps) {
   return (
     <section className="task-detail-section run-outcome-section">
-      <h4>Last run outcome</h4>
+      {/* After a loop the newest row is usually a review, so the heading names
+          the row: otherwise a review's outcome reads as the implementation's
+          (task 037). */}
+      <h4>
+        {lastRun && !loading
+          ? `Last run outcome — ${runLabel(lastRun.kind, lastRun.attempt)}`
+          : "Last run outcome"}
+      </h4>
       {loading && <p className="muted">Loading…</p>}
       {!loading && !lastRun && (
         <p className="muted">No runs yet — an outcome appears here once one has finished.</p>
@@ -58,15 +68,28 @@ export function RunOutcomeSection({ lastRun, loading }: RunOutcomeSectionProps) 
 
 function RunOutcomeDetails({ run }: { readonly run: Run }) {
   const [copied, setCopied] = useState(false);
+  // Fetched on the action, because `Run` carries no path since task 066: the
+  // transcript is this computer's file, derived from the run's ids.
+  const [logPath, setLogPath] = useState<string | null>(null);
+  const [pathError, setPathError] = useState<RimaiaError | null>(null);
 
   async function handleCopyLogPath() {
+    let path: string;
     try {
-      await navigator.clipboard.writeText(run.logPath);
+      path = await getRunLogPath(run.taskId, run.id);
+      setLogPath(path);
+      setPathError(null);
+    } catch (thrown) {
+      setPathError(toRimaiaError(thrown));
+      setCopied(false);
+      return;
+    }
+    try {
+      await navigator.clipboard.writeText(path);
       setCopied(true);
     } catch {
-      // The path is still shown as text below — copying is a convenience on
-      // top of that, never the only way to reach it (no backend command
-      // exists to open it; task 015 owns the transcript viewer).
+      // The path is shown as text below once fetched — copying is a
+      // convenience on top of that, never the only way to reach it.
       setCopied(false);
     }
   }
@@ -110,16 +133,21 @@ function RunOutcomeDetails({ run }: { readonly run: Run }) {
             </dd>
           </>
         )}
-        <dt>Log</dt>
-        <dd>
-          <code>{run.logPath}</code>
-        </dd>
+        {logPath && (
+          <>
+            <dt>Log</dt>
+            <dd>
+              <code>{logPath}</code>
+            </dd>
+          </>
+        )}
       </dl>
       <div className="run-outcome-actions">
         <button type="button" onClick={handleCopyLogPath}>
           {copied ? "Copied" : "Copy log path"}
         </button>
       </div>
+      {pathError && <ErrorBanner error={pathError} onDismiss={() => setPathError(null)} />}
     </>
   );
 }

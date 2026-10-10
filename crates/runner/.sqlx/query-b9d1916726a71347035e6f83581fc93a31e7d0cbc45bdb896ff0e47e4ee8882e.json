@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "\n        INSERT INTO worktrees (task_id, repository_id, path, fenced_at)\n        VALUES (?1, ?2, ?3, ?4)\n        ON CONFLICT (task_id) DO UPDATE\n           SET repository_id = excluded.repository_id,\n               path = excluded.path,\n               fenced_at = excluded.fenced_at\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 4
+    },
+    "nullable": []
+  },
+  "hash": "b9d1916726a71347035e6f83581fc93a31e7d0cbc45bdb896ff0e47e4ee8882e"
+}

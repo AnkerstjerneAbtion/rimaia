@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE tasks SET archived_at = NULL, updated_at = ?1 WHERE id = ?2 RETURNING team_id",
+  "describe": {
+    "columns": [
+      {
+        "name": "team_id",
+        "ordinal": 0,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "9e1179f0cfbfeefa8691abc0b681485b316025aeecb139ef4f04a9085c1ac751"
+}

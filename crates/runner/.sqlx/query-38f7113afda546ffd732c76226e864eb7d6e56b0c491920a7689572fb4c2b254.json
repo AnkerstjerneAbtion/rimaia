@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT step FROM adoptions WHERE step = ?1",
+  "describe": {
+    "columns": [
+      {
+        "name": "step",
+        "ordinal": 0,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "38f7113afda546ffd732c76226e864eb7d6e56b0c491920a7689572fb4c2b254"
+}

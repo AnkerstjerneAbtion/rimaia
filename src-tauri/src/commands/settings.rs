@@ -1,5 +1,5 @@
-//! Base instructions and run-environment commands (task 006, ADR-0009,
-//! ADR-0012, seam-contract D3).
+//! Base instructions, run-environment and strategy-ceiling commands (task
+//! 006, ADR-0009, ADR-0012, seam-contract D3; task 072, ADR-0032).
 //!
 //! Every rule — what an absent key means, how `run_environment` parses, how
 //! a prompt is actually composed from them — lives in
@@ -10,6 +10,7 @@
 //! matches what a run would receive, byte for byte — cannot drift into a
 //! frontend-side approximation.
 
+use rimaia_core::consent::ceiling::{self, StrategyCeiling};
 use rimaia_core::db::{settings, RunEnvironment};
 use rimaia_core::runner::outcome::{self, RunCostSummary};
 use rimaia_core::runner::prompt;
@@ -20,7 +21,7 @@ use crate::state::AppState;
 
 #[tauri::command]
 pub async fn get_base_instructions(state: State<'_, AppState>) -> Result<String> {
-    settings::base_instructions(&state.context.pool).await
+    settings::base_instructions(&state.context).await
 }
 
 /// Replaces `settings.base_instructions`. Never touches a run already
@@ -34,12 +35,32 @@ pub async fn set_base_instructions(state: State<'_, AppState>, value: String) ->
 
 #[tauri::command]
 pub async fn get_run_environment(state: State<'_, AppState>) -> Result<RunEnvironment> {
-    settings::run_environment(&state.context.pool).await
+    settings::run_environment(&state.machine).await
 }
 
 #[tauri::command]
 pub async fn set_run_environment(state: State<'_, AppState>, value: RunEnvironment) -> Result<()> {
-    settings::set_run_environment(&state.context, value).await
+    settings::set_run_environment(&state.machine, value).await
+}
+
+/// This runner's strategy ceiling (ADR-0032 point 3, task 072): the models
+/// and the highest effort a run on this machine may spend its owner's
+/// subscription on. A runner setting, so local (seam-contract D32); no ceiling
+/// is every existing install.
+#[tauri::command]
+pub async fn get_strategy_ceiling(state: State<'_, AppState>) -> Result<StrategyCeiling> {
+    ceiling::strategy_ceiling(&state.machine).await
+}
+
+/// Replaces this runner's strategy ceiling. The next claim carries it and the
+/// next spawn is judged against it; a run already spawned keeps what it was
+/// spawned with.
+#[tauri::command]
+pub async fn set_strategy_ceiling(
+    state: State<'_, AppState>,
+    ceiling: StrategyCeiling,
+) -> Result<()> {
+    ceiling::set_strategy_ceiling(&state.machine, &ceiling).await
 }
 
 /// What runs on this machine have actually cost, so the environment toggle can
@@ -51,7 +72,7 @@ pub async fn set_run_environment(state: State<'_, AppState>, value: RunEnvironme
 /// as the expensive one.
 #[tauri::command]
 pub async fn get_run_cost_summary(state: State<'_, AppState>) -> Result<RunCostSummary> {
-    outcome::observed_run_cost(&state.context.pool, state.runner.provider.as_ref()).await
+    outcome::observed_run_cost(&state.context, state.runner.provider.as_ref()).await
 }
 
 /// The prompt `task_id` would receive right now, composed the same way task
@@ -69,7 +90,7 @@ pub async fn preview_composed_prompt(
     state: State<'_, AppState>,
     task_id: String,
 ) -> Result<String> {
-    let base = settings::base_instructions(&state.context.pool).await?;
+    let base = settings::base_instructions_for_task(&state.context, &task_id).await?;
     let detail = tasks::get_task(&state.context, &task_id).await?;
     let repository = repo::get(&state.context, &detail.task.repository_id).await?;
     let guidance = prompt::StrategyGuidance::for_task(&detail);
@@ -78,6 +99,11 @@ pub async fn preview_composed_prompt(
         &base,
         &detail,
         &repository,
+        // ADR-0032 point 7's facts name the runner a lease was granted to,
+        // and a preview holds no lease. They are `None` in a personal team,
+        // the only one the desktop composes for before 059, so the preview
+        // and a run still agree there byte for byte.
+        None,
         guidance.as_ref(),
         state.runner.provider.fanout_noun(),
     ))

@@ -1,26 +1,26 @@
 //! Whether the queue is working, stored where a crash cannot erase it.
 //!
 //! ADR-0010: "Queue state survives an app restart by being derived from the
-//! database." So this is a `settings` row and not a field on
-//! [`QueueHandle`](super::QueueHandle) — a queue the user started at 18:30 is
+//! database." So this is a stored runner setting (in `runner.db` since task
+//! 041) and not a field on
+//! `rimaia_runner::queue::QueueHandle` — a queue the user started at 18:30 is
 //! still started at 03:00 after the app was force-quit at midnight, and the
 //! loop reads this on its next pass rather than remembering it.
 //!
 //! The key constant lives here rather than in [`crate::db::settings`] for the
-//! reason `runner::process::DISALLOWED_TOOLS` gives for living where it does:
+//! reason `runner::limits::DISALLOWED_TOOLS` gives for living where it does:
 //! seam-contract D3 puts the *rules* about a key with the task that has the
 //! rules, and nothing outside the scheduler has any business knowing what
-//! `queue_state` means. The storage is still task 006's accessor, so there is
-//! one `settings` reader and not two.
+//! `queue_state` means. The storage is the machine store, reached through
+//! `db::settings`' runner accessor, so there is one reader and not two.
 
 use serde::{Deserialize, Serialize};
-use sqlx::SqlitePool;
 
-use crate::context::ServiceContext;
 use crate::db::settings;
 use crate::error::Result;
+use crate::machine::MachineContext;
 
-/// The `settings` key holding [`QueueState`].
+/// The runner settings key holding [`QueueState`].
 pub const QUEUE_STATE: &str = "queue_state";
 
 /// Whether the queue starts new runs.
@@ -82,8 +82,10 @@ impl QueueState {
 }
 
 /// Whether the queue is working. An absent key is [`QueueState::Paused`].
-pub async fn queue_state(pool: &SqlitePool) -> Result<QueueState> {
-    Ok(settings::get(pool, QUEUE_STATE)
+///
+/// This machine's own switch, read from the machine store.
+pub async fn queue_state(machine: &MachineContext) -> Result<QueueState> {
+    Ok(settings::get_runner(machine, QUEUE_STATE)
         .await?
         .as_deref()
         .map(QueueState::from_stored)
@@ -92,28 +94,30 @@ pub async fn queue_state(pool: &SqlitePool) -> Result<QueueState> {
 
 /// Writes the switch and announces it (ADR-0018: `settings:changed` is what
 /// tells the Runs view to re-read the queue's status).
-pub async fn set_queue_state(ctx: &ServiceContext, state: QueueState) -> Result<()> {
-    settings::set(ctx, QUEUE_STATE, state.as_str()).await
+pub async fn set_queue_state(machine: &MachineContext, state: QueueState) -> Result<()> {
+    settings::set_runner(machine, QUEUE_STATE, state.as_str()).await
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::testing::{test_pool, TestContext};
+    use crate::testing::TestContext;
     use pretty_assertions::assert_eq;
 
     #[tokio::test]
     async fn a_queue_nobody_has_ever_started_is_paused() {
-        let pool = test_pool().await;
+        let harness = TestContext::new().await;
 
         assert_eq!(
-            settings::get(&pool, QUEUE_STATE)
+            settings::get_runner(harness.machine(), QUEUE_STATE)
                 .await
                 .expect("read the key"),
             None
         );
         assert_eq!(
-            queue_state(&pool).await.expect("read the default"),
+            queue_state(harness.machine())
+                .await
+                .expect("read the default"),
             QueueState::Paused
         );
     }
@@ -122,23 +126,21 @@ mod tests {
     async fn the_switch_survives_being_read_back_through_the_row_it_wrote() {
         // The whole point of storing it: "queue state derived from the
         // database, so it survives app restart" (ADR-0010). Re-reading through
-        // the pool is the closest a unit test gets to a second launch.
+        // the store is the closest a unit test gets to a second launch.
         let harness = TestContext::new().await;
 
-        set_queue_state(&harness.context, QueueState::Running)
+        set_queue_state(harness.machine(), QueueState::Running)
             .await
             .expect("start the queue");
 
         assert_eq!(
-            settings::get(&harness.context.pool, QUEUE_STATE)
+            settings::get_runner(harness.machine(), QUEUE_STATE)
                 .await
                 .expect("read the row"),
             Some("running".to_string()),
         );
         assert_eq!(
-            queue_state(&harness.context.pool)
-                .await
-                .expect("read it back"),
+            queue_state(harness.machine()).await.expect("read it back"),
             QueueState::Running
         );
     }
@@ -149,14 +151,12 @@ mod tests {
         // CLI must not be able to start an unattended queue.
         let harness = TestContext::new().await;
 
-        settings::set(&harness.context, QUEUE_STATE, "Running")
+        settings::set_runner(harness.machine(), QUEUE_STATE, "Running")
             .await
             .expect("store a typo");
 
         assert_eq!(
-            queue_state(&harness.context.pool)
-                .await
-                .expect("read it back"),
+            queue_state(harness.machine()).await.expect("read it back"),
             QueueState::Paused
         );
     }

@@ -56,6 +56,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use pretty_assertions::assert_eq;
+use rimaia_core::board::{BoardPort, Claim, OwnerPresence};
 use rimaia_core::db::settings;
 use rimaia_core::db::{
     BoardColumn, Repository, Run, RunState, RunStatus, StrategyMode, StrategySource, Task,
@@ -64,7 +65,8 @@ use rimaia_core::mcp::requests::PlanSelectionRequest;
 use rimaia_core::mcp::{self, McpHandle, RunHandles, Tool, MCP_SERVER_NAME};
 use rimaia_core::repo::{self, NewRepository};
 use rimaia_core::runner::events::{transcript_path, RunTail};
-use rimaia_core::runner::process::{DEFAULT_DISALLOWED_TOOLS, DEFAULT_MAX_TURNS};
+use rimaia_core::runner::limits::{DEFAULT_MAX_TURNS, MAX_TURNS};
+use rimaia_core::runner::process::DEFAULT_DISALLOWED_TOOLS;
 use rimaia_core::runner::prompt::{
     compose_prompt, compose_strategy_prompt, compose_strategy_system_append, compose_system_append,
     StrategyGuidance,
@@ -73,18 +75,20 @@ use rimaia_core::runner::provider::ClaudeProvider;
 use rimaia_core::runner::strategy::{
     self as runner_strategy, PlanOutcome, PlanPass, PlanSelection,
 };
-use rimaia_core::runner::{
-    run_task, CancelSignal, ResumeSession, RunRequest, RunTrigger, RunnerConfig,
-};
-use rimaia_core::scheduler::{InFlight, LeaseOwner};
+use rimaia_core::runner::{run_task, CancelSignal, RunRequest, RunTrigger, RunnerConfig};
+use rimaia_core::scheduler::{InFlight, SlotOwner};
 
-/// `ClaudeProvider::tool_handle`, at the path every fixture in this file was
-/// recorded against — `RunnerConfig::default()` is Claude Code (ADR-0026).
-const SET_TASK_STRATEGY_TOOL: &str = "mcp__rimaia__set_task_strategy";
+/// `ClaudeProvider::tool_handle` at the run-scoped handle's own server,
+/// `rimaia-run` (seam-contract D30 point 4) — `RunnerConfig::default()` is
+/// Claude Code (ADR-0026). `strategy-proposal.jsonl` was recorded when the
+/// handle was still served as `rimaia` and stays byte-identical; nothing here
+/// reads the tool name out of its stream.
+const SET_TASK_STRATEGY_TOOL: &str = "mcp__rimaia-run__set_task_strategy";
 use rimaia_core::strategy::{self, StrategyDefaults};
 use rimaia_core::tasks::{
     self, NewTask, Patch, StrategyPlan, StrategyPlanStatus, StrategyWorkflow, TaskDetail, TaskPatch,
 };
+use rimaia_core::testing::board::claim_run;
 use rimaia_core::testing::fixtures::{fixture_lines, fixture_path};
 use rimaia_core::testing::{self, TempRepo, TestContext};
 use rimaia_core::{AppPaths, ErrorCode};
@@ -170,6 +174,7 @@ async fn a_planned_task_spawns_its_planner_with_the_flags_that_let_it_answer() {
     ];
     expected.extend(DEFAULT_DISALLOWED_TOOLS.map(str::to_string));
     expected.extend(PLANNER_DENIED_TOOLS.map(str::to_string));
+    expected.extend(operator_surface_denial());
     expected.extend([
         "--mcp-config".to_string(),
         mcp_config.clone(),
@@ -183,7 +188,7 @@ async fn a_planned_task_spawns_its_planner_with_the_flags_that_let_it_answer() {
     // inline JSON, naming the run-scoped route on the address this server bound.
     let config: serde_json::Value =
         serde_json::from_str(&mcp_config).expect("--mcp-config is inline JSON, not a file path");
-    let url = config["mcpServers"]["rimaia"]["url"]
+    let url = config["mcpServers"]["rimaia-run"]["url"]
         .as_str()
         .expect("the config names a url");
     assert_eq!(
@@ -194,6 +199,91 @@ async fn a_planned_task_spawns_its_planner_with_the_flags_that_let_it_answer() {
             token = url.rsplit('/').next().expect("a token segment"),
         ),
         "the planner is handed the run-scoped route, not the operator's /mcp",
+    );
+}
+
+#[tokio::test]
+async fn the_planner_is_held_to_the_runners_turn_budget_only_when_it_is_lower() {
+    // ADR-0028 point 2: the runner may lower a budget and never raise one. The
+    // planner's budget is the catalogue's six, which the team's `max_turns`
+    // does not cap; a runner override caps it only when it is lower.
+    for (runner, expected) in [("3", "3"), ("50", PLANNER_MAX_TURNS)] {
+        let fixture = StrategyFixture::planned().await;
+        fixture
+            .harness
+            .machine()
+            .store
+            .set_setting(MAX_TURNS, runner)
+            .await
+            .expect("the runner's override");
+        let cli = FakeCli::writing_back(&fixture.task_id);
+
+        fixture.run(&cli).await.expect("the run completes");
+
+        assert_eq!(
+            value_after(&cli.argv(1), "--max-turns"),
+            expected,
+            "a runner override of {runner} against the catalogue's {PLANNER_MAX_TURNS}",
+        );
+    }
+}
+
+#[tokio::test]
+async fn the_planner_is_denied_the_operator_surface_too() {
+    // D30 points 2 and 4. The planner is `strict_local`, so the operator's
+    // registration is not loaded and this denial is belt and braces, but it is
+    // appended for every intent the runner builds, after the caller's own, and
+    // the planner's own write-back is spelled at `rimaia-run`, which the denial
+    // never names.
+    let fixture = StrategyFixture::planned().await;
+    let cli = FakeCli::writing_back(&fixture.task_id);
+
+    fixture.run(&cli).await.expect("the run completes");
+
+    let argv = cli.argv(1);
+    let mut expected_denial = DEFAULT_DISALLOWED_TOOLS.map(str::to_string).to_vec();
+    expected_denial.extend(PLANNER_DENIED_TOOLS.map(str::to_string));
+    expected_denial.extend(operator_surface_denial());
+    assert_eq!(list_after(&argv, "--disallowedTools"), expected_denial);
+    assert_eq!(
+        list_after(&argv, "--allowedTools"),
+        vec!["mcp__rimaia-run__set_task_strategy".to_string()],
+    );
+
+    let config: serde_json::Value = serde_json::from_str(&value_after(&argv, "--mcp-config"))
+        .expect("--mcp-config is inline JSON");
+    let servers: Vec<&String> = config["mcpServers"]
+        .as_object()
+        .expect("an object of servers")
+        .keys()
+        .collect();
+    assert_eq!(servers, vec!["rimaia-run"]);
+}
+
+#[tokio::test]
+async fn an_implementation_run_is_still_denied_every_operator_tool() {
+    // D30 point 2, on the run that has always carried it: every tool in
+    // `Tool::ALL` at the operator's name, the bare `mcp__rimaia` because the CLI
+    // matches it exactly (`run-scoped-server-name.jsonl`), and no handle at all.
+    let fixture = StrategyFixture::planned().await;
+    let cli = FakeCli::writing_back(&fixture.task_id);
+
+    fixture.run(&cli).await.expect("the run completes");
+
+    let argv = cli.argv(2);
+    let mut expected_denial = DEFAULT_DISALLOWED_TOOLS.map(str::to_string).to_vec();
+    expected_denial.push("mcp__rimaia".to_string());
+    expected_denial.extend(
+        Tool::ALL
+            .iter()
+            .map(|tool| format!("mcp__rimaia__{}", tool.as_str())),
+    );
+    assert_eq!(list_after(&argv, "--disallowedTools"), expected_denial);
+    assert!(
+        !argv
+            .iter()
+            .any(|arg| arg == "--mcp-config" || arg == "--allowedTools"),
+        "an implementation run is handed no handle and no grant: {argv:?}",
     );
 }
 
@@ -288,15 +378,10 @@ async fn the_implementation_run_spawns_with_exactly_the_model_and_effort_the_pla
     // auto-approves MCP calls — so without this an implementation run would
     // hold every tool `RunScope` refuses a run, including `move_task` and the
     // ADR-0021 configuration tools.
-    expected.push(format!("mcp__{MCP_SERVER_NAME}"));
-    expected.extend(
-        Tool::ALL
-            .iter()
-            .map(|tool| format!("mcp__{MCP_SERVER_NAME}__{}", tool.as_str())),
-    );
+    expected.extend(operator_surface_denial());
     // ADR-0011's per-attempt bound, which task 014 turned on for every
     // implementation run. Before it the flag was absent and the CLI's own
-    // default applied — see `runner::process::DEFAULT_MAX_TURNS` on why the
+    // default applied — see `runner::limits::DEFAULT_MAX_TURNS` on why the
     // number is what it is, and why too low is worse than too high.
     expected.push("--max-turns".to_string());
     expected.push(DEFAULT_MAX_TURNS.to_string());
@@ -350,7 +435,7 @@ async fn each_run_is_sent_its_own_prompt_and_the_proposal_reaches_the_implementa
     // links, and the planner changed none of them.
     let detail = fixture.detail().await;
     let repository = fixture.repository().await;
-    let catalogue = strategy::catalogue::catalogue(&fixture.harness.context.pool, &ClaudeProvider)
+    let catalogue = strategy::catalogue::catalogue(&fixture.harness.context, &ClaudeProvider)
         .await
         .expect("the catalogue");
 
@@ -359,12 +444,13 @@ async fn each_run_is_sent_its_own_prompt_and_the_proposal_reaches_the_implementa
         compose_strategy_prompt(
             &detail,
             &repository,
+            None,
             &catalogue,
             SET_TASK_STRATEGY_TOOL,
             "subagents",
         )
     );
-    let base = settings::base_instructions(&fixture.harness.context.pool)
+    let base = settings::base_instructions(&fixture.harness.context)
         .await
         .expect("the base instructions");
     assert!(!base.trim().is_empty(), "an empty template proves nothing");
@@ -382,8 +468,62 @@ async fn each_run_is_sent_its_own_prompt_and_the_proposal_reaches_the_implementa
     );
     assert_eq!(
         cli.stdin(2),
-        compose_prompt(&base, &detail, &repository, guidance.as_ref(), "subagents")
+        compose_prompt(
+            &base,
+            &detail,
+            &repository,
+            None,
+            guidance.as_ref(),
+            "subagents"
+        )
     );
+}
+
+#[tokio::test]
+async fn the_planner_prompt_names_the_branch_prepare_created() {
+    // `task_context` writes `- Branch:` into the planner's prompt, and the
+    // claim's context was read before `worktree::prepare` created the branch.
+    // So `run_task` plans from a re-read taken after the worktree exists, not
+    // from the claim.
+    let fixture = StrategyFixture::planned().await;
+    let cli = FakeCli::writing_back(&fixture.task_id);
+    let config = fixture.config(&cli);
+    let board = fixture.harness.board(&fixture.paths, &config);
+    let claim = claim_run(board.as_ref(), &fixture.task_id, RunTrigger::Queued, false)
+        .await
+        .expect("claim the task");
+    assert_eq!(
+        claim.context.task.task.branch, None,
+        "a first run's branch does not exist when it is claimed",
+    );
+
+    fixture
+        .run_claimed(board.as_ref(), &config, &CancelSignal::new(), claim)
+        .await
+        .expect("the run completes");
+
+    let detail = fixture.detail().await;
+    let branch = detail
+        .task
+        .branch
+        .clone()
+        .expect("prepare created the branch");
+    let catalogue = strategy::catalogue::catalogue(&fixture.harness.context, &ClaudeProvider)
+        .await
+        .expect("the catalogue");
+    let expected = compose_strategy_prompt(
+        &detail,
+        &fixture.repository().await,
+        None,
+        &catalogue,
+        SET_TASK_STRATEGY_TOOL,
+        "subagents",
+    );
+    assert!(
+        expected.contains(&format!("- Branch: {branch}\n")),
+        "the composition this test compares against names the branch: {expected}",
+    );
+    assert_eq!(cli.stdin(1), expected);
 }
 
 #[tokio::test]
@@ -409,7 +549,11 @@ async fn a_strategy_run_opens_no_runs_row_and_borrows_the_task_s_own_worktree() 
     );
 
     // One worktree and one branch for the task, shared by both spawns.
-    let worktree = detail.task.worktree_path.expect("task 007 prepared one");
+    let worktree = fixture
+        .harness
+        .worktree_path(&detail.task.id)
+        .await
+        .expect("task 007 prepared one");
     assert_eq!(canonical(&cli.cwd(1)), canonical(&worktree));
     assert_eq!(canonical(&cli.cwd(2)), canonical(&worktree));
     assert_ne!(
@@ -832,16 +976,21 @@ async fn a_card_already_carrying_a_proposal_is_skipped_with_its_proposal_untouch
 #[tokio::test]
 async fn a_pass_and_the_queue_cannot_start_two_processes_for_one_task() {
     // Seam-contract D19's whole point, from the batch side: one registry, not a
-    // second check. The lease below is the one a queued run or a "Run now"
+    // second check. The slot below is the one a queued run or a "Run now"
     // would be holding.
     let fixture = StrategyFixture::planned().await;
     let in_flight = InFlight::new();
     let _held = in_flight
-        .acquire_unbounded(&fixture.task_id, &fixture.repository_id, LeaseOwner::Queue)
+        .acquire_unbounded(&fixture.task_id, &fixture.repository_id, SlotOwner::Queue)
         .expect("the queue takes the task first");
 
     let pass = runner_strategy::plan_all(
-        &fixture.harness.context,
+        fixture.harness.starter(OwnerPresence::AtRunner),
+        fixture
+            .harness
+            .board(&fixture.paths, &fixture.config(&FakeCli::silent()))
+            .as_ref(),
+        fixture.harness.machine(),
         &fixture.paths,
         &fixture.config(&FakeCli::silent()),
         &in_flight,
@@ -872,9 +1021,14 @@ async fn a_pass_and_the_queue_cannot_start_two_processes_for_one_task() {
 #[tokio::test]
 async fn a_repository_without_the_unattended_opt_in_is_skipped_with_the_services_own_reason() {
     let fixture = StrategyFixture::planned().await;
-    repo::set_allow_unattended_runs(&fixture.harness.context, &fixture.repository_id, false)
-        .await
-        .expect("withdraw ADR-0012's opt-in");
+    repo::set_allow_unattended_runs(
+        &fixture.harness.context,
+        fixture.harness.machine(),
+        &fixture.repository_id,
+        false,
+    )
+    .await
+    .expect("withdraw ADR-0012's opt-in");
 
     let pass = plan_selection(
         &fixture,
@@ -899,7 +1053,12 @@ async fn a_pass_cancelled_before_it_starts_spawns_nothing_and_says_it_was_cancel
     cancel.cancel();
 
     let pass = runner_strategy::plan_all(
-        &fixture.harness.context,
+        fixture.harness.starter(OwnerPresence::AtRunner),
+        fixture
+            .harness
+            .board(&fixture.paths, &fixture.config(&cli))
+            .as_ref(),
+        fixture.harness.machine(),
         &fixture.paths,
         &fixture.config(&cli),
         &InFlight::new(),
@@ -930,7 +1089,12 @@ async fn a_pass_plans_an_eligible_card_and_reports_its_model_effort_and_rational
     // rendering progress, so it may not need exclusive access to anything.
     let seen: std::sync::Mutex<Vec<(usize, usize)>> = std::sync::Mutex::new(Vec::new());
     let pass = runner_strategy::plan_all(
-        &fixture.harness.context,
+        fixture.harness.starter(OwnerPresence::AtRunner),
+        fixture
+            .harness
+            .board(&fixture.paths, &fixture.config(&cli))
+            .as_ref(),
+        fixture.harness.machine(),
         &fixture.paths,
         &fixture.config(&cli),
         &InFlight::new(),
@@ -979,7 +1143,12 @@ async fn a_pass_plans_an_eligible_card_and_reports_its_model_effort_and_rational
 /// a skip is decided before anything is spawned.
 async fn plan_selection(fixture: &StrategyFixture, selection: PlanSelection) -> PlanPass {
     runner_strategy::plan_all(
-        &fixture.harness.context,
+        fixture.harness.starter(OwnerPresence::AtRunner),
+        fixture
+            .harness
+            .board(&fixture.paths, &fixture.config(&FakeCli::silent()))
+            .as_ref(),
+        fixture.harness.machine(),
         &fixture.paths,
         &fixture.config(&FakeCli::silent()),
         &InFlight::new(),
@@ -1213,6 +1382,31 @@ fn make_executable(path: &Path) {
         .expect("make the stand-in executable");
 }
 
+/// The operator surface as every spawned run is denied it (D30 point 2):
+/// spelled at `rimaia`, built from `Tool::ALL`, and never at `rimaia-run`.
+fn operator_surface_denial() -> Vec<String> {
+    std::iter::once(format!("mcp__{MCP_SERVER_NAME}"))
+        .chain(
+            Tool::ALL
+                .iter()
+                .map(|tool| format!("mcp__{MCP_SERVER_NAME}__{}", tool.as_str())),
+        )
+        .collect()
+}
+
+/// Every element between `flag` and the next flag.
+fn list_after(argv: &[String], flag: &str) -> Vec<String> {
+    let at = argv
+        .iter()
+        .position(|arg| arg == flag)
+        .unwrap_or_else(|| panic!("{flag} is in the argv: {argv:?}"));
+    argv[at + 1..]
+        .iter()
+        .take_while(|arg| !arg.starts_with("--"))
+        .cloned()
+        .collect()
+}
+
 /// The argument following `flag` in a recorded vector.
 fn value_after(argv: &[String], flag: &str) -> String {
     argv.iter()
@@ -1271,6 +1465,7 @@ impl StrategyFixture {
 
         let registered = repo::register(
             &harness.context,
+            harness.machine(),
             &paths.worktrees_dir(),
             NewRepository {
                 path: repository.path().to_string_lossy().into_owned(),
@@ -1281,7 +1476,7 @@ impl StrategyFixture {
         .await
         .expect("register the test repository");
 
-        repo::set_allow_unattended_runs(&harness.context, &registered.id, true)
+        repo::set_allow_unattended_runs(&harness.context, harness.machine(), &registered.id, true)
             .await
             .expect("ADR-0012's per-repository opt-in");
 
@@ -1329,8 +1524,8 @@ impl StrategyFixture {
             harness.context.clone(),
             0,
             handles.clone(),
-            testing::doctor::environment(),
-            testing::doctor::planner_access(),
+            testing::doctor::provider(),
+            Some(testing::doctor::local_tools(harness.machine())),
         )
         .await;
         tokio::spawn(task_handle.run());
@@ -1374,36 +1569,66 @@ impl StrategyFixture {
         config: &RunnerConfig,
         cancel: &CancelSignal,
     ) -> rimaia_core::Result<Run> {
-        self.spawn(config, cancel, None).await
+        self.spawn(config, cancel, false).await
     }
 
     /// The same, continuing an earlier attempt's session — what the queue does
     /// when a `waiting_retry` deadline arrives.
+    ///
+    /// The board resumes only a task that is waiting, and resumes the newest
+    /// attempt's session, so the task is walked to `waiting_retry` first — the
+    /// state the queue finds it in — and the claim's point is checked against
+    /// the session the caller expects to continue.
     async fn resume(&self, cli: &FakeCli, session_id: &str) -> rimaia_core::Result<Run> {
-        self.spawn(
-            &self.config(cli),
-            &CancelSignal::new(),
-            Some(ResumeSession {
-                session_id: session_id.to_string(),
-            }),
-        )
-        .await
+        for state in [RunState::Queued, RunState::Running, RunState::WaitingRetry] {
+            tasks::set_run_state(&self.harness.context, &self.task_id, state)
+                .await
+                .expect("walk the task to waiting_retry");
+        }
+        let config = self.config(cli);
+        let board = self.harness.board(&self.paths, &config);
+        let claim = claim_run(board.as_ref(), &self.task_id, RunTrigger::Queued, true).await?;
+        assert_eq!(
+            claim.resume.as_ref().map(|point| point.session_id.as_str()),
+            Some(session_id),
+            "the board resumes the session the caller continues",
+        );
+        self.run_claimed(board.as_ref(), &config, &CancelSignal::new(), claim)
+            .await
     }
 
     async fn spawn(
         &self,
         config: &RunnerConfig,
         cancel: &CancelSignal,
-        resume: Option<ResumeSession>,
+        continue_session: bool,
+    ) -> rimaia_core::Result<Run> {
+        let board = self.harness.board(&self.paths, config);
+        let claim = claim_run(
+            board.as_ref(),
+            &self.task_id,
+            RunTrigger::Queued,
+            continue_session,
+        )
+        .await?;
+        self.run_claimed(board.as_ref(), config, cancel, claim)
+            .await
+    }
+
+    async fn run_claimed(
+        &self,
+        board: &dyn BoardPort,
+        config: &RunnerConfig,
+        cancel: &CancelSignal,
+        claim: Claim,
     ) -> rimaia_core::Result<Run> {
         run_task(
-            &self.harness.context,
+            board,
+            self.harness.machine(),
             &self.paths,
             config,
+            claim,
             RunRequest {
-                task_id: self.task_id.clone(),
-                trigger: RunTrigger::Queued,
-                resume,
                 cancel: cancel.clone(),
                 in_flight: None,
             },

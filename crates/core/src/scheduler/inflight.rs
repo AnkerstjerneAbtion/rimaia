@@ -28,11 +28,11 @@
 //! That is the whole reason this is a type rather than two fields. A caller
 //! that asks "how many are running in this repository?" and *then* inserts has
 //! written the double-start bug with extra steps; [`InFlight::acquire`] does
-//! both inside one critical section and returns a [`Lease`] or a reason.
+//! both inside one critical section and returns a [`LocalSlot`] or a reason.
 //!
-//! # A lease is RAII, and that is load-bearing
+//! # A slot is RAII, and that is load-bearing
 //!
-//! Dropping a [`Lease`] frees the slot. `Drop` runs on unwind as well as on a
+//! Dropping a [`LocalSlot`] frees the slot. `Drop` runs on unwind as well as on a
 //! normal return, so a panic anywhere inside the future supervising a run
 //! releases the task rather than leaving it claimed until the app restarts —
 //! the property `src-tauri`'s hand-written `ReleaseOnDrop` guard existed for,
@@ -42,7 +42,7 @@
 //! Dropping also bumps a [`releases`](InFlight::releases) generation, which is
 //! how the queue learns a slot opened. It cannot learn that from
 //! `ChangeEvent`: `finish_run` publishes its events from *inside* `run_task`,
-//! while the lease is still held, so a loop woken only by that channel would
+//! while the slot is still held, so a loop woken only by that channel would
 //! count the finishing run, find no capacity and go back to sleep with nothing
 //! left to wake it. A queue asleep at 2am with a free slot is the failure this
 //! watch exists to prevent, and it also covers a *manual* run freeing capacity,
@@ -54,8 +54,23 @@
 //! row, and it is what stops two *processes* from disagreeing about a task
 //! across restarts. This is an in-memory fact about this process: which tasks
 //! it personally has a child for. Both exist because they answer different
-//! questions, and the queue takes the lease first — before the claim — so that
-//! a Pause pressed mid-claim has something to act on (see `queue`'s header).
+//! questions.
+//!
+//! Not the board's hold on a task either: that is named in [`crate::board`]
+//! and, from task 043, stored by it, and the word for it belongs to the board
+//! alone. This is the runner's local slot, and from the claim to the end of a
+//! run both are held at once. A manual start takes its slot before its claim,
+//! because a person named the task. The runner loop takes its slot after the
+//! claim, because the board chooses the task and the loop does not know which
+//! one it is getting until the claim returns (seam-contract D19's 2026-10-10
+//! amendment).
+//!
+//! # Why it is in `rimaia-core` and not in the runner crate
+//!
+//! ADR-0031 point 6 calls this "the runner's local registry", which says what
+//! it means rather than which crate compiles it. `run_task`'s preparation lock,
+//! the planner's `claim_for_planning` and the MCP server's Plan now all hold
+//! it, and all three are core code, which cannot depend on `rimaia-runner`.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
@@ -76,28 +91,27 @@ pub const CONCURRENCY_CEILING: usize = 8;
 
 /// Who asked for a run.
 ///
-/// The distinction exists for exactly one behaviour: [`QueueHandle::stop`]
-/// cancels the queue's own runs and must leave alone a run the operator
-/// started by hand in front of them. Before this module the two could not be
-/// confused because they lived in separate maps; now that they share one, the
-/// difference has to be recorded rather than implied.
-///
-/// [`QueueHandle::stop`]: crate::scheduler::QueueHandle::stop
+/// The distinction exists for exactly one behaviour: the runner loop's Stop
+/// (`rimaia_runner::queue::QueueHandle::stop`) cancels the queue's own runs
+/// and must leave alone a run the operator started by hand in front of them.
+/// Before this module the two could not be confused because they lived in
+/// separate maps; now that they share one, the difference has to be recorded
+/// rather than implied.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum LeaseOwner {
+pub enum SlotOwner {
     /// The scheduler picked it off the board.
     Queue,
     /// A human pressed a button — "Run now", or "Plan now".
     Manual,
 }
 
-/// Why a lease was refused.
+/// Why a slot was refused.
 ///
 /// Every variant is a *reason a user can be told*, which is the test for
 /// whether something belongs here: a refusal nobody can act on would be better
 /// as a log line.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum LeaseRefused {
+pub enum SlotRefused {
     /// This process already has a child for that task.
     AlreadyInFlight,
     AtGlobalLimit {
@@ -109,7 +123,7 @@ pub enum LeaseRefused {
     },
 }
 
-impl LeaseRefused {
+impl SlotRefused {
     /// The sentence a card or a tool response shows.
     ///
     /// Rendered here rather than at each call site so the button, the MCP tool
@@ -175,13 +189,13 @@ impl Counts {
 /// Deliberately not `Clone`: a slot with two owners is a slot that is freed
 /// twice or never, and the whole point of the type is that there is exactly one
 /// thing whose lifetime the claim tracks.
-pub struct Lease {
+pub struct LocalSlot {
     inner: Arc<Inner>,
     task_id: String,
     cancel: CancelSignal,
 }
 
-impl Lease {
+impl LocalSlot {
     pub fn task_id(&self) -> &str {
         &self.task_id
     }
@@ -194,15 +208,15 @@ impl Lease {
     }
 }
 
-impl Drop for Lease {
+impl Drop for LocalSlot {
     fn drop(&mut self) {
         self.inner.release(&self.task_id);
     }
 }
 
-impl std::fmt::Debug for Lease {
+impl std::fmt::Debug for LocalSlot {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Lease")
+        f.debug_struct("LocalSlot")
             .field("task_id", &self.task_id)
             .finish()
     }
@@ -229,7 +243,7 @@ impl std::fmt::Debug for InFlight {
 
 struct Inner {
     /// `std::sync::Mutex` rather than tokio's, on the same terms
-    /// `scheduler::queue::Shared` states for its own: the guard never spans
+    /// the runner loop's `Shared` states for its own: the guard never spans
     /// caller code and is never held across an `await`, and a lock that cannot
     /// be held across a yield point is one fewer thing to reason about.
     entries: Mutex<HashMap<String, Entry>>,
@@ -263,7 +277,7 @@ impl Default for Inner {
 struct Entry {
     repository_id: String,
     cancel: CancelSignal,
-    owner: LeaseOwner,
+    owner: SlotOwner,
 }
 
 impl InFlight {
@@ -282,9 +296,9 @@ impl InFlight {
         &self,
         task_id: &str,
         repository_id: &str,
-        owner: LeaseOwner,
+        owner: SlotOwner,
         capacity: Capacity,
-    ) -> std::result::Result<Lease, LeaseRefused> {
+    ) -> std::result::Result<LocalSlot, SlotRefused> {
         self.insert(task_id, repository_id, owner, Some(capacity))
     }
 
@@ -302,8 +316,8 @@ impl InFlight {
         &self,
         task_id: &str,
         repository_id: &str,
-        owner: LeaseOwner,
-    ) -> std::result::Result<Lease, LeaseRefused> {
+        owner: SlotOwner,
+    ) -> std::result::Result<LocalSlot, SlotRefused> {
         self.insert(task_id, repository_id, owner, None)
     }
 
@@ -311,18 +325,18 @@ impl InFlight {
         &self,
         task_id: &str,
         repository_id: &str,
-        owner: LeaseOwner,
+        owner: SlotOwner,
         capacity: Option<Capacity>,
-    ) -> std::result::Result<Lease, LeaseRefused> {
+    ) -> std::result::Result<LocalSlot, SlotRefused> {
         let mut entries = self.inner.lock();
 
         if entries.contains_key(task_id) {
-            return Err(LeaseRefused::AlreadyInFlight);
+            return Err(SlotRefused::AlreadyInFlight);
         }
 
         let global = capacity.map_or(CONCURRENCY_CEILING, |c| c.global.min(CONCURRENCY_CEILING));
         if entries.len() >= global {
-            return Err(LeaseRefused::AtGlobalLimit { limit: global });
+            return Err(SlotRefused::AtGlobalLimit { limit: global });
         }
 
         if let Some(capacity) = capacity {
@@ -331,7 +345,7 @@ impl InFlight {
                 .filter(|entry| entry.repository_id == repository_id)
                 .count();
             if in_repository >= capacity.per_repository {
-                return Err(LeaseRefused::AtRepositoryLimit {
+                return Err(SlotRefused::AtRepositoryLimit {
                     repository_id: repository_id.to_string(),
                     limit: capacity.per_repository,
                 });
@@ -348,7 +362,7 @@ impl InFlight {
             },
         );
 
-        Ok(Lease {
+        Ok(LocalSlot {
             inner: Arc::clone(&self.inner),
             task_id: task_id.to_string(),
             cancel,
@@ -402,7 +416,7 @@ impl InFlight {
 
     /// Asks every run started by `owner` to stop, and reports whether there was
     /// anything to ask.
-    pub fn cancel_owned_by(&self, owner: LeaseOwner) -> bool {
+    pub fn cancel_owned_by(&self, owner: SlotOwner) -> bool {
         let entries = self.inner.lock();
         let mut asked = false;
         for entry in entries.values().filter(|entry| entry.owner == owner) {
@@ -485,27 +499,27 @@ mod tests {
     const REPO_A: &str = "repo-a";
     const REPO_B: &str = "repo-b";
 
-    fn queue_lease(
+    fn queue_slot(
         registry: &InFlight,
         task: &str,
         repository: &str,
         capacity: Capacity,
-    ) -> std::result::Result<Lease, LeaseRefused> {
-        registry.acquire(task, repository, LeaseOwner::Queue, capacity)
+    ) -> std::result::Result<LocalSlot, SlotRefused> {
+        registry.acquire(task, repository, SlotOwner::Queue, capacity)
     }
 
     #[test]
-    fn a_task_already_in_flight_cannot_be_leased_twice() {
+    fn a_task_already_in_flight_cannot_hold_two_slots() {
         let registry = InFlight::new();
         let capacity = Capacity {
             global: 4,
             per_repository: 4,
         };
-        let _first = queue_lease(&registry, "task-1", REPO_A, capacity).expect("the first lease");
+        let _first = queue_slot(&registry, "task-1", REPO_A, capacity).expect("the first slot");
 
         assert_eq!(
-            queue_lease(&registry, "task-1", REPO_A, capacity).unwrap_err(),
-            LeaseRefused::AlreadyInFlight,
+            queue_slot(&registry, "task-1", REPO_A, capacity).unwrap_err(),
+            SlotRefused::AlreadyInFlight,
         );
     }
 
@@ -518,21 +532,21 @@ mod tests {
             global: 4,
             per_repository: 1,
         };
-        let _first = queue_lease(&registry, "task-1", REPO_A, capacity).expect("the first lease");
+        let _first = queue_slot(&registry, "task-1", REPO_A, capacity).expect("the first slot");
 
         assert_eq!(
-            queue_lease(&registry, "task-2", REPO_A, capacity).unwrap_err(),
-            LeaseRefused::AtRepositoryLimit {
+            queue_slot(&registry, "task-2", REPO_A, capacity).unwrap_err(),
+            SlotRefused::AtRepositoryLimit {
                 repository_id: REPO_A.to_string(),
                 limit: 1,
             },
         );
-        queue_lease(&registry, "task-3", REPO_B, capacity)
+        queue_slot(&registry, "task-3", REPO_B, capacity)
             .expect("a different repository still has room");
     }
 
     #[test]
-    fn the_ceiling_refuses_a_lease_no_setting_can_widen() {
+    fn the_ceiling_refuses_a_slot_no_setting_can_widen() {
         // A `global` above the ceiling is clamped rather than honoured, which
         // is what makes the ceiling a ceiling and not a default.
         let registry = InFlight::new();
@@ -544,14 +558,14 @@ mod tests {
         let mut held = Vec::new();
         for index in 0..CONCURRENCY_CEILING {
             held.push(
-                queue_lease(&registry, &format!("task-{index}"), REPO_A, capacity)
+                queue_slot(&registry, &format!("task-{index}"), REPO_A, capacity)
                     .expect("a slot under the ceiling"),
             );
         }
 
         assert_eq!(
-            queue_lease(&registry, "one-too-many", REPO_A, capacity).unwrap_err(),
-            LeaseRefused::AtGlobalLimit {
+            queue_slot(&registry, "one-too-many", REPO_A, capacity).unwrap_err(),
+            SlotRefused::AtGlobalLimit {
                 limit: CONCURRENCY_CEILING,
             },
         );
@@ -564,16 +578,16 @@ mod tests {
         for index in 0..CONCURRENCY_CEILING {
             held.push(
                 registry
-                    .acquire_unbounded(&format!("task-{index}"), REPO_A, LeaseOwner::Manual)
+                    .acquire_unbounded(&format!("task-{index}"), REPO_A, SlotOwner::Manual)
                     .expect("a slot under the ceiling"),
             );
         }
 
         assert_eq!(
             registry
-                .acquire_unbounded("one-too-many", REPO_A, LeaseOwner::Manual)
+                .acquire_unbounded("one-too-many", REPO_A, SlotOwner::Manual)
                 .unwrap_err(),
-            LeaseRefused::AtGlobalLimit {
+            SlotRefused::AtGlobalLimit {
                 limit: CONCURRENCY_CEILING,
             },
         );
@@ -582,26 +596,26 @@ mod tests {
     #[test]
     fn a_human_is_not_refused_by_the_caps_the_scheduler_obeys() {
         let registry = InFlight::new();
-        let _queued = queue_lease(&registry, "task-1", REPO_A, Capacity::SEQUENTIAL)
+        let _queued = queue_slot(&registry, "task-1", REPO_A, Capacity::SEQUENTIAL)
             .expect("the queue's own run");
 
         registry
-            .acquire_unbounded("task-2", REPO_A, LeaseOwner::Manual)
+            .acquire_unbounded("task-2", REPO_A, SlotOwner::Manual)
             .expect("a person clicking Run now is not a mis-set setting");
     }
 
     #[test]
-    fn dropping_a_lease_frees_the_slot_and_bumps_the_release_generation() {
+    fn dropping_a_slot_frees_the_slot_and_bumps_the_release_generation() {
         let registry = InFlight::new();
         let mut releases = registry.releases();
         let before = *releases.borrow_and_update();
 
-        let lease =
-            queue_lease(&registry, "task-1", REPO_A, Capacity::SEQUENTIAL).expect("the only slot");
+        let slot =
+            queue_slot(&registry, "task-1", REPO_A, Capacity::SEQUENTIAL).expect("the only slot");
         assert!(registry.holds("task-1"));
         assert!(!releases.has_changed().expect("the sender outlives this"));
 
-        drop(lease);
+        drop(slot);
 
         assert!(!registry.holds("task-1"));
         assert!(registry.is_empty());
@@ -609,7 +623,7 @@ mod tests {
     }
 
     #[test]
-    fn a_lease_dropped_by_a_panicking_supervisor_still_frees_the_slot() {
+    fn a_slot_dropped_by_a_panicking_supervisor_still_frees_the_slot() {
         // The property `src-tauri`'s hand-written `ReleaseOnDrop` guard existed
         // for. A trailing release statement only runs on a normal return; a
         // panic unwinds past it and leaves the task claimed until the app
@@ -618,8 +632,8 @@ mod tests {
         let held = registry.clone();
 
         let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            let _lease = held
-                .acquire("task-1", REPO_A, LeaseOwner::Manual, Capacity::SEQUENTIAL)
+            let _slot = held
+                .acquire("task-1", REPO_A, SlotOwner::Manual, Capacity::SEQUENTIAL)
                 .expect("the only slot");
             panic!("the supervising future blew up");
         }));
@@ -629,17 +643,17 @@ mod tests {
     }
 
     #[test]
-    fn stopping_the_queue_leaves_a_manual_lease_alone() {
+    fn stopping_the_queue_leaves_a_manual_slot_alone() {
         // Before this module the two could not be confused because they lived
         // in separate maps. Sharing one map is what makes the owner load-bearing.
         let registry = InFlight::new();
-        let queued = queue_lease(&registry, "queued", REPO_A, Capacity::SEQUENTIAL)
-            .expect("the queue's run");
+        let queued =
+            queue_slot(&registry, "queued", REPO_A, Capacity::SEQUENTIAL).expect("the queue's run");
         let manual = registry
-            .acquire_unbounded("manual", REPO_B, LeaseOwner::Manual)
+            .acquire_unbounded("manual", REPO_B, SlotOwner::Manual)
             .expect("a run someone started deliberately");
 
-        assert!(registry.cancel_owned_by(LeaseOwner::Queue));
+        assert!(registry.cancel_owned_by(SlotOwner::Queue));
 
         assert!(queued.cancel_signal().is_cancelled());
         assert!(
@@ -651,10 +665,10 @@ mod tests {
     #[test]
     fn cancelling_everything_reaches_both_owners() {
         let registry = InFlight::new();
-        let queued = queue_lease(&registry, "queued", REPO_A, Capacity::SEQUENTIAL)
-            .expect("the queue's run");
+        let queued =
+            queue_slot(&registry, "queued", REPO_A, Capacity::SEQUENTIAL).expect("the queue's run");
         let manual = registry
-            .acquire_unbounded("manual", REPO_B, LeaseOwner::Manual)
+            .acquire_unbounded("manual", REPO_B, SlotOwner::Manual)
             .expect("a manual run");
 
         assert!(registry.cancel_all());
@@ -683,14 +697,14 @@ mod tests {
                 let barrier = Arc::clone(&barrier);
                 std::thread::spawn(move || {
                     barrier.wait();
-                    // The lease is returned, not tested and dropped: dropping
+                    // The slot is returned, not tested and dropped: dropping
                     // it inside the thread would free the slot before the other
                     // thread ever asked for it, and the test would pass without
                     // the two ever having raced.
                     registry.acquire(
                         &format!("task-{index}"),
                         REPO_A,
-                        LeaseOwner::Queue,
+                        SlotOwner::Queue,
                         Capacity::SEQUENTIAL,
                     )
                 })
@@ -717,9 +731,9 @@ mod tests {
             global: 4,
             per_repository: 4,
         };
-        let _a1 = queue_lease(&registry, "a1", REPO_A, capacity).expect("a slot");
-        let _a2 = queue_lease(&registry, "a2", REPO_A, capacity).expect("a slot");
-        let _b1 = queue_lease(&registry, "b1", REPO_B, capacity).expect("a slot");
+        let _a1 = queue_slot(&registry, "a1", REPO_A, capacity).expect("a slot");
+        let _a2 = queue_slot(&registry, "a2", REPO_A, capacity).expect("a slot");
+        let _b1 = queue_slot(&registry, "b1", REPO_B, capacity).expect("a slot");
 
         let counts = registry.counts();
 
@@ -791,9 +805,9 @@ mod tests {
             global: 4,
             per_repository: 4,
         };
-        let _c = queue_lease(&registry, "c", REPO_A, capacity).expect("a slot");
-        let _a = queue_lease(&registry, "a", REPO_A, capacity).expect("a slot");
-        let _b = queue_lease(&registry, "b", REPO_A, capacity).expect("a slot");
+        let _c = queue_slot(&registry, "c", REPO_A, capacity).expect("a slot");
+        let _a = queue_slot(&registry, "a", REPO_A, capacity).expect("a slot");
+        let _b = queue_slot(&registry, "b", REPO_A, capacity).expect("a slot");
 
         assert_eq!(registry.task_ids(), vec!["a", "b", "c"]);
     }

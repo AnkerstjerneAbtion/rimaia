@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "DELETE FROM checkouts WHERE repository_id = ?1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": []
+  },
+  "hash": "ca33894fb650b8e45f2d3a89cf8bbdb0bc0311264cd9a844374e849d9939e759"
+}

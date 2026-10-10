@@ -1,0 +1,37 @@
+[package]
+name = "rimaia-runner"
+version = "0.1.0"
+edition = "2021"
+description = "The Rimaia runner: runner.db and what one machine keeps for itself (ADR-0027, ADR-0028)."
+
+# A library only; the headless binary is task 058's. Like `rimaia-core`, nothing
+# here may require a display server, WebKit or GTK: the headless runner links
+# this crate on a machine that has none, so no desktop-framework crate belongs in
+# either table below.
+# Compiles the loop's test-only accessor (`QueueHandle::completed_passes`), the
+# way `rimaia-core`'s feature of the same name compiles its `testing` module:
+# off for every consumer, on for this crate's own tests through the
+# self-referencing dev-dependency below.
+[features]
+testing = []
+
+[dependencies]
+rimaia-core = { path = "../core" }
+chrono = { workspace = true }
+sqlx = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+
+# `rimaia-core` again, with `testing` on, for the clock and the pre-038 board
+# builder. `pretty_assertions` is pinned directly because `crates/core` pins it
+# directly; the same requirement resolves to the version Cargo.lock already
+# holds, so no crate enters the lock (seam-contract D6, D34).
+[dev-dependencies]
+rimaia-core = { path = "../core", features = ["testing"] }
+rimaia-runner = { path = ".", features = ["testing"] }
+pretty_assertions = "1"
+# `the_queue_status_payload_is_unchanged` pins `get_queue_status`'s JSON. The
+# workspace line `rimaia-core` and the shell already use, so no crate enters
+# the lock (seam-contract D6, D34), and only the tests reach it.
+serde_json = { workspace = true }
+tempfile = { workspace = true }

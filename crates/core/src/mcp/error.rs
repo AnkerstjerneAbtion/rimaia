@@ -126,6 +126,7 @@ mod tests {
         for error in [
             Error::invalid("bad"),
             Error::not_found("missing"),
+            Error::conflict("fenced"),
             Error::internal("broken"),
             Error::from(sqlx::Error::RowNotFound),
             Error::from(std::io::Error::other("io")),

@@ -118,9 +118,20 @@ impl AppPaths {
         self.origin
     }
 
-    /// The single SQLite file (ADR-0003).
+    /// The board's SQLite file (ADR-0003).
     pub fn db_file(&self) -> PathBuf {
         self.data_dir.join("rimaia.db")
+    }
+
+    /// The runner's own SQLite file, beside the board's (ADR-0028 points 3
+    /// and 4, task 040).
+    ///
+    /// Derived here rather than in `rimaia-runner` so the data directory's
+    /// layout stays in one place, and so [`RIMAIA_DATA_DIR`](DATA_DIR_ENV)
+    /// relocates both files through the one [`resolve`](Self::resolve).
+    /// Naming a file is not depending on the crate that opens it.
+    pub fn runner_db_file(&self) -> PathBuf {
+        self.data_dir.join("runner.db")
     }
 
     /// Root of the per-task worktrees: `<data>/worktrees/<repo-slug>/<task-id>/`
@@ -217,6 +228,10 @@ mod tests {
     fn every_path_is_derived_from_the_data_dir() {
         let paths = AppPaths::new("/tmp/rimaia-test");
         assert_eq!(paths.db_file(), Path::new("/tmp/rimaia-test/rimaia.db"));
+        assert_eq!(
+            paths.runner_db_file(),
+            Path::new("/tmp/rimaia-test/runner.db")
+        );
         assert_eq!(
             paths.worktrees_dir(),
             Path::new("/tmp/rimaia-test/worktrees")
@@ -355,6 +370,30 @@ mod tests {
             .expect("an empty value falls back rather than refusing");
         assert_eq!(paths.data_dir(), Path::new("/platform"));
         assert_eq!(paths.origin(), DataDirOrigin::Platform);
+    }
+
+    /// ADR-0028 point 4: the runner's store moves with the board's, so a
+    /// scratch launch cannot write one file into the scratch directory and the
+    /// other into the platform directory every other worktree reads.
+    #[test]
+    fn the_runner_store_sits_beside_the_board_wherever_the_data_directory_resolves() {
+        let fallback = PathBuf::from("/Users/someone/Library/Application Support/com.rimaia.app");
+        let platform = AppPaths::resolve(None, fallback.clone()).expect("no override");
+        assert_eq!(platform.runner_db_file(), fallback.join("runner.db"));
+
+        let root = Path::new(ABSOLUTE_OVERRIDE);
+        let overridden = AppPaths::resolve(Some(OsStr::new(ABSOLUTE_OVERRIDE)), fallback.clone())
+            .expect("absolute override");
+        assert_eq!(overridden.db_file(), root.join("rimaia.db"));
+        assert_eq!(overridden.runner_db_file(), root.join("runner.db"));
+
+        // A refusal is an error, not an `AppPaths`: there is nothing to ask
+        // either file name of.
+        let refused = AppPaths::resolve(Some(OsStr::new("scratch/data")), fallback);
+        assert_eq!(
+            refused.expect_err("a relative override").code(),
+            crate::ErrorCode::Invalid
+        );
     }
 
     /// Resolving decides a path; it does not make one. The shell calls

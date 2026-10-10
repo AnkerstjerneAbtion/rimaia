@@ -9,7 +9,6 @@ import {
   Board,
   describeDragEntity,
   findCard,
-  isEditableTarget,
   nextFocusTarget,
   rangeBetween,
   resolveDrop,
@@ -78,7 +77,6 @@ function task(overrides: Partial<Task> = {}): Task {
     position: 0,
     runState: "idle",
     branch: null,
-    worktreePath: null,
     strategyMode: "default",
     model: null,
     effort: null,
@@ -97,14 +95,8 @@ function repository(overrides: Partial<Repository> = {}): Repository {
   return {
     id: "repo-1",
     name: "rimaia",
-    path: "/code/rimaia",
     defaultBranch: "main",
-    worktreeRoot: "/data/worktrees/rimaia",
-    allowUnattendedRuns: false,
-    maxConcurrency: 1,
     createdAt: "2026-08-20T09:00:00Z",
-    onArchive: "none",
-    onArchiveScript: null,
     ...overrides,
   };
 }
@@ -270,24 +262,6 @@ describe("rangeBetween", () => {
   it("returns null for an id the board does not hold", () => {
     expect(rangeBetween(columns, "a", "ghost")).toBeNull();
     expect(rangeBetween(columns, "ghost", "a")).toBeNull();
-  });
-});
-
-describe("isEditableTarget", () => {
-  it("treats inputs, textareas and contenteditable elements as typing surfaces", () => {
-    expect(isEditableTarget(document.createElement("input"))).toBe(true);
-    expect(isEditableTarget(document.createElement("textarea"))).toBe(true);
-    // jsdom implements neither `contentEditable`'s setter nor
-    // `isContentEditable` at all (a documented jsdom gap) - the attribute is
-    // what `isEditableTarget` falls back to, and what a test can set.
-    const editable = document.createElement("div");
-    editable.setAttribute("contenteditable", "true");
-    expect(isEditableTarget(editable)).toBe(true);
-  });
-
-  it("does not treat a plain element, or null, as a typing surface", () => {
-    expect(isEditableTarget(document.createElement("div"))).toBe(false);
-    expect(isEditableTarget(null)).toBe(false);
   });
 });
 
@@ -866,6 +840,10 @@ describe("Board", () => {
     render(<Board />);
 
     const cardA = (await screen.findByText("Wire the board")).closest<HTMLElement>(".task-card")!;
+    // dnd-kit picks up new announcements in an effect, so the card can be on
+    // screen while the monitor still holds the empty board's, which read the
+    // raw id. Flush effects before the drag starts.
+    await act(async () => {});
     cardA.focus();
     fireEvent.keyDown(cardA, { key: " ", code: "Space" });
 

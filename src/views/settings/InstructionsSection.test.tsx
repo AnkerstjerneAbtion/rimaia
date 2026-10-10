@@ -26,7 +26,6 @@ function taskSummary(overrides: Partial<TaskSummary> = {}): TaskSummary {
     position: 0,
     runState: "idle",
     branch: null,
-    worktreePath: null,
     strategyMode: "default",
     model: null,
     effort: null,
@@ -48,6 +47,7 @@ function taskSummary(overrides: Partial<TaskSummary> = {}): TaskSummary {
     effectiveModel: null,
     effectiveEffort: null,
     effectiveOrigin: "claude_code",
+    reviewLoop: null,
     ...overrides,
   };
 }

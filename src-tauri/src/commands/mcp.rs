@@ -9,9 +9,7 @@
 
 use std::mem;
 
-use rimaia_core::doctor;
 use rimaia_core::mcp::{self, McpProbe, McpState, McpStatus};
-use rimaia_core::runner::strategy::PlannerAccess;
 use rimaia_core::{Error, Result};
 use tauri::State;
 
@@ -47,7 +45,7 @@ pub fn get_mcp_status(state: State<'_, AppState>) -> Result<McpStatus> {
 #[tauri::command]
 pub async fn set_mcp_port(state: State<'_, AppState>, port: u16) -> Result<McpStatus> {
     // Core's own guard on the range, and the message the panel renders.
-    mcp::set_configured_port(&state.context, port).await?;
+    mcp::set_configured_port(&state.machine, port).await?;
 
     let current = get_mcp_status(state.clone())?;
     if current.state == McpState::Listening && current.configured_port == port {
@@ -62,18 +60,12 @@ pub async fn set_mcp_port(state: State<'_, AppState>, port: u16) -> Result<McpSt
         state.context.clone(),
         port,
         state.run_handles.clone(),
-        // Rebuilt from the same two shell values the first bind used, for the
-        // same reason the `RunHandles` above are reused: a rebind must not
-        // quietly narrow what `run_doctor` can see.
-        doctor::Environment::for_runner(state.paths.clone(), &state.runner),
-        // And the same three planning values, for the third time the same
-        // reason: a rebind must not leave the server unable to plan what it
-        // could plan a moment ago.
-        PlannerAccess {
-            paths: state.paths.clone(),
-            runner: state.runner.clone(),
-            in_flight: state.in_flight.clone(),
-        },
+        state.runner.provider.clone(),
+        // Rebuilt from the same shell values the first bind used, for the same
+        // reason the `RunHandles` above are reused: a rebind must not quietly
+        // narrow what `run_doctor` can see, leave the server unable to plan
+        // what it could plan a moment ago, or drop this machine's tools.
+        Some(state.local_tools()),
     )
     .await;
     tauri::async_runtime::spawn(task.run());

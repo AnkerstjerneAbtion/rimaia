@@ -3,13 +3,33 @@
 //!
 //! This module is reads (and, for [`prune_logs`], deletes on disk) — it is
 //! not a third writer of the `runs` table, and **it deletes no rows at all**
-//! (ADR-0022 part 2). [`crate::runner::outcome`] is
-//! still the only thing that inserts or updates a row (ADR-0006), and the
-//! diff and commits a run detail view opens with are
-//! [`crate::worktree::diff_summary`]'s, re-read fresh rather than duplicated
-//! here: every attempt of a task shares one branch (ADR-0005), so there is
-//! one diff to show regardless of which attempt a reviewer opened, and it is
-//! the branch's current state, not a snapshot frozen at that attempt's end.
+//! (ADR-0022 part 2). [`crate::runner::outcome`] is still the only thing that
+//! inserts or updates a row (ADR-0006), and the only writer of
+//! `review_bundles` too.
+//!
+//! # A run detail shows what the run left, not what the branch is now
+//!
+//! Task 015 decided the opposite: the detail view re-read
+//! [`crate::worktree::diff_summary`] on every open, on the argument that every
+//! attempt shares one branch and so there is one diff to show. Task 033
+//! reverses that on purpose, under ADR-0033 point 7. The branch's current state
+//! answers a question about today, it fails once the worktree, the branch or
+//! the clone has moved, and it takes the run's outcome, prompt and transcript
+//! down with it when it does. And a board other machines read cannot run git at
+//! all.
+//!
+//! So [`get_run`] runs **no git, for any row**. It returns the review bundle
+//! the run's finish recorded ([`bundle`]), or [`RunReview::NotRecorded`] when
+//! there is none. What is left of the old behaviour is a fallback in the one
+//! view that has a machine behind it — the desktop overlay asks the local
+//! `get_diff_summary` command for a `NotRecorded` row and labels the answer as
+//! the branch's current state — and none of it is in this module.
+//!
+//! The bundle's `files` and `commits` are stored as JSON in `TEXT` columns,
+//! with the wire's camelCase keys (`shortSha`, `committedAt`), and parsed with
+//! `serde_json`: the workspace `sqlx` has no `json` feature, the choice
+//! `tasks::strategy` records for the same reason. See [`bundle`]'s header on
+//! why those keys are a storage format.
 //!
 //! # "Marked, not trusted" without a new column
 //!
@@ -34,7 +54,9 @@
 //! (`Run` and [`Task`](crate::db::Task) already derive it for exactly this
 //! reason — see [`crate::tasks::service::TaskSummary`]'s own hand-rolled impl
 //! for the precedent of mixing a derived one with extra joined columns).
+//! [`latest_successful_head`] is the one exception, and says why.
 
+pub mod bundle;
 pub mod transcript;
 
 use std::path::{Path, PathBuf};
@@ -45,10 +67,12 @@ use sqlx::sqlite::SqliteRow;
 use sqlx::{FromRow, Row};
 
 use crate::context::ServiceContext;
-use crate::db::{Run, RunStatus};
-use crate::error::{Error, Result};
+use crate::db::{Run, RunKind, RunStatus};
+use crate::error::{Error, ErrorCode, Result};
 use crate::paths::AppPaths;
-use crate::worktree::{self, DiffSummary};
+use crate::runner::events::{stderr_path, transcript_path};
+use crate::worktree::{CommitSummary, DiffStat};
+use bundle::{BundleFile, StoredBundle};
 
 // ---------------------------------------------------------------------------
 // Listing — per task, and the global filtered view
@@ -73,9 +97,9 @@ pub struct RunListEntry {
 }
 
 /// Hand-written for the reason [`crate::tasks::service::TaskSummary`]'s own
-/// impl is: `Run::from_row` reads only its own fifteen columns by name and
-/// ignores whatever else the row carries, which is exactly the three joined
-/// columns this query adds.
+/// impl is: `Run::from_row` reads only its own columns by name and ignores
+/// whatever else the row carries, which is exactly the three joined columns
+/// this query adds.
 impl<'r> FromRow<'r, SqliteRow> for RunListEntry {
     fn from_row(row: &'r SqliteRow) -> sqlx::Result<Self> {
         Ok(RunListEntry {
@@ -97,6 +121,9 @@ impl<'r> FromRow<'r, SqliteRow> for RunListEntry {
 pub struct RunFilter {
     pub repository_id: Option<String>,
     pub status: Option<RunStatus>,
+    /// What the runs were for. `None` is every kind (seam-contract D29
+    /// point 6): the Runs view is a history, and a history leaves nothing out.
+    pub kind: Option<RunKind>,
     /// Matches a run started at or after this instant.
     pub since: Option<DateTime<Utc>>,
     /// Matches a run started strictly *before* this instant.
@@ -116,7 +143,10 @@ pub struct RunFilter {
 /// both `NOT NULL` foreign keys (ADR-0003), so a run with no task or a task
 /// with no repository is not a row this view is ever asked to explain.
 const RUN_LIST_SELECT: &str = r#"
-SELECT r.*,
+SELECT r.id, r.task_id, r.attempt, r.kind, r.status, r.session_id, r.prompt, r.started_at,
+       r.ended_at, r.exit_class, r.error_message, r.num_turns, r.cost_usd, r.pr_url,
+       r.resume_after, r.base_ref, r.model, r.effort, r.run_environment, r.input_tokens,
+       r.output_tokens, r.cache_read_tokens, r.cache_creation_tokens, r.head_sha, r.base_sha,
        t.title AS task_title,
        t.repository_id AS repository_id,
        rep.name AS repository_name
@@ -127,13 +157,28 @@ SELECT r.*,
 
 /// Every run matching `filter`, newest first — the global Runs view's
 /// history list, filterable by repository, outcome and date range.
-pub async fn list_runs(ctx: &ServiceContext, filter: RunFilter) -> Result<Vec<RunListEntry>> {
+///
+/// Entity-less, so it reads one team's history (ADR-0035 point 2): a context
+/// that reaches several is refused rather than handed a merged one.
+///
+/// `paths` is where each run's transcript is looked for: the path is derived
+/// from the run's ids (ADR-0013), never read off the row (task 066).
+pub async fn list_runs(
+    ctx: &ServiceContext,
+    paths: &AppPaths,
+    filter: RunFilter,
+) -> Result<Vec<RunListEntry>> {
+    let team_id = ctx.scope.sole()?.clone();
     let mut sql = String::from(RUN_LIST_SELECT);
+    sql.push_str(" AND t.team_id = ?");
     if filter.repository_id.is_some() {
         sql.push_str(" AND rep.id = ?");
     }
     if filter.status.is_some() {
         sql.push_str(" AND r.status = ?");
+    }
+    if filter.kind.is_some() {
+        sql.push_str(" AND r.kind = ?");
     }
     if filter.since.is_some() {
         sql.push_str(" AND r.started_at >= ?");
@@ -143,12 +188,15 @@ pub async fn list_runs(ctx: &ServiceContext, filter: RunFilter) -> Result<Vec<Ru
     }
     sql.push_str(" ORDER BY r.started_at DESC");
 
-    let mut query = sqlx::query_as::<_, RunListEntry>(&sql);
+    let mut query = sqlx::query_as::<_, RunListEntry>(&sql).bind(team_id);
     if let Some(repository_id) = filter.repository_id {
         query = query.bind(repository_id);
     }
     if let Some(status) = filter.status {
         query = query.bind(status);
+    }
+    if let Some(kind) = filter.kind {
+        query = query.bind(kind);
     }
     if let Some(since) = filter.since {
         query = query.bind(since);
@@ -159,20 +207,99 @@ pub async fn list_runs(ctx: &ServiceContext, filter: RunFilter) -> Result<Vec<Ru
 
     let mut entries = query.fetch_all(&ctx.pool).await?;
     for entry in &mut entries {
-        entry.log_available = log_file_exists(&entry.run.log_path).await;
+        entry.log_available = log_file_exists(&run_log_path(paths, &entry.run)).await;
     }
     Ok(entries)
 }
 
 /// Every run of `task_id`, newest attempt first — the task detail panel's
-/// history list.
+/// history list. Joined to the task in the context's scope: a run inherits its
+/// team through its task (ADR-0029 point 1).
 pub async fn list_runs_for_task(ctx: &ServiceContext, task_id: &str) -> Result<Vec<Run>> {
-    let runs =
-        sqlx::query_as::<_, Run>("SELECT * FROM runs WHERE task_id = ?1 ORDER BY attempt DESC")
-            .bind(task_id)
-            .fetch_all(&ctx.pool)
-            .await?;
+    let runs = sqlx::query_as::<_, Run>(&format!(
+        "SELECT {RUN_COLUMNS} FROM runs r JOIN tasks t ON t.id = r.task_id
+          WHERE r.task_id = ?1 AND t.team_id IN (SELECT value FROM json_each(?2))
+          ORDER BY r.attempt DESC"
+    ))
+    .bind(task_id)
+    .bind(ctx.scope.json())
+    .fetch_all(&ctx.pool)
+    .await?;
     Ok(runs)
+}
+
+/// The commit a task's work was last verified at, and the run that ended on
+/// it: what a dependent branches from (ADR-0033 point 5, task 044).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SuccessfulHead {
+    pub run_id: String,
+    pub head_sha: String,
+}
+
+/// `task_id`'s latest successful implementation or fix `head_sha`, or `None`
+/// when no such run recorded one. Seam-contract D29 point 5 as its 2026-10-04
+/// amendment states it, and the only place "successful head" is defined.
+///
+/// A blank `head_sha` is excluded in the `WHERE`, like a NULL: filtered after
+/// the fetch, a blank row would end the search where a NULL falls through to
+/// an older one.
+///
+/// The one fixed-shape `query!` in this module, against the module doc's
+/// rule: its text is D29's, and the compile-time check is what pins it there.
+pub async fn latest_successful_head(
+    ctx: &ServiceContext,
+    task_id: &str,
+) -> Result<Option<SuccessfulHead>> {
+    let scope = ctx.scope.json();
+    let head = sqlx::query!(
+        r#"SELECT r.id AS "id!", r.head_sha AS "head_sha!"
+             FROM runs r JOIN tasks t ON t.id = r.task_id
+            WHERE r.task_id = ?1 AND t.team_id IN (SELECT value FROM json_each(?2))
+              AND r.status = 'succeeded'
+              AND r.kind IN ('implementation', 'fix')
+              AND r.head_sha IS NOT NULL AND trim(r.head_sha) <> ''
+            ORDER BY r.attempt DESC LIMIT 1"#,
+        task_id,
+        scope,
+    )
+    .fetch_optional(&ctx.pool)
+    .await?;
+
+    Ok(head.map(|row| SuccessfulHead {
+        run_id: row.id,
+        head_sha: row.head_sha,
+    }))
+}
+
+/// The owner of every runner whose work a dependency's commit holds: the
+/// runners of `task_id`'s implementation and fix runs with `attempt` up to
+/// the chosen run's, failed ones included, distinct, in the order each first
+/// ran (task 045's base-commit pieces).
+///
+/// A failed attempt counts because its commits stay in the worktree the next
+/// attempt continues from. Review runs do not, for D29 point 5's reason: a
+/// review that moved `HEAD` is `review_changed_branch`, and nothing builds on
+/// it. `None` stands for a runner or an owner that is gone.
+///
+/// Unscoped, on the caller's connection: it runs inside the claim's
+/// transaction, for a dependency the caller already resolved under its scope.
+pub async fn commit_authors(
+    conn: &mut sqlx::SqliteConnection,
+    task_id: &str,
+    attempt: i64,
+) -> Result<Vec<Option<String>>> {
+    let rows = sqlx::query!(
+        r#"SELECT ru.user_id AS "owner?", min(r.attempt) AS "first!: i64"
+             FROM runs r LEFT JOIN runners ru ON ru.id = r.runner_id
+            WHERE r.task_id = ?1 AND r.kind IN ('implementation', 'fix') AND r.attempt <= ?2
+            GROUP BY ru.user_id
+            ORDER BY 2"#,
+        task_id,
+        attempt,
+    )
+    .fetch_all(&mut *conn)
+    .await?;
+    Ok(rows.into_iter().map(|row| row.owner).collect())
 }
 
 // ---------------------------------------------------------------------------
@@ -180,39 +307,152 @@ pub async fn list_runs_for_task(ctx: &ServiceContext, task_id: &str) -> Result<V
 // ---------------------------------------------------------------------------
 
 /// What a run detail view opens on, in ADR-0013's order: the run's own
-/// outcome (on [`run`](Self::run)), then the branch's diff and commits, then
-/// the PR link (`run.pr_url`) and the exact prompt (`run.prompt`) — all
-/// already on the row. The transcript itself is read separately, page by
-/// page, through [`transcript::read_page`]; a 50MB file has no business
-/// riding along on this struct.
+/// outcome (on [`run`](Self::run)), then what its branch carried
+/// ([`review`](Self::review)), then the PR link (`run.pr_url`) and the exact
+/// prompt (`run.prompt`) — all already on the row. The transcript itself is
+/// read separately, page by page, through [`transcript::read_page`]; a 50MB
+/// file has no business riding along on this struct.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RunDetail {
     #[serde(flatten)]
     pub run: Run,
-    pub diff: DiffSummary,
+    pub review: RunReview,
     pub log_available: bool,
 }
 
-/// The full detail read for one run.
-pub async fn get_run(ctx: &ServiceContext, run_id: &str) -> Result<RunDetail> {
+/// What a run's row says its branch carried when the run ended.
+///
+/// Decided from the recorded shas and the bundle row together, never from a
+/// missing bundle row alone: seam-contract D18 makes NULL "not recorded",
+/// never a claim. See [`review_for`].
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(tag = "source", rename_all = "snake_case")]
+pub enum RunReview {
+    /// Written at this run's finish. `bundle: None` means the recorded shas say the
+    /// branch carried nothing: `head_sha` equals `base_sha`.
+    Recorded { bundle: Option<StoredBundle> },
+    /// Nothing on the row says what the branch carried: the run predates task 033, is
+    /// still in flight, was closed by a crash, or its capture failed.
+    NotRecorded,
+}
+
+/// The full detail read for one run. Runs no git — see this module's header.
+///
+/// One indexed `SELECT` by `run_id` on top of the row read, and nothing that
+/// needs the worktree, the branch or the clone: a row whose repository has
+/// moved reads exactly as well as one whose has not.
+pub async fn get_run(ctx: &ServiceContext, paths: &AppPaths, run_id: &str) -> Result<RunDetail> {
     let run = fetch_run(ctx, run_id).await?;
-    let diff = worktree::diff_summary(ctx, &run.task_id).await?;
-    let log_available = log_file_exists(&run.log_path).await;
+    let bundle = fetch_bundle(ctx, run_id).await?;
+    let review = review_for(&run, bundle);
+    let log_available = log_file_exists(&run_log_path(paths, &run)).await;
 
     Ok(RunDetail {
         run,
-        diff,
+        review,
         log_available,
     })
 }
 
-/// The bare row, for a caller that needs only `log_path` (or another single
-/// column) and would otherwise pay for [`get_run`]'s `diff_summary` git calls
-/// just to discard the result — the Tauri shell's transcript and "open raw
-/// log" commands are exactly this caller.
+/// What `run_id`'s row says its branch carried, without [`get_run`]'s transcript
+/// check: for a caller with no transcript to look for, such as the review loop
+/// composing a fix phase.
+pub async fn review(ctx: &ServiceContext, run_id: &str) -> Result<RunReview> {
+    let run = fetch_run(ctx, run_id).await?;
+    let bundle = fetch_bundle(ctx, run_id).await?;
+    Ok(review_for(&run, bundle))
+}
+
+/// The bare row, for a caller that needs only its ids (or another single
+/// column) and would otherwise pay for [`get_run`]'s bundle read and transcript
+/// check just to discard them — the Tauri shell's transcript commands are
+/// exactly this caller.
 pub async fn get_run_row(ctx: &ServiceContext, run_id: &str) -> Result<Run> {
     fetch_run(ctx, run_id).await
+}
+
+/// Which [`RunReview`] a row and its bundle row add up to:
+///
+/// - a `review_bundles` row exists: `Recorded` with that bundle;
+/// - no row, and `head_sha` and `base_sha` are both set and equal: `Recorded`
+///   with `bundle: None`, the one case where "no commits on its branch" was
+///   measured;
+/// - anything else: `NotRecorded`. Both set and different with no row is a
+///   bundle that could not be built, or a head that is an ancestor of
+///   `base_sha` (a branch reset backwards). Nothing on the row tells the two
+///   apart, and `NotRecorded` is the reading that is never false.
+fn review_for(run: &Run, bundle: Option<StoredBundle>) -> RunReview {
+    if let Some(bundle) = bundle {
+        return RunReview::Recorded {
+            bundle: Some(bundle),
+        };
+    }
+    match (run.head_sha.as_deref(), run.base_sha.as_deref()) {
+        (Some(head), Some(base)) if head == base => RunReview::Recorded { bundle: None },
+        _ => RunReview::NotRecorded,
+    }
+}
+
+/// One `review_bundles` row as SQLite holds it, before its JSON is parsed.
+#[derive(FromRow)]
+struct BundleRow {
+    files_changed: i64,
+    insertions: i64,
+    deletions: i64,
+    files: String,
+    commits: String,
+    patch: Option<String>,
+    patch_bytes: i64,
+    patch_truncated: bool,
+    patch_pruned_at: Option<DateTime<Utc>>,
+    created_at: DateTime<Utc>,
+}
+
+/// `run_id`'s stored bundle, if its finish wrote one.
+///
+/// A row whose JSON does not parse is an `internal` error (seam-contract D8),
+/// never an empty list: only [`bundle`]'s serde types write those columns, so a
+/// parse failure is a bug, and reading it as "no files" would be a false claim
+/// about the run.
+async fn fetch_bundle(ctx: &ServiceContext, run_id: &str) -> Result<Option<StoredBundle>> {
+    let row = sqlx::query_as::<_, BundleRow>(
+        "SELECT files_changed, insertions, deletions, files, commits, patch, patch_bytes,
+                patch_truncated, patch_pruned_at, created_at
+           FROM review_bundles WHERE run_id = ?1",
+    )
+    .bind(run_id)
+    .fetch_optional(&ctx.pool)
+    .await?;
+
+    let Some(row) = row else {
+        return Ok(None);
+    };
+    let files: Vec<BundleFile> = serde_json::from_str(&row.files).map_err(|error| {
+        Error::internal(format!(
+            "run {run_id}'s stored review bundle has unreadable files: {error}"
+        ))
+    })?;
+    let commits: Vec<CommitSummary> = serde_json::from_str(&row.commits).map_err(|error| {
+        Error::internal(format!(
+            "run {run_id}'s stored review bundle has unreadable commits: {error}"
+        ))
+    })?;
+
+    Ok(Some(StoredBundle {
+        diff: DiffStat {
+            files_changed: row.files_changed,
+            insertions: row.insertions,
+            deletions: row.deletions,
+        },
+        files,
+        commits,
+        patch: row.patch,
+        patch_bytes: row.patch_bytes,
+        patch_truncated: row.patch_truncated,
+        patch_pruned_at: row.patch_pruned_at,
+        created_at: row.created_at,
+    }))
 }
 
 /// The transcript path to hand the OS file manager for `run_id`, refusing
@@ -223,30 +463,87 @@ pub async fn get_run_row(ctx: &ServiceContext, run_id: &str) -> Result<Run> {
 /// is raised, and the user is left looking at a button that did nothing. The
 /// same `try_exists` [`get_run`] computes `log_available` with answers it
 /// here, one read earlier, as a sentence the caller can render.
-pub async fn log_path_to_reveal(ctx: &ServiceContext, run_id: &str) -> Result<PathBuf> {
+pub async fn log_path_to_reveal(
+    ctx: &ServiceContext,
+    paths: &AppPaths,
+    run_id: &str,
+) -> Result<PathBuf> {
     let run = fetch_run(ctx, run_id).await?;
-    if !log_file_exists(&run.log_path).await {
+    let log_path = run_log_path(paths, &run);
+    if !log_file_exists(&log_path).await {
         return Err(Error::not_found(format!(
             "this run's transcript is no longer at {} — it was pruned or moved",
-            run.log_path
+            log_path.display()
         )));
     }
-    Ok(PathBuf::from(run.log_path))
+    Ok(log_path)
 }
 
+/// Where `run_id`'s transcript is on this machine, derived from its ids
+/// (ADR-0013) — what "copy log path" copies, now that no run DTO carries one
+/// (task 066). Whether the file is still there is not this read's question;
+/// `logAvailable` answers it.
+///
+/// Refuses a run the context does not hold, and one that is not `task_id`'s,
+/// in the sentence a never-opened run gets.
+pub async fn log_path(
+    ctx: &ServiceContext,
+    paths: &AppPaths,
+    task_id: &str,
+    run_id: &str,
+) -> Result<PathBuf> {
+    let run = fetch_run(ctx, run_id).await?;
+    if run.task_id != task_id {
+        return Err(Error::not_found(format!("no run with id {run_id}")));
+    }
+    Ok(run_log_path(paths, &run))
+}
+
+/// Where `run_id`'s transcript is, for a caller about to read it: the three
+/// transcript reads (task 066). Refuses a run the context does not hold, like
+/// every read here; whether the file is still there is the reader's to find.
+pub async fn transcript_of(
+    ctx: &ServiceContext,
+    paths: &AppPaths,
+    run_id: &str,
+) -> Result<PathBuf> {
+    let run = fetch_run(ctx, run_id).await?;
+    Ok(run_log_path(paths, &run))
+}
+
+/// The transcript a run wrote, at ADR-0013's layout.
+fn run_log_path(paths: &AppPaths, run: &Run) -> PathBuf {
+    transcript_path(paths, &run.task_id, &run.id)
+}
+
+/// Every column of [`Run`], qualified for a `runs r` join.
+///
+/// Spelled out rather than `r.*`, so no read of `runs` carries `log_path`:
+/// the column is still written until task 056 and read by nothing (task 066).
+const RUN_COLUMNS: &str = "r.id, r.task_id, r.attempt, r.kind, r.status, r.session_id, \
+    r.prompt, r.started_at, r.ended_at, r.exit_class, r.error_message, r.num_turns, r.cost_usd, \
+    r.pr_url, r.resume_after, r.base_ref, r.model, r.effort, r.run_environment, r.input_tokens, \
+    r.output_tokens, r.cache_read_tokens, r.cache_creation_tokens, r.head_sha, r.base_sha";
+
+/// A run by id, joined to its task in the context's scope: another team's run
+/// is as missing as one never opened, in the same sentence.
 async fn fetch_run(ctx: &ServiceContext, run_id: &str) -> Result<Run> {
-    sqlx::query_as::<_, Run>("SELECT * FROM runs WHERE id = ?1")
-        .bind(run_id)
-        .fetch_optional(&ctx.pool)
-        .await?
-        .ok_or_else(|| Error::not_found(format!("no run with id {run_id}")))
+    sqlx::query_as::<_, Run>(&format!(
+        "SELECT {RUN_COLUMNS} FROM runs r JOIN tasks t ON t.id = r.task_id
+          WHERE r.id = ?1 AND t.team_id IN (SELECT value FROM json_each(?2))"
+    ))
+    .bind(run_id)
+    .bind(ctx.scope.json())
+    .fetch_optional(&ctx.pool)
+    .await?
+    .ok_or_else(|| Error::not_found(format!("no run with id {run_id}")))
 }
 
 /// True only for a clean "not found" — [`crate::startup::survey`]'s own
 /// `path_is_missing` draws the identical distinction and for the identical
 /// reason: a stat that failed because a network volume has not mounted yet
 /// is not a transcript that was deleted.
-async fn log_file_exists(log_path: &str) -> bool {
+async fn log_file_exists(log_path: &Path) -> bool {
     !matches!(tokio::fs::try_exists(log_path).await, Ok(false))
 }
 
@@ -337,8 +634,10 @@ const STRATEGY_TRANSCRIPT_FLOOR: chrono::Duration = chrono::Duration::hours(1);
 /// `runs` row untouched.
 ///
 /// The row survives on purpose. A pruned run's outcome, diff and commits are
-/// still real history — only its evidence file is gone — and its
-/// `log_path` no longer resolving is exactly the "log unavailable" state
+/// still real history — only its evidence file is gone, and its review bundle
+/// stays whole (ADR-0022 point 2 keeps records; ADR-0036 point 6's patch
+/// pruning is the server's, task 056's) — and its
+/// transcript no longer resolving is exactly the "log unavailable" state
 /// [`get_run`] already renders rather than errors on. Pruning is simply the
 /// deliberate, user-requested version of the same condition startup
 /// reconciliation finds by accident. ADR-0022 part 2 makes that binding: "it
@@ -346,9 +645,9 @@ const STRATEGY_TRANSCRIPT_FLOOR: chrono::Duration = chrono::Duration::hours(1);
 ///
 /// # Two halves, because two kinds of file live in that directory
 ///
-/// The `SELECT`s below enumerate `log_path` **through the database**, which is
-/// the right thing for a run's own transcript and misses every one of task
-/// 020's. A strategy run gets no `runs` row (seam-contract D17.5), so its
+/// The `SELECT`s below enumerate runs **through the database**, and each run's
+/// transcript is at the path its ids derive (ADR-0013). That is the right thing
+/// for a run's own transcript and misses every one of task 020's. A strategy run gets no `runs` row (seam-contract D17.5), so its
 /// `strategy-<uuid>.jsonl` is invisible to any query — while
 /// [`total_log_size`] walks the filesystem and has been counting them all
 /// along. Before task 016 that meant Settings reported disk the prune button
@@ -361,13 +660,28 @@ pub async fn prune_logs(
     paths: &AppPaths,
     criterion: PruneCriterion,
 ) -> Result<PruneResult> {
-    let log_paths: Vec<String> = match &criterion {
+    // Resolved before any file is touched, so a store that cannot answer fails
+    // the call having deleted nothing, rather than being read as "not this
+    // caller's task" halfway through a prune that already did work.
+    let named_task_in_scope = match &criterion {
+        PruneCriterion::OlderThanDays(_) => false,
+        PruneCriterion::Task(task_id) => match crate::tasks::service::team_of(ctx, task_id).await {
+            Ok(_) => true,
+            Err(error) if error.code() == ErrorCode::NotFound => false,
+            Err(error) => return Err(error),
+        },
+    };
+
+    let runs: Vec<(String, String)> = match &criterion {
         PruneCriterion::OlderThanDays(days) => {
             let cutoff = ctx.clock.now() - chrono::Duration::days(*days);
-            sqlx::query_scalar(
-                "SELECT log_path FROM runs WHERE started_at < ?1 AND ended_at IS NOT NULL",
+            sqlx::query_as(
+                "SELECT r.task_id, r.id FROM runs r JOIN tasks t ON t.id = r.task_id
+                  WHERE r.started_at < ?1 AND r.ended_at IS NOT NULL
+                    AND t.team_id IN (SELECT value FROM json_each(?2))",
             )
             .bind(cutoff)
+            .bind(ctx.scope.json())
             .fetch_all(&ctx.pool)
             .await?
         }
@@ -378,22 +692,25 @@ pub async fn prune_logs(
             // this task's logs" clicked during a run deletes the file the
             // runner is writing to — and this is the criterion the panel
             // exposes as a button, so it is the reachable one.
-            sqlx::query_scalar(
-                "SELECT log_path FROM runs WHERE task_id = ?1 AND ended_at IS NOT NULL",
+            sqlx::query_as(
+                "SELECT r.task_id, r.id FROM runs r JOIN tasks t ON t.id = r.task_id
+                  WHERE r.task_id = ?1 AND r.ended_at IS NOT NULL
+                    AND t.team_id IN (SELECT value FROM json_each(?2))",
             )
             .bind(task_id)
+            .bind(ctx.scope.json())
             .fetch_all(&ctx.pool)
             .await?
         }
     };
 
     let mut result = PruneResult::default();
-    for log_path in log_paths {
-        result.bytes_freed += remove_log_files(Path::new(&log_path)).await;
+    for (task_id, run_id) in runs {
+        result.bytes_freed += remove_log_files(paths, &task_id, &run_id).await;
         result.runs_pruned += 1;
     }
 
-    let strategy = prune_strategy_transcripts(ctx, paths, &criterion).await;
+    let strategy = prune_strategy_transcripts(ctx, paths, &criterion, named_task_in_scope).await;
     result.strategy_transcripts_pruned = strategy.count;
     result.bytes_freed += strategy.bytes;
     Ok(result)
@@ -434,14 +751,26 @@ async fn prune_strategy_transcripts(
     ctx: &ServiceContext,
     paths: &AppPaths,
     criterion: &PruneCriterion,
+    named_task_in_scope: bool,
 ) -> SweptTranscripts {
     let floor = ctx.clock.now() - STRATEGY_TRANSCRIPT_FLOOR;
     let (directories, cutoff) = match criterion {
         PruneCriterion::OlderThanDays(days) => {
             let by_age = ctx.clock.now() - chrono::Duration::days(*days);
-            (task_log_directories(paths).await, by_age.min(floor))
+            (
+                outside_other_teams(ctx, task_log_directories(paths).await).await,
+                by_age.min(floor),
+            )
         }
-        PruneCriterion::Task(task_id) => (vec![paths.runs_dir().join(task_id)], floor),
+        // Only a task the scope holds: its directory is named by the id, and
+        // another team's planner transcripts are not this caller's to sweep.
+        // A task the scope does not hold prunes nothing, exactly as a task
+        // with no runs does. [`prune_logs`] asked which, before deleting
+        // anything.
+        PruneCriterion::Task(task_id) if named_task_in_scope => {
+            (vec![paths.runs_dir().join(task_id)], floor)
+        }
+        PruneCriterion::Task(_) => (Vec::new(), floor),
     };
 
     let mut swept = SweptTranscripts::default();
@@ -495,6 +824,40 @@ async fn prune_strategy_transcripts(
     swept
 }
 
+/// The directories of `directories` that do not belong to a task of a team
+/// outside the context's scope: the scope's own tasks, and directories whose
+/// task row is gone, which nobody else can claim either.
+///
+/// Asked in SQL, by the directory's name, so another team's task is excluded
+/// without this caller ever reading which team it is.
+async fn outside_other_teams(ctx: &ServiceContext, directories: Vec<PathBuf>) -> Vec<PathBuf> {
+    let scope = ctx.scope.json();
+    let mut kept = Vec::with_capacity(directories.len());
+    for directory in directories {
+        let Some(task_id) = directory.file_name().and_then(|name| name.to_str()) else {
+            continue;
+        };
+        let foreign = sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM tasks
+              WHERE id = ?1 AND team_id NOT IN (SELECT value FROM json_each(?2))",
+        )
+        .bind(task_id)
+        .bind(&scope)
+        .fetch_one(&ctx.pool)
+        .await;
+        match foreign {
+            Ok(0) => kept.push(directory),
+            Ok(_) => {}
+            Err(error) => tracing::warn!(
+                path = %directory.display(),
+                %error,
+                "could not tell whose planner transcripts these are; leaving them",
+            ),
+        }
+    }
+    kept
+}
+
 /// Every per-task subdirectory of `<data>/runs`, which is the same traversal
 /// [`total_log_size`] makes — deliberately, so that the sweep sees exactly the
 /// files the reported total counts.
@@ -513,21 +876,10 @@ async fn task_log_directories(paths: &AppPaths) -> Vec<PathBuf> {
 }
 
 /// Removes one run's transcript and, if it was ever written, its stderr log
-/// beside it — `runner::events::stderr_path`'s own naming, re-derived from
-/// `log_path` rather than imported, because this module only has the stored
-/// path string and not the `AppPaths`/task id/run id triple that function
-/// takes.
-async fn remove_log_files(log_path: &Path) -> u64 {
-    let mut freed = remove_file_if_exists(log_path).await;
-    if let Some(stderr_path) = sibling_stderr_path(log_path) {
-        freed += remove_file_if_exists(&stderr_path).await;
-    }
-    freed
-}
-
-fn sibling_stderr_path(log_path: &Path) -> Option<PathBuf> {
-    let stem = log_path.file_stem()?.to_str()?;
-    Some(log_path.with_file_name(format!("{stem}.stderr.log")))
+/// beside it, both at the paths `runner::events` names them by.
+async fn remove_log_files(paths: &AppPaths, task_id: &str, run_id: &str) -> u64 {
+    remove_file_if_exists(&transcript_path(paths, task_id, run_id)).await
+        + remove_file_if_exists(&stderr_path(paths, task_id, run_id)).await
 }
 
 async fn remove_file_if_exists(path: &Path) -> u64 {
@@ -548,33 +900,22 @@ mod tests {
     use crate::testing::{TempRepo, TestContext};
     use pretty_assertions::assert_eq;
 
-    /// A registered repository whose `path` points nowhere, seeded directly —
+    /// A repository on the board with no checkout anywhere, seeded directly —
     /// the same shortcut [`crate::tasks::service`]'s own `seed_repository`
-    /// takes, and safe for exactly the tests that take it: the listing and
-    /// pruning reads below are pure SQLite and never invoke git, so
-    /// `repo::register` would drag a real checkout into a test that never
-    /// looks at one.
-    ///
-    /// [`get_run`] is *not* one of those tests. It calls
-    /// [`worktree::diff_summary`], which runs git against this path, so those
-    /// tests use [`seed_repository_at`] with a real [`TempRepo`] instead —
-    /// `CLAUDE.md`'s "never fake git" rule, which a path git rightly refuses
-    /// is the other side of.
+    /// takes, and safe for every test here: the listing, detail and pruning
+    /// reads are pure SQLite and never invoke git (task 033 took the last git
+    /// call out of [`get_run`]), so `repo::register` would drag a real checkout
+    /// into a test that never looks at one.
     async fn seed_repository(ctx: &ServiceContext, name: &str) -> String {
-        seed_repository_at(ctx, name, &format!("/tmp/{name}")).await
-    }
-
-    async fn seed_repository_at(ctx: &ServiceContext, name: &str, path: &str) -> String {
         let id = new_id();
         sqlx::query(
-            "INSERT INTO repositories (id, name, path, default_branch, worktree_root,
-                allow_unattended_runs, created_at)
-             VALUES (?1, ?2, ?3, 'main', '/tmp/rimaia-worktrees', 0, ?4)",
+            "INSERT INTO repositories (id, team_id, name, default_branch, created_at)
+             VALUES (?1, ?4, ?2, 'main', ?3)",
         )
         .bind(&id)
         .bind(name)
-        .bind(path)
         .bind(ctx.clock.now())
+        .bind(ctx.scope.sole().expect("the harness's solo team"))
         .execute(&ctx.pool)
         .await
         .expect("seed a repository");
@@ -594,15 +935,16 @@ mod tests {
         let id = new_id();
         sqlx::query(
             "INSERT INTO tasks
-                (id, repository_id, title, board_column, position, run_state, branch,
+                (id, team_id, repository_id, title, board_column, position, run_state, branch,
                  created_at, updated_at)
-             VALUES (?1, ?2, ?3, 'ready', 1.0, 'idle', ?4, ?5, ?5)",
+             VALUES (?1, ?6, ?2, ?3, 'ready', 1.0, 'idle', ?4, ?5, ?5)",
         )
         .bind(&id)
         .bind(repository_id)
         .bind(title)
         .bind(branch)
         .bind(ctx.clock.now())
+        .bind(ctx.scope.sole().expect("the harness's solo team"))
         .execute(&ctx.pool)
         .await
         .expect("seed a task");
@@ -618,15 +960,14 @@ mod tests {
         exit_class: Option<ExitClass>,
         started_at: DateTime<Utc>,
         ended: bool,
-        log_path: &str,
     ) -> String {
         let id = new_id();
         let ended_at = ended.then_some(started_at);
         sqlx::query(
             "INSERT INTO runs
                 (id, task_id, attempt, status, session_id, prompt, started_at, ended_at,
-                 exit_class, log_path)
-             VALUES (?1, ?2, ?3, ?4, ?5, 'do the thing', ?6, ?7, ?8, ?9)",
+                 exit_class)
+             VALUES (?1, ?2, ?3, ?4, ?5, 'do the thing', ?6, ?7, ?8)",
         )
         .bind(&id)
         .bind(task_id)
@@ -636,22 +977,36 @@ mod tests {
         .bind(started_at)
         .bind(ended_at)
         .bind(exit_class)
-        .bind(log_path)
         .execute(&ctx.pool)
         .await
         .expect("seed a run");
         id
     }
 
-    /// An [`AppPaths`] rooted at a test's own temp directory.
-    ///
-    /// The row-based half of pruning takes absolute `log_path`s off the rows
-    /// and never consults these paths at all, so the tests that predate task
-    /// 016 pass one whose `runs/` subdirectory does not exist — which is
-    /// exactly what "there are no strategy transcripts" looks like on disk,
-    /// and is the reason those tests keep asserting what they always did.
+    /// Re-labels a seeded row's kind. `seed_run` names no kind, which is the
+    /// column default (D29 point 1); review and fix rows say so here.
+    async fn set_kind(ctx: &ServiceContext, run_id: &str, kind: RunKind) {
+        sqlx::query("UPDATE runs SET kind = ?1 WHERE id = ?2")
+            .bind(kind)
+            .bind(run_id)
+            .execute(&ctx.pool)
+            .await
+            .expect("set a run's kind");
+    }
+
+    /// An [`AppPaths`] rooted at a test's own temp directory: where every
+    /// run's transcript is derived to be (ADR-0013, task 066).
     fn paths_at(dir: &tempfile::TempDir) -> AppPaths {
         AppPaths::new(dir.path())
+    }
+
+    /// Writes a run's transcript where its ids say it is.
+    fn write_log(paths: &AppPaths, task_id: &str, run_id: &str, contents: &str) -> PathBuf {
+        let log = transcript_path(paths, task_id, run_id);
+        std::fs::create_dir_all(log.parent().expect("a run directory"))
+            .expect("create the task's log directory");
+        std::fs::write(&log, contents).expect("write a transcript");
+        log
     }
 
     /// Writes a `strategy-<id>.jsonl` under `<data>/runs/<task-id>/` with an
@@ -791,21 +1146,11 @@ mod tests {
         // pruning reaches "marked, not trusted" deliberately rather than by
         // accident.
         let h = TestContext::new().await;
-        // A real repository, because the read-back below goes through
-        // `get_run`, which runs git against its path — and the point of the
-        // read-back is that *everything except the log* is intact.
-        let source = TempRepo::init();
-        let repository_id = seed_repository_at(
-            &h.context,
-            "repo",
-            source.path().to_str().expect("temp path is UTF-8"),
-        )
-        .await;
+        let repository_id = seed_repository(&h.context, "repo").await;
         let task_id = seed_task(&h.context, &repository_id, "a task").await;
 
         let dir = tempfile::tempdir().expect("temp dir");
-        let log = dir.path().join("attempt-1.jsonl");
-        std::fs::write(&log, "a transcript").expect("write a log");
+        let paths = paths_at(&dir);
         let long_ago: DateTime<Utc> = "2026-08-01T00:00:00Z".parse().expect("literal timestamp");
         let run_id = seed_run(
             &h.context,
@@ -815,9 +1160,9 @@ mod tests {
             Some(ExitClass::Success),
             long_ago,
             true,
-            log.to_str().expect("temp path is UTF-8"),
         )
         .await;
+        let log = write_log(&paths, &task_id, &run_id, "a transcript");
 
         let rows_before: i64 = sqlx::query_scalar("SELECT count(*) FROM runs")
             .fetch_one(&h.context.pool)
@@ -828,13 +1173,9 @@ mod tests {
             .await
             .expect("total the cost");
 
-        prune_logs(
-            &h.context,
-            &paths_at(&dir),
-            PruneCriterion::OlderThanDays(10),
-        )
-        .await
-        .expect("prune");
+        prune_logs(&h.context, &paths, PruneCriterion::OlderThanDays(10))
+            .await
+            .expect("prune");
 
         assert!(!log.exists(), "the file is what pruning is for");
         assert_eq!(
@@ -856,7 +1197,7 @@ mod tests {
 
         // And the row is still readable, reporting its transcript as gone
         // rather than erroring on it.
-        let detail = get_run(&h.context, &run_id)
+        let detail = get_run(&h.context, &paths, &run_id)
             .await
             .expect("read the run back");
         assert!(!detail.log_available);
@@ -877,7 +1218,6 @@ mod tests {
             Some(ExitClass::Fatal),
             now,
             true,
-            "/tmp/missing-1.jsonl",
         )
         .await;
         let second = seed_run(
@@ -888,7 +1228,6 @@ mod tests {
             Some(ExitClass::Success),
             now,
             true,
-            "/tmp/missing-2.jsonl",
         )
         .await;
 
@@ -921,7 +1260,6 @@ mod tests {
             Some(ExitClass::Success),
             early,
             true,
-            "/tmp/a.jsonl",
         )
         .await;
         let matching = seed_run(
@@ -932,7 +1270,6 @@ mod tests {
             Some(ExitClass::Success),
             late,
             true,
-            "/tmp/b.jsonl",
         )
         .await;
         seed_run(
@@ -943,7 +1280,6 @@ mod tests {
             Some(ExitClass::Success),
             late,
             true,
-            "/tmp/c.jsonl",
         )
         .await;
         seed_run(
@@ -954,15 +1290,17 @@ mod tests {
             Some(ExitClass::Fatal),
             late,
             true,
-            "/tmp/d.jsonl",
         )
         .await;
 
+        let dir = tempfile::tempdir().expect("temp dir");
         let entries = list_runs(
             &h.context,
+            &paths_at(&dir),
             RunFilter {
                 repository_id: Some(first_repo.clone()),
                 status: Some(RunStatus::Succeeded),
+                kind: None,
                 since: Some("2026-08-10T00:00:00Z".parse().expect("literal timestamp")),
                 until: None,
             },
@@ -976,7 +1314,7 @@ mod tests {
         assert_eq!(entries[0].task_title, "in the first repo");
         assert!(
             !entries[0].log_available,
-            "the seeded log path was never written to disk"
+            "the seeded run's transcript was never written to disk"
         );
     }
 
@@ -1003,7 +1341,6 @@ mod tests {
             Some(ExitClass::Success),
             day_start,
             true,
-            "/tmp/a.jsonl",
         )
         .await;
         seed_run(
@@ -1014,12 +1351,13 @@ mod tests {
             Some(ExitClass::Success),
             next_day_start,
             true,
-            "/tmp/b.jsonl",
         )
         .await;
 
+        let dir = tempfile::tempdir().expect("temp dir");
         let entries = list_runs(
             &h.context,
+            &paths_at(&dir),
             RunFilter {
                 since: Some(day_start),
                 until: Some(next_day_start),
@@ -1042,17 +1380,10 @@ mod tests {
     #[tokio::test]
     async fn get_run_reports_the_log_as_unavailable_when_the_file_is_gone() {
         let h = TestContext::new().await;
-        // A real repository, because `get_run` runs git against its path —
-        // this is the acceptance criterion "a run whose log file was deleted
-        // shows a clear 'log unavailable' state rather than erroring", and it
-        // only means anything if everything *except* the log is intact.
-        let source = TempRepo::init();
-        let repository_id = seed_repository_at(
-            &h.context,
-            "repo",
-            source.path().to_str().expect("temp path is UTF-8"),
-        )
-        .await;
+        // The acceptance criterion "a run whose log file was deleted shows a
+        // clear 'log unavailable' state rather than erroring" — and only the
+        // log: everything else on the detail is intact.
+        let repository_id = seed_repository(&h.context, "repo").await;
         let task_id = seed_task(&h.context, &repository_id, "a task").await;
         let run_id = seed_run(
             &h.context,
@@ -1062,40 +1393,45 @@ mod tests {
             Some(ExitClass::Success),
             h.context.clock.now(),
             true,
-            "/tmp/definitely-does-not-exist-rimaia.jsonl",
         )
         .await;
 
-        let detail = get_run(&h.context, &run_id).await.expect("get_run");
+        let dir = tempfile::tempdir().expect("temp dir");
+        let detail = get_run(&h.context, &paths_at(&dir), &run_id)
+            .await
+            .expect("get_run");
 
         assert!(!detail.log_available);
         assert_eq!(detail.run.id, run_id);
     }
 
     #[tokio::test]
-    async fn get_run_carries_the_branchs_real_diff_and_commits_beside_the_log() {
-        // ADR-0013's ordering in one read: the diff and the commits come
-        // first, and they are git's, not a stored snapshot. Asserted against a
-        // real repository with one real commit on the task's branch — a mocked
-        // git would only prove the mock works (`CLAUDE.md`).
+    async fn get_run_reports_what_the_row_recorded_and_never_what_the_branch_holds_now() {
+        // Task 033 reversed task 015's decision on purpose (ADR-0033 point 7):
+        // the detail is the run's own record, not the branch's current state.
+        // The branch here has a real commit on it, and a row that recorded
+        // nothing must still read as `NotRecorded` — a live `git diff` would
+        // have found the commit.
         let h = TestContext::new().await;
         let source = TempRepo::init().branch("rimaia/a-task").commit(
             "src/parser.rs",
             "// parser\n",
             "Add the parser",
         );
-        let repository_id = seed_repository_at(
-            &h.context,
-            "repo",
-            source.path().to_str().expect("temp path is UTF-8"),
-        )
-        .await;
+        let repository_id = seed_repository(&h.context, "repo").await;
+        h.machine()
+            .store
+            .insert_checkout(&crate::testing::machine::checkout_at(
+                &repository_id,
+                source.path(),
+            ))
+            .await
+            .expect("a checkout of the real clone");
         let task_id =
             seed_task_on_branch(&h.context, &repository_id, "a task", Some("rimaia/a-task")).await;
 
         let dir = tempfile::tempdir().expect("temp dir for a transcript");
-        let log_path = dir.path().join("run-1.jsonl");
-        std::fs::write(&log_path, "{}\n").expect("write a transcript");
+        let paths = paths_at(&dir);
 
         let run_id = seed_run(
             &h.context,
@@ -1105,26 +1441,28 @@ mod tests {
             Some(ExitClass::Success),
             h.context.clock.now(),
             true,
-            log_path.to_str().expect("temp path is UTF-8"),
         )
         .await;
+        write_log(&paths, &task_id, &run_id, "{}\n");
 
-        let detail = get_run(&h.context, &run_id).await.expect("get_run");
+        let detail = get_run(&h.context, &paths, &run_id).await.expect("get_run");
 
         assert!(detail.log_available);
-        assert_eq!(detail.diff.diff.files_changed, 1);
-        assert_eq!(detail.diff.diff.insertions, 1);
+        assert_eq!(detail.review, RunReview::NotRecorded);
+    }
+
+    #[test]
+    fn a_run_detail_names_its_review_source_on_the_wire() {
+        // `src/types.ts` discriminates on `source`; a key spelled any other way
+        // would typecheck on both sides and render nothing.
         assert_eq!(
-            detail
-                .diff
-                .files
-                .iter()
-                .map(|file| file.path.as_str())
-                .collect::<Vec<_>>(),
-            vec!["src/parser.rs"]
+            serde_json::to_value(RunReview::NotRecorded).expect("serialize"),
+            serde_json::json!({ "source": "not_recorded" })
         );
-        assert_eq!(detail.diff.commits.len(), 1);
-        assert_eq!(detail.diff.commits[0].subject, "Add the parser");
+        assert_eq!(
+            serde_json::to_value(RunReview::Recorded { bundle: None }).expect("serialize"),
+            serde_json::json!({ "source": "recorded", "bundle": null })
+        );
     }
 
     #[tokio::test]
@@ -1133,8 +1471,7 @@ mod tests {
         let repository_id = seed_repository(&h.context, "repo").await;
         let task_id = seed_task(&h.context, &repository_id, "a task").await;
         let dir = tempfile::tempdir().expect("temp dir for a transcript");
-        let log_path = dir.path().join("run-1.jsonl");
-        std::fs::write(&log_path, "{}\n").expect("write a transcript");
+        let paths = paths_at(&dir);
         let run_id = seed_run(
             &h.context,
             &task_id,
@@ -1143,11 +1480,11 @@ mod tests {
             Some(ExitClass::Success),
             h.context.clock.now(),
             true,
-            log_path.to_str().expect("temp path is UTF-8"),
         )
         .await;
+        let log_path = write_log(&paths, &task_id, &run_id, "{}\n");
 
-        let revealed = log_path_to_reveal(&h.context, &run_id)
+        let revealed = log_path_to_reveal(&h.context, &paths, &run_id)
             .await
             .expect("the transcript is on disk");
 
@@ -1170,11 +1507,11 @@ mod tests {
             Some(ExitClass::Success),
             h.context.clock.now(),
             true,
-            "/tmp/definitely-does-not-exist-rimaia.jsonl",
         )
         .await;
 
-        let error = log_path_to_reveal(&h.context, &run_id)
+        let dir = tempfile::tempdir().expect("temp dir");
+        let error = log_path_to_reveal(&h.context, &paths_at(&dir), &run_id)
             .await
             .expect_err("the transcript was pruned");
 
@@ -1218,17 +1555,14 @@ mod tests {
         let task_id = seed_task(&h.context, &repository_id, "a task").await;
 
         let dir = tempfile::tempdir().expect("temp dir");
-        let old_log = dir.path().join("old.jsonl");
-        let new_log = dir.path().join("new.jsonl");
-        std::fs::write(&old_log, "old transcript").expect("write old log");
-        std::fs::write(&new_log, "new transcript").expect("write new log");
+        let paths = paths_at(&dir);
 
         // `TestContext::new` starts the clock at `test_epoch`,
         // 2026-08-20T02:00:00Z — ten days back is 2026-08-10T02:00:00Z.
         let old_started: DateTime<Utc> = "2026-08-01T00:00:00Z".parse().expect("literal timestamp");
         let new_started: DateTime<Utc> = "2026-08-20T00:00:00Z".parse().expect("literal timestamp");
 
-        seed_run(
+        let old_run = seed_run(
             &h.context,
             &task_id,
             1,
@@ -1236,10 +1570,9 @@ mod tests {
             Some(ExitClass::Success),
             old_started,
             true,
-            old_log.to_str().expect("temp path is UTF-8"),
         )
         .await;
-        seed_run(
+        let new_run = seed_run(
             &h.context,
             &task_id,
             2,
@@ -1247,17 +1580,14 @@ mod tests {
             Some(ExitClass::Success),
             new_started,
             true,
-            new_log.to_str().expect("temp path is UTF-8"),
         )
         .await;
+        let old_log = write_log(&paths, &task_id, &old_run, "old transcript");
+        let new_log = write_log(&paths, &task_id, &new_run, "new transcript");
 
-        let result = prune_logs(
-            &h.context,
-            &paths_at(&dir),
-            PruneCriterion::OlderThanDays(10),
-        )
-        .await
-        .expect("prune");
+        let result = prune_logs(&h.context, &paths, PruneCriterion::OlderThanDays(10))
+            .await
+            .expect("prune");
 
         assert_eq!(result.runs_pruned, 1);
         assert_eq!(result.bytes_freed, "old transcript".len() as u64);
@@ -1272,11 +1602,10 @@ mod tests {
         let task_id = seed_task(&h.context, &repository_id, "a task").await;
 
         let dir = tempfile::tempdir().expect("temp dir");
-        let in_flight_log = dir.path().join("in-flight.jsonl");
-        std::fs::write(&in_flight_log, "still going").expect("write log");
+        let paths = paths_at(&dir);
 
         let very_old: DateTime<Utc> = "2020-01-01T00:00:00Z".parse().expect("literal timestamp");
-        seed_run(
+        let run_id = seed_run(
             &h.context,
             &task_id,
             1,
@@ -1284,20 +1613,16 @@ mod tests {
             None,
             very_old,
             false,
-            in_flight_log.to_str().expect("temp path is UTF-8"),
         )
         .await;
+        let in_flight_log = write_log(&paths, &task_id, &run_id, "still going");
 
         // A cutoff just one day back from the test clock's `test_epoch` is
         // still decades after `very_old` — if the `ended_at IS NOT NULL`
         // guard were missing, this would prune it.
-        let result = prune_logs(
-            &h.context,
-            &paths_at(&dir),
-            PruneCriterion::OlderThanDays(1),
-        )
-        .await
-        .expect("prune");
+        let result = prune_logs(&h.context, &paths, PruneCriterion::OlderThanDays(1))
+            .await
+            .expect("prune");
 
         assert_eq!(result.runs_pruned, 0);
         assert!(in_flight_log.exists());
@@ -1311,13 +1636,10 @@ mod tests {
         let other_task_id = seed_task(&h.context, &repository_id, "another task").await;
 
         let dir = tempfile::tempdir().expect("temp dir");
-        let this_task_log = dir.path().join("this-task.jsonl");
-        let other_task_log = dir.path().join("other-task.jsonl");
-        std::fs::write(&this_task_log, "mine").expect("write log");
-        std::fs::write(&other_task_log, "not mine").expect("write log");
+        let paths = paths_at(&dir);
 
         let now = h.context.clock.now();
-        seed_run(
+        let this_run = seed_run(
             &h.context,
             &task_id,
             1,
@@ -1325,10 +1647,9 @@ mod tests {
             Some(ExitClass::Success),
             now,
             true,
-            this_task_log.to_str().expect("temp path is UTF-8"),
         )
         .await;
-        seed_run(
+        let other_run = seed_run(
             &h.context,
             &other_task_id,
             1,
@@ -1336,17 +1657,16 @@ mod tests {
             Some(ExitClass::Success),
             now,
             true,
-            other_task_log.to_str().expect("temp path is UTF-8"),
         )
         .await;
+        let this_task_log = write_log(&paths, &task_id, &this_run, "mine");
+        let other_task_log = write_log(&paths, &other_task_id, &other_run, "not mine");
 
         // A second attempt on the *same* task, still running — `ended_at` NULL.
         // This is the case the panel's button can reach mid-run, so it is the
         // one worth pinning: the transcript being written to right now is the
         // only record of work that has not finished.
-        let in_flight_log = dir.path().join("in-flight.jsonl");
-        std::fs::write(&in_flight_log, "still going").expect("write log");
-        seed_run(
+        let in_flight_run = seed_run(
             &h.context,
             &task_id,
             2,
@@ -1354,11 +1674,11 @@ mod tests {
             None,
             now,
             false,
-            in_flight_log.to_str().expect("temp path is UTF-8"),
         )
         .await;
+        let in_flight_log = write_log(&paths, &task_id, &in_flight_run, "still going");
 
-        let result = prune_logs(&h.context, &paths_at(&dir), PruneCriterion::Task(task_id))
+        let result = prune_logs(&h.context, &paths, PruneCriterion::Task(task_id))
             .await
             .expect("prune");
 
@@ -1369,5 +1689,261 @@ mod tests {
             "a run still in flight keeps the transcript it is writing to",
         );
         assert!(other_task_log.exists(), "another task's log is untouched");
+    }
+
+    #[tokio::test]
+    async fn pruning_a_task_removes_its_review_and_fix_transcripts_too() {
+        // D29 point 6: pruning reads the whole history. A kind filter here
+        // would leave review and fix transcripts nothing could ever prune.
+        let h = TestContext::new().await;
+        let dir = tempfile::tempdir().expect("temp dir");
+        let paths = paths_at(&dir);
+        let now = h.context.clock.now();
+        let repository_id = seed_repository(&h.context, "rimaia").await;
+        let task_id = seed_task(&h.context, &repository_id, "Looped").await;
+
+        let mut logs = Vec::new();
+        for (attempt, kind) in [
+            (1, RunKind::Implementation),
+            (2, RunKind::Review),
+            (3, RunKind::Fix),
+        ] {
+            let run_id = seed_run(
+                &h.context,
+                &task_id,
+                attempt,
+                RunStatus::Succeeded,
+                Some(ExitClass::Success),
+                now,
+                true,
+            )
+            .await;
+            set_kind(&h.context, &run_id, kind).await;
+            logs.push(write_log(&paths, &task_id, &run_id, "{}\n"));
+        }
+
+        let result = prune_logs(&h.context, &paths, PruneCriterion::Task(task_id))
+            .await
+            .expect("prune");
+
+        assert_eq!(result.runs_pruned, 3);
+        for log in &logs {
+            assert!(!log.exists(), "{} is pruned", log.display());
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // The latest successful head (D29 point 5, task 044)
+    // -----------------------------------------------------------------------
+
+    async fn set_head(ctx: &ServiceContext, run_id: &str, head_sha: Option<&str>) {
+        sqlx::query("UPDATE runs SET head_sha = ?1 WHERE id = ?2")
+            .bind(head_sha)
+            .bind(run_id)
+            .execute(&ctx.pool)
+            .await
+            .expect("set a run's head_sha");
+    }
+
+    /// A finished row of `kind` and `status` at `attempt`, ending on `head`.
+    async fn seed_ended(
+        h: &TestContext,
+        task_id: &str,
+        attempt: i64,
+        kind: RunKind,
+        status: RunStatus,
+        head: Option<&str>,
+    ) -> String {
+        let exit_class = match status {
+            RunStatus::Succeeded => Some(ExitClass::Success),
+            RunStatus::Failed => Some(ExitClass::Transient),
+            RunStatus::Cancelled => Some(ExitClass::Cancelled),
+            RunStatus::Interrupted => Some(ExitClass::Interrupted),
+            RunStatus::Running => None,
+        };
+        let ended = status != RunStatus::Running;
+        let run_id = seed_run(
+            &h.context,
+            task_id,
+            attempt,
+            status,
+            exit_class,
+            h.context.clock.now(),
+            ended,
+        )
+        .await;
+        set_kind(&h.context, &run_id, kind).await;
+        set_head(&h.context, &run_id, head).await;
+        run_id
+    }
+
+    async fn a_task(h: &TestContext) -> String {
+        let repository_id = seed_repository(&h.context, "Repo").await;
+        seed_task(&h.context, &repository_id, "A").await
+    }
+
+    #[tokio::test]
+    async fn the_latest_successful_head_skips_running_failed_cancelled_and_interrupted_rows() {
+        let h = TestContext::new().await;
+        let task_id = a_task(&h).await;
+        assert_eq!(
+            latest_successful_head(&h.context, &task_id)
+                .await
+                .expect("read"),
+            None,
+            "a task that has never run has no head",
+        );
+
+        let succeeded = seed_ended(
+            &h,
+            &task_id,
+            1,
+            RunKind::Implementation,
+            RunStatus::Succeeded,
+            Some("1111111111111111111111111111111111111111"),
+        )
+        .await;
+        for (attempt, status) in [
+            (2, RunStatus::Failed),
+            (3, RunStatus::Cancelled),
+            (4, RunStatus::Interrupted),
+            (5, RunStatus::Running),
+        ] {
+            let head = format!("{attempt}").repeat(40);
+            seed_ended(
+                &h,
+                &task_id,
+                attempt,
+                RunKind::Implementation,
+                status,
+                Some(&head),
+            )
+            .await;
+        }
+
+        assert_eq!(
+            latest_successful_head(&h.context, &task_id)
+                .await
+                .expect("read"),
+            Some(SuccessfulHead {
+                run_id: succeeded,
+                head_sha: "1111111111111111111111111111111111111111".to_string(),
+            }),
+        );
+    }
+
+    #[tokio::test]
+    async fn the_latest_successful_head_is_the_highest_attempt_among_implementation_and_fix_rows() {
+        let h = TestContext::new().await;
+        let task_id = a_task(&h).await;
+        seed_ended(
+            &h,
+            &task_id,
+            1,
+            RunKind::Implementation,
+            RunStatus::Succeeded,
+            Some("1111111111111111111111111111111111111111"),
+        )
+        .await;
+        let fix = seed_ended(
+            &h,
+            &task_id,
+            2,
+            RunKind::Fix,
+            RunStatus::Succeeded,
+            Some("2222222222222222222222222222222222222222"),
+        )
+        .await;
+
+        assert_eq!(
+            latest_successful_head(&h.context, &task_id)
+                .await
+                .expect("read"),
+            Some(SuccessfulHead {
+                run_id: fix,
+                head_sha: "2222222222222222222222222222222222222222".to_string(),
+            }),
+        );
+    }
+
+    #[tokio::test]
+    async fn a_succeeded_review_that_moved_head_is_not_a_base() {
+        // Task 021 calls a review that moved `HEAD` failed while its `status`
+        // stays `succeeded`; its commits are ones nobody reviewed.
+        let h = TestContext::new().await;
+        let task_id = a_task(&h).await;
+        let implementation = seed_ended(
+            &h,
+            &task_id,
+            1,
+            RunKind::Implementation,
+            RunStatus::Succeeded,
+            Some("1111111111111111111111111111111111111111"),
+        )
+        .await;
+        seed_ended(
+            &h,
+            &task_id,
+            2,
+            RunKind::Review,
+            RunStatus::Succeeded,
+            Some("2222222222222222222222222222222222222222"),
+        )
+        .await;
+
+        assert_eq!(
+            latest_successful_head(&h.context, &task_id)
+                .await
+                .expect("read"),
+            Some(SuccessfulHead {
+                run_id: implementation,
+                head_sha: "1111111111111111111111111111111111111111".to_string(),
+            }),
+        );
+    }
+
+    #[tokio::test]
+    async fn a_blank_head_sha_is_no_head_and_an_older_row_still_counts() {
+        let h = TestContext::new().await;
+        let task_id = a_task(&h).await;
+        let older = seed_ended(
+            &h,
+            &task_id,
+            1,
+            RunKind::Implementation,
+            RunStatus::Succeeded,
+            Some("1111111111111111111111111111111111111111"),
+        )
+        .await;
+        let newest = seed_ended(
+            &h,
+            &task_id,
+            2,
+            RunKind::Fix,
+            RunStatus::Succeeded,
+            Some("   "),
+        )
+        .await;
+        let expected = Some(SuccessfulHead {
+            run_id: older,
+            head_sha: "1111111111111111111111111111111111111111".to_string(),
+        });
+
+        assert_eq!(
+            latest_successful_head(&h.context, &task_id)
+                .await
+                .expect("read"),
+            expected,
+            "a blank head falls through to the older row",
+        );
+
+        // Exactly as for a NULL.
+        set_head(&h.context, &newest, None).await;
+        assert_eq!(
+            latest_successful_head(&h.context, &task_id)
+                .await
+                .expect("read"),
+            expected,
+        );
     }
 }

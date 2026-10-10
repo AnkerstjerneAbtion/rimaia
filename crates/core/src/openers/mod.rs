@@ -478,17 +478,18 @@ fn terminal(machine: &Machine, probe: &impl Probe) -> Option<How> {
 /// Deliberately does **not** check that the directory still exists. That race
 /// cannot be won — the check and the launch are two moments — and the opener
 /// reports a path that has gone in its own words.
+///
+/// The worktree is the one `local`, this machine's store, records (task 066),
+/// read through [`crate::worktree::local_path`].
 pub async fn launch_for_task(
     ctx: &crate::context::ServiceContext,
+    local: &crate::machine::MachineContext,
     machine: &Machine,
     probe: &impl Probe,
     target: Target,
     task_id: &str,
 ) -> crate::error::Result<Launch> {
-    let detail = crate::tasks::get_task(ctx, task_id).await?;
-    let worktree = detail.task.worktree_path.ok_or_else(|| {
-        crate::error::Error::invalid("this task has no worktree yet — start a run to create one")
-    })?;
+    let worktree = crate::worktree::local_path(ctx, local, task_id).await?;
 
     let detected = resolve(target, machine, probe).ok_or_else(|| {
         crate::error::Error::invalid(format!(

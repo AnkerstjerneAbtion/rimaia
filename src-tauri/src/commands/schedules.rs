@@ -6,11 +6,12 @@
 //! call the same functions without passing through here.
 //!
 //! Nothing in this file starts a queue. The timer is a third arm of the
-//! scheduler's own `select!` — see `rimaia_core::scheduler::queue`'s header on
+//! scheduler's own `select!` — see `rimaia_runner::queue`'s header on
 //! why it is not a second task, and why it is emphatically not a command.
 
 use rimaia_core::db::Schedule;
 use rimaia_core::schedule::{self, PreflightSummary, ScheduleInput, ScheduleView};
+use rimaia_core::scheduler;
 use rimaia_core::Result;
 use tauri::State;
 
@@ -23,13 +24,13 @@ use crate::state::AppState;
 /// and a list without it would be a list nobody could check.
 #[tauri::command]
 pub async fn list_schedules(state: State<'_, AppState>) -> Result<Vec<ScheduleView>> {
-    schedule::list(&state.context).await
+    schedule::list(&state.machine).await
 }
 
 /// Creates a schedule, armed from now.
 #[tauri::command]
 pub async fn create_schedule(state: State<'_, AppState>, input: ScheduleInput) -> Result<Schedule> {
-    schedule::create(&state.context, input).await
+    schedule::create(&state.machine, input).await
 }
 
 /// Replaces a schedule's configuration, leaving its fire history alone.
@@ -39,7 +40,7 @@ pub async fn update_schedule(
     id: String,
     input: ScheduleInput,
 ) -> Result<Schedule> {
-    schedule::update(&state.context, &id, input).await
+    schedule::update(&state.machine, &id, input).await
 }
 
 /// Turns a schedule on or off without deleting its configuration (task 013's
@@ -55,25 +56,32 @@ pub async fn set_schedule_enabled(
     id: String,
     enabled: bool,
 ) -> Result<Schedule> {
-    schedule::set_enabled(&state.context, &id, enabled).await
+    schedule::set_enabled(&state.machine, &id, enabled).await
 }
 
 #[tauri::command]
 pub async fn delete_schedule(state: State<'_, AppState>, id: String) -> Result<()> {
-    schedule::delete(&state.context, &id).await
+    schedule::delete(&state.machine, &id).await
 }
 
 /// What this schedule would do if it fired now: which tasks will run, in what
 /// order, and which are blocked and why.
 ///
-/// The evening button. Computed from `selection::plan` — the same function the
-/// queue loop itself calls — so it cannot drift from what actually happens.
+/// The evening button. Computed from `selection::plan` over the repositories
+/// `scheduler::view::for_runner` lists — the same function and the same list
+/// the queue's claim uses — so it cannot drift from what actually happens.
 #[tauri::command]
 pub async fn preview_schedule_preflight(
     state: State<'_, AppState>,
     id: String,
 ) -> Result<PreflightSummary> {
-    schedule::preview(&state.context, &id).await
+    let (repositories, _) = scheduler::view::for_runner(&state.machine, &state.in_flight).await?;
+    let runner = scheduler::RunnerView::new(
+        state.solo.runner_id.clone(),
+        state.runner.provider.id(),
+        repositories,
+    );
+    schedule::preview(&state.machine, &state.context, &id, &runner).await
 }
 
 /// Every IANA zone name, for the picker.

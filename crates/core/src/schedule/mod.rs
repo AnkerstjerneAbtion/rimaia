@@ -6,10 +6,18 @@
 //! [`cron`] is the only file that knows `croner` and `chrono-tz` exist, behind
 //! two pure searches and one local-time resolver. [`fire`] is when a schedule is
 //! due, entirely pure and clock-injected, so a DST test is a table of values.
-//! [`window`] is the one window that is open, stored in `settings` in
+//! [`window`] is the one window that is open, stored as a runner setting in
 //! seam-contract D3's shape. [`preflight`] is what a schedule *would* do, built
 //! from [`selection::plan`](crate::scheduler::selection::plan) verbatim. And
 //! this file is the CRUD, which is the only part that writes anything.
+//!
+//! # Machine state, behind the machine store
+//!
+//! A schedule says when *this machine's* queue starts by itself (ADR-0031
+//! point 6), so since task 041 the table lives in `runner.db` and every
+//! function here takes a [`MachineContext`]. The rules stay here: validation,
+//! arming, what "not found" says and what is announced. The store only holds
+//! the rows.
 //!
 //! Only the last two touch the database, which is what makes the first three
 //! testable as functions — the same split [`scheduler`](crate::scheduler) makes
@@ -19,7 +27,7 @@
 //!
 //! Nothing in this module waits, and nothing in it starts a queue. The wake is a
 //! third arm of the queue's own `select!` (see
-//! [`queue`](crate::scheduler::queue)'s header), because ADR-0010 makes the
+//! `rimaia_runner::queue`'s header), because ADR-0010 makes the
 //! scheduler the only component allowed to move a task into `running` and a
 //! second task calling `QueueHandle::start` would be a second decider racing
 //! `try_step`'s own switch re-checks. This module answers questions; the loop
@@ -40,12 +48,11 @@ pub mod window;
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use sqlx::SqlitePool;
 
-use crate::context::ServiceContext;
 use crate::db::{new_id, Schedule, ScheduleMode};
 use crate::error::{Error, Result};
 use crate::events::ChangeEvent;
+use crate::machine::MachineContext;
 use crate::scheduler::inflight::CONCURRENCY_CEILING;
 
 pub use fire::{Due, Trigger};
@@ -130,9 +137,11 @@ pub struct ScheduleInput {
 /// By name, so the list does not reshuffle when a row is edited — the same
 /// stability [`repo::list`](crate::repo::list) gives Settings, and for the same
 /// reason: a list the user is reading must not move under them.
-pub async fn list(ctx: &ServiceContext) -> Result<Vec<ScheduleView>> {
-    let now = ctx.clock.now();
-    Ok(rows(&ctx.pool)
+pub async fn list(machine: &MachineContext) -> Result<Vec<ScheduleView>> {
+    let now = machine.clock.now();
+    Ok(machine
+        .store
+        .list_schedules()
         .await?
         .into_iter()
         .map(|schedule| ScheduleView::of(schedule, now))
@@ -145,54 +154,35 @@ pub async fn list(ctx: &ServiceContext) -> Result<Vec<ScheduleView>> {
 /// minute produce one fire (the loop declines to reopen a window), so *which*
 /// one wins has to be the same answer on every pass and after every restart, or
 /// a rename would silently change which of two overlapping schedules owns the
-/// night.
-pub async fn enabled(pool: &SqlitePool) -> Result<Vec<Schedule>> {
-    Ok(rows(pool)
+/// night. The store lists by name and then id.
+pub async fn enabled(machine: &MachineContext) -> Result<Vec<Schedule>> {
+    Ok(machine
+        .store
+        .list_schedules()
         .await?
         .into_iter()
         .filter(|schedule| schedule.enabled)
         .collect())
 }
 
-async fn rows(pool: &SqlitePool) -> Result<Vec<Schedule>> {
-    let schedules = sqlx::query_as!(
-        Schedule,
-        r#"
-        SELECT id, name, mode AS "mode: ScheduleMode", cron,
-               start_at AS "start_at: DateTime<Utc>", max_concurrency,
-               enabled AS "enabled: bool", timezone, stop_at,
-               last_fired_at AS "last_fired_at: DateTime<Utc>",
-               armed_at AS "armed_at: DateTime<Utc>"
-        FROM schedules
-        ORDER BY name ASC, id ASC
-        "#
-    )
-    .fetch_all(pool)
-    .await?;
-    Ok(schedules)
-}
-
 /// One schedule by id, or `Error::not_found`.
-pub async fn get(ctx: &ServiceContext, id: &str) -> Result<Schedule> {
-    fetch(&ctx.pool, id).await
+pub async fn get(machine: &MachineContext, id: &str) -> Result<Schedule> {
+    machine
+        .store
+        .get_schedule(id)
+        .await?
+        .ok_or_else(|| not_found(id))
 }
 
-async fn fetch(pool: &SqlitePool, id: &str) -> Result<Schedule> {
-    sqlx::query_as!(
-        Schedule,
-        r#"
-        SELECT id, name, mode AS "mode: ScheduleMode", cron,
-               start_at AS "start_at: DateTime<Utc>", max_concurrency,
-               enabled AS "enabled: bool", timezone, stop_at,
-               last_fired_at AS "last_fired_at: DateTime<Utc>",
-               armed_at AS "armed_at: DateTime<Utc>"
-        FROM schedules WHERE id = ?1
-        "#,
-        id,
-    )
-    .fetch_optional(pool)
-    .await?
-    .ok_or_else(|| Error::not_found(format!("no schedule with id {id}")))
+fn not_found(id: &str) -> Error {
+    Error::not_found(format!("no schedule with id {id}"))
+}
+
+/// Announces a write to one schedule.
+fn announce(machine: &MachineContext, id: &str) {
+    // A machine event on the board's channel, under `event_team`, until task
+    // 048 gives machine events `LocalEvents`.
+    machine.publish(|team| ChangeEvent::schedules(team, [id.to_string()]));
 }
 
 /// Creates a schedule, armed from now.
@@ -201,34 +191,26 @@ async fn fetch(pool: &SqlitePool, id: &str) -> Result<Schedule> {
 /// closes: a nightly 22:00 schedule created at 23:00 would otherwise fire
 /// immediately, for an occurrence an hour older than the row itself. The user
 /// who typed "every night at 22:00" at 23:00 meant tomorrow.
-pub async fn create(ctx: &ServiceContext, input: ScheduleInput) -> Result<Schedule> {
+pub async fn create(machine: &MachineContext, input: ScheduleInput) -> Result<Schedule> {
     let input = validate(input)?;
-    let id = new_id();
-    let armed_at = ctx.clock.now();
-    let mode = input.mode.as_str();
+    let schedule = Schedule {
+        id: new_id(),
+        name: input.name,
+        mode: input.mode,
+        cron: input.cron,
+        start_at: input.start_at,
+        max_concurrency: input.max_concurrency,
+        enabled: input.enabled,
+        timezone: Some(input.timezone),
+        stop_at: input.stop_at,
+        last_fired_at: None,
+        armed_at: Some(machine.clock.now()),
+    };
 
-    sqlx::query!(
-        r#"
-        INSERT INTO schedules
-            (id, name, mode, cron, start_at, max_concurrency, enabled, timezone, stop_at, armed_at)
-        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
-        "#,
-        id,
-        input.name,
-        mode,
-        input.cron,
-        input.start_at,
-        input.max_concurrency,
-        input.enabled,
-        input.timezone,
-        input.stop_at,
-        armed_at,
-    )
-    .execute(&ctx.pool)
-    .await?;
+    machine.store.insert_schedule(&schedule).await?;
 
-    let schedule = fetch(&ctx.pool, &id).await?;
-    ctx.publish(ChangeEvent::schedules([id]));
+    let schedule = get(machine, &schedule.id).await?;
+    announce(machine, &schedule.id);
     Ok(schedule)
 }
 
@@ -239,42 +221,37 @@ pub async fn create(ctx: &ServiceContext, input: ScheduleInput) -> Result<Schedu
 /// owed again. `armed_at` is left alone too, unless the edit enables a schedule
 /// that was off — which is [`set_enabled`]'s rule, applied here so the two doors
 /// cannot disagree about what enabling means.
-pub async fn update(ctx: &ServiceContext, id: &str, input: ScheduleInput) -> Result<Schedule> {
-    let existing = fetch(&ctx.pool, id).await?;
+pub async fn update(machine: &MachineContext, id: &str, input: ScheduleInput) -> Result<Schedule> {
+    let existing = get(machine, id).await?;
     let input = validate(input)?;
-    let mode = input.mode.as_str();
     // Re-arming on an edit that switches a schedule on, for exactly the reason
     // `set_enabled` re-arms: a month spent disabled is not a month of missed
     // nights to catch up on, and the route the user took to flip the toggle is
     // not something the rule should depend on.
     let armed_at = match (existing.enabled, input.enabled) {
-        (false, true) => Some(ctx.clock.now()),
+        (false, true) => Some(machine.clock.now()),
         _ => existing.armed_at,
     };
 
-    sqlx::query!(
-        r#"
-        UPDATE schedules
-           SET name = ?2, mode = ?3, cron = ?4, start_at = ?5, max_concurrency = ?6,
-               enabled = ?7, timezone = ?8, stop_at = ?9, armed_at = ?10
-         WHERE id = ?1
-        "#,
-        id,
-        input.name,
-        mode,
-        input.cron,
-        input.start_at,
-        input.max_concurrency,
-        input.enabled,
-        input.timezone,
-        input.stop_at,
+    let replaced = Schedule {
+        id: existing.id,
+        name: input.name,
+        mode: input.mode,
+        cron: input.cron,
+        start_at: input.start_at,
+        max_concurrency: input.max_concurrency,
+        enabled: input.enabled,
+        timezone: Some(input.timezone),
+        stop_at: input.stop_at,
+        last_fired_at: existing.last_fired_at,
         armed_at,
-    )
-    .execute(&ctx.pool)
-    .await?;
+    };
+    if !machine.store.update_schedule(&replaced).await? {
+        return Err(not_found(id));
+    }
 
-    let schedule = fetch(&ctx.pool, id).await?;
-    ctx.publish(ChangeEvent::schedules([id.to_string()]));
+    let schedule = get(machine, id).await?;
+    announce(machine, id);
     Ok(schedule)
 }
 
@@ -286,27 +263,22 @@ pub async fn update(ctx: &ServiceContext, id: &str, input: ScheduleInput) -> Res
 /// thirty missed occurrences. Turning it *off* leaves `armed_at` alone, because
 /// there is nothing to protect against — a disabled schedule is not due for
 /// anything.
-pub async fn set_enabled(ctx: &ServiceContext, id: &str, enabled: bool) -> Result<Schedule> {
+pub async fn set_enabled(machine: &MachineContext, id: &str, enabled: bool) -> Result<Schedule> {
     let armed_at = match enabled {
-        true => Some(ctx.clock.now()),
-        false => fetch(&ctx.pool, id).await?.armed_at,
+        true => Some(machine.clock.now()),
+        false => get(machine, id).await?.armed_at,
     };
 
-    let changed = sqlx::query!(
-        "UPDATE schedules SET enabled = ?2, armed_at = ?3 WHERE id = ?1",
-        id,
-        enabled,
-        armed_at,
-    )
-    .execute(&ctx.pool)
-    .await?
-    .rows_affected();
-    if changed == 0 {
-        return Err(Error::not_found(format!("no schedule with id {id}")));
+    if !machine
+        .store
+        .set_schedule_enabled(id, enabled, armed_at)
+        .await?
+    {
+        return Err(not_found(id));
     }
 
-    let schedule = fetch(&ctx.pool, id).await?;
-    ctx.publish(ChangeEvent::schedules([id.to_string()]));
+    let schedule = get(machine, id).await?;
+    announce(machine, id);
     Ok(schedule)
 }
 
@@ -320,15 +292,9 @@ pub async fn set_enabled(ctx: &ServiceContext, id: &str, enabled: bool) -> Resul
 /// Called by the queue loop and by nothing else. It is the one write in this
 /// module that is not a user action, which is why it is not on the command
 /// surface at all.
-pub async fn record_fire(ctx: &ServiceContext, id: &str, now: DateTime<Utc>) -> Result<()> {
-    sqlx::query!(
-        "UPDATE schedules SET last_fired_at = ?2 WHERE id = ?1",
-        id,
-        now,
-    )
-    .execute(&ctx.pool)
-    .await?;
-    ctx.publish(ChangeEvent::schedules([id.to_string()]));
+pub async fn record_fire(machine: &MachineContext, id: &str, now: DateTime<Utc>) -> Result<()> {
+    machine.store.record_schedule_fire(id, now).await?;
+    announce(machine, id);
     Ok(())
 }
 
@@ -340,16 +306,12 @@ pub async fn record_fire(ctx: &ServiceContext, id: &str, now: DateTime<Utc>) -> 
 /// so deleting the schedule at midnight leaves tonight running and stops
 /// tomorrow. Closing the window is Stop's job, and the user pressing Stop is a
 /// different sentence from the user tidying up a list.
-pub async fn delete(ctx: &ServiceContext, id: &str) -> Result<()> {
-    let changed = sqlx::query!("DELETE FROM schedules WHERE id = ?1", id)
-        .execute(&ctx.pool)
-        .await?
-        .rows_affected();
-    if changed == 0 {
-        return Err(Error::not_found(format!("no schedule with id {id}")));
+pub async fn delete(machine: &MachineContext, id: &str) -> Result<()> {
+    if !machine.store.delete_schedule(id).await? {
+        return Err(not_found(id));
     }
 
-    ctx.publish(ChangeEvent::schedules([id.to_string()]));
+    announce(machine, id);
     Ok(())
 }
 
@@ -453,7 +415,7 @@ mod tests {
     async fn a_schedule_round_trips_through_the_row_it_wrote() {
         let harness = TestContext::new().await;
 
-        let created = create(&harness.context, nightly())
+        let created = create(harness.machine(), nightly())
             .await
             .expect("create a schedule");
 
@@ -471,7 +433,9 @@ mod tests {
         assert_eq!(created.last_fired_at, None);
 
         assert_eq!(
-            get(&harness.context, &created.id).await.expect("read back"),
+            get(harness.machine(), &created.id)
+                .await
+                .expect("read back"),
             created
         );
     }
@@ -482,11 +446,11 @@ mod tests {
         // expression is caught in the evening rather than discovered in the
         // morning."
         let harness = TestContext::new().await;
-        create(&harness.context, nightly())
+        create(harness.machine(), nightly())
             .await
             .expect("create a schedule");
 
-        let listed = list(&harness.context).await.expect("list schedules");
+        let listed = list(harness.machine()).await.expect("list schedules");
 
         assert_eq!(listed.len(), 1);
         assert_eq!(
@@ -501,11 +465,11 @@ mod tests {
     async fn one_broken_row_does_not_make_the_list_unreadable() {
         // The list is where a broken schedule is *fixed*, so it has to render.
         let harness = TestContext::new().await;
-        let broken = create(&harness.context, nightly())
+        let broken = create(harness.machine(), nightly())
             .await
             .expect("create a schedule");
         create(
-            &harness.context,
+            harness.machine(),
             ScheduleInput {
                 name: "Working".to_string(),
                 ..nightly()
@@ -514,15 +478,18 @@ mod tests {
         .await
         .expect("create a second schedule");
         // Past the service, the way ADR-0003 says the user may.
-        sqlx::query!(
-            "UPDATE schedules SET cron = 'every night please' WHERE id = ?1",
-            broken.id
-        )
-        .execute(&harness.context.pool)
-        .await
-        .expect("hand-edit a row");
+        let hand_edited = Schedule {
+            cron: Some("every night please".to_string()),
+            ..broken.clone()
+        };
+        assert!(harness
+            .machine()
+            .store
+            .update_schedule(&hand_edited)
+            .await
+            .expect("hand-edit a row"));
 
-        let listed = list(&harness.context).await.expect("the list still reads");
+        let listed = list(harness.machine()).await.expect("the list still reads");
 
         assert_eq!(listed.len(), 2);
         let broken_view = listed
@@ -547,7 +514,7 @@ mod tests {
 
         for timezone in ["", "  ", "CEST", "Europe/Copenhagn"] {
             let error = create(
-                &harness.context,
+                harness.machine(),
                 ScheduleInput {
                     timezone: timezone.to_string(),
                     ..nightly()
@@ -565,7 +532,7 @@ mod tests {
         let harness = TestContext::new().await;
 
         let error = create(
-            &harness.context,
+            harness.machine(),
             ScheduleInput {
                 cron: None,
                 start_at: None,
@@ -586,7 +553,7 @@ mod tests {
         let harness = TestContext::new().await;
 
         let error = create(
-            &harness.context,
+            harness.machine(),
             ScheduleInput {
                 start_at: Some(at("2026-08-20T18:30:00Z")),
                 ..nightly()
@@ -603,7 +570,7 @@ mod tests {
         let harness = TestContext::new().await;
 
         let error = create(
-            &harness.context,
+            harness.machine(),
             ScheduleInput {
                 cron: Some("every night".to_string()),
                 ..nightly()
@@ -613,7 +580,7 @@ mod tests {
         .expect_err("a typo must not be stored");
 
         assert!(error.to_string().contains("0 22 * * *"), "{error}");
-        assert_eq!(list(&harness.context).await.expect("list").len(), 0);
+        assert_eq!(list(harness.machine()).await.expect("list").len(), 0);
     }
 
     #[tokio::test]
@@ -621,7 +588,7 @@ mod tests {
         let harness = TestContext::new().await;
 
         let error = create(
-            &harness.context,
+            harness.machine(),
             ScheduleInput {
                 stop_at: Some("6am".to_string()),
                 ..nightly()
@@ -639,7 +606,7 @@ mod tests {
 
         for refused in [0, -1, CONCURRENCY_CEILING as i64 + 1] {
             let error = create(
-                &harness.context,
+                harness.machine(),
                 ScheduleInput {
                     max_concurrency: refused,
                     ..nightly()
@@ -659,7 +626,7 @@ mod tests {
         let harness = TestContext::new().await;
 
         create(
-            &harness.context,
+            harness.machine(),
             ScheduleInput {
                 name: "   ".to_string(),
                 ..nightly()
@@ -668,7 +635,7 @@ mod tests {
         .await
         .expect_err("a blank name is not a name");
 
-        assert_eq!(list(&harness.context).await.expect("list").len(), 0);
+        assert_eq!(list(harness.machine()).await.expect("list").len(), 0);
     }
 
     #[tokio::test]
@@ -676,15 +643,15 @@ mod tests {
         // Editing tonight's stop time must not make tonight's occurrence owed
         // again.
         let harness = TestContext::new().await;
-        let created = create(&harness.context, nightly())
+        let created = create(harness.machine(), nightly())
             .await
             .expect("create a schedule");
-        record_fire(&harness.context, &created.id, harness.clock.now())
+        record_fire(harness.machine(), &created.id, harness.clock.now())
             .await
             .expect("fire it");
 
         let updated = update(
-            &harness.context,
+            harness.machine(),
             &created.id,
             ScheduleInput {
                 stop_at: Some("07:00".to_string()),
@@ -708,11 +675,11 @@ mod tests {
         // Task 013's fifth acceptance criterion, and the re-arm that stops a
         // month of missed nights firing at once.
         let harness = TestContext::new().await;
-        let created = create(&harness.context, nightly())
+        let created = create(harness.machine(), nightly())
             .await
             .expect("create a schedule");
 
-        let disabled = set_enabled(&harness.context, &created.id, false)
+        let disabled = set_enabled(harness.machine(), &created.id, false)
             .await
             .expect("turn it off");
         assert!(!disabled.enabled);
@@ -726,13 +693,13 @@ mod tests {
             "turning it off arms nothing"
         );
         assert_eq!(
-            enabled(&harness.context.pool).await.expect("read").len(),
+            enabled(harness.machine()).await.expect("read").len(),
             0,
             "and the loop stops seeing it",
         );
 
         harness.clock.advance(chrono::Duration::days(30));
-        let re_enabled = set_enabled(&harness.context, &created.id, true)
+        let re_enabled = set_enabled(harness.machine(), &created.id, true)
             .await
             .expect("turn it back on");
 
@@ -742,7 +709,7 @@ mod tests {
             Some(harness.clock.now()),
             "a month spent off is not a month of nights to catch up on",
         );
-        assert_eq!(enabled(&harness.context.pool).await.expect("read").len(), 1);
+        assert_eq!(enabled(harness.machine()).await.expect("read").len(), 1);
     }
 
     #[tokio::test]
@@ -751,7 +718,7 @@ mod tests {
         // something the catch-up behaviour should depend on.
         let harness = TestContext::new().await;
         let created = create(
-            &harness.context,
+            harness.machine(),
             ScheduleInput {
                 enabled: false,
                 ..nightly()
@@ -761,7 +728,7 @@ mod tests {
         .expect("create a disabled schedule");
 
         harness.clock.advance(chrono::Duration::days(30));
-        let enabled_by_edit = update(&harness.context, &created.id, nightly())
+        let enabled_by_edit = update(harness.machine(), &created.id, nightly())
             .await
             .expect("enable it through the form");
 
@@ -771,16 +738,16 @@ mod tests {
     #[tokio::test]
     async fn deleting_removes_it_and_deleting_it_twice_says_so() {
         let harness = TestContext::new().await;
-        let created = create(&harness.context, nightly())
+        let created = create(harness.machine(), nightly())
             .await
             .expect("create a schedule");
 
-        delete(&harness.context, &created.id)
+        delete(harness.machine(), &created.id)
             .await
             .expect("delete it");
-        assert_eq!(list(&harness.context).await.expect("list").len(), 0);
+        assert_eq!(list(harness.machine()).await.expect("list").len(), 0);
 
-        let error = delete(&harness.context, &created.id)
+        let error = delete(harness.machine(), &created.id)
             .await
             .expect_err("there is nothing left to delete");
         assert!(error.to_string().contains("no schedule with id"), "{error}");
@@ -792,13 +759,13 @@ mod tests {
         // `schedules` row is an entity, not a key/value setting.
         let mut harness = TestContext::new().await;
 
-        let created = create(&harness.context, nightly())
+        let created = create(harness.machine(), nightly())
             .await
             .expect("create a schedule");
 
         assert_eq!(
             harness.changes.try_recv().expect("a waiting publication"),
-            ChangeEvent::schedules([created.id.clone()]),
+            ChangeEvent::schedules(harness.solo.team_id.clone(), [created.id.clone()]),
         );
     }
 
@@ -809,7 +776,7 @@ mod tests {
 
         assert!(names.iter().any(|name| name == CPH));
         create(
-            &harness.context,
+            harness.machine(),
             ScheduleInput {
                 timezone: names.last().expect("a zone").clone(),
                 ..nightly()

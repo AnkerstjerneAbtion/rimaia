@@ -132,3 +132,16 @@ the `result` event.
 
 `num_turns`, `total_cost_usd`, `duration_ms`, `usage`, `modelUsage` and `permission_denials`
 all arrive on the terminal event — nothing to derive for the `runs` row in ADR-0013.
+
+## Amendment, 2026-10-05 — `allowed_warning` is not a limit
+
+Task 035's two `run-scoped-server-*.jsonl` recordings, made against CLI 2.1.287, carry the
+first status other than `"allowed"` any real recording holds: `"allowed_warning"`, with
+`rateLimitType: "seven_day"` at a utilization of 0.86 and `surpassedThreshold: 0.75`. The
+account was past the warning threshold of its weekly window, and both runs completed.
+
+**`allowed_warning` is not a limit.** Claude's usage parser reads it as allowed, beside
+`"allowed"`; every other status is still a wall, as above. Reading it as one would classify a
+run that died without a `result` past the threshold as `usage_limit`, and hold the whole queue
+until the window resets, days away, for runs the account was still allowed to make. The
+payload when a window is actually closed is still unobserved.

@@ -30,7 +30,6 @@ function task(overrides: Partial<Task> = {}): Task {
     position: 0,
     runState: "idle",
     branch: null,
-    worktreePath: null,
     strategyMode: "default",
     model: null,
     effort: null,
@@ -58,6 +57,9 @@ function detail(overrides: Partial<TaskDetail> = {}): TaskDetail {
     effectiveModel: null,
     effectiveEffort: null,
     effectiveOrigin: "claude_code",
+    reviewInstructions: null,
+    reviewConfig: {},
+    reviewLoop: null,
     ...overrides,
   };
 }
@@ -84,6 +86,17 @@ function worktreeStatus(overrides: Partial<WorktreeStatus> = {}): WorktreeStatus
     ...overrides,
   };
 }
+
+/** This computer's checkout of the task's repository (task 066). */
+const CHECKOUT = {
+  repositoryId: "repo-1",
+  path: "/code/rimaia",
+  worktreeRoot: "/data/worktrees/rimaia",
+  maxConcurrency: 1,
+  unattendedConsent: true,
+  onArchive: "none",
+  onArchiveScript: null,
+} as const;
 
 beforeEach(() => {
   mockInvoke.mockReset();
@@ -151,6 +164,7 @@ describe("TaskDetailPanel", () => {
             id: "run-1",
             taskId: "task-1",
             attempt: 1,
+            kind: "implementation",
             status: "succeeded",
             sessionId: "s1",
             prompt: "p",
@@ -160,7 +174,6 @@ describe("TaskDetailPanel", () => {
             errorMessage: null,
             numTurns: 5,
             costUsd: 0.1061,
-            logPath: "/data/runs/task-1/run-1.jsonl",
             prUrl: null,
             resumeAfter: null,
             baseRef: null,
@@ -171,6 +184,8 @@ describe("TaskDetailPanel", () => {
             outputTokens: null,
             cacheReadTokens: null,
             cacheCreationTokens: null,
+            headSha: null,
+            baseSha: null,
           },
         });
       }
@@ -188,7 +203,42 @@ describe("TaskDetailPanel", () => {
     // section task 008 owns rather than picking one arbitrarily.
     const outcomeSection = document.querySelector<HTMLElement>(".run-outcome-section")!;
     expect(within(outcomeSection).getByText("Succeeded")).toBeInTheDocument();
-    expect(screen.getByText("/data/runs/task-1/run-1.jsonl")).toBeInTheDocument();
+    // The transcript's path is fetched on the copy action (task 066), so it
+    // is not on screen before anyone asks for it.
+    expect(within(outcomeSection).getByRole("button", { name: "Copy log path" })).toBeInTheDocument();
+  });
+
+  it("shows where this computer records the task's worktree", async () => {
+    mockInvoke.mockImplementation(async (command) => {
+      if (command === "get_task") return detail();
+      if (command === "get_worktree_status") return worktreeStatus();
+      if (command === "list_runs_for_task") return [];
+      if (command === "list_checkouts") return [CHECKOUT];
+      if (command === "list_local_worktrees") {
+        return [{ taskId: "task-1", path: "/data/worktrees/rimaia/task-1" }];
+      }
+      throw new Error(`unexpected command: ${command}`);
+    });
+
+    render(<TaskDetailPanel task={task()} repositoryName="rimaia" onClose={vi.fn()} />);
+
+    expect(await screen.findByText("/data/worktrees/rimaia/task-1")).toBeInTheDocument();
+    expect(screen.queryByText("Not set up on this computer.")).toBeNull();
+  });
+
+  it("says the worktree cannot be here when this computer has no checkout of the repository", async () => {
+    mockInvoke.mockImplementation(async (command) => {
+      if (command === "get_task") return detail();
+      if (command === "get_worktree_status") return worktreeStatus();
+      if (command === "list_runs_for_task") return [];
+      if (command === "list_checkouts") return [];
+      if (command === "list_local_worktrees") return [];
+      throw new Error(`unexpected command: ${command}`);
+    });
+
+    render(<TaskDetailPanel task={task()} repositoryName="rimaia" onClose={vi.fn()} />);
+
+    expect(await screen.findByText("Not set up on this computer.")).toBeInTheDocument();
   });
 
   it("remounts every field fresh when the selected task changes", async () => {
@@ -229,6 +279,7 @@ describe("TaskDetailPanel", () => {
             id: "run-1",
             taskId: "task-1",
             attempt: 1,
+            kind: "implementation",
             status: "interrupted",
             sessionId: "s1",
             prompt: "p",
@@ -238,7 +289,6 @@ describe("TaskDetailPanel", () => {
             errorMessage: null,
             numTurns: 1,
             costUsd: null,
-            logPath: "/tmp/run.jsonl",
             prUrl: null,
             resumeAfter: null,
             baseRef: null,
@@ -249,6 +299,8 @@ describe("TaskDetailPanel", () => {
             outputTokens: null,
             cacheReadTokens: null,
             cacheCreationTokens: null,
+            headSha: null,
+            baseSha: null,
           },
         });
       }

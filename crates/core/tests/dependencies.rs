@@ -15,7 +15,7 @@ use pretty_assertions::assert_eq;
 use rimaia_core::db::BoardColumn;
 use rimaia_core::tasks::{self, NewTask};
 use rimaia_core::testing::TestContext;
-use rimaia_core::{ChangeEvent, Clock, ErrorCode};
+use rimaia_core::{Change, ChangeEvent, Clock, ErrorCode};
 use sqlx::SqlitePool;
 
 #[tokio::test]
@@ -379,15 +379,18 @@ async fn the_delete_refusal_inflects_for_more_than_one_dependent() {
 
 const NOW: &str = "2026-08-20T02:00:00+00:00";
 
-async fn seed_repository(pool: &SqlitePool, name: &str, path: &str) -> String {
+/// A repository on the board alone. `_path` is what a clone of it would be
+/// at, and is no board fact since task 066.
+async fn seed_repository(pool: &SqlitePool, name: &str, _path: &str) -> String {
     let id = rimaia_core::db::new_id();
+    let team_id = solo_team(pool).await;
     sqlx::query!(
-        r#"INSERT INTO repositories (id, name, path, default_branch, worktree_root, allow_unattended_runs, created_at)
-           VALUES (?1, ?2, ?3, 'main', '/tmp/rimaia-worktrees', 0, ?4)"#,
+        r#"INSERT INTO repositories (id, team_id, name, default_branch, allow_unattended_runs, created_at)
+           VALUES (?1, ?4, ?2, 'main', 0, ?3)"#,
         id,
         name,
-        path,
         NOW,
+        team_id,
     )
     .execute(pool)
     .await
@@ -412,8 +415,8 @@ async fn create_task(h: &TestContext, repository_id: &str, title: &str) -> rimai
 }
 
 fn task_ids(event: ChangeEvent) -> Vec<String> {
-    match event {
-        ChangeEvent::Tasks(ids) => ids.to_vec(),
+    match event.change {
+        Change::Tasks(ids) => ids.to_vec(),
         other => panic!("expected a task change, got {other:?}"),
     }
 }
@@ -422,4 +425,17 @@ fn task_ids(event: ChangeEvent) -> Vec<String> {
 /// own call made, not one a fixture made first.
 fn drain(h: &mut TestContext) {
     while h.changes.try_recv().is_ok() {}
+}
+
+/// The solo team the board's rows belong to: the identity `TestContext`
+/// already created, or a first launch's, read through the same
+/// `identity::ensure_solo` either way.
+async fn solo_team(pool: &SqlitePool) -> String {
+    rimaia_core::identity::ensure_solo(
+        pool,
+        &rimaia_core::testing::TestClock::new(rimaia_core::testing::test_epoch()),
+    )
+    .await
+    .expect("the board's solo identity")
+    .team_id
 }

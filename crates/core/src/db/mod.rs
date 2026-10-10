@@ -12,10 +12,12 @@ use std::path::Path;
 use std::time::Duration;
 
 use sqlx::migrate::Migrator;
-use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteSynchronous};
+use sqlx::sqlite::{
+    SqliteConnectOptions, SqliteConnection, SqliteJournalMode, SqlitePoolOptions, SqliteSynchronous,
+};
 use sqlx::SqlitePool;
 
-use crate::error::Result;
+use crate::error::{Error, Result};
 
 pub mod models;
 pub mod settings;
@@ -23,7 +25,7 @@ pub mod settings;
 /// Re-exported so callers write `db::Task` rather than `db::models::Task`: the
 /// module is an organizing detail, and the rows are the store's vocabulary.
 pub use models::{
-    new_id, BoardColumn, ExitClass, MutationSource, OnArchive, Repository, Run, RunState,
+    new_id, BoardColumn, ExitClass, MutationSource, OnArchive, Repository, Run, RunKind, RunState,
     RunStatus, Schedule, ScheduleMode, Setting, StrategyMode, StrategySource, Task, TaskDependency,
     TaskLink,
 };
@@ -48,9 +50,19 @@ pub(crate) const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 /// not depend on the working directory the build runs from — and paired with
 /// `build.rs`, which is what makes an added migration force a rebuild.
 ///
-/// Private: [`migrate`] is the whole public surface, so the app and the
-/// in-memory test harness cannot end up applying different sets.
+/// Private: [`migrate`] is the whole public surface for the board's set, so
+/// the app and the in-memory test harness cannot end up applying different
+/// sets. [`migrations`] lends it out read-only, for a test that has to see
+/// every file sqlx embedded.
 static MIGRATOR: Migrator = sqlx::migrate!("../../src-tauri/migrations");
+
+/// Every board migration as sqlx embedded it, in version order.
+///
+/// Read-only, so `no_migration_opts_out_of_its_transaction` can look at what
+/// the binary actually carries rather than at the files on disk.
+pub fn migrations() -> impl Iterator<Item = &'static sqlx::migrate::Migration> {
+    MIGRATOR.iter()
+}
 
 /// Opens (creating if absent) the database at `path`.
 ///
@@ -75,13 +87,116 @@ pub async fn connect(path: &Path) -> Result<SqlitePool> {
 /// second launch runs nothing. Startup calls this before the window opens and
 /// aborts on failure (seam-contract D11) — there is no useful UI to draw over a
 /// half-migrated database.
+///
+/// The only way a board migration is applied to a real `rimaia.db`: it goes
+/// through [`apply_migrations`], which is what makes a table rebuild safe.
 pub async fn migrate(pool: &SqlitePool) -> Result<()> {
+    apply_migrations(&MIGRATOR, pool).await
+}
+
+/// Applies `migrator` with foreign-key enforcement off around it, and checks
+/// that what it left behind holds together (seam-contract D28 part 1).
+///
+/// Rebuilding a table other tables reference is only safe with enforcement
+/// off: with it on, `DROP TABLE tasks` is an implicit `DELETE` that fires every
+/// `ON DELETE CASCADE`. `PRAGMA foreign_keys` does nothing inside a
+/// transaction, and sqlx 0.8.6 runs every SQLite migration inside one and
+/// ignores `-- no-transaction` on this driver, so the pragma has to be set out
+/// here, on the connection the migrator then uses. Each file still runs in
+/// sqlx's own transaction, and that is what keeps a rebuild atomic.
+///
+/// Takes the migrator rather than naming [`MIGRATOR`] because the runner store
+/// applies its own set the same way (task 040), and names no board table for
+/// the same reason.
+///
+/// A connection that fails anywhere in here is closed rather than returned:
+/// one with enforcement off must never go back to the pool, where the next
+/// service would write through it unchecked. For the one-connection in-memory
+/// test pool that discards the database, which is what a failed migration
+/// deserves anyway.
+pub async fn apply_migrations(migrator: &Migrator, pool: &SqlitePool) -> Result<()> {
+    let mut conn = pool.acquire().await?;
+    let applied = apply_on(migrator, &mut conn).await;
+    if applied.is_err() {
+        conn.close_on_drop();
+    }
+    applied
+}
+
+async fn apply_on(migrator: &Migrator, conn: &mut SqliteConnection) -> Result<()> {
+    set_foreign_keys(conn, false).await?;
+
+    let before = applied_migration_count(conn).await?;
     // `MigrateError` is a sibling of `sqlx::Error`, not one of its variants, so
     // the `#[from]` on `Error::Database` cannot make this hop unaided. Folded in
     // rather than given a code of its own (seam-contract D8): the only caller
     // aborts startup, so nothing branches on it.
-    MIGRATOR.run(pool).await.map_err(sqlx::Error::from)?;
+    migrator.run(&mut *conn).await.map_err(sqlx::Error::from)?;
+
+    // Only after a run that changed something: a board the sqlite3 CLI left
+    // inconsistent is that writer's to repair, and refusing it on an ordinary
+    // launch would lock the user out of the app they would repair it with.
+    if applied_migration_count(conn).await? != before {
+        ensure_no_dangling_references(conn).await?;
+    }
+
+    set_foreign_keys(conn, true).await
+}
+
+/// Sets enforcement and reads it back, because SQLite ignores the pragma
+/// silently inside a transaction rather than refusing it.
+async fn set_foreign_keys(conn: &mut SqliteConnection, enforce: bool) -> Result<()> {
+    let statement = if enforce {
+        "PRAGMA foreign_keys = ON"
+    } else {
+        "PRAGMA foreign_keys = OFF"
+    };
+    sqlx::query(statement).execute(&mut *conn).await?;
+
+    let reads: i64 = sqlx::query_scalar("PRAGMA foreign_keys")
+        .fetch_one(&mut *conn)
+        .await?;
+    if reads != i64::from(enforce) {
+        return Err(Error::internal(format!(
+            "`{statement}` did not take effect: foreign_keys still reads {reads}"
+        )));
+    }
     Ok(())
+}
+
+/// How many migrations sqlx has recorded, or zero before its table exists.
+async fn applied_migration_count(conn: &mut SqliteConnection) -> Result<i64> {
+    let has_table: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name = '_sqlx_migrations'",
+    )
+    .fetch_one(&mut *conn)
+    .await?;
+    if has_table == 0 {
+        return Ok(0);
+    }
+    let count: i64 = sqlx::query_scalar("SELECT count(*) FROM _sqlx_migrations")
+        .fetch_one(&mut *conn)
+        .await?;
+    Ok(count)
+}
+
+/// Enforcement was off while the files ran, so nothing cascaded and nothing
+/// was refused: this is where a file that relied on either is caught.
+async fn ensure_no_dangling_references(conn: &mut SqliteConnection) -> Result<()> {
+    let dangling: Option<(String, Option<i64>, String)> =
+        sqlx::query_as(r#"SELECT "table", rowid, parent FROM pragma_foreign_key_check LIMIT 1"#)
+            .fetch_optional(&mut *conn)
+            .await?;
+    match dangling {
+        None => Ok(()),
+        Some((table, rowid, parent)) => {
+            let rowid = rowid.map_or_else(|| "no rowid".to_string(), |rowid| rowid.to_string());
+            Err(Error::internal(format!(
+                "a migration left a dangling reference: {table} row {rowid} names a missing \
+                 {parent} row (run PRAGMA foreign_key_check)"
+            )))
+        }
+    }
 }
 
 #[cfg(test)]
@@ -134,6 +249,43 @@ mod tests {
 
         assert!(!after_first.is_empty(), "no migration was applied at all");
         assert_eq!(after_first, after_second);
+    }
+
+    #[tokio::test]
+    async fn a_migration_that_leaves_a_dangling_reference_is_refused_by_name() {
+        // Enforcement is off while the files run, so nothing refuses the
+        // orphan as it is written: step 4 of D28 part 1 is what catches it,
+        // and the message is what a failed startup shows (D11).
+        let migrations = tempfile::tempdir().expect("temp dir");
+        std::fs::write(
+            migrations.path().join("20990101000000_orphan.sql"),
+            "-- An orphan.\n\
+             CREATE TABLE parent (id INTEGER PRIMARY KEY);\n\
+             CREATE TABLE child (id INTEGER PRIMARY KEY, parent_id INTEGER REFERENCES parent (id));\n\
+             INSERT INTO child (id, parent_id) VALUES (7, 1);\n",
+        )
+        .expect("write the migration");
+        let migrator = Migrator::new(migrations.path()).await.expect("read it");
+        let dir = tempfile::tempdir().expect("temp dir");
+        let pool = connect(&dir.path().join("rimaia.db"))
+            .await
+            .expect("connect");
+
+        let error = apply_migrations(&migrator, &pool)
+            .await
+            .expect_err("the orphan is refused");
+
+        assert_eq!(
+            error.to_string(),
+            "a migration left a dangling reference: child row 7 names a missing parent row \
+             (run PRAGMA foreign_key_check)"
+        );
+        let foreign_keys: i64 = sqlx::query_scalar("PRAGMA foreign_keys")
+            .fetch_one(&pool)
+            .await
+            .expect("foreign_keys");
+        assert_eq!(foreign_keys, 1, "the failed connection never went back");
+        pool.close().await;
     }
 
     /// Read from sqlx's own bookkeeping rather than from the schema: what makes a

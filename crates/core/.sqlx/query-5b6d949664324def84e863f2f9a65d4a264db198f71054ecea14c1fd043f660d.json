@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT r.resume_after AS \"resume_after: DateTime<Utc>\"\n             FROM runs r JOIN tasks t ON t.id = r.task_id\n            WHERE r.task_id = ?1 AND t.team_id IN (SELECT value FROM json_each(?2))\n            ORDER BY r.attempt DESC LIMIT 1",
+  "describe": {
+    "columns": [
+      {
+        "name": "resume_after: DateTime<Utc>",
+        "ordinal": 0,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      true
+    ]
+  },
+  "hash": "5b6d949664324def84e863f2f9a65d4a264db198f71054ecea14c1fd043f660d"
+}

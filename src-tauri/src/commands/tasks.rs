@@ -208,6 +208,17 @@ pub async fn update_task(
     .await
 }
 
+/// Assigns a task to one member of its team, or returns it to the pool with
+/// `None` (ADR-0032 point 1).
+#[tauri::command]
+pub async fn assign_task(
+    state: State<'_, AppState>,
+    task_id: String,
+    assignee_id: Option<String>,
+) -> Result<Task> {
+    tasks::assign_task(&state.context, &task_id, assignee_id.as_deref()).await
+}
+
 /// Deletes a task. Refused, naming what still depends on it, when another
 /// task does.
 #[tauri::command]
@@ -221,14 +232,14 @@ pub async fn delete_task(state: State<'_, AppState>, id: String) -> Result<()> {
 /// Refused for a `running` or `waiting_retry` task, with no force to pass.
 #[tauri::command]
 pub async fn archive_task(state: State<'_, AppState>, id: String) -> Result<ArchivedTask> {
-    tasks::archive_task(&state.context, &id).await
+    tasks::archive_task(&state.context, Some(&state.machine), &id).await
 }
 
 /// Archives the board's hand-picked set, reporting refusals instead of
 /// aborting on the first one (seam-contract D20 point 2, D26.3).
 #[tauri::command]
 pub async fn archive_tasks(state: State<'_, AppState>, ids: Vec<String>) -> Result<ArchiveReport> {
-    tasks::archive_tasks(&state.context, &ids).await
+    tasks::archive_tasks(&state.context, Some(&state.machine), &ids).await
 }
 
 /// Puts an archived task back in the column it was in. Nothing the cleanup
@@ -251,6 +262,7 @@ pub async fn move_task(
 ) -> Result<Task> {
     tasks::move_task(
         &state.context,
+        Some(&state.machine),
         &id,
         column,
         before_id.as_deref(),

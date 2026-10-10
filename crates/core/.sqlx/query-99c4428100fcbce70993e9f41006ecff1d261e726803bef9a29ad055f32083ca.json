@@ -1,0 +1,158 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT dep.id, dep.repository_id, dep.title, dep.plan, dep.extra_instructions,\n            dep.board_column AS \"column: BoardColumn\", dep.position,\n            dep.run_state AS \"run_state: RunState\", dep.branch,\n            dep.strategy_mode AS \"strategy_mode: StrategyMode\", dep.model, dep.effort,\n            dep.strategy_plan, dep.strategy_source AS \"strategy_source: StrategySource\",\n            dep.strategy_updated_at AS \"strategy_updated_at: DateTime<Utc>\",\n            dep.created_at AS \"created_at: DateTime<Utc>\",\n            dep.updated_at AS \"updated_at: DateTime<Utc>\",\n            dep.source AS \"source: MutationSource\",\n            dep.archived_at AS \"archived_at: DateTime<Utc>\",\n            dep.created_by, dep.assignee_id, dep.assigned_by, dep.plan_revision,\n            dep.plan_updated_by\n           FROM task_dependencies d\n           JOIN tasks dep ON dep.id = d.task_id\n          WHERE d.depends_on_task_id = ?1 AND dep.team_id IN (SELECT value FROM json_each(?2))",
+  "describe": {
+    "columns": [
+      {
+        "name": "id",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "repository_id",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "title",
+        "ordinal": 2,
+        "type_info": "Text"
+      },
+      {
+        "name": "plan",
+        "ordinal": 3,
+        "type_info": "Text"
+      },
+      {
+        "name": "extra_instructions",
+        "ordinal": 4,
+        "type_info": "Text"
+      },
+      {
+        "name": "column: BoardColumn",
+        "ordinal": 5,
+        "type_info": "Text"
+      },
+      {
+        "name": "position",
+        "ordinal": 6,
+        "type_info": "Float"
+      },
+      {
+        "name": "run_state: RunState",
+        "ordinal": 7,
+        "type_info": "Text"
+      },
+      {
+        "name": "branch",
+        "ordinal": 8,
+        "type_info": "Text"
+      },
+      {
+        "name": "strategy_mode: StrategyMode",
+        "ordinal": 9,
+        "type_info": "Text"
+      },
+      {
+        "name": "model",
+        "ordinal": 10,
+        "type_info": "Text"
+      },
+      {
+        "name": "effort",
+        "ordinal": 11,
+        "type_info": "Text"
+      },
+      {
+        "name": "strategy_plan",
+        "ordinal": 12,
+        "type_info": "Text"
+      },
+      {
+        "name": "strategy_source: StrategySource",
+        "ordinal": 13,
+        "type_info": "Text"
+      },
+      {
+        "name": "strategy_updated_at: DateTime<Utc>",
+        "ordinal": 14,
+        "type_info": "Text"
+      },
+      {
+        "name": "created_at: DateTime<Utc>",
+        "ordinal": 15,
+        "type_info": "Text"
+      },
+      {
+        "name": "updated_at: DateTime<Utc>",
+        "ordinal": 16,
+        "type_info": "Text"
+      },
+      {
+        "name": "source: MutationSource",
+        "ordinal": 17,
+        "type_info": "Text"
+      },
+      {
+        "name": "archived_at: DateTime<Utc>",
+        "ordinal": 18,
+        "type_info": "Text"
+      },
+      {
+        "name": "created_by",
+        "ordinal": 19,
+        "type_info": "Text"
+      },
+      {
+        "name": "assignee_id",
+        "ordinal": 20,
+        "type_info": "Text"
+      },
+      {
+        "name": "assigned_by",
+        "ordinal": 21,
+        "type_info": "Text"
+      },
+      {
+        "name": "plan_revision",
+        "ordinal": 22,
+        "type_info": "Integer"
+      },
+      {
+        "name": "plan_updated_by",
+        "ordinal": 23,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      true,
+      true,
+      false,
+      false,
+      false,
+      true,
+      false,
+      true,
+      true,
+      true,
+      true,
+      true,
+      false,
+      false,
+      false,
+      true,
+      true,
+      true,
+      true,
+      false,
+      true
+    ]
+  },
+  "hash": "99c4428100fcbce70993e9f41006ecff1d261e726803bef9a29ad055f32083ca"
+}

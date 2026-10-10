@@ -31,9 +31,11 @@
 //! dropped. Nothing about whether the queue runs may depend on whether a toast
 //! was drawn.
 
+use rimaia_core::machine::MachineContext;
 use rimaia_core::schedule::window::{self, RunWindow};
-use rimaia_core::scheduler::{QueueHandle, QueueState};
-use rimaia_core::{ChangeEvent, ServiceContext};
+use rimaia_core::scheduler::QueueState;
+use rimaia_core::{Change, ChangeEvent};
+use rimaia_runner::queue::QueueHandle;
 use tauri::AppHandle;
 use tauri_plugin_notification::NotificationExt;
 use tokio::sync::broadcast;
@@ -46,7 +48,7 @@ use tokio::sync::broadcast::error::RecvError;
 /// order everything else in that hook keeps.
 pub async fn announce_run_windows(
     app: AppHandle,
-    ctx: ServiceContext,
+    machine: MachineContext,
     queue: QueueHandle,
     mut events: broadcast::Receiver<ChangeEvent>,
 ) {
@@ -55,15 +57,18 @@ pub async fn announce_run_windows(
     // occasionally `Some` at startup, and seeding from it is what stops the
     // first settings change of the session announcing a window that has been
     // open since last night.
-    let mut seen = current(&ctx).await;
+    let mut seen = current(&machine).await;
     let mut announced_error: Option<String> = queue.last_step_error();
 
     loop {
         match events.recv().await {
             // Only `Settings` can carry either of these: the window and
-            // `queue_state` are both `settings` rows. A task moving or a run
+            // `queue_state` are both runner settings, announced as `Settings`. A task moving or a run
             // ending cannot open a window, so there is nothing to re-read.
-            Ok(ChangeEvent::Settings) => {}
+            Ok(ChangeEvent {
+                change: Change::Settings,
+                ..
+            }) => {}
             Ok(_) => continue,
             // A dropped event costs one late comparison, never a missed one:
             // the next event re-reads the same rows and still finds the
@@ -72,7 +77,7 @@ pub async fn announce_run_windows(
             Err(RecvError::Closed) => break,
         }
 
-        let now = current(&ctx).await;
+        let now = current(&machine).await;
         match (&seen, &now) {
             (None, Some(open)) => notify(&app, "Rimaia is working", &opened(open)),
             (Some(closed), None) => notify(&app, "Rimaia has stopped", &closed_message(closed)),
@@ -96,12 +101,12 @@ pub async fn announce_run_windows(
 
 /// The open window, or `None` — plus the switch, because a window that is open
 /// while the queue is paused is not a queue that is working.
-async fn current(ctx: &ServiceContext) -> Option<RunWindow> {
-    let window = window::active(&ctx.pool).await.unwrap_or_else(|error| {
+async fn current(machine: &MachineContext) -> Option<RunWindow> {
+    let window = window::active(machine).await.unwrap_or_else(|error| {
         tracing::debug!(%error, "could not read the run window for a notification");
         None
     });
-    let running = rimaia_core::scheduler::queue_state(&ctx.pool)
+    let running = rimaia_core::scheduler::queue_state(machine)
         .await
         .map(|state| state == QueueState::Running)
         .unwrap_or(false);

@@ -31,7 +31,6 @@ function task(overrides: Partial<Task> = {}): Task {
     position: 0,
     runState: "idle",
     branch: null,
-    worktreePath: null,
     strategyMode: "default",
     model: null,
     effort: null,

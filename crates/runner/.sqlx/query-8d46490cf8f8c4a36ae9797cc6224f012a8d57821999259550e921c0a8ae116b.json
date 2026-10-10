@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO runner_identity (singleton, runner_id, server_url, created_at)\n             VALUES (1, ?1, NULL, ?2)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "8d46490cf8f8c4a36ae9797cc6224f012a8d57821999259550e921c0a8ae116b"
+}

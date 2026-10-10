@@ -3687,6 +3687,7 @@ version = "0.1.0"
 dependencies = [
  "chrono",
  "rimaia-core",
+ "rimaia-runner",
  "serde",
  "serde_json",
  "sqlx",
@@ -3727,6 +3728,21 @@ dependencies = [
  "tokio-test",
  "tracing",
  "uuid",
+]
+
+[[package]]
+name = "rimaia-runner"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "pretty_assertions",
+ "rimaia-core",
+ "rimaia-runner",
+ "serde_json",
+ "sqlx",
+ "tempfile",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]

@@ -55,22 +55,29 @@ use std::process::Command;
 use std::time::Duration;
 
 use pretty_assertions::assert_eq;
+use rimaia_core::board::service::team_disallowed_tools;
+use rimaia_core::board::OwnerPresence;
 use rimaia_core::db::settings::{self, RunEnvironment};
 use rimaia_core::db::{BoardColumn, ExitClass, Run, RunState, RunStatus, Task};
+use rimaia_core::mcp::{MCP_SERVER_NAME, RUN_MCP_SERVER_NAME};
 use rimaia_core::repo::{self, NewRepository};
 use rimaia_core::runner::events::{stderr_path, transcript_path, RunEvent, RunTail};
+use rimaia_core::runner::limits::DISALLOWED_TOOLS;
 use rimaia_core::runner::process::{
-    disallowed_tools, inherited_identity_vars, is_process_identity, verify_permission_mode,
-    DEFAULT_DISALLOWED_TOOLS, DISALLOWED_TOOLS,
+    inherited_identity_vars, is_process_identity, verify_permission_mode, DEFAULT_DISALLOWED_TOOLS,
 };
 use rimaia_core::runner::prompt::compose_prompt;
 use rimaia_core::runner::provider::{
-    AgentProvider, ClaudeProvider, ForbiddenOperation, ProviderId, RimaiaHandle, SessionIntent,
+    claude, AgentProvider, ClaudeProvider, ForbiddenOperation, ProviderId, RimaiaHandle,
+    SessionIntent,
 };
 use rimaia_core::runner::{
-    run_task, CancelSignal, PermissionMode, RunIntent, RunRequest, RunTrigger, RunnerConfig,
+    claim_manual_start, run_task, CancelSignal, ManualStart, PermissionMode, RunIntent, RunRequest,
+    RunTrigger, RunnerConfig, Started,
 };
+use rimaia_core::scheduler::InFlight;
 use rimaia_core::tasks::{self, NewTask, Patch, TaskPatch};
+use rimaia_core::testing::board::claim_run;
 use rimaia_core::testing::fixtures::{fixture_lines, fixture_path};
 use rimaia_core::testing::{TempRepo, TestContext};
 use rimaia_core::{AppPaths, ErrorCode};
@@ -187,7 +194,7 @@ fn the_claude_argv_carries_every_flag_in_the_order_the_contract_documents() {
         ],
         rimaia_handle: Some(RimaiaHandle {
             url: "http://127.0.0.1:4517/mcp/run/tok".to_string(),
-            server: "rimaia",
+            server: RUN_MCP_SERVER_NAME,
         }),
         max_turns: Some(40),
         ..invocation()
@@ -214,16 +221,241 @@ fn the_claude_argv_carries_every_flag_in_the_order_the_contract_documents() {
             "--effort",
             "high",
             "--allowedTools",
-            "mcp__rimaia__set_task_strategy",
+            "mcp__rimaia-run__set_task_strategy",
             "--disallowedTools",
             "Bash(git reset --hard origin/:*)",
             "Bash",
             "Bash(rm -rf /:*)",
             "--mcp-config",
-            r#"{"mcpServers":{"rimaia":{"type":"http","url":"http://127.0.0.1:4517/mcp/run/tok"}}}"#,
+            r#"{"mcpServers":{"rimaia-run":{"type":"http","url":"http://127.0.0.1:4517/mcp/run/tok"}}}"#,
             "--max-turns",
             "40",
         ]
+    );
+}
+
+#[test]
+fn no_intent_ever_denies_the_run_scoped_server() {
+    // D30 point 2. The operator surface is spelled at `rimaia` only, so a run's
+    // own handle, served as `rimaia-run`, is never denied with it — whichever
+    // operations an intent carries, including an operator rule that happens to
+    // mention it by a prefix of the name.
+    let every_operation = vec![
+        ForbiddenOperation::RemoteHistoryRewrite,
+        ForbiddenOperation::RemoteBranchDeletion,
+        ForbiddenOperation::HardResetToRemote,
+        ForbiddenOperation::AnyFileMutation,
+        ForbiddenOperation::AnyShellCommand,
+        ForbiddenOperation::RimaiaToolSurface,
+        operator_rule("Bash(rm -rf /:*)"),
+    ];
+
+    let denied = claude::spell_out(&every_operation);
+
+    assert!(denied.iter().any(|pattern| pattern == "mcp__rimaia"));
+    assert!(
+        !denied
+            .iter()
+            .any(|pattern| pattern.starts_with(&format!("mcp__{RUN_MCP_SERVER_NAME}"))),
+        "{denied:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Two CLI facts the run-scoped name rests on (seam-contract D30 point 8)
+//
+// Read off recordings rather than assumed, as CLAUDE.md asks of CLI behaviour.
+// Both were made with two stdio stand-ins registered, `rimaia` and
+// `rimaia-run`; `tests/fixtures/cli/README.md` gives the argv and what each
+// stand-in listed and answered.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn the_bare_server_rule_denies_its_own_server_and_not_rimaia_run() {
+    // `--disallowedTools mcp__rimaia` alone, under `bypassPermissions` and with
+    // no `--allowedTools`: an unlisted call would be approved, so whatever the
+    // first server lost, the bare rule took, and whatever the second kept, the
+    // rule did not match as a prefix.
+    let stream = Recorded::of("run-scoped-server-name");
+
+    let init = stream.init();
+    assert_eq!(init["permissionMode"], "bypassPermissions");
+    assert_eq!(
+        stream.connected_servers(),
+        vec!["rimaia".to_string(), "rimaia-run".to_string()],
+        "both stand-ins connected, so a missing tool is the rule's doing",
+    );
+    assert_eq!(
+        stream.mcp_tools(),
+        vec!["mcp__rimaia-run__set_task_strategy".to_string()],
+        "the bare rule took every `rimaia` tool and left `rimaia-run`'s",
+    );
+
+    // Asked for by name, the operator's tool is not there to be called.
+    assert_eq!(
+        stream.tool_result_text("ToolSearch", "\"select:mcp__rimaia__get_task\""),
+        Some("No matching deferred tools found".to_string()),
+    );
+    assert!(
+        !stream
+            .tool_calls()
+            .iter()
+            .any(|name| name == "mcp__rimaia__get_task"),
+        "a denied tool is never called",
+    );
+
+    // And the run-scoped one is, and is answered.
+    assert_eq!(
+        stream.tool_result_text("mcp__rimaia-run__set_task_strategy", ""),
+        Some("ok: rimaia-run answered set_task_strategy".to_string()),
+    );
+    let result = stream.result();
+    assert_eq!(result["subtype"], "success");
+    assert_eq!(result["permission_denials"], serde_json::json!([]));
+
+    // Exact match, so the bare entry stays in what every run is denied.
+    let denied = claude::spell_out(&[ForbiddenOperation::RimaiaToolSurface]);
+    assert_eq!(denied.first().map(String::as_str), Some("mcp__rimaia"));
+}
+
+#[test]
+fn an_allowed_tool_at_a_hyphenated_server_is_callable_under_accept_edits() {
+    // The planner's shape: `acceptEdits`, which refuses an unallowed MCP call
+    // (`strategy-proposal.jsonl`'s section of the README), with
+    // `--allowedTools mcp__rimaia-run__set_task_strategy`. A success shows the
+    // allow rule matches the hyphenated server segment, so the respelled
+    // planner can still answer.
+    let stream = Recorded::of("run-scoped-server-allowed");
+
+    assert_eq!(stream.init()["permissionMode"], "acceptEdits");
+    assert_eq!(
+        stream.tool_calls(),
+        vec![
+            "ToolSearch".to_string(),
+            "mcp__rimaia-run__set_task_strategy".to_string()
+        ],
+    );
+    assert_eq!(
+        stream.tool_result_text("mcp__rimaia-run__set_task_strategy", ""),
+        Some("ok: rimaia-run answered set_task_strategy".to_string()),
+    );
+    let result = stream.result();
+    assert_eq!(result["subtype"], "success");
+    assert_eq!(result["permission_denials"], serde_json::json!([]));
+}
+
+/// A recording, parsed line by line into raw JSON: these tests read what the
+/// CLI printed, not what Rimaia's parser makes of it.
+struct Recorded {
+    events: Vec<serde_json::Value>,
+}
+
+impl Recorded {
+    fn of(name: &str) -> Self {
+        Self {
+            events: fixture_lines(name)
+                .map(|line| serde_json::from_str(&line).expect("a recorded line is JSON"))
+                .collect(),
+        }
+    }
+
+    fn init(&self) -> &serde_json::Value {
+        self.events
+            .iter()
+            .find(|event| event["type"] == "system" && event["subtype"] == "init")
+            .expect("an init event")
+    }
+
+    fn result(&self) -> &serde_json::Value {
+        self.events
+            .iter()
+            .find(|event| event["type"] == "result")
+            .expect("a result event")
+    }
+
+    fn connected_servers(&self) -> Vec<String> {
+        let mut names: Vec<String> = self.init()["mcp_servers"]
+            .as_array()
+            .expect("mcp_servers")
+            .iter()
+            .filter(|server| server["status"] == "connected")
+            .filter_map(|server| server["name"].as_str().map(str::to_string))
+            .collect();
+        names.sort();
+        names
+    }
+
+    fn mcp_tools(&self) -> Vec<String> {
+        self.init()["tools"]
+            .as_array()
+            .expect("tools")
+            .iter()
+            .filter_map(|tool| tool.as_str())
+            .filter(|tool| tool.starts_with("mcp__"))
+            .map(str::to_string)
+            .collect()
+    }
+
+    fn blocks(&self, role: &str) -> Vec<&serde_json::Value> {
+        self.events
+            .iter()
+            .filter(|event| event["type"] == role)
+            .filter_map(|event| event["message"]["content"].as_array())
+            .flatten()
+            .collect()
+    }
+
+    /// Every tool the run called, in order.
+    fn tool_calls(&self) -> Vec<String> {
+        self.blocks("assistant")
+            .into_iter()
+            .filter(|block| block["type"] == "tool_use")
+            .filter_map(|block| block["name"].as_str().map(str::to_string))
+            .collect()
+    }
+
+    /// The text of the result answering the first call to `tool` whose input
+    /// mentions `input_contains`, with its error flag required to be unset.
+    fn tool_result_text(&self, tool: &str, input_contains: &str) -> Option<String> {
+        let call = self.blocks("assistant").into_iter().find(|block| {
+            block["type"] == "tool_use"
+                && block["name"] == tool
+                && block["input"].to_string().contains(input_contains)
+        })?;
+        let answer = self
+            .blocks("user")
+            .into_iter()
+            .find(|block| block["type"] == "tool_result" && block["tool_use_id"] == call["id"])?;
+        assert_ne!(
+            answer["is_error"], true,
+            "{tool} was answered with an error"
+        );
+        match &answer["content"] {
+            serde_json::Value::String(text) => Some(text.clone()),
+            serde_json::Value::Array(parts) => parts
+                .iter()
+                .find_map(|part| part["text"].as_str().map(str::to_string)),
+            _ => None,
+        }
+    }
+}
+
+#[test]
+fn a_tool_handle_normalises_the_server_segment_the_way_the_cli_does() {
+    // D30 point 3: an operator-chosen server name with a character outside
+    // `[A-Za-z0-9_-]` is registered by the CLI with `_` in its place, so the
+    // spelling a denial or a grant uses has to match.
+    assert_eq!(
+        ClaudeProvider.tool_handle(RUN_MCP_SERVER_NAME, "get_task"),
+        "mcp__rimaia-run__get_task"
+    );
+    assert_eq!(
+        ClaudeProvider.tool_handle(MCP_SERVER_NAME, "get_task"),
+        "mcp__rimaia__get_task"
+    );
+    assert_eq!(
+        ClaudeProvider.tool_handle("my rimaia.local", "get_task"),
+        "mcp__my_rimaia_local__get_task"
     );
 }
 
@@ -427,7 +659,7 @@ async fn an_unset_blocklist_is_the_default_and_an_emptied_one_is_no_blocklist() 
     let harness = TestContext::new().await;
 
     assert_eq!(
-        disallowed_tools(&harness.context.pool)
+        team_disallowed_tools(&harness.context, &harness.solo.team_id)
             .await
             .expect("read the default"),
         DEFAULT_DISALLOWED_TOOLS
@@ -436,7 +668,7 @@ async fn an_unset_blocklist_is_the_default_and_an_emptied_one_is_no_blocklist() 
             .collect::<Vec<_>>()
     );
 
-    settings::set(
+    rimaia_core::testing::settings::set(
         &harness.context,
         DISALLOWED_TOOLS,
         "Bash(git push --force:*)\n\n  Bash(rm -rf /:*)  \n",
@@ -444,7 +676,7 @@ async fn an_unset_blocklist_is_the_default_and_an_emptied_one_is_no_blocklist() 
     .await
     .expect("store a list");
     assert_eq!(
-        disallowed_tools(&harness.context.pool)
+        team_disallowed_tools(&harness.context, &harness.solo.team_id)
             .await
             .expect("read it back"),
         vec![
@@ -454,11 +686,11 @@ async fn an_unset_blocklist_is_the_default_and_an_emptied_one_is_no_blocklist() 
         "blank lines and padding are formatting, not patterns"
     );
 
-    settings::set(&harness.context, DISALLOWED_TOOLS, "")
+    rimaia_core::testing::settings::set(&harness.context, DISALLOWED_TOOLS, "")
         .await
         .expect("empty the list");
     assert_eq!(
-        disallowed_tools(&harness.context.pool)
+        team_disallowed_tools(&harness.context, &harness.solo.team_id)
             .await
             .expect("read it back"),
         Vec::<String>::new()
@@ -533,7 +765,7 @@ async fn a_run_never_hands_the_child_an_inherited_claude_variable_in_either_mode
 
     for environment in [RunEnvironment::Inherit, RunEnvironment::StrictLocal] {
         let fixture = RunnerFixture::new().await;
-        settings::set_run_environment(&fixture.harness.context, environment)
+        settings::set_run_environment(fixture.harness.machine(), environment)
             .await
             .expect("choose the run environment");
         let cli = FakeCli::replaying("success", 0);
@@ -558,7 +790,7 @@ async fn strict_local_is_the_only_mode_that_reaches_the_cli_as_isolation_flags()
     // that one pins the vector, this one proves the vector is what a real
     // process is actually handed, read back off the child's own `argv`.
     let fixture = RunnerFixture::new().await;
-    settings::set_run_environment(&fixture.harness.context, RunEnvironment::StrictLocal)
+    settings::set_run_environment(fixture.harness.machine(), RunEnvironment::StrictLocal)
         .await
         .expect("choose the run environment");
     let cli = FakeCli::replaying("success", 0);
@@ -626,14 +858,11 @@ async fn a_missing_claude_binary_is_refused_before_any_run_state_is_written() {
         ..RunnerConfig::default()
     };
 
-    let error = run_task(
-        &fixture.harness.context,
-        &fixture.paths,
-        &config,
-        fixture.request(),
-    )
-    .await
-    .expect_err("a run needs the CLI");
+    let error = fixture
+        .start(&config, RunTrigger::Queued)
+        .await
+        .err()
+        .expect("a run needs the CLI");
 
     assert_eq!(error.code(), ErrorCode::Invalid);
     assert!(
@@ -721,20 +950,14 @@ async fn a_cli_that_applied_a_permission_mode_nobody_asked_for_stops_the_run() {
 
     // The process itself ran fine; the refusal is Rimaia's, so it is recorded
     // the way every other failed run is rather than raised as a spawn error.
-    let run = run_task(
-        &fixture.harness.context,
-        &fixture.paths,
-        &fixture.config(&cli),
-        RunRequest {
-            task_id: fixture.task_id.clone(),
-            trigger: RunTrigger::Manual,
-            resume: None,
-            cancel: CancelSignal::new(),
-            in_flight: None,
-        },
-    )
-    .await
-    .expect("the attempt is recorded rather than lost");
+    let run = fixture
+        .run_claimed(
+            &fixture.config(&cli),
+            RunTrigger::Manual,
+            &CancelSignal::new(),
+        )
+        .await
+        .expect("the attempt is recorded rather than lost");
 
     assert_eq!(run.status, RunStatus::Failed);
     assert_eq!(run.exit_class, Some(ExitClass::Fatal));
@@ -767,20 +990,14 @@ async fn a_manual_run_against_an_init_that_echoes_accept_edits_succeeds() {
     let fixture = RunnerFixture::new().await;
     let cli = FakeCli::replaying_with_permission_mode("success", "acceptEdits", 0);
 
-    let run = run_task(
-        &fixture.harness.context,
-        &fixture.paths,
-        &fixture.config(&cli),
-        RunRequest {
-            task_id: fixture.task_id.clone(),
-            trigger: RunTrigger::Manual,
-            resume: None,
-            cancel: CancelSignal::new(),
-            in_flight: None,
-        },
-    )
-    .await
-    .expect("the manual run completes");
+    let run = fixture
+        .run_claimed(
+            &fixture.config(&cli),
+            RunTrigger::Manual,
+            &CancelSignal::new(),
+        )
+        .await
+        .expect("the manual run completes");
 
     assert_eq!(run.status, RunStatus::Succeeded);
     assert_eq!(run.exit_class, Some(ExitClass::Success));
@@ -845,11 +1062,9 @@ async fn the_transcript_is_the_stream_verbatim_and_valid_jsonl() {
     for line in &written {
         serde_json::from_str::<serde_json::Value>(line).expect("every line is a JSON document");
     }
-    assert_eq!(
-        run.log_path,
-        transcript_path(&fixture.paths, &fixture.task_id, &run.id)
-            .to_string_lossy()
-            .into_owned()
+    assert!(
+        transcript_path(&fixture.paths, &fixture.task_id, &run.id).is_file(),
+        "ADR-0013's path, derived from the ids, is where the transcript is"
     );
 }
 
@@ -914,9 +1129,9 @@ async fn the_child_works_in_the_tasks_worktree_and_never_in_the_repository() {
     fixture.run(&cli).await.expect("the run completes");
 
     let worktree = fixture
-        .task()
+        .harness
+        .worktree_path(&fixture.task_id)
         .await
-        .worktree_path
         .expect("task 007 recorded one");
     assert_eq!(canonical(&cli.child_cwd()), canonical(&worktree));
     assert_ne!(
@@ -1182,9 +1397,10 @@ async fn a_repository_that_has_not_opted_in_cannot_start_a_task() {
     let cli = FakeCli::replaying("success", 0);
 
     let error = fixture
-        .run(&cli)
+        .start(&fixture.config(&cli), RunTrigger::Manual)
         .await
-        .expect_err("an un-opted repository holds tasks but cannot run them");
+        .err()
+        .expect("an un-opted repository holds tasks but cannot run them");
 
     assert_eq!(error.code(), ErrorCode::Invalid);
     assert!(
@@ -1210,11 +1426,77 @@ async fn a_task_that_failed_last_night_can_be_started_again() {
     }
     let cli = FakeCli::replaying("success", 0);
 
-    let run = fixture.run(&cli).await.expect("the run completes");
+    let run = fixture
+        .start_and_run(&fixture.config(&cli), RunTrigger::Queued)
+        .await
+        .expect("the run completes");
 
     assert_eq!(run.attempt, 1, "last night failed before it opened a row");
     assert_eq!(fixture.task().await.run_state, RunState::Idle);
     assert_eq!(fixture.task().await.column, BoardColumn::InReview);
+}
+
+#[tokio::test]
+async fn a_manual_run_whose_worktree_cannot_be_prepared_does_not_leave_its_card_running() {
+    // Task 036's first behaviour change. A manual start claims and then spawns
+    // `run_task`, and a failure between the claim and the `runs` row used to
+    // return without giving the claim back, so the card read "running" until
+    // the next launch reconciled it. A repository whose `.git` has gone is the
+    // failure here: `worktree::prepare` cannot run `git worktree add` in it.
+    let fixture = RunnerFixture::new().await;
+    let cli = FakeCli::replaying("success", 0);
+    std::fs::remove_dir_all(fixture.repository.path().join(".git"))
+        .expect("take the repository's git directory away");
+
+    fixture
+        .start_and_run(&fixture.config(&cli), RunTrigger::Manual)
+        .await
+        .expect_err("no worktree can be prepared in a repository with no git directory");
+
+    let detail = fixture.detail().await;
+    assert_eq!(detail.task.run_state, RunState::Failed);
+    assert_eq!(detail.last_run, None, "a `runs` row was opened");
+}
+
+#[tokio::test]
+async fn the_prompt_is_composed_from_the_task_as_it_reads_after_the_worktree_exists() {
+    // A claim's context is the board as it read before the claim, and for a
+    // first run that is before `worktree::prepare` created the branch the
+    // prompt names. Composing from it would tell the agent `- Branch:` nothing.
+    let fixture = RunnerFixture::new().await;
+    let cli = FakeCli::replaying("success", 0);
+    let config = fixture.config(&cli);
+    let board = fixture.harness.board(&fixture.paths, &config);
+    let claim = claim_run(board.as_ref(), &fixture.task_id, RunTrigger::Queued, false)
+        .await
+        .expect("claim the task");
+    assert_eq!(
+        claim.context.task.task.branch, None,
+        "a first run's branch does not exist when it is claimed",
+    );
+
+    run_task(
+        board.as_ref(),
+        fixture.harness.machine(),
+        &fixture.paths,
+        &config,
+        claim,
+        fixture.request(&CancelSignal::new()),
+    )
+    .await
+    .expect("the run completes");
+
+    let branch = fixture
+        .task()
+        .await
+        .branch
+        .expect("prepare created the branch");
+    let expected = fixture.composed_prompt().await;
+    assert!(
+        expected.contains(&format!("- Branch: {branch}\n")),
+        "the composition this test compares against names the branch: {expected}",
+    );
+    assert_eq!(cli.child_stdin(), expected);
 }
 
 // ---------------------------------------------------------------------------
@@ -1507,6 +1789,7 @@ impl RunnerFixture {
 
         let registered = repo::register(
             &harness.context,
+            harness.machine(),
             &paths.worktrees_dir(),
             NewRepository {
                 path: repository.path().to_string_lossy().into_owned(),
@@ -1518,9 +1801,14 @@ impl RunnerFixture {
         .expect("register the test repository");
 
         if opt_in {
-            repo::set_allow_unattended_runs(&harness.context, &registered.id, true)
-                .await
-                .expect("ADR-0012's per-repository opt-in");
+            repo::set_allow_unattended_runs(
+                &harness.context,
+                harness.machine(),
+                &registered.id,
+                true,
+            )
+            .await
+            .expect("ADR-0012's per-repository opt-in");
         }
 
         let task = tasks::create_task(
@@ -1547,18 +1835,80 @@ impl RunnerFixture {
         }
     }
 
-    /// A queued run — the trigger whose permission mode every recording in the
-    /// corpus was captured under. See this file's header.
-    fn request(&self) -> RunRequest {
+    /// What `run_task` is handed beside its claim.
+    fn request(&self, cancel: &CancelSignal) -> RunRequest {
         RunRequest {
-            task_id: self.task_id.clone(),
-            trigger: RunTrigger::Queued,
-            resume: None,
-            cancel: CancelSignal::new(),
+            cancel: cancel.clone(),
             // One run, so there is nothing in this repository to take turns
             // with — see `RunRequest::in_flight`.
             in_flight: None,
         }
+    }
+
+    /// The manual starter's preflight and claim, as Run now runs it.
+    async fn start(
+        &self,
+        config: &RunnerConfig,
+        trigger: RunTrigger,
+    ) -> rimaia_core::Result<Started> {
+        // The posture a trigger names is the one presence decides (ADR-0031
+        // point 7): an owner at the runner is a manual run.
+        let presence = match trigger {
+            RunTrigger::Manual => OwnerPresence::AtRunner,
+            RunTrigger::Queued => OwnerPresence::Remote,
+        };
+        claim_manual_start(
+            self.harness.starter(presence),
+            self.harness.board(&self.paths, config).as_ref(),
+            self.harness.machine(),
+            &self.paths,
+            config,
+            &InFlight::new(),
+            ManualStart {
+                task_id: self.task_id.clone(),
+                continue_session: false,
+            },
+        )
+        .await
+    }
+
+    /// Run now, end to end: the starter, then `run_task` under the slot.
+    async fn start_and_run(
+        &self,
+        config: &RunnerConfig,
+        trigger: RunTrigger,
+    ) -> rimaia_core::Result<Run> {
+        let Started { slot, claim } = self.start(config, trigger).await?;
+        let board = self.harness.board(&self.paths, config);
+        run_task(
+            board.as_ref(),
+            self.harness.machine(),
+            &self.paths,
+            config,
+            claim,
+            self.request(&slot.cancel_signal()),
+        )
+        .await
+    }
+
+    /// A run claimed through the board the way the queue claims, then run.
+    async fn run_claimed(
+        &self,
+        config: &RunnerConfig,
+        trigger: RunTrigger,
+        cancel: &CancelSignal,
+    ) -> rimaia_core::Result<Run> {
+        let board = self.harness.board(&self.paths, config);
+        let claim = claim_run(board.as_ref(), &self.task_id, trigger, false).await?;
+        run_task(
+            board.as_ref(),
+            self.harness.machine(),
+            &self.paths,
+            config,
+            claim,
+            self.request(cancel),
+        )
+        .await
     }
 
     fn config(&self, cli: &FakeCli) -> RunnerConfig {
@@ -1568,14 +1918,11 @@ impl RunnerFixture {
         }
     }
 
+    /// A queued run — the trigger whose permission mode every recording in the
+    /// corpus was captured under. See this file's header.
     async fn run(&self, cli: &FakeCli) -> rimaia_core::Result<Run> {
-        run_task(
-            &self.harness.context,
-            &self.paths,
-            &self.config(cli),
-            self.request(),
-        )
-        .await
+        self.run_claimed(&self.config(cli), RunTrigger::Queued, &CancelSignal::new())
+            .await
     }
 
     async fn run_with(&self, cli: &FakeCli, cancel: &CancelSignal) -> rimaia_core::Result<Run> {
@@ -1587,16 +1934,7 @@ impl RunnerFixture {
         config: &RunnerConfig,
         cancel: &CancelSignal,
     ) -> rimaia_core::Result<Run> {
-        run_task(
-            &self.harness.context,
-            &self.paths,
-            config,
-            RunRequest {
-                cancel: cancel.clone(),
-                ..self.request()
-            },
-        )
-        .await
+        self.run_claimed(config, RunTrigger::Queued, cancel).await
     }
 
     fn repository_path(&self) -> String {
@@ -1633,11 +1971,11 @@ impl RunnerFixture {
         let repository = repo::get(&self.harness.context, &self.repository_id)
             .await
             .expect("read the repository");
-        let base = settings::base_instructions(&self.harness.context.pool)
+        let base = settings::base_instructions(&self.harness.context)
             .await
             .expect("read the base instructions");
 
-        compose_prompt(&base, &detail, &repository, None, "subagents")
+        compose_prompt(&base, &detail, &repository, None, None, "subagents")
     }
 
     /// The JSONL transcript, line by line.
@@ -1676,8 +2014,9 @@ fn planner_invocation() -> RunIntent<'static> {
         workspace: workspace(),
         model: Some("haiku".to_string()),
         effort: Some("low".to_string()),
-        // Rimaia's name for the tool; `mcp__rimaia__set_task_strategy` is this
-        // provider's spelling of it, which is what the assertions below read.
+        // Rimaia's name for the tool; `mcp__rimaia-run__set_task_strategy` is
+        // this provider's spelling of it at the handle's own server, which is
+        // what the assertions below read (seam-contract D30 point 3).
         required_tools: vec!["set_task_strategy"],
         forbidden: vec![
             ForbiddenOperation::AnyFileMutation,
@@ -1685,7 +2024,7 @@ fn planner_invocation() -> RunIntent<'static> {
         ],
         rimaia_handle: Some(RimaiaHandle {
             url: "http://127.0.0.1:4517/mcp/run/tok".to_string(),
-            server: "rimaia",
+            server: RUN_MCP_SERVER_NAME,
         }),
         max_turns: Some(6),
     }
@@ -1712,7 +2051,7 @@ fn a_strategy_run_is_permitted_to_call_the_one_tool_it_exists_to_call() {
         .iter()
         .position(|arg| arg == "--allowedTools")
         .expect("a planner that cannot call its own write-back cannot plan");
-    assert_eq!(argv[at + 1], "mcp__rimaia__set_task_strategy");
+    assert_eq!(argv[at + 1], "mcp__rimaia-run__set_task_strategy");
 }
 
 #[test]
@@ -1761,7 +2100,7 @@ fn the_scoped_mcp_config_is_one_inline_json_argument_and_not_a_file_path() {
 
     let config: serde_json::Value =
         serde_json::from_str(&argv[at + 1]).expect("the config is an inline JSON string");
-    let url = config["mcpServers"]["rimaia"]["url"]
+    let url = config["mcpServers"]["rimaia-run"]["url"]
         .as_str()
         .expect("the scoped endpoint");
     assert!(url.contains("/mcp/run/"), "the run-scoped route, not /mcp");

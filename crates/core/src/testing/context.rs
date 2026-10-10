@@ -12,9 +12,17 @@ use std::sync::Arc;
 use chrono::{DateTime, Utc};
 use tokio::sync::broadcast::Receiver;
 
-use crate::context::ServiceContext;
+use crate::board::{
+    lease, BoardPort, InProcessBoard, LeaseTerm, OwnerPresence, PreviewOf, RunContext,
+};
+use crate::context::{ServiceContext, TeamScope};
 use crate::db::MutationSource;
 use crate::events::ChangeEvent;
+use crate::identity::{ensure_solo, SoloIdentity};
+use crate::machine::MachineContext;
+use crate::paths::AppPaths;
+use crate::runner::{RunnerConfig, Starter};
+use crate::testing::machine::MemoryMachine;
 use crate::testing::{test_pool, TestClock};
 
 /// Where a [`TestContext`]'s clock starts unless the test says otherwise.
@@ -37,6 +45,13 @@ pub struct TestContext {
     /// The same instant the context's `Arc<dyn Clock>` reads — advance this and
     /// the code under test sees the new time.
     pub clock: TestClock,
+    /// The board's solo team, user and runner, from the same
+    /// [`ensure_solo`] the shell calls, so a test reads the ids rather than
+    /// querying for them.
+    pub solo: SoloIdentity,
+    /// This machine's own state, over a [`MemoryMachine`]. See
+    /// [`machine`](Self::machine).
+    machine: MachineContext,
 }
 
 impl TestContext {
@@ -49,22 +64,169 @@ impl TestContext {
     /// The same, with the clock pinned somewhere else — for a test whose subject
     /// is an absolute time, such as a usage limit's epoch `resetsAt`.
     pub async fn starting_at(start: DateTime<Utc>) -> Self {
-        let clock = TestClock::new(start);
+        Self::over(test_pool().await, TestClock::new(start)).await
+    }
+
+    /// The same, over a board database in the file `db_file`, through the
+    /// production [`db::connect`](crate::db::connect) pool: more than one
+    /// connection, so two callers really do run at once (task 043's race
+    /// cases). The in-memory pool has one connection and would serialise
+    /// them, proving nothing.
+    pub async fn over_file(db_file: &std::path::Path) -> Self {
+        let pool = crate::db::connect(db_file)
+            .await
+            .expect("open a file-backed board");
+        crate::db::migrate(&pool)
+            .await
+            .expect("migrate a file-backed board");
+        Self::over(pool, TestClock::new(test_epoch())).await
+    }
+
+    async fn over(pool: sqlx::SqlitePool, clock: TestClock) -> Self {
+        // Through the shell's own path rather than rows written here, so every
+        // service test runs against the identity a first launch creates (D28
+        // part 3).
+        let solo = ensure_solo(&pool, &clock)
+            .await
+            .expect("a fresh board must get a solo identity");
         // `Ui` because a service test stands in for the board unless it says
         // otherwise; a test about the MCP path re-sources with `with_source`,
-        // exactly as `mcp::build` does (ADR-0019).
+        // exactly as `mcp::build` does (ADR-0019). Scoped and acting exactly as
+        // the shell's context is.
         let context = ServiceContext::new(
-            test_pool().await,
+            pool,
             Arc::new(clock.clone()),
             MutationSource::Ui,
+            TeamScope::one(solo.team_id.clone()),
+            solo.user_id.clone(),
         );
         let changes = context.subscribe();
+        // The shell's shape (task 041): the board's own sender and the solo
+        // team, so a machine write reaches `changes` exactly as it reaches the
+        // window, and the same clock the board reads.
+        let machine = MachineContext {
+            store: Arc::new(MemoryMachine::new()),
+            clock: Arc::new(clock.clone()),
+            changes: context.changes.clone(),
+            event_team: solo.team_id.clone(),
+        };
 
         Self {
             context,
             changes,
             clock,
+            solo,
+            machine,
         }
+    }
+
+    /// The machine context over this test's [`MemoryMachine`], sharing the
+    /// test's clock, change channel and solo team (task 041).
+    ///
+    /// One store per harness, so what a test writes through it is what the
+    /// code under test reads back. A test that asserts on `runner.db` itself
+    /// lives in `crates/runner/tests/` instead; one here asserts on behaviour,
+    /// and says "the machine store".
+    pub fn machine(&self) -> &MachineContext {
+        &self.machine
+    }
+
+    /// The solo user asking the solo runner to start, at the machine or not
+    /// (ADR-0031 point 7): what a test hands a start door. Every production
+    /// door in solo is [`OwnerPresence::AtRunner`]; a test that wants the
+    /// unattended posture a recording was captured under asks for
+    /// [`OwnerPresence::Remote`].
+    pub fn starter(&self, presence: OwnerPresence) -> Starter<'_> {
+        Starter {
+            ctx: &self.context,
+            runner_id: &self.solo.runner_id,
+            presence,
+        }
+    }
+
+    /// Where this machine's store records `task_id`'s worktree, if anywhere:
+    /// what a test reads where it read `tasks.worktree_path` before task 066.
+    pub async fn worktree_path(&self, task_id: &str) -> Option<String> {
+        crate::machine::local::worktree_path(&self.machine, task_id)
+            .await
+            .expect("the machine store answers")
+    }
+
+    /// [`worktree::prepare`](crate::worktree::prepare) for `task_id`, the way
+    /// a runner calls it: under the solo lease, recording the path in this
+    /// test's machine store and the branch through an in-process board port
+    /// over this test's own context (task 066).
+    ///
+    /// The context `prepare` builds from, base included, is the board's
+    /// [`preview`](BoardPort::preview) of the task at the call (task 044). A
+    /// test whose subject is the base takes its context from `preview` or a
+    /// claim itself and calls [`prepare_worktree_from`](Self::prepare_worktree_from).
+    ///
+    /// The branch is fenced by a lease (task 043). A task the solo runner
+    /// already holds is prepared under its own lease; otherwise the test
+    /// holds one with no edge for the call and ends it after, so a test that
+    /// only wants a worktree does not have to claim the task, which would move
+    /// its run state.
+    pub async fn prepare_worktree(
+        &self,
+        task_id: &str,
+    ) -> crate::Result<crate::worktree::Worktree> {
+        let context = self
+            .preview_board()
+            .preview(task_id, PreviewOf::Run)
+            .await?;
+        self.prepare_worktree_from(&context).await
+    }
+
+    /// [`prepare_worktree`](Self::prepare_worktree), from a context the test
+    /// already holds: the task, the repository and the base all come from it.
+    pub async fn prepare_worktree_from(
+        &self,
+        context: &RunContext,
+    ) -> crate::Result<crate::worktree::Worktree> {
+        let board = self.preview_board();
+        let task_id = context.task.task.id.as_str();
+        let held = lease::state_of(&self.context, task_id).await?.lease;
+        if let Some(held) = held {
+            let lease =
+                crate::board::LeaseRef::new(task_id, held.generation, self.solo.team_id.clone());
+            return crate::worktree::prepare(&self.machine, &board, &lease, context).await;
+        }
+
+        let lease = lease::grant_for_test(&self.context, task_id, &self.solo.runner_id).await?;
+        let prepared = crate::worktree::prepare(&self.machine, &board, &lease, context).await;
+        lease::end_for_test(&self.context, &lease).await?;
+        prepared
+    }
+
+    /// The in-process board [`prepare_worktree`](Self::prepare_worktree)
+    /// previews and records the branch through.
+    fn preview_board(&self) -> InProcessBoard {
+        InProcessBoard::new(
+            self.context.clone(),
+            AppPaths::new(std::env::temp_dir()),
+            RunnerConfig::default().provider,
+            self.solo.runner_id.clone(),
+            LeaseTerm::Never,
+        )
+    }
+
+    /// The board port over this test's own context (seam-contract D31 point
+    /// 8), so what a test arranges through `context` is what the runner reads
+    /// through the port.
+    ///
+    /// The provider comes from `config` rather than being a parameter of its
+    /// own: a board built for another provider than the runner it serves hands
+    /// the planner the wrong catalogue, and nothing fails loudly (task 036's
+    /// Traps). Taking it from the config is what makes that unwritable here.
+    pub fn board(&self, paths: &AppPaths, config: &RunnerConfig) -> Arc<dyn BoardPort> {
+        Arc::new(InProcessBoard::new(
+            self.context.clone(),
+            paths.clone(),
+            config.provider.clone(),
+            self.solo.runner_id.clone(),
+            LeaseTerm::Never,
+        ))
     }
 }
 
@@ -78,11 +240,13 @@ mod tests {
     async fn the_receiver_is_listening_before_the_test_calls_anything() {
         let mut harness = TestContext::new().await;
 
-        harness.context.publish(ChangeEvent::Settings);
+        harness
+            .context
+            .publish(ChangeEvent::settings(harness.solo.team_id.clone()));
 
         assert_eq!(
             harness.changes.try_recv().expect("a waiting publication"),
-            ChangeEvent::Settings
+            ChangeEvent::settings(harness.solo.team_id.clone())
         );
     }
 

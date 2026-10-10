@@ -45,17 +45,36 @@
 //! [`SkipReason`], rather than being filtered out of it. ADR-0012 makes the
 //! per-repository opt-in the whole security posture, and a posture the user
 //! cannot see is one they cannot fix at 09:00 when nothing ran overnight.
+//!
+//! The one exception is a task this runner is not eligible for
+//! ([`board::lease::eligible`](crate::board::lease::eligible)): pinned to
+//! another runner, from task 043, or set to a model another provider claims,
+//! from task 067. It is left out of *this runner's* plan before positions are
+//! numbered, and carries no `SkipReason`, because it is not a problem with the
+//! card: another runner can claim it. Saying why is the card's (task 061).
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap};
+use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
 use serde::Serialize;
 
+use crate::board::lease::{self, Candidate, PhaseModels, Route, Verdict};
+use crate::board::{FreeCapacity, LeasePurpose};
+use crate::consent::ceiling::StrategyCeiling;
+use crate::consent::pieces::Composes;
+use crate::consent::{self, Composition};
 use crate::context::ServiceContext;
 use crate::db::{BoardColumn, RunState};
 use crate::error::Result;
-use crate::repo;
+use crate::events::RunnerId;
+use crate::review_loop::config as review_config;
+use crate::runner::provider::ProviderId;
 use crate::scheduler::inflight::Counts;
+use crate::strategy::catalogue::{catalogue_for_provider, Catalogue};
+use crate::strategy::effective_strategy;
+use crate::strategy::settings::{self as strategy_settings, StrategyDefaults};
+use crate::tasks::strategy::needs_planning;
 use crate::tasks::{self, TaskFilter, TaskSummary};
 
 /// Why the queue will not start a `ready` task it can otherwise see.
@@ -65,7 +84,7 @@ use crate::tasks::{self, TaskFilter, TaskSummary};
 /// colour, and only [`UnattendedRunsNotAllowed`](SkipReason::UnattendedRunsNotAllowed)
 /// is something the user has to act on before the queue can ever start the
 /// task.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum SkipReason {
     /// ADR-0012's per-repository opt-in is off. Un-opted repositories hold
@@ -101,6 +120,24 @@ pub enum SkipReason {
     /// own, because that is ADR-0011's `waiting_retry` path and task 014's
     /// policy, not a second automatic attempt at the same wall.
     NeedsAttention,
+    /// ADR-0032 point 2: the task is assigned to someone else, or is in the
+    /// pool of a team this runner does not take pool work from.
+    ///
+    /// Three variants in a closed set, each with `WaitingForRetry`'s
+    /// justification (D23 point 4): each persists until a person acts, and
+    /// each names a different act. This one is reassigning the card or
+    /// joining the pool.
+    NotEligible,
+    /// ADR-0032 point 3: a piece of the content the run would execute was
+    /// written by someone this runner's owner has neither accepted nor
+    /// trusts. The act is accepting, or trusting.
+    ConsentMissing,
+    /// ADR-0032 point 4: the team does not allow unattended runs in the
+    /// repository. The act is asking a team owner. Not
+    /// [`UnattendedRunsNotAllowed`](SkipReason::UnattendedRunsNotAllowed),
+    /// which since task 042 means only that this runner did not list the
+    /// repository, which its owner fixes on this machine.
+    ForbiddenByTeam,
 }
 
 impl SkipReason {
@@ -121,6 +158,13 @@ impl SkipReason {
             SkipReason::AlreadyInFlight => "already started",
             SkipReason::WaitingForRetry => "waiting to resume",
             SkipReason::NeedsAttention => "the last run did not succeed",
+            SkipReason::NotEligible => {
+                "assigned to someone else, or outside the pool this runner takes"
+            }
+            SkipReason::ConsentMissing => "waiting for you to accept a change",
+            SkipReason::ForbiddenByTeam => {
+                "the team does not allow unattended runs in this repository"
+            }
         }
     }
 }
@@ -147,8 +191,8 @@ pub struct QueueEntry {
     /// When ADR-0011's policy scheduled this task's next attempt.
     ///
     /// **Populated only for a task in `waiting_retry`**, which is what makes it
-    /// safe for `try_step` to read `resume_after.is_some()` as "this entry is a
-    /// resume": a task that failed last night and was started again by hand
+    /// safe for the `ClaimTarget::Next` body to read `resume_after.is_some()` as
+    /// "this entry is a resume": a task that failed last night and was started again by hand
     /// still has an old deadline on its last run, and copying it here
     /// unconditionally would make a fresh start look like a continuation.
     ///
@@ -158,13 +202,62 @@ pub struct QueueEntry {
     pub resume_after: Option<DateTime<Utc>>,
 }
 
-/// Every `ready` task in board order, with the reason the queue will pass over
-/// each one it cannot start.
+/// The runner a plan is drawn for: who it is, what it runs, and the
+/// repositories it lists on every `ClaimTarget::Next` (task 042's view, which
+/// task 043 gives the runner's identity).
+///
+/// `repositories` is the set this runner consented to run unattended in, read
+/// once per pass by
+/// [`machine::consented_repositories`](crate::machine::consented_repositories)
+/// (task 066). Not the board's `allow_unattended_runs`, which is the team
+/// ceiling since task 038 and is not this runner's to read (task 045): reading
+/// it would skip every repository registered from task 066 on, and keep
+/// offering one whose consent was withdrawn.
+///
+/// `provider` is what task 067's model rule reads in `lease::eligible`: a
+/// task whose model belongs to another provider is left out of this runner's
+/// plan.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RunnerView {
+    pub runner_id: RunnerId,
+    pub provider: ProviderId,
+    pub repositories: BTreeSet<String>,
+    /// The runner's strategy ceiling (task 045), which the claim carries and
+    /// `lease::eligible` refuses with. No ceiling unless the runner has one.
+    pub ceiling: StrategyCeiling,
+}
+
+impl RunnerView {
+    pub fn new(
+        runner_id: impl Into<RunnerId>,
+        provider: ProviderId,
+        repositories: impl IntoIterator<Item = String>,
+    ) -> Self {
+        Self {
+            runner_id: runner_id.into(),
+            provider,
+            repositories: repositories.into_iter().collect(),
+            ceiling: StrategyCeiling::default(),
+        }
+    }
+
+    /// The same view, judged against `ceiling`: what the runner store holds.
+    pub fn with_ceiling(self, ceiling: StrategyCeiling) -> Self {
+        Self { ceiling, ..self }
+    }
+}
+
+/// Every `ready` task in board order that `runner` may take, with the reason
+/// the queue will pass over each one it cannot start.
 ///
 /// Re-read from scratch on every pass of the queue loop — never a snapshot
 /// taken when the queue was started. That is what makes "a task dragged to the
 /// top mid-queue is picked up next" true rather than aspirational.
-pub async fn plan(ctx: &ServiceContext) -> Result<Vec<QueueEntry>> {
+///
+/// A task [`lease::eligible`] refuses `runner` (pinned to another runner, or
+/// set to another provider's model) is left out before positions are numbered, so the plan a card shows and the
+/// task `claim(Next)` takes agree. The claim transaction asks again.
+pub async fn plan(ctx: &ServiceContext, runner: &RunnerView) -> Result<Vec<QueueEntry>> {
     let ready = tasks::list_tasks(
         ctx,
         TaskFilter {
@@ -174,42 +267,167 @@ pub async fn plan(ctx: &ServiceContext) -> Result<Vec<QueueEntry>> {
     )
     .await?;
 
-    // One read of the repository table rather than one per task: a board of
-    // fifty cards is served by a handful of repositories, and this runs on
-    // every pass of the loop.
-    let opted_in: HashSet<String> = repo::list(ctx)
-        .await?
-        .into_iter()
-        .filter(repo::allows_unattended_runs)
-        .map(|repository| repository.id)
-        .collect();
-
     // One instant for the whole pass, not one per entry: two tasks whose
     // deadlines straddle the microsecond between two `now()` calls would
     // otherwise be judged against different clocks, and the plan a card renders
     // would not be the plan the batch was taken from.
     let now = ctx.clock.now();
 
-    let mut plan = Vec::with_capacity(ready.len());
-    let mut claimable = 0;
-    for summary in &ready {
-        let skip = skip_reason(summary, opted_in.contains(&summary.task.repository_id), now);
-        let queue_position = skip.is_none().then(|| {
-            claimable += 1;
-            claimable
-        });
+    // What eligibility's model rule reads, over the pool and before the
+    // connection below is held: the test pool has one connection.
+    let candidates = candidates(ctx, runner, &ready).await?;
 
-        plan.push(QueueEntry {
-            task_id: summary.task.id.clone(),
-            title: summary.task.title.clone(),
-            repository_id: summary.task.repository_id.clone(),
-            queue_position,
-            skip,
-            resume_after: scheduled_resume(summary),
-        });
+    // Acquired after the list, never across it: the test pool has one
+    // connection.
+    let mut conn = ctx.pool.acquire().await?;
+    let mut entries = Vec::with_capacity(ready.len());
+    for (summary, (composes, defaults, models, composition)) in ready.iter().zip(&candidates) {
+        let candidate = Candidate {
+            runner_id: &runner.runner_id,
+            provider: runner.provider,
+            catalogue: &defaults.catalogue,
+            models,
+            ceiling: &runner.ceiling,
+            composition,
+        };
+        let verdict = lease::eligible(&mut conn, &summary.task.id, &candidate, *composes).await?;
+        // 042's listed-repository check is the runner's half and speaks
+        // first; eligibility's reason fills an entry it leaves unskipped.
+        let listed = skip_reason(
+            summary,
+            runner.repositories.contains(&summary.task.repository_id),
+            now,
+        );
+        let (route, skip) = match verdict {
+            Verdict::Eligible(route) => (route, listed),
+            Verdict::Ineligible(ineligible) => match ineligible.skip_reason() {
+                Some(reason) => (Route::Assigned, listed.or(Some(reason))),
+                // Another runner can take it with nobody acting: not this
+                // runner's, and not a problem with the card.
+                None => continue,
+            },
+        };
+
+        entries.push((
+            route,
+            QueueEntry {
+                task_id: summary.task.id.clone(),
+                title: summary.task.title.clone(),
+                repository_id: summary.task.repository_id.clone(),
+                queue_position: None,
+                skip,
+                resume_after: scheduled_resume(summary),
+            },
+        ));
     }
 
-    Ok(plan)
+    // The owner's own tasks first, in board order, then the pool's (ADR-0032
+    // point 2). Stable, so board order holds within each.
+    entries.sort_by_key(|(route, _)| *route);
+    let mut claimable = 0;
+    Ok(entries
+        .into_iter()
+        .map(|(_, mut entry)| {
+            entry.queue_position = entry.skip.is_none().then(|| {
+                claimable += 1;
+                claimable
+            });
+            entry
+        })
+        .collect())
+}
+
+/// One repository's share of what eligibility reads: the catalogue the board
+/// resolves for the runner's provider in the repository's team, and the
+/// strategy defaults that decide a task's mode.
+struct RepositoryDefaults {
+    catalogue: Catalogue,
+    repository: StrategyDefaults,
+    global: StrategyDefaults,
+}
+
+/// For each task in `ready`, the purpose a claim would lease it as and what
+/// its phases would spawn with, so the plan asks [`lease::eligible`] the
+/// question the claim transaction will ask (task 067).
+///
+/// - A due retry resumes as the kind that was waiting (D29 point 3).
+/// - A fresh start is `strategy` when it needs planning, ADR-0016's inline
+///   planner, which the model rule exempts, and `implementation` otherwise.
+///
+/// The repository reads are made once per repository, as
+/// `tasks::service`'s own effective-strategy pass makes them, and a review's
+/// `review_model` is read only for a review waiting to resume.
+async fn candidates(
+    ctx: &ServiceContext,
+    runner: &RunnerView,
+    ready: &[TaskSummary],
+) -> Result<Vec<(Composes, Arc<RepositoryDefaults>, PhaseModels, Composition)>> {
+    let mut by_repository: HashMap<String, Arc<RepositoryDefaults>> = HashMap::new();
+    let mut candidates = Vec::with_capacity(ready.len());
+
+    for summary in ready {
+        let repository_id = &summary.task.repository_id;
+        let defaults = match by_repository.get(repository_id) {
+            Some(defaults) => Arc::clone(defaults),
+            None => {
+                let team_id = crate::repo::team_of(ctx, repository_id).await?;
+                let defaults = Arc::new(RepositoryDefaults {
+                    catalogue: catalogue_for_provider(ctx, &team_id, runner.provider).await?,
+                    repository: strategy_settings::repository_default(ctx, repository_id).await?,
+                    global: strategy_settings::global_default_for(ctx, &team_id).await?,
+                });
+                by_repository.insert(repository_id.clone(), Arc::clone(&defaults));
+                defaults
+            }
+        };
+
+        // What the claim would compose: `lease::claim` decides the same way.
+        let composes = match (scheduled_resume(summary), &summary.last_run) {
+            (Some(_), Some(run)) => Composes::Phase(run.kind.into()),
+            _ => {
+                let mode =
+                    effective_strategy(&summary.task, &defaults.repository, &defaults.global).mode;
+                if needs_planning(&summary.task, mode) {
+                    Composes::PlannerThenImplementation
+                } else {
+                    Composes::Phase(LeasePurpose::Implementation)
+                }
+            }
+        };
+        let (review, review_effort) = match composes.purpose() {
+            LeasePurpose::Review => {
+                let config = review_config::resolve(ctx, &summary.task.id, repository_id)
+                    .await?
+                    .config;
+                (config.review_model, config.review_effort)
+            }
+            _ => (None, None),
+        };
+        // What the composers would include besides the revisions: a base
+        // commit only for a task with dependencies, and findings only for a
+        // review or fix waiting to resume, so a board of plain tasks reads
+        // nothing more here.
+        let findings = composes.reads_findings();
+        let composition = if findings || summary.dependency_count > 0 {
+            consent::composition(ctx, &summary.task.id, findings).await?
+        } else {
+            Composition::default()
+        };
+
+        candidates.push((
+            composes,
+            defaults,
+            PhaseModels {
+                strategy: summary.effective_model.clone(),
+                review,
+                effort: summary.effective_effort.clone(),
+                review_effort,
+            },
+            composition,
+        ));
+    }
+
+    Ok(candidates)
 }
 
 /// The deadline ADR-0011's policy wrote for this task's next attempt, or `None`
@@ -280,8 +498,8 @@ pub fn next_batch<'a>(
         if entry.skip.is_some() {
             continue;
         }
-        // A lease is taken *before* the claim (see `queue`'s header), so
-        // between those two points a task the button already holds still reads
+        // A manual start takes its slot *before* its claim, so between those
+        // two points a task the button already holds still reads
         // `idle` on the board and carries no skip reason. Passing over it here
         // costs nothing — `acquire` would refuse it anyway — but counting its
         // slot as free would hand the batch one more entry than there is room
@@ -310,6 +528,26 @@ pub fn next_batch<'a>(
     }
 
     batch
+}
+
+/// The entry a `ClaimTarget::Next` claims first: the first in board order with
+/// no skip reason and a free slot in its repository, or `None` when there is
+/// none or `capacity.total` is zero (task 042).
+///
+/// `capacity` is what the runner has *free*, already net of its own in-flight
+/// runs, so nothing here subtracts: a `per_repository` of one is one more run,
+/// not a cap of one. A repository missing from it has no free slot, the
+/// reading [`next_batch`] gives a missing key ("never unbounded"). Capacity is
+/// still not a [`SkipReason`], for the reason `next_batch` gives.
+pub fn first_startable<'a>(
+    plan: &'a [QueueEntry],
+    capacity: &FreeCapacity,
+) -> Option<&'a QueueEntry> {
+    if capacity.total == 0 {
+        return None;
+    }
+    plan.iter()
+        .find(|entry| entry.skip.is_none() && capacity.for_repository(&entry.repository_id) > 0)
 }
 
 /// The task the queue would claim next, or `None` when there is nothing to do.
@@ -363,7 +601,7 @@ pub fn skip_reason(
     match task.task.run_state {
         RunState::Idle => None,
         RunState::WaitingRetry => match scheduled_resume(task) {
-            // Due: this is ours to claim, through `claim::claim_retry`.
+            // Due: this is ours to claim, as a resume (`board::lease::claim`).
             Some(at) if at <= now => None,
             Some(_) => Some(SkipReason::WaitingForRetry),
             // Waiting on nothing. Whoever put it here did not schedule a
@@ -384,6 +622,7 @@ mod tests {
     use crate::strategy::StrategyOrigin;
     use crate::tasks::LastRunSummary;
     use pretty_assertions::assert_eq;
+    use std::collections::HashSet;
 
     /// The instant every test below judges a deadline against.
     const NOW: &str = "2026-08-20T02:00:00Z";
@@ -405,7 +644,6 @@ mod tests {
                 position: 1.0,
                 run_state,
                 branch: None,
-                worktree_path: None,
                 strategy_mode: StrategyMode::Default,
                 model: None,
                 effort: None,
@@ -416,6 +654,11 @@ mod tests {
                 updated_at: at("2026-08-20T12:00:00Z"),
                 source: MutationSource::Ui,
                 archived_at: None,
+                created_by: None,
+                assignee_id: None,
+                assigned_by: None,
+                plan_revision: 1,
+                plan_updated_by: None,
             },
             link_count: 0,
             dependency_count: 0,
@@ -429,6 +672,7 @@ mod tests {
             effective_model: None,
             effective_effort: None,
             effective_origin: StrategyOrigin::ClaudeCode,
+            review_loop: None,
         }
     }
 
@@ -440,6 +684,7 @@ mod tests {
     fn waiting(resume_after: Option<DateTime<Utc>>) -> TaskSummary {
         TaskSummary {
             last_run: Some(LastRunSummary {
+                kind: crate::db::RunKind::Implementation,
                 status: RunStatus::Failed,
                 exit_class: Some(crate::db::ExitClass::UsageLimit),
                 ended_at: Some(at("2026-08-20T01:59:00Z")),
@@ -695,7 +940,7 @@ mod tests {
     }
 
     #[test]
-    fn a_task_something_already_holds_a_lease_on_never_takes_a_slot() {
+    fn a_task_something_already_holds_a_slot_for_never_takes_one() {
         // The window between `acquire` and the claim: a task the button holds
         // still reads `idle` on the board and carries no skip reason. Counting
         // its slot as free would hand the batch one more entry than there is
@@ -757,6 +1002,76 @@ mod tests {
             next_batch(&plan, &over, 2, &caps(&[])),
             Vec::<&QueueEntry>::new()
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // first_startable (task 042, `ClaimTarget::Next`)
+    // -----------------------------------------------------------------------
+
+    fn free(total: usize, pairs: &[(&str, usize)]) -> FreeCapacity {
+        FreeCapacity {
+            total,
+            per_repository: pairs
+                .iter()
+                .map(|(id, slots)| ((*id).to_string(), *slots))
+                .collect(),
+        }
+    }
+
+    fn first<'a>(plan: &'a [QueueEntry], capacity: &FreeCapacity) -> Option<&'a str> {
+        first_startable(plan, capacity).map(|entry| entry.task_id.as_str())
+    }
+
+    #[test]
+    fn the_first_startable_entry_is_taken_in_board_order() {
+        let plan = vec![
+            in_repository("first", "a"),
+            in_repository("second", "b"),
+            in_repository("third", "c"),
+        ];
+
+        assert_eq!(
+            first(&plan, &free(3, &[("a", 1), ("b", 1), ("c", 1)])),
+            Some("first")
+        );
+    }
+
+    #[test]
+    fn a_skipped_entry_is_passed_over_for_the_next_startable_one() {
+        let plan = vec![
+            QueueEntry {
+                repository_id: "a".to_string(),
+                ..entry("skipped", Some(SkipReason::NeedsAttention), None)
+            },
+            in_repository("startable", "a"),
+        ];
+
+        assert_eq!(first(&plan, &free(1, &[("a", 1)])), Some("startable"));
+    }
+
+    #[test]
+    fn a_repository_with_no_free_slot_is_stepped_over() {
+        let plan = vec![in_repository("a1", "a"), in_repository("b1", "b")];
+
+        assert_eq!(first(&plan, &free(2, &[("a", 0), ("b", 1)])), Some("b1"));
+        assert_eq!(first(&plan, &free(2, &[("a", 0), ("b", 0)])), None);
+    }
+
+    #[test]
+    fn a_repository_missing_from_the_free_slots_has_none() {
+        // The conservative reading of a missing key, applied to a value that
+        // is already net: never "unbounded".
+        let plan = vec![in_repository("gone1", "gone"), in_repository("b1", "b")];
+
+        assert_eq!(first(&plan, &free(4, &[("b", 1)])), Some("b1"));
+        assert_eq!(first(&plan[..1], &free(4, &[("b", 1)])), None);
+    }
+
+    #[test]
+    fn no_free_capacity_starts_nothing_whatever_the_repositories_say() {
+        let plan = vec![in_repository("first", "a")];
+
+        assert_eq!(first(&plan, &free(0, &[("a", 4)])), None);
     }
 
     #[test]

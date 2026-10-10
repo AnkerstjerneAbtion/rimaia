@@ -25,11 +25,13 @@ use std::path::{Path, PathBuf};
 
 use serde::Serialize;
 
-use crate::context::ServiceContext;
-use crate::db::Repository;
+use crate::context::{ScopedTx, ServiceContext};
+use crate::db::{OnArchive, Repository};
 use crate::error::{Error, Result};
-use crate::events::ChangeEvent;
+use crate::events::{ChangeEvent, TeamId};
+use crate::machine::{self, Checkout, CheckoutPatch, CheckoutView, MachineContext};
 use crate::scheduler::CONCURRENCY_CEILING;
+use crate::tasks::Patch;
 
 /// What registering a new local repository needs.
 ///
@@ -44,21 +46,19 @@ pub struct NewRepository {
     pub worktree_root: Option<String>,
 }
 
-/// An edit to an already-registered repository.
+/// An edit to the board's half of an already-registered repository.
 ///
 /// A patch, not a replacement: every field left `None` is left unchanged, the
 /// same shape task 004's task edits use and for the same reason — an "edit
 /// default branch" form has no business also overwriting the name.
+///
+/// Only what the board holds. The worktree root and the per-repository cap are
+/// this machine's checkout since task 066, and have setters of their own:
+/// [`set_worktree_root`] and [`set_max_concurrency`].
 #[derive(Debug, Clone, Default)]
 pub struct RepositoryPatch {
     pub name: Option<String>,
     pub default_branch: Option<String>,
-    pub worktree_root: Option<String>,
-    /// ADR-0010's per-repository opt-out, in the number of runs this repository
-    /// will hold at once. Held to [`MIN_REPOSITORY_CONCURRENCY`] and
-    /// [`CONCURRENCY_CEILING`] — see [`set_max_concurrency`], which is the door
-    /// the Settings control and the MCP tool both use.
-    pub max_concurrency: Option<i64>,
 }
 
 /// What live inspection of a repository's remote found (task 003's "detect
@@ -76,62 +76,125 @@ pub struct RemoteInfo {
     pub gh_ready: Option<bool>,
 }
 
-/// Every registered repository, alphabetically — the order the Settings list
-/// shows them in.
+/// Every repository the context's one team registered, alphabetically — the
+/// order the Settings list shows them in.
+///
+/// Entity-less, so it acts on one team (ADR-0035 point 2): a context that
+/// reaches several is refused rather than handed a mixed list.
 pub async fn list(ctx: &ServiceContext) -> Result<Vec<Repository>> {
+    let team_id = ctx.scope.sole()?;
     let repositories = sqlx::query_as!(
         Repository,
         r#"
-        SELECT id, name, path, default_branch, worktree_root, allow_unattended_runs,
-               max_concurrency, created_at AS "created_at: chrono::DateTime<chrono::Utc>",
-               credential_login, credential_label,
-               credential_added_at AS "credential_added_at: chrono::DateTime<chrono::Utc>",
-               on_archive AS "on_archive: crate::db::OnArchive", on_archive_script
+        SELECT id, name, default_branch, allow_unattended_runs,
+               created_at AS "created_at: chrono::DateTime<chrono::Utc>"
         FROM repositories
+        WHERE team_id = ?1
         ORDER BY name ASC, created_at ASC
-        "#
+        "#,
+        team_id,
     )
     .fetch_all(&ctx.pool)
     .await?;
     Ok(repositories)
 }
 
-/// One repository by id. `Error::not_found` when there is none — task 003's
-/// removal and edit paths both start here, so both get that message for free
-/// rather than reimplementing "does this id exist".
+/// This machine's checkouts of the repositories the context's one team holds,
+/// ordered by repository id: what `list_checkouts` answers, through both
+/// doors (task 066).
+///
+/// A checkout of a repository the caller cannot see is left out, so one
+/// machine shared by two teams' clones tells neither about the other (ADR-0029
+/// point 5); in solo that is every checkout. The board is read through
+/// [`list`], the named read a local handler may make (D32's 2026-10-04
+/// amendment).
+pub async fn checkouts(
+    ctx: &ServiceContext,
+    machine: &MachineContext,
+) -> Result<Vec<CheckoutView>> {
+    let visible: std::collections::HashSet<String> = list(ctx)
+        .await?
+        .into_iter()
+        .map(|repository| repository.id)
+        .collect();
+    Ok(machine
+        .store
+        .list_checkouts()
+        .await?
+        .into_iter()
+        .filter(|checkout| visible.contains(&checkout.repository_id))
+        .map(CheckoutView::from)
+        .collect())
+}
+
+/// One repository by id. `Error::not_found` when there is none in the
+/// context's scope — task 003's removal and edit paths both start here, so
+/// both get that message for free rather than reimplementing "does this id
+/// exist", and another team's repository gets exactly the same one.
 pub async fn get(ctx: &ServiceContext, id: &str) -> Result<Repository> {
-    fetch_repository_row(&ctx.pool, id).await
+    fetch_repository_row(&ctx.pool, &ctx.scope.json(), id).await
 }
 
 /// The one place a repository row is read back — used both inside a
 /// transaction (`&mut *tx`, before a write that depends on the current row,
 /// the way [`update`] does) and against the bare pool (a plain [`get`]).
-/// Generic over [`sqlx::Executor`] for the same reason
-/// `tasks::service::fetch_task_row` is: nothing here requires the caller's
-/// transaction, so the flexibility is free.
-async fn fetch_repository_row<'e, E>(executor: E, id: &str) -> Result<Repository>
+///
+/// Scoped in the query, never fetched and compared after: `scope` is
+/// [`TeamScope::json`](crate::TeamScope::json), and a row outside it is not
+/// there.
+async fn fetch_repository_row<'e, E>(executor: E, scope: &str, id: &str) -> Result<Repository>
 where
     E: sqlx::Executor<'e, Database = sqlx::Sqlite>,
 {
     sqlx::query_as!(
         Repository,
         r#"
-        SELECT id, name, path, default_branch, worktree_root, allow_unattended_runs,
-               max_concurrency, created_at AS "created_at: chrono::DateTime<chrono::Utc>",
-               credential_login, credential_label,
-               credential_added_at AS "credential_added_at: chrono::DateTime<chrono::Utc>",
-               on_archive AS "on_archive: crate::db::OnArchive", on_archive_script
+        SELECT id, name, default_branch, allow_unattended_runs,
+               created_at AS "created_at: chrono::DateTime<chrono::Utc>"
         FROM repositories
-        WHERE id = ?1
+        WHERE id = ?1 AND team_id IN (SELECT value FROM json_each(?2))
         "#,
         id,
+        scope,
     )
     .fetch_optional(executor)
     .await?
     .ok_or_else(|| Error::not_found(format!("no repository with id {id}")))
 }
 
-/// Validates and registers a local repository.
+/// The team repository `id` belongs to, inside the caller's transaction, in
+/// the sentence [`fetch_repository_row`] uses for one the scope does not hold.
+///
+/// What a task created in it is owned by (ADR-0029 point 1), and what an
+/// event about it names (ADR-0034 point 3).
+pub(crate) async fn team_of_repository(tx: &mut ScopedTx, id: &str) -> Result<TeamId> {
+    let scope = tx.scope().json();
+    select_team(&mut **tx, &scope, id).await
+}
+
+/// [`team_of_repository`] over the pool: the team whose settings a
+/// repository-level read or write goes to.
+pub(crate) async fn team_of(ctx: &ServiceContext, id: &str) -> Result<TeamId> {
+    select_team(&ctx.pool, &ctx.scope.json(), id).await
+}
+
+async fn select_team<'e, E>(executor: E, scope: &str, id: &str) -> Result<TeamId>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Sqlite>,
+{
+    sqlx::query_scalar!(
+        "SELECT team_id FROM repositories
+         WHERE id = ?1 AND team_id IN (SELECT value FROM json_each(?2))",
+        id,
+        scope,
+    )
+    .fetch_optional(executor)
+    .await?
+    .ok_or_else(|| Error::not_found(format!("no repository with id {id}")))
+}
+
+/// Validates and registers a local repository: the board's row, then this
+/// machine's checkout of it.
 ///
 /// `worktrees_dir` is the shell-resolved `<app-data>/worktrees`
 /// ([`crate::paths::AppPaths::worktrees_dir`]) — core derives paths and never
@@ -146,23 +209,33 @@ where
 /// use validating a default branch in a directory that turned out not to be
 /// a repository at all.
 ///
-/// Two more checks the schema comment on `repositories.path` delegated to
-/// this task: a directory already registered under another row is refused
+/// Two more checks: a clone this machine already has a checkout of is refused
 /// rather than silently duplicated (checked first, right after
-/// canonicalization — it needs no git introspection, so there is no reason
-/// to pay for that before ruling out the cheaper problem), and a
-/// caller-supplied `name` or `worktree_root` is held to the same non-blank
-/// rule [`update`] already enforces — a blank value must not be storable
-/// through one door and refused through the other (ADR-0006).
+/// canonicalization — it needs no git introspection), and a caller-supplied
+/// `name` or `worktree_root` is held to the same non-blank rule the setters
+/// enforce — a blank value must not be storable through one door and refused
+/// through the other (ADR-0006).
+///
+/// A local command in solo until task 054 splits it (D32's appendix). The
+/// board's row names no retired column, so its `path` and `worktree_root` are
+/// `NULL` and the rest take their defaults; everything about the clone is
+/// this machine's [`Checkout`] (ADR-0033 point 2).
 pub async fn register(
     ctx: &ServiceContext,
+    machine: &MachineContext,
     worktrees_dir: &Path,
     new: NewRepository,
 ) -> Result<Repository> {
+    // A repository is the root of what a team owns, so there is no parent row
+    // to take its team from: the request has to name exactly one (ADR-0029
+    // point 5). Read before anything else, so a scope of several teams is
+    // refused rather than half-applied.
+    let team_id = ctx.scope.sole()?.clone();
+
     let requested = Path::new(&new.path);
     let canonical = validate_directory(requested).await?;
     let path = path_to_string(&canonical)?;
-    ensure_not_already_registered(ctx, &path).await?;
+    ensure_not_already_registered(machine, &path).await?;
     validate_is_a_registrable_git_repository(&canonical).await?;
     validate_has_at_least_one_commit(&canonical).await?;
     let default_branch = resolve_default_branch(&canonical).await?;
@@ -173,7 +246,7 @@ pub async fn register(
     };
     let worktree_root = match new.worktree_root {
         Some(root) => require_non_empty(root, "worktree root")?,
-        None => path_to_string(&worktrees_dir.join(naming::slugify(&name)))?,
+        None => default_worktree_root(worktrees_dir, &name)?,
     };
 
     let id = crate::db::new_id();
@@ -181,38 +254,58 @@ pub async fn register(
 
     sqlx::query!(
         r#"
-        INSERT INTO repositories
-            (id, name, path, default_branch, worktree_root, allow_unattended_runs, created_at)
-        VALUES (?1, ?2, ?3, ?4, ?5, 0, ?6)
+        INSERT INTO repositories (id, team_id, name, default_branch, created_at)
+        VALUES (?1, ?2, ?3, ?4, ?5)
         "#,
         id,
+        team_id,
         name,
-        path,
         default_branch,
-        worktree_root,
         created_at,
     )
     .execute(&ctx.pool)
     .await?;
 
-    // Publish before the read-back: the row is already committed (this
-    // insert runs in autocommit), so a failure in `get` below must not cost
-    // the notification for a mutation that already happened (ADR-0018).
-    ctx.publish(ChangeEvent::repositories([id.clone()]));
-    let repository = get(ctx, &id).await?;
-    Ok(repository)
+    // Publish before the checkout: the row is already committed (this insert
+    // runs in autocommit), so a failure below must not cost the notification
+    // for a mutation that already happened (ADR-0018).
+    ctx.publish(ChangeEvent::repositories(team_id, [id.clone()]));
+
+    let checkout = Checkout {
+        repository_id: id.clone(),
+        path,
+        worktree_root,
+        max_concurrency: MIN_REPOSITORY_CONCURRENCY,
+        unattended_consent: false,
+        on_archive: OnArchive::None,
+        on_archive_script: None,
+        credential_login: None,
+        credential_label: None,
+        credential_added_at: None,
+        created_at,
+    };
+    machine::local::insert_checkout(machine, &checkout).await?;
+
+    get(ctx, &id).await
 }
 
-/// The migration's own delegated question, answered: whether `path` may be
-/// registered twice. It may not — two rows naming one directory would give
-/// the Settings list two identical entries, and let task 007 create
-/// worktrees for "different" repositories against the one git repository.
-async fn ensure_not_already_registered(ctx: &ServiceContext, path: &str) -> Result<()> {
-    let count: i64 = sqlx::query_scalar!("SELECT count(*) FROM repositories WHERE path = ?1", path)
-        .fetch_one(&ctx.pool)
-        .await?;
+/// Whether `path` may be registered twice. It may not — two checkouts naming
+/// one directory would give the Settings list two identical entries, and let
+/// task 007 create worktrees for "different" repositories against the one git
+/// repository.
+///
+/// Checked against this machine's checkouts, which is where a clone lives
+/// since task 066, rather than against the board. One clone mapped to two
+/// teams' repositories is task 054's to allow by remote, not this check's.
+async fn ensure_not_already_registered(machine: &MachineContext, path: &str) -> Result<()> {
+    let taken = machine
+        .store
+        .list_checkouts()
+        .await?
+        .iter()
+        .any(|checkout| checkout.path == path);
 
-    if count > 0 {
+    if taken {
         return Err(Error::invalid(format!("{path} is already registered")));
     }
     Ok(())
@@ -229,8 +322,9 @@ async fn ensure_not_already_registered(ctx: &ServiceContext, path: &str) -> Resu
 /// server and the scheduler as writers that can all touch a repository "at
 /// the same moment").
 pub async fn update(ctx: &ServiceContext, id: &str, patch: RepositoryPatch) -> Result<Repository> {
-    let mut tx = ctx.pool.begin().await?;
-    let mut repository = fetch_repository_row(&mut *tx, id).await?;
+    let mut tx = ctx.begin().await?;
+    let scope = tx.scope().json();
+    let mut repository = fetch_repository_row(&mut *tx, &scope, id).await?;
 
     if let Some(name) = patch.name {
         repository.name = require_non_empty(name, "name")?;
@@ -238,35 +332,29 @@ pub async fn update(ctx: &ServiceContext, id: &str, patch: RepositoryPatch) -> R
     if let Some(default_branch) = patch.default_branch {
         repository.default_branch = require_non_empty(default_branch, "default branch")?;
     }
-    if let Some(worktree_root) = patch.worktree_root {
-        repository.worktree_root = require_non_empty(worktree_root, "worktree root")?;
-    }
-    if let Some(max_concurrency) = patch.max_concurrency {
-        repository.max_concurrency = require_usable_concurrency(max_concurrency)?;
-    }
 
-    sqlx::query!(
+    let team_id = sqlx::query_scalar!(
         r#"
         UPDATE repositories
-        SET name = ?1, default_branch = ?2, worktree_root = ?3, max_concurrency = ?4
-        WHERE id = ?5
+        SET name = ?1, default_branch = ?2
+        WHERE id = ?3
+        RETURNING team_id
         "#,
         repository.name,
         repository.default_branch,
-        repository.worktree_root,
-        repository.max_concurrency,
         id,
     )
-    .execute(&mut *tx)
+    .fetch_one(&mut *tx)
     .await?;
 
     tx.commit().await?;
 
-    ctx.publish(ChangeEvent::repositories([id.to_string()]));
+    ctx.publish(ChangeEvent::repositories(team_id, [id.to_string()]));
     Ok(repository)
 }
 
-/// Flips ADR-0012's per-repository opt-in to unattended runs.
+/// Flips this runner's consent to unattended runs in one repository (ADR-0012,
+/// ADR-0032 point 4).
 ///
 /// The confirmation dialog that states plainly what enabling this permits —
 /// "the agent can run any command in this repository's worktree, including
@@ -274,24 +362,46 @@ pub async fn update(ctx: &ServiceContext, id: &str, patch: RepositoryPatch) -> R
 /// wording) — is the caller's job. This function is the explicit act itself,
 /// called only once the user has agreed to that, never the thing that
 /// decides whether to ask.
+///
+/// Writes the checkout's `unattended_consent` and nothing else. The board's
+/// `allow_unattended_runs` is the team ceiling, which task 045 gives its own
+/// command; neither this nor any reader before 045 touches it.
 pub async fn set_allow_unattended_runs(
     ctx: &ServiceContext,
+    machine: &MachineContext,
     id: &str,
     allow: bool,
-) -> Result<Repository> {
-    let mut repository = get(ctx, id).await?;
+) -> Result<CheckoutView> {
+    let repository = get(ctx, id).await?;
+    let patch = CheckoutPatch {
+        unattended_consent: Some(allow),
+        ..CheckoutPatch::default()
+    };
+    Ok(machine::local::patch_checkout(machine, &repository, &patch)
+        .await?
+        .into())
+}
 
-    sqlx::query!(
-        "UPDATE repositories SET allow_unattended_runs = ?1 WHERE id = ?2",
-        allow,
-        id,
-    )
-    .execute(&ctx.pool)
-    .await?;
-
-    repository.allow_unattended_runs = allow;
-    ctx.publish(ChangeEvent::repositories([id.to_string()]));
-    Ok(repository)
+/// Moves where this machine creates the repository's worktrees.
+///
+/// Its own command since task 066, when the root left `update_repository`'s
+/// patch: it is this machine's setting, not the board's (D32's appendix).
+/// Held to the non-blank rule [`register`] applies to a chosen root.
+pub async fn set_worktree_root(
+    ctx: &ServiceContext,
+    machine: &MachineContext,
+    id: &str,
+    worktree_root: String,
+) -> Result<CheckoutView> {
+    let worktree_root = require_non_empty(worktree_root, "worktree root")?;
+    let repository = get(ctx, id).await?;
+    let patch = CheckoutPatch {
+        worktree_root: Some(worktree_root),
+        ..CheckoutPatch::default()
+    };
+    Ok(machine::local::patch_checkout(machine, &repository, &patch)
+        .await?
+        .into())
 }
 
 /// The smallest per-repository cap that means anything: a repository that will
@@ -316,20 +426,24 @@ pub const MIN_REPOSITORY_CONCURRENCY: i64 = 1;
 /// clamped by [`scheduler::capacity`] rather than stopping a night's queue.
 ///
 /// [`scheduler::capacity`]: crate::scheduler::capacity
+///
+/// A per-runner cap since task 066 (ADR-0031 point 6), so it is written to this
+/// machine's checkout.
 pub async fn set_max_concurrency(
     ctx: &ServiceContext,
+    machine: &MachineContext,
     id: &str,
     max_concurrency: i64,
-) -> Result<Repository> {
-    update(
-        ctx,
-        id,
-        RepositoryPatch {
-            max_concurrency: Some(max_concurrency),
-            ..RepositoryPatch::default()
-        },
-    )
-    .await
+) -> Result<CheckoutView> {
+    let max_concurrency = require_usable_concurrency(max_concurrency)?;
+    let repository = get(ctx, id).await?;
+    let patch = CheckoutPatch {
+        max_concurrency: Some(max_concurrency),
+        ..CheckoutPatch::default()
+    };
+    Ok(machine::local::patch_checkout(machine, &repository, &patch)
+        .await?
+        .into())
 }
 
 /// Holds a per-repository cap to the range that has a meaning, naming both
@@ -346,23 +460,35 @@ fn require_usable_concurrency(max_concurrency: i64) -> Result<i64> {
     Ok(max_concurrency)
 }
 
-/// Whether `repository` may be used to start a task unattended (ADR-0012).
-/// A plain read of the flag, named so a call site reads as a question rather
-/// than a field access — [`ensure_unattended_runs_allowed`] is the version
-/// that turns "no" into the `Error` a caller can propagate directly.
-pub fn allows_unattended_runs(repository: &Repository) -> bool {
-    repository.allow_unattended_runs
+/// Whether this runner consented to unattended runs in `checkout`'s repository
+/// (ADR-0012, ADR-0032 point 4). A plain read of the flag, named so a call
+/// site reads as a question rather than a field access —
+/// [`ensure_unattended_runs_allowed`] is the version that turns "no" into the
+/// `Error` a caller can propagate directly.
+pub fn allows_unattended_runs(checkout: &Checkout) -> bool {
+    checkout.unattended_consent
 }
 
-/// Refuses to let a task start unless its repository has opted in to
-/// unattended runs. The runner (task 008) and the scheduler (task 009) both
-/// call this rather than re-deriving the rule, so a repository is runnable —
-/// or not — the same way from whichever path asks (ADR-0006), and the run
-/// button's explanation is this message rather than a second one invented at
-/// the call site.
-pub fn ensure_unattended_runs_allowed(repository: &Repository) -> Result<()> {
-    if repository.allow_unattended_runs {
-        Ok(())
+/// Refuses to let a task start unless this runner consented to unattended runs
+/// in its repository, and answers the checkout a run then works in. The
+/// starter (task 008) and the runner both call this rather than re-deriving
+/// the rule, so a repository is runnable — or not — the same way from
+/// whichever path asks (ADR-0006), and the run button's explanation is this
+/// message rather than a second one invented at the call site.
+///
+/// The runner's half only (D31's table). A repository with no checkout here
+/// is refused as [`machine::not_set_up`]; the team ceiling is the claim's
+/// (`board::lease::eligible`, task 045). Every spawn path calls this again at
+/// the last point before the agent process starts, because the board is not
+/// trusted to have honoured the repositories a runner listed (ADR-0032 point
+/// 4).
+pub async fn ensure_unattended_runs_allowed(
+    machine: &MachineContext,
+    repository: &Repository,
+) -> Result<Checkout> {
+    let checkout = machine::checkout_of(machine, repository).await?;
+    if checkout.unattended_consent {
+        Ok(checkout)
     } else {
         Err(Error::invalid(format!(
             "\"{}\" has not enabled unattended agent runs. Enable it in Settings → Repositories before starting tasks here.",
@@ -371,20 +497,92 @@ pub fn ensure_unattended_runs_allowed(repository: &Repository) -> Result<()> {
     }
 }
 
+/// Sets ADR-0032 point 4's team ceiling for a repository: whether the team
+/// allows unattended runs in it at all. The board command D32 promises for
+/// task 045; `machine::set_repository_unattended_runs` stays the runner's own
+/// consent, and stays local.
+///
+/// It requires the `Owner` role in the repository's team (ADR-0029's roles
+/// table), the first role check, which task 051 generalises: a member is
+/// refused as `Invalid`. A personal team has no ceiling, because its owner and
+/// the machine's owner are one person, so it is refused there too.
+#[tracing::instrument(
+    skip_all,
+    fields(user_id = ctx.actor.as_str(), repository_id = %repository_id)
+)]
+pub async fn set_repository_unattended_ceiling(
+    ctx: &ServiceContext,
+    repository_id: &str,
+    allowed: bool,
+) -> Result<Repository> {
+    let mut tx = ctx.begin_immediate().await?;
+    let team_id = team_of_repository(&mut tx, repository_id).await?;
+    let team = sqlx::query!(
+        r#"SELECT t.personal_user_id, m.role AS "role?"
+             FROM teams t
+             LEFT JOIN team_memberships m ON m.team_id = t.id AND m.user_id = ?2
+            WHERE t.id = ?1"#,
+        team_id,
+        ctx.actor,
+    )
+    .fetch_one(&mut *tx)
+    .await?;
+    if team.personal_user_id.is_some() {
+        return Err(Error::invalid(
+            crate::consent::personal_team_has_no_ceiling(),
+        ));
+    }
+    if team.role.as_deref() != Some(crate::identity::Role::Owner.as_str()) {
+        return Err(Error::invalid(crate::consent::ceiling_needs_an_owner()));
+    }
+    sqlx::query!(
+        "UPDATE repositories SET allow_unattended_runs = ?1 WHERE id = ?2",
+        allowed,
+        repository_id,
+    )
+    .execute(&mut *tx)
+    .await?;
+    tx.commit().await?;
+
+    ctx.publish(ChangeEvent::repositories(
+        team_id,
+        [repository_id.to_string()],
+    ));
+    get(ctx, repository_id).await
+}
+
 /// Removes a repository. Refused, naming how many, when any task still
 /// references it — the schema's `ON DELETE RESTRICT` is the backstop for a
 /// writer that is not this function (the MCP server, or the user with the
-/// `sqlite3` CLI); this is the message the user actually reads.
+/// `sqlite3` CLI); this is the message the user actually reads. The refusal
+/// comes before any write in either store.
 ///
-/// It also deletes the repository's strategy default, which lives in `settings`
-/// under a key rather than in a column (seam-contract D17.1). A settings key is
-/// not a foreign key and nothing cascades, so this is the only thing standing
-/// between removing a repository and leaving configuration behind that no
-/// screen will ever show again. Inside the transaction, so a removal refused
-/// two statements later has not thrown that configuration away on its way to
-/// the refusal.
-pub async fn remove(ctx: &ServiceContext, id: &str) -> Result<()> {
-    let mut tx = ctx.pool.begin().await?;
+/// Given a machine, it then forgets every worktree record of the repository
+/// and removes the checkout (task 066). Each such record belongs to a task the
+/// board already deleted, because the refusal above passed; `delete_task`
+/// removes no worktree, so they exist on real installs, and the checkout's
+/// `RESTRICT` would otherwise refuse its removal and orphan it. The
+/// directories themselves stay on disk, as a deleted task's always have. The
+/// shell passes `Some`; a server, which has no machine, `None`.
+///
+/// It also deletes the repository's strategy default, which lives in
+/// `team_settings` under a key rather than in a column (seam-contract D17.1).
+/// A settings key is not a foreign key and nothing cascades, so this is the
+/// only thing standing between removing a repository and leaving configuration
+/// behind that no screen will ever show again. In the same transaction as the
+/// repository's delete, so a refused removal has not thrown that configuration
+/// away on its way to the refusal, and the removal announces only itself.
+pub async fn remove(
+    ctx: &ServiceContext,
+    machine: Option<&MachineContext>,
+    id: &str,
+) -> Result<()> {
+    let mut tx = ctx.begin().await?;
+
+    // Looked up first, in the scope, so another team's repository is refused
+    // as a missing one rather than with a count of tasks it has no business
+    // hearing about.
+    let team_id = team_of_repository(&mut tx, id).await?;
 
     let task_count = sqlx::query_scalar!(
         r#"SELECT count(*) AS "count!: i64" FROM tasks WHERE repository_id = ?1"#,
@@ -408,30 +606,44 @@ pub async fn remove(ctx: &ServiceContext, id: &str) -> Result<()> {
         )));
     }
 
-    let deleted = sqlx::query!("DELETE FROM repositories WHERE id = ?1", id)
+    sqlx::query!("DELETE FROM repositories WHERE id = ?1", id)
         .execute(&mut *tx)
-        .await?
-        .rows_affected();
+        .await?;
 
-    if deleted == 0 {
-        return Err(Error::not_found(format!("no repository with id {id}")));
-    }
-
-    // Spelled through the module that owns the key, not with a `format!` here:
-    // two spellings of `strategy_default.<id>` would leak a row per removed
-    // repository and nothing would ever notice (seam-contract D3, D17.1).
-    crate::strategy::settings::delete_repository_default(&mut *tx, id).await?;
+    // Through the one statement that writes `team_settings`, so the checks
+    // tasks 045 and 051 hang there cover a removal too. The key is spelled by
+    // the module that owns it, not with a `format!` here: two spellings of
+    // `strategy_default.<id>` would leak a row per removed repository and
+    // nothing would ever notice (seam-contract D3, D17.1).
+    crate::db::settings::set_team_in(
+        ctx,
+        &mut tx,
+        &team_id,
+        &crate::strategy::settings::repository_default_key(id),
+        None,
+        false,
+    )
+    .await?;
 
     tx.commit().await?;
-    ctx.publish(ChangeEvent::repositories([id.to_string()]));
+    ctx.publish(ChangeEvent::repositories(team_id, [id.to_string()]));
+
+    if let Some(machine) = machine {
+        for record in machine.store.list_worktrees().await? {
+            if record.repository_id == id {
+                machine::local::forget_worktree(machine, &record.task_id).await?;
+            }
+        }
+        machine::local::remove_checkout(machine, id).await?;
+    }
     Ok(())
 }
 
-/// Fresh inspection of `repository`'s remote and PR readiness. Never fails on
+/// Fresh inspection of a checkout's remote and PR readiness. Never fails on
 /// a missing or unauthenticated `gh` — see [`RemoteInfo::gh_ready`] — so the
 /// only propagated error is `git` itself being unrunnable.
-pub async fn remote_info(repository: &Repository) -> Result<RemoteInfo> {
-    let path = Path::new(&repository.path);
+pub async fn remote_info(checkout: &Checkout) -> Result<RemoteInfo> {
+    let path = Path::new(&checkout.path);
     let remote_url = git::remote_url(path).await?;
 
     let gh_ready = match remote_url.as_deref().and_then(git::host_from_remote_url) {
@@ -468,8 +680,8 @@ pub enum GhStatus {
 /// throw away which of the two failures happened. `program` is injected for
 /// the reason [`git::gh_probe`] gives — a test cannot depend on whether the
 /// machine running it happens to be logged in to GitHub.
-pub async fn gh_status(repository: &Repository, program: &Path) -> Result<GhStatus> {
-    let remote_url = git::remote_url(Path::new(&repository.path)).await?;
+pub async fn gh_status(checkout: &Checkout, program: &Path) -> Result<GhStatus> {
+    let remote_url = git::remote_url(Path::new(&checkout.path)).await?;
     let Some(host) = remote_url.as_deref().and_then(git::host_from_remote_url) else {
         return Ok(GhStatus::NoRemote);
     };
@@ -481,15 +693,15 @@ pub async fn gh_status(repository: &Repository, program: &Path) -> Result<GhStat
     })
 }
 
-/// Why a registered repository's stored path is no longer usable, or `None`
-/// when it still is.
+/// Why a checkout's stored path is no longer usable, or `None` when it still
+/// is.
 ///
 /// The doctor's version of the checks [`validate_directory`] and
 /// [`register`] run at registration time, asked again later: a path that was
 /// valid when it was registered is not a path that is valid tonight. Renaming
 /// a project directory is an ordinary thing to do and nothing tells Rimaia.
-pub async fn path_problem(repository: &Repository) -> Result<Option<String>> {
-    let path = Path::new(&repository.path);
+pub async fn path_problem(checkout: &Checkout) -> Result<Option<String>> {
+    let path = Path::new(&checkout.path);
 
     let Ok(metadata) = tokio::fs::metadata(path).await else {
         return Ok(Some("the directory no longer exists".to_string()));
@@ -573,6 +785,16 @@ async fn resolve_default_branch(path: &Path) -> Result<String> {
     })
 }
 
+/// Where a repository named `name` keeps its worktrees when nobody chose:
+/// `<worktrees_dir>/<slug>` (ADR-0005).
+///
+/// [`register`]'s default, and the one task 041's adoption gives a checkout
+/// whose board row has no root, so the two cannot derive different
+/// directories for one repository.
+pub fn default_worktree_root(worktrees_dir: &Path, name: &str) -> Result<String> {
+    path_to_string(&worktrees_dir.join(naming::slugify(name)))
+}
+
 fn path_to_string(path: &Path) -> Result<String> {
     path.to_str()
         .map(str::to_string)
@@ -624,74 +846,71 @@ pub struct CredentialStatus {
     pub ssh_remote: bool,
 }
 
-/// Records that a repository now carries a credential.
+/// Records that a repository now carries a credential on this machine.
 ///
 /// **The secret is not this function's business.** The caller stores it in the
 /// keychain first and calls this with what the forge said — which is what keeps
 /// the token out of every path that touches SQLite, including this one's own
 /// error messages.
 ///
-/// `credential_login` is `None` for a save `gh` could not verify, and the row
-/// is still a configured credential: `credential_added_at` is what says so, and
-/// it is what the spawn path reads.
+/// `credential_login` is `None` for a save `gh` could not verify, and the
+/// checkout still carries a configured credential: `credential_added_at` is
+/// what says so, and it is what the spawn path reads. Written to the checkout,
+/// because the keychain item it describes is on this machine (ADR-0033 point
+/// 6, D25); the keychain stays keyed by repository id until task 054.
 pub async fn set_credential_metadata(
     ctx: &ServiceContext,
+    machine: &MachineContext,
     id: &str,
     login: Option<&str>,
     label: Option<&str>,
-) -> Result<Repository> {
-    let mut repository = get(ctx, id).await?;
-    let added_at = ctx.clock.now();
-
-    sqlx::query!(
-        "UPDATE repositories
-         SET credential_login = ?1, credential_label = ?2, credential_added_at = ?3
-         WHERE id = ?4",
-        login,
-        label,
-        added_at,
-        id,
-    )
-    .execute(&ctx.pool)
-    .await?;
-
-    repository.credential_login = login.map(str::to_string);
-    repository.credential_label = label.map(str::to_string);
-    repository.credential_added_at = Some(added_at);
-    ctx.publish(ChangeEvent::repositories([id.to_string()]));
-    Ok(repository)
+) -> Result<Checkout> {
+    let repository = get(ctx, id).await?;
+    let patch = CheckoutPatch {
+        credential_login: set_or_clear(login),
+        credential_label: set_or_clear(label),
+        credential_added_at: Patch::Set(machine.clock.now()),
+        ..CheckoutPatch::default()
+    };
+    machine::local::patch_checkout(machine, &repository, &patch).await
 }
 
 /// Clears the metadata. The caller deletes the keychain item.
 ///
-/// All three columns together, because a row with a label and no `added_at`
-/// would read as configured to [`has_credential`] and as nothing to the pane.
-pub async fn clear_credential_metadata(ctx: &ServiceContext, id: &str) -> Result<Repository> {
-    let mut repository = get(ctx, id).await?;
+/// All three fields together, because a checkout with a label and no
+/// `added_at` would read as configured to [`has_credential`] and as nothing to
+/// the pane.
+pub async fn clear_credential_metadata(
+    ctx: &ServiceContext,
+    machine: &MachineContext,
+    id: &str,
+) -> Result<Checkout> {
+    let repository = get(ctx, id).await?;
+    let patch = CheckoutPatch {
+        credential_login: Patch::Clear,
+        credential_label: Patch::Clear,
+        credential_added_at: Patch::Clear,
+        ..CheckoutPatch::default()
+    };
+    machine::local::patch_checkout(machine, &repository, &patch).await
+}
 
-    sqlx::query!(
-        "UPDATE repositories
-         SET credential_login = NULL, credential_label = NULL, credential_added_at = NULL
-         WHERE id = ?1",
-        id,
-    )
-    .execute(&ctx.pool)
-    .await?;
-
-    repository.credential_login = None;
-    repository.credential_label = None;
-    repository.credential_added_at = None;
-    ctx.publish(ChangeEvent::repositories([id.to_string()]));
-    Ok(repository)
+/// A credential field written whole: the value when there is one, cleared
+/// when there is not, so a re-save never keeps the previous token's label.
+fn set_or_clear(value: Option<&str>) -> Patch<String> {
+    match value {
+        Some(value) => Patch::Set(value.to_string()),
+        None => Patch::Clear,
+    }
 }
 
 /// Whether this repository's runs must spawn with a token of their own.
 ///
-/// **Read off the row, never off the keychain.** A keychain that cannot be
-/// reached has to be a *refusal* — ADR-0020's fail-closed rule — and a spawn
-/// path that asked the keychain "is anything there" would read a locked one as
-/// "no credential configured" and fall straight back to the operator's ambient
-/// login, which is the exact failure the rule exists to prevent.
-pub fn has_credential(repository: &Repository) -> bool {
-    repository.credential_added_at.is_some()
+/// **Read off the checkout, never off the keychain.** A keychain that cannot
+/// be reached has to be a *refusal* — ADR-0020's fail-closed rule — and a
+/// spawn path that asked the keychain "is anything there" would read a locked
+/// one as "no credential configured" and fall straight back to the operator's
+/// ambient login, which is the exact failure the rule exists to prevent.
+pub fn has_credential(checkout: &Checkout) -> bool {
+    checkout.credential_added_at.is_some()
 }

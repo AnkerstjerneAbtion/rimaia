@@ -183,6 +183,27 @@ impl FakeCli {
         );
     }
 
+    /// [`replays_on_attempt`](Self::replays_on_attempt), for a recording that
+    /// is not in the Claude corpus.
+    pub fn replays_path_on_attempt(
+        &self,
+        task_id: &str,
+        attempt: usize,
+        recording: &Path,
+        code: i32,
+    ) {
+        self.write_plan(
+            &format!("{task_id}-{attempt}"),
+            &[
+                "replay".to_string(),
+                recording.display().to_string(),
+                code.to_string(),
+                String::new(),
+                String::new(),
+            ],
+        );
+    }
+
     fn replay_plan(fixture: &str, code: i32) -> [String; 5] {
         [
             "replay".to_string(),
@@ -223,6 +244,133 @@ impl FakeCli {
                 String::new(),
             ],
         );
+    }
+
+    /// Appends a line reading `message` to `path` in the worktree it was
+    /// started in, commits that file on `message`, and then replays `fixture`.
+    ///
+    /// [`commits_on_attempt`](Self::commits_on_attempt)'s sibling for task 033,
+    /// whose subject is the diff a run leaves: an empty commit has none, and a
+    /// review bundle of an empty diff would prove nothing about the patch.
+    /// Appending rather than overwriting, so two attempts that name the same
+    /// path each leave a line of their own. `path` is relative to the worktree
+    /// and must not need a directory created.
+    pub fn commits_a_file_on_attempt(
+        &self,
+        task_id: &str,
+        attempt: usize,
+        path: &str,
+        message: &str,
+        fixture: &str,
+        code: i32,
+    ) {
+        self.write_plan(
+            &format!("{task_id}-{attempt}"),
+            &[
+                "commit_file".to_string(),
+                fixture_path(fixture).display().to_string(),
+                code.to_string(),
+                message.to_string(),
+                path.to_string(),
+            ],
+        );
+    }
+
+    /// Calls `tool` with `arguments` over the run-scoped handle this attempt
+    /// was handed, then replays `fixture` (task 021).
+    ///
+    /// Lifted from `tests/runner_strategy.rs`'s planner write-back, so a
+    /// review or fix test does not hand-write the `curl`: the stand-in reads
+    /// its own `--mcp-config` out of argv and POSTs one JSON-RPC `tools/call`
+    /// at the URL in it. That is the real `/mcp/run/<token>` route, so the
+    /// grant, the scope check and the store are all the production ones.
+    ///
+    /// `arguments` may contain the string `__FINDING_ID__`, which becomes the
+    /// first finding id the attempt's own prompt names on a `- Id:` line: a
+    /// fix is told its findings' ids only in its prompt, and a test cannot know
+    /// them before the review that raises them has run.
+    ///
+    /// `before` is what the stand-in does to the worktree first.
+    pub fn calls_tool_on_attempt(
+        &self,
+        task_id: &str,
+        attempt: usize,
+        tool: &str,
+        arguments: serde_json::Value,
+        before: WorktreeAction,
+        fixture: &str,
+    ) {
+        self.calls_tool_on_attempt_path(
+            task_id,
+            attempt,
+            tool,
+            arguments,
+            before,
+            &fixture_path(fixture),
+        );
+    }
+
+    /// The same, for a recording that is not in the Claude corpus. The Ledger
+    /// stand-in has no `--mcp-config` to read the URL from, so it reads the
+    /// `tools.toml` its provider wrote into `LEDGER_HOME` instead.
+    pub fn calls_tool_on_attempt_path(
+        &self,
+        task_id: &str,
+        attempt: usize,
+        tool: &str,
+        arguments: serde_json::Value,
+        before: WorktreeAction,
+        recording: &Path,
+    ) {
+        let call = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": { "name": tool, "arguments": arguments },
+        });
+        let body = self.path(&format!("call-{task_id}-{attempt}.json"));
+        std::fs::write(&body, call.to_string()).expect("write the tool call");
+        self.write_plan(
+            &format!("{task_id}-{attempt}"),
+            &[
+                "call".to_string(),
+                recording.display().to_string(),
+                "0".to_string(),
+                body.display().to_string(),
+                before.encode(),
+            ],
+        );
+    }
+
+    /// Appends a line to the tracked `path` in its worktree and commits
+    /// nothing, then replays `fixture`: a run that leaves uncommitted tracked
+    /// changes behind (task 021's worktree checks).
+    pub fn edits_on_attempt(&self, task_id: &str, attempt: usize, path: &str, fixture: &str) {
+        self.write_plan(
+            &format!("{task_id}-{attempt}"),
+            &[
+                "edit".to_string(),
+                fixture_path(fixture).display().to_string(),
+                "0".to_string(),
+                String::new(),
+                path.to_string(),
+            ],
+        );
+    }
+
+    /// The server's answer to the call attempt `attempt` of `task_id` made,
+    /// parsed. Panics when the call was never made or not answered as JSON.
+    pub fn tool_answer(&self, task_id: &str, attempt: usize) -> serde_json::Value {
+        let body = self
+            .read(&format!("called-{task_id}-{attempt}"))
+            .unwrap_or_default();
+        serde_json::from_str(&body).unwrap_or_else(|_| {
+            panic!(
+                "attempt {attempt} of {task_id} got no JSON answer: {body:?}; curl said: {}",
+                self.read(&format!("called-{task_id}-{attempt}.err"))
+                    .unwrap_or_default()
+            )
+        })
     }
 
     /// Replays the first `head` lines of `fixture` for `task_id`, then waits
@@ -338,6 +486,18 @@ impl FakeCli {
             .collect()
     }
 
+    /// The environment attempt `attempt` of `task_id` was spawned with, as
+    /// `env` printed it: one `NAME=value` per line, a value with a newline in
+    /// it continuing onto the next.
+    pub fn env(&self, task_id: &str, attempt: usize) -> std::collections::BTreeMap<String, String> {
+        self.read(&format!("env-{task_id}-{attempt}"))
+            .unwrap_or_else(|| panic!("attempt {attempt} of {task_id} was never spawned"))
+            .lines()
+            .filter_map(|line| line.split_once('='))
+            .map(|(name, value)| (name.to_string(), value.to_string()))
+            .collect()
+    }
+
     /// What was delivered on that attempt's stdin — the prompt, verbatim.
     pub fn stdin(&self, task_id: &str, attempt: usize) -> String {
         self.read(&format!("stdin-{task_id}-{attempt}"))
@@ -412,8 +572,8 @@ impl FakeCli {
 
     /// Makes every future `--version` probe block until
     /// [`release_version_probe`](Self::release_version_probe) is called —
-    /// widening, for a test, the window `try_step` leaves open between
-    /// registering its `CancelSignal` and actually claiming a task. The probe
+    /// widening, for a test, the window the runner loop's `try_step` leaves
+    /// open between reading the switch and actually claiming a task. The probe
     /// otherwise answers instantly, which is correct for every other test and
     /// exactly why this is opt-in rather than the default.
     pub fn hold_version_probe(&self) {
@@ -423,6 +583,32 @@ impl FakeCli {
     /// Releases a probe blocked by [`hold_version_probe`](Self::hold_version_probe).
     pub fn release_version_probe(&self) {
         std::fs::write(self.path("version-go"), "").expect("release the version-probe gate");
+    }
+
+    /// Whether a `--version` probe is blocked on
+    /// [`hold_version_probe`](Self::hold_version_probe) right now, or has been:
+    /// the stand-in marks the hold as it enters it.
+    pub fn version_probe_is_held(&self) -> bool {
+        self.path("version-held").exists()
+    }
+
+    /// How many `--version` probes this stand-in has answered after the first
+    /// `auth`, which is the line between the preflight doctor and everything
+    /// after it — the runner loop's probe and a run's own (see
+    /// [`write_script`](Self::write_script) on why `auth` draws that line).
+    /// The doctor's first probe, before it asks `auth`, is not counted.
+    pub fn returned_probes(&self) -> usize {
+        self.count_lines("probes")
+    }
+
+    /// How many `--version` probes this stand-in was asked for at all, the
+    /// doctor's included.
+    pub fn version_probes(&self) -> usize {
+        self.count_lines("version-probes")
+    }
+
+    fn count_lines(&self, name: &str) -> usize {
+        self.read(name).map_or(0, |log| log.lines().count())
     }
 
     /// Every subcommand this stand-in was asked for and does not implement.
@@ -543,9 +729,12 @@ impl FakeCli {
         let script = format!(
             "#!/bin/sh\n\
              if [ \"$1\" = '--version' ]; then\n\
+             printf 'probe\\n' >> '{dir}/version-probes'\n\
              if [ -f '{dir}/version-hold' ] && [ -f '{dir}/auth-seen' ]; then\n\
+             : > '{dir}/version-held'\n\
              while [ ! -f '{dir}/version-go' ]; do sleep 0.02; done\n\
              fi\n\
+             if [ -f '{dir}/auth-seen' ]; then printf 'probe\\n' >> '{dir}/probes'; fi\n\
              echo '{version}'; exit 0\n\
              fi\n\
              {auth}\
@@ -575,6 +764,7 @@ impl FakeCli {
              attempt=1\n\
              fi\n\
              printf '%s\\n' \"$@\" > \"$dir/argv-$task-$attempt\"\n\
+             env > \"$dir/env-$task-$attempt\"\n\
              cat > \"$dir/stdin-$task-$attempt\"\n\
              printf 'start %s\\n' \"$task\" >> \"$dir/spawns\"\n\
              plan=\"$dir/plan-$task-$attempt\"\n\
@@ -589,6 +779,46 @@ impl FakeCli {
                ;;\n\
              commit)\n\
                git commit --allow-empty -q -m \"$three\" >&2\n\
+               cat \"$one\"\n\
+               printf 'end %s\\n' \"$task\" >> \"$dir/spawns\"\n\
+               exit \"$two\"\n\
+               ;;\n\
+             commit_file)\n\
+               printf '%s\\n' \"$three\" >> \"$four\"\n\
+               git add -- \"$four\" >&2\n\
+               git commit -q -m \"$three\" >&2\n\
+               cat \"$one\"\n\
+               printf 'end %s\\n' \"$task\" >> \"$dir/spawns\"\n\
+               exit \"$two\"\n\
+               ;;\n\
+             edit)\n\
+               printf 'edited\\n' >> \"$four\"\n\
+               cat \"$one\"\n\
+               printf 'end %s\\n' \"$task\" >> \"$dir/spawns\"\n\
+               exit \"$two\"\n\
+               ;;\n\
+             call)\n\
+               case \"$four\" in\n\
+               commit:*) git commit --allow-empty -q -m \"${{four#commit:}}\" >&2;;\n\
+               edit:*) printf 'edited\\n' >> \"${{four#edit:}}\";;\n\
+               esac\n\
+               config=''\n\
+               prev=''\n\
+               for arg in \"$@\"; do\n\
+               if [ \"$prev\" = '--mcp-config' ]; then config=\"$arg\"; fi\n\
+               prev=\"$arg\"\n\
+               done\n\
+               if [ -n \"$config\" ]; then\n\
+               url=$(printf '%s' \"$config\" | sed -e 's/.*\"url\":\"//' -e 's/\".*//')\n\
+               else\n\
+               url=$(sed -n 's/^url = \"\\(.*\\)\"$/\\1/p' \"$LEDGER_HOME/tools.toml\")\n\
+               fi\n\
+               finding=$(sed -n 's/^- Id: `\\(.*\\)`$/\\1/p' \"$dir/stdin-$task-$attempt\" | head -n 1)\n\
+               body=$(sed \"s/__FINDING_ID__/$finding/g\" \"$three\")\n\
+               if [ -n \"$GH_TOKEN\" ]; then printf 'token %s\\n' \"$GH_TOKEN\" >&2; fi\n\
+               curl -sS -X POST \"$url\" -H 'accept: application/json, text/event-stream' \
+             -H 'content-type: application/json' -d \"$body\" \
+             > \"$dir/called-$task-$attempt\" 2> \"$dir/called-$task-$attempt.err\"\n\
                cat \"$one\"\n\
                printf 'end %s\\n' \"$task\" >> \"$dir/spawns\"\n\
                exit \"$two\"\n\
@@ -634,6 +864,27 @@ impl FakeCli {
         let program = self.path(stand_in.program);
         std::fs::write(&program, script).expect("write the stand-in CLI");
         make_executable(&program);
+    }
+}
+
+/// What a stand-in does to its worktree before it answers.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WorktreeAction {
+    Nothing,
+    /// An empty commit with this message: `HEAD` moves.
+    Commit(String),
+    /// Appends a line to this tracked path and commits nothing: the worktree
+    /// is left with uncommitted tracked changes.
+    Edit(String),
+}
+
+impl WorktreeAction {
+    fn encode(&self) -> String {
+        match self {
+            WorktreeAction::Nothing => String::new(),
+            WorktreeAction::Commit(message) => format!("commit:{message}"),
+            WorktreeAction::Edit(path) => format!("edit:{path}"),
+        }
     }
 }
 

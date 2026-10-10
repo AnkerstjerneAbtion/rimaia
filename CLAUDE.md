@@ -51,6 +51,8 @@ which is the run queue.
 | --- | --- |
 | `crates/core/` | `rimaia-core` — all logic. **Must not depend on `tauri`** (ADR-0015) |
 | `crates/core/tests/fixtures/` | Recorded `stream-json` CLI streams and the test-repo builder |
+| `crates/runner/` | `rimaia-runner`: the runner loop, `runner.db` and the headless binary (ADR-0027, ADR-0028) |
+| `crates/runner/migrations/` | `runner.db` migrations. Board migrations stay in `src-tauri/migrations/` |
 | `src-tauri/` | Tauri shell: commands, window, state wiring. Thin |
 | `src-tauri/migrations/` | SQLite migrations (ADR-0003). The test harness applies these too |
 | `src/` | React 19 + TypeScript frontend |
@@ -65,8 +67,10 @@ npm run typecheck                     # tsc --noEmit
 npm run test                          # vitest run
 npm run build                         # tsc && vite build — the only thing that compiles the CSS
 cargo test -p rimaia-core             # logic tests, no system deps needed
+cargo test -p rimaia-runner           # runner loop and runner.db, no system deps needed
 cargo fmt --all --check
 cargo clippy -p rimaia-core --all-targets -- -D warnings
+cargo clippy -p rimaia-runner --all-targets -- -D warnings
 cargo check --workspace --all-targets # includes the Tauri shell
 ./scripts/check-command-wiring.sh     # both generate_handler! lists agree, and every commands.ts name is registered
 ```
@@ -91,14 +95,29 @@ tests without shipping it to consumers. Do not add a feature flag to the CI invo
 it would diverge from the command above for no gain.
 
 `SQLX_OFFLINE=true` is set in CI, so clippy, `cargo test` and `cargo check` all compile the
-query macros against the checked-in `.sqlx/` cache at the workspace root instead of a live
-database. After changing any query — or any migration a query reads — regenerate and
-commit it:
+query macros against a checked-in cache instead of a live database. The board's queries use
+`crates/core/.sqlx/` and the runner's use `crates/runner/.sqlx/`. There is no cache at the
+workspace root, and a test fails if one appears. After changing any query, or any migration a
+query reads, in either crate, regenerate both caches and commit them:
 
 ```bash
-export DATABASE_URL="sqlite:target/sqlx-prepare.db?mode=rwc"
-cargo sqlx migrate run --source src-tauri/migrations
-cargo sqlx prepare --workspace -- --all-targets
+# Absolute paths, passed with -D and never exported (seam-contract D33).
+BOARD_DB="sqlite:$PWD/target/sqlx-prepare-board.db?mode=rwc"
+RUNNER_DB="sqlite:$PWD/target/sqlx-prepare-runner.db?mode=rwc"
+rm -f target/sqlx-prepare-*.db*
+
+# 1. Board: rimaia-core against src-tauri/migrations, into crates/core/.sqlx
+cargo sqlx migrate run --source src-tauri/migrations -D "$BOARD_DB"
+(cd crates/core && cargo sqlx prepare -D "$BOARD_DB" -- --all-targets)
+
+# 2. Runner: rimaia-runner against crates/runner/migrations, into crates/runner/.sqlx.
+#    The check builds rimaia-core offline from the cache step 1 just wrote, so the
+#    prepare below does not rebuild it online against a database with no board tables.
+#    Errors from rimaia-runner in the check come from its stale cache, which the next
+#    line regenerates.
+cargo sqlx migrate run --source crates/runner/migrations -D "$RUNNER_DB"
+SQLX_OFFLINE=true cargo check -p rimaia-runner --all-targets || true
+(cd crates/runner && cargo sqlx prepare -D "$RUNNER_DB" -- --all-targets)
 ```
 
 `--all-targets` matters here for the same reason it does for clippy: the integration tests
@@ -110,6 +129,36 @@ your machine. Install the matching CLI once — the version must track the `sqlx
 cargo install sqlx-cli --version 0.8.6 --no-default-features --features rustls,sqlite
 ```
 
+## Look at the UI you changed
+
+**If you changed anything under `src/`, take screenshots and look at them before you finish.**
+Passing `typecheck`, `vitest` and `build` proves the code compiles and the DOM is right; it
+proves nothing about whether the screen is legible, and jsdom has no layout engine. CI does not
+run this — it is yours to run.
+
+```bash
+npx playwright install webkit            # once per machine; npm ci downloads no browser
+npm run screenshot                       # -> .screenshots/latest/, 10 views x 2 schemes x 2 widths
+npm run screenshot -- --label before     # a named set; run it before you start, again after
+npm run screenshot -- --grep runs        # a narrowed run overwrites only what it writes
+```
+
+It renders the dev server's fixture entry (`fixtures.html`, scenarios in `src/dev/fixtures/`) in
+headless WebKit on a free port — never 1420 — with no Rust, database or `RIMAIA_DATA_DIR`.
+Files are `<scenario>--<view>--<scheme>--<width>.png`, so a before/after pair is two files to
+open. Read the PNGs; you can see images.
+
+What to look for, in **both** colour schemes and at **both** widths (1440 and 1024): contrast of
+text and badges against their surface, overflow and clipping, wrapping of long titles, and
+whether state (running, blocked, failed, dismissed) is distinguishable **without colour**. The
+`busy` scenario seeds the ugly cases on purpose. You tend to grade your own work generously:
+name what is wrong before what is right.
+
+**A new command needs a fixture row** in `src/dev/fixtures/answers.ts`, or
+`src/dev/fixtures/fixtures.test.ts` fails. A new field on a type the seed builds fails
+`npm run typecheck` until the seed follows. Writes in fixture mode change nothing; the
+screenshots are for looking at, not for diffing.
+
 ## Testing (ADR-0015)
 
 Logic-first. Vitest for the frontend, `cargo test` for Rust. **No E2E.**
@@ -117,7 +166,9 @@ Logic-first. Vitest for the frontend, `cargo test` for Rust. **No E2E.**
 **These modules must have tests, and a change to one without a change to its tests is
 incomplete:** prompt composition · outcome classification · event-stream parsing · retry
 and backoff policy · position/rebalance math · run-state transitions · dependency cycles
-and base-ref resolution · worktree operations · MCP handlers.
+and base-ref resolution · worktree operations · MCP handlers · tenant isolation · the lease
+protocol (claim, fencing, pinning, per-runner reconcile) · consent, eligibility and the
+strategy ceiling.
 
 Rules:
 
@@ -138,6 +189,10 @@ Rules:
 - **Business rules live in `rimaia-core` services.** Tauri commands and MCP handlers are
   thin adapters over the same functions. If a rule is enforced in only one of them, that
   is a bug (ADR-0006).
+- **Every service reads and writes through its context's scope** (ADR-0029 point 5): an id
+  outside it is answered exactly as a never-issued one, and an MCP tool is not done until
+  it has a case in `crates/core/tests/tenant_isolation.rs` (046 extends this to every
+  command).
 - **Migrations are append-only** once shipped. Never edit a migration that has run.
 - **Enums, not strings**, for `column`, `run_state`, `exit_class`, `strategy_mode`.
 - **Tolerant parsing of CLI output.** Unknown event types are persisted and ignored, never
@@ -156,6 +211,10 @@ Rules:
   ~3.6× per run, so surface per-run cost near the toggle.
 - **Always strip inherited `CLAUDE_*` env vars**, regardless of that setting.
   `CLAUDE_CODE_SESSION_ID` and friends are process identity, not user config.
+- **`max_turns` and `disallowed_tools` have a team value and a runner value.** The
+  effective value is the stricter of the two (ADR-0028 point 2): the lower turn budget, and
+  the team's blocklist plus whatever the runner adds. A run is never built from either half
+  alone; `runner::limits::effective` and `planner_max_turns` are the only place they meet.
 - **Classify runs on `result.terminal_reason` + `subtype`**, not on exit code alone. A
   SIGTERM-killed run still emits a `result` and exits 143.
 - Usage limits arrive as a typed `rate_limit_event` with an epoch `resetsAt`, on every
@@ -167,8 +226,21 @@ Rules:
   `RIMAIA_DATA_DIR=/tmp/rimaia-<branch> npm run tauri dev`. Every worktree otherwise resolves
   the *same* data directory, so a branch carrying an unmerged migration writes it into the one
   database every other branch reads, and every branch without that file then refuses to start
-  (ADR-0023). It must be an absolute path; a relative one or an unexpanded `~` is refused at
-  startup rather than guessed at.
+  (ADR-0023). It relocates `runner.db` as well as `rimaia.db` (ADR-0028 point 4). It must be
+  an absolute path; a relative one or an unexpanded `~` is refused at startup rather than
+  guessed at.
+- **Board migrations are applied only through `db::migrate`**, which turns foreign keys off
+  around the migrator, checks `PRAGMA foreign_key_check` after, and turns them back on
+  (seam-contract D28 part 1). Never apply one to a real `rimaia.db` with `cargo sqlx migrate
+  run` or the sqlite3 CLI: with enforcement on, a table rebuild's `DROP TABLE` cascades and
+  deletes every child row. No migration file begins with `-- no-transaction`. The prepare
+  recipe above still works, because the rebuild's guard passes on an empty `tasks`.
+- **Machine state lives in `runner.db`, behind `rimaia_core::machine`; its rules stay in
+  core, and no board DTO carries an absolute path.** The runner keys, schedules, checkouts
+  and worktree records are reached through a `MachineContext` (`AppState.machine`,
+  `TestContext::machine()`), never the board's context. `rimaia-runner` stores them and
+  decides nothing (seam-contract D31's 2026-10-10 amendments). A run's transcript path is
+  derived from its ids, never read off `runs.log_path`.
 - Board `position` is a fractional float; ordering is the priority mechanism. There is no
   separate priority field (ADR-0007).
 - A dependency is satisfied when its run **succeeds**, not when a human marks it done

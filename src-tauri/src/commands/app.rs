@@ -32,7 +32,7 @@ pub async fn get_app_info(state: State<'_, AppState>) -> Result<AppInfo> {
         data_dir: paths.data_dir().display().to_string(),
         db_file: paths.db_file().display().to_string(),
         logs_dir: paths.logs_dir().display().to_string(),
-        onboarding_dismissed: rimaia_core::db::settings::onboarding_dismissed(&state.context.pool)
+        onboarding_dismissed: rimaia_core::db::settings::onboarding_dismissed(&state.machine)
             .await?,
     })
 }

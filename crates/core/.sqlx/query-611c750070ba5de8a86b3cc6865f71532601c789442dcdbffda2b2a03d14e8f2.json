@@ -1,0 +1,62 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT team_id, plan_revision, plan_updated_by,\n                  plan_written_during_run AS \"plan_written_during_run: bool\",\n                  review_instructions, review_instructions_revision,\n                  review_instructions_updated_by,\n                  review_instructions_written_during_run\n                      AS \"review_instructions_written_during_run: bool\"\n             FROM tasks WHERE id = ?1",
+  "describe": {
+    "columns": [
+      {
+        "name": "team_id",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "plan_revision",
+        "ordinal": 1,
+        "type_info": "Integer"
+      },
+      {
+        "name": "plan_updated_by",
+        "ordinal": 2,
+        "type_info": "Text"
+      },
+      {
+        "name": "plan_written_during_run: bool",
+        "ordinal": 3,
+        "type_info": "Bool"
+      },
+      {
+        "name": "review_instructions",
+        "ordinal": 4,
+        "type_info": "Text"
+      },
+      {
+        "name": "review_instructions_revision",
+        "ordinal": 5,
+        "type_info": "Integer"
+      },
+      {
+        "name": "review_instructions_updated_by",
+        "ordinal": 6,
+        "type_info": "Text"
+      },
+      {
+        "name": "review_instructions_written_during_run: bool",
+        "ordinal": 7,
+        "type_info": "Bool"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false,
+      true,
+      false,
+      true,
+      false,
+      true,
+      false
+    ]
+  },
+  "hash": "611c750070ba5de8a86b3cc6865f71532601c789442dcdbffda2b2a03d14e8f2"
+}

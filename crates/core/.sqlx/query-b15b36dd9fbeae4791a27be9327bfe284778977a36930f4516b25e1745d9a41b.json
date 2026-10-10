@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT review_config FROM repositories\n          WHERE id = ?1 AND team_id IN (SELECT value FROM json_each(?2))",
+  "describe": {
+    "columns": [
+      {
+        "name": "review_config",
+        "ordinal": 0,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      true
+    ]
+  },
+  "hash": "b15b36dd9fbeae4791a27be9327bfe284778977a36930f4516b25e1745d9a41b"
+}

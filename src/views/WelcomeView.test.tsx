@@ -5,7 +5,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 
 import { WelcomeView } from "./WelcomeView";
-import type { DoctorReport, Repository } from "../types";
+import type { CheckoutView, DoctorReport, Repository } from "../types";
 
 // Mocked at the Tauri seam, like every other view test here.
 vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }));
@@ -19,12 +19,24 @@ function repository(overrides: Partial<Repository> = {}): Repository {
   return {
     id: "repo-1",
     name: "rimaia",
-    path: "/src/rimaia",
     defaultBranch: "main",
-    worktreeRoot: "/data/worktrees",
-    allowUnattendedRuns: false,
     ...overrides,
   } as Repository;
+}
+
+/** This computer's checkout of {@link repository}, which holds the consent
+ *  step two reads (task 066). */
+function checkout(overrides: Partial<CheckoutView> = {}): CheckoutView {
+  return {
+    repositoryId: "repo-1",
+    path: "/code/rimaia",
+    worktreeRoot: "/data/worktrees/rimaia",
+    maxConcurrency: 1,
+    unattendedConsent: false,
+    onArchive: "none",
+    onArchiveScript: null,
+    ...overrides,
+  };
 }
 
 const healthy: DoctorReport = { results: [], dismissals: [] };
@@ -32,6 +44,7 @@ const healthy: DoctorReport = { results: [], dismissals: [] };
 /** Every command the welcome screen and its embedded controls read on mount. */
 function respondWith({
   repositories = [] as Repository[],
+  checkouts = [] as CheckoutView[],
   instructions = "",
   doctor = healthy,
 } = {}) {
@@ -41,6 +54,8 @@ function respondWith({
         return doctor;
       case "list_repositories":
         return repositories;
+      case "list_checkouts":
+        return checkouts;
       case "get_base_instructions":
         return instructions;
       case "get_run_environment":
@@ -87,13 +102,24 @@ describe("WelcomeView", () => {
   // true, not when someone clicked a button on this screen.
   it("marks steps done from live configuration rather than from clicks", async () => {
     respondWith({
-      repositories: [repository({ allowUnattendedRuns: true })],
+      repositories: [repository()],
+      checkouts: [checkout({ unattendedConsent: true })],
       instructions: "Always open a pull request.",
     });
     render(<WelcomeView onFinish={vi.fn()} />);
 
     await waitFor(() => expect(screen.getAllByText("Done").length).toBeGreaterThanOrEqual(3));
     expect(screen.getByText("Enabled for rimaia.")).toBeInTheDocument();
+  });
+
+  it("does not count a repository this computer has no checkout of as enabled", async () => {
+    // The consent is this computer's (task 066): a repository on the board
+    // that is not set up here has given none.
+    respondWith({ repositories: [repository()], checkouts: [] });
+    render(<WelcomeView onFinish={vi.fn()} />);
+
+    await screen.findByRole("heading", { level: 3, name: /Enable unattended runs/ });
+    expect(screen.queryByText("Enabled for rimaia.")).not.toBeInTheDocument();
   });
 
   it("leaves a step to do when its configuration is absent", async () => {

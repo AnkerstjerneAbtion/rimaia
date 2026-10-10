@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT t.id FROM tasks t\n          WHERE (t.run_state = ?1 OR t.run_state = ?2\n                 OR EXISTS (SELECT 1 FROM runs r WHERE r.task_id = t.id AND r.ended_at IS NULL))\n            AND t.team_id IN (SELECT value FROM json_each(?3))\n            AND NOT EXISTS (SELECT 1 FROM runner_leases l WHERE l.task_id = t.id)\n          ORDER BY t.id",
+  "describe": {
+    "columns": [
+      {
+        "name": "id",
+        "ordinal": 0,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "5fe1a1f005b6fd4c8ca0e1190cd8a9f5aae5d35c7468444fb033b959d758d5f0"
+}

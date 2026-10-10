@@ -11,14 +11,21 @@
 //! rather than by constructing the structs, so the schema and the handler are
 //! exercised together.
 
-use rimaia_core::db::{settings, BoardColumn, MutationSource, StrategyMode, StrategySource};
-use rimaia_core::mcp::requests::{
-    ArchiveTaskRequest, ArchiveTasksRequest, GetTaskRequest, ListTasksRequest, MoveTaskRequest,
-    RemoveTaskLinkRequest, SetRepositoryOnArchiveRequest, SetTaskDependenciesRequest,
-    UpdateTaskRequest,
+use rimaia_core::db::{
+    settings, BoardColumn, MutationSource, RunKind, StrategyMode, StrategySource,
 };
-use rimaia_core::mcp::responses::{TaskListView, TaskView};
+use rimaia_core::mcp::requests::{
+    ArchiveTaskRequest, ArchiveTasksRequest, GetReviewHistoryRequest, GetReviewLevelRequest,
+    GetTaskRequest, ListReviewFindingsRequest, ListTasksRequest, MoveTaskRequest,
+    RemoveTaskLinkRequest, ReviewNoteRequest, SetRepositoryOnArchiveRequest,
+    SetRepositoryReviewConfigRequest, SetReviewSettingsRequest, SetTaskDependenciesRequest,
+    SetTaskReviewRequest, UpdateTaskRequest,
+};
+use rimaia_core::mcp::responses::{ReviewFindingView, ReviewHistoryView, TaskListView, TaskView};
 use rimaia_core::mcp::RimaiaServer;
+use rimaia_core::review::{self, FindingSeverity, NewReviewFinding};
+use rimaia_core::review_loop::config as review_config;
+use rimaia_core::runner::outcome::{start_run, NewRun};
 use rimaia_core::strategy::{settings as strategy_settings, StrategyDefaults};
 use rimaia_core::tasks::{self, NewTask, StrategyPlan, TaskPatch};
 use rimaia_core::testing::{self, TestContext};
@@ -401,8 +408,67 @@ async fn a_task_created_over_mcp_publishes_tasks_changed_on_the_original_subscri
 
     assert_eq!(
         h.changes.try_recv().expect("a publication"),
-        ChangeEvent::tasks([created.id])
+        ChangeEvent::tasks(h.solo.team_id.clone(), [created.id])
     );
+}
+
+// ---------------------------------------------------------------------------
+// The review verdicts, through both doors (task 034, ADR-0006)
+
+#[tokio::test]
+async fn a_reject_over_mcp_writes_what_the_service_writes() {
+    let h = TestContext::new().await;
+    // Two repositories, so the twins land on the same positions: a column's
+    // bottom is per repository.
+    let direct_repo = seed_repository(&h.context.pool, "direct", "/tmp/direct").await;
+    let mcp_repo = seed_repository(&h.context.pool, "mcp", "/tmp/mcp").await;
+    let mut twins = Vec::new();
+    for repository_id in [&direct_repo, &mcp_repo] {
+        let task = tasks::create_task(
+            &h.context,
+            NewTask {
+                repository_id: repository_id.clone(),
+                title: "Review me".to_string(),
+                plan: Some("a plan".to_string()),
+                extra_instructions: Some("Keep it small.".to_string()),
+                column: Some(BoardColumn::InReview),
+                links: vec![],
+            },
+        )
+        .await
+        .expect("create a twin");
+        twins.push(task.id);
+    }
+
+    let direct =
+        rimaia_core::review::reject(&h.context, Some(h.machine()), &twins[0], "Wrong approach.")
+            .await
+            .expect("reject through the service");
+    let Json(over_mcp) = server(&h)
+        .reject_task(Parameters(request::<ReviewNoteRequest>(json!({
+            "task_id": twins[1],
+            "note": "Wrong approach.",
+        }))))
+        .await
+        .unwrap_or_else(|error| panic!("the tool must succeed: {:?}", error.0));
+
+    let twin = tasks::get_task(&h.context, &twins[1])
+        .await
+        .expect("twin")
+        .task;
+    assert_eq!(
+        over_mcp.task.extra_instructions,
+        direct.task.extra_instructions
+    );
+    assert_eq!(over_mcp.task.column, direct.task.column);
+    assert_eq!(twin.position, direct.task.position);
+    assert_eq!(twin.branch, direct.task.branch);
+    assert_eq!(
+        h.worktree_path(&twins[1]).await,
+        h.worktree_path(&direct.task.id).await
+    );
+    assert_eq!(over_mcp.set_aside_branch, direct.set_aside_branch);
+    assert!(over_mcp.dependents.is_empty());
 }
 
 // ---------------------------------------------------------------------------
@@ -706,7 +772,7 @@ async fn unarchiving_over_mcp_hands_back_the_whole_card() {
     let h = TestContext::new().await;
     let repository_id = seed_repository(&h.context.pool, "rimaia", "/tmp/rimaia").await;
     let task = create_ready(&h, &repository_id, "Back on the board").await;
-    tasks::archive_task(&h.context, &task.id)
+    tasks::archive_task(&h.context, Some(h.machine()), &task.id)
         .await
         .expect("archive");
 
@@ -747,6 +813,476 @@ async fn setting_a_script_on_archive_without_a_path_is_refused_readably() {
 }
 
 #[tokio::test]
+async fn list_review_findings_answers_the_same_over_mcp_and_the_tauri_command() {
+    // ADR-0021's parity: `commands::review::list_review_findings` is one line
+    // over `review::findings::list`, so the service's answer is the window's,
+    // and the tool must give the same findings in the same order.
+    let h = TestContext::new().await;
+    let repository_id = seed_repository(&h.context.pool, "rimaia", "/tmp/rimaia").await;
+    let task = create_task(&h, &repository_id, "Reviewed").await;
+    let paths = rimaia_core::AppPaths::new(std::path::Path::new("/tmp/rimaia-tools-test"));
+    let mut reviews = Vec::new();
+    for titles in [vec!["Zeta", "Alpha"], vec!["Mu"]] {
+        let review = start_run(
+            &h.context,
+            &paths,
+            NewRun {
+                task_id: task.id.clone(),
+                kind: RunKind::Review,
+                session_id: rimaia_core::db::new_id(),
+                prompt: "review it".to_string(),
+                base_ref: None,
+                base_sha: None,
+            },
+        )
+        .await
+        .expect("open a review row");
+        let findings = titles
+            .iter()
+            .map(|title| NewReviewFinding {
+                severity: FindingSeverity::Medium,
+                title: (*title).to_string(),
+                body: format!("{title}, explained."),
+                file: None,
+                line: None,
+            })
+            .collect();
+        review::findings::record(&h.context, &task.id, &review.id, findings)
+            .await
+            .expect("record the review's findings");
+        testing::runs::close_run(
+            &h.context,
+            &review.id,
+            rimaia_core::db::RunStatus::Succeeded,
+            rimaia_core::db::ExitClass::Success,
+            None,
+        )
+        .await;
+        reviews.push(review.id);
+    }
+
+    let window = review::findings::list(&h.context, &task.id, None)
+        .await
+        .expect("the window's read");
+    let Json(over_mcp) = server(&h)
+        .list_review_findings(Parameters(request::<ListReviewFindingsRequest>(
+            json!({ "task_id": task.id }),
+        )))
+        .await
+        .expect("the operator reads findings");
+
+    let window_view: Vec<ReviewFindingView> = window
+        .iter()
+        .cloned()
+        .map(ReviewFindingView::from)
+        .collect();
+    assert_eq!(over_mcp.findings, window_view);
+    let titles: Vec<&str> = over_mcp
+        .findings
+        .iter()
+        .map(|finding| finding.title.as_str())
+        .collect();
+    assert_eq!(titles, vec!["Zeta", "Alpha", "Mu"]);
+    assert_eq!(over_mcp.findings[2].review_run_id, reviews[1]);
+
+    let Json(open) = server(&h)
+        .list_review_findings(Parameters(request::<ListReviewFindingsRequest>(
+            json!({ "task_id": task.id, "status": "fixed" }),
+        )))
+        .await
+        .expect("filtered by status");
+    assert_eq!(open.findings, vec![]);
+}
+
+#[tokio::test]
+async fn the_operator_reads_a_tasks_review_history_with_every_finding_status() {
+    // ADR-0021's parity, task 037: `commands::review::get_review_history` is
+    // one line over `review_loop::history`, so the tool must answer with the
+    // same loops, in its own spelling, and say for every finding whether it
+    // blocks.
+    let h = TestContext::new().await;
+    let repository_id = seed_repository(&h.context.pool, "rimaia", "/tmp/rimaia").await;
+    let task = create_task(&h, &repository_id, "Reviewed").await;
+    let row = |kind, session, head| {
+        testing::runs::seed_row(
+            &h.context,
+            &task.id,
+            testing::runs::SeededRow::succeeded(kind, session, head),
+        )
+    };
+    let finding = |review: String, ordinal, severity, title: &'static str, resolved| {
+        let (status, resolution, by) = match resolved {
+            Some((status, reason, fix)) => (status, Some(reason), Some(fix)),
+            None => (review::FindingStatus::Open, None, None),
+        };
+        let h = &h;
+        let task_id = task.id.clone();
+        async move {
+            testing::runs::seed_finding(
+                &h.context,
+                &task_id,
+                testing::runs::SeededFinding {
+                    review_run_id: &review,
+                    ordinal,
+                    severity,
+                    title,
+                    status,
+                    resolution,
+                    resolved_by_run_id: by.as_deref(),
+                },
+            )
+            .await
+        }
+    };
+    row(RunKind::Implementation, "impl", "a").await;
+    let first = row(RunKind::Review, "r1", "a").await;
+    let fix = row(RunKind::Fix, "f1", "b").await;
+    finding(
+        first.clone(),
+        0,
+        FindingSeverity::High,
+        "Fixed one",
+        Some((review::FindingStatus::Fixed, "Done.", fix.clone())),
+    )
+    .await;
+    finding(
+        first.clone(),
+        1,
+        FindingSeverity::High,
+        "Rejected one",
+        Some((
+            review::FindingStatus::Rejected,
+            "The caller guarantees it.",
+            fix.clone(),
+        )),
+    )
+    .await;
+    let second = row(RunKind::Review, "r2", "b").await;
+    finding(second.clone(), 0, FindingSeverity::High, "Open one", None).await;
+    finding(second, 1, FindingSeverity::Low, "Advisory one", None).await;
+
+    let history = rimaia_core::review_loop::history(&h.context, &task.id)
+        .await
+        .expect("the window's read");
+    let Json(over_mcp) = server(&h)
+        .get_review_history(Parameters(request::<GetReviewHistoryRequest>(
+            json!({ "task_id": task.id }),
+        )))
+        .await
+        .expect("the operator reads the history");
+
+    assert_eq!(over_mcp, ReviewHistoryView::from(history));
+    let wire = serde_json::to_value(&over_mcp).expect("the view serializes");
+    let newest = &wire["loops"][0];
+    assert_eq!(newest["earlier"], json!(false));
+    assert_eq!(newest["fixes_spent"], json!(1));
+    assert_eq!(newest["verdict"], json!("findings_remain"));
+    assert_eq!(newest["open_blocking"], json!(1));
+    assert_eq!(newest["open_advisory"], json!(1));
+
+    let first_round = &newest["rounds"][0];
+    let statuses: Vec<(&Value, &Value, &Value)> = first_round["findings"]
+        .as_array()
+        .expect("the first review's findings")
+        .iter()
+        .map(|f| (&f["title"], &f["status"], &f["resolution"]))
+        .collect();
+    assert_eq!(
+        statuses,
+        vec![
+            (&json!("Fixed one"), &json!("fixed"), &json!("Done.")),
+            (
+                &json!("Rejected one"),
+                &json!("rejected"),
+                &json!("The caller guarantees it.")
+            ),
+        ]
+    );
+    assert_eq!(
+        first_round["fix"]["resolved"].as_array().map(Vec::len),
+        Some(2)
+    );
+    let second_round = &newest["rounds"][1];
+    let blocking: Vec<(&Value, &Value, &Value)> = second_round["findings"]
+        .as_array()
+        .expect("the second review's findings")
+        .iter()
+        .map(|f| (&f["title"], &f["status"], &f["blocking"]))
+        .collect();
+    assert_eq!(
+        blocking,
+        vec![
+            (&json!("Open one"), &json!("open"), &json!(true)),
+            (&json!("Advisory one"), &json!("open"), &json!(false)),
+        ]
+    );
+}
+
+#[tokio::test]
+async fn a_review_level_says_what_it_inherits_and_what_it_resolves_to() {
+    // Task 037: the interface offers `Inherit (<value>)` per field, so core
+    // answers it. Both doors reach `get_review_level`, and the tool must say
+    // the same thing as the service for every level.
+    let h = TestContext::new().await;
+    let provider = rimaia_core::runner::provider::ClaudeProvider;
+    let repository_id = seed_repository(&h.context.pool, "rimaia", "/tmp/rimaia").await;
+    let task = create_task(&h, &repository_id, "Levelled").await;
+    review_config::set_review_settings(
+        &h.context,
+        &provider,
+        "",
+        json!({ "enabled": "on_cost_acknowledged", "max_review_loops": 4 }),
+    )
+    .await
+    .expect("global");
+    review_config::set_repository_review_config(
+        &h.context,
+        &provider,
+        &repository_id,
+        json!({ "max_review_loops": 1, "blocking_severity": "high" }),
+    )
+    .await
+    .expect("repository");
+    review_config::set_task_review(
+        &h.context,
+        &provider,
+        &task.id,
+        None,
+        json!({ "enabled": "off" }),
+    )
+    .await
+    .expect("task");
+
+    let level = |level: &str, id: Option<&str>| {
+        let request = request::<GetReviewLevelRequest>(json!({ "level": level, "id": id }));
+        let h = &h;
+        async move {
+            let Json(over_mcp) = server(h)
+                .get_review_level(Parameters(request))
+                .await
+                .expect("the operator reads a level");
+            over_mcp
+        }
+    };
+
+    let global = level("global", None).await;
+    assert_eq!(
+        global,
+        review_config::get_review_level(
+            &h.context,
+            rimaia_core::review_loop::ReviewLevelName::Global,
+            None
+        )
+        .await
+        .expect("the window's read")
+    );
+    assert_eq!(global.config.max_review_loops, Some(4));
+    assert_eq!(
+        global.inherited.max_review_loops,
+        Some(2),
+        "the built-in default"
+    );
+    assert_eq!(
+        global.inherited.enabled,
+        Some(review_config::ReviewEnabled::Off)
+    );
+
+    let repository = level("repository", Some(&repository_id)).await;
+    assert_eq!(repository.config.max_review_loops, Some(1));
+    assert_eq!(
+        repository.inherited.max_review_loops,
+        Some(4),
+        "the global's"
+    );
+    assert_eq!(
+        repository.inherited.enabled,
+        Some(review_config::ReviewEnabled::OnCostAcknowledged)
+    );
+    assert_eq!(repository.effective.max_review_loops, Some(1));
+
+    let task_level = level("task", Some(&task.id)).await;
+    assert_eq!(
+        task_level.config.enabled,
+        Some(review_config::ReviewEnabled::Off)
+    );
+    assert_eq!(
+        task_level.inherited.enabled,
+        Some(review_config::ReviewEnabled::OnCostAcknowledged),
+        "what the task becomes if it stops saying off"
+    );
+    assert_eq!(
+        task_level.inherited.max_review_loops,
+        Some(1),
+        "the repository's"
+    );
+    assert_eq!(
+        task_level.effective.enabled,
+        Some(review_config::ReviewEnabled::Off)
+    );
+    assert_eq!(
+        task_level.effective.blocking_severity,
+        Some(FindingSeverity::High)
+    );
+
+    for refused in [
+        request::<GetReviewLevelRequest>(json!({ "level": "global", "id": "x" })),
+        request::<GetReviewLevelRequest>(json!({ "level": "task" })),
+    ] {
+        let refusal = as_result(server(&h).get_review_level(Parameters(refused)).await);
+        assert_eq!(
+            refusal.is_error,
+            Some(true),
+            "a level and its id must agree"
+        );
+    }
+}
+
+#[tokio::test]
+async fn the_review_settings_answer_the_same_over_mcp_and_the_tauri_command() {
+    // ADR-0021's parity, task 021: `commands::review`'s four are one line each
+    // over `review_loop::config`, so the service's answer is the window's. The
+    // tools reach the same functions, so a write through either door is read
+    // back identically through the other, and a refusal reads the same.
+    let h = TestContext::new().await;
+    let repository_id = seed_repository(&h.context.pool, "rimaia", "/tmp/rimaia").await;
+    let task = create_task(&h, &repository_id, "Reviewed").await;
+    let provider = rimaia_core::runner::provider::ClaudeProvider;
+
+    let Json(written) = server(&h)
+        .set_review_settings(Parameters(request::<SetReviewSettingsRequest>(json!({
+            "instructions": "Run /review.",
+            "config": { "enabled": "on_cost_acknowledged", "max_review_loops": 1 },
+        }))))
+        .await
+        .expect("the operator configures the loop");
+    let window = review_config::get_review_settings(&h.context)
+        .await
+        .expect("the window's read");
+    assert_eq!(written, window);
+    let Json(over_mcp) = server(&h)
+        .get_review_settings()
+        .await
+        .expect("the operator reads it back");
+    assert_eq!(over_mcp, window);
+
+    let from_window = review_config::set_repository_review_config(
+        &h.context,
+        &provider,
+        &repository_id,
+        json!({ "blocking_severity": "high" }),
+    )
+    .await
+    .expect("the window configures a repository");
+    let Json(from_mcp) = server(&h)
+        .set_repository_review_config(Parameters(request::<SetRepositoryReviewConfigRequest>(
+            json!({ "repository_id": repository_id, "config": { "blocking_severity": "high" } }),
+        )))
+        .await
+        .expect("the operator configures a repository");
+    assert_eq!(from_mcp, from_window);
+
+    let Json(task_review) = server(&h)
+        .set_task_review(Parameters(request::<SetTaskReviewRequest>(json!({
+            "task_id": task.id,
+            "review_instructions": "Use /strict-review.",
+            "config": { "fix_session": "resume" },
+        }))))
+        .await
+        .expect("the operator configures a task");
+    let detail = tasks::get_task(&h.context, &task.id)
+        .await
+        .expect("the window reads the task");
+    assert_eq!(detail.review_instructions, task_review.instructions);
+    assert_eq!(detail.review_config, task_review.config);
+
+    let refusal = review_config::set_task_review(
+        &h.context,
+        &provider,
+        &task.id,
+        None,
+        json!({ "max_review_loops": 6 }),
+    )
+    .await
+    .expect_err("six fixes is not bounded");
+    assert_same_refusal(
+        &refusal,
+        server(&h)
+            .set_task_review(Parameters(request::<SetTaskReviewRequest>(json!({
+                "task_id": task.id,
+                "config": { "max_review_loops": 6 },
+            }))))
+            .await,
+    );
+}
+
+#[tokio::test]
+async fn max_review_loops_above_five_is_refused() {
+    let h = TestContext::new().await;
+    let provider = rimaia_core::runner::provider::ClaudeProvider;
+
+    for loops in [0, 5] {
+        review_config::set_review_settings(
+            &h.context,
+            &provider,
+            "",
+            json!({ "max_review_loops": loops }),
+        )
+        .await
+        .expect("zero to five is bounded");
+    }
+    let refused = review_config::set_review_settings(
+        &h.context,
+        &provider,
+        "",
+        json!({ "max_review_loops": 6 }),
+    )
+    .await
+    .expect_err("six is refused");
+    assert_eq!(refused.code(), rimaia_core::ErrorCode::Invalid);
+    assert_eq!(
+        refused.to_string(),
+        "max_review_loops is at most 5; 6 fixes is not a bounded loop"
+    );
+}
+
+#[tokio::test]
+async fn a_review_model_outside_the_catalogue_is_refused() {
+    let h = TestContext::new().await;
+    let provider = rimaia_core::runner::provider::ClaudeProvider;
+    let catalogue = rimaia_core::strategy::catalogue::catalogue(&h.context, &provider)
+        .await
+        .expect("the catalogue");
+    let listed_model = catalogue.models[0].id.clone();
+    let listed_effort = catalogue.efforts[0].id.clone();
+
+    review_config::set_review_settings(
+        &h.context,
+        &provider,
+        "",
+        json!({ "review_model": listed_model, "review_effort": listed_effort }),
+    )
+    .await
+    .expect("a listed model and effort are accepted");
+
+    for (field, value) in [
+        ("review_model", "gpt-nothing"),
+        ("review_effort", "ludicrous"),
+    ] {
+        let refused =
+            review_config::set_review_settings(&h.context, &provider, "", json!({ field: value }))
+                .await
+                .expect_err("not in the catalogue");
+        assert_eq!(refused.code(), rimaia_core::ErrorCode::Invalid);
+        assert!(
+            refused.to_string().starts_with(&format!(
+                "{field} \"{value}\" is not in the strategy catalogue"
+            )),
+            "{refused}"
+        );
+    }
+}
+
+#[tokio::test]
 async fn an_unknown_task_id_reaches_the_agent_as_readable_content() {
     // Task 010's "a specific, actionable error to the calling agent": not an
     // opaque protocol failure, and not "invalid input".
@@ -779,8 +1315,8 @@ const NOW: &str = "2026-08-20T02:00:00+00:00";
 fn server(h: &TestContext) -> RimaiaServer {
     RimaiaServer::new(
         h.context.with_source(MutationSource::Mcp),
-        testing::doctor::environment(),
-        testing::doctor::planner_access(),
+        testing::doctor::provider(),
+        Some(testing::doctor::local_tools(h.machine())),
     )
 }
 
@@ -844,14 +1380,16 @@ where
 
 async fn seed_repository(pool: &SqlitePool, name: &str, path: &str) -> String {
     let id = rimaia_core::db::new_id();
+    let team_id = solo_team(pool).await;
     sqlx::query(
-        "INSERT INTO repositories (id, name, path, default_branch, worktree_root, allow_unattended_runs, created_at)
-         VALUES (?1, ?2, ?3, 'main', '/tmp/rimaia-worktrees', 0, ?4)",
+        "INSERT INTO repositories (id, team_id, name, path, default_branch, worktree_root, allow_unattended_runs, created_at)
+         VALUES (?1, ?5, ?2, ?3, 'main', '/tmp/rimaia-worktrees', 0, ?4)",
     )
     .bind(&id)
     .bind(name)
     .bind(path)
     .bind(NOW)
+    .bind(&team_id)
     .execute(pool)
     .await
     .expect("seed a repository");
@@ -934,4 +1472,17 @@ Then check that `position` is still fractional: board order *is* execution order
         plan.push_str(paragraph);
     }
     plan
+}
+
+/// The solo team the board's rows belong to: the identity `TestContext`
+/// already created, or a first launch's, read through the same
+/// `identity::ensure_solo` either way.
+async fn solo_team(pool: &SqlitePool) -> String {
+    rimaia_core::identity::ensure_solo(
+        pool,
+        &rimaia_core::testing::TestClock::new(rimaia_core::testing::test_epoch()),
+    )
+    .await
+    .expect("the board's solo identity")
+    .team_id
 }

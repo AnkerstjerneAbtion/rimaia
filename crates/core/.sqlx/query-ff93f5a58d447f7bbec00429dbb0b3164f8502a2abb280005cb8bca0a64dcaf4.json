@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "\n        UPDATE repositories\n        SET name = ?1, default_branch = ?2\n        WHERE id = ?3\n        RETURNING team_id\n        ",
+  "describe": {
+    "columns": [
+      {
+        "name": "team_id",
+        "ordinal": 0,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "ff93f5a58d447f7bbec00429dbb0b3164f8502a2abb280005cb8bca0a64dcaf4"
+}

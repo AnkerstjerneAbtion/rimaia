@@ -19,6 +19,7 @@ use rimaia_core::archive;
 use rimaia_core::credentials::provision::{self, Verification};
 use rimaia_core::credentials::Secret;
 use rimaia_core::db::{OnArchive, Repository};
+use rimaia_core::machine::{self, Checkout, CheckoutView};
 use rimaia_core::repo::{self, NewRepository, RemoteInfo, RepositoryPatch};
 use rimaia_core::{Error, Result};
 use serde::Deserialize;
@@ -42,6 +43,11 @@ pub struct RegisterRepositoryInput {
 
 /// What the frontend sends [`update_repository`]. Mirrors [`RepositoryPatch`]
 /// field for field — every field left `None` leaves that column unchanged.
+///
+/// The board's half only. `worktreeRoot` left in task 066 for
+/// [`set_repository_worktree_root`]: it is this machine's setting (D32's
+/// appendix), and an unknown key off the wire is ignored rather than refused,
+/// as it always was.
 #[derive(Debug, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct UpdateRepositoryInput {
@@ -49,19 +55,29 @@ pub struct UpdateRepositoryInput {
     pub name: Option<String>,
     #[serde(default)]
     pub default_branch: Option<String>,
-    #[serde(default)]
-    pub worktree_root: Option<String>,
 }
 
 /// Every registered repository, alphabetically — the order Settings shows
-/// them in.
+/// them in. The board's half, with no path (task 066); this machine's clones
+/// are [`list_checkouts`].
 #[tauri::command]
 pub async fn list_repositories(state: State<'_, AppState>) -> Result<Vec<Repository>> {
     repo::list(&state.context).await
 }
 
+/// This machine's checkout of every repository it has one of (task 066): the
+/// per-machine fields the board's `Repository` no longer carries.
+///
+/// A local command (D32's appendix). Its one board fact, which repositories
+/// the caller can see, comes through `repo::checkouts`'s named read.
+#[tauri::command]
+pub async fn list_checkouts(state: State<'_, AppState>) -> Result<Vec<CheckoutView>> {
+    repo::checkouts(&state.context, &state.machine).await
+}
+
 /// Validates and registers a local repository (task 003's four checks; each
-/// produces its own message).
+/// produces its own message): the board's row, then this machine's checkout.
+/// A local command until task 054 splits it (D32's appendix).
 #[tauri::command]
 pub async fn register_repository(
     state: State<'_, AppState>,
@@ -70,6 +86,7 @@ pub async fn register_repository(
     let worktrees_dir = state.paths.worktrees_dir();
     repo::register(
         &state.context,
+        &state.machine,
         &worktrees_dir,
         NewRepository {
             path: input.path,
@@ -94,12 +111,24 @@ pub async fn update_repository(
         RepositoryPatch {
             name: patch.name,
             default_branch: patch.default_branch,
-            worktree_root: patch.worktree_root,
-            // Not on the edit form: raising a repository's cap is the opt-out
-            // ADR-0010 wants taken deliberately, so it has its own command and
-            // its own explanation next to the control.
-            max_concurrency: None,
         },
+    )
+    .await
+}
+
+/// Moves where this machine creates a repository's worktrees (task 066, D32's
+/// Binds): `update_repository`'s `worktreeRoot`, now this machine's checkout.
+#[tauri::command]
+pub async fn set_repository_worktree_root(
+    state: State<'_, AppState>,
+    repository_id: String,
+    worktree_root: String,
+) -> Result<CheckoutView> {
+    repo::set_worktree_root(
+        &state.context,
+        &state.machine,
+        &repository_id,
+        worktree_root,
     )
     .await
 }
@@ -117,8 +146,8 @@ pub async fn set_repository_max_concurrency(
     state: State<'_, AppState>,
     id: String,
     max_concurrency: i64,
-) -> Result<Repository> {
-    repo::set_max_concurrency(&state.context, &id, max_concurrency).await
+) -> Result<CheckoutView> {
+    repo::set_max_concurrency(&state.context, &state.machine, &id, max_concurrency).await
 }
 
 /// Chooses what archiving a task in this repository cleans up (ADR-0025
@@ -135,8 +164,9 @@ pub async fn set_repository_on_archive(
     id: String,
     on_archive: OnArchive,
     script: Option<String>,
-) -> Result<Repository> {
-    archive::set_repository_on_archive(&state.context, &id, on_archive, script).await
+) -> Result<CheckoutView> {
+    archive::set_repository_on_archive(&state.context, &state.machine, &id, on_archive, script)
+        .await
 }
 
 /// Flips ADR-0012's per-repository opt-in to unattended runs. The
@@ -148,15 +178,29 @@ pub async fn set_repository_unattended_runs(
     state: State<'_, AppState>,
     id: String,
     allow: bool,
+) -> Result<CheckoutView> {
+    repo::set_allow_unattended_runs(&state.context, &state.machine, &id, allow).await
+}
+
+/// Sets the team ceiling: whether the repository's team allows unattended runs
+/// in it at all (ADR-0032 point 4). A board command, refused to a member and
+/// on a personal team; [`set_repository_unattended_runs`] stays this runner's
+/// own consent.
+#[tauri::command]
+pub async fn set_repository_unattended_ceiling(
+    state: State<'_, AppState>,
+    id: String,
+    allowed: bool,
 ) -> Result<Repository> {
-    repo::set_allow_unattended_runs(&state.context, &id, allow).await
+    repo::set_repository_unattended_ceiling(&state.context, &id, allowed).await
 }
 
 /// Removes a repository. Refused, naming how many, when any task still
-/// references it.
+/// references it; then this machine forgets its worktree records and its
+/// checkout (task 066).
 #[tauri::command]
 pub async fn remove_repository(state: State<'_, AppState>, id: String) -> Result<()> {
-    repo::remove(&state.context, &id).await
+    repo::remove(&state.context, Some(&state.machine), &id).await
 }
 
 /// Fresh inspection of a repository's remote and `gh` readiness — never
@@ -167,7 +211,7 @@ pub async fn get_repository_remote_info(
     id: String,
 ) -> Result<RemoteInfo> {
     let repository = repo::get(&state.context, &id).await?;
-    repo::remote_info(&repository).await
+    repo::remote_info(&machine::checkout_of(&state.machine, &repository).await?).await
 }
 
 // ---------------------------------------------------------------------------
@@ -187,7 +231,8 @@ pub async fn get_repository_credential_status(
     id: String,
 ) -> Result<repo::CredentialStatus> {
     let repository = repo::get(&state.context, &id).await?;
-    credential_status(&state, &repository).await
+    let checkout = machine::checkout_of(&state.machine, &repository).await?;
+    credential_status(&state, &repository, &checkout).await
 }
 
 /// Verifies a pasted token and stores it.
@@ -209,9 +254,10 @@ pub async fn set_repository_credential(
     label: Option<String>,
 ) -> Result<repo::CredentialStatus> {
     let repository = repo::get(&state.context, &id).await?;
+    let checkout = machine::checkout_of(&state.machine, &repository).await?;
     let secret = Secret::new(token)?;
 
-    let owner_repo = repo::remote_info(&repository)
+    let owner_repo = repo::remote_info(&checkout)
         .await
         .ok()
         .and_then(|remote| remote.remote_url)
@@ -232,11 +278,16 @@ pub async fn set_repository_credential(
     }
 
     state.runner.credentials.set(&id, secret).await?;
-    let stored =
-        repo::set_credential_metadata(&state.context, &id, verification.login(), label.as_deref())
-            .await?;
+    let stored = repo::set_credential_metadata(
+        &state.context,
+        &state.machine,
+        &id,
+        verification.login(),
+        label.as_deref(),
+    )
+    .await?;
 
-    credential_status(&state, &stored).await
+    credential_status(&state, &repository, &stored).await
 }
 
 /// Removes it, keychain first.
@@ -249,30 +300,34 @@ pub async fn remove_repository_credential(
     state: State<'_, AppState>,
     id: String,
 ) -> Result<repo::CredentialStatus> {
+    let repository = repo::get(&state.context, &id).await?;
     state.runner.credentials.delete(&id).await?;
-    let cleared = repo::clear_credential_metadata(&state.context, &id).await?;
+    let cleared = repo::clear_credential_metadata(&state.context, &state.machine, &id).await?;
 
-    credential_status(&state, &cleared).await
+    credential_status(&state, &repository, &cleared).await
 }
 
+/// The pane's view of one checkout's credential: the metadata off this
+/// machine's checkout (task 066), the keychain's own answer beside it.
 async fn credential_status(
     state: &State<'_, AppState>,
-    repository: &rimaia_core::db::Repository,
+    repository: &Repository,
+    checkout: &Checkout,
 ) -> Result<repo::CredentialStatus> {
     // Best-effort: a `git remote` that cannot be read is not a reason a
     // credential pane cannot open, and the SSH notice is a caveat rather than a
     // gate.
-    let ssh_remote = repo::remote_info(repository)
+    let ssh_remote = repo::remote_info(checkout)
         .await
         .ok()
         .and_then(|remote| remote.remote_url)
         .is_some_and(|url| url.starts_with("git@") || url.starts_with("ssh://"));
 
     Ok(repo::CredentialStatus {
-        configured: repo::has_credential(repository),
-        login: repository.credential_login.clone(),
-        label: repository.credential_label.clone(),
-        added_at: repository.credential_added_at,
+        configured: repo::has_credential(checkout),
+        login: checkout.credential_login.clone(),
+        label: checkout.credential_label.clone(),
+        added_at: checkout.credential_added_at,
         store: state.runner.credentials.status(&repository.id).await,
         ssh_remote,
     })

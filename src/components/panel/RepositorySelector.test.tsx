@@ -18,14 +18,8 @@ function repository(overrides: Partial<Repository> = {}): Repository {
   return {
     id: "repo-1",
     name: "rimaia",
-    path: "/code/rimaia",
     defaultBranch: "main",
-    worktreeRoot: "/data/worktrees/rimaia",
-    allowUnattendedRuns: false,
-    maxConcurrency: 1,
     createdAt: "2026-08-20T09:00:00Z",
-    onArchive: "none",
-    onArchiveScript: null,
     ...overrides,
   };
 }
@@ -41,7 +35,7 @@ function props(overrides: Partial<Parameters<typeof RepositorySelector>[0]> = {}
     repositoryId: "repo-1",
     repositories: REPOSITORIES,
     repositoryName: "rimaia",
-    worktreePath: null,
+    branch: null,
     hasRuns: false,
     detailLoading: false,
     ...overrides,
@@ -119,17 +113,13 @@ describe("RepositorySelector", () => {
     expect(select).toHaveValue("repo-1");
   });
 
-  it("is disabled and names the worktree once one exists", () => {
-    render(
-      <RepositorySelector
-        {...props({ worktreePath: "/data/worktrees/rimaia/wire-the-board" })}
-      />,
-    );
+  it("is disabled and names the branch once one is recorded (D13's 2026-10-10 amendment)", () => {
+    render(<RepositorySelector {...props({ branch: "rimaia/wire-the-board" })} />);
 
     expect(screen.getByLabelText("Task repository")).toBeDisabled();
     expect(
       screen.getByText(
-        "Cannot move to another repository: it already has a worktree at /data/worktrees/rimaia/wire-the-board.",
+        "Cannot move to another repository: it already has a branch, rimaia/wire-the-board, in rimaia.",
       ),
     ).toBeInTheDocument();
   });
@@ -145,14 +135,12 @@ describe("RepositorySelector", () => {
     ).toBeInTheDocument();
   });
 
-  it("names the worktree, not the run count, when both hold — the order the service refuses in", () => {
-    render(
-      <RepositorySelector {...props({ worktreePath: "/data/worktrees/x", hasRuns: true })} />,
-    );
+  it("names the branch, not the run count, when both hold — the order the service refuses in", () => {
+    render(<RepositorySelector {...props({ branch: "rimaia/x", hasRuns: true })} />);
 
     expect(
       screen.getByText(
-        "Cannot move to another repository: it already has a worktree at /data/worktrees/x.",
+        "Cannot move to another repository: it already has a branch, rimaia/x, in rimaia.",
       ),
     ).toBeInTheDocument();
     expect(screen.queryByText(/a run has already been recorded/)).toBeNull();

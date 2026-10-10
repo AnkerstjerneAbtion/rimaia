@@ -16,39 +16,45 @@ use chrono::{DateTime, Utc};
 use schemars::JsonSchema;
 use serde::Serialize;
 
-use crate::analytics::Analytics;
+use crate::analytics::{Analytics, RunOutcomes};
 use crate::archive::OnArchiveOutcome;
+use crate::consent::ceiling::StrategyCeiling;
 use crate::credentials::StoreStatus;
 use crate::db::settings::Dismissal;
+use crate::db::Task;
 use crate::db::{
-    BoardColumn, ExitClass, MutationSource, OnArchive, Repository, Run, RunState, RunStatus,
-    Schedule, ScheduleMode, StrategyMode, StrategySource, TaskLink,
+    BoardColumn, ExitClass, MutationSource, OnArchive, Repository, Run, RunKind, RunState,
+    RunStatus, Schedule, ScheduleMode, StrategyMode, StrategySource, TaskLink,
 };
 use crate::doctor::{CheckResult, DoctorReport};
+use crate::review::{
+    Dependent, Digest, DigestEntry, DigestLoop, DigestOutcome, DigestTotals, FindingSeverity,
+    FindingStatus, ReviewFinding, ReviewOutcome,
+};
+use crate::review_loop::{
+    HistoryFinding, LoopHistory, PhaseSummary, ReviewConfig, ReviewHistory, ReviewLoopSummary,
+    ReviewRound, UnreviewedReason, Verdict,
+};
 use crate::runner::strategy::{PlanOutcome, PlanPass, PlanResult};
 use crate::schedule::{PreflightSummary, ScheduleView as CoreScheduleView};
 use crate::scheduler::RunCapacity;
+use crate::scheduler::SkipReason;
 use crate::strategy::StrategyApproval;
 use crate::tasks::{ArchiveReport, ArchivedTask, RefusedArchive, TaskDetail, TaskSummary};
 use crate::worktree::{AutoCleanup, WorktreeInventoryEntry};
+use std::collections::BTreeMap;
 
 /// One registered repository, as `list_repositories` reports it.
+///
+/// The board's half only (task 066): no path and nothing else that is true of
+/// one machine. This machine's clone of it, its cap and its consent are
+/// `list_checkouts`'s [`CheckoutView`].
 #[derive(Debug, Clone, PartialEq, Serialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub struct RepositoryView {
     pub id: String,
     pub name: String,
-    pub path: String,
     pub default_branch: String,
-    /// ADR-0012's per-repository opt-in. Surfaced because it is the difference
-    /// between a task that will run unattended tonight and one that will sit
-    /// in `ready` waiting for a human to say yes.
-    pub allow_unattended_runs: bool,
-    /// ADR-0010's per-repository cap, `1` unless the operator opted out.
-    /// Surfaced for the same reason as the flag above: it is the difference
-    /// between two of this repository's tasks running tonight and them running
-    /// one after the other.
-    pub max_concurrency: i64,
 }
 
 impl From<Repository> for RepositoryView {
@@ -56,12 +62,54 @@ impl From<Repository> for RepositoryView {
         Self {
             id: repository.id,
             name: repository.name,
-            path: repository.path,
             default_branch: repository.default_branch,
-            allow_unattended_runs: repository.allow_unattended_runs,
-            max_concurrency: repository.max_concurrency,
         }
     }
+}
+
+/// This machine's clone of one repository, as `list_checkouts` and
+/// `set_repository_max_concurrency` report it (D16.1's snake case).
+///
+/// A local tool's view, so it may carry a path: it describes this machine to
+/// the operator's own MCP client, which read the same facts off
+/// `list_repositories` until task 066 (ADR-0021).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub struct CheckoutView {
+    pub repository_id: String,
+    pub path: String,
+    pub worktree_root: String,
+    /// ADR-0010's per-repository cap, `1` unless the operator opted out: the
+    /// difference between two of this repository's tasks running tonight and
+    /// them running one after the other.
+    pub max_concurrency: i64,
+    /// This runner's consent to unattended runs (ADR-0012, ADR-0032 point 4):
+    /// the difference between a task that will run unattended tonight and one
+    /// that will sit in `ready` waiting for a human to say yes.
+    pub unattended_consent: bool,
+    pub on_archive: OnArchive,
+    pub on_archive_script: Option<String>,
+}
+
+impl From<crate::machine::CheckoutView> for CheckoutView {
+    fn from(checkout: crate::machine::CheckoutView) -> Self {
+        Self {
+            repository_id: checkout.repository_id,
+            path: checkout.path,
+            worktree_root: checkout.worktree_root,
+            max_concurrency: checkout.max_concurrency,
+            unattended_consent: checkout.unattended_consent,
+            on_archive: checkout.on_archive,
+            on_archive_script: checkout.on_archive_script,
+        }
+    }
+}
+
+/// `list_checkouts`' answer.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub struct CheckoutListView {
+    pub checkouts: Vec<CheckoutView>,
 }
 
 /// One task in full: the plan, the links, what it depends on, and how its last
@@ -88,7 +136,6 @@ pub struct TaskView {
     pub column: BoardColumn,
     pub run_state: RunState,
     pub branch: Option<String>,
-    pub worktree_path: Option<String>,
     pub model: Option<String>,
     pub effort: Option<String>,
     /// How `model` and `effort` get chosen (ADR-0016). The **stored** mode, not
@@ -118,6 +165,65 @@ pub struct TaskView {
     pub links: Vec<TaskLinkView>,
     pub depends_on: Vec<String>,
     pub last_run: Option<RunView>,
+    /// The task's own override of the review instructions, and its own loop
+    /// settings, before any inheritance (task 021).
+    pub review_instructions: Option<String>,
+    pub review_config: ReviewConfig,
+    /// Where the task's review loop stands, or absent when the loop never
+    /// touched it.
+    pub review_loop: Option<ReviewLoopView>,
+}
+
+/// [`ReviewLoopSummary`] in this surface's spelling (D16.1).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub struct ReviewLoopView {
+    /// The effective setting now.
+    pub enabled: bool,
+    pub max_review_loops: u32,
+    pub fixes_spent: u32,
+    /// Review phases in the current loop.
+    pub reviews: u32,
+    /// `none`, `clean`, `findings_remain` or `unreviewed`. The last two are
+    /// what flags a card.
+    pub verdict: &'static str,
+    /// Why, when the verdict is `unreviewed`.
+    pub unreviewed_reason: Option<UnreviewedReason>,
+    pub open_blocking: u32,
+    /// Open findings below the blocking severity: raised, and not worth a fix.
+    pub open_advisory: u32,
+    /// A review after a fix raised a finding the fix had fixed, or a new
+    /// blocking one. A signal that the loop may be going in circles, not a
+    /// verdict.
+    pub ping_pong: bool,
+}
+
+/// A verdict as this surface spells it: a word, and why when it is
+/// `unreviewed`.
+fn verdict_parts(verdict: Verdict) -> (&'static str, Option<UnreviewedReason>) {
+    match verdict {
+        Verdict::None => ("none", None),
+        Verdict::Clean => ("clean", None),
+        Verdict::FindingsRemain { .. } => ("findings_remain", None),
+        Verdict::Unreviewed { reason } => ("unreviewed", Some(reason)),
+    }
+}
+
+impl From<ReviewLoopSummary> for ReviewLoopView {
+    fn from(summary: ReviewLoopSummary) -> Self {
+        let (verdict, unreviewed_reason) = verdict_parts(summary.verdict);
+        Self {
+            enabled: summary.enabled,
+            max_review_loops: summary.max_review_loops,
+            fixes_spent: summary.fixes_spent,
+            reviews: summary.reviews,
+            verdict,
+            unreviewed_reason,
+            open_blocking: summary.open_blocking,
+            open_advisory: summary.open_advisory,
+            ping_pong: summary.ping_pong,
+        }
+    }
 }
 
 impl From<TaskDetail> for TaskView {
@@ -138,6 +244,9 @@ impl From<TaskDetail> for TaskView {
             effective_model: _,
             effective_effort: _,
             effective_origin: _,
+            review_instructions,
+            review_config,
+            review_loop,
         } = detail;
 
         Self {
@@ -149,7 +258,6 @@ impl From<TaskDetail> for TaskView {
             column: task.column,
             run_state: task.run_state,
             branch: task.branch,
-            worktree_path: task.worktree_path,
             model: task.model,
             effort: task.effort,
             strategy_mode: task.strategy_mode,
@@ -162,6 +270,9 @@ impl From<TaskDetail> for TaskView {
             links: links.into_iter().map(TaskLinkView::from).collect(),
             depends_on,
             last_run: last_run.map(RunView::from),
+            review_instructions,
+            review_config,
+            review_loop: review_loop.map(ReviewLoopView::from),
         }
     }
 }
@@ -253,7 +364,13 @@ pub struct CredentialStatusView {
 }
 
 impl CredentialStatusView {
-    pub fn new(repository: &Repository, store: StoreStatus) -> Self {
+    /// The board's name for the repository, this machine's checkout for the
+    /// metadata (task 066).
+    pub fn new(
+        repository: &Repository,
+        checkout: &crate::machine::Checkout,
+        store: StoreStatus,
+    ) -> Self {
         let (keychain, keychain_detail) = match &store {
             StoreStatus::Stored => ("stored", None),
             StoreStatus::Absent => ("absent", None),
@@ -262,10 +379,10 @@ impl CredentialStatusView {
         Self {
             repository_id: repository.id.clone(),
             repository: repository.name.clone(),
-            configured: repository.credential_added_at.is_some(),
-            login: repository.credential_login.clone(),
-            label: repository.credential_label.clone(),
-            added_at: repository.credential_added_at,
+            configured: crate::repo::has_credential(checkout),
+            login: checkout.credential_login.clone(),
+            label: checkout.credential_label.clone(),
+            added_at: checkout.credential_added_at,
             keychain: keychain.to_string(),
             keychain_detail,
         }
@@ -284,6 +401,50 @@ impl CredentialStatusView {
 pub struct AnalyticsView {
     pub from: Option<DateTime<Utc>>,
     pub to: Option<DateTime<Utc>>,
+    /// `runs_total` through `failure_rate` count **implementation runs only**
+    /// (seam-contract D29 point 7): a review's `succeeded` says the reviewer
+    /// ran, not that the work was good. Review and fix runs are counted in
+    /// `review_loop_outcomes`.
+    pub runs_total: usize,
+    pub runs_succeeded: usize,
+    pub runs_failed: usize,
+    pub runs_cancelled: usize,
+    pub runs_interrupted: usize,
+    pub runs_running: usize,
+    /// Of the implementation runs that *ended*, `null` when none has.
+    pub failure_rate: Option<f64>,
+    /// Summed over the rows that have a cost, of every kind. Read
+    /// `runs_without_cost` before quoting it: a period predating ADR-0022's
+    /// capture columns is partly unrecorded rather than cheaper (seam-contract
+    /// D18). Always `implementation_spend_usd + review_loop_spend_usd`.
+    pub spend_usd: f64,
+    pub runs_without_cost: usize,
+    pub tasks_attempted: usize,
+    pub tasks_completed: usize,
+    /// Total spend over completed tasks — every failed attempt included, which
+    /// is the only honest way to say what a finished task cost.
+    pub cost_per_completed_task_usd: Option<f64>,
+    /// Of implementation runs only.
+    pub median_duration_seconds: Option<i64>,
+    /// Summed run duration, not wall-clock: parallel runs each contribute.
+    pub unattended_hours: f64,
+    pub models: Vec<ModelUseView>,
+    pub planner_spend_usd: f64,
+    pub implementation_spend_usd: f64,
+    /// What review and fix runs cost (ADR-0017's loop).
+    pub review_loop_spend_usd: f64,
+    /// How review and fix runs ended, in the same five counts and rate the
+    /// flat `runs_*` fields give for implementation runs.
+    pub review_loop_outcomes: RunOutcomesView,
+    /// The user's own figure, and `null` until they give one. Absent means the
+    /// comparison must not be drawn, never that the subscription is free.
+    pub subscription_monthly_usd: Option<f64>,
+}
+
+/// Five counts and a rate, nested where the implementation's are flat.
+#[derive(Debug, Clone, PartialEq, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub struct RunOutcomesView {
     pub runs_total: usize,
     pub runs_succeeded: usize,
     pub runs_failed: usize,
@@ -292,25 +453,20 @@ pub struct AnalyticsView {
     pub runs_running: usize,
     /// Of the runs that *ended*, `null` when none has.
     pub failure_rate: Option<f64>,
-    /// Summed over the rows that have a cost. Read `runs_without_cost` before
-    /// quoting it: a period predating ADR-0022's capture columns is partly
-    /// unrecorded rather than cheaper (seam-contract D18).
-    pub spend_usd: f64,
-    pub runs_without_cost: usize,
-    pub tasks_attempted: usize,
-    pub tasks_completed: usize,
-    /// Total spend over completed tasks — every failed attempt included, which
-    /// is the only honest way to say what a finished task cost.
-    pub cost_per_completed_task_usd: Option<f64>,
-    pub median_duration_seconds: Option<i64>,
-    /// Summed run duration, not wall-clock: parallel runs each contribute.
-    pub unattended_hours: f64,
-    pub models: Vec<ModelUseView>,
-    pub planner_spend_usd: f64,
-    pub implementation_spend_usd: f64,
-    /// The user's own figure, and `null` until they give one. Absent means the
-    /// comparison must not be drawn, never that the subscription is free.
-    pub subscription_monthly_usd: Option<f64>,
+}
+
+impl From<&RunOutcomes> for RunOutcomesView {
+    fn from(outcomes: &RunOutcomes) -> Self {
+        Self {
+            runs_total: outcomes.total(),
+            runs_succeeded: outcomes.succeeded,
+            runs_failed: outcomes.failed,
+            runs_cancelled: outcomes.cancelled,
+            runs_interrupted: outcomes.interrupted,
+            runs_running: outcomes.running,
+            failure_rate: outcomes.failure_rate(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, JsonSchema)]
@@ -351,6 +507,8 @@ impl From<&Analytics> for AnalyticsView {
                 .collect(),
             planner_spend_usd: report.planner_spend_usd,
             implementation_spend_usd: report.implementation_spend_usd,
+            review_loop_spend_usd: report.review_loop_spend_usd,
+            review_loop_outcomes: RunOutcomesView::from(&report.review_loop_outcomes),
             subscription_monthly_usd: report.subscription_monthly_usd,
         }
     }
@@ -608,6 +766,9 @@ impl From<TaskLink> for TaskLinkView {
 pub struct RunView {
     pub id: String,
     pub attempt: i64,
+    /// What the run was for: `get_task`'s `last_run` is the newest row of any
+    /// kind (seam-contract D29 point 4), so it has to say which.
+    pub kind: RunKind,
     pub status: RunStatus,
     pub exit_class: Option<ExitClass>,
     pub error_message: Option<String>,
@@ -621,6 +782,7 @@ impl From<Run> for RunView {
         Self {
             id: run.id,
             attempt: run.attempt,
+            kind: run.kind,
             status: run.status,
             exit_class: run.exit_class,
             error_message: run.error_message,
@@ -916,6 +1078,25 @@ pub struct WorktreeAutoCleanupView {
     pub setting: AutoCleanup,
 }
 
+/// This runner's strategy ceiling, in the tool surface's `snake_case`
+/// (D16.1) rather than the Tauri boundary's camelCase. `null` on either half
+/// is no limit on it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub struct StrategyCeilingView {
+    pub models: Option<Vec<String>>,
+    pub max_effort: Option<String>,
+}
+
+impl From<StrategyCeiling> for StrategyCeilingView {
+    fn from(ceiling: StrategyCeiling) -> Self {
+        Self {
+            models: ceiling.models,
+            max_effort: ceiling.max_effort,
+        }
+    }
+}
+
 /// What a repository's archive cleanup did to one task (ADR-0025 point 6).
 ///
 /// A flat shape rather than the core enum's tagged one, because a `snake_case`
@@ -1048,6 +1229,476 @@ pub struct RepositoryOnArchiveView {
     pub script: Option<String>,
 }
 
+/// A task as a review verdict leaves it. **No plan text** (D16.6): the caller
+/// decided about the work and already knows what was asked of it.
+#[derive(Debug, Clone, PartialEq, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub struct ReviewedTaskView {
+    pub id: String,
+    pub repository_id: String,
+    pub title: String,
+    pub column: BoardColumn,
+    pub run_state: RunState,
+    pub branch: Option<String>,
+    /// Including any review note the verdict appended.
+    pub extra_instructions: Option<String>,
+}
+
+impl From<Task> for ReviewedTaskView {
+    fn from(task: Task) -> Self {
+        Self {
+            id: task.id,
+            repository_id: task.repository_id,
+            title: task.title,
+            column: task.column,
+            run_state: task.run_state,
+            branch: task.branch,
+            extra_instructions: task.extra_instructions,
+        }
+    }
+}
+
+/// One task that depends directly on the task under review.
+#[derive(Debug, Clone, PartialEq, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub struct DependentView {
+    pub id: String,
+    pub title: String,
+    pub column: BoardColumn,
+    pub run_state: RunState,
+    pub archived: bool,
+    /// At least one of its runs started from the reviewed task's work.
+    pub built_on: bool,
+}
+
+impl From<Dependent> for DependentView {
+    fn from(dependent: Dependent) -> Self {
+        Self {
+            id: dependent.id,
+            title: dependent.title,
+            column: dependent.column,
+            run_state: dependent.run_state,
+            archived: dependent.archived_at.is_some(),
+            built_on: dependent.built_on,
+        }
+    }
+}
+
+/// `get_task_dependents`.
+#[derive(Debug, Clone, PartialEq, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub struct TaskDependentsView {
+    pub dependents: Vec<DependentView>,
+}
+
+/// One finding, as `record_review_findings`, `resolve_review_finding` and
+/// `list_review_findings` answer with it.
+#[derive(Debug, Clone, PartialEq, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub struct ReviewFindingView {
+    pub id: String,
+    pub task_id: String,
+    pub review_run_id: String,
+    /// The finding's place in the report that recorded it, from 0.
+    pub ordinal: i64,
+    pub severity: FindingSeverity,
+    pub title: String,
+    pub body: String,
+    pub file: Option<String>,
+    pub line: Option<i64>,
+    pub status: FindingStatus,
+    pub resolution: Option<String>,
+    pub resolved_by_run_id: Option<String>,
+    pub created_at: DateTime<Utc>,
+    pub resolved_at: Option<DateTime<Utc>>,
+}
+
+impl From<ReviewFinding> for ReviewFindingView {
+    fn from(finding: ReviewFinding) -> Self {
+        Self {
+            id: finding.id,
+            task_id: finding.task_id,
+            review_run_id: finding.review_run_id,
+            ordinal: finding.ordinal,
+            severity: finding.severity,
+            title: finding.title,
+            body: finding.body,
+            file: finding.file,
+            line: finding.line,
+            status: finding.status,
+            resolution: finding.resolution,
+            resolved_by_run_id: finding.resolved_by_run_id,
+            created_at: finding.created_at,
+            resolved_at: finding.resolved_at,
+        }
+    }
+}
+
+/// `record_review_findings` and `list_review_findings`, in review order and
+/// then in the order the reviewer gave them.
+#[derive(Debug, Clone, PartialEq, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub struct ReviewFindingsView {
+    pub findings: Vec<ReviewFindingView>,
+}
+
+impl From<Vec<ReviewFinding>> for ReviewFindingsView {
+    fn from(findings: Vec<ReviewFinding>) -> Self {
+        Self {
+            findings: findings.into_iter().map(Into::into).collect(),
+        }
+    }
+}
+
+/// One finding in a review history: the stored row, and whether it blocks
+/// against the task's effective `blocking_severity`, decided in core.
+#[derive(Debug, Clone, PartialEq, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub struct HistoryFindingView {
+    #[serde(flatten)]
+    pub finding: ReviewFindingView,
+    pub blocking: bool,
+    /// Rejected because an earlier fix had rejected the same finding, rather
+    /// than by a fix of its own.
+    pub carried_over: bool,
+}
+
+impl From<HistoryFinding> for HistoryFindingView {
+    fn from(finding: HistoryFinding) -> Self {
+        Self {
+            blocking: finding.blocking,
+            carried_over: finding.carried_over,
+            finding: finding.finding.into(),
+        }
+    }
+}
+
+/// One phase of a loop: an implementation, a review or a fix.
+#[derive(Debug, Clone, PartialEq, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub struct PhaseView {
+    pub kind: RunKind,
+    /// Oldest first; more than one when the phase was resumed after a limit.
+    pub run_ids: Vec<String>,
+    /// The `attempt` of each run in `run_ids`.
+    pub attempts: Vec<i64>,
+    pub status: RunStatus,
+    pub exit_class: Option<ExitClass>,
+}
+
+impl From<PhaseSummary> for PhaseView {
+    fn from(phase: PhaseSummary) -> Self {
+        Self {
+            kind: phase.kind,
+            run_ids: phase.run_ids,
+            attempts: phase.attempts,
+            status: phase.status,
+            exit_class: phase.exit_class,
+        }
+    }
+}
+
+/// A fix, and the findings its rows resolved.
+#[derive(Debug, Clone, PartialEq, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub struct FixRoundView {
+    pub phase: PhaseView,
+    pub resolved: Vec<HistoryFindingView>,
+}
+
+/// One review, the fix that followed it and the ping-pong lists.
+#[derive(Debug, Clone, PartialEq, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub struct ReviewRoundView {
+    pub review: Option<PhaseView>,
+    pub findings: Vec<HistoryFindingView>,
+    pub fix: Option<FixRoundView>,
+    /// Findings a fix had marked fixed that this review raised again.
+    pub regressed: Vec<HistoryFindingView>,
+    /// Blocking findings the review before it did not raise.
+    pub new_after_fix: Vec<HistoryFindingView>,
+    pub ping_pong: bool,
+}
+
+/// One loop: an implementation and the rounds after it.
+#[derive(Debug, Clone, PartialEq, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub struct LoopHistoryView {
+    /// Before a re-run implementation: not the loop the verdict is about.
+    pub earlier: bool,
+    pub implementation: PhaseView,
+    pub rounds: Vec<ReviewRoundView>,
+    pub fixes_spent: u32,
+    /// `none`, `clean`, `findings_remain` or `unreviewed`.
+    pub verdict: &'static str,
+    /// Why, when the verdict is `unreviewed`.
+    pub unreviewed_reason: Option<UnreviewedReason>,
+    pub open_blocking: u32,
+    pub open_advisory: u32,
+}
+
+impl From<ReviewRound> for ReviewRoundView {
+    fn from(round: ReviewRound) -> Self {
+        let findings = |list: Vec<HistoryFinding>| list.into_iter().map(Into::into).collect();
+        Self {
+            review: round.review.map(Into::into),
+            findings: findings(round.findings),
+            fix: round.fix.map(|fix| FixRoundView {
+                phase: fix.phase.into(),
+                resolved: findings(fix.resolved),
+            }),
+            regressed: findings(round.regressed),
+            new_after_fix: findings(round.new_after_fix),
+            ping_pong: round.ping_pong,
+        }
+    }
+}
+
+impl From<LoopHistory> for LoopHistoryView {
+    fn from(one: LoopHistory) -> Self {
+        let (verdict, unreviewed_reason) = verdict_parts(one.verdict);
+        Self {
+            earlier: one.earlier,
+            implementation: one.implementation.into(),
+            rounds: one.rounds.into_iter().map(Into::into).collect(),
+            fixes_spent: one.fixes_spent,
+            verdict,
+            unreviewed_reason,
+            open_blocking: one.open_blocking,
+            open_advisory: one.open_advisory,
+        }
+    }
+}
+
+/// `get_review_history`: every loop the task has had, oldest first.
+#[derive(Debug, Clone, PartialEq, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub struct ReviewHistoryView {
+    pub loops: Vec<LoopHistoryView>,
+}
+
+impl From<ReviewHistory> for ReviewHistoryView {
+    fn from(history: ReviewHistory) -> Self {
+        Self {
+            loops: history.loops.into_iter().map(Into::into).collect(),
+        }
+    }
+}
+
+/// `reject_task` and `request_task_changes`.
+#[derive(Debug, Clone, PartialEq, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub struct ReviewOutcomeView {
+    pub task: ReviewedTaskView,
+    /// Every direct dependent. Both verdicts take the task out of review, which
+    /// blocks them until it succeeds again.
+    pub dependents: Vec<DependentView>,
+    /// `reject_task` only: the branch that holds the rejected work, still in git.
+    pub set_aside_branch: Option<String>,
+}
+
+impl From<ReviewOutcome> for ReviewOutcomeView {
+    fn from(outcome: ReviewOutcome) -> Self {
+        Self {
+            task: outcome.task.into(),
+            dependents: outcome.dependents.into_iter().map(Into::into).collect(),
+            set_aside_branch: outcome.set_aside_branch,
+        }
+    }
+}
+
+/// One task's night.
+#[derive(Debug, Clone, PartialEq, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub struct DigestEntryView {
+    pub task_id: String,
+    pub title: String,
+    pub repository_id: String,
+    pub column: BoardColumn,
+    pub outcome: DigestOutcome,
+    pub runs: i64,
+    pub run_seconds: Option<i64>,
+    /// `None` when any of the counted runs has no recorded cost.
+    pub cost_usd: Option<f64>,
+    pub last_run_id: Option<String>,
+    pub error_message: Option<String>,
+    pub pr_url: Option<String>,
+    pub blocking_title: Option<String>,
+    pub skip_reason: Option<SkipReason>,
+    /// The kind of the newest row the outcome is taken from; `null` for an
+    /// entry with no row in the window.
+    pub last_run_kind: Option<RunKind>,
+    /// Where the task's review loop stands; `null` when it has none.
+    pub review_loop: Option<DigestLoopView>,
+}
+
+/// A task's review loop, derived from its rows (seam-contract D29 point 8).
+#[derive(Debug, Clone, PartialEq, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub struct DigestLoopView {
+    /// Review runs after the task's newest implementation run.
+    pub reviews_since_implementation: u32,
+    /// The task's open findings, of every loop.
+    pub open_findings: u32,
+}
+
+impl From<DigestLoop> for DigestLoopView {
+    fn from(review_loop: DigestLoop) -> Self {
+        Self {
+            reviews_since_implementation: review_loop.reviews_since_implementation,
+            open_findings: review_loop.open_findings,
+        }
+    }
+}
+
+impl From<DigestEntry> for DigestEntryView {
+    fn from(entry: DigestEntry) -> Self {
+        Self {
+            task_id: entry.task_id,
+            title: entry.title,
+            repository_id: entry.repository_id,
+            column: entry.column,
+            outcome: entry.outcome,
+            runs: entry.runs,
+            run_seconds: entry.run_seconds,
+            cost_usd: entry.cost_usd,
+            last_run_id: entry.last_run_id,
+            error_message: entry.error_message,
+            pr_url: entry.pr_url,
+            blocking_title: entry.blocking_title,
+            skip_reason: entry.skip_reason,
+            last_run_kind: entry.last_run_kind,
+            review_loop: entry.review_loop.map(Into::into),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub struct DigestTotalsView {
+    pub runs: i64,
+    pub run_seconds: i64,
+    pub span_seconds: Option<i64>,
+    pub cost_usd: f64,
+    pub runs_without_cost: i64,
+    /// Entries per outcome, every outcome present.
+    pub counts: BTreeMap<DigestOutcome, i64>,
+}
+
+impl From<DigestTotals> for DigestTotalsView {
+    fn from(totals: DigestTotals) -> Self {
+        Self {
+            runs: totals.runs,
+            run_seconds: totals.run_seconds,
+            span_seconds: totals.span_seconds,
+            cost_usd: totals.cost_usd,
+            runs_without_cost: totals.runs_without_cost,
+            counts: totals.counts,
+        }
+    }
+}
+
+/// `get_review_digest`.
+#[derive(Debug, Clone, PartialEq, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub struct ReviewDigestView {
+    pub since: DateTime<Utc>,
+    /// Pass this to `mark_review_digest_seen` once the digest has been read.
+    pub until: DateTime<Utc>,
+    pub entries: Vec<DigestEntryView>,
+    pub totals: DigestTotalsView,
+}
+
+impl From<Digest> for ReviewDigestView {
+    fn from(digest: Digest) -> Self {
+        Self {
+            since: digest.since,
+            until: digest.until,
+            entries: digest.entries.into_iter().map(Into::into).collect(),
+            totals: digest.totals.into(),
+        }
+    }
+}
+
+/// `mark_review_digest_seen`.
+#[derive(Debug, Clone, PartialEq, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub struct DigestMarkerView {
+    /// What is stored now: the later of the previous marker and the instant given.
+    pub seen_through: DateTime<Utc>,
+}
+
+// ---------------------------------------------------------------------------
+// Assignment and consent (ADR-0032, task 045)
+// ---------------------------------------------------------------------------
+
+/// `accept_content`: the revision now on the caller's record.
+#[derive(Debug, Clone, PartialEq, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub struct AcceptedView {
+    pub team_id: String,
+    pub task_id: Option<String>,
+    #[schemars(with = "String")]
+    pub kind: crate::consent::pieces::ContentKind,
+    pub revision: String,
+}
+
+/// `set_repository_unattended_ceiling`: the team ceiling as it now stands.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub struct UnattendedCeilingView {
+    pub repository_id: String,
+    pub allowed: bool,
+}
+
+/// `get_task_consent`: [`TaskConsent`](crate::consent::TaskConsent) in
+/// D16.1's snake case.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub struct TaskConsentView {
+    pub eligibility: crate::consent::EligibilityStatus,
+    pub pinned_runner_id: Option<String>,
+    pub team_ceiling: crate::consent::TeamCeiling,
+    /// Every piece the runner's owner has neither written, accepted nor
+    /// trusted, each with what accepting it takes.
+    pub missing: Vec<MissingPieceView>,
+}
+
+/// One piece of [`TaskConsentView::missing`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub struct MissingPieceView {
+    #[schemars(with = "String")]
+    pub kind: crate::consent::pieces::ContentKind,
+    pub task_id: Option<String>,
+    pub revision: String,
+    /// `None` for a former member.
+    pub author_login: Option<String>,
+    #[schemars(with = "String")]
+    pub reason: crate::consent::pieces::MissingReason,
+}
+
+impl From<crate::consent::TaskConsent> for TaskConsentView {
+    fn from(consent: crate::consent::TaskConsent) -> Self {
+        Self {
+            eligibility: consent.eligibility,
+            pinned_runner_id: consent.pinned_runner_id,
+            team_ceiling: consent.team_ceiling,
+            missing: consent
+                .missing
+                .into_iter()
+                .map(|piece| MissingPieceView {
+                    kind: piece.kind,
+                    task_id: piece.task_id,
+                    revision: piece.revision,
+                    author_login: piece.author_login,
+                    reason: piece.reason,
+                })
+                .collect(),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1068,7 +1719,6 @@ mod tests {
             position: 1.5,
             run_state: RunState::Idle,
             branch: None,
-            worktree_path: None,
             strategy_mode: StrategyMode::Default,
             model: Some("opus".to_string()),
             effort: None,
@@ -1079,6 +1729,11 @@ mod tests {
             updated_at: "2026-08-20T12:30:00Z".parse().expect("a literal timestamp"),
             source: MutationSource::Mcp,
             archived_at: None,
+            created_by: None,
+            assignee_id: None,
+            assigned_by: None,
+            plan_revision: 1,
+            plan_updated_by: None,
         }
     }
 
@@ -1102,9 +1757,44 @@ mod tests {
             effective_model: Some("opus".to_string()),
             effective_effort: Some("high".to_string()),
             effective_origin: StrategyOrigin::Repository,
+            review_instructions: Some("Run /review".to_string()),
+            review_config: crate::review_loop::ReviewConfig {
+                max_review_loops: Some(1),
+                ..crate::review_loop::ReviewConfig::default()
+            },
+            review_loop: Some(ReviewLoopSummary {
+                enabled: true,
+                max_review_loops: 1,
+                fixes_spent: 1,
+                reviews: 2,
+                verdict: Verdict::Unreviewed {
+                    reason: UnreviewedReason::NothingRecorded,
+                },
+                open_blocking: 0,
+                open_advisory: 0,
+                ping_pong: false,
+            }),
         });
 
         let wire = serde_json::to_value(&view).expect("a DTO must always serialize");
+
+        // The loop's fields (task 021), in this surface's spelling.
+        assert_eq!(wire["review_instructions"], json!("Run /review"));
+        assert_eq!(wire["review_config"], json!({ "max_review_loops": 1 }));
+        assert_eq!(
+            wire["review_loop"],
+            json!({
+                "enabled": true,
+                "max_review_loops": 1,
+                "fixes_spent": 1,
+                "reviews": 2,
+                "verdict": "unreviewed",
+                "unreviewed_reason": "nothing_recorded",
+                "open_blocking": 0,
+                "open_advisory": 0,
+                "ping_pong": false,
+            })
+        );
 
         // snake_case, in both directions, and unlike the row's own camelCase
         // (seam-contract D16).
@@ -1149,6 +1839,7 @@ mod tests {
             blocked_by_incomplete: false,
             blocking_title: None,
             last_run: Some(LastRunSummary {
+                kind: crate::db::RunKind::Implementation,
                 status: RunStatus::Succeeded,
                 exit_class: Some(ExitClass::Success),
                 ended_at: None,
@@ -1160,6 +1851,7 @@ mod tests {
             effective_model: Some("opus".to_string()),
             effective_effort: Some("high".to_string()),
             effective_origin: StrategyOrigin::Repository,
+            review_loop: None,
         });
 
         let wire = serde_json::to_value(&item).expect("a DTO must always serialize");
@@ -1188,6 +1880,7 @@ mod tests {
             effective_model: None,
             effective_effort: None,
             effective_origin: StrategyOrigin::ClaudeCode,
+            review_loop: None,
         });
 
         assert!(!item.has_plan);
@@ -1199,6 +1892,7 @@ mod tests {
             id: "run-1".to_string(),
             task_id: "task-1".to_string(),
             attempt: 2,
+            kind: RunKind::Review,
             status: RunStatus::Failed,
             session_id: "session".to_string(),
             prompt: "the whole composed prompt".to_string(),
@@ -1208,7 +1902,6 @@ mod tests {
             error_message: Some("usage limit reached".to_string()),
             num_turns: Some(12),
             cost_usd: Some(1.5),
-            log_path: "/tmp/run-1.jsonl".to_string(),
             pr_url: None,
             resume_after: None,
             base_ref: None,
@@ -1219,10 +1912,13 @@ mod tests {
             output_tokens: None,
             cache_read_tokens: None,
             cache_creation_tokens: None,
+            head_sha: None,
+            base_sha: None,
         });
 
         let wire = serde_json::to_value(&view).expect("a DTO must always serialize");
 
+        assert_eq!(wire["kind"], json!("review"));
         assert_eq!(wire["exit_class"], json!("usage_limit"));
         assert_eq!(wire["error_message"], json!("usage limit reached"));
         // The transcript is a file (ADR-0013) and the prompt is the run's own

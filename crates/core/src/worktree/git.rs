@@ -34,6 +34,43 @@ const LOG_FIELD_SEPARATOR: char = '\u{1f}';
 
 const LOG_FORMAT: &str = "--format=%H\u{1f}%h\u{1f}%an\u{1f}%cI\u{1f}%s";
 
+/// The options every `git diff` here runs with, the live numstat and the
+/// recorded patch alike (task 033).
+///
+/// Each one overrides an operator config key that would otherwise change the
+/// bytes a review bundle stores, or break the pairing of numstat rows with
+/// patch sections that [`super::bundle`] relies on:
+///
+/// - `--no-color` against `color.ui = always`, which puts ANSI escapes into
+///   the patch.
+/// - `--no-ext-diff` against `diff.external`, which replaces the patch with
+///   whatever the tool prints, often nothing.
+/// - `--no-textconv` against a textconv driver, which would store a converted
+///   rendering instead of the file's content.
+/// - `--submodule=short` against `diff.submodule = diff`, which expands one
+///   submodule change into several `diff --git` sections against one numstat
+///   row.
+/// - `--src-prefix=a/ --dst-prefix=b/` against `diff.noprefix` and
+///   `diff.mnemonicPrefix`, under which `git apply`'s default `-p1` no longer
+///   applies the patch.
+/// - `--no-relative` against `diff.relative`, which narrows the paths to a
+///   subdirectory.
+/// - `-M` against `diff.renames`, which decides whether a rename is one section
+///   or two. It pins git's own default.
+///
+/// One constant for both paths, so the live summary and the recorded bundle
+/// cannot disagree about what a range contains.
+pub(super) const DIFF_OPTIONS: [&str; 8] = [
+    "--no-color",
+    "--no-ext-diff",
+    "--no-textconv",
+    "--submodule=short",
+    "--src-prefix=a/",
+    "--dst-prefix=b/",
+    "--no-relative",
+    "-M",
+];
+
 /// Both captured streams and whether git succeeded — the shape a caller that
 /// wants to *interpret* a non-zero exit needs. [`checked`] is the shape for
 /// callers that do not.
@@ -239,6 +276,15 @@ pub(super) async fn is_dirty(worktree: &Path) -> Result<bool> {
     Ok(dirty_file_count(worktree).await? > 0)
 }
 
+/// Whether a tracked file has uncommitted changes, staged or not. Untracked
+/// files are ignored, which is the one difference from [`is_dirty`]: a review
+/// phase's checks (task 021) judge what a reviewer changed, and a test run
+/// leaves untracked files behind as a matter of course.
+pub(super) async fn has_tracked_changes(worktree: &Path) -> Result<bool> {
+    let stdout = checked(worktree, &["status", "--porcelain", "--untracked-files=no"]).await?;
+    Ok(stdout.lines().any(|line| !line.is_empty()))
+}
+
 /// How many paths [`is_dirty`] is answering "yes" about.
 ///
 /// A count rather than a bool because task 016's refusal has to *name* what it
@@ -312,8 +358,117 @@ pub(super) async fn diff(
     branch: &str,
 ) -> Result<(DiffStat, Vec<FileDiffStat>)> {
     let range = format!("{base}...{branch}");
-    let stdout = checked(dir, &["diff", "--numstat", &range]).await?;
+    let stdout = checked(dir, &diff_args("--numstat", &range)).await?;
     Ok(parse_numstat(&stdout))
+}
+
+/// `git diff` over `range` with [`DIFF_OPTIONS`], in one of its two output
+/// formats: `--numstat` or `--patch`. One builder, so the two invocations a
+/// bundle pairs by position cannot drift apart in anything but the format.
+pub(super) fn diff_args<'a>(format: &'a str, range: &'a str) -> Vec<&'a str> {
+    let mut args = vec!["diff"];
+    args.extend(DIFF_OPTIONS);
+    args.push(format);
+    args.push(range);
+    args
+}
+
+/// The commit `HEAD` names in `dir`, or the reason it names none.
+pub(super) async fn head_sha(dir: &Path) -> Result<String> {
+    checked(dir, &["rev-parse", "--verify", "HEAD^{commit}"]).await
+}
+
+/// The best common ancestor of `base` and `HEAD` in `dir` — where the branch
+/// checked out there forked from `base`.
+pub(super) async fn merge_base_with_head(dir: &Path, base: &str) -> Result<String> {
+    checked(dir, &["merge-base", base, "HEAD"]).await
+}
+
+/// Runs git and hands its stdout to `on_line` one line at a time, as raw
+/// bytes with the terminating `\n` kept, instead of capturing it whole.
+///
+/// The one streaming call here, and it exists for the review bundle's patch:
+/// a vendored 500 MB diff must cost the bundle's cap plus a read buffer, not
+/// 500 MB. Bytes rather than `String` because a patch is not guaranteed to be
+/// UTF-8, and deciding what to do about that is the caller's business.
+///
+/// stderr is drained on a task of its own, so a git that writes a lot of it
+/// cannot fill the pipe and stall while stdout is being read. A non-zero exit
+/// is an error carrying that stderr, the same sentence [`checked`] produces.
+pub(super) async fn stream_lines<S, F>(dir: &Path, args: &[S], mut on_line: F) -> Result<()>
+where
+    S: AsRef<OsStr>,
+    F: FnMut(&[u8]),
+{
+    use std::process::Stdio;
+    use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader};
+
+    let mut child = tokio::process::Command::new("git")
+        .current_dir(dir)
+        .args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+        .map_err(|error| {
+            Error::internal(format!("could not run git in {}: {error}", dir.display()))
+        })?;
+
+    let mut stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| Error::internal("git's stderr was not captured"))?;
+    let stderr = tokio::spawn(async move {
+        let mut bytes = Vec::new();
+        // A read error here loses diagnostics, not data: the exit status below
+        // still decides whether the call failed.
+        let _ = stderr.read_to_end(&mut bytes).await;
+        String::from_utf8_lossy(&bytes).trim_end().to_string()
+    });
+
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| Error::internal("git's stdout was not captured"))?;
+    let mut reader = BufReader::new(stdout);
+    let mut line = Vec::new();
+    loop {
+        line.clear();
+        let read = reader.read_until(b'\n', &mut line).await.map_err(|error| {
+            Error::internal(format!(
+                "could not read git's output in {}: {error}",
+                dir.display()
+            ))
+        })?;
+        if read == 0 {
+            break;
+        }
+        on_line(&line);
+    }
+
+    let status = child.wait().await.map_err(|error| {
+        Error::internal(format!(
+            "could not wait for git in {}: {error}",
+            dir.display()
+        ))
+    })?;
+    let detail = stderr.await.unwrap_or_default();
+
+    tracing::debug!(
+        dir = %dir.display(),
+        command = %command_line(args),
+        status = status.code().unwrap_or(-1),
+        "ran git",
+    );
+
+    if status.success() {
+        return Ok(());
+    }
+    Err(Error::invalid(format!(
+        "git {} failed: {detail}",
+        command_line(args)
+    )))
 }
 
 /// The commits on `branch` that are not on `base`, newest first — ADR-0013's
@@ -378,7 +533,7 @@ fn parse_worktree_list(stdout: &str) -> Vec<WorktreeEntry> {
 /// `splitn(3, ...)` rather than `split('\t')`: the path is the third field and
 /// is taken whole, including any tab a pathological filename might itself
 /// contain, instead of being cut at the first one.
-fn parse_numstat(stdout: &str) -> (DiffStat, Vec<FileDiffStat>) {
+pub(super) fn parse_numstat(stdout: &str) -> (DiffStat, Vec<FileDiffStat>) {
     let mut stat = DiffStat::default();
     let mut files = Vec::new();
 

@@ -1,0 +1,32 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT content AS \"content: ContentKind\", task_id, revision\n             FROM acceptances WHERE user_id = ?1 AND team_id = ?2",
+  "describe": {
+    "columns": [
+      {
+        "name": "content: ContentKind",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "task_id",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "revision",
+        "ordinal": 2,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      false,
+      true,
+      false
+    ]
+  },
+  "hash": "2a084dc12021f7fd1a85dc0bb46d82360e183f465c8a89f0954af90f669c2af0"
+}

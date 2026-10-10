@@ -1,0 +1,38 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT plan_revision, plan_updated_by, review_instructions_revision,\n                          review_instructions_updated_by\n                     FROM tasks WHERE id = ?1",
+  "describe": {
+    "columns": [
+      {
+        "name": "plan_revision",
+        "ordinal": 0,
+        "type_info": "Integer"
+      },
+      {
+        "name": "plan_updated_by",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "review_instructions_revision",
+        "ordinal": 2,
+        "type_info": "Integer"
+      },
+      {
+        "name": "review_instructions_updated_by",
+        "ordinal": 3,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      true,
+      false,
+      true
+    ]
+  },
+  "hash": "41dc777d664be11d18aa91455d3f2c7e1cb3b044de18a3fc88d1309facf182b7"
+}

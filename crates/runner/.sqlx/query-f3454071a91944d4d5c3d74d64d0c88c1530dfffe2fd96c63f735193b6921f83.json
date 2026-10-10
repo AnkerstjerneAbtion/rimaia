@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE held_leases SET run_id = ?2, purpose = ?3 WHERE task_id = ?1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": []
+  },
+  "hash": "f3454071a91944d4d5c3d74d64d0c88c1530dfffe2fd96c63f735193b6921f83"
+}
