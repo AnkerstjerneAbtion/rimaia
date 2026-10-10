@@ -200,6 +200,50 @@ pub struct RunContext {
     /// from a board that predates the loop.
     #[serde(default)]
     pub review: Option<ReviewContext>,
+    /// What the task's worktree is created from, decided board-side (D31
+    /// point 6, task 044). A run records the base its claim carried, never a
+    /// later read's: the dependency graph can change in between.
+    pub base: RunBase,
+}
+
+/// What a task's worktree branches from (ADR-0033 point 5, ADR-0008), as the
+/// board resolved it. `worktree::base_ref` owns the rule.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RunBase {
+    /// The label: what `runs.base_ref` records and the panel shows.
+    pub base_ref: String,
+    /// `None` when the base is the repository's default branch.
+    pub dependency: Option<BaseDependency>,
+    /// ADR-0008's warning, one sentence rendered verbatim (D8).
+    pub warning: Option<String>,
+}
+
+impl RunBase {
+    /// What git is handed: the dependency's commit when there is one, the
+    /// label otherwise. Never the dependency's branch name, which may have
+    /// moved past the commit its last successful run ended on.
+    pub fn revision(&self) -> &str {
+        match &self.dependency {
+            Some(dependency) => &dependency.commit,
+            None => &self.base_ref,
+        }
+    }
+}
+
+/// The dependency a base was taken from. One `Option` on [`RunBase`] rather
+/// than four, because these facts are present or absent together.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BaseDependency {
+    pub task_id: String,
+    /// For the refusal `worktree::prepare` raises when the clone lacks
+    /// [`commit`](Self::commit).
+    pub title: String,
+    /// The run whose `head_sha` is [`commit`](Self::commit).
+    pub run_id: String,
+    /// That `head_sha`, in full.
+    pub commit: String,
 }
 
 /// What a review or fix phase is composed from, read board-side under the

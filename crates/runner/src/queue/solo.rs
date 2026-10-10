@@ -1,13 +1,14 @@
-//! The four board reads the solo loop still makes without the port, and the
-//! one board context it still hands a run (task 042, Scope point 5).
+//! The four board reads the solo loop still makes without the port (task 042,
+//! Scope point 5).
 //!
 //! Everything the loop *writes* goes through the [`BoardPort`] or through the
-//! machine's own store. What is left is four reads that have no port method
-//! yet, and the context `run_task` keeps for `worktree::prepare` until task
-//! 044 removes it. They live here, and only here: this is the one file under
-//! `queue/` that holds a board `ServiceContext`, so it is the one place tasks
-//! 058's headless runner and 059's connected mode replace, and a reviewer can
-//! check that with one `grep`.
+//! machine's own store, and a run reaches the board only through the port:
+//! task 044 took away the context `run_task` kept for `worktree::prepare`.
+//! What is left is four reads that have no port method yet. They live here,
+//! and only here: this is the one file under `queue/` that holds a board
+//! `ServiceContext`, so it is the one place tasks 058's headless runner and
+//! 059's connected mode replace, and a reviewer can check that with one
+//! `grep`.
 //!
 //! [`BoardPort`]: rimaia_core::board::BoardPort
 
@@ -36,9 +37,9 @@ pub struct SoloBoard {
 
 impl SoloBoard {
     /// Re-sources `ctx` to [`MutationSource::System`], as the loop's own
-    /// `build` did before task 042: the only write it can reach through here
-    /// is `worktree::prepare`'s, made for a run the queue started, and the
-    /// shell hands one `Ui` context to every subsystem (ADR-0019).
+    /// `build` did before task 042: the shell hands one `Ui` context to every
+    /// subsystem (ADR-0019), and nothing the loop reads through here is the
+    /// user's doing.
     ///
     /// `runner_id` and `provider` are the runner the board port serves, so a
     /// plan drawn here is drawn for the runner that claims.
@@ -115,13 +116,5 @@ impl SoloBoard {
         repositories: &[String],
     ) -> Result<PreflightSummary> {
         preflight::preview(machine, &self.ctx, schedule_id, &self.view(repositories)).await
-    }
-
-    /// **Not a read: task 044's temporary context.** `run_task` still takes a
-    /// board context for `worktree::prepare` alone, and the loop's supervisor
-    /// passes it this one. Task 044 removes it once `RunContext::base` carries
-    /// what that call needs.
-    pub fn prepare_context(&self) -> &ServiceContext {
-        &self.ctx
     }
 }

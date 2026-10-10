@@ -676,13 +676,12 @@ pub async fn claim_for_planning(
 /// and before the slot drops: that deletes the lease row, leaves `run_state`
 /// alone (a strategy claim took no edge), and forgets this runner's record.
 ///
-/// `machine` is this machine's own state and clock. `prepare_ctx` is a board
-/// context held for [`worktree::prepare`](crate::worktree::prepare) and
-/// nothing else, as `run_task`'s is, until task 044 removes it.
+/// `machine` is this machine's own state and clock. The worktree is prepared
+/// from the claim's context, base included (task 044), so nothing here reads
+/// the board except through `board`.
 pub async fn plan_claimed(
     board: &dyn BoardPort,
     machine: &MachineContext,
-    prepare_ctx: &ServiceContext,
     paths: &AppPaths,
     config: &RunnerConfig,
     claim: PlannerClaim,
@@ -690,7 +689,7 @@ pub async fn plan_claimed(
     let cancel = claim.cancel_signal();
     let PlannerClaim { slot, claim } = claim;
 
-    let outcome = plan_under(board, machine, prepare_ctx, paths, config, &claim, &cancel).await;
+    let outcome = plan_under(board, machine, paths, config, &claim, &cancel).await;
 
     let released = board.release(&claim.lease).await;
     if let Err(error) = &released {
@@ -705,7 +704,6 @@ pub async fn plan_claimed(
 async fn plan_under(
     board: &dyn BoardPort,
     machine: &MachineContext,
-    prepare_ctx: &ServiceContext,
     paths: &AppPaths,
     config: &RunnerConfig,
     claim: &Claim,
@@ -718,7 +716,7 @@ async fn plan_under(
     // operator's (ADR-0005). `prepare` is idempotent, so a task that already has
     // one is unchanged and a task that does not gets the same worktree its
     // implementation run would have used.
-    let worktree = crate::worktree::prepare(prepare_ctx, machine, board, lease).await?;
+    let worktree = crate::worktree::prepare(machine, board, lease, &claim.context).await?;
 
     match plan(
         board,
@@ -1037,7 +1035,7 @@ pub async fn plan_all(
             // deliberately.
             match claim_for_planning(board, machine, in_flight, &task_id, SlotOwner::Manual).await?
             {
-                Ok(claim) => plan_claimed(board, machine, ctx, paths, config, claim).await?,
+                Ok(claim) => plan_claimed(board, machine, paths, config, claim).await?,
                 Err(skip) => PlanOutcome::Skipped(skip),
             }
         };

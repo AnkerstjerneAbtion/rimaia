@@ -991,7 +991,6 @@ impl Looping {
             runs.spawn(supervise(
                 Arc::clone(&self.shared.board),
                 machine.clone(),
-                self.shared.solo.clone(),
                 self.shared.paths.clone(),
                 self.shared.runner.clone(),
                 slot,
@@ -1123,11 +1122,9 @@ impl Looping {
 /// release. Dropping it earlier would wake the loop while `finish_run`'s own
 /// writes were still landing, and the pass it woke would read a board that had
 /// not finished changing.
-#[allow(clippy::too_many_arguments)]
 async fn supervise(
     board: Arc<dyn BoardPort>,
     machine: MachineContext,
-    solo: SoloBoard,
     paths: AppPaths,
     runner: RunnerConfig,
     slot: LocalSlot,
@@ -1137,17 +1134,7 @@ async fn supervise(
     let task_id = claim.lease.task_id.clone();
     let lease = claim.lease.clone();
 
-    match run_task(
-        board.as_ref(),
-        &machine,
-        solo.prepare_context(),
-        &paths,
-        &runner,
-        claim,
-        request,
-    )
-    .await
-    {
+    match run_task(board.as_ref(), &machine, &paths, &runner, claim, request).await {
         Ok(run) => tracing::info!(
             %task_id,
             run_id = %run.id,

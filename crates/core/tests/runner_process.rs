@@ -1477,7 +1477,6 @@ async fn the_prompt_is_composed_from_the_task_as_it_reads_after_the_worktree_exi
     run_task(
         board.as_ref(),
         fixture.harness.machine(),
-        &fixture.harness.context,
         &fixture.paths,
         &config,
         claim,
@@ -1877,7 +1876,6 @@ impl RunnerFixture {
         run_task(
             board.as_ref(),
             self.harness.machine(),
-            &self.harness.context,
             &self.paths,
             config,
             claim,
@@ -1898,7 +1896,6 @@ impl RunnerFixture {
         run_task(
             board.as_ref(),
             self.harness.machine(),
-            &self.harness.context,
             &self.paths,
             config,
             claim,

@@ -1156,7 +1156,6 @@ a task that already carries a proposal is re-planned, which is what this tool me
                 let outcome = runner_strategy::plan_claimed(
                     local.planner.board.as_ref(),
                     &local.machine,
-                    &self.ctx,
                     &local.planner.paths,
                     &local.planner.runner,
                     claim,

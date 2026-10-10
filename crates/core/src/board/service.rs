@@ -45,6 +45,7 @@ use crate::scheduler::selection::{self, RunnerView};
 use crate::strategy::{self, catalogue};
 use crate::tasks;
 use crate::tasks::strategy::{prepare_strategy, write_strategy, StrategyPlan};
+use crate::worktree::base_ref;
 
 use super::lease::{self, ClaimRequest, Door, Edges, LeaseTerm};
 use super::types::{
@@ -648,6 +649,10 @@ async fn read_context(
     let resolved = review_loop::config::resolve(ctx, task_id, &repository.id).await?;
     let review = review_loop::context(ctx, task_id, resolved).await?;
 
+    // Decided here, under the context's scope, so the runner creates the
+    // worktree from it without reading the dependency graph (D31 point 6).
+    let base = base_ref::resolve(ctx, &task.task, &repository).await?;
+
     Ok(RunContext {
         task,
         repository,
@@ -656,6 +661,7 @@ async fn read_context(
         catalogue,
         limits,
         review: Some(review),
+        base,
     })
 }
 

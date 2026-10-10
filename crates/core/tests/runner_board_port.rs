@@ -500,7 +500,6 @@ impl Fixture {
             run_task(
                 board,
                 self.machine(),
-                self.ctx(),
                 &self.paths,
                 config,
                 claim,

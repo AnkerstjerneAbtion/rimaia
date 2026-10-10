@@ -1,17 +1,26 @@
 //! Board-port helpers for tests: a port that refuses everything, the claim a
-//! fixture takes before it hands a task to `run_task`, and the claim and run a
-//! crash test leaves behind for the lease reconcile (task 043).
+//! fixture takes before it hands a task to `run_task`, the claim and run a
+//! crash test leaves behind for the lease reconcile (task 043), and a whole
+//! run made without a child, for a test whose subject is what a later run
+//! builds on (task 044).
+
+use std::path::Path;
 
 use crate::board::{
     BoardFuture, BoardPort, Claim, ClaimTarget, FinishReceipt, FinishRun, Heartbeat, LeaseRef,
-    RunContext, StartRun, TranscriptAck, TranscriptChunk,
+    RunContext, StartRun, TranscriptAck, TranscriptChunk, TranscriptEnd,
 };
+use crate::db::{new_id, RunKind};
 use crate::error::{Error, Result};
 use crate::machine::MachineContext;
 use crate::review::findings::NewReviewFinding;
 use crate::runner::events::RunTail;
+use crate::runner::outcome::RunOutcome;
 use crate::runner::RunTrigger;
 use crate::tasks::strategy::StrategyPlan;
+use crate::testing::repo::git;
+use crate::testing::TestContext;
+use crate::worktree::Worktree;
 
 /// Every fallible method answers `Invalid` with the same sentence, and the
 /// tail goes nowhere.
@@ -150,4 +159,82 @@ pub async fn start_and_note(
         .expect("open the run");
     crate::machine::leases::note_run(machine, &claim.lease.task_id, Some(&run_id), kind.into())
         .await;
+}
+
+/// One run [`run_without_a_child`] made: the worktree it ran in, its row, and
+/// the commit it ended on as `git rev-parse HEAD` read it.
+#[derive(Debug, Clone)]
+pub struct FinishedRun {
+    pub worktree: Worktree,
+    pub run_id: String,
+    pub head_sha: String,
+}
+
+/// A run of `task_id` as the runner makes one, with no child, through the
+/// board services production uses: the claim, the worktree prepared from the
+/// claim's context, each of `files` committed in it, the row opened with the
+/// worktree's base, and the finish at `HEAD` with `outcome`.
+///
+/// For a test whose subject is what a later run builds on (task 044), which
+/// needs a run that really ended on a commit. A test about the run itself
+/// goes through `run_task` and `FakeCli` instead.
+pub async fn run_without_a_child(
+    harness: &TestContext,
+    board: &dyn BoardPort,
+    task_id: &str,
+    kind: RunKind,
+    continue_session: bool,
+    files: &[&str],
+    outcome: RunOutcome,
+) -> FinishedRun {
+    let claim = claim_run(board, task_id, RunTrigger::Manual, continue_session)
+        .await
+        .expect("claim the task");
+    let worktree = harness
+        .prepare_worktree_from(&claim.context)
+        .await
+        .expect("prepare the worktree from the claim");
+    let checkout = Path::new(&worktree.path);
+    for file in files {
+        std::fs::write(checkout.join(file), format!("// {file}\n")).expect("write a file");
+        git(checkout, &["add", "--", file]);
+        git(checkout, &["commit", "-m", &format!("Add {file}")]);
+    }
+    let head_sha = git(checkout, &["rev-parse", "HEAD"]);
+
+    let run_id = new_id();
+    board
+        .start_run(
+            &claim.lease,
+            StartRun {
+                run_id: run_id.clone(),
+                kind,
+                session_id: format!("session-{task_id}"),
+                prompt: "do the work".to_string(),
+                base_ref: Some(worktree.base.base_ref.clone()),
+                base_sha: worktree.base_sha.clone(),
+            },
+        )
+        .await
+        .expect("open the run");
+    board
+        .finish_run(
+            &claim.lease,
+            &run_id,
+            FinishRun {
+                outcome,
+                head_sha: Some(head_sha.clone()),
+                bundle: None,
+                window_closes_at: None,
+                transcript: TranscriptEnd::Complete { length: 0 },
+            },
+        )
+        .await
+        .expect("finish the run");
+
+    FinishedRun {
+        worktree,
+        run_id,
+        head_sha,
+    }
 }

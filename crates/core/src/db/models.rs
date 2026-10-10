@@ -663,6 +663,9 @@ pub struct Run {
     /// The branch this attempt was created from (ADR-0008): the repository's
     /// default branch, or a dependency's branch when the task has one. A fact
     /// about the attempt, not about what the resolver would answer today.
+    /// Since task 044 a label: a chained run's commit is `base_sha`, which may
+    /// be behind this branch's tip, and a dependency whose branch is gone is
+    /// named by that commit here too.
     pub base_ref: Option<String>,
     /// ADR-0022's capture columns: what this attempt was spawned as, and what it
     /// spent. Written once by `finish_run` and never updated.
@@ -688,9 +691,11 @@ pub struct Run {
     /// one still in flight, one a crash closed, or one whose worktree could not
     /// be read at the finish. Never backfilled.
     pub head_sha: Option<String>,
-    /// What [`base_ref`](Self::base_ref) resolved to for this attempt: the
-    /// fork point `git merge-base <base_ref> HEAD` in the worktree, written at
-    /// the open beside `base_ref`. NULL on the same terms as `head_sha`.
+    /// The commit this attempt was built on, and the authoritative half of
+    /// the base (task 044): the fork point `git merge-base <revision> HEAD` in
+    /// the worktree, where the revision is the dependency's successful head
+    /// when the run chained and [`base_ref`](Self::base_ref) otherwise. Written
+    /// at the open beside `base_ref`. NULL on the same terms as `head_sha`.
     pub base_sha: Option<String>,
 }
 

@@ -236,7 +236,6 @@ pub async fn clear_task_strategy(state: State<'_, AppState>, task_id: String) ->
 /// slot is taken while the tool awaits the whole planner.
 #[tauri::command]
 pub async fn plan_task_strategy(state: State<'_, AppState>, task_id: String) -> Result<()> {
-    let context = state.context.clone();
     let machine = state.machine.clone();
     let paths = state.paths.clone();
     let config = state.runner.clone();
@@ -258,15 +257,8 @@ pub async fn plan_task_strategy(state: State<'_, AppState>, task_id: String) -> 
     probe_cli(config.provider.as_ref(), &config.program).await?;
 
     tauri::async_runtime::spawn(async move {
-        if let Err(error) = runner_strategy::plan_claimed(
-            board.as_ref(),
-            &machine,
-            &context,
-            &paths,
-            &config,
-            claim,
-        )
-        .await
+        if let Err(error) =
+            runner_strategy::plan_claimed(board.as_ref(), &machine, &paths, &config, claim).await
         {
             tracing::error!(
                 %task_id, %error,

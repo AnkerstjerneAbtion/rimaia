@@ -23,7 +23,7 @@ pub use in_process::InProcessBoard;
 pub use lease::{LeaseTerm, LEASE_LIFETIME};
 pub use port::{BoardFuture, BoardPort};
 pub use types::{
-    BoardMethod, ChangeSummary, Claim, ClaimTarget, FinishReceipt, FinishRun, FreeCapacity,
-    Heartbeat, ImplementationBase, LeasePurpose, LeaseRef, NextStep, ReviewContext, RunContext,
-    StartRun, TeamLimits, TranscriptAck, TranscriptChunk, TranscriptEnd,
+    BaseDependency, BoardMethod, ChangeSummary, Claim, ClaimTarget, FinishReceipt, FinishRun,
+    FreeCapacity, Heartbeat, ImplementationBase, LeasePurpose, LeaseRef, NextStep, ReviewContext,
+    RunBase, RunContext, StartRun, TeamLimits, TranscriptAck, TranscriptChunk, TranscriptEnd,
 };

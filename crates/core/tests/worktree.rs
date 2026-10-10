@@ -20,14 +20,18 @@ use std::process::Command;
 
 use chrono::{DateTime, Utc};
 use pretty_assertions::assert_eq;
-use rimaia_core::db::{BoardColumn, Repository, RunKind, RunState, Task};
+use rimaia_core::db::{BoardColumn, ExitClass, Repository, RunKind, RunState, RunStatus, Task};
 use rimaia_core::paths::AppPaths;
 use rimaia_core::repo::{self, NewRepository, RepositoryPatch};
-use rimaia_core::runner::outcome::{start_run, NewRun};
+use rimaia_core::runner::events::TokenUsage;
+use rimaia_core::runner::outcome::{start_run, NewRun, RunOutcome, SpawnedAs};
+use rimaia_core::runner::RunnerConfig;
+use rimaia_core::runs;
 use rimaia_core::tasks::{self, NewTask, TaskFilter};
+use rimaia_core::testing::board::{run_without_a_child, FinishedRun};
 use rimaia_core::testing::{TempRepo, TestContext};
 use rimaia_core::worktree::{self, ForceRemoval};
-use rimaia_core::{ChangeEvent, ServiceContext};
+use rimaia_core::{ChangeEvent, ErrorCode, ServiceContext};
 
 /// The last component of every fixture's `worktree_root`. The space is
 /// load-bearing — see the module docs.
@@ -52,7 +56,7 @@ async fn preparing_a_worktree_checks_out_the_base_on_a_namespaced_branch() {
         worktree.branch,
         format!("rimaia/{}-wire-the-board-to-the-store", task.id)
     );
-    assert_eq!(worktree.base_ref, "main");
+    assert_eq!(worktree.base.base_ref, "main");
     assert_eq!(Path::new(&worktree.path), f.root().join(&task.id));
 
     let checkout = PathBuf::from(&worktree.path);
@@ -314,68 +318,134 @@ async fn preparing_onto_a_directory_left_detached_is_refused_with_an_actionable_
 }
 
 // ---------------------------------------------------------------------------
-// Branch chaining (ADR-0008, task 011)
+// Branch chaining (ADR-0008, task 011; ADR-0033 point 5, task 044)
 //
 // Every assertion here is made with `git merge-base`, `rev-parse` or `log`
 // against a real repository, which is task 011's own acceptance criterion: "a
 // dependent task's worktree is created from its dependency's branch, verified
-// by `git merge-base`". A test that only read `Worktree::base_ref` back would
-// prove the struct, not the checkout.
+// by `git merge-base`". Since task 044 that is the commit the dependency's last
+// successful run ended on, and the runs here are opened and finished through
+// the board services production uses. A test that only read `Worktree::base`
+// back would prove the struct, not the checkout.
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-async fn a_dependent_branches_from_its_dependency_and_git_merge_base_proves_it() {
+async fn a_dependent_branches_from_its_dependencys_successful_head_and_git_merge_base_proves_it() {
     let f = Fixture::new().await;
     let a = f.task("Add the API endpoint").await;
     let b = f.task("Call it from the UI").await;
 
-    // A runs: its worktree exists, it commits, and its card is filed for review
-    // — which is the whole of what ADR-0008 calls "satisfied".
-    let a_worktree = f.harness.prepare_worktree(&a.id).await.expect("prepare A");
-    commit_in(
-        Path::new(&a_worktree.path),
-        "endpoint.rs",
-        "// A\n",
-        "Add A",
-    );
-    let a_tip = git(Path::new(&a_worktree.path), &["rev-parse", "HEAD"]);
-    file_for_review(&f, &a.id).await;
+    // A runs and succeeds, which files it for review — the whole of what
+    // ADR-0008 calls "satisfied" — and records the commit it ended on.
+    let a_run = f.succeed(&a.id, &["endpoint.rs"]).await;
+    assert_eq!(f.reload(&a.id).await.column, BoardColumn::InReview);
+    f.depends(&b.id, &[&a.id]).await;
 
-    tasks::set_task_dependencies(f.ctx(), &b.id, std::slice::from_ref(&a.id))
-        .await
-        .expect("B depends on A");
+    let b_run = f.succeed(&b.id, &[]).await;
 
-    let b_worktree = f.harness.prepare_worktree(&b.id).await.expect("prepare B");
-
-    assert_eq!(b_worktree.base_ref, a_worktree.branch);
+    assert_eq!(b_run.worktree.base.base_ref, a_run.worktree.branch);
     assert_eq!(
-        b_worktree.dependency_warning, None,
+        b_run.worktree.base.warning, None,
         "one dependency, nothing to warn about"
     );
 
-    // The two claims that matter, and neither is readable off the struct:
-    // B starts exactly at A's tip, and A's commit is an ancestor of B's branch.
-    let b_checkout = PathBuf::from(&b_worktree.path);
-    assert_eq!(git(&b_checkout, &["rev-parse", "HEAD"]), a_tip);
+    // The claims that matter, and none is readable off the struct: B starts
+    // exactly at A's head, and A's commit is an ancestor of B's branch.
+    let b_checkout = PathBuf::from(&b_run.worktree.path);
+    assert_eq!(git(&b_checkout, &["rev-parse", "HEAD"]), a_run.head_sha);
     assert_eq!(
         git(
             f.source.path(),
-            &["merge-base", &a_worktree.branch, &b_worktree.branch],
+            &["merge-base", &a_run.worktree.branch, &b_run.worktree.branch],
         ),
-        a_tip,
-        "A's branch must be an ancestor of B's, not merely a name it was given",
+        a_run.head_sha,
+        "A's commit must be an ancestor of B's branch, not merely a name it was given",
     );
     assert!(
         b_checkout.join("endpoint.rs").is_file(),
         "B is written against code that is actually there — the reason ADR-0008 exists",
     );
+
+    let row = f.run_row(&b_run.run_id).await;
+    assert_eq!(
+        row.base_ref.as_deref(),
+        Some(a_run.worktree.branch.as_str())
+    );
+    assert_eq!(row.base_sha.as_deref(), Some(a_run.head_sha.as_str()));
 }
 
 #[tokio::test]
-async fn an_unsatisfied_dependency_leaves_the_dependent_on_the_default_branch() {
-    // A has a branch with commits on it, but its card is still in `ready`
-    // because the run failed. ADR-0008 gates chaining on the column, so B does
-    // not build on work nobody accepted.
+async fn a_dependent_branches_from_the_last_succeeded_head_and_skips_a_failed_fix() {
+    // Seam-contract D29's required test. A fix commits on A's branch and then
+    // fails: the branch has moved, the verified commit has not.
+    let f = Fixture::new().await;
+    let a = f.task("Add the API endpoint").await;
+    let b = f.task("Call it from the UI").await;
+    let implementation = f.succeed(&a.id, &["endpoint.rs"]).await;
+    let fix = f
+        .run_as(&a.id, RunKind::Fix, false, &["fix.rs"], fatal())
+        .await;
+    assert_eq!(
+        f.reload(&a.id).await.column,
+        BoardColumn::InReview,
+        "a failed fix leaves the implementation's card where it was",
+    );
+    assert_eq!(
+        git(
+            f.source.path(),
+            &["rev-parse", &implementation.worktree.branch]
+        ),
+        fix.head_sha,
+        "A's branch tip is the failed fix's commit",
+    );
+    f.depends(&b.id, &[&a.id]).await;
+
+    let b_worktree = f.harness.prepare_worktree(&b.id).await.expect("prepare B");
+
+    let b_checkout = PathBuf::from(&b_worktree.path);
+    assert_eq!(
+        git(&b_checkout, &["rev-parse", "HEAD"]),
+        implementation.head_sha
+    );
+    assert!(
+        !b_checkout.join("fix.rs").exists(),
+        "the failed fix's work is not in B's base",
+    );
+    assert_eq!(
+        b_worktree.base_sha.as_deref(),
+        Some(implementation.head_sha.as_str())
+    );
+}
+
+#[tokio::test]
+async fn commits_added_to_a_dependencys_branch_after_its_run_are_not_in_the_base() {
+    let f = Fixture::new().await;
+    let a = f.task("Add the API endpoint").await;
+    let b = f.task("Call it from the UI").await;
+    let a_run = f.succeed(&a.id, &["endpoint.rs"]).await;
+    commit_in(
+        Path::new(&a_run.worktree.path),
+        "by-hand.rs",
+        "// by hand\n",
+        "Add something by hand",
+    );
+    move_to(&f, &a.id, BoardColumn::Done).await;
+    f.depends(&b.id, &[&a.id]).await;
+
+    let b_worktree = f.harness.prepare_worktree(&b.id).await.expect("prepare B");
+
+    let b_checkout = PathBuf::from(&b_worktree.path);
+    assert_eq!(git(&b_checkout, &["rev-parse", "HEAD"]), a_run.head_sha);
+    assert!(!b_checkout.join("by-hand.rs").exists());
+    assert_eq!(b_worktree.base.base_ref, a_run.worktree.branch);
+}
+
+#[tokio::test]
+async fn a_dependency_with_a_branch_but_no_successful_run_is_not_a_base() {
+    // The deliberate behaviour change of task 044 (ADR-0033 point 5). A has a
+    // branch with commits, and a human dragged it to `in_review`. Before, B
+    // built on that branch; now only a commit a run finished cleanly on is a
+    // base, so B starts at the default branch and says why.
     let f = Fixture::new().await;
     let a = f.task("Add the API endpoint").await;
     let b = f.task("Call it from the UI").await;
@@ -386,99 +456,213 @@ async fn an_unsatisfied_dependency_leaves_the_dependent_on_the_default_branch() 
         "// A\n",
         "Add A",
     );
-    tasks::set_task_dependencies(f.ctx(), &b.id, std::slice::from_ref(&a.id))
-        .await
-        .expect("B depends on A");
+    file_for_review(&f, &a.id).await;
+    f.depends(&b.id, &[&a.id]).await;
 
     let b_worktree = f.harness.prepare_worktree(&b.id).await.expect("prepare B");
 
-    assert_eq!(b_worktree.base_ref, "main");
+    assert_eq!(b_worktree.base.base_ref, "main");
     assert_eq!(
         git(Path::new(&b_worktree.path), &["rev-parse", "HEAD"]),
         f.source.head_sha(),
     );
+    assert_eq!(
+        b_worktree.base.warning.as_deref(),
+        Some(
+            "This task branches from main: none of its dependencies can be built on yet. \
+             \"Add the API endpoint\" has no successful run to build on."
+        ),
+    );
+}
+
+#[tokio::test]
+async fn a_dependency_retried_after_its_dependent_started_leaves_the_dependent_on_the_earlier_commit(
+) {
+    let f = Fixture::new().await;
+    let a = f.task("Add the API endpoint").await;
+    let b = f.task("Call it from the UI").await;
+    let first = f.succeed(&a.id, &["first.rs"]).await;
+    f.depends(&b.id, &[&a.id]).await;
+
+    // B's run is opened on A's first head and ends on a usage limit, so its
+    // worktree stays for the retry.
+    let b_first = f
+        .run_as(&b.id, RunKind::Implementation, false, &[], usage_limit())
+        .await;
+    assert_eq!(
+        f.run_row(&b_first.run_id).await.base_sha.as_deref(),
+        Some(first.head_sha.as_str())
+    );
+    assert_eq!(f.reload(&b.id).await.run_state, RunState::WaitingRetry);
+
+    // A goes back for another go, on its own branch, and succeeds again.
+    move_to(&f, &a.id, BoardColumn::Ready).await;
+    let second = f.succeed(&a.id, &["second.rs"]).await;
+    assert_ne!(second.head_sha, first.head_sha);
+
+    let b_second = f
+        .run_as(&b.id, RunKind::Implementation, true, &[], succeeded())
+        .await;
+
+    assert_eq!(b_second.worktree.path, b_first.worktree.path, "reused");
+    assert_eq!(
+        f.run_row(&b_second.run_id).await.base_sha.as_deref(),
+        Some(first.head_sha.as_str()),
+        "B was built on A's first head, and its second row still says so",
+    );
+    assert!(!Path::new(&b_second.worktree.path)
+        .join("second.rs")
+        .exists());
+
+    let c = f.task("Use it elsewhere").await;
+    f.depends(&c.id, &[&a.id]).await;
+    let c_worktree = f.harness.prepare_worktree(&c.id).await.expect("prepare C");
+    assert_eq!(
+        git(Path::new(&c_worktree.path), &["rev-parse", "HEAD"]),
+        second.head_sha
+    );
+}
+
+#[tokio::test]
+async fn a_dependency_commit_missing_from_the_clone_is_refused_before_anything_is_created() {
+    // The squash-merged-and-cleaned-up case: A's branch was deleted the way
+    // task 016 deletes it and its commits collected, so the commit A's run
+    // ended on exists nowhere. The board still chooses it, and the runner
+    // refuses rather than overrule the board with a fallback.
+    let f = Fixture::new().await;
+    let a = f.task("Add the API endpoint").await;
+    let b = f.task("Call it from the UI").await;
+    let a_run = f.succeed(&a.id, &["endpoint.rs"]).await;
+    move_to(&f, &a.id, BoardColumn::Done).await;
+    worktree::remove(f.ctx(), f.machine(), &a.id, true, ForceRemoval::No)
+        .await
+        .expect("remove A's worktree and branch");
+    assert_eq!(f.reload(&a.id).await.branch, None);
+    git(
+        f.source.path(),
+        &["reflog", "expire", "--expire=now", "--all"],
+    );
+    git(f.source.path(), &["gc", "--prune=now", "--quiet"]);
     assert!(
-        b_worktree
-            .dependency_warning
-            .as_deref()
-            .is_some_and(|warning| warning.contains("Add the API endpoint")),
-        "the warning must name what is not in the base: {:?}",
-        b_worktree.dependency_warning,
+        !object_exists(f.source.path(), &a_run.head_sha),
+        "the fixture must really have lost the commit",
+    );
+    f.depends(&b.id, &[&a.id]).await;
+
+    let error = f
+        .harness
+        .prepare_worktree(&b.id)
+        .await
+        .expect_err("a base the clone does not have is refused");
+
+    assert_eq!(error.code(), ErrorCode::Invalid);
+    assert_eq!(
+        error.to_string(),
+        format!(
+            "\"{}\" does not have {}, the commit \"Add the API endpoint\" last finished on. \
+             Fetch it into this clone, or remove \"Add the API endpoint\" from this task's \
+             dependencies and run it again.",
+            f.repository.name, a_run.head_sha,
+        ),
+    );
+    assert!(!f.root().join(&b.id).exists(), "no worktree directory");
+    assert_eq!(
+        git(f.source.path(), &["branch", "--list", "rimaia/*"]),
+        "",
+        "no branch",
+    );
+    assert_eq!(f.reload(&b.id).await.branch, None);
+    assert_eq!(
+        f.harness.worktree_path(&b.id).await,
+        None,
+        "no worktree record"
+    );
+}
+
+#[tokio::test]
+async fn an_unsatisfied_dependency_leaves_the_dependent_on_the_default_branch() {
+    // A succeeded, and the human dragged it back to `ready` for another go.
+    // ADR-0008 gates chaining on the column, so the successful run does not
+    // outvote them.
+    let f = Fixture::new().await;
+    let a = f.task("Add the API endpoint").await;
+    let b = f.task("Call it from the UI").await;
+    f.succeed(&a.id, &["endpoint.rs"]).await;
+    move_to(&f, &a.id, BoardColumn::Ready).await;
+    f.depends(&b.id, &[&a.id]).await;
+
+    let b_worktree = f.harness.prepare_worktree(&b.id).await.expect("prepare B");
+
+    assert_eq!(b_worktree.base.base_ref, "main");
+    assert_eq!(
+        git(Path::new(&b_worktree.path), &["rev-parse", "HEAD"]),
+        f.source.head_sha(),
+    );
+    assert_eq!(
+        b_worktree.base.warning.as_deref(),
+        Some(
+            "This task branches from main: none of its dependencies can be built on yet. \
+             \"Add the API endpoint\" is not in review or done."
+        ),
     );
 }
 
 #[tokio::test]
 async fn a_dependency_that_has_never_run_cannot_be_a_base() {
     // Satisfied — dragged straight to `done` by a user who implemented it
-    // themselves — but with no branch to build on. There is nothing to hand
-    // `git worktree add`, so it falls through to the default branch and says so.
+    // themselves — but with no run, so no commit anyone verified. It falls
+    // through to the default branch and says so.
     let f = Fixture::new().await;
     let a = f.task("Did it by hand").await;
     let b = f.task("Call it from the UI").await;
     move_to(&f, &a.id, BoardColumn::Done).await;
-    tasks::set_task_dependencies(f.ctx(), &b.id, std::slice::from_ref(&a.id))
-        .await
-        .expect("B depends on A");
+    f.depends(&b.id, &[&a.id]).await;
 
     let b_worktree = f.harness.prepare_worktree(&b.id).await.expect("prepare B");
 
-    assert_eq!(b_worktree.base_ref, "main");
+    assert_eq!(b_worktree.base.base_ref, "main");
     assert_eq!(
-        b_worktree.dependency_warning.as_deref(),
+        b_worktree.base.warning.as_deref(),
         Some(
-            "This task branches from main: none of its dependencies has a branch to build \
-             on yet. \"Did it by hand\" has not produced one — a dependency that has never \
-             run cannot be a base."
+            "This task branches from main: none of its dependencies can be built on yet. \
+             \"Did it by hand\" has no successful run to build on."
         ),
     );
 }
 
 #[tokio::test]
 async fn two_dependencies_base_off_the_higher_one_and_warn_about_the_other() {
-    // Both satisfied, both with branches, both in `in_review` — so the tie is
-    // broken by ascending `position`, and `position` ascends downwards
-    // (ADR-0007). A was filed first and sits above B.
+    // Both satisfied, both with a successful head, both in `in_review` — so
+    // the tie is broken by ascending `position`, and `position` ascends
+    // downwards (ADR-0007).
     let f = Fixture::new().await;
     let a = f.task("Add the API endpoint").await;
     let b = f.task("Add the schema").await;
     let c = f.task("Call them from the UI").await;
-
-    let a_worktree = f.harness.prepare_worktree(&a.id).await.expect("prepare A");
-    commit_in(
-        Path::new(&a_worktree.path),
-        "endpoint.rs",
-        "// A\n",
-        "Add A",
-    );
-    let a_tip = git(Path::new(&a_worktree.path), &["rev-parse", "HEAD"]);
-    file_for_review(&f, &a.id).await;
-
-    let b_worktree = f.harness.prepare_worktree(&b.id).await.expect("prepare B");
-    commit_in(Path::new(&b_worktree.path), "schema.rs", "// B\n", "Add B");
-    file_for_review(&f, &b.id).await;
-
-    tasks::set_task_dependencies(f.ctx(), &c.id, &[a.id.clone(), b.id.clone()])
-        .await
-        .expect("C depends on both");
+    let a_run = f.succeed(&a.id, &["endpoint.rs"]).await;
+    f.succeed(&b.id, &["schema.rs"]).await;
+    f.depends(&c.id, &[&a.id, &b.id]).await;
 
     let c_worktree = f.harness.prepare_worktree(&c.id).await.expect("prepare C");
 
-    assert_eq!(c_worktree.base_ref, a_worktree.branch);
+    assert_eq!(c_worktree.base.base_ref, a_run.worktree.branch);
     assert_eq!(
         git(Path::new(&c_worktree.path), &["rev-parse", "HEAD"]),
-        a_tip
+        a_run.head_sha
     );
     assert!(
         !PathBuf::from(&c_worktree.path).join("schema.rs").is_file(),
         "B's work is genuinely not in C's base — which is exactly what the warning is for",
     );
-
-    let warning = c_worktree
-        .dependency_warning
-        .as_deref()
-        .expect("two dependencies must produce ADR-0008's explicit warning");
-    assert!(warning.contains("Add the API endpoint"), "{warning}");
-    assert!(warning.contains("\"Add the schema\""), "{warning}");
+    assert_eq!(
+        c_worktree.base.warning,
+        Some(format!(
+            "This task branches from \"Add the API endpoint\" ({}). \"Add the schema\" is also \
+             a dependency and is not in that base — merge into it what you need, or run this \
+             task again once the rest have landed.",
+            a_run.worktree.branch,
+        )),
+    );
 }
 
 #[tokio::test]
@@ -490,38 +674,30 @@ async fn the_resolved_base_is_recorded_on_the_run() {
     let f = Fixture::new().await;
     let a = f.task("Add the API endpoint").await;
     let b = f.task("Call it from the UI").await;
-    let a_worktree = f.harness.prepare_worktree(&a.id).await.expect("prepare A");
-    commit_in(
-        Path::new(&a_worktree.path),
-        "endpoint.rs",
-        "// A\n",
-        "Add A",
-    );
-    file_for_review(&f, &a.id).await;
-    tasks::set_task_dependencies(f.ctx(), &b.id, std::slice::from_ref(&a.id))
-        .await
-        .expect("B depends on A");
+    let a_run = f.succeed(&a.id, &["endpoint.rs"]).await;
+    f.depends(&b.id, &[&a.id]).await;
 
     let b_worktree = f.harness.prepare_worktree(&b.id).await.expect("prepare B");
-    let data = scratch_dir("rimaia-run-data-");
-    let paths = AppPaths::new(data.path());
-    paths.create_all().expect("the app data directories");
     let run = start_run(
         f.ctx(),
-        &paths,
+        &f.paths,
         NewRun {
             task_id: b.id.clone(),
             kind: RunKind::Implementation,
             session_id: "0b6d3e2e-0000-4000-8000-00000000ba5e".to_string(),
             prompt: "implement the plan".to_string(),
-            base_ref: Some(b_worktree.base_ref.clone()),
+            base_ref: Some(b_worktree.base.base_ref.clone()),
             base_sha: b_worktree.base_sha.clone(),
         },
     )
     .await
     .expect("open the run row");
 
-    assert_eq!(run.base_ref.as_deref(), Some(a_worktree.branch.as_str()));
+    assert_eq!(
+        run.base_ref.as_deref(),
+        Some(a_run.worktree.branch.as_str())
+    );
+    assert_eq!(run.base_sha.as_deref(), Some(a_run.head_sha.as_str()));
 
     // Now the dependency changes out from under the recorded attempt. The
     // status still reports the base the branch actually has.
@@ -533,13 +709,13 @@ async fn the_resolved_base_is_recorded_on_the_run() {
         .await
         .expect("status");
     assert_eq!(
-        status.base_ref, a_worktree.branch,
+        status.base_ref, a_run.worktree.branch,
         "a re-resolution would say `main` and silently re-measure the diff",
     );
     let summary = worktree::diff_summary(f.ctx(), f.machine(), &b.id)
         .await
         .expect("diff summary");
-    assert_eq!(summary.base_ref, a_worktree.branch);
+    assert_eq!(summary.base_ref, a_run.worktree.branch);
 }
 
 #[tokio::test]
@@ -1327,6 +1503,9 @@ struct Fixture {
     _worktrees: tempfile::TempDir,
     worktree_root: PathBuf,
     repository: Repository,
+    /// The app data directory the board's runs record their transcripts
+    /// under, inside `_worktrees`.
+    paths: AppPaths,
 }
 
 impl Fixture {
@@ -1366,12 +1545,16 @@ impl Fixture {
         .await
         .expect("register the fixture repository");
 
+        let paths = AppPaths::new(worktrees.path().join("data"));
+        paths.create_all().expect("the app data directories");
+
         Self {
             harness,
             source,
             _worktrees: worktrees,
             worktree_root: root,
             repository,
+            paths,
         }
     }
 
@@ -1441,6 +1624,48 @@ impl Fixture {
         // what a test means by "a worktree".
         .filter(|entry| entry.path != self.source.path())
         .collect()
+    }
+
+    async fn run_row(&self, run_id: &str) -> rimaia_core::db::Run {
+        runs::get_run_row(self.ctx(), run_id)
+            .await
+            .expect("read the run back")
+    }
+
+    async fn depends(&self, task_id: &str, on: &[&str]) {
+        let on: Vec<String> = on.iter().map(|id| (*id).to_string()).collect();
+        tasks::set_task_dependencies(self.ctx(), task_id, &on)
+            .await
+            .expect("set the dependencies");
+    }
+
+    /// An implementation run of `task_id` that commits `files` and succeeds.
+    async fn succeed(&self, task_id: &str, files: &[&str]) -> FinishedRun {
+        self.run_as(task_id, RunKind::Implementation, false, files, succeeded())
+            .await
+    }
+
+    /// A run of `task_id` through the board services production uses, with
+    /// no child: see [`run_without_a_child`].
+    async fn run_as(
+        &self,
+        task_id: &str,
+        kind: RunKind,
+        continue_session: bool,
+        files: &[&str],
+        outcome: RunOutcome,
+    ) -> FinishedRun {
+        let board = self.harness.board(&self.paths, &RunnerConfig::default());
+        run_without_a_child(
+            &self.harness,
+            board.as_ref(),
+            task_id,
+            kind,
+            continue_session,
+            files,
+            outcome,
+        )
+        .await
     }
 
     fn drain_changes(&mut self) {
@@ -1578,6 +1803,53 @@ async fn move_to(f: &Fixture, task_id: &str, column: BoardColumn) {
     )
     .await
     .expect("file the card");
+}
+
+fn succeeded() -> RunOutcome {
+    RunOutcome {
+        exit_class: ExitClass::Success,
+        status: RunStatus::Succeeded,
+        error_message: None,
+        num_turns: Some(4),
+        cost_usd: Some(0.25),
+        duration_ms: Some(1_000),
+        pr_url: None,
+        usage_limit_resets_at: None,
+        resume_after: None,
+        spawned_as: SpawnedAs::default(),
+        usage: TokenUsage::default(),
+    }
+}
+
+/// A failure nothing retries.
+fn fatal() -> RunOutcome {
+    RunOutcome {
+        exit_class: ExitClass::Fatal,
+        status: RunStatus::Failed,
+        error_message: Some("the fix gave up".to_string()),
+        ..succeeded()
+    }
+}
+
+/// A usage limit with a reset time, which leaves the task waiting to retry.
+fn usage_limit() -> RunOutcome {
+    RunOutcome {
+        exit_class: ExitClass::UsageLimit,
+        status: RunStatus::Failed,
+        error_message: Some("usage limit reached".to_string()),
+        usage_limit_resets_at: Some("2026-08-20T07:00:00Z".parse().expect("a literal timestamp")),
+        ..succeeded()
+    }
+}
+
+/// Whether `sha` is in `dir`'s object store at all.
+fn object_exists(dir: &Path, sha: &str) -> bool {
+    Command::new("git")
+        .current_dir(dir)
+        .args(["cat-file", "-e", &format!("{sha}^{{commit}}")])
+        .status()
+        .expect("run git cat-file")
+        .success()
 }
 
 /// What ADR-0008 calls satisfying a dependency: the card reaches `in_review`.

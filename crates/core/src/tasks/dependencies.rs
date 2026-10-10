@@ -178,7 +178,7 @@ pub async fn set_task_dependencies(
 ///
 /// The order is the load-bearing part, and it is not `list_tasks`' own
 /// `board_column ASC` — see [`BoardColumn::board_rank`]. It decides two things
-/// that have to agree with each other: which dependency's branch a dependent
+/// that have to agree with each other: which dependency's commit a dependent
 /// task is created from ([`crate::worktree`]'s base-ref resolution) and which
 /// blocker's title a blocked card names. A card that names one task while its
 /// worktree chains off another would be describing a board that does not

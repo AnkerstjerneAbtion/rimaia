@@ -831,7 +831,6 @@ async fn every_starter_records_its_claim_before_it_spawns() {
             run_task(
                 &spy,
                 f.machine(),
-                f.ctx(),
                 &f.paths,
                 &config,
                 started.claim,
@@ -881,7 +880,7 @@ async fn every_starter_records_its_claim_before_it_spawns() {
         .expect("the claim")
         .expect("nothing refused it");
     let generation = claim.lease().generation;
-    plan_claimed(&spy, f.machine(), f.ctx(), &f.paths, &config, claim)
+    plan_claimed(&spy, f.machine(), &f.paths, &config, claim)
         .await
         .expect("the planner ran");
     let (before_spawn, _) = spy.take();
@@ -1731,7 +1730,6 @@ impl Fixture {
             run_task(
                 self.board(which).as_ref(),
                 self.machine(),
-                self.ctx(),
                 &self.paths,
                 &self.config(),
                 claim,

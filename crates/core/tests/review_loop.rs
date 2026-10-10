@@ -1643,15 +1643,7 @@ impl Fixture {
             .expect("claim the task");
         tokio::time::timeout(
             TEST_TIMEOUT,
-            run_task(
-                board,
-                self.machine(),
-                self.ctx(),
-                &self.paths,
-                config,
-                claim,
-                request,
-            ),
+            run_task(board, self.machine(), &self.paths, config, claim, request),
         )
         .await
         .expect("a run must finish inside the test timeout")
@@ -1664,7 +1656,6 @@ impl Fixture {
             run_task(
                 board,
                 self.machine(),
-                self.ctx(),
                 &self.paths,
                 config,
                 claim,

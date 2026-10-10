@@ -72,7 +72,6 @@ use crate::board::{
     BoardPort, Claim, FinishReceipt, FinishRun, ImplementationBase, LeasePurpose, LeaseRef,
     NextStep, RunContext, StartRun, TranscriptEnd,
 };
-use crate::context::ServiceContext;
 use crate::credentials::inject::ChildEnvironment;
 use crate::credentials::CredentialAccess;
 use crate::db::settings::{self, RunEnvironment};
@@ -491,22 +490,19 @@ pub struct Attempt<'a> {
 /// a worktree of its own and has no shared `.git` to contend for, so extending
 /// the lock past this point would turn a per-repository cap of two into a
 /// sequential queue wearing a parallel label.
+///
+/// `context` is the claim's, never a later `run_context`'s: the base the
+/// worktree is built on, and the run records, is the one the board granted
+/// the claim on (task 044).
 async fn prepare_worktree(
     phases: &Phases<'_>,
     in_flight: Option<&InFlight>,
-    repository_id: &str,
+    context: &RunContext,
 ) -> Result<Worktree> {
-    let prepare = || {
-        worktree::prepare(
-            phases.prepare_ctx,
-            phases.machine,
-            phases.board,
-            phases.lease,
-        )
-    };
+    let prepare = || worktree::prepare(phases.machine, phases.board, phases.lease, context);
     match in_flight {
         Some(registry) => {
-            let lock = registry.preparation_lock(repository_id);
+            let lock = registry.preparation_lock(&context.repository.id);
             let _held = lock.lock().await;
             prepare().await
         }
@@ -592,15 +588,13 @@ pub(crate) fn implementation_intent<'a>(
 /// it.
 ///
 /// `machine` is this machine's own state (task 041): the run environment, the
-/// run window and the usage-limit pause, and the clock. `prepare_ctx` is a
-/// board context held for one call and nothing else: [`worktree::prepare`]
-/// still reads the task, the repository and the base ref through it, and
-/// task 044 removes it once `RunContext::base` carries what that call needs.
+/// run window and the usage-limit pause, and the clock. Everything it reads
+/// from the board comes through `board`, the worktree's base included: the
+/// claim carries it as `RunContext::base` (task 044).
 #[tracing::instrument(skip_all, fields(task_id = %claim.lease.task_id))]
 pub async fn run_task(
     board: &dyn BoardPort,
     machine: &MachineContext,
-    prepare_ctx: &ServiceContext,
     paths: &AppPaths,
     config: &RunnerConfig,
     claim: Claim,
@@ -616,7 +610,6 @@ pub async fn run_task(
     let phases = Phases {
         board,
         machine,
-        prepare_ctx,
         paths,
         config,
         lease: &lease,
@@ -686,12 +679,9 @@ async fn run_implementation(
     context: &RunContext,
     plans: bool,
 ) -> Result<FinishReceipt> {
-    // `prepare_ctx` is reached through `phases` by `prepare_worktree`, its one
-    // use until task 044.
     let Phases {
         board,
         machine,
-        prepare_ctx: _,
         paths,
         config,
         lease,
@@ -769,7 +759,7 @@ async fn run_implementation(
         board,
         machine,
         lease,
-        prepare_worktree(phases, request.in_flight.as_ref(), &context.repository.id).await,
+        prepare_worktree(phases, request.in_flight.as_ref(), context).await,
     )
     .await?;
 
@@ -884,9 +874,10 @@ async fn run_implementation(
                 session_id: conversation.clone(),
                 prompt: prompt.clone(),
                 // ADR-0008: what this attempt was actually branched from, taken
-                // off the worktree `prepare` just resolved rather than resolved
-                // again, so the row records the base the branch really has.
-                base_ref: Some(worktree.base_ref.clone()),
+                // off the worktree `prepare` built from the claim's base, never
+                // the re-reads' above, so the row records the base the branch
+                // really has: the label, and the commit that is authoritative.
+                base_ref: Some(worktree.base.base_ref.clone()),
                 base_sha: worktree.base_sha.clone(),
             },
         )
@@ -926,8 +917,6 @@ async fn run_implementation(
 struct Phases<'a> {
     board: &'a dyn BoardPort,
     machine: &'a MachineContext,
-    /// For [`worktree::prepare`] and nothing else, until task 044.
-    prepare_ctx: &'a ServiceContext,
     paths: &'a AppPaths,
     config: &'a RunnerConfig,
     lease: &'a LeaseRef,

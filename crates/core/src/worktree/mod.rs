@@ -34,10 +34,13 @@
 //! # The base ref
 //!
 //! [`base_ref`] owns it — ADR-0008's branch chaining, which task 011 grew out
-//! of the one-line seam task 007 left here. Two rules of this module follow
-//! from it and are stated once, at [`recorded_base_ref`]: [`prepare`] resolves
-//! the base fresh and records it on the run it is about to start, while
-//! [`status`] and [`diff_summary`] prefer the *recorded* value.
+//! of the one-line seam task 007 left here, as ADR-0033 point 5 amends it: a
+//! dependent branches from its dependency's last verified commit. The board
+//! resolves it (task 044) and hands it to [`prepare`] as `RunContext::base`.
+//! Two rules of this module follow from it and are stated once, at
+//! [`recorded_base_ref`]: [`prepare`] builds on the base its claim carried and
+//! records it on the run it is about to start, while [`status`] and
+//! [`diff_summary`] prefer the *recorded* value.
 //!
 //! # Removal, and the layer above it
 //!
@@ -49,7 +52,7 @@
 //! policy) is task 016's and lives in [`cleanup`], on top of this rather than
 //! inside it.
 
-mod base_ref;
+pub(crate) mod base_ref;
 pub mod bundle;
 pub mod cleanup;
 mod git;
@@ -70,7 +73,7 @@ use std::path::{Path, PathBuf};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-use crate::board::{BoardPort, LeaseRef};
+use crate::board::{BoardPort, LeaseRef, RunBase, RunContext};
 use crate::context::ServiceContext;
 use crate::db::{Repository, RunState, Task};
 use crate::error::{Error, Result};
@@ -80,11 +83,10 @@ use crate::machine::{self, Checkout, MachineContext, WorktreeRecord};
 /// A task's worktree: where it is, what branch it is on, and what that branch
 /// was created from.
 ///
-/// `base_ref` is carried rather than stored **on the task** — there is no
-/// column for it there and seam-contract D4 forbids a migration to add one — so
-/// it is re-derived on every call by [`base_ref::resolve`]. The caller that
-/// starts a run puts it on the `runs` row instead, which is a column that
-/// already exists: see [`recorded_base_ref`].
+/// The base is carried rather than stored **on the task** — there is no
+/// column for it there and seam-contract D4 forbids a migration to add one. It
+/// is the one the run's claim carried, and the caller that starts a run puts
+/// it on the `runs` row: see [`recorded_base_ref`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Worktree {
@@ -92,21 +94,22 @@ pub struct Worktree {
     pub repository_id: String,
     pub path: String,
     pub branch: String,
-    pub base_ref: String,
-    /// ADR-0008's explicit multi-dependency warning, or `None`. Carried on the
-    /// worktree as well as on [`WorktreeStatus`] because [`prepare`] is what
-    /// the runner calls, and a warning produced during an unattended run has
-    /// nowhere else to be logged.
-    pub dependency_warning: Option<String>,
-    /// Where this worktree's branch forked from [`base_ref`](Self::base_ref):
-    /// `git merge-base <base_ref> HEAD`, run in the worktree (task 033).
+    /// What the board said to build on: the label `runs.base_ref` records,
+    /// the dependency commit when there is one, and ADR-0008's warning.
+    /// Carried through to `start_run` unchanged, and the warning is logged by
+    /// [`prepare`] too, because a warning produced during an unattended run
+    /// has nowhere else to be read.
+    pub base: RunBase,
+    /// Where this worktree's branch forked from [`RunBase::revision`]:
+    /// `git merge-base <revision> HEAD`, run in the worktree (task 033).
     ///
-    /// On a fresh worktree that is the base's tip. On a resumed one it is the
-    /// fork point against the base *this attempt* resolved, not wherever that
-    /// base has moved since — which is what ADR-0033 point 5 means by "exactly
-    /// what the run started from", and why it is computed on the idempotent
-    /// path too. `None`, with a warning logged, when git cannot answer; a
-    /// missing fork point never fails a start.
+    /// On a fresh worktree that is the revision itself, so a chained run's
+    /// `base_sha` is its dependency's `head_sha` byte for byte. On a resumed
+    /// one it is the fork point against the base *this attempt* was handed,
+    /// not wherever that base has moved since — which is what ADR-0033 point 5
+    /// means by "exactly what the run started from", and why it is computed on
+    /// the idempotent path too. `None`, with a warning logged, when git cannot
+    /// answer; a missing fork point never fails a start.
     pub base_sha: Option<String>,
 }
 
@@ -288,8 +291,10 @@ struct Location {
 ///    run.
 /// 3. `git worktree prune`, because git's administrative record outlives a
 ///    directory somebody deleted by hand.
-/// 4. `git worktree add <path> -b <branch> <base-ref>`, with the path
-///    `<worktree_root>/<task-id>` and the branch `rimaia/<task-id>-<slug>`.
+/// 4. `git worktree add <path> -b <branch> <revision>`, with the path
+///    `<worktree_root>/<task-id>`, the branch `rimaia/<task-id>-<slug>`, and
+///    the revision [`RunBase::revision`]: the dependency's commit when the
+///    board chose one, the default branch otherwise.
 ///
 /// Refuses a worktree root inside the repository working tree, and any path
 /// outside the configured root — see [`safety`] for why neither check is a
@@ -299,42 +304,43 @@ struct Location {
 /// from this machine's checkout, and a repository with none is refused as
 /// [`machine::not_set_up`] before anything is touched. A fresh worktree is
 /// recorded in the machine store, and its branch on the board through
-/// [`BoardPort::record_branch`] (task 066, D31's table). `ctx` is the board
-/// context `run_task` and `plan_claimed` keep for this one call, for the task
-/// read and the base ref, until task 044's `RunContext::base` replaces it.
+/// [`BoardPort::record_branch`] (task 066, D31's table).
+///
+/// The task, the repository and the base come from `context`, the claim's
+/// (task 044): the board resolved the base, and this function reads no board
+/// state of its own. Never the recorded value, and never a later
+/// `run_context`'s: this call produces the next attempt, from the base the
+/// claim was granted on.
 pub async fn prepare(
-    ctx: &ServiceContext,
     machine: &MachineContext,
     board: &dyn BoardPort,
     lease: &LeaseRef,
+    context: &RunContext,
 ) -> Result<Worktree> {
-    let task = fetch_task(ctx, &lease.task_id).await?;
-    let repository = crate::repo::get(ctx, &task.repository_id).await?;
-    let checkout = machine::checkout_of(machine, &repository).await?;
-    let location = locate(&repository, &checkout).await?;
+    let task = &context.task.task;
+    let repository = &context.repository;
+    if task.id != lease.task_id {
+        return Err(Error::internal(format!(
+            "a worktree for task {} was asked for under the lease of task {}",
+            task.id, lease.task_id,
+        )));
+    }
+    let base = &context.base;
+    let checkout = machine::checkout_of(machine, repository).await?;
+    let location = locate(repository, &checkout).await?;
     let recorded = machine::local::worktree_path(machine, &task.id).await?;
-    // Fresh, never the recorded value: this call is what produces the next
-    // attempt, so the answer has to describe the dependency graph as it is now.
-    let resolved = base_ref::resolve(ctx, &task, &repository).await?;
-    let base_ref = resolved.base_ref;
 
-    if let Some(warning) = &resolved.warning {
+    if let Some(warning) = &base.warning {
         // Logged as well as returned, because `prepare`'s caller on the
         // unattended path is the runner, and nobody is reading a return value
         // at 03:00.
-        tracing::warn!(task_id = %task.id, %base_ref, "{warning}");
+        tracing::warn!(task_id = %task.id, base_ref = %base.base_ref, "{warning}");
     }
 
-    if let Some(mut existing) = existing_worktree(
-        &location,
-        &task,
-        recorded.as_deref(),
-        &base_ref,
-        resolved.warning.clone(),
-    )
-    .await?
+    if let Some(mut existing) =
+        existing_worktree(&location, task, recorded.as_deref(), base).await?
     {
-        existing.base_sha = fork_point(Path::new(&existing.path), &base_ref).await;
+        existing.base_sha = fork_point(Path::new(&existing.path), base.revision()).await;
         return Ok(existing);
     }
 
@@ -360,8 +366,8 @@ pub async fn prepare(
     git::fetch_prune(&location.repository).await;
     git::worktree_prune(&location.repository).await?;
 
-    ensure_base_ref_exists(&location, &repository, &base_ref).await?;
-    let (branch, create_branch) = resolve_branch(&location.repository, &task).await?;
+    ensure_base_exists(&location, repository, base).await?;
+    let (branch, create_branch) = resolve_branch(&location.repository, task).await?;
 
     // The components of `root` that did not exist when it was resolved are
     // created here as plain directories, so the resolved form stays canonical
@@ -371,12 +377,12 @@ pub async fn prepare(
         &location.repository,
         &path,
         &branch,
-        &base_ref,
+        base.revision(),
         create_branch,
     )
     .await?;
 
-    let base_sha = fork_point(&path, &base_ref).await;
+    let base_sha = fork_point(&path, base.revision()).await;
     let path = path_to_string(&path)?;
     machine::local::record_worktree(
         machine,
@@ -391,29 +397,28 @@ pub async fn prepare(
     board.record_branch(lease, &branch).await?;
 
     Ok(Worktree {
-        task_id: task.id,
-        repository_id: repository.id,
+        task_id: task.id.clone(),
+        repository_id: repository.id.clone(),
         path,
         branch,
-        base_ref,
-        dependency_warning: resolved.warning,
+        base: base.clone(),
         base_sha,
     })
 }
 
 /// [`Worktree::base_sha`]: where the branch checked out at `worktree` forked
-/// from `base_ref`, or `None` with a warning when git cannot say.
+/// from `revision`, or `None` with a warning when git cannot say.
 ///
 /// Never an error, because nothing about starting a run depends on it: it is a
-/// record for the review bundle and for task 044's chaining, and a run that
+/// record for the review bundle and for a dependent's chaining, and a run that
 /// cannot record its fork point still has work to do.
-async fn fork_point(worktree: &Path, base_ref: &str) -> Option<String> {
-    match git::merge_base_with_head(worktree, base_ref).await {
+async fn fork_point(worktree: &Path, revision: &str) -> Option<String> {
+    match git::merge_base_with_head(worktree, revision).await {
         Ok(sha) => Some(sha),
         Err(error) => {
             tracing::warn!(
                 worktree = %worktree.display(),
-                %base_ref,
+                %revision,
                 %error,
                 "could not compute the fork point; this run will record no base_sha",
             );
@@ -721,15 +726,15 @@ async fn correct_run_state(ctx: &ServiceContext, task: &Task) -> Result<Option<R
 /// one — `runs.base_ref`, written by `runner::outcome::start_run`.
 ///
 /// **[`status`] and [`diff_summary`] prefer this over a fresh resolution, and
-/// [`prepare`] never reads it.** ADR-0008's amendment of 2026-09-02 takes that
+/// [`prepare`] never reads it** — it builds on its claim's `RunContext::base`. ADR-0008's amendment of 2026-09-02 takes that
 /// decision; the argument is that a task's dependencies can change between
 /// attempts, so a re-derivation answers a different question from the one being
 /// asked. The morning review is reading a branch that already exists and wants
 /// to know what it was measured against; re-resolving would silently re-measure
 /// yesterday's diff against a base chosen from today's graph, and the diff would
 /// change without anybody committing anything. `prepare` is the opposite case —
-/// it is producing the next attempt, so the current graph is exactly the right
-/// input.
+/// it is producing the next attempt, so the graph as the board read it at the
+/// claim is exactly the right input.
 ///
 /// `None` for a task that has never run, where there is nothing recorded and the
 /// fresh resolution is also the only answer available.
@@ -750,7 +755,7 @@ async fn recorded_base_ref(ctx: &ServiceContext, task_id: &str) -> Result<Option
     .await?
     // Two layers of `Option`: no run at all, and a run from before this column
     // was written. Both mean "nothing recorded", and so does a blank string —
-    // `base_ref::has_branch` refuses the same value for the same reason.
+    // `base_ref::recorded_branch` refuses the same value for the same reason.
     .flatten()
     .filter(|base_ref| !base_ref.trim().is_empty());
 
@@ -799,8 +804,7 @@ async fn existing_worktree(
     location: &Location,
     task: &Task,
     recorded: Option<&str>,
-    base_ref: &str,
-    dependency_warning: Option<String>,
+    base: &RunBase,
 ) -> Result<Option<Worktree>> {
     let Some((path, branch)) =
         live_worktree(&location.repository, recorded, task.branch.as_deref()).await?
@@ -818,8 +822,7 @@ async fn existing_worktree(
         repository_id: task.repository_id.clone(),
         path: path_to_string(&path)?,
         branch,
-        base_ref: base_ref.to_string(),
-        dependency_warning,
+        base: base.clone(),
         // Filled by `prepare`, which is the only caller and the one that
         // decides what a missing answer means.
         base_sha: None,
@@ -892,22 +895,38 @@ async fn resolve_branch(repository_path: &Path, task: &Task) -> Result<(String, 
     )))
 }
 
-/// Refuses a base ref that is not in the repository, with a sentence naming
-/// what to fix — a `default_branch` typed by hand into task 003's edit form is
-/// not re-validated there, so this is where a typo surfaces.
-async fn ensure_base_ref_exists(
+/// Refuses a base that is not in the repository, with a sentence naming what
+/// to fix, before anything is created.
+///
+/// A default branch typed by hand into task 003's edit form is not
+/// re-validated there, so this is where a typo surfaces. A dependency's commit
+/// the clone does not have, after `prepare`'s best-effort fetch, is refused
+/// rather than skipped: the board chose this base and never runs git (D31
+/// point 6, ADR-0033 point 7), so falling back to the default branch here
+/// would overrule it on a fact it cannot see, and the run would record a base
+/// it was not built on.
+async fn ensure_base_exists(
     location: &Location,
     repository: &Repository,
-    base_ref: &str,
+    base: &RunBase,
 ) -> Result<()> {
-    if git::commit_exists(&location.repository, base_ref).await? {
+    if git::commit_exists(&location.repository, base.revision()).await? {
         return Ok(());
     }
-    Err(Error::invalid(format!(
-        "\"{}\" has no branch named {base_ref} to create a worktree from. \
-         Set its default branch in Settings → Repositories.",
-        repository.name,
-    )))
+    Err(Error::invalid(match &base.dependency {
+        // The remedy does not name the default branch: with another satisfied
+        // dependency, removing this one builds on that one instead.
+        Some(dependency) => format!(
+            "\"{}\" does not have {}, the commit \"{}\" last finished on. Fetch it into this \
+             clone, or remove \"{}\" from this task's dependencies and run it again.",
+            repository.name, dependency.commit, dependency.title, dependency.title,
+        ),
+        None => format!(
+            "\"{}\" has no branch named {} to create a worktree from. \
+             Set its default branch in Settings → Repositories.",
+            repository.name, base.base_ref,
+        ),
+    }))
 }
 
 /// Where `task_id`'s worktree is on this machine, for a caller that hands the

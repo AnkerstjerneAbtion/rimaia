@@ -574,7 +574,6 @@ impl Fixture {
         run_task(
             board.as_ref(),
             self.harness.machine(),
-            &self.harness.context,
             &self.paths,
             &config,
             claim,

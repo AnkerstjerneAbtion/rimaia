@@ -1616,7 +1616,6 @@ impl StrategyFixture {
         run_task(
             board,
             self.harness.machine(),
-            &self.harness.context,
             &self.paths,
             config,
             claim,

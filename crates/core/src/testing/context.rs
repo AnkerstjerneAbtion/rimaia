@@ -12,7 +12,7 @@ use std::sync::Arc;
 use chrono::{DateTime, Utc};
 use tokio::sync::broadcast::Receiver;
 
-use crate::board::{lease, BoardPort, InProcessBoard, LeaseTerm};
+use crate::board::{lease, BoardPort, InProcessBoard, LeaseTerm, RunContext};
 use crate::context::{ServiceContext, TeamScope};
 use crate::db::MutationSource;
 use crate::events::ChangeEvent;
@@ -142,6 +142,11 @@ impl TestContext {
     /// test's machine store and the branch through an in-process board port
     /// over this test's own context (task 066).
     ///
+    /// The context `prepare` builds from, base included, is the board's
+    /// [`preview`](BoardPort::preview) of the task at the call (task 044). A
+    /// test whose subject is the base takes its context from `preview` or a
+    /// claim itself and calls [`prepare_worktree_from`](Self::prepare_worktree_from).
+    ///
     /// The branch is fenced by a lease (task 043). A task the solo runner
     /// already holds is prepared under its own lease; otherwise the test
     /// holds one with no edge for the call and ends it after, so a test that
@@ -151,24 +156,41 @@ impl TestContext {
         &self,
         task_id: &str,
     ) -> crate::Result<crate::worktree::Worktree> {
-        let board = InProcessBoard::new(
+        let context = self.preview_board().preview(task_id).await?;
+        self.prepare_worktree_from(&context).await
+    }
+
+    /// [`prepare_worktree`](Self::prepare_worktree), from a context the test
+    /// already holds: the task, the repository and the base all come from it.
+    pub async fn prepare_worktree_from(
+        &self,
+        context: &RunContext,
+    ) -> crate::Result<crate::worktree::Worktree> {
+        let board = self.preview_board();
+        let task_id = context.task.task.id.as_str();
+        let held = lease::state_of(&self.context, task_id).await?.lease;
+        if let Some(held) = held {
+            let lease =
+                crate::board::LeaseRef::new(task_id, held.generation, self.solo.team_id.clone());
+            return crate::worktree::prepare(&self.machine, &board, &lease, context).await;
+        }
+
+        let lease = lease::grant_for_test(&self.context, task_id, &self.solo.runner_id).await?;
+        let prepared = crate::worktree::prepare(&self.machine, &board, &lease, context).await;
+        lease::end_for_test(&self.context, &lease).await?;
+        prepared
+    }
+
+    /// The in-process board [`prepare_worktree`](Self::prepare_worktree)
+    /// previews and records the branch through.
+    fn preview_board(&self) -> InProcessBoard {
+        InProcessBoard::new(
             self.context.clone(),
             AppPaths::new(std::env::temp_dir()),
             RunnerConfig::default().provider,
             self.solo.runner_id.clone(),
             LeaseTerm::Never,
-        );
-        let held = lease::state_of(&self.context, task_id).await?.lease;
-        if let Some(held) = held {
-            let lease =
-                crate::board::LeaseRef::new(task_id, held.generation, self.solo.team_id.clone());
-            return crate::worktree::prepare(&self.context, &self.machine, &board, &lease).await;
-        }
-
-        let lease = lease::grant_for_test(&self.context, task_id, &self.solo.runner_id).await?;
-        let prepared = crate::worktree::prepare(&self.context, &self.machine, &board, &lease).await;
-        lease::end_for_test(&self.context, &lease).await?;
-        prepared
+        )
     }
 
     /// The board port over this test's own context (seam-contract D31 point

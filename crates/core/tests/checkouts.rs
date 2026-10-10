@@ -410,12 +410,18 @@ async fn a_new_worktree_writes_its_branch_through_the_board_port() {
     let f = Fixture::new().await;
     let task = f.task("Refused", "1. Branch").await;
     let lease = LeaseRef::new(task.clone(), 1, f.harness.solo.team_id.clone());
+    let context = f
+        .harness
+        .board(&f.paths, &RunnerConfig::default())
+        .preview(&task)
+        .await
+        .expect("preview");
 
     let error = worktree::prepare(
-        f.ctx(),
         f.harness.machine(),
         &testing::board::Unwired,
         &lease,
+        &context,
     )
     .await
     .expect_err("the port refused the branch");
@@ -580,7 +586,6 @@ async fn an_unattended_run_needs_this_runners_consent() {
         run_task(
             board.as_ref(),
             f.harness.machine(),
-            f.ctx(),
             &f.paths,
             &config,
             started.claim,
@@ -897,7 +902,6 @@ impl Fixture {
             run_task(
                 board.as_ref(),
                 self.harness.machine(),
-                self.ctx(),
                 &self.paths,
                 &config,
                 claim,

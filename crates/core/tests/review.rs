@@ -1387,7 +1387,6 @@ mod end_to_end {
                 run_task(
                     board.as_ref(),
                     self.machine(),
-                    self.ctx(),
                     &self.paths,
                     &config,
                     claim,

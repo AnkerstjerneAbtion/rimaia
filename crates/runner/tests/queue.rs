@@ -1417,7 +1417,6 @@ async fn a_starter_that_claims_before_it_spawns_never_produces_a_second_process(
     let queue = fixture.spawn_queue();
 
     let button = {
-        let ctx = fixture.ctx().clone();
         let machine = fixture.machine().clone();
         let paths = fixture.paths.clone();
         let runner = fixture.runner();
@@ -1436,7 +1435,6 @@ async fn a_starter_that_claims_before_it_spawns_never_produces_a_second_process(
                 run_task(
                     board.as_ref(),
                     &machine,
-                    &ctx,
                     &paths,
                     &runner,
                     claim,
@@ -2236,7 +2234,6 @@ async fn retry_now_starts_a_waiting_task_before_its_deadline() {
     run_task(
         board.as_ref(),
         fixture.machine(),
-        fixture.ctx(),
         &fixture.paths,
         &fixture.runner(),
         claim,
@@ -3094,7 +3091,6 @@ async fn a_usage_limit_pause_is_held_by_the_runner() {
         run_task(
             board.as_ref(),
             fixture.machine(),
-            fixture.ctx(),
             &fixture.paths,
             &config,
             claim,
@@ -3644,7 +3640,6 @@ async fn a_manual_run_gets_the_same_limits_as_a_queued_one() {
         run_task(
             board.as_ref(),
             fixture.machine(),
-            fixture.ctx(),
             &fixture.paths,
             &config,
             started.claim,

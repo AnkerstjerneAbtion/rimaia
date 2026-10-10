@@ -175,7 +175,7 @@ impl TempRepo {
 
 /// Runs git in `dir` and returns trimmed stdout, panicking with both streams on
 /// failure — a git error in a test is a broken test, not a handled condition.
-fn git<S: AsRef<OsStr>>(dir: &Path, args: &[S]) -> String {
+pub(crate) fn git<S: AsRef<OsStr>>(dir: &Path, args: &[S]) -> String {
     let output = Command::new("git")
         .current_dir(dir)
         .args(args)
