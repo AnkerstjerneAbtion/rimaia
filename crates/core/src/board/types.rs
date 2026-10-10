@@ -20,6 +20,7 @@ use std::time::Duration;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
+use crate::consent::ceiling::StrategyCeiling;
 use crate::db::{Repository, Run, RunKind};
 use crate::events::TeamId;
 use crate::review::findings::ReviewFinding;
@@ -115,6 +116,12 @@ pub enum ClaimTarget {
         /// solo loop always sends zero (D31's 2026-10-10 amendment).
         #[serde(with = "duration_millis")]
         wait: Duration,
+        /// This runner's strategy ceiling (task 045), which the board cannot
+        /// read: it refuses a task whose named choice is above it, and the
+        /// runner fills from it at spawn. Left off the wire when there is
+        /// none, which is every runner before 045.
+        #[serde(default, skip_serializing_if = "StrategyCeiling::is_none")]
+        ceiling: StrategyCeiling,
     },
     /// Run now (`continue_session: false`), or Retry now and a due retry
     /// (`true`). Only the second comes back with [`Claim::resume`] set.
@@ -122,9 +129,15 @@ pub enum ClaimTarget {
         task_id: String,
         trigger: RunTrigger,
         continue_session: bool,
+        #[serde(default, skip_serializing_if = "StrategyCeiling::is_none")]
+        ceiling: StrategyCeiling,
     },
     /// A planner: purpose `strategy`, no `runs` row and no `run_state` edge.
-    Plan { task_id: String },
+    Plan {
+        task_id: String,
+        #[serde(default, skip_serializing_if = "StrategyCeiling::is_none")]
+        ceiling: StrategyCeiling,
+    },
 }
 
 /// What a runner can still take on, sent with every
@@ -204,6 +217,25 @@ pub struct RunContext {
     /// point 6, task 044). A run records the base its claim carried, never a
     /// later read's: the dependency graph can change in between.
     pub base: RunBase,
+    /// Who wrote the plan revision a run executes and whose machine runs it
+    /// (ADR-0032 point 7, task 045), filled board-side from the lease's
+    /// runner. `None` in a personal team, where every author and the
+    /// machine's owner are one person, and from a context read without a
+    /// runner.
+    #[serde(default)]
+    pub authorship: Option<RunAuthorship>,
+}
+
+/// The two facts ADR-0032 point 7 has the agent told, in `# Task context`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RunAuthorship {
+    pub plan_revision: i64,
+    /// The author's login; `None` for a deleted account.
+    pub plan_author: Option<String>,
+    /// The runner's owner's login.
+    pub runner_owner: String,
+    pub runner_label: String,
 }
 
 /// What a task's worktree branches from (ADR-0033 point 5, ADR-0008), as the
@@ -353,6 +385,10 @@ pub struct FinishRun {
     /// retry. Runner-owned state, so it travels as a fact.
     pub window_closes_at: Option<DateTime<Utc>>,
     pub transcript: TranscriptEnd,
+    /// This runner's strategy ceiling, for the phase a `Continue` would
+    /// start (task 045). Read by the board only when it decides to continue.
+    #[serde(default, skip_serializing_if = "StrategyCeiling::is_none")]
+    pub ceiling: StrategyCeiling,
 }
 
 /// Where the transcript of a finished run is.

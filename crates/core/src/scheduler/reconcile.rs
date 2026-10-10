@@ -135,6 +135,8 @@ fn interrupted_finish() -> FinishRun {
         bundle: None,
         window_closes_at: None,
         transcript: TranscriptEnd::KeptOnRunner,
+        // An interrupted run never continues, so no phase is judged.
+        ceiling: Default::default(),
     }
 }
 

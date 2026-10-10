@@ -466,6 +466,11 @@ mod tests {
             updated_at: test_epoch(),
             source: MutationSource::Ui,
             archived_at: None,
+            created_by: None,
+            assignee_id: None,
+            assigned_by: None,
+            plan_revision: 1,
+            plan_updated_by: None,
         }
     }
 }

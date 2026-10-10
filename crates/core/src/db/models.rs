@@ -587,6 +587,32 @@ pub struct Task {
     /// orthogonal to [`run_state`](Task::run_state), for the same reason
     /// ADR-0007 gives for keeping those two apart.
     pub archived_at: Option<DateTime<Utc>>,
+    /// Who wrote the task (ADR-0030 point 8), from task 045. `None` for a
+    /// deleted account, which leaves "a former member", or for a row a server
+    /// held before anyone was recorded.
+    #[serde(default)]
+    pub created_by: Option<String>,
+    /// The one person whose runners run this task (ADR-0032 point 1). `None`
+    /// is the team's pool; in a personal team an unassigned task is its
+    /// owner's own, which `consent::eligibility` decides, not this column.
+    #[serde(default)]
+    pub assignee_id: Option<String>,
+    #[serde(default)]
+    pub assigned_by: Option<String>,
+    /// ADR-0032 point 3's revision of `plan` and `extra_instructions`
+    /// together: incremented by every write that changes either, and by
+    /// nothing else.
+    #[serde(default = "first_revision")]
+    pub plan_revision: i64,
+    /// Who wrote the current plan revision.
+    #[serde(default)]
+    pub plan_updated_by: Option<String>,
+}
+
+/// The revision every revisioned column starts at, and what a board that
+/// predates task 045 sends for one it does not know.
+const fn first_revision() -> i64 {
+    1
 }
 
 /// One external reference on a task — an Asana task, a GitHub issue, a doc
@@ -913,6 +939,11 @@ mod tests {
             updated_at: timestamp("2026-08-20T12:30:00Z"),
             source: MutationSource::Mcp,
             archived_at: None,
+            created_by: None,
+            assignee_id: None,
+            assigned_by: None,
+            plan_revision: 1,
+            plan_updated_by: None,
         };
 
         assert_eq!(
@@ -945,6 +976,12 @@ mod tests {
                 // the value that means "on the board", which is why the card
                 // can read it directly rather than asking for a flag beside it.
                 "archivedAt": null,
+                // Task 045's attribution, assignment and plan revision.
+                "createdBy": null,
+                "assigneeId": null,
+                "assignedBy": null,
+                "planRevision": 1,
+                "planUpdatedBy": null,
             })
         );
     }

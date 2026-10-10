@@ -659,6 +659,7 @@ pub async fn claim_for_planning(
     let claim = board
         .claim(ClaimTarget::Plan {
             task_id: task_id.to_string(),
+            ceiling: crate::consent::ceiling::strategy_ceiling(machine).await?,
         })
         .await?
         // A `Plan` claim takes no edge, so it is lost only to a task deleted

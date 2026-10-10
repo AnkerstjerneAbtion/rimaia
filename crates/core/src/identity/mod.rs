@@ -143,11 +143,17 @@ pub async fn create_personal_team(
     // 20260820120100_seed_settings.sql, for the same reason: a new team's
     // first run composes with the default instructions, and clearing them is
     // the user's choice to make.
+    //
+    // The team's first revision of them is its owner's (ADR-0032 point 3), so
+    // nobody's runner has a seed to accept.
     sqlx::query!(
-        "INSERT INTO team_settings (team_id, key, value) VALUES (?1, ?2, ?3)",
+        "INSERT INTO team_settings (team_id, key, value, revision, updated_by, updated_at)
+         VALUES (?1, ?2, ?3, 1, ?4, ?5)",
         team_id,
         BASE_INSTRUCTIONS,
         DEFAULT_BASE_INSTRUCTIONS,
+        user_id,
+        now,
     )
     .execute(&mut *conn)
     .await?;

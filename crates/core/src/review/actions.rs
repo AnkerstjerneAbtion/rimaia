@@ -19,7 +19,8 @@ use crate::error::{Error, Result};
 use crate::events::ChangeEvent;
 use crate::machine::MachineContext;
 use crate::tasks::service::{
-    ensure_ready_has_a_plan, fetch_task_row, move_within, task_row, team_of_task, Destination,
+    ensure_ready_has_a_plan, fetch_task_row, move_within, task_row, team_of_task, write_plan,
+    Destination,
 };
 use crate::worktree::{self, cleanup, ForceRemoval};
 
@@ -152,6 +153,13 @@ async fn decide(
         set_aside_worktree(ctx, machine, &task).await?;
     }
 
+    // Point 6's mark for the note's plan revision, read over the pool before
+    // the write lock (ADR-0032 point 3). Approve writes no note.
+    let during_run = match note {
+        Some(_) => crate::consent::written_during_run(ctx, &ctx.actor).await?,
+        None => false,
+    };
+
     // `BEGIN IMMEDIATE` for `move_into_column`'s reason: the reads below decide
     // what the writes do.
     let mut tx = ctx.begin_immediate().await?;
@@ -172,7 +180,7 @@ async fn decide(
             _ => Verdict::ChangesRequested,
         };
         let combined = note::append(task.extra_instructions.as_deref(), verdict, text);
-        write_extra_instructions(&mut tx, id, &combined).await?;
+        write_extra_instructions(&mut tx, &task, &combined, &ctx.actor, during_run).await?;
     }
     if action == Action::Reject {
         sqlx::query!("UPDATE tasks SET branch = NULL WHERE id = ?1", id)
@@ -322,19 +330,24 @@ async fn set_aside_worktree(
     worktree::remove(ctx, machine, &task.id, false, ForceRemoval::No).await
 }
 
-/// The one place a review writes `extra_instructions`, so that task 045's
-/// `plan_revision` bump (ADR-0032 point 3) has exactly one place to go.
+/// The one place a review writes `extra_instructions`, through the plan
+/// helper: the note is a plan revision by the reviewer (ADR-0032 point 3),
+/// inside the verdict's one transaction, so a refused verdict bumps nothing.
 async fn write_extra_instructions(
     tx: &mut SqliteConnection,
-    id: &str,
+    task: &Task,
     extra_instructions: &str,
+    reviewer: &str,
+    written_during_run: bool,
 ) -> Result<()> {
-    sqlx::query!(
-        "UPDATE tasks SET extra_instructions = ?1 WHERE id = ?2",
-        extra_instructions,
-        id,
+    write_plan(
+        tx,
+        &task.id,
+        task.plan.as_deref(),
+        Some(extra_instructions),
+        reviewer,
+        written_during_run,
     )
-    .execute(&mut *tx)
     .await?;
     Ok(())
 }

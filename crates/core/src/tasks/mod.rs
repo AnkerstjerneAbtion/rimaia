@@ -37,7 +37,8 @@ pub use position::{position_between, rebalance_column, rebalanced_positions, Pla
 pub use run_state::{is_legal_run_state_transition, run_state_spelling, set_run_state};
 pub(crate) use service::team_of_task;
 pub use service::{
-    archive_task, archive_tasks, create_task, delete_task, get_task, list_tasks, move_task,
+    archive_task, archive_tasks, assign_task, create_task, delete_task, get_task, list_tasks,
+    move_task,
     move_task_to_bottom, unarchive_task, update_task, ArchiveReport, ArchivedTask, LastRunSummary,
     RefusedArchive, TaskDetail, TaskSummary,
 };

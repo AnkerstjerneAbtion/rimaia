@@ -494,6 +494,55 @@ pub async fn ensure_unattended_runs_allowed(
     }
 }
 
+/// Sets ADR-0032 point 4's team ceiling for a repository: whether the team
+/// allows unattended runs in it at all. The board command D32 promises for
+/// task 045; `machine::set_repository_unattended_runs` stays the runner's own
+/// consent, and stays local.
+///
+/// It requires the `Owner` role in the repository's team (ADR-0029's roles
+/// table), the first role check, which task 051 generalises: a member is
+/// refused as `Invalid`. A personal team has no ceiling, because its owner and
+/// the machine's owner are one person, so it is refused there too.
+#[tracing::instrument(
+    skip_all,
+    fields(user_id = ctx.actor.as_str(), repository_id = %repository_id)
+)]
+pub async fn set_repository_unattended_ceiling(
+    ctx: &ServiceContext,
+    repository_id: &str,
+    allowed: bool,
+) -> Result<Repository> {
+    let mut tx = ctx.begin_immediate().await?;
+    let team_id = team_of_repository(&mut tx, repository_id).await?;
+    let team = sqlx::query!(
+        r#"SELECT t.personal_user_id, m.role AS "role?"
+             FROM teams t
+             LEFT JOIN team_memberships m ON m.team_id = t.id AND m.user_id = ?2
+            WHERE t.id = ?1"#,
+        team_id,
+        ctx.actor,
+    )
+    .fetch_one(&mut *tx)
+    .await?;
+    if team.personal_user_id.is_some() {
+        return Err(Error::invalid(crate::consent::personal_team_has_no_ceiling()));
+    }
+    if team.role.as_deref() != Some(crate::identity::Role::Owner.as_str()) {
+        return Err(Error::invalid(crate::consent::ceiling_needs_an_owner()));
+    }
+    sqlx::query!(
+        "UPDATE repositories SET allow_unattended_runs = ?1 WHERE id = ?2",
+        allowed,
+        repository_id,
+    )
+    .execute(&mut *tx)
+    .await?;
+    tx.commit().await?;
+
+    ctx.publish(ChangeEvent::repositories(team_id, [repository_id.to_string()]));
+    get(ctx, repository_id).await
+}
+
 /// Removes a repository. Refused, naming how many, when any task still
 /// references it — the schema's `ON DELETE RESTRICT` is the backstop for a
 /// writer that is not this function (the MCP server, or the user with the
@@ -564,6 +613,7 @@ pub async fn remove(
         &team_id,
         &crate::strategy::settings::repository_default_key(id),
         None,
+        false,
     )
     .await?;
 

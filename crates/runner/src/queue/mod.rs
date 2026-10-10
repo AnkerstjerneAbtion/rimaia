@@ -232,6 +232,7 @@ use std::sync::{Arc, Mutex};
 
 use chrono::{DateTime, Duration, Utc};
 use rimaia_core::board::{BoardPort, Claim, ClaimTarget};
+use rimaia_core::consent::ceiling::strategy_ceiling;
 use rimaia_core::db::Schedule;
 use rimaia_core::doctor;
 use rimaia_core::events::ChangeEvent;
@@ -336,10 +337,11 @@ pub async fn status_with_plan(handle: &QueueHandle) -> Result<QueueStatus> {
     let shared = &handle.shared;
     let machine = &shared.machine;
     let (repositories, _) = view::for_runner(machine, &shared.in_flight).await?;
+    let ceiling = strategy_ceiling(machine).await?;
     Ok(QueueStatus {
         state: state::queue_state(machine).await?,
         running_task_ids: handle.in_flight_task_ids(),
-        plan: shared.solo.plan(&repositories).await?,
+        plan: shared.solo.plan(&repositories, &ceiling).await?,
         last_step_error: shared.step_error(),
         usage_limit_pause_until: pause::active_until(machine, machine.clock.now()).await?,
         window: window::active(machine).await?,
@@ -950,6 +952,9 @@ impl Looping {
                 repositories: repositories.clone(),
                 // Always zero from the solo loop: see this module's header.
                 wait: std::time::Duration::ZERO,
+                // Read with the caps, fresh every claim, by the route the run
+                // environment takes (task 045).
+                ceiling: strategy_ceiling(machine).await?,
             };
             asked_at = machine.clock.now();
             let Some(claim) = self.shared.board.claim(target).await? else {
@@ -1085,7 +1090,11 @@ impl Looping {
             match self
                 .shared
                 .solo
-                .next_deadline(repositories, asked_at)
+                .next_deadline(
+                    repositories,
+                    asked_at,
+                    &strategy_ceiling(&self.shared.machine).await?,
+                )
                 .await?
             {
                 Some(at) => Step::IdleUntil(at),

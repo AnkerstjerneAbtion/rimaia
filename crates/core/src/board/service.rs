@@ -50,16 +50,40 @@ use crate::worktree::base_ref;
 use super::lease::{self, Candidate, ClaimRequest, Door, Edges, LeaseTerm, PhaseModels};
 use super::types::{
     Claim, ClaimTarget, FinishReceipt, FinishRun, FreeCapacity, Heartbeat, LeaseRef, NextStep,
-    RunContext, StartRun, TeamLimits, TranscriptAck, TranscriptChunk,
+    RunAuthorship, RunContext, StartRun, TeamLimits, TranscriptAck, TranscriptChunk,
 };
+use crate::consent::ceiling::StrategyCeiling;
+use crate::consent::{self, Composition};
+use crate::db::RunKind;
 
 /// The context a claim of `task_id` would carry. Writes nothing.
-pub async fn preview(
-    ctx: &ServiceContext,
-    provider: &dyn AgentProvider,
-    task_id: &str,
-) -> Result<RunContext> {
-    read_context(ctx, provider, task_id).await
+///
+/// Refuses, with the claim's own sentence, a task `lease::eligible` would
+/// refuse this runner for the purpose a claim would lease it as now (task
+/// 045). It takes no ceiling: it passes `StrategyCeiling::default()`, so it
+/// reports eligibility and consent refusals only, and a ceiling refusal comes
+/// from the claim.
+pub async fn preview(ctx: &ServiceContext, runner: Runner<'_>, task_id: &str) -> Result<RunContext> {
+    let context = read_context(ctx, runner, task_id).await?;
+    let purpose = consent::purpose_now(ctx, &context.task.task).await?;
+    let composition = Composition::of(&context);
+    let models = PhaseModels::of(&context);
+    let ceiling = StrategyCeiling::default();
+    let candidate = Candidate {
+        runner_id: runner.id,
+        provider: runner.provider.id(),
+        catalogue: &context.catalogue,
+        models: &models,
+        ceiling: &ceiling,
+        composition: &composition,
+    };
+    let mut conn = ctx.pool.acquire().await?;
+    let verdict = lease::eligible(&mut conn, task_id, &candidate, purpose).await?;
+    drop(conn);
+    match verdict.refusal() {
+        Some(refusal) => Err(Error::invalid(refusal)),
+        None => Ok(context),
+    }
 }
 
 /// Whether a runner's owner is at the machine when they ask it to start a run
@@ -172,11 +196,13 @@ pub async fn claim(
             capacity,
             repositories,
             wait,
-        } => claim_next(ctx, runner, &capacity, &repositories, wait).await,
+            ceiling,
+        } => claim_next(ctx, runner, &capacity, &repositories, wait, &ceiling).await,
         ClaimTarget::Run {
             task_id,
             trigger,
             continue_session,
+            ceiling,
         } => {
             claim_task(
                 ctx,
@@ -187,11 +213,12 @@ pub async fn claim(
                     continue_session,
                 },
                 Door::Named,
+                &ceiling,
             )
             .await
         }
-        ClaimTarget::Plan { task_id } => {
-            claim_task(ctx, runner, &task_id, Route::Plan, Door::Named).await
+        ClaimTarget::Plan { task_id, ceiling } => {
+            claim_task(ctx, runner, &task_id, Route::Plan, Door::Named, &ceiling).await
         }
     }
 }
@@ -229,11 +256,13 @@ async fn claim_next(
     capacity: &FreeCapacity,
     repositories: &[String],
     wait: std::time::Duration,
+    ceiling: &StrategyCeiling,
 ) -> Result<Option<Claim>> {
     let view = RunnerView {
         runner_id: runner.id.to_string(),
         provider: runner.provider.id(),
         repositories: repositories.iter().cloned().collect(),
+        ceiling: ceiling.clone(),
     };
     if wait.is_zero() {
         return try_next(ctx, runner, capacity, &view).await;
@@ -308,7 +337,9 @@ async fn try_next(
             continue_session: entry.resume_after.is_some(),
         };
 
-        if let Some(claim) = claim_task(ctx, runner, &task_id, route, Door::Next).await? {
+        if let Some(claim) =
+            claim_task(ctx, runner, &task_id, route, Door::Next, &view.ceiling).await?
+        {
             return Ok(Some(claim));
         }
         plan.retain(|entry| entry.task_id != task_id);
@@ -346,8 +377,9 @@ async fn claim_task(
     task_id: &str,
     route: Route,
     door: Door,
+    ceiling: &StrategyCeiling,
 ) -> Result<Option<Claim>> {
-    let context = match read_context(ctx, runner.provider, task_id).await {
+    let context = match read_context(ctx, runner, task_id).await {
         Ok(context) => context,
         Err(error) if error.code() == ErrorCode::NotFound => return Ok(None),
         Err(error) => return Err(error),
@@ -379,6 +411,7 @@ async fn claim_task(
     };
 
     let models = PhaseModels::of(&context);
+    let composition = Composition::of(&context);
     let granted = lease::claim(
         ctx,
         ClaimRequest {
@@ -388,6 +421,8 @@ async fn claim_task(
                 provider: runner.provider.id(),
                 catalogue: &context.catalogue,
                 models: &models,
+                ceiling,
+                composition: &composition,
             },
             term: runner.term,
             edges,
@@ -433,10 +468,35 @@ pub async fn run_context(
     lease: &LeaseRef,
 ) -> Result<RunContext> {
     let ctx = &lease_context(ctx, lease)?;
+    // Read first, over the pool, because the consent re-check below needs the
+    // composition, and the fence's transaction holds the one test connection.
+    // A stale lease's read is thrown away by the fence.
+    let context = read_context(ctx, runner, &lease.task_id).await?;
+    let composition = Composition::of(&context);
+
     let mut tx = ctx.begin_immediate().await?;
-    lease::current(&mut tx, lease, runner.id).await?;
+    let held = lease::current(&mut tx, lease, runner.id).await?;
+    // D31 point 6: a plan edited between the claim and the composition is
+    // never composed. The lease really ends, so the runner's reaction to
+    // `Conflict` is the right one, and a solo lease is not left `running`
+    // with no holder.
+    if let Some(refused) =
+        lease::consent_refusal(&mut tx, &lease.task_id, runner.id, held.purpose, &composition)
+            .await?
+    {
+        lease::end_within(ctx, &mut tx, lease).await?;
+        let team_id = tasks::team_of_task(&mut tx, &lease.task_id).await?;
+        tx.commit().await?;
+        ctx.publish(crate::ChangeEvent::tasks(team_id, [lease.task_id.clone()]));
+        return Err(Error::conflict(format!(
+            "this runner's lease on task {} (generation {}) has ended: {}",
+            lease.task_id,
+            lease.generation,
+            refused.refusal()
+        )));
+    }
     tx.commit().await?;
-    read_context(ctx, runner.provider, &lease.task_id).await
+    Ok(context)
 }
 
 /// Writes `tasks.branch` and nothing else: the worktree path is the runner's
@@ -571,6 +631,7 @@ pub async fn finish_run(
         window_closes_at,
         // Acknowledged either way in process: the file never left the machine.
         transcript: _,
+        ceiling,
     } = finish;
 
     if outcome.resume_after.is_some() {
@@ -605,15 +666,26 @@ pub async fn finish_run(
     // What the model rule reads for the next phase, over the pool and before
     // the write lock, as a claim reads it. Only a `Continue` consults it, so a
     // finish that ends the lease reads nothing more.
-    let (catalogue, models) = match decision.next {
-        NextStep::Continue { .. } => model_inputs(ctx, runner.provider, &lease.task_id).await?,
-        NextStep::Released { .. } => (catalogue::Catalogue::default(), PhaseModels::default()),
+    let (catalogue, models, composition) = match decision.next {
+        NextStep::Continue { kind } => {
+            let (catalogue, models) = model_inputs(ctx, runner.provider, &lease.task_id).await?;
+            let findings = matches!(kind, RunKind::Review | RunKind::Fix);
+            let composition = consent::composition(ctx, &lease.task_id, findings).await?;
+            (catalogue, models, composition)
+        }
+        NextStep::Released { .. } => (
+            catalogue::Catalogue::default(),
+            PhaseModels::default(),
+            Composition::default(),
+        ),
     };
     let candidate = Candidate {
         runner_id,
         provider: runner.provider.id(),
         catalogue: &catalogue,
         models: &models,
+        ceiling: &ceiling,
+        composition: &composition,
     };
 
     let mut tx = ctx.begin_immediate().await?;
@@ -730,11 +802,8 @@ pub async fn record_review_findings(
 }
 
 /// What a run of `task_id` is composed from and bounded by, read once.
-async fn read_context(
-    ctx: &ServiceContext,
-    provider: &dyn AgentProvider,
-    task_id: &str,
-) -> Result<RunContext> {
+async fn read_context(ctx: &ServiceContext, runner: Runner<'_>, task_id: &str) -> Result<RunContext> {
+    let provider = runner.provider;
     let task = tasks::get_task(ctx, task_id).await?;
     let repository = crate::repo::get(ctx, &task.task.repository_id).await?;
     // Every team setting below is the task's own team's, so the prompt, the
@@ -756,6 +825,7 @@ async fn read_context(
     // Decided here, under the context's scope, so the runner creates the
     // worktree from it without reading the dependency graph (D31 point 6).
     let base = base_ref::resolve(ctx, &task.task, &repository).await?;
+    let authorship = authorship(ctx, &task.task, runner.id).await?;
 
     Ok(RunContext {
         task,
@@ -766,7 +836,45 @@ async fn read_context(
         limits,
         review: Some(review),
         base,
+        authorship,
     })
+}
+
+/// ADR-0032 point 7's two facts, from the task's row and the runner's: who
+/// wrote the plan revision and whose machine runs it. `None` in a personal
+/// team, where every author and the machine's owner are one person and the
+/// facts would say nothing.
+async fn authorship(
+    ctx: &ServiceContext,
+    task: &crate::db::Task,
+    runner_id: &str,
+) -> Result<Option<RunAuthorship>> {
+    let row = sqlx::query!(
+        r#"SELECT tm.personal_user_id, a.login AS "plan_author?",
+                  o.login AS "runner_owner?", r.label AS "runner_label?"
+             FROM tasks t
+             JOIN teams tm ON tm.id = t.team_id
+             LEFT JOIN users a ON a.id = t.plan_updated_by
+             LEFT JOIN runners r ON r.id = ?2
+             LEFT JOIN users o ON o.id = r.user_id
+            WHERE t.id = ?1"#,
+        task.id,
+        runner_id,
+    )
+    .fetch_one(&ctx.pool)
+    .await?;
+    if row.personal_user_id.is_some() {
+        return Ok(None);
+    }
+    let (Some(runner_owner), Some(runner_label)) = (row.runner_owner, row.runner_label) else {
+        return Ok(None);
+    };
+    Ok(Some(RunAuthorship {
+        plan_revision: task.plan_revision,
+        plan_author: row.plan_author,
+        runner_owner,
+        runner_label,
+    }))
 }
 
 /// What the model rule reads about `task_id` for `provider`'s runner: the
@@ -793,6 +901,8 @@ async fn model_inputs(
         PhaseModels {
             strategy: effective.model,
             review: review.config.review_model,
+            effort: effective.effort,
+            review_effort: review.config.review_effort,
         },
     ))
 }

@@ -205,7 +205,9 @@ pub async fn dependencies_of(ctx: &ServiceContext, task_id: &str) -> Result<Vec<
             dep.created_at AS "created_at: DateTime<Utc>",
             dep.updated_at AS "updated_at: DateTime<Utc>",
             dep.source AS "source: MutationSource",
-            dep.archived_at AS "archived_at: DateTime<Utc>"
+            dep.archived_at AS "archived_at: DateTime<Utc>",
+            dep.created_by, dep.assignee_id, dep.assigned_by, dep.plan_revision,
+            dep.plan_updated_by
            FROM task_dependencies d
            JOIN tasks dep ON dep.id = d.depends_on_task_id
           WHERE d.task_id = ?1 AND dep.team_id IN (SELECT value FROM json_each(?2))"#,
@@ -257,7 +259,9 @@ where
             dep.created_at AS "created_at: DateTime<Utc>",
             dep.updated_at AS "updated_at: DateTime<Utc>",
             dep.source AS "source: MutationSource",
-            dep.archived_at AS "archived_at: DateTime<Utc>"
+            dep.archived_at AS "archived_at: DateTime<Utc>",
+            dep.created_by, dep.assignee_id, dep.assigned_by, dep.plan_revision,
+            dep.plan_updated_by
            FROM task_dependencies d
            JOIN tasks dep ON dep.id = d.task_id
           WHERE d.depends_on_task_id = ?1 AND dep.team_id IN (SELECT value FROM json_each(?2))"#,

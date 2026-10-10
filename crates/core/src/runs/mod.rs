@@ -271,6 +271,37 @@ pub async fn latest_successful_head(
     }))
 }
 
+/// The owner of every runner whose work a dependency's commit holds: the
+/// runners of `task_id`'s implementation and fix runs with `attempt` up to
+/// the chosen run's, failed ones included, distinct, in the order each first
+/// ran (task 045's base-commit pieces).
+///
+/// A failed attempt counts because its commits stay in the worktree the next
+/// attempt continues from. Review runs do not, for D29 point 5's reason: a
+/// review that moved `HEAD` is `review_changed_branch`, and nothing builds on
+/// it. `None` stands for a runner or an owner that is gone.
+///
+/// Unscoped, on the caller's connection: it runs inside the claim's
+/// transaction, for a dependency the caller already resolved under its scope.
+pub async fn commit_authors(
+    conn: &mut sqlx::SqliteConnection,
+    task_id: &str,
+    attempt: i64,
+) -> Result<Vec<Option<String>>> {
+    let rows = sqlx::query!(
+        r#"SELECT ru.user_id AS "owner?", min(r.attempt) AS "first!: i64"
+             FROM runs r LEFT JOIN runners ru ON ru.id = r.runner_id
+            WHERE r.task_id = ?1 AND r.kind IN ('implementation', 'fix') AND r.attempt <= ?2
+            GROUP BY ru.user_id
+            ORDER BY 2"#,
+        task_id,
+        attempt,
+    )
+    .fetch_all(&mut *conn)
+    .await?;
+    Ok(rows.into_iter().map(|row| row.owner).collect())
+}
+
 // ---------------------------------------------------------------------------
 // One run's detail — ADR-0013's ordering, in one read
 // ---------------------------------------------------------------------------

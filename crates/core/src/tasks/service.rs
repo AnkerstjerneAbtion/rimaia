@@ -235,7 +235,8 @@ const TASK_SUMMARY_SELECT: &str = r#"
 SELECT t.id, t.repository_id, t.title, t.plan, t.extra_instructions, t.board_column,
        t.position, t.run_state, t.branch, t.strategy_mode, t.model, t.effort,
        t.strategy_plan, t.strategy_source, t.strategy_updated_at, t.created_at,
-       t.updated_at, t.source, t.archived_at,
+       t.updated_at, t.source, t.archived_at, t.created_by, t.assignee_id, t.assigned_by,
+       t.plan_revision, t.plan_updated_by,
        (SELECT count(*) FROM task_links WHERE task_id = t.id) AS link_count,
        (SELECT count(*) FROM task_dependencies WHERE task_id = t.id) AS dependency_count,
        EXISTS (SELECT 1
@@ -286,6 +287,9 @@ pub async fn create_task(ctx: &ServiceContext, input: NewTask) -> Result<Task> {
     let column = input.column.unwrap_or(BoardColumn::NotReady);
     let plan = normalize_plan(input.plan);
     ensure_ready_has_a_plan(column, &plan, &input.title)?;
+    // The task's first plan revision is the actor's (ADR-0032 point 3), and
+    // the mark is read before the transaction because it reads over the pool.
+    let during_run = crate::consent::written_during_run(ctx, &ctx.actor).await?;
 
     let mut tx = ctx.begin().await?;
 
@@ -304,8 +308,9 @@ pub async fn create_task(ctx: &ServiceContext, input: NewTask) -> Result<Task> {
     sqlx::query!(
         r#"INSERT INTO tasks
             (id, team_id, repository_id, title, plan, extra_instructions, board_column,
-             position, run_state, created_at, updated_at, source)
-           VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?10, ?11)"#,
+             position, run_state, created_at, updated_at, source, created_by, plan_updated_by,
+             plan_written_during_run)
+           VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?10, ?11, ?12, ?12, ?13)"#,
         id,
         team_id,
         input.repository_id,
@@ -317,6 +322,8 @@ pub async fn create_task(ctx: &ServiceContext, input: NewTask) -> Result<Task> {
         RunState::Idle,
         now,
         ctx.source,
+        ctx.actor,
+        during_run,
     )
     .execute(&mut *tx)
     .await?;
@@ -597,7 +604,7 @@ fn strongest_origin(effective: &EffectiveStrategy) -> StrategyOrigin {
             StrategyOrigin::Task => 3,
             StrategyOrigin::Repository => 2,
             StrategyOrigin::Global => 1,
-            StrategyOrigin::ClaudeCode => 0,
+            StrategyOrigin::ClaudeCode | StrategyOrigin::RunnerCeiling => 0,
         }
     }
 
@@ -628,6 +635,13 @@ fn strongest_origin(effective: &EffectiveStrategy) -> StrategyOrigin {
     )
 )]
 pub async fn update_task(ctx: &ServiceContext, id: &str, patch: TaskPatch) -> Result<Task> {
+    // Point 6's mark, read over the pool before the transaction, and only
+    // when the patch could change a plan revision.
+    let touches_plan =
+        !matches!(patch.plan, Patch::Unset) || !matches!(patch.extra_instructions, Patch::Unset);
+    let during_run =
+        touches_plan && crate::consent::written_during_run(ctx, &ctx.actor).await?;
+
     let mut tx = ctx.begin().await?;
     let current = fetch_task_row(&mut tx, id).await?;
     let team_id = team_of_task(&mut tx, id).await?;
@@ -667,13 +681,11 @@ pub async fn update_task(ctx: &ServiceContext, id: &str, patch: TaskPatch) -> Re
 
     let now = ctx.clock.now();
     sqlx::query!(
-        r#"UPDATE tasks SET repository_id = ?1, title = ?2, plan = ?3, extra_instructions = ?4,
-            model = ?5, effort = ?6, strategy_mode = ?7, position = ?8, updated_at = ?9
-            WHERE id = ?10"#,
+        r#"UPDATE tasks SET repository_id = ?1, title = ?2, model = ?3, effort = ?4,
+            strategy_mode = ?5, position = ?6, updated_at = ?7
+            WHERE id = ?8"#,
         placement.repository_id,
         title,
-        plan,
-        extra_instructions,
         model,
         effort,
         strategy_mode,
@@ -682,6 +694,15 @@ pub async fn update_task(ctx: &ServiceContext, id: &str, patch: TaskPatch) -> Re
         id,
     )
     .execute(&mut *tx)
+    .await?;
+    write_plan(
+        &mut tx,
+        id,
+        plan.as_deref(),
+        extra_instructions.as_deref(),
+        &ctx.actor,
+        during_run,
+    )
     .await?;
 
     tx.commit().await?;
@@ -698,6 +719,77 @@ pub async fn update_task(ctx: &ServiceContext, id: &str, patch: TaskPatch) -> Re
     ));
     let updated = task_row(ctx, id).await?;
     Ok(updated)
+}
+
+/// The plan helper (ADR-0032 point 3): every write of `plan` or
+/// `extra_instructions` after a task is created goes through here, so every
+/// one records a revision, its author and point 6's mark.
+///
+/// **Storing the same text again is not an edit.** It bumps nothing, so it
+/// does not undo anyone's acceptance; the statement writes only when either
+/// value changes, and answers whether it did.
+pub(crate) async fn write_plan(
+    conn: &mut SqliteConnection,
+    id: &str,
+    plan: Option<&str>,
+    extra_instructions: Option<&str>,
+    author: &str,
+    written_during_run: bool,
+) -> Result<bool> {
+    let written = sqlx::query!(
+        "UPDATE tasks
+            SET plan = ?1, extra_instructions = ?2, plan_revision = plan_revision + 1,
+                plan_updated_by = ?3, plan_written_during_run = ?4
+          WHERE id = ?5 AND (plan IS NOT ?1 OR extra_instructions IS NOT ?2)",
+        plan,
+        extra_instructions,
+        author,
+        written_during_run,
+        id,
+    )
+    .execute(&mut *conn)
+    .await?;
+    Ok(written.rows_affected() > 0)
+}
+
+/// Assigns a task to one member of its team, or returns it to the pool with
+/// `None` (ADR-0032 point 1). Every member may; `assigned_by` records who.
+///
+/// The assignee must be a member of the task's team: anyone else is refused
+/// as `NotFound`, worded as for a user who does not exist (039's rule).
+#[tracing::instrument(
+    skip_all,
+    fields(
+        source = ctx.source.as_str(),
+        user_id = ctx.actor.as_str(),
+        task_id = %task_id,
+    )
+)]
+pub async fn assign_task(
+    ctx: &ServiceContext,
+    task_id: &str,
+    assignee_id: Option<&str>,
+) -> Result<Task> {
+    let mut tx = ctx.begin_immediate().await?;
+    fetch_task_row(&mut tx, task_id).await?;
+    let team_id = team_of_task(&mut tx, task_id).await?;
+    if let Some(assignee) = assignee_id {
+        crate::consent::ensure_member(&mut tx, &team_id, assignee).await?;
+    }
+    let now = ctx.clock.now();
+    sqlx::query!(
+        "UPDATE tasks SET assignee_id = ?1, assigned_by = ?2, updated_at = ?3 WHERE id = ?4",
+        assignee_id,
+        ctx.actor,
+        now,
+        task_id,
+    )
+    .execute(&mut *tx)
+    .await?;
+    tx.commit().await?;
+
+    ctx.publish(ChangeEvent::tasks(team_id, [task_id.to_string()]));
+    task_row(ctx, task_id).await
 }
 
 /// Deletes a task, refusing when another task depends on it (ADR-0008:
@@ -1451,7 +1543,8 @@ where
             strategy_updated_at AS "strategy_updated_at: DateTime<Utc>",
             created_at AS "created_at: DateTime<Utc>", updated_at AS "updated_at: DateTime<Utc>",
             source AS "source: MutationSource",
-            archived_at AS "archived_at: DateTime<Utc>"
+            archived_at AS "archived_at: DateTime<Utc>",
+            created_by, assignee_id, assigned_by, plan_revision, plan_updated_by
            FROM tasks WHERE id = ?1 AND team_id IN (SELECT value FROM json_each(?2))"#,
         id,
         scope,
@@ -1744,6 +1837,11 @@ mod tests {
                 updated_at: "2026-08-20T12:30:00Z".parse().expect("a literal timestamp"),
                 source: MutationSource::Ui,
                 archived_at: None,
+                created_by: None,
+                assignee_id: None,
+                assigned_by: None,
+                plan_revision: 1,
+                plan_updated_by: None,
             },
             link_count: 2,
             dependency_count: 1,
@@ -1821,6 +1919,11 @@ mod tests {
                 updated_at: "2026-08-20T12:00:00Z".parse().expect("a literal timestamp"),
                 source: MutationSource::Mcp,
                 archived_at: None,
+                created_by: None,
+                assignee_id: None,
+                assigned_by: None,
+                plan_revision: 1,
+                plan_updated_by: None,
             },
             link_count: 0,
             dependency_count: 0,
@@ -2158,6 +2261,11 @@ mod tests {
                 updated_at: crate::testing::test_epoch(),
                 source: MutationSource::Ui,
                 archived_at: None,
+                created_by: None,
+                assignee_id: None,
+                assigned_by: None,
+                plan_revision: 1,
+                plan_updated_by: None,
             },
             link_count: 0,
             dependency_count: 0,

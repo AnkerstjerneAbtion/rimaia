@@ -226,6 +226,7 @@ async fn a_lost_race_in_next_moves_on_to_the_next_entry() {
     f.board(Which::B)
         .claim(ClaimTarget::Plan {
             task_id: top.clone(),
+            ceiling: Default::default(),
         })
         .await
         .expect("plan")
@@ -272,6 +273,7 @@ async fn a_strategy_claim_writes_a_lease_and_no_run_state_edge() {
         .board(Which::A)
         .claim(ClaimTarget::Plan {
             task_id: task.clone(),
+            ceiling: Default::default(),
         })
         .await
         .expect("plan")
@@ -703,6 +705,7 @@ async fn run_now_and_plan_now_on_another_runner_refuse_a_pinned_task_and_name_th
         run_now(&task),
         ClaimTarget::Plan {
             task_id: task.clone(),
+            ceiling: Default::default(),
         },
     ] {
         let error = f
@@ -1288,6 +1291,7 @@ async fn a_strategy_lease_held_at_a_crash_is_released_and_run_state_is_untouched
     let claim = board
         .claim(ClaimTarget::Plan {
             task_id: task.clone(),
+            ceiling: Default::default(),
         })
         .await
         .expect("plan")
@@ -1437,6 +1441,7 @@ fn run_now(task_id: &str) -> ClaimTarget {
         task_id: task_id.to_string(),
         trigger: RunTrigger::Queued,
         continue_session: false,
+        ceiling: Default::default(),
     }
 }
 
@@ -1495,6 +1500,7 @@ fn finishing(outcome: RunOutcome) -> FinishRun {
         bundle: None,
         window_closes_at: None,
         transcript: TranscriptEnd::Complete { length: 0 },
+        ceiling: Default::default(),
     }
 }
 
@@ -1677,6 +1683,7 @@ impl Fixture {
             },
             repositories: vec![self.repository_id.clone()],
             wait: Duration::ZERO,
+            ceiling: Default::default(),
         }
     }
 

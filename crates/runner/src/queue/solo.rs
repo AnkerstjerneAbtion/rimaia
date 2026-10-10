@@ -13,6 +13,7 @@
 //! [`BoardPort`]: rimaia_core::board::BoardPort
 
 use chrono::{DateTime, Utc};
+use rimaia_core::consent::ceiling::{strategy_ceiling, StrategyCeiling};
 use rimaia_core::db::MutationSource;
 use rimaia_core::doctor::{self, DoctorReport};
 use rimaia_core::events::RunnerId;
@@ -51,12 +52,15 @@ impl SoloBoard {
         }
     }
 
-    fn view(&self, repositories: &[String]) -> RunnerView {
+    /// The view the loop's `Next` carries: its repositories and its strategy
+    /// ceiling, so a plan's skip reasons are this runner's (task 045).
+    fn view(&self, repositories: &[String], ceiling: &StrategyCeiling) -> RunnerView {
         RunnerView::new(
             self.runner_id.clone(),
             self.provider,
             repositories.iter().cloned(),
         )
+        .with_ceiling(ceiling.clone())
     }
 
     /// **Read 1: the deadline arm's source** (Scope point 4).
@@ -76,8 +80,9 @@ impl SoloBoard {
         &self,
         repositories: &[String],
         after: DateTime<Utc>,
+        ceiling: &StrategyCeiling,
     ) -> Result<Option<DateTime<Utc>>> {
-        let plan = self.plan(repositories).await?;
+        let plan = self.plan(repositories, ceiling).await?;
         let still_waiting: Vec<QueueEntry> = plan
             .into_iter()
             .filter(|entry| entry.resume_after.is_some_and(|at| at > after))
@@ -92,8 +97,12 @@ impl SoloBoard {
     /// **Read 2: the plan half of `status_with_plan`**: every `ready` task in
     /// board order with the reason a claim would pass over it, planned over
     /// the same repositories the loop sends with `Next`.
-    pub async fn plan(&self, repositories: &[String]) -> Result<Vec<QueueEntry>> {
-        selection::plan(&self.ctx, &self.view(repositories)).await
+    pub async fn plan(
+        &self,
+        repositories: &[String],
+        ceiling: &StrategyCeiling,
+    ) -> Result<Vec<QueueEntry>> {
+        selection::plan(&self.ctx, &self.view(repositories, ceiling)).await
     }
 
     /// **Read 3: the doctor**, which lists the board's repositories by name.
@@ -115,6 +124,8 @@ impl SoloBoard {
         schedule_id: &str,
         repositories: &[String],
     ) -> Result<PreflightSummary> {
-        preflight::preview(machine, &self.ctx, schedule_id, &self.view(repositories)).await
+        let ceiling = strategy_ceiling(machine).await?;
+        let view = self.view(repositories, &ceiling);
+        preflight::preview(machine, &self.ctx, schedule_id, &view).await
     }
 }

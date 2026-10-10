@@ -225,6 +225,7 @@ fn run_target(task_id: &str, continue_session: bool) -> ClaimTarget {
         task_id: task_id.to_string(),
         trigger: RunTrigger::Queued,
         continue_session,
+        ceiling: Default::default(),
     }
 }
 
@@ -271,6 +272,7 @@ fn finishing(outcome: RunOutcome) -> FinishRun {
         bundle: None,
         window_closes_at: None,
         transcript: TranscriptEnd::Complete { length: 0 },
+        ceiling: Default::default(),
     }
 }
 
@@ -428,6 +430,7 @@ fn next_target_waiting(
         },
         repositories: repositories.iter().map(|id| (*id).to_string()).collect(),
         wait,
+        ceiling: Default::default(),
     }
 }
 
@@ -672,6 +675,7 @@ pub mod cases {
             harness.runner(Which::A).as_ref(),
             ClaimTarget::Plan {
                 task_id: task_id.clone(),
+                ceiling: Default::default(),
             },
         )
         .await;
@@ -734,6 +738,7 @@ pub mod cases {
             runner.as_ref(),
             ClaimTarget::Plan {
                 task_id: task_id.clone(),
+                ceiling: Default::default(),
             },
         )
         .await;
@@ -802,6 +807,7 @@ pub mod cases {
             runner.as_ref(),
             ClaimTarget::Plan {
                 task_id: task_id.clone(),
+                ceiling: Default::default(),
             },
         )
         .await;
@@ -1934,6 +1940,7 @@ pub mod cases {
             ledger.as_ref(),
             ClaimTarget::Plan {
                 task_id: by_hand.clone(),
+                ceiling: Default::default(),
             },
         )
         .await;
@@ -1988,6 +1995,7 @@ pub mod cases {
                 task_id: task_id.clone(),
                 trigger: RunTrigger::Manual,
                 continue_session: false,
+                ceiling: Default::default(),
             },
         )
         .await;

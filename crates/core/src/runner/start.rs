@@ -144,6 +144,7 @@ pub async fn claim_manual_start(
             task_id: start.task_id.clone(),
             trigger,
             continue_session: start.continue_session,
+            ceiling: crate::consent::ceiling::strategy_ceiling(machine).await?,
         })
         .await?
         .ok_or_else(|| Error::invalid(lost_start(start.continue_session)))?;

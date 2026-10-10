@@ -44,6 +44,7 @@ pub mod provider;
 pub mod repo;
 pub mod runs;
 pub mod settings;
+pub mod shared;
 pub mod teams;
 
 pub use cli::{open_gate, FakeCli, WorktreeAction};

@@ -602,7 +602,7 @@ async fn a_run_scoped_handle_lists_only_its_own_team() {
 /// A `ScopedTx` counts as a transaction here. It carries the context's scope,
 /// which is why the helpers below may take one, but each of them is still a
 /// door into someone else's transaction, so each is named.
-const STORE_HANDLE_EXCEPTIONS: [(&str, &str); 29] = [
+const STORE_HANDLE_EXCEPTIONS: [(&str, &str); 39] = [
     ("db::connect", "it makes the pool; no context can exist yet"),
     ("db::migrate", "it runs before the context is built"),
     (
@@ -729,6 +729,54 @@ const STORE_HANDLE_EXCEPTIONS: [(&str, &str); 29] = [
         "tasks::service::team_of_task",
         "every write that names a task resolves the task's team inside its own transaction, for \
          its event; it filters by that transaction's scope",
+    ),
+    (
+        "tasks::service::write_plan",
+        "the plan helper: update_task and a review note record a plan revision inside the \
+         transaction that read the task (045)",
+    ),
+    (
+        "board::lease::consent_refusal",
+        "run_context re-checks consent inside its fence's transaction and ends the lease there \
+         (045); it reads one task by id",
+    ),
+    (
+        "board::lease::end_within",
+        "release and run_context end a fenced lease inside the transaction that fenced it (045)",
+    ),
+    (
+        "consent::inputs",
+        "eligible reads the revisions a run would execute inside the claim's transaction (045); \
+         it reads one task by id, which the caller has already scoped",
+    ),
+    (
+        "consent::missing",
+        "eligible reads the owner's acceptances and trust list inside the claim's transaction \
+         (045); it filters by the task's team",
+    ),
+    (
+        "consent::task_row",
+        "eligible reads the task's assignee, team and ceiling inside the claim's transaction \
+         (045); it reads one task by id, which the caller has already scoped",
+    ),
+    (
+        "consent::runner_row",
+        "eligible reads the claiming runner's owner and policy inside the claim's transaction \
+         (045); it reads the runner the adapter serves",
+    ),
+    (
+        "consent::refusal_for",
+        "eligible names a missing piece's author inside the claim's transaction (045)",
+    ),
+    (
+        "consent::ensure_member",
+        "assign_task and set_trust check membership inside the transaction that writes (045); \
+         it reads one membership of a team the caller has already scoped",
+    ),
+    (
+        "runs::commit_authors",
+        "eligible credits a dependency's commit to its runners' owners inside the claim's \
+         transaction (045); the dependency was resolved under the caller's scope",
     ),
 ];
 

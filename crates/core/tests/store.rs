@@ -59,15 +59,18 @@ async fn a_fresh_database_gets_every_table_the_schema_declares() {
     // the SQL back at itself. `review_bundles` is ADR-0033 point 7's, added by task 033
     // as seam-contract D28 part 6 declares it, and `review_findings` ADR-0017's, added
     // by task 035 the same way. The seven team-mode tables (`runners` through `users`)
-    // are ADR-0029, ADR-0030 and ADR-0031's, added by task 038 the same way, and
-    // `runner_leases` ADR-0031 point 1's, added by task 043.
+    // are ADR-0029, ADR-0030 and ADR-0031's, added by task 038 the same way,
+    // `runner_leases` ADR-0031 point 1's, added by task 043, and `acceptances`,
+    // `trusted_authors` and `runner_pool_teams` ADR-0032's, added by task 045.
     assert_eq!(
         tables,
         vec![
+            "acceptances",
             "repositories",
             "review_bundles",
             "review_findings",
             "runner_leases",
+            "runner_pool_teams",
             "runners",
             "runs",
             "schedules",
@@ -79,6 +82,7 @@ async fn a_fresh_database_gets_every_table_the_schema_declares() {
             "team_memberships",
             "team_settings",
             "teams",
+            "trusted_authors",
             "user_settings",
             "users",
         ]
@@ -303,6 +307,11 @@ async fn a_task_round_trips_every_field_exactly() {
             updated_at,
             source: MutationSource::Mcp,
             archived_at: None,
+            created_by: None,
+            assignee_id: None,
+            assigned_by: None,
+            plan_revision: 1,
+            plan_updated_by: None,
         }
     );
 }
@@ -1454,7 +1463,8 @@ async fn fetch_task(pool: &SqlitePool, id: &str) -> Task {
             strategy_updated_at AS "strategy_updated_at: DateTime<Utc>",
             created_at AS "created_at: DateTime<Utc>", updated_at AS "updated_at: DateTime<Utc>",
             source AS "source: MutationSource",
-            archived_at AS "archived_at: DateTime<Utc>"
+            archived_at AS "archived_at: DateTime<Utc>",
+            created_by, assignee_id, assigned_by, plan_revision, plan_updated_by
            FROM tasks WHERE id = ?1"#,
         id,
     )

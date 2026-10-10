@@ -592,6 +592,7 @@ pub async fn set_review_settings(
     // Both keys through the one team-settings statement, in one transaction
     // and announced once: the instructions and the configuration are one save,
     // and neither commits without the other.
+    let during_run = crate::consent::written_during_run(ctx, &ctx.actor).await?;
     let mut tx = ctx.begin().await?;
     settings::set_team_in(
         ctx,
@@ -599,9 +600,18 @@ pub async fn set_review_settings(
         &team_id,
         REVIEW_INSTRUCTIONS,
         Some(instructions),
+        during_run,
     )
     .await?;
-    settings::set_team_in(ctx, &mut tx, &team_id, REVIEW_CONFIG, Some(&stored)).await?;
+    settings::set_team_in(
+        ctx,
+        &mut tx,
+        &team_id,
+        REVIEW_CONFIG,
+        Some(&stored),
+        during_run,
+    )
+    .await?;
     tx.commit().await?;
     ctx.publish(ChangeEvent::settings(team_id));
 
@@ -682,24 +692,55 @@ pub async fn set_task_review(
     let stored = config.to_stored()?;
     let instructions = instructions.filter(|text| !text.trim().is_empty());
     let now = ctx.clock.now();
+    // Point 6's mark, read over the pool before the transaction.
+    let during_run = crate::consent::written_during_run(ctx, &ctx.actor).await?;
 
+    let mut tx = ctx.begin().await?;
     sqlx::query!(
-        "UPDATE tasks SET review_instructions = ?1, review_config = ?2, updated_at = ?3
-          WHERE id = ?4 AND team_id = ?5",
-        instructions,
+        "UPDATE tasks SET review_config = ?1, updated_at = ?2 WHERE id = ?3 AND team_id = ?4",
         stored,
         now,
         task_id,
         team_id,
     )
-    .execute(&ctx.pool)
+    .execute(&mut *tx)
     .await?;
+    write_review_instructions(&mut tx, task_id, instructions.as_deref(), &ctx.actor, during_run)
+        .await?;
+    tx.commit().await?;
 
     ctx.publish(ChangeEvent::tasks(team_id, [task_id.to_string()]));
     Ok(TaskReview {
         instructions,
         config,
     })
+}
+
+/// The review-instructions helper (ADR-0032 point 3): the only writer of a
+/// task's `review_instructions`, which records a revision, its author and
+/// point 6's mark. Storing the same text again bumps nothing.
+async fn write_review_instructions(
+    conn: &mut sqlx::SqliteConnection,
+    task_id: &str,
+    instructions: Option<&str>,
+    author: &str,
+    written_during_run: bool,
+) -> Result<()> {
+    sqlx::query!(
+        "UPDATE tasks
+            SET review_instructions = ?1,
+                review_instructions_revision = review_instructions_revision + 1,
+                review_instructions_updated_by = ?2,
+                review_instructions_written_during_run = ?3
+          WHERE id = ?4 AND review_instructions IS NOT ?1",
+        instructions,
+        author,
+        written_during_run,
+        task_id,
+    )
+    .execute(&mut *conn)
+    .await?;
+    Ok(())
 }
 
 #[cfg(test)]

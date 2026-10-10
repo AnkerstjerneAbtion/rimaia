@@ -16,7 +16,9 @@ use rimaia_core::identity::{create_personal_team, PersonalTeam};
 use rimaia_core::repo::{self, NewRepository};
 use rimaia_core::runner::{RunTrigger, RunnerConfig};
 use rimaia_core::tasks::{self, NewTask};
+use rimaia_core::consent::{self, eligibility::RunnerEligibility};
 use rimaia_core::testing::db::insert_runner;
+use rimaia_core::testing::shared::create_shared_team;
 use rimaia_core::testing::{TempRepo, TestContext};
 use rimaia_core::{AppPaths, Change, ChangeEvent, ServiceContext, TeamScope};
 use tempfile::TempDir;
@@ -157,7 +159,7 @@ async fn a_claims_lease_names_the_tasks_team() {
     let h = TestContext::new().await;
     let data = scratch_dir();
     let paths = AppPaths::new(data.path());
-    let second = second_team(&h).await;
+    let second = second_shared_team(&h).await;
     // A board serving a runner that reaches both teams: since task 039 a board
     // scoped to one team cannot see the other's task at all, so this is the
     // board whose lease could name the wrong team if it took it from the scope.
@@ -177,6 +179,23 @@ async fn a_claims_lease_names_the_tasks_team() {
         h.machine(),
     )
     .await;
+    // Since task 045 a runner takes a shared team's task only when the team
+    // allows unattended runs there and the task is its owner's or in its pool.
+    repo::set_repository_unattended_ceiling(
+        &h.context.with_scope(TeamScope::one(second.team_id.clone())),
+        &other_fixture.repository_id,
+        true,
+    )
+    .await
+    .expect("the owner allows unattended runs");
+    consent::set_runner_eligibility(
+        &both,
+        &h.solo.runner_id,
+        RunnerEligibility::AssignedThenPool,
+        &[second.team_id.clone()],
+    )
+    .await
+    .expect("the runner takes the shared team's pool");
 
     for (fixture, team) in [
         (solo_fixture, h.solo.team_id.clone()),
@@ -208,6 +227,17 @@ async fn second_team(h: &TestContext) -> PersonalTeam {
         .expect("a second team");
     tx.commit().await.expect("commit the team");
     team
+}
+
+/// A team the solo user owns and shares with nobody yet: not a personal team,
+/// so its task is the solo runner's only through the pool.
+async fn second_shared_team(h: &TestContext) -> PersonalTeam {
+    let mut conn = h.context.pool.acquire().await.expect("a connection");
+    let team_id = create_shared_team(&mut conn, &h.clock, "Shared", &h.solo.user_id).await;
+    PersonalTeam {
+        user_id: h.solo.user_id.clone(),
+        team_id,
+    }
 }
 
 /// A registered repository, through the service, and ready tasks in it. The
@@ -264,6 +294,7 @@ fn run_now(task_id: &str) -> ClaimTarget {
         task_id: task_id.to_string(),
         trigger: RunTrigger::Manual,
         continue_session: false,
+        ceiling: Default::default(),
     }
 }
 

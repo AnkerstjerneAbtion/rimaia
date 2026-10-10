@@ -275,8 +275,12 @@ pub(crate) async fn set_team(
     key: &str,
     value: Option<&str>,
 ) -> Result<()> {
+    let during_run = match value {
+        Some(_) => crate::consent::written_during_run(ctx, &ctx.actor).await?,
+        None => false,
+    };
     let mut conn = ctx.pool.acquire().await?;
-    set_team_in(ctx, &mut conn, team_id, key, value).await?;
+    set_team_in(ctx, &mut conn, team_id, key, value, during_run).await?;
     drop(conn);
 
     ctx.publish(ChangeEvent::settings(team_id.to_string()));
@@ -288,30 +292,48 @@ pub(crate) async fn set_team(
 /// writes two keys together (the review loop's instructions and configuration)
 /// commits them as one and announces once.
 ///
-/// **The one statement that writes `team_settings`.** Task 045 adds the
-/// revision and authorship columns here and task 051 the owner check, so a key
+/// **The one statement that writes `team_settings`.** Task 045 records the
+/// revision and authorship here and task 051 adds the owner check, so a key
 /// added later inherits both without anyone having to remember them. Removal
 /// comes here too, for the same reason: a delete that bypassed this function
 /// would be a write those checks never see. Its callers today are the review
 /// loop's save and a repository's strategy default leaving inside its
 /// repository's removal (D17.1).
+///
+/// Every key whose value changes gets a new `revision`, `ctx.actor` as
+/// `updated_by`, `updated_at` from the clock and point 6's mark,
+/// `written_during_run`, which the caller read over the pool before its
+/// transaction (ADR-0032 point 3). Consent reads only the two instruction
+/// keys, but one rule for every row is simpler than a list. Storing the same
+/// value again bumps nothing.
 pub(crate) async fn set_team_in(
     ctx: &ServiceContext,
     conn: &mut SqliteConnection,
     team_id: &str,
     key: &str,
     value: Option<&str>,
+    written_during_run: bool,
 ) -> Result<()> {
     ensure_placed(key, Placement::Team)?;
     ensure_team_in_scope(ctx, team_id)?;
     match value {
         Some(value) => {
+            let now = ctx.clock.now();
             sqlx::query!(
-                "INSERT INTO team_settings (team_id, key, value) VALUES (?1, ?2, ?3)
-                 ON CONFLICT (team_id, key) DO UPDATE SET value = excluded.value",
+                "INSERT INTO team_settings
+                    (team_id, key, value, revision, updated_by, updated_at, written_during_run)
+                 VALUES (?1, ?2, ?3, 1, ?4, ?5, ?6)
+                 ON CONFLICT (team_id, key) DO UPDATE
+                    SET value = excluded.value, revision = team_settings.revision + 1,
+                        updated_by = excluded.updated_by, updated_at = excluded.updated_at,
+                        written_during_run = excluded.written_during_run
+                  WHERE team_settings.value IS NOT excluded.value",
                 team_id,
                 key,
                 value,
+                ctx.actor,
+                now,
+                written_during_run,
             )
             .execute(&mut *conn)
             .await?;

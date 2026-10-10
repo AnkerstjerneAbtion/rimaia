@@ -33,6 +33,11 @@ pub enum StrategyOrigin {
     Global,
     /// Unset everywhere: the flag is omitted and the CLI's own default applies.
     ClaudeCode,
+    /// Filled by the runner's strategy ceiling at spawn, for a half nothing
+    /// else named (task 045). Appears only in the strategy a runner spawns
+    /// with, never in the board's per-task resolution, which is why the
+    /// frontend's `StrategyOrigin` does not list it.
+    RunnerCeiling,
 }
 
 /// What a run will actually spawn with, and where each half came from.
@@ -309,6 +314,11 @@ mod tests {
             updated_at: test_epoch(),
             source: MutationSource::Ui,
             archived_at: None,
+            created_by: None,
+            assignee_id: None,
+            assigned_by: None,
+            plan_revision: 1,
+            plan_updated_by: None,
         }
     }
 }

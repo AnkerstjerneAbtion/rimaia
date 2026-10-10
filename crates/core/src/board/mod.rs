@@ -26,5 +26,6 @@ pub use service::{authorize_start, OwnerPresence};
 pub use types::{
     BaseDependency, BoardMethod, ChangeSummary, Claim, ClaimTarget, FinishReceipt, FinishRun,
     FreeCapacity, Heartbeat, ImplementationBase, LeasePurpose, LeaseRef, NextStep, ReviewContext,
-    RunBase, RunContext, StartRun, TeamLimits, TranscriptAck, TranscriptChunk, TranscriptEnd,
+    RunAuthorship, RunBase, RunContext, StartRun, TeamLimits, TranscriptAck, TranscriptChunk,
+    TranscriptEnd,
 };

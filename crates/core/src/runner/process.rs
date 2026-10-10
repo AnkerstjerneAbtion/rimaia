@@ -72,6 +72,7 @@ use crate::board::{
     BoardPort, Claim, FinishReceipt, FinishRun, ImplementationBase, LeasePurpose, LeaseRef,
     NextStep, RunContext, StartRun, TranscriptEnd,
 };
+use crate::consent::ceiling::{self, StrategyCeiling};
 use crate::credentials::inject::ChildEnvironment;
 use crate::credentials::CredentialAccess;
 use crate::db::settings::{self, RunEnvironment};
@@ -1397,6 +1398,7 @@ impl Phases<'_> {
                     bundle: capture.bundle,
                     window_closes_at: None,
                     transcript,
+                    ceiling: next_phase_ceiling(self.machine).await,
                 };
                 match self.board.finish_run(self.lease, run_id, finish).await {
                     Ok(receipt) => {
@@ -1450,6 +1452,7 @@ impl Phases<'_> {
                     bundle: capture.bundle,
                     window_closes_at: run_window_closes_at(self.machine, task_id, run_id).await,
                     transcript,
+                    ceiling: next_phase_ceiling(self.machine).await,
                 },
             )
             .await?;
@@ -1483,6 +1486,19 @@ impl Phases<'_> {
 
         Ok(receipt)
     }
+}
+
+/// This runner's strategy ceiling, sent with a finish for the phase a
+/// `Continue` would start (task 045). A ceiling that cannot be read is sent as
+/// none: the board's refusal is only the early half, and the spawn gate reads
+/// it again before the next phase spawns, where a read failure refuses.
+async fn next_phase_ceiling(machine: &MachineContext) -> StrategyCeiling {
+    ceiling::strategy_ceiling(machine)
+        .await
+        .unwrap_or_else(|error| {
+            tracing::warn!(%error, "could not read this runner's strategy ceiling for a finish");
+            StrategyCeiling::default()
+        })
 }
 
 fn phase_noun(kind: RunKind) -> &'static str {

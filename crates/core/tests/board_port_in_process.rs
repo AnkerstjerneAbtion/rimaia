@@ -203,6 +203,7 @@ async fn every_board_dto_round_trips_through_json() {
         task_id: task.id.clone(),
         trigger: RunTrigger::Manual,
         continue_session: false,
+        ceiling: Default::default(),
     };
     let claim: Claim = board
         .claim(target.clone())
@@ -249,6 +250,7 @@ async fn every_board_dto_round_trips_through_json() {
         bundle: None::<ReviewBundle>,
         window_closes_at: Some(harness.clock.now() + TimeDelta::hours(4)),
         transcript: TranscriptEnd::Complete { length: 42 },
+        ceiling: Default::default(),
     };
     let receipt: FinishReceipt = board
         .finish_run(&claim.lease, "run-1", finish.clone())
@@ -260,6 +262,7 @@ async fn every_board_dto_round_trips_through_json() {
     round_trips(&target);
     round_trips(&ClaimTarget::Plan {
         task_id: task.id.clone(),
+        ceiling: Default::default(),
     });
     round_trips(&ClaimTarget::Next {
         capacity: FreeCapacity {
@@ -268,6 +271,7 @@ async fn every_board_dto_round_trips_through_json() {
         },
         repositories: vec![task.repository_id.clone()],
         wait: std::time::Duration::from_millis(1_500),
+        ceiling: Default::default(),
     });
     round_trips(&claim);
     round_trips(&Claim {
@@ -315,6 +319,7 @@ fn a_next_claims_wait_crosses_the_wire_as_integer_milliseconds() {
         },
         repositories: vec!["repo-a".to_string()],
         wait: std::time::Duration::ZERO,
+        ceiling: Default::default(),
     };
 
     assert_eq!(

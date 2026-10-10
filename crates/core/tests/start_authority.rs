@@ -240,6 +240,7 @@ async fn a_model_no_provider_lists_still_reaches_the_cli() {
             },
             repositories: vec![f.repository_id.clone()],
             wait: Duration::ZERO,
+            ceiling: Default::default(),
         })
         .await
         .expect("claim")

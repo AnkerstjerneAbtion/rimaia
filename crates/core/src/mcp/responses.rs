@@ -1638,6 +1638,11 @@ mod tests {
             updated_at: "2026-08-20T12:30:00Z".parse().expect("a literal timestamp"),
             source: MutationSource::Mcp,
             archived_at: None,
+            created_by: None,
+            assignee_id: None,
+            assigned_by: None,
+            plan_revision: 1,
+            plan_updated_by: None,
         }
     }
 

@@ -1061,6 +1061,7 @@ async fn a_review_waiting_on_a_usage_limit_is_resumed_by_the_queue_as_a_review()
             capacity,
             repositories,
             wait: Duration::ZERO,
+            ceiling: Default::default(),
         })
         .await
         .expect("claim")

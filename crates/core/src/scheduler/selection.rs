@@ -59,7 +59,9 @@ use std::sync::Arc;
 use chrono::{DateTime, Utc};
 use serde::Serialize;
 
-use crate::board::lease::{self, Candidate, Eligibility, PhaseModels};
+use crate::board::lease::{self, Candidate, PhaseModels, Route, Verdict};
+use crate::consent::ceiling::StrategyCeiling;
+use crate::consent::{self, Composition};
 use crate::board::{FreeCapacity, LeasePurpose};
 use crate::context::ServiceContext;
 use crate::db::{BoardColumn, RunState};
@@ -117,6 +119,24 @@ pub enum SkipReason {
     /// own, because that is ADR-0011's `waiting_retry` path and task 014's
     /// policy, not a second automatic attempt at the same wall.
     NeedsAttention,
+    /// ADR-0032 point 2: the task is assigned to someone else, or is in the
+    /// pool of a team this runner does not take pool work from.
+    ///
+    /// Three variants in a closed set, each with `WaitingForRetry`'s
+    /// justification (D23 point 4): each persists until a person acts, and
+    /// each names a different act. This one is reassigning the card or
+    /// joining the pool.
+    NotEligible,
+    /// ADR-0032 point 3: a piece of the content the run would execute was
+    /// written by someone this runner's owner has neither accepted nor
+    /// trusts. The act is accepting, or trusting.
+    ConsentMissing,
+    /// ADR-0032 point 4: the team does not allow unattended runs in the
+    /// repository. The act is asking a team owner. Not
+    /// [`UnattendedRunsNotAllowed`](SkipReason::UnattendedRunsNotAllowed),
+    /// which since task 042 means only that this runner did not list the
+    /// repository, which its owner fixes on this machine.
+    ForbiddenByTeam,
 }
 
 impl SkipReason {
@@ -137,6 +157,13 @@ impl SkipReason {
             SkipReason::AlreadyInFlight => "already started",
             SkipReason::WaitingForRetry => "waiting to resume",
             SkipReason::NeedsAttention => "the last run did not succeed",
+            SkipReason::NotEligible => {
+                "assigned to someone else, or outside the pool this runner takes"
+            }
+            SkipReason::ConsentMissing => "waiting for you to accept a change",
+            SkipReason::ForbiddenByTeam => {
+                "the team does not allow unattended runs in this repository"
+            }
         }
     }
 }
@@ -194,6 +221,9 @@ pub struct RunnerView {
     pub runner_id: RunnerId,
     pub provider: ProviderId,
     pub repositories: BTreeSet<String>,
+    /// The runner's strategy ceiling (task 045), which the claim carries and
+    /// `lease::eligible` refuses with. No ceiling unless the runner has one.
+    pub ceiling: StrategyCeiling,
 }
 
 impl RunnerView {
@@ -206,7 +236,13 @@ impl RunnerView {
             runner_id: runner_id.into(),
             provider,
             repositories: repositories.into_iter().collect(),
+            ceiling: StrategyCeiling::default(),
         }
+    }
+
+    /// The same view, judged against `ceiling`: what the runner store holds.
+    pub fn with_ceiling(self, ceiling: StrategyCeiling) -> Self {
+        Self { ceiling, ..self }
     }
 }
 
@@ -243,42 +279,61 @@ pub async fn plan(ctx: &ServiceContext, runner: &RunnerView) -> Result<Vec<Queue
     // Acquired after the list, never across it: the test pool has one
     // connection.
     let mut conn = ctx.pool.acquire().await?;
-    let mut plan = Vec::with_capacity(ready.len());
-    let mut claimable = 0;
-    for (summary, (purpose, defaults, models)) in ready.iter().zip(&candidates) {
+    let mut entries = Vec::with_capacity(ready.len());
+    for (summary, (purpose, defaults, models, composition)) in ready.iter().zip(&candidates) {
         let candidate = Candidate {
             runner_id: &runner.runner_id,
             provider: runner.provider,
             catalogue: &defaults.catalogue,
             models,
+            ceiling: &runner.ceiling,
+            composition,
         };
-        if lease::eligible(&mut conn, &summary.task.id, &candidate, *purpose).await?
-            != Eligibility::Eligible
-        {
-            continue;
-        }
-
-        let skip = skip_reason(
+        let verdict = lease::eligible(&mut conn, &summary.task.id, &candidate, *purpose).await?;
+        // 042's listed-repository check is the runner's half and speaks
+        // first; eligibility's reason fills an entry it leaves unskipped.
+        let listed = skip_reason(
             summary,
             runner.repositories.contains(&summary.task.repository_id),
             now,
         );
-        let queue_position = skip.is_none().then(|| {
-            claimable += 1;
-            claimable
-        });
+        let (route, skip) = match verdict {
+            Verdict::Eligible(route) => (route, listed),
+            Verdict::Ineligible(ineligible) => match ineligible.skip_reason() {
+                Some(reason) => (Route::Assigned, listed.or(Some(reason))),
+                // Another runner can take it with nobody acting: not this
+                // runner's, and not a problem with the card.
+                None => continue,
+            },
+        };
 
-        plan.push(QueueEntry {
-            task_id: summary.task.id.clone(),
-            title: summary.task.title.clone(),
-            repository_id: summary.task.repository_id.clone(),
-            queue_position,
-            skip,
-            resume_after: scheduled_resume(summary),
-        });
+        entries.push((
+            route,
+            QueueEntry {
+                task_id: summary.task.id.clone(),
+                title: summary.task.title.clone(),
+                repository_id: summary.task.repository_id.clone(),
+                queue_position: None,
+                skip,
+                resume_after: scheduled_resume(summary),
+            },
+        ));
     }
 
-    Ok(plan)
+    // The owner's own tasks first, in board order, then the pool's (ADR-0032
+    // point 2). Stable, so board order holds within each.
+    entries.sort_by_key(|(route, _)| *route);
+    let mut claimable = 0;
+    Ok(entries
+        .into_iter()
+        .map(|(_, mut entry)| {
+            entry.queue_position = entry.skip.is_none().then(|| {
+                claimable += 1;
+                claimable
+            });
+            entry
+        })
+        .collect())
 }
 
 /// One repository's share of what eligibility reads: the catalogue the board
@@ -305,7 +360,7 @@ async fn candidates(
     ctx: &ServiceContext,
     runner: &RunnerView,
     ready: &[TaskSummary],
-) -> Result<Vec<(LeasePurpose, Arc<RepositoryDefaults>, PhaseModels)>> {
+) -> Result<Vec<(LeasePurpose, Arc<RepositoryDefaults>, PhaseModels, Composition)>> {
     let mut by_repository: HashMap<String, Arc<RepositoryDefaults>> = HashMap::new();
     let mut candidates = Vec::with_capacity(ready.len());
 
@@ -337,14 +392,24 @@ async fn candidates(
                 }
             }
         };
-        let review = match purpose {
+        let (review, review_effort) = match purpose {
             LeasePurpose::Review => {
-                review_config::resolve(ctx, &summary.task.id, repository_id)
+                let config = review_config::resolve(ctx, &summary.task.id, repository_id)
                     .await?
-                    .config
-                    .review_model
+                    .config;
+                (config.review_model, config.review_effort)
             }
-            _ => None,
+            _ => (None, None),
+        };
+        // What the composers would include besides the revisions: a base
+        // commit only for a task with dependencies, and findings only for a
+        // review or fix waiting to resume, so a board of plain tasks reads
+        // nothing more here.
+        let findings = matches!(purpose, LeasePurpose::Review | LeasePurpose::Fix);
+        let composition = if findings || summary.dependency_count > 0 {
+            consent::composition(ctx, &summary.task.id, findings).await?
+        } else {
+            Composition::default()
         };
 
         candidates.push((
@@ -353,7 +418,10 @@ async fn candidates(
             PhaseModels {
                 strategy: summary.effective_model.clone(),
                 review,
+                effort: summary.effective_effort.clone(),
+                review_effort,
             },
+            composition,
         ));
     }
 
@@ -584,6 +652,11 @@ mod tests {
                 updated_at: at("2026-08-20T12:00:00Z"),
                 source: MutationSource::Ui,
                 archived_at: None,
+                created_by: None,
+                assignee_id: None,
+                assigned_by: None,
+                plan_revision: 1,
+                plan_updated_by: None,
             },
             link_count: 0,
             dependency_count: 0,

@@ -77,7 +77,7 @@ impl InProcessBoard {
 
 impl BoardPort for InProcessBoard {
     fn preview<'a>(&'a self, task_id: &'a str) -> BoardFuture<'a, RunContext> {
-        Box::pin(service::preview(&self.ctx, self.provider.as_ref(), task_id))
+        Box::pin(service::preview(&self.ctx, self.runner(), task_id))
     }
 
     fn claim<'a>(&'a self, target: ClaimTarget) -> BoardFuture<'a, Option<Claim>> {

@@ -91,8 +91,13 @@ use crate::tasks::run_state::transition;
 use crate::tasks::service::{fetch_task_row, team_of_task};
 use crate::tasks::strategy::needs_planning;
 
+use crate::consent::ceiling::{self, PhaseStrategy, StrategyCeiling};
+use crate::consent::pieces::pieces_for;
+use crate::consent::{self, Composition, Ineligible, TeamCeiling};
+pub use crate::consent::Route;
 use crate::runner::provider::ProviderId;
 use crate::strategy::catalogue::{runs_on, Catalogue};
+use crate::strategy::StrategyOrigin;
 
 use super::types::{Heartbeat, LeasePurpose, LeaseRef, NextStep, RunContext};
 
@@ -235,42 +240,26 @@ pub async fn held_by(ctx: &ServiceContext, runner_id: &str) -> Result<Vec<(Lease
 
 /// Whether a runner may take a task, as [`eligible`] answers it.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Eligibility {
-    Eligible,
-    /// ADR-0031 point 4: the task's next attempt is another runner's.
-    PinnedElsewhere {
-        label: String,
-    },
-    /// ADR-0031 point 1: the phase would spawn with a model that belongs to
-    /// another provider ([`runs_on`]).
-    ModelNotOffered {
-        model: String,
-        provider: ProviderId,
-    },
+pub enum Verdict {
+    /// The runner may take it, on this footing.
+    Eligible(Route),
+    /// The first rule that refuses it.
+    Ineligible(Ineligible),
 }
 
-impl Eligibility {
+impl Verdict {
     /// The sentence a person reads when a named claim is refused, or `None`
     /// when the runner may take the task.
     pub fn refusal(&self) -> Option<String> {
         match self {
-            Eligibility::Eligible => None,
-            Eligibility::PinnedElsewhere { label } => Some(format!(
-                "this task is pinned to {label}, which has its worktree and the agent's \
-                 conversation. Only that runner can run it until someone chooses to run it \
-                 elsewhere."
-            )),
-            Eligibility::ModelNotOffered { model, provider } => Some(format!(
-                "this task asks for the model \"{model}\", which {} cannot run. Change the \
-                 task's model, or run it on a runner whose provider offers it.",
-                provider.display_name()
-            )),
+            Verdict::Eligible(_) => None,
+            Verdict::Ineligible(ineligible) => Some(ineligible.refusal()),
         }
     }
 }
 
-/// The models a task's phases would spawn with, read with the claim's
-/// context before any transaction opens (task 067).
+/// The models and efforts a task's phases would spawn with, read with the
+/// claim's context before any transaction opens (tasks 067 and 045).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct PhaseModels {
     /// The effective strategy's model (ADR-0016): what an implementation and
@@ -278,17 +267,21 @@ pub struct PhaseModels {
     pub strategy: Option<String>,
     /// The review loop's `review_model`, when one names it (task 021).
     pub review: Option<String>,
+    /// The effective strategy's effort.
+    pub effort: Option<String>,
+    /// The review loop's `review_effort`, when one names it.
+    pub review_effort: Option<String>,
 }
 
 impl PhaseModels {
     /// What `context`'s phases would spawn with, as `run_task` resolves it.
     pub fn of(context: &RunContext) -> Self {
+        let config = context.review.as_ref().map(|review| &review.config);
         Self {
             strategy: context.strategy.model.clone(),
-            review: context
-                .review
-                .as_ref()
-                .and_then(|review| review.config.review_model.clone()),
+            review: config.and_then(|config| config.review_model.clone()),
+            effort: context.strategy.effort.clone(),
+            review_effort: config.and_then(|config| config.review_effort.clone()),
         }
     }
 
@@ -308,11 +301,42 @@ impl PhaseModels {
             LeasePurpose::Strategy => None,
         }
     }
+
+    /// What the strategy ceiling judges for `purpose` (task 045): the
+    /// effective strategy for implementation and fix, 021's review model and
+    /// effort for review, and the planner's budget for strategy, which the
+    /// model rule exempts and the ceiling does not.
+    pub fn strategy_for(&self, purpose: LeasePurpose, catalogue: &Catalogue) -> PhaseStrategy {
+        let (model, effort) = match purpose {
+            LeasePurpose::Implementation | LeasePurpose::Fix => {
+                (self.strategy.clone(), self.effort.clone())
+            }
+            LeasePurpose::Review => (
+                self.review.clone().or_else(|| self.strategy.clone()),
+                self.review_effort.clone().or_else(|| self.effort.clone()),
+            ),
+            LeasePurpose::Strategy => (
+                catalogue.planner.model.clone(),
+                catalogue.planner.effort.clone(),
+            ),
+        };
+        let origin = |value: &Option<String>| match value {
+            Some(_) => StrategyOrigin::Task,
+            None => StrategyOrigin::ClaudeCode,
+        };
+        PhaseStrategy {
+            model_origin: origin(&model),
+            effort_origin: origin(&effort),
+            model,
+            effort,
+        }
+    }
 }
 
 /// A runner as a candidate for one task: who it is, what its provider runs,
-/// and what the task's phases would spawn with. Everything [`eligible`] needs
-/// that is not read inside the asking transaction.
+/// what the task's phases would spawn with, the runner's strategy ceiling
+/// and what the composers would include. Everything [`eligible`] needs that
+/// is not read inside the asking transaction.
 #[derive(Debug, Clone, Copy)]
 pub struct Candidate<'a> {
     pub runner_id: &'a str,
@@ -322,25 +346,37 @@ pub struct Candidate<'a> {
     /// The catalogue the board resolves for `provider` in the task's team.
     pub catalogue: &'a Catalogue,
     pub models: &'a PhaseModels,
+    /// The ceiling the claim carried (task 045). The board only refuses with
+    /// it; the runner fills from it at spawn.
+    pub ceiling: &'a StrategyCeiling,
+    /// Which findings and which base commit the composers would include.
+    pub composition: &'a Composition,
 }
 
 /// Whether `candidate` may take `task_id` for `purpose`: the one place the
 /// board decides that *this* runner may take *this* task.
 ///
-/// Two rules, in this order:
+/// Six rules, in this order, and the first that refuses is the answer:
 ///
 /// 1. **Pinning** (task 043): a task pinned to another runner is not this
 ///    runner's, for every purpose, `strategy` included.
-/// 2. **The model rule** (task 067, ADR-0031 point 1): a phase whose model
-///    belongs to another provider ([`runs_on`]) is not this runner's.
-///    `strategy` is exempt ([`PhaseModels::for_purpose`]).
+/// 2. **Eligibility** (task 045, ADR-0032 point 2): assigned to the runner's
+///    owner, unassigned in their personal team, or in a pool the runner
+///    takes. A task pinned here and then reassigned is nobody's.
+/// 3. **The team ceiling** (ADR-0032 point 4), for every purpose, except in a
+///    personal team, where the runner's own consent is the whole decision.
+/// 4. **The model rule** (task 067, ADR-0031 point 1). `strategy` is exempt
+///    ([`PhaseModels::for_purpose`]).
+/// 5. **The strategy ceiling** ([`ceiling::judge`]), using only its refusal.
+/// 6. **Consent** (ADR-0032 points 3 and 6) to every piece
+///    [`pieces_for`](crate::consent::pieces::pieces_for) lists for `purpose`.
 ///
-/// Task 045 adds consent here, and nothing adds a second call: selection's
-/// plan, the claim transaction and a `Continue` all ask this. Selection's own
-/// rules (ADR-0010's order, dependencies, D21's cap) are not restated here.
+/// Nothing adds a second call: selection's plan, the claim transaction, a
+/// `Continue` and `run_context` all ask this. Selection's own rules
+/// (ADR-0010's order, dependencies, D21's cap) are not restated here.
 ///
-/// Takes the connection of whichever transaction asks, so the pin is read in
-/// the transaction that acts on it. A task that does not exist is
+/// Takes the connection of whichever transaction asks, so everything above
+/// is read in the transaction that acts on it. A task that does not exist is
 /// `Eligible`: whether it exists is the caller's question, answered in its
 /// own words.
 pub async fn eligible(
@@ -348,37 +384,123 @@ pub async fn eligible(
     task_id: &str,
     candidate: &Candidate<'_>,
     purpose: LeasePurpose,
-) -> Result<Eligibility> {
-    let pinned = sqlx::query!(
-        r#"SELECT t.pinned_runner_id AS "pinned_runner_id?", r.label AS "label?"
-             FROM tasks t LEFT JOIN runners r ON r.id = t.pinned_runner_id
-            WHERE t.id = ?1"#,
-        task_id,
-    )
-    .fetch_optional(&mut *conn)
-    .await?;
-
-    let Some(row) = pinned else {
-        return Ok(Eligibility::Eligible);
+) -> Result<Verdict> {
+    let refuse = |ineligible| Ok(Verdict::Ineligible(ineligible));
+    let Some(task) = consent::task_row(conn, task_id).await? else {
+        return Ok(Verdict::Eligible(Route::Assigned));
     };
-    if let Some(pinned) = row.pinned_runner_id {
+
+    if let Some(pinned) = &task.pinned_runner_id {
         if pinned != candidate.runner_id {
-            return Ok(Eligibility::PinnedElsewhere {
-                label: row.label.unwrap_or(pinned),
+            return refuse(Ineligible::PinnedElsewhere {
+                label: task.pinned_label.clone().unwrap_or_else(|| pinned.clone()),
             });
         }
     }
 
+    // A runner the board has no row for has no owner to be eligible or to
+    // consent: only a plan drawn for a view, never a claim, whose lease row
+    // would name it, can ask about one. It is judged on the other four rules.
+    let runner = consent::runner_row(conn, candidate.runner_id).await?;
+    let route = match &runner {
+        Some(row) => match consent::decide(&task, Some(row), candidate.runner_id) {
+            Ok(route) => route,
+            Err(ineligible) => return refuse(ineligible),
+        },
+        None => Route::Assigned,
+    };
+
+    if task.team_ceiling() == TeamCeiling::Forbidden {
+        return refuse(Ineligible::ForbiddenByTeam {
+            repository: task.repository_name.clone(),
+        });
+    }
+
     if let Some(model) = candidate.models.for_purpose(purpose) {
         if !runs_on(model, candidate.provider, candidate.catalogue) {
-            return Ok(Eligibility::ModelNotOffered {
+            return refuse(Ineligible::ModelNotOffered {
                 model: model.to_string(),
                 provider: candidate.provider,
             });
         }
     }
 
-    Ok(Eligibility::Eligible)
+    let strategy = candidate.models.strategy_for(purpose, candidate.catalogue);
+    if let Err(exceeded) = ceiling::judge(&strategy, candidate.ceiling, candidate.catalogue) {
+        return refuse(Ineligible::CeilingExceeded {
+            label: runner
+                .as_ref()
+                .map_or_else(|| candidate.runner_id.to_string(), |runner| runner.label.clone()),
+            exceeded,
+        });
+    }
+
+    if let Some(runner) = &runner {
+        if let Some(refused) = refuse_consent(
+            conn,
+            task_id,
+            candidate.runner_id,
+            &runner.owner,
+            &task.team_id,
+            purpose,
+            candidate.composition,
+        )
+        .await?
+        {
+            return refuse(refused);
+        }
+    }
+
+    Ok(Verdict::Eligible(route))
+}
+
+/// [`eligible`]'s sixth rule alone: whether `runner_id`'s owner still
+/// consents to everything a `purpose` run of `task_id` would execute. What
+/// `run_context` re-checks before a composition (D31 point 6).
+pub(crate) async fn consent_refusal(
+    conn: &mut SqliteConnection,
+    task_id: &str,
+    runner_id: &str,
+    purpose: LeasePurpose,
+    composition: &Composition,
+) -> Result<Option<Ineligible>> {
+    let Some(task) = consent::task_row(conn, task_id).await? else {
+        return Ok(None);
+    };
+    let Some(runner) = consent::runner_row(conn, runner_id).await? else {
+        return Ok(None);
+    };
+    let owner = runner.owner;
+    refuse_consent(
+        conn,
+        task_id,
+        runner_id,
+        &owner,
+        &task.team_id,
+        purpose,
+        composition,
+    )
+    .await
+}
+
+async fn refuse_consent(
+    conn: &mut SqliteConnection,
+    task_id: &str,
+    runner_id: &str,
+    owner: &str,
+    team_id: &str,
+    purpose: LeasePurpose,
+    composition: &Composition,
+) -> Result<Option<Ineligible>> {
+    let Some(inputs) = consent::inputs(conn, task_id, runner_id, composition).await? else {
+        return Ok(None);
+    };
+    let pieces = pieces_for(purpose, &inputs);
+    let missing = consent::missing(conn, owner, team_id, &pieces).await?;
+    match missing.into_iter().next() {
+        Some((piece, reason)) => Ok(Some(consent::refusal_for(conn, &piece, reason).await?)),
+        None => Ok(None),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -677,11 +799,22 @@ pub(crate) async fn open_run(
 pub(crate) async fn release(ctx: &ServiceContext, runner_id: &str, lease: &LeaseRef) -> Result<()> {
     let mut tx = ctx.begin_immediate().await?;
     current(&mut tx, lease, runner_id).await?;
+    end_within(ctx, &mut tx, lease).await?;
 
-    let task = fetch_task_row(&mut tx, &lease.task_id).await?;
+    let team_id = team_of_task(&mut tx, &lease.task_id).await?;
+    tx.commit().await?;
+    ctx.publish(ChangeEvent::tasks(team_id, [lease.task_id.clone()]));
+    Ok(())
+}
+
+/// [`release`]'s landing, inside a transaction that has already fenced
+/// `lease`: a task still `running` taken to `failed`, and the lease deleted.
+/// `run_context` ends a lease whose consent was lost with exactly this.
+pub(crate) async fn end_within(ctx: &ServiceContext, tx: &mut ScopedTx, lease: &LeaseRef) -> Result<()> {
+    let task = fetch_task_row(tx, &lease.task_id).await?;
     if task.run_state == RunState::Running {
         transition(
-            &mut tx,
+            tx,
             ctx.clock.as_ref(),
             &lease.task_id,
             RunState::Running,
@@ -689,12 +822,7 @@ pub(crate) async fn release(ctx: &ServiceContext, runner_id: &str, lease: &Lease
         )
         .await?;
     }
-    delete(&mut tx, lease).await?;
-
-    let team_id = team_of_task(&mut tx, &lease.task_id).await?;
-    tx.commit().await?;
-    ctx.publish(ChangeEvent::tasks(team_id, [lease.task_id.clone()]));
-    Ok(())
+    delete(tx, lease).await
 }
 
 /// `finish_run`'s landing, inside the transaction that lands the task: the

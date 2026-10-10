@@ -121,6 +121,7 @@ pub async fn claim_run(
             task_id: task_id.to_string(),
             trigger,
             continue_session,
+            ceiling: Default::default(),
         })
         .await?;
     Ok(claim.unwrap_or_else(|| panic!("the fixture's task {task_id} was already claimed")))
@@ -227,6 +228,7 @@ pub async fn run_without_a_child(
                 bundle: None,
                 window_closes_at: None,
                 transcript: TranscriptEnd::Complete { length: 0 },
+                ceiling: Default::default(),
             },
         )
         .await

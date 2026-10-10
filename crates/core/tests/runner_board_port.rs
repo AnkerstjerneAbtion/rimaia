@@ -167,6 +167,7 @@ async fn a_retry_claim_for_a_waiting_review_claims_it_as_a_review() {
             task_id: fixture.task_id.clone(),
             trigger: RunTrigger::Queued,
             continue_session: true,
+            ceiling: Default::default(),
         })
         .await
         .expect("a review is resumed")

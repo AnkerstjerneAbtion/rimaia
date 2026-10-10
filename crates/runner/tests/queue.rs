@@ -1485,6 +1485,7 @@ async fn a_starter_that_claims_before_it_spawns_never_produces_a_second_process(
                     task_id,
                     trigger: RunTrigger::Queued,
                     continue_session: false,
+                    ceiling: Default::default(),
                 })
                 .await
                 .expect("claim")?;
@@ -2279,6 +2280,7 @@ async fn retry_now_starts_a_waiting_task_before_its_deadline() {
             // for. See this file's header.
             trigger: RunTrigger::Queued,
             continue_session: true,
+            ceiling: Default::default(),
         })
         .await
         .expect("claim the waiting task")
@@ -3139,6 +3141,7 @@ async fn a_usage_limit_pause_is_held_by_the_runner() {
             task_id: task_id.clone(),
             trigger: RunTrigger::Queued,
             continue_session: false,
+            ceiling: Default::default(),
         })
         .await
         .expect("claim")
@@ -3559,6 +3562,7 @@ async fn the_plan_and_the_next_claim_agree_on_what_starts_first() {
             capacity,
             repositories,
             wait: Duration::ZERO,
+            ceiling: Default::default(),
         })
         .await
         .expect("claim")

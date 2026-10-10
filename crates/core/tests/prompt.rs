@@ -871,6 +871,11 @@ fn task() -> TaskDetail {
             updated_at: timestamp(),
             source: MutationSource::Ui,
             archived_at: None,
+            created_by: None,
+            assignee_id: None,
+            assigned_by: None,
+            plan_revision: 1,
+            plan_updated_by: None,
         },
         links: vec![
             link("Asana", "https://app.asana.com/0/1/2", 0.0),
