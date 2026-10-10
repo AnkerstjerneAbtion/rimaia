@@ -147,7 +147,7 @@ Logic-first. Vitest for the frontend, `cargo test` for Rust. **No E2E.**
 **These modules must have tests, and a change to one without a change to its tests is
 incomplete:** prompt composition · outcome classification · event-stream parsing · retry
 and backoff policy · position/rebalance math · run-state transitions · dependency cycles
-and base-ref resolution · worktree operations · MCP handlers.
+and base-ref resolution · worktree operations · MCP handlers · tenant isolation.
 
 Rules:
 
@@ -168,6 +168,10 @@ Rules:
 - **Business rules live in `rimaia-core` services.** Tauri commands and MCP handlers are
   thin adapters over the same functions. If a rule is enforced in only one of them, that
   is a bug (ADR-0006).
+- **Every service reads and writes through its context's scope** (ADR-0029 point 5): an id
+  outside it is answered exactly as a never-issued one, and an MCP tool is not done until
+  it has a case in `crates/core/tests/tenant_isolation.rs` (046 extends this to every
+  command).
 - **Migrations are append-only** once shipped. Never edit a migration that has run.
 - **Enums, not strings**, for `column`, `run_state`, `exit_class`, `strategy_mode`.
 - **Tolerant parsing of CLI output.** Unknown event types are persisted and ignored, never

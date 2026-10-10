@@ -338,7 +338,7 @@ pub(crate) async fn set_user(ctx: &ServiceContext, key: &str, value: &str) -> Re
 ///
 /// Takes the context for its actor and nothing else, never its pool: the read
 /// belongs to the caller's transaction (a review verdict, `mark_seen`).
-pub async fn get_user_in(
+pub(crate) async fn get_user_in(
     ctx: &ServiceContext,
     conn: &mut SqliteConnection,
     key: &str,
@@ -360,7 +360,7 @@ pub async fn get_user_in(
 /// **The one statement that writes `user_settings`.** The row is always the
 /// context's actor's, never the row of whoever triggered a run or owns a
 /// card, so a teammate's review never moves another person's marker.
-pub async fn set_user_in(
+pub(crate) async fn set_user_in(
     ctx: &ServiceContext,
     conn: &mut SqliteConnection,
     key: &str,
