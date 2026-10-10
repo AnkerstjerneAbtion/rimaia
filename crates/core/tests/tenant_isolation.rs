@@ -34,6 +34,9 @@
 //! `no_service_takes_a_pool_without_a_scope` scans every function signature in
 //! `crates/core/src/`: a service that took a pool could start a transaction no
 //! scope ever sees.
+//! `each_split_settings_table_has_one_writer` scans the statements: a second
+//! writer of `team_settings` would be a write the checks tasks 045 and 051
+//! hang on `set_team` never see.
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -696,6 +699,134 @@ fn no_service_takes_a_pool_without_a_scope() {
     );
 }
 
+/// The functions allowed a statement that writes a split settings table, each
+/// with why. Task 039 makes `set_team` and `set_user_in` the one writer of
+/// their table, so tasks 045 and 051 can hang their checks on it and a key
+/// added later inherits them; a second writer would be a write those checks
+/// never see.
+const SETTINGS_WRITERS: [(&str, &str, &str); 3] = [
+    (
+        "team_settings",
+        "db::settings::set_team",
+        "the one writer: it sets a team key and, with `None`, removes it",
+    ),
+    (
+        "team_settings",
+        "identity::create_personal_team",
+        "the seed row that comes into being with its team (D28 part 3); no set_team can run \
+         before the team exists",
+    ),
+    (
+        "user_settings",
+        "db::settings::set_user_in",
+        "the one writer; set_user is it run over the pool",
+    ),
+];
+
+#[test]
+fn each_split_settings_table_has_one_writer() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    let mut writers = BTreeSet::new();
+
+    for file in rust_files(&root) {
+        let relative = file.strip_prefix(&root).expect("under src");
+        if relative.starts_with("testing") {
+            continue;
+        }
+        let module = module_path(relative);
+        let raw: Vec<char> = std::fs::read_to_string(&file)
+            .expect("read a source file")
+            .chars()
+            .collect();
+        let blanked: Vec<char> = blank(&raw.iter().collect::<String>()).chars().collect();
+        let live: Vec<char> = without_test_modules(&blanked.iter().collect::<String>())
+            .chars()
+            .collect();
+        assert_eq!(
+            raw.len(),
+            live.len(),
+            "blanking moved {}",
+            relative.display()
+        );
+        let lowered: String = raw.iter().collect::<String>().to_lowercase();
+        let lowered: Vec<char> = lowered.chars().collect();
+        assert_eq!(
+            raw.len(),
+            lowered.len(),
+            "lowercasing moved {}",
+            relative.display()
+        );
+
+        for at in 0..raw.len() {
+            let Some(table) = writes_settings_table(&lowered, at) else {
+                continue;
+            };
+            // A literal's opening quote survives blanking, where a comment
+            // leaves nothing, and is blanked again only in a test module.
+            let Some(quote) = (0..at).rev().find(|&i| !blanked[i].is_whitespace()) else {
+                continue;
+            };
+            let in_a_literal = matches!(blanked[quote], '"' | 'r');
+            if !in_a_literal || live[quote] != blanked[quote] {
+                continue;
+            }
+            let function = enclosing_fn(&live, quote).unwrap_or_default();
+            let path = format!("{module}::{function}");
+            writers.insert((table, path.trim_start_matches("::").to_string()));
+        }
+    }
+
+    let expected: BTreeSet<(&str, String)> = SETTINGS_WRITERS
+        .iter()
+        .map(|(table, path, _)| (*table, path.to_string()))
+        .collect();
+    assert_eq!(
+        writers, expected,
+        "write team_settings through db::settings::set_team and user_settings through \
+         set_user_in; an exception needs an entry in SETTINGS_WRITERS with its reason"
+    );
+}
+
+/// The settings table a write statement starting at `at` names, if one does:
+/// `insert into`, `replace into`, `update` or `delete from`, then the table.
+fn writes_settings_table(lowered: &[char], at: usize) -> Option<&'static str> {
+    let starts_word = at == 0 || !(lowered[at - 1].is_alphanumeric() || lowered[at - 1] == '_');
+    if !starts_word {
+        return None;
+    }
+    let rest: String = lowered[at..lowered.len().min(at + 80)].iter().collect();
+    let words: Vec<&str> = rest.split_whitespace().collect();
+    let table = match words.as_slice() {
+        ["insert" | "replace", "into", table, ..]
+        | ["insert", "or", _, "into", table, ..]
+        | ["delete", "from", table, ..]
+        | ["update", table, ..] => *table,
+        _ => return None,
+    };
+    let table = table.trim_end_matches(|c: char| !(c.is_alphanumeric() || c == '_'));
+    ["team_settings", "user_settings"]
+        .into_iter()
+        .find(|known| *known == table)
+}
+
+/// The name of the last `fn` declared before `position` in a blanked source:
+/// the function a statement sits in, since no writer nests one inside another.
+fn enclosing_fn(chars: &[char], position: usize) -> Option<String> {
+    (0..position.saturating_sub(2)).rev().find_map(|i| {
+        let is_fn = chars[i] == 'f'
+            && chars[i + 1] == 'n'
+            && chars[i + 2].is_whitespace()
+            && (i == 0 || !(chars[i - 1].is_alphanumeric() || chars[i - 1] == '_'));
+        is_fn.then(|| {
+            chars[i + 3..]
+                .iter()
+                .skip_while(|c| c.is_whitespace())
+                .take_while(|c| c.is_alphanumeric() || **c == '_')
+                .collect()
+        })
+    })
+}
+
 /// One `fn` signature, through its opening brace or semicolon.
 struct Signature {
     name: String,
@@ -823,8 +954,9 @@ fn blank(source: &str) -> String {
                 out.push('\'');
                 i += 1;
                 while i < chars.len() && chars[i] != '\'' {
-                    out.push(' ');
-                    i += if chars[i] == '\\' { 2 } else { 1 };
+                    let width = if chars[i] == '\\' { 2 } else { 1 };
+                    out.extend(std::iter::repeat_n(' ', width));
+                    i += width;
                 }
                 out.push('\'');
                 i += 1;

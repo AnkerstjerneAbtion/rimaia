@@ -585,7 +585,7 @@ async fn arrange(
 
     let settings = team_settings(&repository.id, marking);
     for (key, value) in &settings {
-        settings::set_team(ctx, &team_id, key, value)
+        settings::set_team(ctx, &team_id, key, Some(value))
             .await
             .expect("store a team setting");
     }

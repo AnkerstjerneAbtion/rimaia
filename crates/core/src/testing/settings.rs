@@ -16,7 +16,7 @@ use crate::error::Result;
 /// or its actor, and announces it as the accessor does.
 pub async fn set(ctx: &ServiceContext, key: &str, value: &str) -> Result<()> {
     match placement(key) {
-        Placement::Team => settings::set_team(ctx, ctx.scope.sole()?, key, value).await,
+        Placement::Team => settings::set_team(ctx, ctx.scope.sole()?, key, Some(value)).await,
         Placement::User => settings::set_user(ctx, key, value).await,
         Placement::Runner => settings::set_runner(ctx, key, value).await,
     }
@@ -24,7 +24,7 @@ pub async fn set(ctx: &ServiceContext, key: &str, value: &str) -> Result<()> {
 
 /// Writes a team key for `team_id`, which must be in the context's scope.
 pub async fn set_team(ctx: &ServiceContext, team_id: &str, key: &str, value: &str) -> Result<()> {
-    settings::set_team(ctx, team_id, key, value).await
+    settings::set_team(ctx, team_id, key, Some(value)).await
 }
 
 /// Reads `key` from the store its placement names, for the context's one team

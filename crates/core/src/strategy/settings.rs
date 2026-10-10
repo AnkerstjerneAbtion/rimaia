@@ -31,7 +31,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::context::{ScopedTx, ServiceContext};
+use crate::context::ServiceContext;
 use crate::db::{settings, StrategyMode};
 use crate::error::{Error, Result};
 
@@ -186,19 +186,17 @@ pub async fn set_repository_default(
 
 /// Removes `repository_id`'s defaults, leaving no orphan row behind (D17.1).
 ///
-/// Runs inside the transaction that deletes the repository itself, so a
-/// removal refused because tasks still reference it has not thrown the
-/// repository's configuration away on the way to the refusal. Nothing is
-/// published either — the caller already announces
-/// [`ChangeEvent::repositories`](crate::ChangeEvent::repositories), and the
-/// only surface that renders this row is the repository row that just
-/// disappeared.
-pub async fn delete_repository_default(
-    tx: &mut ScopedTx,
+/// Called by [`crate::repo::remove`] once the repository's own delete has
+/// committed, so a removal refused because tasks still reference it has not
+/// thrown the repository's configuration away on the way to the refusal. It
+/// goes through [`settings::set_team`] like every other team-settings write,
+/// so the checks tasks 045 and 051 hang there cover it too.
+pub(crate) async fn delete_repository_default(
+    ctx: &ServiceContext,
     team_id: &str,
     repository_id: &str,
 ) -> Result<()> {
-    settings::remove_team(tx, team_id, &repository_default_key(repository_id)).await
+    settings::set_team(ctx, team_id, &repository_default_key(repository_id), None).await
 }
 
 /// How much of a proposal a human has to look at before it runs, for the
@@ -214,7 +212,13 @@ pub async fn approval(ctx: &ServiceContext) -> Result<StrategyApproval> {
 }
 
 pub async fn set_approval(ctx: &ServiceContext, value: StrategyApproval) -> Result<()> {
-    settings::set_team(ctx, ctx.scope.sole()?, STRATEGY_APPROVAL, value.as_str()).await
+    settings::set_team(
+        ctx,
+        ctx.scope.sole()?,
+        STRATEGY_APPROVAL,
+        Some(value.as_str()),
+    )
+    .await
 }
 
 /// One reader and one absent-value rule for both levels of default.
@@ -254,7 +258,7 @@ async fn store_defaults(
         Error::internal(format!("the strategy default did not serialize: {error}"))
     })?;
 
-    settings::set_team(ctx, team_id, key, &json).await
+    settings::set_team(ctx, team_id, key, Some(&json)).await
 }
 
 #[cfg(test)]
@@ -407,8 +411,8 @@ mod tests {
 
     #[tokio::test]
     async fn a_refused_repository_removal_keeps_its_strategy_default() {
-        // The reason the delete runs inside `remove`'s transaction rather than
-        // after it: a repository that is still referenced is still configured.
+        // Why the default is removed only once the repository's delete has
+        // committed: a repository that is still referenced is still configured.
         let h = TestContext::new().await;
         let registered = registered(&h).await;
         let repository = &registered.repository;
@@ -492,9 +496,14 @@ mod tests {
     async fn a_hand_edited_approval_falls_back_to_automatic_instead_of_failing() {
         let h = TestContext::new().await;
 
-        settings::set_team(&h.context, &h.solo.team_id, STRATEGY_APPROVAL, "ask me")
-            .await
-            .expect("store a typo");
+        settings::set_team(
+            &h.context,
+            &h.solo.team_id,
+            STRATEGY_APPROVAL,
+            Some("ask me"),
+        )
+        .await
+        .expect("store a typo");
 
         assert_eq!(
             approval(&h.context).await.expect("read it back"),
@@ -531,7 +540,7 @@ mod tests {
 
         for key in [STRATEGY_DEFAULT, repository_key.as_str()] {
             for typo in ["", "{", r#"{"mode":"planed"}"#, r#"{"mdel":"opus"}"#] {
-                settings::set_team(&h.context, &h.solo.team_id, key, typo)
+                settings::set_team(&h.context, &h.solo.team_id, key, Some(typo))
                     .await
                     .expect("store a typo");
 
@@ -554,7 +563,7 @@ mod tests {
             &h.context,
             &h.solo.team_id,
             STRATEGY_DEFAULT,
-            r#"{"model":"sonnet"}"#,
+            Some(r#"{"model":"sonnet"}"#),
         )
         .await
         .expect("store a partial default");

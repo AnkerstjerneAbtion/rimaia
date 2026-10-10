@@ -26,7 +26,7 @@
 use serde::{Deserialize, Serialize};
 use sqlx::SqliteConnection;
 
-use crate::context::{ScopedTx, ServiceContext};
+use crate::context::ServiceContext;
 use crate::doctor::Check;
 use crate::error::{Error, Result};
 use crate::events::ChangeEvent;
@@ -258,11 +258,15 @@ pub(crate) async fn get_team(
     Ok(value)
 }
 
-/// Writes one team's value for a team key, and announces it to that team.
+/// Writes one team's value for a team key, or removes it with `None`, and
+/// announces the change to that team.
 ///
 /// **The one writer of `team_settings`.** Task 045 adds the revision and
 /// authorship columns here and task 051 the owner check, so a key added later
-/// inherits both without anyone having to remember them.
+/// inherits both without anyone having to remember them. Removal comes here
+/// too, for the same reason: a delete that bypassed this function would be a
+/// write those checks never see. Its one caller today is a repository's
+/// strategy default leaving with its repository (D17.1).
 ///
 /// One statement, so the `execute` *is* the commit; the publication still
 /// follows it, because ADR-0018's rule is about what a subscriber can read
@@ -271,43 +275,34 @@ pub(crate) async fn set_team(
     ctx: &ServiceContext,
     team_id: &str,
     key: &str,
-    value: &str,
+    value: Option<&str>,
 ) -> Result<()> {
     ensure_placed(key, Placement::Team)?;
     ensure_team_in_scope(ctx, team_id)?;
-    sqlx::query!(
-        "INSERT INTO team_settings (team_id, key, value) VALUES (?1, ?2, ?3)
-         ON CONFLICT (team_id, key) DO UPDATE SET value = excluded.value",
-        team_id,
-        key,
-        value,
-    )
-    .execute(&ctx.pool)
-    .await?;
+    match value {
+        Some(value) => {
+            sqlx::query!(
+                "INSERT INTO team_settings (team_id, key, value) VALUES (?1, ?2, ?3)
+                 ON CONFLICT (team_id, key) DO UPDATE SET value = excluded.value",
+                team_id,
+                key,
+                value,
+            )
+            .execute(&ctx.pool)
+            .await?;
+        }
+        None => {
+            sqlx::query!(
+                "DELETE FROM team_settings WHERE team_id = ?1 AND key = ?2",
+                team_id,
+                key,
+            )
+            .execute(&ctx.pool)
+            .await?;
+        }
+    }
 
     ctx.publish(ChangeEvent::settings(team_id.to_string()));
-    Ok(())
-}
-
-/// Deletes one team's row for a team key inside the caller's transaction,
-/// publishing nothing.
-///
-/// For the one key that has an owner row elsewhere, a repository's strategy
-/// default (D17.1): removing the repository removes its default in the same
-/// transaction, and the caller's own event covers it. A delete leaves no row
-/// for task 045's revision to describe, which is why it is not [`set_team`].
-pub(crate) async fn remove_team(tx: &mut ScopedTx, team_id: &str, key: &str) -> Result<()> {
-    ensure_placed(key, Placement::Team)?;
-    if !tx.scope().contains(team_id) {
-        return Err(Error::not_found(format!("no team with id {team_id}")));
-    }
-    sqlx::query!(
-        "DELETE FROM team_settings WHERE team_id = ?1 AND key = ?2",
-        team_id,
-        key,
-    )
-    .execute(&mut **tx)
-    .await?;
     Ok(())
 }
 
@@ -441,7 +436,7 @@ pub async fn base_instructions_for_task(ctx: &ServiceContext, task_id: &str) -> 
 }
 
 pub async fn set_base_instructions(ctx: &ServiceContext, value: &str) -> Result<()> {
-    set_team(ctx, ctx.scope.sole()?, BASE_INSTRUCTIONS, value).await
+    set_team(ctx, ctx.scope.sole()?, BASE_INSTRUCTIONS, Some(value)).await
 }
 
 /// How much configuration a run inherits. Absent means
@@ -733,7 +728,7 @@ mod tests {
 
         let mut refusals = vec![
             get_team(&h.context, &team, RUN_ENVIRONMENT).await.err(),
-            set_team(&h.context, &team, SUBSCRIPTION_MONTHLY_USD, "1")
+            set_team(&h.context, &team, SUBSCRIPTION_MONTHLY_USD, Some("1"))
                 .await
                 .err(),
             get_user(&h.context, BASE_INSTRUCTIONS).await.err(),
@@ -776,9 +771,12 @@ mod tests {
             get_team(&h.context, elsewhere, BASE_INSTRUCTIONS)
                 .await
                 .expect_err("a team the context cannot reach"),
-            set_team(&h.context, elsewhere, BASE_INSTRUCTIONS, "x")
+            set_team(&h.context, elsewhere, BASE_INSTRUCTIONS, Some("x"))
                 .await
                 .expect_err("a team the context cannot reach"),
+            set_team(&h.context, elsewhere, BASE_INSTRUCTIONS, None)
+                .await
+                .expect_err("a removal is a write like any other"),
         ] {
             assert_eq!(error.code(), crate::ErrorCode::NotFound);
             assert_eq!(error.to_string(), format!("no team with id {elsewhere}"));
@@ -847,6 +845,35 @@ mod tests {
 
         assert_eq!(
             h.changes.try_recv().expect("a publication"),
+            ChangeEvent::settings(h.solo.team_id.clone())
+        );
+    }
+
+    #[tokio::test]
+    async fn removing_a_team_setting_deletes_its_row_and_announces_it() {
+        // Removal goes through the one writer, so it is scoped and announced
+        // exactly as a write is, and leaves no row behind (D17.1).
+        let mut h = TestContext::new().await;
+        let key = "strategy_default.3f2b1c00-0000-4000-8000-0000000000c3";
+        set_team(&h.context, &h.solo.team_id, key, Some("{}"))
+            .await
+            .expect("write the row");
+        h.changes.try_recv().expect("the write's publication");
+
+        set_team(&h.context, &h.solo.team_id, key, None)
+            .await
+            .expect("remove the row");
+
+        let rows = sqlx::query_scalar!(
+            r#"SELECT count(*) AS "count!: i64" FROM team_settings WHERE key = ?1"#,
+            key,
+        )
+        .fetch_one(&h.context.pool)
+        .await
+        .expect("count the rows");
+        assert_eq!(rows, 0);
+        assert_eq!(
+            h.changes.try_recv().expect("the removal's publication"),
             ChangeEvent::settings(h.solo.team_id.clone())
         );
     }

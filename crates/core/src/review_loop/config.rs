@@ -594,8 +594,8 @@ pub async fn set_review_settings(
     // and task 051's owner check land, and each write announces itself. The
     // configuration goes second, so a failure between the two leaves the loop
     // as it was configured with new instructions, never the other way round.
-    settings::set_team(ctx, &team_id, REVIEW_INSTRUCTIONS, instructions).await?;
-    settings::set_team(ctx, &team_id, REVIEW_CONFIG, &stored).await?;
+    settings::set_team(ctx, &team_id, REVIEW_INSTRUCTIONS, Some(instructions)).await?;
+    settings::set_team(ctx, &team_id, REVIEW_CONFIG, Some(&stored)).await?;
 
     Ok(ReviewSettings {
         instructions: instructions.to_string(),

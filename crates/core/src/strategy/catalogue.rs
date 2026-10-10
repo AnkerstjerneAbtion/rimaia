@@ -212,7 +212,7 @@ pub async fn set_catalogue(ctx: &ServiceContext, json: &str) -> Result<()> {
     parse_raw(trimmed)
         .map_err(|message| Error::invalid(format!("the catalogue is not valid JSON: {message}")))?;
 
-    settings::set_team(ctx, ctx.scope.sole()?, STRATEGY_CATALOGUE, trimmed).await
+    settings::set_team(ctx, ctx.scope.sole()?, STRATEGY_CATALOGUE, Some(trimmed)).await
 }
 
 /// The catalogue as the operator wrote it — every field `Option`, so an absent
@@ -299,7 +299,7 @@ mod tests {
             // a warning instead of a silently empty dropdown.
             r#"{"model": [{"id": "opus", "label": "Opus"}]}"#,
         ] {
-            settings::set_team(&h.context, &h.solo.team_id, STRATEGY_CATALOGUE, typo)
+            settings::set_team(&h.context, &h.solo.team_id, STRATEGY_CATALOGUE, Some(typo))
                 .await
                 .expect("store a typo");
 
@@ -325,7 +325,7 @@ mod tests {
             &h.context,
             &h.solo.team_id,
             STRATEGY_CATALOGUE,
-            r#"{"models": []}"#,
+            Some(r#"{"models": []}"#),
         )
         .await
         .expect("store an empty model list");
@@ -350,7 +350,7 @@ mod tests {
             &h.context,
             &h.solo.team_id,
             STRATEGY_CATALOGUE,
-            r#"{"planner": {}}"#,
+            Some(r#"{"planner": {}}"#),
         )
         .await
         .expect("store a planner with no model");

@@ -438,7 +438,10 @@ every command).
   `set_base_instructions`, the `settings` row for `base_instructions` is unchanged, and a
   stale value in it is never read.
 - `db::settings::get` and `db::settings::set` are not `pub`. The per-placement accessors
-  are `pub(crate)`, and `set_team` is the only function that writes `team_settings`.
+  are `pub(crate)`, and `set_team` is the only function that writes `team_settings`,
+  removals included (`None` deletes the row), beside the seed row 038's
+  `identity::create_personal_team` writes as the team comes into being.
+  `each_split_settings_table_has_one_writer` holds both tables to their one writer.
   034's `set_in` is gone: `grep -rn "set_in(" crates/core/src` returns nothing, and
   `set_user_in` is the only statement that writes `user_settings`.
 - `the_digest_marker_is_written_to_the_actors_user_settings_row`. Under the `a` context,
