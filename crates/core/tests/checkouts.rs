@@ -5,6 +5,11 @@
 //! reach (`MemoryMachine`, bound to `runner.db` by `machine_store_contract!`).
 //! Each test says "the machine store" where it asserts on one.
 
+// Every test that spawns the fake CLI is `#[cfg(unix)]`: it is a shell script,
+// and Windows will not execute one. So are the fixture pieces only those tests
+// reach, allowed rather than gated one by one, as in `archive.rs`.
+#![cfg_attr(not(unix), allow(dead_code, unused_imports))]
+
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -187,6 +192,7 @@ fn the_retired_column_check_sees_through_aliases_and_ignores_literals() {
 // No board DTO carries an absolute path
 // ---------------------------------------------------------------------------
 
+#[cfg(unix)]
 #[tokio::test]
 async fn no_board_dto_carries_an_absolute_path() {
     let f = Fixture::new().await;
@@ -496,6 +502,7 @@ async fn a_repository_not_set_up_on_this_computer_refuses_to_run() {
 // Consent
 // ---------------------------------------------------------------------------
 
+#[cfg(unix)]
 #[tokio::test]
 async fn an_unattended_run_needs_this_runners_consent() {
     // The team ceiling at 1 and this runner's consent at 0: refused, and the
@@ -719,6 +726,7 @@ async fn a_repository_whose_deleted_tasks_left_worktrees_can_be_removed_and_regi
 // Log paths are derived
 // ---------------------------------------------------------------------------
 
+#[cfg(unix)]
 #[tokio::test]
 async fn a_run_log_is_found_by_its_ids_not_its_column() {
     let f = Fixture::new().await;
@@ -778,6 +786,7 @@ async fn a_run_log_is_found_by_its_ids_not_its_column() {
     );
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn a_run_log_path_is_refused_for_another_tasks_run() {
     let f = Fixture::new().await;
