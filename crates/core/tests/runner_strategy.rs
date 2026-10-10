@@ -75,7 +75,7 @@ use rimaia_core::runner::strategy::{
     self as runner_strategy, PlanOutcome, PlanPass, PlanSelection,
 };
 use rimaia_core::runner::{run_task, CancelSignal, RunRequest, RunTrigger, RunnerConfig};
-use rimaia_core::scheduler::{InFlight, LeaseOwner};
+use rimaia_core::scheduler::{InFlight, SlotOwner};
 
 /// `ClaudeProvider::tool_handle` at the run-scoped handle's own server,
 /// `rimaia-run` (seam-contract D30 point 4) — `RunnerConfig::default()` is
@@ -940,12 +940,12 @@ async fn a_card_already_carrying_a_proposal_is_skipped_with_its_proposal_untouch
 #[tokio::test]
 async fn a_pass_and_the_queue_cannot_start_two_processes_for_one_task() {
     // Seam-contract D19's whole point, from the batch side: one registry, not a
-    // second check. The lease below is the one a queued run or a "Run now"
+    // second check. The slot below is the one a queued run or a "Run now"
     // would be holding.
     let fixture = StrategyFixture::planned().await;
     let in_flight = InFlight::new();
     let _held = in_flight
-        .acquire_unbounded(&fixture.task_id, &fixture.repository_id, LeaseOwner::Queue)
+        .acquire_unbounded(&fixture.task_id, &fixture.repository_id, SlotOwner::Queue)
         .expect("the queue takes the task first");
 
     let pass = runner_strategy::plan_all(

@@ -28,7 +28,7 @@ use rimaia_core::runner::prompt::{compose_prompt, StrategyGuidance};
 use rimaia_core::runner::provider::{AgentProvider, ClaudeProvider};
 use rimaia_core::runner::strategy::claim_for_planning;
 use rimaia_core::runs::{self, transcript};
-use rimaia_core::scheduler::LeaseOwner;
+use rimaia_core::scheduler::SlotOwner;
 use rimaia_core::strategy::catalogue::{self, STRATEGY_CATALOGUE};
 use rimaia_core::strategy::settings::{
     self as strategy_settings, repository_default_key, StrategyApproval, STRATEGY_APPROVAL,
@@ -123,7 +123,7 @@ async fn a_foreign_id_is_answered_exactly_as_a_missing_one() {
             &t.machine,
             &t.in_flight,
             id,
-            LeaseOwner::Manual,
+            SlotOwner::Manual,
         )
         .await
         .map(|claimed| claimed.is_ok())
@@ -171,7 +171,7 @@ async fn a_foreign_id_is_answered_exactly_as_a_missing_one() {
 
     // None of them created a worktree, a lease, a process or a `runs` row.
     assert_eq!(t.run_count().await, runs_before);
-    assert!(t.in_flight.is_empty(), "no lease is held");
+    assert!(t.in_flight.is_empty(), "no slot is held");
     assert_eq!(t.cli.started(), Vec::<String>::new());
     let worktrees: Vec<_> = std::fs::read_dir(t.paths.worktrees_dir())
         .expect("the worktrees directory")

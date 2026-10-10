@@ -77,7 +77,7 @@ pub use capacity::{
 };
 pub use claim::{claim, claim_retry, give_up, release, ClaimOutcome};
 pub use inflight::{
-    Capacity, Counts, InFlight, Lease, LeaseOwner, LeaseRefused, CONCURRENCY_CEILING,
+    Capacity, Counts, InFlight, LocalSlot, SlotOwner, SlotRefused, CONCURRENCY_CEILING,
 };
 pub use pause::{
     active_until as usage_limit_pause_until, note_usage_limit, USAGE_LIMIT_PAUSE_UNTIL,

@@ -281,8 +281,8 @@ pub fn next_batch<'a>(
         if entry.skip.is_some() {
             continue;
         }
-        // A lease is taken *before* the claim (see `queue`'s header), so
-        // between those two points a task the button already holds still reads
+        // A manual start takes its slot *before* its claim, so between those
+        // two points a task the button already holds still reads
         // `idle` on the board and carries no skip reason. Passing over it here
         // costs nothing — `acquire` would refuse it anyway — but counting its
         // slot as free would hand the batch one more entry than there is room
@@ -698,7 +698,7 @@ mod tests {
     }
 
     #[test]
-    fn a_task_something_already_holds_a_lease_on_never_takes_a_slot() {
+    fn a_task_something_already_holds_a_slot_for_never_takes_one() {
         // The window between `acquire` and the claim: a task the button holds
         // still reads `idle` on the board and carries no skip reason. Counting
         // its slot as free would hand the batch one more entry than there is

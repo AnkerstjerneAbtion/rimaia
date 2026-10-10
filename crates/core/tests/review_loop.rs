@@ -44,7 +44,7 @@ use rimaia_core::runner::provider::{ClaudeProvider, ProviderId};
 use rimaia_core::runner::{
     claim_manual_start, run_task, CancelSignal, ManualStart, RunRequest, RunTrigger, RunnerConfig,
 };
-use rimaia_core::scheduler::{self, InFlight, LeaseOwner};
+use rimaia_core::scheduler::{self, InFlight, SlotOwner};
 use rimaia_core::startup;
 use rimaia_core::tasks::strategy::StrategyPlan;
 use rimaia_core::tasks::{self, NewTask};
@@ -897,7 +897,7 @@ async fn the_in_flight_slot_is_held_across_phases_and_released_once() {
     fixture.reviews_on(4, vec![]);
     let in_flight = InFlight::new();
     let slot = in_flight
-        .acquire_unbounded(&task, &fixture.repository_id, LeaseOwner::Queue)
+        .acquire_unbounded(&task, &fixture.repository_id, SlotOwner::Queue)
         .expect("the queue's slot");
     let config = fixture.config();
     let spy = Spy::new(fixture.board(&config));
@@ -922,11 +922,11 @@ async fn the_in_flight_slot_is_held_across_phases_and_released_once() {
     );
     assert_eq!(*spy.releases.lock().expect("the spy"), 0, "never released");
     assert!(in_flight
-        .acquire_unbounded(&task, &fixture.repository_id, LeaseOwner::Manual)
+        .acquire_unbounded(&task, &fixture.repository_id, SlotOwner::Manual)
         .is_err());
     drop(slot);
     assert!(in_flight
-        .acquire_unbounded(&task, &fixture.repository_id, LeaseOwner::Manual)
+        .acquire_unbounded(&task, &fixture.repository_id, SlotOwner::Manual)
         .is_ok());
 }
 
@@ -1843,7 +1843,7 @@ impl BoardPort for Spy {
                         .acquire_unbounded(
                             &lease.task_id,
                             &context.repository.id,
-                            LeaseOwner::Manual,
+                            SlotOwner::Manual,
                         )
                         .is_err()
                 });

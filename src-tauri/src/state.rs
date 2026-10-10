@@ -169,7 +169,7 @@ pub fn local_tools(
         doctor: doctor::Environment::for_runner(paths.clone(), runner),
         // Task 023: everything a planner needs (the data directory, the
         // `claude` the runner would spawn and the one in-flight registry every
-        // other door takes leases from) is reachable from `rimaia-core`.
+        // other door takes slots from) is reachable from `rimaia-core`.
         planner: PlannerAccess {
             paths: paths.clone(),
             runner: runner.clone(),
@@ -200,7 +200,7 @@ impl AppState {
     /// the app just killed by quitting should not silently restart itself on
     /// the next launch without the user asking again"). `in_flight.cancel_all`
     /// then reaches every run whoever started it, which `stop` deliberately
-    /// does not: `stop` is scoped to the queue's own leases, because stopping
+    /// does not: `stop` is scoped to the queue's own slots, because stopping
     /// the queue is a statement about the queue. Quitting is a statement about
     /// everything.
     ///

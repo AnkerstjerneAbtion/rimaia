@@ -172,7 +172,7 @@
 //!
 //! # A Pause, a Stop or a shutdown pressed mid-claim is not lost
 //!
-//! `try_step` takes its [`Lease`] on the shared [`InFlight`] registry — the one
+//! `try_step` takes its [`LocalSlot`] on the shared [`InFlight`] registry — the one
 //! thing [`QueueHandle::stop`] has to signal, and the one thing that makes
 //! [`QueueHandle::in_flight_task_ids`] non-empty — **before** the `claude`
 //! prerequisite check and the claim itself, not after either succeeds. Both
@@ -217,7 +217,7 @@ use crate::paths::AppPaths;
 use crate::runner::{probe_cli, run_task, CancelSignal, RunRequest, RunTrigger, RunnerConfig};
 use crate::schedule::window::{self, RunWindow};
 use crate::schedule::{self, fire, preflight, Due};
-use crate::scheduler::inflight::{Capacity, InFlight, Lease, LeaseOwner};
+use crate::scheduler::inflight::{Capacity, InFlight, LocalSlot, SlotOwner};
 use crate::scheduler::selection::{self, QueueEntry};
 use crate::scheduler::state::{self, QueueState};
 use crate::scheduler::{capacity, pause};
@@ -446,14 +446,14 @@ impl QueueHandle {
     /// a running task "goes to `failed` with `cancelled` reason"), which is not
     /// a state the queue re-selects — so a stopped task stays stopped.
     ///
-    /// Scoped to [`LeaseOwner::Queue`]. Before the registries were merged this
+    /// Scoped to [`SlotOwner::Queue`]. Before the registries were merged this
     /// was true by accident, because a manual run lived in a different map that
     /// this handle could not reach; now that they share one it has to be said.
     /// Stopping the queue is a statement about the queue, and a run the
     /// operator started by hand in front of them is not part of it.
     pub async fn stop(&self) -> Result<()> {
         self.pause().await?;
-        if self.shared.in_flight.cancel_owned_by(LeaseOwner::Queue) {
+        if self.shared.in_flight.cancel_owned_by(SlotOwner::Queue) {
             tracing::info!("stopping the run queue's own in-flight runs");
         }
         Ok(())
@@ -960,12 +960,12 @@ impl QueueTask {
         // "a human already started this one" is an ordinary race the queue
         // loses gracefully — it moves to the next entry rather than recording a
         // step error nobody needs to read.
-        let mut leased: Vec<(&QueueEntry, Lease)> = Vec::with_capacity(batch.len());
+        let mut leased: Vec<(&QueueEntry, LocalSlot)> = Vec::with_capacity(batch.len());
         for entry in batch {
             match self.shared.in_flight.acquire(
                 &entry.task_id,
                 &entry.repository_id,
-                LeaseOwner::Queue,
+                SlotOwner::Queue,
                 Capacity {
                     global: capacity.global,
                     per_repository: capacity.for_repository(&entry.repository_id),
@@ -1135,7 +1135,7 @@ async fn supervise(
     ctx: ServiceContext,
     paths: AppPaths,
     runner: RunnerConfig,
-    lease: Lease,
+    lease: LocalSlot,
     claim: Claim,
     request: RunRequest,
 ) {

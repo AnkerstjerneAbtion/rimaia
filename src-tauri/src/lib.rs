@@ -782,7 +782,7 @@ pub fn run() {
 /// that loop's next claim against this exit path, instead of ordering against
 /// it, would leave a task claimed with nobody left supervising it). Cancelling
 /// the runs actually in flight is `AppState::cancel_everything` right after,
-/// which reaches every lease in the shared registry exactly as it reaches a
+/// which reaches every slot in the shared registry exactly as it reaches a
 /// manual one. Net effect: quitting mid-run cancels those runs the same way
 /// pressing the queue's own Stop button would — including that button's side
 /// effect of leaving `queue_state = paused` for the next launch — and the wait
@@ -790,7 +790,7 @@ pub fn run() {
 /// performs the cancellation itself.
 ///
 /// **Both halves still hold with N runs (task 012), and neither needed a
-/// change.** `cancel_all` signals every lease in one pass rather than the one
+/// change.** `cancel_all` signals every slot in one pass rather than the one
 /// the queue happened to hold, so N children are SIGTERMed at the same instant
 /// and the single grace period below covers all of them rather than N of them
 /// in series. `has_in_flight_runs` is `!in_flight.is_empty()`, which is already
@@ -798,7 +798,7 @@ pub fn run() {
 /// this loop, and the queue's own `JoinSet` drain — converge on the same
 /// condition from opposite sides without either being able to block the other:
 /// the drain awaits supervisors that have already been asked to stop, and each
-/// of them frees its lease on the way out, which is what this loop is watching.
+/// of them frees its slot on the way out, which is what this loop is watching.
 async fn shut_down(app: &tauri::AppHandle) {
     let Some(state) = app.try_state::<AppState>() else {
         // Nothing was ever `manage`d — setup failed before reaching that

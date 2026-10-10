@@ -31,8 +31,8 @@ use crate::worktree::DiffStat;
 
 /// Names one lease, never what it is for (D31 point 3).
 ///
-/// `LeaseRef` and not `Lease`, because `scheduler::Lease` is D19's in-process
-/// slot until task 042 renames it.
+/// `LeaseRef`, named before task 042 renamed D19's in-process slot
+/// `scheduler::LocalSlot`: "lease" means only the board's lease.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LeaseRef {

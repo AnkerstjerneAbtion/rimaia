@@ -61,7 +61,7 @@ use rimaia_core::runs::bundle::RunCapture;
 use rimaia_core::schedule::window::RunWindow;
 use rimaia_core::schedule::{self as scheduler_schedule, ScheduleInput};
 use rimaia_core::scheduler::{
-    self, capacity, ClaimOutcome, InFlight, LeaseOwner, QueueHandle, QueueState, SkipReason,
+    self, capacity, ClaimOutcome, InFlight, QueueHandle, QueueState, SkipReason, SlotOwner,
 };
 use rimaia_core::startup;
 use rimaia_core::tasks::{self, NewTask, TaskFilter, TaskSummary};
@@ -1010,7 +1010,7 @@ async fn a_manual_run_occupies_a_slot_the_queue_then_does_not_use() {
     walk_to(&fixture, &manual, RunState::Running).await;
     let registry = InFlight::new();
     let manual_lease = registry
-        .acquire_unbounded(&manual, &manual_repository, LeaseOwner::Manual)
+        .acquire_unbounded(&manual, &manual_repository, SlotOwner::Manual)
         .expect("a person clicking Run now is not refused by the caps");
 
     let queue = fixture.spawn_queue_with(registry.clone());
@@ -1061,7 +1061,7 @@ async fn the_queue_starts_the_next_task_when_a_slot_is_freed_and_nothing_else_ch
     walk_to(&fixture, &occupant, RunState::Running).await;
     let registry = InFlight::new();
     let occupying = registry
-        .acquire_unbounded(&occupant, &occupied_repository, LeaseOwner::Manual)
+        .acquire_unbounded(&occupant, &occupied_repository, SlotOwner::Manual)
         .expect("the only slot");
 
     let mut changes = fixture.ctx().subscribe();

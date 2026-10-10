@@ -65,7 +65,7 @@ use crate::error::{Error, Result};
 use crate::machine::MachineContext;
 use crate::mcp::{Grant, RUN_MCP_SERVER_NAME};
 use crate::paths::AppPaths;
-use crate::scheduler::{InFlight, Lease, LeaseOwner, LeaseRefused};
+use crate::scheduler::{InFlight, LocalSlot, SlotOwner, SlotRefused};
 use crate::strategy::{self, EffectiveStrategy};
 use crate::tasks::strategy::{StrategyPlan, StrategyPlanRun, StrategyPlanStatus};
 use crate::tasks::{self, TaskDetail, TaskFilter, TaskSummary};
@@ -502,7 +502,7 @@ async fn stamp_run_metadata(
 pub struct PlannerAccess {
     pub paths: AppPaths,
     pub runner: RunnerConfig,
-    /// The one registry every door takes leases from — the queue, "Run now",
+    /// The one registry every door takes slots from — the queue, "Run now",
     /// "Plan now" and a pass.
     pub in_flight: InFlight,
     /// Where a planner's claim and write-backs go (seam-contract D31 point 8).
@@ -535,7 +535,7 @@ impl std::fmt::Debug for PlannerAccess {
 /// this used to live in `src-tauri`.
 pub struct PlannerClaim {
     /// D19's slot, which stays the runner's.
-    slot: Lease,
+    slot: LocalSlot,
     /// The board's `Plan` claim, and the context the planner is composed from.
     claim: Claim,
 }
@@ -585,7 +585,7 @@ pub async fn claim_for_planning(
     machine: &MachineContext,
     in_flight: &InFlight,
     task_id: &str,
-    owner: LeaseOwner,
+    owner: SlotOwner,
 ) -> Result<std::result::Result<PlannerClaim, PlanSkip>> {
     let preview = board.preview(task_id).await?;
     let repository = &preview.repository;
@@ -724,7 +724,7 @@ pub enum PlanSkip {
     NotPlanned { mode: StrategyMode },
     /// The queue, a manual run, or another planner already holds this task —
     /// the one registry, not a second check (seam-contract D19).
-    InFlight(LeaseRefused),
+    InFlight(SlotRefused),
     /// ADR-0012's per-repository opt-in is off.
     RepositoryNotOptedIn { repository: String, reason: String },
 }
@@ -994,8 +994,7 @@ pub async fn plan_all(
             // `Manual`, because a pass is a person at the machine: a Stop
             // pressed on the queue must not kill a preflight they started
             // deliberately.
-            match claim_for_planning(board, machine, in_flight, &task_id, LeaseOwner::Manual)
-                .await?
+            match claim_for_planning(board, machine, in_flight, &task_id, SlotOwner::Manual).await?
             {
                 Ok(claim) => plan_claimed(board, machine, ctx, paths, config, claim).await?,
                 Err(skip) => PlanOutcome::Skipped(skip),

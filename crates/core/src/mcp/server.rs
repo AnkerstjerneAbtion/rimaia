@@ -1146,7 +1146,7 @@ a task that already carries a proposal is re-planned, which is what this tool me
             &local.machine,
             &local.planner.in_flight,
             &request.task_id,
-            scheduler::LeaseOwner::Manual,
+            scheduler::SlotOwner::Manual,
         )
         .await?;
 

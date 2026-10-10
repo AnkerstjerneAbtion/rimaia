@@ -19,7 +19,7 @@ use rimaia_core::runner::strategy::{
     PlanOutcome, PlanPass, PlanProgress, PlanResult, PlanSelection,
 };
 use rimaia_core::runner::{probe_cli, strategy as runner_strategy, CancelSignal};
-use rimaia_core::scheduler::LeaseOwner;
+use rimaia_core::scheduler::SlotOwner;
 use rimaia_core::strategy::{
     catalogue, settings as strategy_settings, Catalogue, StrategyApproval, StrategyDefaults,
 };
@@ -217,19 +217,19 @@ pub async fn clear_task_strategy(state: State<'_, AppState>, task_id: String) ->
 /// nobody is watching. Both are read-only, and the planner performs them again
 /// as part of its own contract.
 ///
-/// The in-flight lease is what a second click fails against, and it is also
+/// The in-flight slot is what a second click fails against, and it is also
 /// what makes "Plan now" and "Run now" refuse each other: they take the same
 /// registry entry, so a planner in flight cannot be joined by an implementation
 /// run in the same worktree.
 ///
 /// That registry is now `rimaia_core::scheduler::InFlight` rather than a map in
-/// `src-tauri`, and the queue takes its leases from the same value. Before
+/// `src-tauri`, and the queue takes its slots from the same value. Before
 /// that, the queue claimed on the database row and the planner claimed in the
 /// shell, so a planner and a queued run genuinely could both start for one task
 /// — the hazard task 023 names in its Notes, closed as a consequence of there
 /// being one registry rather than two.
 ///
-/// Every rule this used to hold — the opt-in, the resolved mode, the lease
+/// Every rule this used to hold — the opt-in, the resolved mode, the slot
 /// itself — is now `runner_strategy::claim_for_planning`'s, so this and the
 /// `plan_task_strategy` MCP tool are two adapters over one function (ADR-0006).
 /// The split into a claim and a run is what lets this one answer as soon as the
@@ -250,7 +250,7 @@ pub async fn plan_task_strategy(state: State<'_, AppState>, task_id: String) -> 
         &state.machine,
         &state.in_flight,
         &task_id,
-        LeaseOwner::Manual,
+        SlotOwner::Manual,
     )
     .await?
     .map_err(|skip| Error::invalid(skip.message()))?;
@@ -350,7 +350,7 @@ pub async fn plan_tasks_strategy(
 /// written in place.
 ///
 /// The planner currently running is asked to stop too — the pass's signal is
-/// the one `plan_all` checks between cards, and each card's own lease carries
+/// the one `plan_all` checks between cards, and each card's own slot carries
 /// its own. A pass that has already finished is a no-op rather than an error:
 /// the user pressed Cancel a second too late, which is not a mistake to report.
 #[tauri::command]

@@ -11,7 +11,7 @@ use crate::error::{Error, Result};
 use crate::machine::MachineContext;
 use crate::paths::AppPaths;
 use crate::repo;
-use crate::scheduler::{InFlight, Lease, LeaseOwner};
+use crate::scheduler::{InFlight, LocalSlot, SlotOwner};
 
 use super::process::{implementation_intent, probe_cli, session_intent, RunTrigger, RunnerConfig};
 use super::provider;
@@ -38,7 +38,7 @@ pub struct ManualStart {
 /// Drop the slot only once the run it was taken for has finished: it is what
 /// a second click, the queue and Plan now all fail against.
 pub struct Started {
-    pub slot: Lease,
+    pub slot: LocalSlot,
     pub claim: Claim,
 }
 
@@ -68,7 +68,7 @@ pub async fn claim_manual_start(
     // of them is not the mis-set-configuration failure those settings exist
     // for. The per-task exclusion and the absolute ceiling still apply.
     let slot = in_flight
-        .acquire_unbounded(&start.task_id, &preview.repository.id, LeaseOwner::Manual)
+        .acquire_unbounded(&start.task_id, &preview.repository.id, SlotOwner::Manual)
         .map_err(|refused| Error::invalid(refused.message()))?;
 
     // This runner's consent, from its checkout; a repository with no checkout
