@@ -57,7 +57,8 @@ use std::collections::HashSet;
 use std::path::Path;
 use std::sync::Arc;
 
-use crate::board::{BoardPort, Claim, ClaimTarget, LeaseRef, PreviewOf, RunContext};
+use crate::board::lease::PhaseModels;
+use crate::board::{BoardPort, Claim, ClaimTarget, LeasePurpose, LeaseRef, PreviewOf, RunContext};
 use crate::context::ServiceContext;
 use crate::db::settings::RunEnvironment;
 use crate::db::{new_id, BoardColumn, ExitClass, Repository, StrategyMode};
@@ -288,7 +289,7 @@ async fn plan(
     // This runner's half of the limits, read when the planner starts, as every
     // process a runner starts reads it (ADR-0032 point 5).
     let runner_limits = super::limits::runner_limits(machine).await?;
-    let intent = planner_intent(
+    let mut intent = planner_intent(
         config,
         context,
         &runner_limits,
@@ -324,6 +325,15 @@ async fn plan(
     if let Err(refusal) = crate::repo::ensure_unattended_runs_allowed(machine, repository).await {
         return Ok(Planned::Failed(refusal.to_string()));
     }
+    // And this runner's strategy ceiling beside it (task 072), on the
+    // planner's own budget, which is what the claim judged for `strategy`.
+    let budget = PhaseModels::of(context).strategy_for(LeasePurpose::Strategy, catalogue);
+    let spawn = match super::process::judge_at_spawn(machine, context, &budget).await {
+        Ok(spawn) => spawn,
+        Err(refusal) => return Ok(Planned::Failed(refusal.to_string())),
+    };
+    intent.model = spawn.model;
+    intent.effort = spawn.effort;
 
     // Read *before* the spawn, and compared against the task's own
     // `strategy_updated_at` afterwards. This is how "did the planner actually
@@ -352,7 +362,7 @@ async fn plan(
             // login while the run after it refused would be two answers to one
             // question about the same repository.
             credentials: &credentials,
-            notes: &[],
+            notes: &spawn.notes,
         },
     )
     .await;

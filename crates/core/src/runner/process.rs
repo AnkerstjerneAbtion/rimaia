@@ -68,11 +68,13 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, Command};
 use tokio::sync::watch;
 
+use crate::board::lease::PhaseModels;
 use crate::board::{
     BoardPort, Claim, FinishReceipt, FinishRun, ImplementationBase, LeasePurpose, LeaseRef,
     NextStep, RunContext, StartRun, TranscriptEnd,
 };
-use crate::consent::ceiling::{self, StrategyCeiling};
+use crate::consent::ceiling::{self, PhaseStrategy, StrategyCeiling};
+use crate::consent::Ineligible;
 use crate::credentials::inject::ChildEnvironment;
 use crate::credentials::CredentialAccess;
 use crate::db::settings::{self, RunEnvironment};
@@ -101,6 +103,7 @@ use crate::runner::provider::{
 use crate::runner::strategy;
 use crate::runs::bundle::RunCapture;
 use crate::scheduler::{pause, InFlight, ResumePoint};
+use crate::strategy::StrategyOrigin;
 use crate::worktree::{self, Worktree};
 
 // ---------------------------------------------------------------------------
@@ -846,8 +849,6 @@ async fn run_implementation(
     };
 
     intent.system_append = compose_system_append(detail, repository);
-    intent.model = model;
-    intent.effort = effort;
     intent.prompt = &prompt;
     intent.workspace = Path::new(&worktree.path);
 
@@ -876,6 +877,24 @@ async fn run_implementation(
         repo::ensure_unattended_runs_allowed(machine, repository).await,
     )
     .await?;
+    // And this runner's strategy ceiling beside it (task 072): the model and
+    // effort the run spawns with are the ceiling's answer, never the
+    // resolution's alone.
+    let resolved = PhaseStrategy {
+        model,
+        effort,
+        model_origin: context.strategy.model_origin,
+        effort_origin: context.strategy.effort_origin,
+    };
+    let spawn = released(
+        board,
+        machine,
+        lease,
+        judge_at_spawn(machine, &context, &resolved).await,
+    )
+    .await?;
+    intent.model = spawn.model;
+    intent.effort = spawn.effort;
 
     // Minted here rather than by the row (D10): the report is idempotent by
     // id, which is what lets task 056 hold it in an outbox.
@@ -913,7 +932,7 @@ async fn run_implementation(
         plan: &plan,
         cancel: &request.cancel,
         credentials: &credentials,
-        notes: &[],
+        notes: &spawn.notes,
     };
 
     let executed = execute(board, lease, machine, paths, config, attempt).await;
@@ -1223,18 +1242,12 @@ impl Phases<'_> {
         }
 
         let provider_id = config.provider.id();
-        let (model, effort, limits, system_append) = match kind {
+        // What the board judged this phase on when it continued (task 045):
+        // 021's review model and effort for a review, falling back to the
+        // effective strategy, and the effective strategy for a fix.
+        let strategy = PhaseModels::of(&context).strategy_for(kind.into(), &context.catalogue);
+        let (limits, system_append) = match kind {
             RunKind::Review => (
-                review
-                    .config
-                    .review_model
-                    .clone()
-                    .or_else(|| context.strategy.model.clone()),
-                review
-                    .config
-                    .review_effort
-                    .clone()
-                    .or_else(|| context.strategy.effort.clone()),
                 limits::effective(
                     &context.limits,
                     &runner_limits,
@@ -1244,8 +1257,6 @@ impl Phases<'_> {
                 compose_review_system_append(&tool_name),
             ),
             _ => (
-                context.strategy.model.clone(),
-                context.strategy.effort.clone(),
                 limits::effective(&context.limits, &runner_limits, provider_id, []),
                 compose_system_append(&context.task, &context.repository),
             ),
@@ -1260,8 +1271,8 @@ impl Phases<'_> {
             run_environment,
             system_append,
             prompt: String::new(),
-            model,
-            effort,
+            model: strategy.model.clone(),
+            effort: strategy.effort.clone(),
             max_turns: config.max_turns.or(Some(limits.max_turns)),
             forbidden: limits.forbidden,
             required_tools: vec![tool.as_str()],
@@ -1330,6 +1341,15 @@ impl Phases<'_> {
         repo::ensure_unattended_runs_allowed(self.machine, &context.repository)
             .await
             .map_err(|error| error.to_string())?;
+        // And the strategy ceiling beside it (task 072): the board judged the
+        // `Continue` on the ceiling the finish carried, which the owner may
+        // have lowered since.
+        let spawn = judge_at_spawn(self.machine, &context, &strategy)
+            .await
+            .map_err(|error| error.to_string())?;
+        prepared.model = spawn.model;
+        prepared.effort = spawn.effort;
+        prepared.notes.extend(spawn.notes);
 
         Ok(prepared)
     }
@@ -1514,11 +1534,87 @@ impl Phases<'_> {
     }
 }
 
+/// What a phase spawns with once this runner's strategy ceiling has judged it
+/// at spawn, and what the run's transcript records about it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SpawnStrategy {
+    pub model: Option<String>,
+    pub effort: Option<String>,
+    /// One line per half the ceiling filled, naming
+    /// [`StrategyOrigin::RunnerCeiling`](crate::strategy::StrategyOrigin), for
+    /// the transcript's stderr ([`Attempt::notes`]).
+    pub notes: Vec<String>,
+}
+
+/// The sentence a spawn-time ceiling note ends with: the origin's own wire
+/// spelling, so a reader can match it to the panel's vocabulary.
+const RUNNER_CEILING_ORIGIN: &str = "origin: runner_ceiling";
+
+/// This runner's strategy ceiling, judged again at the last point before a
+/// spawn (ADR-0032 point 3, task 072), beside the consent re-check.
+///
+/// The claim carried the ceiling read when it was made, and the board refused
+/// with it (task 045), but the board is not trusted to have honoured it, and
+/// the owner can lower it while a planner or an earlier phase runs. So the
+/// stored ceiling is read again here, in the process that spawns, and
+/// [`ceiling::judge`] decides: a named choice above it is refused in 045's
+/// sentence, and a half nothing named is filled. The result replaces the
+/// context's model and effort for this spawn and no other: the board's
+/// per-task resolution never carries `RunnerCeiling`.
+///
+/// `Err` is the refusal, as [`Error::invalid`], for the caller to release
+/// with or record as the phase's reason. The label is the runner's own when
+/// the board sent one (`authorship`, a shared team); in a personal team it
+/// has none to send, and "this runner" reads as the same sentence.
+pub(crate) async fn judge_at_spawn(
+    machine: &MachineContext,
+    context: &RunContext,
+    strategy: &PhaseStrategy,
+) -> Result<SpawnStrategy> {
+    let ceiling = ceiling::strategy_ceiling(machine).await?;
+    let judged = ceiling::judge(strategy, &ceiling, &context.catalogue).map_err(|exceeded| {
+        let label = context
+            .authorship
+            .as_ref()
+            .map_or("this runner", |authorship| authorship.runner_label.as_str());
+        Error::invalid(
+            Ineligible::CeilingExceeded {
+                label: label.to_string(),
+                exceeded,
+            }
+            .refusal(),
+        )
+    })?;
+
+    let mut notes = Vec::new();
+    if judged.model_origin == StrategyOrigin::RunnerCeiling {
+        if let Some(model) = &judged.model {
+            notes.push(format!(
+                "rimaia: no model was named, so this run spawned with \"{model}\", the first \
+                 model in this runner's strategy ceiling ({RUNNER_CEILING_ORIGIN})"
+            ));
+        }
+    }
+    if judged.effort_origin == StrategyOrigin::RunnerCeiling {
+        if let Some(effort) = &judged.effort {
+            notes.push(format!(
+                "rimaia: no effort was named, so this run spawned with \"{effort}\", the highest \
+                 effort this runner's strategy ceiling allows ({RUNNER_CEILING_ORIGIN})"
+            ));
+        }
+    }
+    Ok(SpawnStrategy {
+        model: judged.model,
+        effort: judged.effort,
+        notes,
+    })
+}
+
 /// This runner's strategy ceiling, sent with a finish for the phase a
 /// `Continue` would start (task 045). A ceiling that cannot be read is sent as
 /// none rather than failing a finish that has already happened: the board's
-/// refusal is a cost control, not consent, and judging the ceiling again
-/// before the next phase spawns is task 072's.
+/// refusal is a cost control, not consent, and the next phase is judged again
+/// before it spawns ([`judge_at_spawn`]).
 async fn next_phase_ceiling(machine: &MachineContext) -> StrategyCeiling {
     ceiling::strategy_ceiling(machine)
         .await

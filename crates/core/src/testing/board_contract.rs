@@ -25,6 +25,8 @@
 //! `run_now_is_not_bound_by_capacity` and the owner case),
 //! consent and eligibility (045: the cases on [`Harness::start_shared`], and
 //! `a_personal_team_ignores_the_ceiling_column`),
+//! the strategy ceiling across a `Continue` (072:
+//! `a_review_phase_reached_through_continue_with_a_model_outside_the_ceiling_is_released`),
 //! expiry (053), `run_tool` (055), resends (056).
 
 use std::future::Future;
@@ -168,6 +170,7 @@ macro_rules! board_contract {
             a_fix_phase_whose_findings_lost_consent_is_released_instead_of_continued,
             a_team_that_forbids_unattended_runs_blocks_every_runner,
             a_personal_team_ignores_the_ceiling_column,
+            a_review_phase_reached_through_continue_with_a_model_outside_the_ceiling_is_released,
         );
     };
     (@cases $harness:ty; $($case:ident),* $(,)?) => {
@@ -2485,5 +2488,77 @@ pub mod cases {
         )
         .await;
         assert_same(claim.lease.task_id.clone(), queued, "Next takes it");
+    }
+
+    // -----------------------------------------------------------------------
+    // The strategy ceiling across a `Continue` (task 072), on the shared board
+    // -----------------------------------------------------------------------
+
+    pub async fn a_review_phase_reached_through_continue_with_a_model_outside_the_ceiling_is_released<
+        H: Harness,
+    >() {
+        let harness = H::start_shared().await;
+        let board = harness.board();
+        let arranged = Arranged::new(board).await;
+        arranged.allow_in_team(board, true).await;
+        review_config::set_review_settings(
+            board,
+            &ClaudeProvider,
+            "",
+            serde_json::json!({ "enabled": "on_cost_acknowledged", "review_model": "opus" }),
+        )
+        .await
+        .expect("the owner turns the loop on with a review model");
+        let bob = harness.owner(Which::B);
+        let as_bob = as_owner(&harness, Which::B);
+        // Bob's own task, naming no model, so the implementation is within any
+        // ceiling and neither eligibility nor consent refuses the review.
+        let task_id = arranged.task_by(&as_bob, "Bob's plan", Some(&bob)).await;
+        let runner = harness.runner(Which::B);
+        let claim = claimed(runner.as_ref(), run_target(&task_id, false)).await;
+        let run_id = new_id();
+        runner
+            .start_run(&claim.lease, starting(&run_id, RunKind::Implementation))
+            .await
+            .expect("start the implementation");
+
+        // The finish carries the ceiling the review would spawn under.
+        let receipt = runner
+            .finish_run(
+                &claim.lease,
+                &run_id,
+                FinishRun {
+                    ceiling: crate::consent::ceiling::StrategyCeiling {
+                        models: Some(vec!["sonnet".to_string()]),
+                        max_effort: None,
+                    },
+                    ..finishing_at(succeeded(), "a1")
+                },
+            )
+            .await
+            .expect("finish the implementation");
+
+        assert_same(
+            receipt.next,
+            NextStep::Released { resume_after: None },
+            "the loop ends rather than continuing into a review on opus",
+        );
+        assert_same(lease_of(board, &task_id).await, None, "the lease is gone");
+        let kinds: Vec<RunKind> = runs::list_runs_for_task(board, &task_id)
+            .await
+            .expect("read the runs")
+            .iter()
+            .map(|run| run.kind)
+            .collect();
+        assert_same(
+            kinds,
+            vec![RunKind::Implementation],
+            "no review run was started",
+        );
+        let detail = tasks::get_task(board, &task_id)
+            .await
+            .expect("read the task");
+        assert_same(detail.task.column, BoardColumn::InReview, "the column");
+        assert_same(detail.task.run_state, RunState::Idle, "the run state");
     }
 }

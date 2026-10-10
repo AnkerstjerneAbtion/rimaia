@@ -6,9 +6,9 @@
 //! does with the ceiling a claim carries: a named start refused in Scope 11's
 //! sentence, `Next` passing the task over with no reason, and each purpose
 //! judged on what that phase would spawn with. Judging again at spawn, and
-//! filling an absent choice, are task 072's. How the runner reads the stored
-//! key is here too; that the loop and the starter send what it reads is
-//! asserted in `crates/runner/tests/queue.rs`.
+//! filling an absent choice, are in `tests/ceiling_at_spawn.rs` (task 072).
+//! How the runner reads the stored key is here too; that the loop and the
+//! starter send what it reads is asserted in `crates/runner/tests/queue.rs`.
 //!
 //! Bob's runner, "Mac mini", on the shared team (`testing::shared`), running
 //! Bob's own tasks, so neither eligibility nor consent is what refuses.
