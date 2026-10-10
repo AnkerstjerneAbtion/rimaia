@@ -35,6 +35,7 @@ use rimaia_core::review;
 use rimaia_core::review::findings::{FindingStatus, NewReviewFinding, ReviewFinding};
 use rimaia_core::review_loop::{self, config as review_config, UnreviewedReason, Verdict};
 use rimaia_core::runner::events::{stderr_path, transcript_path, RunTail};
+use rimaia_core::runner::limits::{DISALLOWED_TOOLS, MAX_TURNS};
 use rimaia_core::runner::outcome::{start_run, NewRun};
 use rimaia_core::runner::process::DEFAULT_DISALLOWED_TOOLS;
 use rimaia_core::runner::prompt::{
@@ -547,6 +548,53 @@ async fn a_review_phase_argv_carries_rimaia_run_and_denies_file_mutation() {
             .any(|arg| arg.starts_with("mcp__rimaia-run") && arg != RECORD_TOOL),
         "no pattern denies or allows anything else at the run's own server"
     );
+}
+
+#[tokio::test]
+async fn a_review_phase_is_spawned_with_the_same_limits_as_its_implementation_phase() {
+    // ADR-0028 point 2 and ADR-0032 point 5: every process a runner starts is
+    // held to the stricter of the team's limits and the runner's, a review
+    // phase included. The review adds only its own denial.
+    let fixture = Fixture::new().await;
+    fixture.enable(json!({})).await;
+    let task = fixture.task_id.clone();
+    fixture.reviews_on(2, vec![]);
+    let team = &fixture.harness.solo.team_id;
+    testing::settings::set_team(fixture.ctx(), team, MAX_TURNS, "300")
+        .await
+        .expect("the team's budget");
+    testing::settings::set_team(fixture.ctx(), team, DISALLOWED_TOOLS, "Bash(rm:*)")
+        .await
+        .expect("the team's rule");
+    fixture
+        .machine()
+        .store
+        .set_setting(MAX_TURNS, "40")
+        .await
+        .expect("the runner's lower budget");
+    fixture
+        .machine()
+        .store
+        .set_setting(DISALLOWED_TOOLS, "Bash(curl:*)")
+        .await
+        .expect("the runner's added rule");
+
+    fixture.run().await;
+
+    let implementation = fixture.cli.argv(&task, 1);
+    let review = fixture.cli.argv(&task, 2);
+    assert_eq!(value_after(&implementation, "--max-turns"), "40");
+    assert_eq!(value_after(&review, "--max-turns"), "40");
+
+    let both: Vec<String> = ["Bash(rm:*)", "Bash(curl:*)"].map(str::to_string).to_vec();
+    let mut expected = both.clone();
+    expected.extend(operator_surface_denial());
+    assert_eq!(list_after(&implementation, "--disallowedTools"), expected);
+
+    let mut expected = both;
+    expected.extend(["Write", "Edit", "NotebookEdit"].map(str::to_string));
+    expected.extend(operator_surface_denial());
+    assert_eq!(list_after(&review, "--disallowedTools"), expected);
 }
 
 #[tokio::test]
@@ -1378,6 +1426,19 @@ fn value_after(argv: &[String], flag: &str) -> String {
         .and_then(|at| argv.get(at + 1))
         .unwrap_or_else(|| panic!("{flag} is not in {argv:?}"))
         .clone()
+}
+
+/// Every element between `flag` and the next flag.
+fn list_after(argv: &[String], flag: &str) -> Vec<String> {
+    let at = argv
+        .iter()
+        .position(|arg| arg == flag)
+        .unwrap_or_else(|| panic!("{flag} is not in {argv:?}"));
+    argv[at + 1..]
+        .iter()
+        .take_while(|arg| !arg.starts_with("--"))
+        .cloned()
+        .collect()
 }
 
 /// An argument as the stand-in logs it: one element per line, so an argument

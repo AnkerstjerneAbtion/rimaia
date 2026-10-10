@@ -16,7 +16,7 @@ use rimaia_core::db::settings::{
 };
 use rimaia_core::identity::{self, SoloIdentity};
 use rimaia_core::review_loop::config::{REVIEW_CONFIG, REVIEW_INSTRUCTIONS};
-use rimaia_core::runner::process::{DISALLOWED_TOOLS, MAX_TURNS};
+use rimaia_core::runner::limits::{DISALLOWED_TOOLS, MAX_TURNS};
 use rimaia_core::strategy::catalogue::STRATEGY_CATALOGUE;
 use rimaia_core::strategy::settings::{
     repository_default_key, STRATEGY_APPROVAL, STRATEGY_DEFAULT,

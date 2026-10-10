@@ -8,7 +8,7 @@
 //! loop reads this on its next pass rather than remembering it.
 //!
 //! The key constant lives here rather than in [`crate::db::settings`] for the
-//! reason `runner::process::DISALLOWED_TOOLS` gives for living where it does:
+//! reason `runner::limits::DISALLOWED_TOOLS` gives for living where it does:
 //! seam-contract D3 puts the *rules* about a key with the task that has the
 //! rules, and nothing outside the scheduler has any business knowing what
 //! `queue_state` means. The storage is the machine store, reached through

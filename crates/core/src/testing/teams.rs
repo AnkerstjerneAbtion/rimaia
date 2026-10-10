@@ -683,8 +683,8 @@ fn team_settings(repository_id: &str, marking: Marking) -> Vec<(String, String)>
                 crate::strategy::settings::STRATEGY_APPROVAL => {
                     marking.pick("automatic", "manual").to_string()
                 }
-                crate::runner::process::MAX_TURNS => marking.pick("41", "57").to_string(),
-                crate::runner::process::DISALLOWED_TOOLS => {
+                crate::runner::limits::MAX_TURNS => marking.pick("41", "57").to_string(),
+                crate::runner::limits::DISALLOWED_TOOLS => {
                     format!("Bash({}:*)", marking.text("tool").replace(' ', "-"))
                 }
                 crate::review_loop::config::REVIEW_INSTRUCTIONS => {

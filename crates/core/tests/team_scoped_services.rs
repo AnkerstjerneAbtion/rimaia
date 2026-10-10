@@ -13,6 +13,7 @@ use std::path::Path;
 use chrono::{DateTime, Duration, Utc};
 use pretty_assertions::assert_eq;
 use rimaia_core::analytics::{self, Period};
+use rimaia_core::board::service::{team_disallowed_tools, team_max_turns};
 use rimaia_core::board::RunContext;
 use rimaia_core::db::settings::{self, placement, Placement, ALL_KEYS};
 use rimaia_core::db::{BoardColumn, RunState};
@@ -22,8 +23,8 @@ use rimaia_core::repo::{self, NewRepository};
 use rimaia_core::review::{self, findings, FindingResolution};
 use rimaia_core::review_loop::config as review_config;
 use rimaia_core::runner::events::transcript_path;
+use rimaia_core::runner::limits::{DISALLOWED_TOOLS, MAX_TURNS};
 use rimaia_core::runner::outcome::observed_run_cost;
-use rimaia_core::runner::process::{self, DISALLOWED_TOOLS, MAX_TURNS};
 use rimaia_core::runner::prompt::{compose_prompt, StrategyGuidance};
 use rimaia_core::runner::provider::{AgentProvider, ClaudeProvider};
 use rimaia_core::runner::strategy::claim_for_planning;
@@ -469,7 +470,7 @@ async fn a_run_is_forbidden_what_its_own_team_forbids() {
     assert_eq!(limits.max_turns, expected_turns);
     assert_eq!(limits.disallowed_tools, expected_tools);
     assert_eq!(
-        process::max_turns(&t.both, &t.team_a.team_id)
+        team_max_turns(&t.both, &t.team_a.team_id)
             .await
             .expect("team A's budget"),
         expected_turns
@@ -602,7 +603,7 @@ async fn every_settings_key_reads_from_the_store_d28_places_it_in() {
                 plant(&t, m, key, &values[0], &values[1], &values[2]).await;
                 let read = match key {
                     settings::BASE_INSTRUCTIONS => settings::base_instructions(a).await,
-                    DISALLOWED_TOOLS => process::disallowed_tools(a, &t.team_a.team_id)
+                    DISALLOWED_TOOLS => team_disallowed_tools(a, &t.team_a.team_id)
                         .await
                         .map(|rules| rules.join("\n")),
                     _ => review_config::get_review_settings(a)
@@ -658,7 +659,7 @@ async fn every_settings_key_reads_from_the_store_d28_places_it_in() {
             MAX_TURNS => {
                 let planted = ["11", "22", "33"].map(String::from);
                 plant(&t, m, key, &planted[0], &planted[1], &planted[2]).await;
-                let read = process::max_turns(a, &t.team_a.team_id)
+                let read = team_max_turns(a, &t.team_a.team_id)
                     .await
                     .expect("read")
                     .to_string();

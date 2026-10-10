@@ -235,7 +235,7 @@ pub struct ChangeSummary {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TeamLimits {
-    /// The per-attempt turn budget (`runner::process::max_turns`).
+    /// The per-attempt turn budget (`board::service::team_max_turns`).
     pub max_turns: u32,
     /// The stored blocklist, one rule per entry, or `None` when nobody has set
     /// one. `None` and `Some(vec![])` differ: the first means ADR-0012's

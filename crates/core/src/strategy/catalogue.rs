@@ -70,7 +70,7 @@ pub struct CatalogueEntry {
 /// where an *unedited* key reaches it; [`PlannerBudget::default`] itself is
 /// the neutral value with no opinion, for the reason [`Catalogue::default`]
 /// gives. Explicit beats default, the same rule
-/// [`crate::runner::process::disallowed_tools`] states for an empty blocklist.
+/// [`crate::board::service::team_disallowed_tools`] states for an empty blocklist.
 /// `JsonSchema` because ADR-0021 puts this on the tool surface, and because
 /// unlike a row type it *is* the wire shape: seam-contract D16.1 keeps row types
 /// out of `mcp::responses` by projecting them, but a catalogue is a
@@ -316,7 +316,7 @@ mod tests {
     #[tokio::test]
     async fn an_explicitly_empty_model_list_means_no_choices_not_the_default_list() {
         // The operator turning a dropdown off is a thing they are allowed to
-        // do — `runner::process::disallowed_tools`' established rule. Note that
+        // do — `board::service::team_disallowed_tools`' established rule. Note that
         // `efforts`, which they did *not* write, still fills in from the
         // provider.
         let h = TestContext::new().await;

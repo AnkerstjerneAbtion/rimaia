@@ -55,14 +55,15 @@ use std::process::Command;
 use std::time::Duration;
 
 use pretty_assertions::assert_eq;
+use rimaia_core::board::service::team_disallowed_tools;
 use rimaia_core::db::settings::{self, RunEnvironment};
 use rimaia_core::db::{BoardColumn, ExitClass, Run, RunState, RunStatus, Task};
 use rimaia_core::mcp::{MCP_SERVER_NAME, RUN_MCP_SERVER_NAME};
 use rimaia_core::repo::{self, NewRepository};
 use rimaia_core::runner::events::{stderr_path, transcript_path, RunEvent, RunTail};
+use rimaia_core::runner::limits::DISALLOWED_TOOLS;
 use rimaia_core::runner::process::{
-    disallowed_tools, inherited_identity_vars, is_process_identity, verify_permission_mode,
-    DEFAULT_DISALLOWED_TOOLS, DISALLOWED_TOOLS,
+    inherited_identity_vars, is_process_identity, verify_permission_mode, DEFAULT_DISALLOWED_TOOLS,
 };
 use rimaia_core::runner::prompt::compose_prompt;
 use rimaia_core::runner::provider::{
@@ -657,7 +658,7 @@ async fn an_unset_blocklist_is_the_default_and_an_emptied_one_is_no_blocklist() 
     let harness = TestContext::new().await;
 
     assert_eq!(
-        disallowed_tools(&harness.context, &harness.solo.team_id)
+        team_disallowed_tools(&harness.context, &harness.solo.team_id)
             .await
             .expect("read the default"),
         DEFAULT_DISALLOWED_TOOLS
@@ -674,7 +675,7 @@ async fn an_unset_blocklist_is_the_default_and_an_emptied_one_is_no_blocklist() 
     .await
     .expect("store a list");
     assert_eq!(
-        disallowed_tools(&harness.context, &harness.solo.team_id)
+        team_disallowed_tools(&harness.context, &harness.solo.team_id)
             .await
             .expect("read it back"),
         vec![
@@ -688,7 +689,7 @@ async fn an_unset_blocklist_is_the_default_and_an_emptied_one_is_no_blocklist() 
         .await
         .expect("empty the list");
     assert_eq!(
-        disallowed_tools(&harness.context, &harness.solo.team_id)
+        team_disallowed_tools(&harness.context, &harness.solo.team_id)
             .await
             .expect("read it back"),
         Vec::<String>::new()

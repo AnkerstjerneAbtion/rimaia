@@ -29,6 +29,7 @@
 //! supervision.
 
 pub mod events;
+pub mod limits;
 pub mod outcome;
 pub mod process;
 pub mod prompt;
@@ -36,9 +37,13 @@ pub mod provider;
 pub mod start;
 pub mod strategy;
 
+pub use limits::{
+    effective as effective_limits, runner_limits, EffectiveLimits, RunnerLimits, DEFAULT_MAX_TURNS,
+    DISALLOWED_TOOLS, MAX_TURNS,
+};
 pub use process::{
-    execute, max_turns, probe_cli, run_task, Attempt, CancelSignal, PermissionMode, RunRequest,
-    RunTrigger, RunnerConfig, DEFAULT_MAX_TURNS, MAX_TURNS,
+    execute, probe_cli, run_task, Attempt, CancelSignal, PermissionMode, RunRequest, RunTrigger,
+    RunnerConfig,
 };
 pub use provider::{AgentProvider, ProviderId, RunIntent, SpawnPlan};
 pub use start::{claim_manual_start, ManualStart, Started};

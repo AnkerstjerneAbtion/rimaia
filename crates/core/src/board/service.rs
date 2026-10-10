@@ -30,8 +30,9 @@ use crate::paths::AppPaths;
 use crate::review::findings::{self, NewReviewFinding};
 use crate::review_loop;
 use crate::runner::events::RunTail;
+use crate::runner::limits::{self, DEFAULT_MAX_TURNS, DISALLOWED_TOOLS, MAX_TURNS};
 use crate::runner::outcome::{self, NewRun, RunOutcome};
-use crate::runner::process::{self, DISALLOWED_TOOLS};
+use crate::runner::process::DEFAULT_DISALLOWED_TOOLS;
 use crate::runner::provider::AgentProvider;
 use crate::runner::RunTrigger;
 use crate::runs::bundle::RunCapture;
@@ -523,10 +524,7 @@ async fn read_context(
     let strategy = strategy::effective_strategy(&task.task, &per_repository, &global);
 
     let catalogue = catalogue::catalogue_for(ctx, &team_id, provider).await?;
-    let limits = TeamLimits {
-        max_turns: process::max_turns(ctx, &team_id).await?,
-        disallowed_tools: stored_disallowed_tools(ctx, &team_id).await?,
-    };
+    let limits = team_limits(ctx, &team_id).await?;
 
     let resolved = review_loop::config::resolve(ctx, task_id, &repository.id).await?;
     let review = review_loop::context(ctx, task_id, resolved).await?;
@@ -542,21 +540,63 @@ async fn read_context(
     })
 }
 
-/// The stored blocklist as rules, one per non-blank line, or `None` when it
-/// was never set. `runner::process::disallowed_tools` documents why an
-/// explicitly empty setting is an empty list rather than the default.
-async fn stored_disallowed_tools(
-    ctx: &ServiceContext,
-    team_id: &str,
-) -> Result<Option<Vec<String>>> {
-    Ok(settings::get_team(ctx, team_id, DISALLOWED_TOOLS)
+/// The team's half of what bounds a run, read once, here, for the team that
+/// owns the task (ADR-0028 point 2, task 042).
+///
+/// The only reader of the team's `max_turns` and `disallowed_tools`. A runner
+/// receives them as `RunContext::limits` and combines them with its own
+/// override in `runner::limits::effective`; nothing on the runner reads the
+/// team's settings itself.
+pub async fn team_limits(ctx: &ServiceContext, team_id: &str) -> Result<TeamLimits> {
+    Ok(TeamLimits {
+        max_turns: team_max_turns(ctx, team_id).await?,
+        disallowed_tools: settings::get_team(ctx, team_id, DISALLOWED_TOOLS)
+            .await?
+            .map(|stored| limits::rules(&stored)),
+    })
+}
+
+/// The team's per-attempt turn budget, or [`DEFAULT_MAX_TURNS`] when nobody
+/// has set one.
+///
+/// Tolerant on read, like every other key in this codebase and for ADR-0003's
+/// reason — but note what "tolerant" costs here and does not: an unusable
+/// value falls back to a budget that is generous, never to *no* budget,
+/// because "no budget" is the runaway ADR-0011 asked for a bound against.
+pub async fn team_max_turns(ctx: &ServiceContext, team_id: &str) -> Result<u32> {
+    let Some(stored) = settings::get_team(ctx, team_id, MAX_TURNS).await? else {
+        return Ok(DEFAULT_MAX_TURNS);
+    };
+
+    match stored.trim().parse::<u32>() {
+        Ok(0) | Err(_) => {
+            tracing::warn!(
+                value = stored,
+                default = DEFAULT_MAX_TURNS,
+                "unusable max_turns; falling back to the default"
+            );
+            Ok(DEFAULT_MAX_TURNS)
+        }
+        Ok(value) => Ok(value),
+    }
+}
+
+/// The team's blocklist as rules, or [`DEFAULT_DISALLOWED_TOOLS`] when nobody
+/// has set one.
+///
+/// An explicitly empty setting means an empty list — the operator turning the
+/// blocklist off is a thing they are allowed to do, and silently restoring the
+/// default would be the same defect `settings::base_instructions` documents.
+/// [`team_limits`] carries the same distinction as `None` against
+/// `Some(vec![])`.
+pub async fn team_disallowed_tools(ctx: &ServiceContext, team_id: &str) -> Result<Vec<String>> {
+    Ok(team_limits(ctx, team_id)
         .await?
-        .map(|stored| {
-            stored
-                .lines()
-                .map(str::trim)
-                .filter(|line| !line.is_empty())
-                .map(str::to_string)
+        .disallowed_tools
+        .unwrap_or_else(|| {
+            DEFAULT_DISALLOWED_TOOLS
+                .iter()
+                .map(|pattern| (*pattern).to_string())
                 .collect()
         }))
 }

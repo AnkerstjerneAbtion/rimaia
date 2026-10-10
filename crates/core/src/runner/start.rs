@@ -77,9 +77,13 @@ pub async fn claim_manual_start(
     repo::ensure_unattended_runs_allowed(machine, &preview.repository).await?;
 
     let run_environment = settings::run_environment(machine).await?;
+    // The same two halves a queued run is held to, so a manual run is
+    // negotiated against the limits `run_task` will spawn it with.
+    let runner_limits = super::limits::runner_limits(machine).await?;
     let home = paths.provider_home(config.provider.id(), &start.task_id);
     let intent = implementation_intent(
         &preview,
+        &runner_limits,
         config,
         start.trigger,
         run_environment,

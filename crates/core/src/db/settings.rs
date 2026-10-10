@@ -114,8 +114,8 @@ pub const ALL_KEYS: [&str; 20] = [
     crate::strategy::catalogue::STRATEGY_CATALOGUE,
     crate::strategy::settings::STRATEGY_DEFAULT,
     crate::strategy::settings::STRATEGY_APPROVAL,
-    crate::runner::process::MAX_TURNS,
-    crate::runner::process::DISALLOWED_TOOLS,
+    crate::runner::limits::MAX_TURNS,
+    crate::runner::limits::DISALLOWED_TOOLS,
     crate::review_loop::config::REVIEW_INSTRUCTIONS,
     crate::review_loop::config::REVIEW_CONFIG,
     SUBSCRIPTION_MONTHLY_USD,
@@ -968,7 +968,7 @@ mod tests {
         // would be caught going to the team.
         use crate::review::digest::REVIEW_DIGEST_SEEN_THROUGH;
         use crate::review_loop::config::{REVIEW_CONFIG, REVIEW_INSTRUCTIONS};
-        use crate::runner::process::{DISALLOWED_TOOLS, MAX_TURNS};
+        use crate::runner::limits::{DISALLOWED_TOOLS, MAX_TURNS};
         use crate::strategy::catalogue::STRATEGY_CATALOGUE;
         use crate::strategy::settings::{
             repository_default_key, STRATEGY_APPROVAL, STRATEGY_DEFAULT,

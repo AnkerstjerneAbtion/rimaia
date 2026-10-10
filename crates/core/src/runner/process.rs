@@ -70,7 +70,7 @@ use tokio::sync::watch;
 
 use crate::board::{
     BoardPort, Claim, FinishReceipt, FinishRun, ImplementationBase, LeaseRef, NextStep, RunContext,
-    StartRun, TeamLimits, TranscriptEnd,
+    StartRun, TranscriptEnd,
 };
 use crate::context::ServiceContext;
 use crate::credentials::inject::ChildEnvironment;
@@ -87,6 +87,7 @@ use crate::review_loop::FixSession;
 use crate::runner::events::{
     transcript_path, EventStream, InitEvent, RunEvent, RunTail, TokenUsage,
 };
+use crate::runner::limits::{self, RunnerLimits};
 use crate::runner::outcome::{PullRequestWatch, RunOutcome, SpawnedAs, Termination};
 use crate::runner::prompt::{
     compose_fix_continuation, compose_fix_prompt, compose_fix_resume, compose_prompt,
@@ -138,44 +139,6 @@ pub const DEFAULT_GRACE_PERIOD: Duration = Duration::from_secs(10);
 /// cancellation, on a path that runs at most twice per run.
 #[cfg(unix)]
 const KILL: &str = "kill";
-
-/// The `settings` key holding the tool blocklist (ADR-0012 point 3: "the list is
-/// a setting so it can grow with experience").
-///
-/// Read through [`settings::get_team`] rather than through SQL of this module's
-/// own, which is seam-contract D3's rule, and for the team that owns the task:
-/// a run is forbidden what its own team forbids. The key constant sits here rather than in
-/// [`settings`] because the vocabulary is the runner's — the stored value is
-/// written in the active provider's own rule language, and nothing outside this
-/// module has any business knowing its shape.
-pub const DISALLOWED_TOOLS: &str = "disallowed_tools";
-
-/// The `settings` key holding the per-attempt turn budget (ADR-0011:
-/// "`--max-turns` per attempt bounds runaway loops").
-///
-/// Here rather than in [`settings`], for the same seam-contract D3 reason
-/// [`DISALLOWED_TOOLS`] gives: the vocabulary is the runner's, and nothing
-/// outside this module has any business knowing that a "turn" is a Claude Code
-/// concept.
-pub const MAX_TURNS: &str = "max_turns";
-
-/// How many turns one attempt may take when nobody has set a budget.
-///
-/// Chosen from two constraints pulling in opposite directions. A turn limit is
-/// [`ExitClass::Fatal`] (`runner::outcome`'s rule 4, and ADR-0011's fatal row
-/// names it): a budget set too low does not cost a retry, it **abandons the
-/// task**, half-done, with a card that says "failed" for a reason the operator
-/// did not choose. And a budget set too high does not bound the runaway
-/// ADR-0011 wants bounded. The spike's recorded runs took four to forty turns
-/// for one-file work, so a substantial overnight plan plausibly wants a few
-/// hundred; three hundred is comfortably above honest work and far below a loop
-/// that has stopped making progress.
-///
-/// **This changes every implementation run's argv**, which is why
-/// `tests/runner_process.rs` asserts the vector with `--max-turns 300` in it
-/// rather than without: before task 014 the flag was never passed at all, and
-/// the CLI's own default applied.
-pub const DEFAULT_MAX_TURNS: u32 = 300;
 
 // ---------------------------------------------------------------------------
 // What a run is allowed to do
@@ -263,144 +226,6 @@ fn is_identity_of_any_provider(prefixes: &[&str], name: &str) -> bool {
         name.get(..prefix.len())
             .is_some_and(|head| head.eq_ignore_ascii_case(prefix))
     })
-}
-
-// ---------------------------------------------------------------------------
-// Settings this module reads
-// ---------------------------------------------------------------------------
-
-/// Rimaia's operator tool surface, denied to every run the runner spawns
-/// whatever the operator's configuration says.
-///
-/// # Why this is not part of the blocklist setting
-///
-/// That list is configuration, and an explicitly empty setting means an empty
-/// list — the operator is allowed to turn it off. This is not configuration. It
-/// closes a hole that would otherwise make [`RunScope`](crate::mcp::RunScope)
-/// decorative.
-///
-/// # The hole
-///
-/// `run_environment` defaults to `inherit` (ADR-0004's amendment), and ADR-0006
-/// tells the operator to register Rimaia with `claude mcp add`. So an
-/// implementation run's session loads the **operator's unscoped `/mcp`**, and
-/// ADR-0012 gives that run `bypassPermissions`, which — unlike `acceptEdits` —
-/// auto-approves MCP calls. The run would hold `move_task`, `create_task`,
-/// `set_task_dependencies`, and every ADR-0021 configuration tool: exactly the
-/// rows `Tool::run_access` marks `Refused`. A prompt-injected run could mark its
-/// own card `done`, or change the model every future run uses, with no bash
-/// involved at all.
-///
-/// # Named as an intent, spelled by the provider
-///
-/// Which tool names that is, and whether a whole server can be denied at once,
-/// is one provider's business (ADR-0026 point 4). What Rimaia states is the
-/// operation.
-///
-/// # Every run, and never a run's own handle
-///
-/// The denial works by tool name, so a run's own scoped handle is served under
-/// a different server name, `rimaia-run`, and this is spelled at the operator's
-/// `rimaia` only. That is what lets it be unconditional: [`forbidden_operations`]
-/// appends it for every intent, implementation, planner, review or fix, and no
-/// caller can drop it. Seam-contract D30 points 1 and 2 decide it, and
-/// `run-scoped-server-name.jsonl` records the CLI matching the server segment
-/// exactly rather than as a prefix.
-const RIMAIA_TOOL_SURFACE: ForbiddenOperation = ForbiddenOperation::RimaiaToolSurface;
-
-/// The tool blocklist, or [`DEFAULT_DISALLOWED_TOOLS`] when nobody has set one.
-///
-/// One pattern per line rather than comma-separated: a pattern contains spaces
-/// and parentheses already, and a line is the one separator that cannot appear
-/// inside one. Blank lines are ignored, so the stored value stays readable in
-/// the `sqlite3` CLI (ADR-0003).
-///
-/// An explicitly empty setting means an empty list — the operator turning the
-/// blocklist off is a thing they are allowed to do, and silently restoring the
-/// default would be the same defect `settings::base_instructions` documents.
-///
-/// `team_id`'s value only; the runner's stricter override is task 042's.
-pub async fn disallowed_tools(ctx: &ServiceContext, team_id: &str) -> Result<Vec<String>> {
-    let Some(stored) = settings::get_team(ctx, team_id, DISALLOWED_TOOLS).await? else {
-        return Ok(DEFAULT_DISALLOWED_TOOLS
-            .iter()
-            .map(|pattern| (*pattern).to_string())
-            .collect());
-    };
-
-    Ok(stored
-        .lines()
-        .map(str::trim)
-        .filter(|line| !line.is_empty())
-        .map(str::to_string)
-        .collect())
-}
-
-/// The blocklist as the **operations** an intent carries (ADR-0026 point 4).
-///
-/// The same setting [`disallowed_tools`] reads, one level up and as the board
-/// handed it over in [`TeamLimits`]: an unset setting means ADR-0012 point 3's
-/// three operations, and a set one means the operator's own rules, each tagged
-/// with the provider whose vocabulary it was written in. The tag is what stops
-/// those strings being handed to a provider that never spoke them — and what
-/// stops them being silently dropped either.
-///
-/// `extra` is whatever the caller adds on top, and only what is particular to
-/// it: nothing for an implementation run, the planner's own denials for a
-/// strategy run. The operator tool surface is appended here, after `extra`, for
-/// every intent (seam-contract D30 point 2), because a denial a caller has to
-/// remember is one a caller can forget.
-///
-/// Pure since task 036: the read is the board's, done once when it builds a
-/// [`RunContext`](crate::board::RunContext), so a blocklist cannot be read
-/// twice and refused on one value and spawned on another.
-pub(crate) fn forbidden_operations(
-    limits: &TeamLimits,
-    provider: &dyn AgentProvider,
-    extra: impl IntoIterator<Item = ForbiddenOperation>,
-) -> Vec<ForbiddenOperation> {
-    let mut forbidden: Vec<ForbiddenOperation> = match &limits.disallowed_tools {
-        None => claude::DEFAULT_FORBIDDEN.to_vec(),
-        Some(rules) => rules
-            .iter()
-            .map(|rule| ForbiddenOperation::ProviderRule {
-                provider: provider.id(),
-                rule: rule.clone(),
-            })
-            .collect(),
-    };
-    forbidden.extend(extra);
-    forbidden.push(RIMAIA_TOOL_SURFACE);
-
-    forbidden
-}
-
-/// The per-attempt turn budget, or [`DEFAULT_MAX_TURNS`] when nobody has set
-/// one.
-///
-/// Tolerant on read, like every other key in this codebase and for ADR-0003's
-/// reason — but note what "tolerant" costs here and does not: an unusable value
-/// falls back to a budget that is generous, never to *no* budget, because "no
-/// budget" is the runaway ADR-0011 asked for a bound against.
-///
-/// `team_id`'s value only, the team that owns the task: the runner's stricter
-/// override is task 042's.
-pub async fn max_turns(ctx: &ServiceContext, team_id: &str) -> Result<u32> {
-    let Some(stored) = settings::get_team(ctx, team_id, MAX_TURNS).await? else {
-        return Ok(DEFAULT_MAX_TURNS);
-    };
-
-    match stored.trim().parse::<u32>() {
-        Ok(0) | Err(_) => {
-            tracing::warn!(
-                value = stored,
-                default = DEFAULT_MAX_TURNS,
-                "unusable max_turns; falling back to the default"
-            );
-            Ok(DEFAULT_MAX_TURNS)
-        }
-        Ok(value) => Ok(value),
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -697,13 +522,18 @@ async fn prepare_worktree(
 /// fields [`negotiate`](provider::negotiate) reads are all here; the prompt,
 /// the workspace and the strategy are filled in afterwards, and it reads none
 /// of them.
+///
+/// `runner` is this runner's half of the limits, read through the machine
+/// when the run starts; the team's half is the context's (ADR-0028 point 2).
 pub(crate) fn implementation_intent<'a>(
     context: &RunContext,
+    runner: &RunnerLimits,
     config: &RunnerConfig,
     trigger: RunTrigger,
     run_environment: RunEnvironment,
     session: SessionIntent<'a>,
 ) -> RunIntent<'a> {
+    let limits = limits::effective(&context.limits, runner, config.provider.id(), []);
     RunIntent {
         session,
         permission_mode: trigger.permission_mode(),
@@ -712,12 +542,13 @@ pub(crate) fn implementation_intent<'a>(
         prompt: "",
         model: None,
         effort: None,
-        // The board's budget, unless this installation's wiring overrides it —
-        // which in production it never does (`RunnerConfig::default` leaves it
-        // `None`), and which a test or a future strategy caller may.
-        max_turns: config.max_turns.or(Some(context.limits.max_turns)),
+        // The stricter of the team's and the runner's budgets, unless this
+        // installation's wiring overrides it — which in production it never
+        // does (`RunnerConfig::default` leaves it `None`), and which a test or
+        // a future strategy caller may.
+        max_turns: config.max_turns.or(Some(limits.max_turns)),
         workspace: Path::new(""),
-        forbidden: forbidden_operations(&context.limits, config.provider.as_ref(), []),
+        forbidden: limits.forbidden,
         // Empty: ADR-0012 gives an unattended implementation run
         // `bypassPermissions`, which approves everything the blocklist has not
         // already taken away. A list here would narrow that, which is task
@@ -869,6 +700,10 @@ async fn run_implementation(
     // Runner-owned, and read once, so the run is negotiated against the same
     // value it is then spawned with.
     let run_environment = released(board, lease, settings::run_environment(machine).await).await?;
+    // This runner's half of the limits, read when the run starts by the same
+    // route as the run environment, never cached across runs (ADR-0028 point
+    // 2). The team's half is the claim's context.
+    let runner_limits = released(board, lease, limits::runner_limits(machine).await).await?;
 
     // Rimaia's conversation id, minted before anything exists so a resume works
     // even against a provider whose child dies before announcing itself
@@ -879,6 +714,7 @@ async fn run_implementation(
     let home = paths.provider_home(config.provider.id(), &task_id);
     let mut intent = implementation_intent(
         context,
+        &runner_limits,
         config,
         trigger,
         run_environment,
@@ -1247,6 +1083,11 @@ impl Phases<'_> {
         let run_environment = settings::run_environment(self.machine)
             .await
             .map_err(|error| error.to_string())?;
+        // Per phase, as for the implementation: every process a runner starts
+        // is held to the stricter of the two halves (ADR-0032 point 5).
+        let runner_limits = limits::runner_limits(self.machine)
+            .await
+            .map_err(|error| error.to_string())?;
         let checkout = repo::ensure_unattended_runs_allowed(self.machine, &context.repository)
             .await
             .map_err(|error| error.to_string())?;
@@ -1339,7 +1180,8 @@ impl Phases<'_> {
             }
         }
 
-        let (model, effort, forbidden, system_append) = match kind {
+        let provider_id = config.provider.id();
+        let (model, effort, limits, system_append) = match kind {
             RunKind::Review => (
                 review
                     .config
@@ -1351,9 +1193,10 @@ impl Phases<'_> {
                     .review_effort
                     .clone()
                     .or_else(|| context.strategy.effort.clone()),
-                forbidden_operations(
+                limits::effective(
                     &context.limits,
-                    config.provider.as_ref(),
+                    &runner_limits,
+                    provider_id,
                     [ForbiddenOperation::AnyFileMutation],
                 ),
                 compose_review_system_append(&tool_name),
@@ -1361,7 +1204,7 @@ impl Phases<'_> {
             _ => (
                 context.strategy.model.clone(),
                 context.strategy.effort.clone(),
-                forbidden_operations(&context.limits, config.provider.as_ref(), []),
+                limits::effective(&context.limits, &runner_limits, provider_id, []),
                 compose_system_append(&context.task, &context.repository),
             ),
         };
@@ -1377,8 +1220,8 @@ impl Phases<'_> {
             prompt: String::new(),
             model,
             effort,
-            max_turns: config.max_turns.or(Some(context.limits.max_turns)),
-            forbidden,
+            max_turns: config.max_turns.or(Some(limits.max_turns)),
+            forbidden: limits.forbidden,
             required_tools: vec![tool.as_str()],
             handle: RimaiaHandle {
                 url,

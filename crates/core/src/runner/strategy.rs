@@ -70,7 +70,8 @@ use crate::strategy::{self, EffectiveStrategy};
 use crate::tasks::strategy::{StrategyPlan, StrategyPlanRun, StrategyPlanStatus};
 use crate::tasks::{self, TaskDetail, TaskFilter, TaskSummary};
 
-use super::process::{forbidden_operations, Attempt, CancelSignal, PermissionMode, RunnerConfig};
+use super::limits::{self, RunnerLimits};
+use super::process::{Attempt, CancelSignal, PermissionMode, RunnerConfig};
 use super::prompt::{compose_strategy_prompt, compose_strategy_system_append, StrategyGuidance};
 use super::provider::{self, ForbiddenOperation, RimaiaHandle, RunIntent, SessionIntent};
 
@@ -273,9 +274,13 @@ async fn plan(
     );
     let home = paths.provider_home(config.provider.id(), task_id);
     let conversation = new_id();
+    // This runner's half of the limits, read when the planner starts, as every
+    // process a runner starts reads it (ADR-0032 point 5).
+    let runner_limits = super::limits::runner_limits(machine).await?;
     let intent = planner_intent(
         config,
         context,
+        &runner_limits,
         task_id,
         &prompt,
         worktree,
@@ -384,12 +389,13 @@ async fn plan(
 ///   property is the other half: `--strict-mcp-config` is what guarantees the
 ///   only MCP server this run can reach is the scoped Rimaia handle, and not
 ///   whatever the operator has configured.
-/// - **Bounded by `--max-turns`** from the catalogue, so a planner in a loop
-///   costs cents.
+/// - **Bounded by `--max-turns`** from the catalogue, or this runner's lower
+///   override, so a planner in a loop costs cents.
 #[allow(clippy::too_many_arguments)]
 fn planner_intent<'a>(
     config: &RunnerConfig,
     context: &RunContext,
+    runner_limits: &RunnerLimits,
     task_id: &str,
     prompt: &'a str,
     worktree: &'a Path,
@@ -398,8 +404,13 @@ fn planner_intent<'a>(
     handle: RimaiaHandle,
 ) -> RunIntent<'a> {
     let catalogue = &context.catalogue;
-    let forbidden =
-        forbidden_operations(&context.limits, config.provider.as_ref(), PLANNER_FORBIDDEN);
+    let forbidden = limits::effective(
+        &context.limits,
+        runner_limits,
+        config.provider.id(),
+        PLANNER_FORBIDDEN,
+    )
+    .forbidden;
 
     RunIntent {
         session: SessionIntent::Open { conversation, home },
@@ -436,7 +447,12 @@ fn planner_intent<'a>(
         required_tools: vec![crate::mcp::Tool::SetTaskStrategy.as_str()],
         forbidden,
         rimaia_handle: Some(handle),
-        max_turns: Some(catalogue.planner.max_turns),
+        // The catalogue's budget, or this runner's when that is lower. The
+        // team's `max_turns` caps implementation phases, not the planner.
+        max_turns: Some(limits::planner_max_turns(
+            catalogue.planner.max_turns,
+            runner_limits,
+        )),
     }
 }
 

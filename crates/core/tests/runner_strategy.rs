@@ -65,7 +65,8 @@ use rimaia_core::mcp::requests::PlanSelectionRequest;
 use rimaia_core::mcp::{self, McpHandle, RunHandles, Tool, MCP_SERVER_NAME};
 use rimaia_core::repo::{self, NewRepository};
 use rimaia_core::runner::events::{transcript_path, RunTail};
-use rimaia_core::runner::process::{DEFAULT_DISALLOWED_TOOLS, DEFAULT_MAX_TURNS};
+use rimaia_core::runner::limits::{DEFAULT_MAX_TURNS, MAX_TURNS};
+use rimaia_core::runner::process::DEFAULT_DISALLOWED_TOOLS;
 use rimaia_core::runner::prompt::{
     compose_prompt, compose_strategy_prompt, compose_strategy_system_append, compose_system_append,
     StrategyGuidance,
@@ -199,6 +200,32 @@ async fn a_planned_task_spawns_its_planner_with_the_flags_that_let_it_answer() {
         ),
         "the planner is handed the run-scoped route, not the operator's /mcp",
     );
+}
+
+#[tokio::test]
+async fn the_planner_is_held_to_the_runners_turn_budget_only_when_it_is_lower() {
+    // ADR-0028 point 2: the runner may lower a budget and never raise one. The
+    // planner's budget is the catalogue's six, which the team's `max_turns`
+    // does not cap; a runner override caps it only when it is lower.
+    for (runner, expected) in [("3", "3"), ("50", PLANNER_MAX_TURNS)] {
+        let fixture = StrategyFixture::planned().await;
+        fixture
+            .harness
+            .machine()
+            .store
+            .set_setting(MAX_TURNS, runner)
+            .await
+            .expect("the runner's override");
+        let cli = FakeCli::writing_back(&fixture.task_id);
+
+        fixture.run(&cli).await.expect("the run completes");
+
+        assert_eq!(
+            value_after(&cli.argv(1), "--max-turns"),
+            expected,
+            "a runner override of {runner} against the catalogue's {PLANNER_MAX_TURNS}",
+        );
+    }
 }
 
 #[tokio::test]
@@ -354,7 +381,7 @@ async fn the_implementation_run_spawns_with_exactly_the_model_and_effort_the_pla
     expected.extend(operator_surface_denial());
     // ADR-0011's per-attempt bound, which task 014 turned on for every
     // implementation run. Before it the flag was absent and the CLI's own
-    // default applied — see `runner::process::DEFAULT_MAX_TURNS` on why the
+    // default applied — see `runner::limits::DEFAULT_MAX_TURNS` on why the
     // number is what it is, and why too low is worse than too high.
     expected.push("--max-turns".to_string());
     expected.push(DEFAULT_MAX_TURNS.to_string());
