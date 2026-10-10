@@ -2,12 +2,16 @@ use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
 
 use rimaia_core::board::BoardPort;
+use rimaia_core::doctor;
 use rimaia_core::identity::SoloIdentity;
-use rimaia_core::mcp::{McpHandle, RunHandles};
+use rimaia_core::machine::MachineContext;
+use rimaia_core::mcp::{LocalTools, McpHandle, RunHandles};
 use rimaia_core::runner::events::RunTail;
+use rimaia_core::runner::strategy::PlannerAccess;
 use rimaia_core::runner::{CancelSignal, RunnerConfig};
 use rimaia_core::scheduler::{InFlight, QueueHandle};
 use rimaia_core::{AppPaths, ServiceContext};
+use rimaia_runner::RunnerStore;
 
 /// Everything a command needs, built once at startup and managed by Tauri.
 ///
@@ -65,6 +69,16 @@ pub struct AppState {
     /// already scoped to the team and acting for the user; this keeps the
     /// record itself, which task 046's `Caller::solo` reads (D32 point 7).
     pub solo: SoloIdentity,
+    /// This machine's own store, `runner.db` (ADR-0028 point 3), opened and
+    /// adopted into in `setup()`: for a runner-crate reader such as task 049's
+    /// `runner_identity` read. Core code never sees this type; it reaches the
+    /// same store through [`machine`](Self::machine).
+    pub runner_store: RunnerStore,
+    /// The machine context over [`runner_store`](Self::runner_store), the
+    /// board's change sender and the solo team (task 041): what every command
+    /// and subsystem reads and writes this machine's own state through. The
+    /// same value the queue and the MCP server were built with.
+    pub machine: MachineContext,
     pub paths: AppPaths,
     pub in_flight: InFlight,
     pub tails: RunTails,
@@ -133,7 +147,50 @@ pub struct AppState {
 /// in `rimaia_core::runner::events`).
 const MAX_TRACKED_RUN_TAILS: usize = 32;
 
+/// This machine's MCP tools: the machine, a doctor over the shell's own paths
+/// and runner, and the planner's access (task 041).
+///
+/// One function for the first bind in `setup()` and the rebind in
+/// `commands::mcp::set_mcp_port`, so a rebind cannot quietly narrow what
+/// `run_doctor` sees, leave the server unable to plan what it could plan a
+/// moment ago, or drop this machine's tools.
+pub fn local_tools(
+    machine: &MachineContext,
+    paths: &AppPaths,
+    runner: &RunnerConfig,
+    in_flight: &InFlight,
+    board_port: &Arc<dyn BoardPort>,
+) -> LocalTools {
+    LocalTools {
+        machine: machine.clone(),
+        // The shell's own paths and runner, not `Programs::default`, so
+        // `run_doctor` over MCP reports on the same `claude` binary and the
+        // same data directory the window does (ADR-0021's parity).
+        doctor: doctor::Environment::for_runner(paths.clone(), runner),
+        // Task 023: everything a planner needs (the data directory, the
+        // `claude` the runner would spawn and the one in-flight registry every
+        // other door takes leases from) is reachable from `rimaia-core`.
+        planner: PlannerAccess {
+            paths: paths.clone(),
+            runner: runner.clone(),
+            in_flight: in_flight.clone(),
+            board: Arc::clone(board_port),
+        },
+    }
+}
+
 impl AppState {
+    /// [`local_tools`] over this state's own values.
+    pub fn local_tools(&self) -> LocalTools {
+        local_tools(
+            &self.machine,
+            &self.paths,
+            &self.runner,
+            &self.in_flight,
+            &self.board_port,
+        )
+    }
+
     /// Asks every in-flight run to stop and reports whether there was anything
     /// to ask, so a caller with nothing running can skip the wait entirely.
     ///

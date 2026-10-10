@@ -23,6 +23,9 @@
 //! `/mcp/run/{token}` is one run working on one task, and the allow table lives
 //! in [`crate::mcp::scope`] rather than in eleven `if` statements here.
 
+use std::sync::Arc;
+
+use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::wrapper::{Json, Parameters};
 use rmcp::model::{Implementation, ServerCapabilities, ServerInfo};
 use rmcp::{tool, tool_handler, tool_router, ServerHandler};
@@ -31,6 +34,7 @@ use crate::analytics::{self, Period};
 use crate::context::{ServiceContext, TeamScope};
 use crate::db::{BoardColumn, StrategySource};
 use crate::doctor;
+use crate::machine::MachineContext;
 use crate::mcp::error::ToolError;
 use crate::mcp::requests::{
     AddTaskLinkRequest, AnalyticsRequest, ArchiveTaskRequest, ArchiveTasksRequest, ClearableField,
@@ -60,6 +64,7 @@ use crate::mcp::scope::{RunScope, Tool};
 use crate::review;
 use crate::review_loop::{self, ReviewConfig, ReviewLevel, ReviewSettings, TaskReview};
 use crate::runner::prompt::TEMPLATE_VARIABLES;
+use crate::runner::provider::AgentProvider;
 use crate::runner::strategy::{self as runner_strategy, PlanOutcome, PlanSelection, PlannerAccess};
 use crate::schedule;
 use crate::scheduler::{self, capacity};
@@ -77,9 +82,10 @@ Rimaia instead of implementing it in this session. You are writing for a future 
 have the plan and nothing else: no memory of this conversation, and nobody to ask. Anything the \
 implementation depends on must be in the plan.";
 
-/// The tool handler. Two fields: the services it calls through, and which door
-/// it was reached through. It still has no state of its own — everything it can
-/// do, it does through the same services the Tauri commands call.
+/// The tool handler. Three fields: the board services it calls through,
+/// which door it was reached through, and this machine, when the host has
+/// one. It still has no state of its own — everything it can do, it does
+/// through the same services the Tauri commands call.
 ///
 /// Cheap to clone, like [`ServiceContext`] itself: the streamable-HTTP
 /// transport builds one per request.
@@ -89,47 +95,90 @@ pub struct RimaiaServer {
     /// Carried on the *value*, not on the request, which is the whole argument
     /// for putting the token in the path — see [`RunScope`].
     scope: RunScope,
-    /// What `run_doctor` reports about (task 018).
-    ///
-    /// An explicit constructor parameter rather than a default, because the two
-    /// things it carries cannot be guessed from here and a wrong guess would be
-    /// a doctor that reassures about the wrong installation: the app data
-    /// directory is a platform lookup only the shell can do (see
-    /// [`AppPaths`](crate::AppPaths)), and `programs.agent` must be the very
-    /// binary the runner would spawn. This is also the gap ADR-0021 names for
-    /// `plan_task_strategy` — the MCP server not knowing the shell's `AppPaths`
-    /// — closed for the one tool that only *reads* it.
-    doctor: doctor::Environment,
-    /// What `plan_task_strategy` and `plan_tasks_strategy` spawn through (task
-    /// 023). An explicit constructor parameter for exactly the reason `doctor`
-    /// is one: the data directory, the `claude` the runner would spawn and the
-    /// shared in-flight registry are all things only the shell knows, and a
-    /// wrong guess would be a planner running against the wrong installation.
-    ///
-    /// **This is the other half of ADR-0021's named gap.** The tool was left off
-    /// the surface because the ownership of "is this task already in flight"
-    /// lived in `src-tauri`; seam-contract D19 moved it, and this carries it in.
-    planner: PlannerAccess,
+    /// The agent CLI whose catalogue the board tools read and validate
+    /// against, read for nothing else: the board side's counterpart of
+    /// `InProcessBoard`'s provider (D31 point 9), which task 046 replaces with
+    /// D32's `ProviderProfile`. A field of its own rather than read off
+    /// [`LocalTools`], because the board router serves without a machine.
+    provider: Arc<dyn AgentProvider>,
+    /// This machine, for the local router (task 041). `None` on a host with
+    /// no machine, which then serves the board router alone.
+    local: Option<LocalTools>,
 }
 
-/// `vis = "pub"` so `tests/mcp_scope.rs`, which lives outside this crate, can
-/// enumerate the registered tools and require each one to have declared a
-/// run-scope decision. That anti-drift test is the only thing that makes the
-/// allow table hard to forget, and it cannot be written against a private
-/// router.
-#[tool_router(vis = "pub")]
-impl RimaiaServer {
-    /// Takes the context already re-sourced by `mcp::build`, so nothing here
-    /// has to remember that its writes are `mcp` (ADR-0019).
+/// What the local router reaches this machine through (task 041, ADR-0035
+/// point 6).
+///
+/// Core defines the handlers and the [`MachineStore`](crate::machine::MachineStore)
+/// trait; the host decides whether a machine exists and supplies it. The shell
+/// passes `Some` to both the operator's and the run-scoped constructor; task
+/// 046's server and task 060's hosted `/mcp` pass `None`.
+#[derive(Clone)]
+pub struct LocalTools {
+    /// This machine's own state: the settings, the schedules and, from task
+    /// 066, the checkouts and worktree records.
+    pub machine: MachineContext,
+    /// What `run_doctor` reports about (task 018).
     ///
-    /// [`RunScope::Operator`], because `/mcp` is what this constructor serves
-    /// and task 020 takes nothing away from it.
-    pub fn new(ctx: ServiceContext, doctor: doctor::Environment, planner: PlannerAccess) -> Self {
+    /// An explicit field rather than a default, because the two things it
+    /// carries cannot be guessed from here and a wrong guess would be a doctor
+    /// that reassures about the wrong installation: the app data directory is a
+    /// platform lookup only the shell can do (see [`AppPaths`](crate::AppPaths)),
+    /// and `programs.agent` must be the very binary the runner would spawn.
+    pub doctor: doctor::Environment,
+    /// What `plan_task_strategy` and `plan_tasks_strategy` spawn through (task
+    /// 023), for exactly the reason `doctor` is a field: the data directory,
+    /// the `claude` the runner would spawn and the shared in-flight registry
+    /// are all things only the shell knows. Also where
+    /// `get_repository_credential_status` reaches this machine's keychain.
+    pub planner: PlannerAccess,
+}
+
+impl std::fmt::Debug for LocalTools {
+    /// By hand because neither a machine store nor a board port is `Debug`.
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("LocalTools")
+            .field("machine", &self.machine)
+            .field("doctor", &self.doctor)
+            .field("planner", &self.planner)
+            .finish()
+    }
+}
+
+/// The board router: every tool that needs only the board, including the
+/// ones tasks 033–035 and 021 added. Five of them, `archive_task`,
+/// `archive_tasks`, `move_task`, `approve_task` and `reject_task`, also hand
+/// this machine to their core function when there is one, for the reaction
+/// it runs on the machine (task 041).
+///
+/// `vis = "pub"` here and on [`local_router`](Self::local_router) so
+/// `tests/mcp_scope.rs`, which lives outside this crate, can enumerate the
+/// registered tools through [`tool_router`](Self::tool_router) and require each
+/// one to have declared a run-scope decision. That anti-drift test is the only
+/// thing that makes the allow table hard to forget, and it cannot be written
+/// against a private router.
+#[tool_router(router = board_router, vis = "pub")]
+impl RimaiaServer {
+    /// The operator's server, on `/mcp`: [`RunScope::Operator`], because that
+    /// is what this constructor serves and task 020 takes nothing away from
+    /// it.
+    ///
+    /// Takes the context already re-sourced by `mcp::build`, so nothing here
+    /// has to remember that its writes are `mcp` (ADR-0019). `local` is this
+    /// machine, when the host has one: `Some` serves the local router beside
+    /// the board router, and `None`, a server's call, serves the board router
+    /// alone (task 041).
+    pub fn new(
+        ctx: ServiceContext,
+        provider: Arc<dyn AgentProvider>,
+        local: Option<LocalTools>,
+    ) -> Self {
         Self {
             ctx,
             scope: RunScope::Operator,
-            doctor,
-            planner,
+            provider,
+            local,
         }
     }
 
@@ -138,161 +187,21 @@ impl RimaiaServer {
     ///
     /// A second constructor rather than a parameter on [`new`](Self::new),
     /// because a scope is not something the operator path should be able to get
-    /// wrong by passing the wrong argument.
+    /// wrong by passing the wrong argument. `local` is what the operator's
+    /// server was given: a run is still offered every local tool, and calling
+    /// one is [`RunScope::authorize`]'s refusal, never an unknown tool.
     pub fn scoped(
         ctx: ServiceContext,
-        doctor: doctor::Environment,
-        planner: PlannerAccess,
+        provider: Arc<dyn AgentProvider>,
+        local: Option<LocalTools>,
         scope: RunScope,
     ) -> Self {
         Self {
             ctx,
             scope,
-            doctor,
-            planner,
+            provider,
+            local,
         }
-    }
-
-    #[tool(
-        description = "Check this Rimaia installation for the environment problems that make an \
-overnight queue fail: a missing or signed-out Claude Code CLI, a git too old for worktrees, a \
-GitHub CLI that cannot open a pull request, an unwritable or full data directory, a registered \
-repository whose directory has moved, and an MCP port nothing is listening on. Call this when the \
-user reports that runs are failing, before telling them to start the queue, or when \
-`start_queue` has refused — every result carries the specific command that fixes it, and \
-`is_blocking` says whether the queue would refuse to start right now."
-    )]
-    pub async fn run_doctor(&self) -> Result<Json<DoctorReportView>, ToolError> {
-        self.scope.authorize(Tool::RunDoctor, None)?;
-
-        let report = doctor::run(&self.ctx, &self.doctor).await?;
-        Ok(Json(DoctorReportView::from(&report)))
-    }
-
-    #[tool(
-        description = "Record that the first-run walkthrough has been seen, so Rimaia opens on \
-the board instead of the welcome screen. Call it only when the user says they are done with \
-setup, or want to skip it — it changes nothing about how runs work, and un-dismissing it is not \
-something this surface offers."
-    )]
-    pub async fn dismiss_onboarding(&self) -> Result<Json<OnboardingView>, ToolError> {
-        self.scope.authorize(Tool::DismissOnboarding, None)?;
-
-        db::settings::set_onboarding_dismissed(&self.ctx, true).await?;
-        Ok(Json(OnboardingView {
-            onboarding_dismissed: true,
-        }))
-    }
-
-    #[tool(
-        description = "Run the strategy planner for one task now and wait for it to finish, then \
-report the model, effort and rationale it proposed. Call this when the user wants to see how a \
-task will be modelled before committing to the expensive implementation run — a planner costs a \
-few cents and a handful of turns, where the run it is checking costs on the order of a dollar. \
-The task must resolve to `planned` mode and its repository must have opted into unattended runs; \
-a task that already carries a proposal is re-planned, which is what this tool means that \
-`plan_tasks_strategy` deliberately does not."
-    )]
-    pub async fn plan_task_strategy(
-        &self,
-        Parameters(request): Parameters<TaskStrategyRequest>,
-    ) -> Result<Json<PlanResultView>, ToolError> {
-        self.scope
-            .authorize(Tool::PlanTaskStrategy, Some(&request.task_id))?;
-
-        let claim = runner_strategy::claim_for_planning(
-            self.planner.board.as_ref(),
-            &self.planner.in_flight,
-            &request.task_id,
-            scheduler::LeaseOwner::Manual,
-        )
-        .await?;
-
-        let (title, outcome) = match claim {
-            Ok(claim) => {
-                let title = claim.title().to_string();
-                let outcome = runner_strategy::plan_claimed(
-                    self.planner.board.as_ref(),
-                    &self.ctx,
-                    &self.planner.paths,
-                    &self.planner.runner,
-                    claim,
-                )
-                .await?;
-                (title, outcome)
-            }
-            Err(skip) => {
-                let detail = tasks::get_task(&self.ctx, &request.task_id).await?;
-                (detail.task.title, PlanOutcome::Skipped(skip))
-            }
-        };
-
-        Ok(Json(PlanResultView::new(
-            &request.task_id,
-            &title,
-            &outcome,
-        )))
-    }
-
-    #[tool(
-        description = "Plan a whole column, a whole repository or a hand-picked set of tasks in \
-one pass, one planner at a time, and report what each one was modelled as. This is the preflight \
-the user runs before leaving for the evening: spending forty cents to see how ten cards are \
-modelled, before committing forty dollars of implementation, is the cheapest check this product \
-offers. Call it when the user asks to check how a set of tasks will run, or before starting the \
-queue on a column they have not reviewed. State at least one of `column`, `repository_id` or \
-`task_ids`; each one narrows the set, and a selection that states none of them is refused rather \
-than taken to mean the whole board. A card that already carries a proposal is skipped with that \
-named as the reason and its proposal left untouched — use `plan_task_strategy` to re-plan one \
-deliberately."
-    )]
-    pub async fn plan_tasks_strategy(
-        &self,
-        Parameters(request): Parameters<PlanSelectionRequest>,
-    ) -> Result<Json<PlanPassView>, ToolError> {
-        self.scope.authorize(Tool::PlanTasksStrategy, None)?;
-
-        let selection: PlanSelection = request.into();
-        // A pass reached over MCP has no Cancel button to trip, so the signal
-        // is one nothing holds. It is still passed rather than made optional:
-        // one loop, one cancellation story, and the surface that *does* have a
-        // button hands in a real one.
-        let cancel = crate::runner::CancelSignal::new();
-        let pass = runner_strategy::plan_all(
-            self.planner.board.as_ref(),
-            &self.ctx,
-            &self.planner.paths,
-            &self.planner.runner,
-            &self.planner.in_flight,
-            &selection,
-            &cancel,
-            &|_progress| {},
-        )
-        .await?;
-
-        Ok(Json(PlanPassView::from(&pass)))
-    }
-
-    #[tool(
-        description = "Report whether one repository carries a forge token of its own, whose \
-account it belongs to, what the user called it, and whether this machine's keychain still holds \
-it. Call this when a run failed to push or to open a pull request, or before telling the user \
-their token is fine — a repository whose credential is configured and whose keychain item has \
-gone refuses to run rather than falling back to the operator's own login, and this is what says \
-so. **The token itself is never returned by anything**, and there is no tool that sets or \
-removes one: a live forge token has no business travelling over this protocol."
-    )]
-    pub async fn get_repository_credential_status(
-        &self,
-        Parameters(request): Parameters<RepositoryRequest>,
-    ) -> Result<Json<CredentialStatusView>, ToolError> {
-        self.scope
-            .authorize(Tool::GetRepositoryCredentialStatus, None)?;
-
-        let repository = repo::get(&self.ctx, &request.repository_id).await?;
-        let store = self.planner.runner.credentials.status(&repository.id).await;
-
-        Ok(Json(CredentialStatusView::new(&repository, store)))
     }
 
     #[tool(
@@ -350,47 +259,6 @@ analytics page can show spend as a share of it. Call it only when the user state
         db::settings::set_subscription_monthly_usd(&self.ctx, request.monthly_usd).await?;
         Ok(Json(SubscriptionCostView {
             monthly_usd: db::settings::subscription_monthly_usd(&self.ctx).await?,
-        }))
-    }
-
-    #[tool(
-        description = "Put down one doctor warning the user has read and decided about, so it \
-stops appearing in the banner above every screen. Take `check`, `repository` and `detail` \
-verbatim from a `run_doctor` row — all three are the key, so the same check about a different \
-repository stays visible, and the warning comes back by itself if its `detail` ever changes. \
-This is presentation only: it never changes whether the queue will start, and a `fail` row \
-cannot be dismissed at all. Call it when the user says they know about a warning and want it \
-out of the way, never to tidy up a report on their behalf."
-    )]
-    pub async fn dismiss_doctor_warning(
-        &self,
-        Parameters(request): Parameters<DoctorDismissalRequest>,
-    ) -> Result<Json<DoctorDismissalsView>, ToolError> {
-        self.scope.authorize(Tool::DismissDoctorWarning, None)?;
-
-        let dismissals = doctor::dismiss(&self.ctx, request.into()).await?;
-        Ok(Json(DoctorDismissalsView {
-            dismissals: dismissals.iter().map(DismissalView::from).collect(),
-        }))
-    }
-
-    #[tool(
-        description = "Bring a dismissed doctor warning back, so it appears in the banner again. \
-Call this when the user asks to see a warning they previously put down, or wants to tidy up \
-dismissals that no longer apply. Take the three fields from `run_doctor`'s `dismissals` list, \
-which holds every dismissal on record — including ones that match no current row, because the \
-environment was fixed or the warning's wording changed. Removing one of those is how they are \
-cleared."
-    )]
-    pub async fn restore_doctor_warning(
-        &self,
-        Parameters(request): Parameters<DoctorDismissalRequest>,
-    ) -> Result<Json<DoctorDismissalsView>, ToolError> {
-        self.scope.authorize(Tool::RestoreDoctorWarning, None)?;
-
-        let dismissals = doctor::restore(&self.ctx, &request.into()).await?;
-        Ok(Json(DoctorDismissalsView {
-            dismissals: dismissals.iter().map(DismissalView::from).collect(),
         }))
     }
 
@@ -569,6 +437,7 @@ explicitly asks you to."
 
         let moved = tasks::move_task(
             &self.ctx,
+            self.machine(),
             &request.task_id,
             request.column,
             before_id.as_deref(),
@@ -728,7 +597,7 @@ told about."
     pub async fn get_strategy_catalogue(&self) -> Result<Json<Catalogue>, ToolError> {
         self.scope.authorize(Tool::GetStrategyCatalogue, None)?;
         Ok(Json(
-            strategy::catalogue::catalogue(&self.ctx, self.doctor.provider.as_ref()).await?,
+            strategy::catalogue::catalogue(&self.ctx, self.provider.as_ref()).await?,
         ))
     }
 
@@ -745,7 +614,7 @@ before it is stored, so an unparseable one is refused and the previous catalogue
         self.scope.authorize(Tool::SetStrategyCatalogue, None)?;
         strategy::catalogue::set_catalogue(&self.ctx, &request.catalogue).await?;
         Ok(Json(
-            strategy::catalogue::catalogue(&self.ctx, self.doctor.provider.as_ref()).await?,
+            strategy::catalogue::catalogue(&self.ctx, self.provider.as_ref()).await?,
         ))
     }
 
@@ -838,68 +707,6 @@ run that is still in flight."
         self.task_view(&request.task_id).await
     }
 
-    // Task 016's read surface. The three commands that *delete* a worktree
-    // have no tool here, and that is not an oversight — see this module's own
-    // note and seam-contract D20. What an agent can do is find out what is on
-    // the disk and say so, which is the half of the problem it can help with
-    // without being able to make it irreversible.
-
-    #[tool(
-        description = "List every git worktree Rimaia has created, with the task it belongs to, \
-its branch, its size on disk, when anything last wrote in it, and whether its branch is already \
-merged into the repository's default branch. Call this when the user asks what is taking up \
-space, or before suggesting a cleanup: `uncommitted_changes` and `unpushed_commits` are work that \
-exists nowhere else, and a worktree with either is one to leave alone. Removing a worktree is \
-deliberately not available here — it is irreversible, so it lives only in Settings → Storage, \
-where a human confirms it."
-    )]
-    pub async fn list_worktrees(&self) -> Result<Json<WorktreeListView>, ToolError> {
-        self.scope.authorize(Tool::ListWorktrees, None)?;
-
-        let inventory = worktree::inventory(&self.ctx).await?;
-        Ok(Json(WorktreeListView {
-            worktrees: inventory
-                .entries
-                .into_iter()
-                .map(WorktreeView::from)
-                .collect(),
-            total_bytes: inventory.total_bytes,
-        }))
-    }
-
-    #[tool(
-        description = "Read whether a task reaching the `done` column automatically has its git \
-worktree removed. Call this before advising on disk usage: when it is `off`, which is the \
-default, every finished task keeps a full checkout until somebody clears it by hand, and that is \
-usually the explanation for a large `worktrees` directory."
-    )]
-    pub async fn get_worktree_auto_cleanup(
-        &self,
-    ) -> Result<Json<WorktreeAutoCleanupView>, ToolError> {
-        self.scope.authorize(Tool::GetWorktreeAutoCleanup, None)?;
-        Ok(Json(WorktreeAutoCleanupView {
-            setting: worktree::auto_cleanup(&self.ctx).await?,
-        }))
-    }
-
-    #[tool(
-        description = "Turn automatic worktree removal on or off. Call it with \
-`on_done_acknowledged` only after telling the user what it deletes: every task they move to \
-`done` will lose its checkout, including any uncommitted file in it that a run left behind. It \
-never forces and never deletes a branch, so work that was committed survives — but work that was \
-not is gone. `off` restores the default."
-    )]
-    pub async fn set_worktree_auto_cleanup(
-        &self,
-        Parameters(request): Parameters<SetWorktreeAutoCleanupRequest>,
-    ) -> Result<Json<WorktreeAutoCleanupView>, ToolError> {
-        self.scope.authorize(Tool::SetWorktreeAutoCleanup, None)?;
-        worktree::set_auto_cleanup(&self.ctx, request.setting).await?;
-        Ok(Json(WorktreeAutoCleanupView {
-            setting: request.setting,
-        }))
-    }
-
     #[tool(
         description = "Take a task off the user's board without deleting anything. The task keeps \
 its run history, its links and its dependency edges, and can be put back with `unarchive_task`. \
@@ -913,7 +720,7 @@ did. A task that is running or waiting to retry is refused: cancel the run first
         Parameters(request): Parameters<ArchiveTaskRequest>,
     ) -> Result<Json<ArchivedTaskView>, ToolError> {
         self.scope.authorize(Tool::ArchiveTask, None)?;
-        let archived = tasks::archive_task(&self.ctx, &request.task_id).await?;
+        let archived = tasks::archive_task(&self.ctx, self.machine(), &request.task_id).await?;
         Ok(Json(archived.into()))
     }
 
@@ -928,7 +735,7 @@ refusal as an error."
         Parameters(request): Parameters<ArchiveTasksRequest>,
     ) -> Result<Json<ArchiveReportView>, ToolError> {
         self.scope.authorize(Tool::ArchiveTasks, None)?;
-        let report = tasks::archive_tasks(&self.ctx, &request.task_ids).await?;
+        let report = tasks::archive_tasks(&self.ctx, self.machine(), &request.task_ids).await?;
         Ok(Json(report.into()))
     }
 
@@ -960,7 +767,7 @@ cleanup for done tasks."
         Parameters(request): Parameters<ArchiveTaskRequest>,
     ) -> Result<Json<ReviewedTaskView>, ToolError> {
         self.scope.authorize(Tool::ApproveTask, None)?;
-        let task = review::approve(&self.ctx, &request.task_id).await?;
+        let task = review::approve(&self.ctx, self.machine(), &request.task_id).await?;
         Ok(Json(task.into()))
     }
 
@@ -998,7 +805,8 @@ ones that already ran on this task's work."
         Parameters(request): Parameters<ReviewNoteRequest>,
     ) -> Result<Json<ReviewOutcomeView>, ToolError> {
         self.scope.authorize(Tool::RejectTask, None)?;
-        let outcome = review::reject(&self.ctx, &request.task_id, &request.note).await?;
+        let outcome =
+            review::reject(&self.ctx, self.machine(), &request.task_id, &request.note).await?;
         Ok(Json(outcome.into()))
     }
 
@@ -1181,7 +989,7 @@ that is not in the strategy catalogue."
         Ok(Json(
             review_loop::config::set_review_settings(
                 &self.ctx,
-                self.doctor.provider.as_ref(),
+                self.provider.as_ref(),
                 &request.instructions,
                 request.config,
             )
@@ -1204,7 +1012,7 @@ the loop on is spelled `\"enabled\": \"on_cost_acknowledged\"`; confirm the cost
         Ok(Json(
             review_loop::config::set_repository_review_config(
                 &self.ctx,
-                self.doctor.provider.as_ref(),
+                self.provider.as_ref(),
                 &request.repository_id,
                 request.config,
             )
@@ -1229,13 +1037,317 @@ field (see `get_review_settings`). Turning the loop on is spelled \
         Ok(Json(
             review_loop::config::set_task_review(
                 &self.ctx,
-                self.doctor.provider.as_ref(),
+                self.provider.as_ref(),
                 &request.task_id,
                 request.review_instructions,
                 request.config,
             )
             .await?,
         ))
+    }
+
+    #[tool(
+        description = "Accept a planner's proposal on behalf of the user, marking the strategy as \
+theirs rather than the planner's. A later planner run will then leave it alone. Call this when a human has \
+reviewed a proposal and is happy with it; it speaks for that human, so a run cannot call it — \
+not even about its own task."
+    )]
+    pub async fn accept_task_strategy(
+        &self,
+        Parameters(request): Parameters<TaskStrategyRequest>,
+    ) -> Result<Json<TaskView>, ToolError> {
+        self.scope.authorize(Tool::AcceptTaskStrategy, None)?;
+        let task = tasks::strategy::accept_task_strategy(&self.ctx, &request.task_id).await?;
+        self.task_view(&task.id).await
+    }
+
+    #[tool(
+        description = "Discard a task's recorded strategy proposal so a planned task will be \
+planned again on its next run. Call this after a planner failed, or when the plan has changed \
+enough that the old proposal no longer describes the work."
+    )]
+    pub async fn clear_task_strategy(
+        &self,
+        Parameters(request): Parameters<TaskStrategyRequest>,
+    ) -> Result<Json<TaskView>, ToolError> {
+        self.scope.authorize(Tool::ClearTaskStrategy, None)?;
+        let task = tasks::strategy::clear_task_strategy(&self.ctx, &request.task_id).await?;
+        self.task_view(&task.id).await
+    }
+}
+
+/// The tools that inspect, reconfigure or spawn on this machine (ADR-0035
+/// point 6, task 041): the doctor and its dismissals, credentials and
+/// worktrees, capacity, schedules, and the two planning tools, which are here
+/// because they spawn.
+///
+/// Registered only when the host handed in a [`LocalTools`], so a server that
+/// has no machine serves none of them: calling one there is an unknown tool.
+/// Each reaches this machine only through `self.local()`, and none issues a
+/// board query of its own; a board fact comes through a named core read
+/// function over the board context (D32's 2026-10-04 amendment), for task 059
+/// to convert.
+#[tool_router(router = local_router, vis = "pub")]
+impl RimaiaServer {
+    #[tool(
+        description = "Check this Rimaia installation for the environment problems that make an \
+overnight queue fail: a missing or signed-out Claude Code CLI, a git too old for worktrees, a \
+GitHub CLI that cannot open a pull request, an unwritable or full data directory, a registered \
+repository whose directory has moved, and an MCP port nothing is listening on. Call this when the \
+user reports that runs are failing, before telling them to start the queue, or when \
+`start_queue` has refused — every result carries the specific command that fixes it, and \
+`is_blocking` says whether the queue would refuse to start right now."
+    )]
+    pub async fn run_doctor(&self) -> Result<Json<DoctorReportView>, ToolError> {
+        self.scope.authorize(Tool::RunDoctor, None)?;
+        let local = self.local()?;
+
+        let report = doctor::run(&local.machine, &self.ctx, &local.doctor).await?;
+        Ok(Json(DoctorReportView::from(&report)))
+    }
+
+    #[tool(
+        description = "Record that the first-run walkthrough has been seen, so Rimaia opens on \
+the board instead of the welcome screen. Call it only when the user says they are done with \
+setup, or want to skip it — it changes nothing about how runs work, and un-dismissing it is not \
+something this surface offers."
+    )]
+    pub async fn dismiss_onboarding(&self) -> Result<Json<OnboardingView>, ToolError> {
+        self.scope.authorize(Tool::DismissOnboarding, None)?;
+        let local = self.local()?;
+
+        db::settings::set_onboarding_dismissed(&local.machine, true).await?;
+        Ok(Json(OnboardingView {
+            onboarding_dismissed: true,
+        }))
+    }
+
+    #[tool(
+        description = "Run the strategy planner for one task now and wait for it to finish, then \
+report the model, effort and rationale it proposed. Call this when the user wants to see how a \
+task will be modelled before committing to the expensive implementation run — a planner costs a \
+few cents and a handful of turns, where the run it is checking costs on the order of a dollar. \
+The task must resolve to `planned` mode and its repository must have opted into unattended runs; \
+a task that already carries a proposal is re-planned, which is what this tool means that \
+`plan_tasks_strategy` deliberately does not."
+    )]
+    pub async fn plan_task_strategy(
+        &self,
+        Parameters(request): Parameters<TaskStrategyRequest>,
+    ) -> Result<Json<PlanResultView>, ToolError> {
+        self.scope
+            .authorize(Tool::PlanTaskStrategy, Some(&request.task_id))?;
+        let local = self.local()?;
+
+        let claim = runner_strategy::claim_for_planning(
+            local.planner.board.as_ref(),
+            &local.planner.in_flight,
+            &request.task_id,
+            scheduler::LeaseOwner::Manual,
+        )
+        .await?;
+
+        let (title, outcome) = match claim {
+            Ok(claim) => {
+                let title = claim.title().to_string();
+                let outcome = runner_strategy::plan_claimed(
+                    local.planner.board.as_ref(),
+                    &local.machine,
+                    &self.ctx,
+                    &local.planner.paths,
+                    &local.planner.runner,
+                    claim,
+                )
+                .await?;
+                (title, outcome)
+            }
+            Err(skip) => {
+                let detail = tasks::get_task(&self.ctx, &request.task_id).await?;
+                (detail.task.title, PlanOutcome::Skipped(skip))
+            }
+        };
+
+        Ok(Json(PlanResultView::new(
+            &request.task_id,
+            &title,
+            &outcome,
+        )))
+    }
+
+    #[tool(
+        description = "Plan a whole column, a whole repository or a hand-picked set of tasks in \
+one pass, one planner at a time, and report what each one was modelled as. This is the preflight \
+the user runs before leaving for the evening: spending forty cents to see how ten cards are \
+modelled, before committing forty dollars of implementation, is the cheapest check this product \
+offers. Call it when the user asks to check how a set of tasks will run, or before starting the \
+queue on a column they have not reviewed. State at least one of `column`, `repository_id` or \
+`task_ids`; each one narrows the set, and a selection that states none of them is refused rather \
+than taken to mean the whole board. A card that already carries a proposal is skipped with that \
+named as the reason and its proposal left untouched — use `plan_task_strategy` to re-plan one \
+deliberately."
+    )]
+    pub async fn plan_tasks_strategy(
+        &self,
+        Parameters(request): Parameters<PlanSelectionRequest>,
+    ) -> Result<Json<PlanPassView>, ToolError> {
+        self.scope.authorize(Tool::PlanTasksStrategy, None)?;
+        let local = self.local()?;
+
+        let selection: PlanSelection = request.into();
+        // A pass reached over MCP has no Cancel button to trip, so the signal
+        // is one nothing holds. It is still passed rather than made optional:
+        // one loop, one cancellation story, and the surface that *does* have a
+        // button hands in a real one.
+        let cancel = crate::runner::CancelSignal::new();
+        let pass = runner_strategy::plan_all(
+            local.planner.board.as_ref(),
+            &local.machine,
+            &self.ctx,
+            &local.planner.paths,
+            &local.planner.runner,
+            &local.planner.in_flight,
+            &selection,
+            &cancel,
+            &|_progress| {},
+        )
+        .await?;
+
+        Ok(Json(PlanPassView::from(&pass)))
+    }
+
+    #[tool(
+        description = "Report whether one repository carries a forge token of its own, whose \
+account it belongs to, what the user called it, and whether this machine's keychain still holds \
+it. Call this when a run failed to push or to open a pull request, or before telling the user \
+their token is fine — a repository whose credential is configured and whose keychain item has \
+gone refuses to run rather than falling back to the operator's own login, and this is what says \
+so. **The token itself is never returned by anything**, and there is no tool that sets or \
+removes one: a live forge token has no business travelling over this protocol."
+    )]
+    pub async fn get_repository_credential_status(
+        &self,
+        Parameters(request): Parameters<RepositoryRequest>,
+    ) -> Result<Json<CredentialStatusView>, ToolError> {
+        self.scope
+            .authorize(Tool::GetRepositoryCredentialStatus, None)?;
+        let local = self.local()?;
+
+        let repository = repo::get(&self.ctx, &request.repository_id).await?;
+        let store = local
+            .planner
+            .runner
+            .credentials
+            .status(&repository.id)
+            .await;
+
+        Ok(Json(CredentialStatusView::new(&repository, store)))
+    }
+
+    #[tool(
+        description = "Put down one doctor warning the user has read and decided about, so it \
+stops appearing in the banner above every screen. Take `check`, `repository` and `detail` \
+verbatim from a `run_doctor` row — all three are the key, so the same check about a different \
+repository stays visible, and the warning comes back by itself if its `detail` ever changes. \
+This is presentation only: it never changes whether the queue will start, and a `fail` row \
+cannot be dismissed at all. Call it when the user says they know about a warning and want it \
+out of the way, never to tidy up a report on their behalf."
+    )]
+    pub async fn dismiss_doctor_warning(
+        &self,
+        Parameters(request): Parameters<DoctorDismissalRequest>,
+    ) -> Result<Json<DoctorDismissalsView>, ToolError> {
+        self.scope.authorize(Tool::DismissDoctorWarning, None)?;
+        let local = self.local()?;
+
+        let dismissals = doctor::dismiss(&local.machine, request.into()).await?;
+        Ok(Json(DoctorDismissalsView {
+            dismissals: dismissals.iter().map(DismissalView::from).collect(),
+        }))
+    }
+
+    #[tool(
+        description = "Bring a dismissed doctor warning back, so it appears in the banner again. \
+Call this when the user asks to see a warning they previously put down, or wants to tidy up \
+dismissals that no longer apply. Take the three fields from `run_doctor`'s `dismissals` list, \
+which holds every dismissal on record — including ones that match no current row, because the \
+environment was fixed or the warning's wording changed. Removing one of those is how they are \
+cleared."
+    )]
+    pub async fn restore_doctor_warning(
+        &self,
+        Parameters(request): Parameters<DoctorDismissalRequest>,
+    ) -> Result<Json<DoctorDismissalsView>, ToolError> {
+        self.scope.authorize(Tool::RestoreDoctorWarning, None)?;
+        let local = self.local()?;
+
+        let dismissals = doctor::restore(&local.machine, &request.into()).await?;
+        Ok(Json(DoctorDismissalsView {
+            dismissals: dismissals.iter().map(DismissalView::from).collect(),
+        }))
+    }
+
+    // Task 016's read surface. The three commands that *delete* a worktree
+    // have no tool here, and that is not an oversight — see this module's own
+    // note and seam-contract D20. What an agent can do is find out what is on
+    // the disk and say so, which is the half of the problem it can help with
+    // without being able to make it irreversible.
+
+    #[tool(
+        description = "List every git worktree Rimaia has created, with the task it belongs to, \
+its branch, its size on disk, when anything last wrote in it, and whether its branch is already \
+merged into the repository's default branch. Call this when the user asks what is taking up \
+space, or before suggesting a cleanup: `uncommitted_changes` and `unpushed_commits` are work that \
+exists nowhere else, and a worktree with either is one to leave alone. Removing a worktree is \
+deliberately not available here — it is irreversible, so it lives only in Settings → Storage, \
+where a human confirms it."
+    )]
+    pub async fn list_worktrees(&self) -> Result<Json<WorktreeListView>, ToolError> {
+        self.scope.authorize(Tool::ListWorktrees, None)?;
+
+        let inventory = worktree::inventory(&self.ctx).await?;
+        Ok(Json(WorktreeListView {
+            worktrees: inventory
+                .entries
+                .into_iter()
+                .map(WorktreeView::from)
+                .collect(),
+            total_bytes: inventory.total_bytes,
+        }))
+    }
+
+    #[tool(
+        description = "Read whether a task reaching the `done` column automatically has its git \
+worktree removed. Call this before advising on disk usage: when it is `off`, which is the \
+default, every finished task keeps a full checkout until somebody clears it by hand, and that is \
+usually the explanation for a large `worktrees` directory."
+    )]
+    pub async fn get_worktree_auto_cleanup(
+        &self,
+    ) -> Result<Json<WorktreeAutoCleanupView>, ToolError> {
+        self.scope.authorize(Tool::GetWorktreeAutoCleanup, None)?;
+        let local = self.local()?;
+        Ok(Json(WorktreeAutoCleanupView {
+            setting: worktree::auto_cleanup(&local.machine).await?,
+        }))
+    }
+
+    #[tool(
+        description = "Turn automatic worktree removal on or off. Call it with \
+`on_done_acknowledged` only after telling the user what it deletes: every task they move to \
+`done` will lose its checkout, including any uncommitted file in it that a run left behind. It \
+never forces and never deletes a branch, so work that was committed survives — but work that was \
+not is gone. `off` restores the default."
+    )]
+    pub async fn set_worktree_auto_cleanup(
+        &self,
+        Parameters(request): Parameters<SetWorktreeAutoCleanupRequest>,
+    ) -> Result<Json<WorktreeAutoCleanupView>, ToolError> {
+        self.scope.authorize(Tool::SetWorktreeAutoCleanup, None)?;
+        let local = self.local()?;
+        worktree::set_auto_cleanup(&local.machine, request.setting).await?;
+        Ok(Json(WorktreeAutoCleanupView {
+            setting: request.setting,
+        }))
     }
 
     #[tool(
@@ -1267,35 +1379,6 @@ RIMAIA_REPOSITORY_PATH, RIMAIA_BRANCH and RIMAIA_WORKTREE_PATH in its environmen
         }))
     }
 
-    #[tool(
-        description = "Accept a planner's proposal on behalf of the user, marking the strategy as \
-theirs rather than the planner's. A later planner run will then leave it alone. Call this when a human has \
-reviewed a proposal and is happy with it; it speaks for that human, so a run cannot call it — \
-not even about its own task."
-    )]
-    pub async fn accept_task_strategy(
-        &self,
-        Parameters(request): Parameters<TaskStrategyRequest>,
-    ) -> Result<Json<TaskView>, ToolError> {
-        self.scope.authorize(Tool::AcceptTaskStrategy, None)?;
-        let task = tasks::strategy::accept_task_strategy(&self.ctx, &request.task_id).await?;
-        self.task_view(&task.id).await
-    }
-
-    #[tool(
-        description = "Discard a task's recorded strategy proposal so a planned task will be \
-planned again on its next run. Call this after a planner failed, or when the plan has changed \
-enough that the old proposal no longer describes the work."
-    )]
-    pub async fn clear_task_strategy(
-        &self,
-        Parameters(request): Parameters<TaskStrategyRequest>,
-    ) -> Result<Json<TaskView>, ToolError> {
-        self.scope.authorize(Tool::ClearTaskStrategy, None)?;
-        let task = tasks::strategy::clear_task_strategy(&self.ctx, &request.task_id).await?;
-        self.task_view(&task.id).await
-    }
-
     // Task 012's four (ADR-0010). Every one is refused to a run — see
     // `scope::Tool::run_access` for the argument, which is ADR-0021 point 4's
     // second permanent refusal one layer out.
@@ -1309,7 +1392,8 @@ even though sequential always runs exactly one."
     )]
     pub async fn get_run_capacity(&self) -> Result<Json<RunCapacityView>, ToolError> {
         self.scope.authorize(Tool::GetRunCapacity, None)?;
-        Ok(Json(capacity::configured(&self.ctx).await?.into()))
+        let local = self.local()?;
+        Ok(Json(capacity::configured(&local.machine).await?.into()))
     }
 
     #[tool(
@@ -1324,8 +1408,9 @@ limit says."
         Parameters(request): Parameters<SetScheduleModeRequest>,
     ) -> Result<Json<RunCapacityView>, ToolError> {
         self.scope.authorize(Tool::SetScheduleMode, None)?;
-        capacity::set_schedule_mode(&self.ctx, request.mode).await?;
-        Ok(Json(capacity::configured(&self.ctx).await?.into()))
+        let local = self.local()?;
+        capacity::set_schedule_mode(&local.machine, request.mode).await?;
+        Ok(Json(capacity::configured(&local.machine).await?.into()))
     }
 
     #[tool(
@@ -1339,8 +1424,9 @@ clamped. It bounds the queue in total; each repository still holds at most its o
         Parameters(request): Parameters<SetMaxConcurrencyRequest>,
     ) -> Result<Json<RunCapacityView>, ToolError> {
         self.scope.authorize(Tool::SetMaxConcurrency, None)?;
-        capacity::set_max_concurrency(&self.ctx, request.max_concurrency).await?;
-        Ok(Json(capacity::configured(&self.ctx).await?.into()))
+        let local = self.local()?;
+        capacity::set_max_concurrency(&local.machine, request.max_concurrency).await?;
+        Ok(Json(capacity::configured(&local.machine).await?.into()))
     }
 
     #[tool(
@@ -1374,8 +1460,9 @@ Schedules are the operator's own standing instructions, so a run cannot read or 
     )]
     pub async fn list_schedules(&self) -> Result<Json<ScheduleListView>, ToolError> {
         self.scope.authorize(Tool::ListSchedules, None)?;
+        let local = self.local()?;
         Ok(Json(ScheduleListView {
-            schedules: schedule::list(&self.ctx)
+            schedules: schedule::list(&local.machine)
                 .await?
                 .into_iter()
                 .map(ScheduleView::from)
@@ -1396,7 +1483,8 @@ a run cannot call it."
         Parameters(request): Parameters<ScheduleConfigRequest>,
     ) -> Result<Json<ScheduleView>, ToolError> {
         self.scope.authorize(Tool::CreateSchedule, None)?;
-        let created = schedule::create(&self.ctx, request.into()).await?;
+        let local = self.local()?;
+        let created = schedule::create(&local.machine, request.into()).await?;
         Ok(Json(created.into()))
     }
 
@@ -1412,8 +1500,9 @@ happen again. Reconfiguring an unattended queue is the operator's, so a run cann
         Parameters(request): Parameters<UpdateScheduleRequest>,
     ) -> Result<Json<ScheduleView>, ToolError> {
         self.scope.authorize(Tool::UpdateSchedule, None)?;
+        let local = self.local()?;
         let updated =
-            schedule::update(&self.ctx, &request.schedule_id, request.config.into()).await?;
+            schedule::update(&local.machine, &request.schedule_id, request.config.into()).await?;
         Ok(Json(updated.into()))
     }
 
@@ -1429,8 +1518,9 @@ call it."
         Parameters(request): Parameters<SetScheduleEnabledRequest>,
     ) -> Result<Json<ScheduleView>, ToolError> {
         self.scope.authorize(Tool::SetScheduleEnabled, None)?;
+        let local = self.local()?;
         let updated =
-            schedule::set_enabled(&self.ctx, &request.schedule_id, request.enabled).await?;
+            schedule::set_enabled(&local.machine, &request.schedule_id, request.enabled).await?;
         Ok(Json(updated.into()))
     }
 
@@ -1445,7 +1535,8 @@ not the same act as stopping tonight. A run cannot call it."
         Parameters(request): Parameters<ScheduleRequest>,
     ) -> Result<Json<ScheduleDeletedView>, ToolError> {
         self.scope.authorize(Tool::DeleteSchedule, None)?;
-        schedule::delete(&self.ctx, &request.schedule_id).await?;
+        let local = self.local()?;
+        schedule::delete(&local.machine, &request.schedule_id).await?;
         Ok(Json(ScheduleDeletedView {
             schedule_id: request.schedule_id,
             deleted: true,
@@ -1464,8 +1555,9 @@ there in the morning unless somebody acts. A run cannot call it."
         Parameters(request): Parameters<ScheduleRequest>,
     ) -> Result<Json<PreflightView>, ToolError> {
         self.scope.authorize(Tool::PreviewSchedulePreflight, None)?;
+        let local = self.local()?;
         Ok(Json(
-            schedule::preview(&self.ctx, &request.schedule_id)
+            schedule::preview(&local.machine, &self.ctx, &request.schedule_id)
                 .await?
                 .into(),
         ))
@@ -1486,6 +1578,39 @@ queue configured with one of those runs an hour out for half the year and nothin
 }
 
 impl RimaiaServer {
+    /// Every tool this server can register: the board router and the local
+    /// router combined. What a server with a machine serves, and what the
+    /// anti-drift test `every_registered_tool_has_a_run_scope_decision`
+    /// iterates, so a tool added to either block still needs a decision.
+    pub fn tool_router() -> ToolRouter<Self> {
+        Self::board_router() + Self::local_router()
+    }
+
+    /// What this server serves: both routers given a machine, and the board
+    /// router alone without one, where calling a local tool is an unknown
+    /// tool.
+    fn router(&self) -> ToolRouter<Self> {
+        match self.local {
+            Some(_) => Self::tool_router(),
+            None => Self::board_router(),
+        }
+    }
+
+    /// This machine, for a local handler. Only the local router calls it, and
+    /// that router is registered only when there is a machine, so `Internal`
+    /// here is a wiring mistake.
+    fn local(&self) -> Result<&LocalTools> {
+        self.local.as_ref().ok_or_else(|| {
+            crate::Error::internal("a local tool was reached on a server with no machine")
+        })
+    }
+
+    /// This machine, for the five board tools whose core function reacts on
+    /// it when there is one.
+    fn machine(&self) -> Option<&MachineContext> {
+        self.local.as_ref().map(|local| &local.machine)
+    }
+
     /// The uniform answer: whatever a tool touched, read back in full.
     async fn task_view(&self, task_id: &str) -> Result<Json<TaskView>, ToolError> {
         let detail = tasks::get_task(&self.ctx, task_id).await?;
@@ -1563,7 +1688,7 @@ impl RimaiaServer {
     }
 }
 
-#[tool_handler]
+#[tool_handler(router = self.router())]
 impl ServerHandler for RimaiaServer {
     /// Written out rather than left to the macro's `name`/`version` arguments,
     /// which take string literals only — this way the version is
@@ -1790,9 +1915,9 @@ mod tests {
     async fn the_server_introduces_itself_as_rimaia_with_instructions() {
         let harness = crate::testing::TestContext::new().await;
         let info = RimaiaServer::new(
-            harness.context,
-            crate::testing::doctor::environment(),
-            crate::testing::doctor::planner_access(),
+            harness.context.clone(),
+            Arc::new(crate::runner::provider::ClaudeProvider),
+            Some(crate::testing::doctor::local_tools(harness.machine())),
         )
         .get_info();
 

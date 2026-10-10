@@ -199,6 +199,7 @@ async fn run_task_releases_a_claim_whose_context_no_longer_negotiates() {
     };
     let (queue, task) = scheduler::build(
         fixture.board(&config),
+        fixture.machine().clone(),
         fixture.ctx().clone(),
         fixture.paths.clone(),
         config,
@@ -242,7 +243,7 @@ async fn a_usage_limit_holds_new_starts_before_the_board_hears_the_run_finished(
     let config = fixture.config();
     let witness = PauseWitness {
         inner: fixture.board(&config),
-        board: fixture.ctx().clone(),
+        machine: fixture.machine().clone(),
         seen: Mutex::new(None),
     };
 
@@ -291,7 +292,7 @@ async fn a_usage_limit_that_outlasts_the_run_window_still_holds_new_starts_until
     fixture.cli.replays(&fixture.task_id, "usage-limit", 143);
     let now = fixture.harness.clock.now();
     window::open(
-        fixture.ctx(),
+        fixture.machine(),
         &RunWindow {
             schedule_id: "tonight".to_string(),
             schedule_name: "Tonight".to_string(),
@@ -315,11 +316,115 @@ async fn a_usage_limit_that_outlasts_the_run_window_still_holds_new_starts_until
     assert_eq!(fixture.paused_until().await, Some(reported_reset()));
 }
 
+#[tokio::test]
+async fn a_usage_limit_pause_is_held_by_the_runner() {
+    // Task 041: the pause is this machine's, so a run hitting a wall writes it
+    // to the machine store, the board's legacy copy of the key is left exactly
+    // as it was, and the queue reads the machine's hold, starting nothing
+    // until the clock passes it.
+    let fixture = Fixture::new().await;
+    sqlx::query("INSERT INTO settings (key, value) VALUES (?1, 'the board copy')")
+        .bind(pause::USAGE_LIMIT_PAUSE_UNTIL)
+        .execute(&fixture.ctx().pool)
+        .await
+        .expect("plant the board's legacy row");
+    fixture
+        .cli
+        .replays_on_attempt(&fixture.task_id, 1, "usage-limit", 143);
+    let config = fixture.config();
+
+    let run = fixture
+        .run(fixture.board(&config).as_ref(), &config)
+        .await
+        .expect("the attempt is recorded");
+
+    assert_eq!(run.exit_class, Some(ExitClass::UsageLimit));
+    let held_until = run.resume_after.expect("a usage limit is retried");
+    assert_eq!(fixture.paused_until().await, Some(held_until));
+    assert_eq!(
+        fixture
+            .machine()
+            .store
+            .get_setting(pause::USAGE_LIMIT_PAUSE_UNTIL)
+            .await
+            .expect("read the machine store"),
+        Some(held_until.to_rfc3339()),
+    );
+    assert_eq!(
+        board_row(fixture.ctx(), pause::USAGE_LIMIT_PAUSE_UNTIL).await,
+        Some("the board copy".to_string()),
+        "the board's row is unchanged"
+    );
+
+    // A second ready task, which a free slot would start at once if nothing
+    // held it.
+    let held = fixture.add_task("Would burn a start").await;
+    let (queue, loop_task) = scheduler::build(
+        fixture.board(&config),
+        fixture.machine().clone(),
+        fixture.ctx().clone(),
+        fixture.paths.clone(),
+        config,
+        InFlight::new(),
+    );
+    tokio::spawn(loop_task.run());
+    let mut changes = fixture.ctx().subscribe();
+    queue.start().await.expect("start the queue");
+    converge().await;
+
+    assert_eq!(
+        fixture.cli.started(),
+        vec![fixture.task_id.clone()],
+        "nothing starts while the machine holds new starts"
+    );
+    assert_eq!(
+        queue
+            .status()
+            .await
+            .expect("read the status")
+            .usage_limit_pause_until,
+        Some(held_until)
+    );
+
+    fixture
+        .harness
+        .clock
+        .set(held_until + TimeDelta::minutes(1));
+    tokio::time::timeout(TEST_TIMEOUT, async {
+        while !fixture.cli.started().contains(&held) {
+            changes.recv().await.ok();
+        }
+    })
+    .await
+    .expect("the queue starts once the clock passes the hold");
+
+    queue.shutdown();
+}
+
+/// The board's legacy `settings` row for `key`, read past every accessor.
+async fn board_row(ctx: &ServiceContext, key: &str) -> Option<String> {
+    sqlx::query_scalar("SELECT value FROM settings WHERE key = ?1")
+        .bind(key)
+        .fetch_optional(&ctx.pool)
+        .await
+        .expect("read the board's legacy row")
+}
+
+/// Gives the queue's loop every chance to act on what it has already been
+/// told, without waiting on a clock: a start it was going to make has been
+/// made once this returns.
+async fn converge() {
+    for _ in 0..2_000 {
+        tokio::task::yield_now().await;
+    }
+}
+
 /// A board that reads the usage-limit pause the moment `finish_run` is
 /// entered, and otherwise passes every call through.
 struct PauseWitness {
     inner: Arc<dyn BoardPort>,
-    board: ServiceContext,
+    /// The runner's machine, where the pause is held (task 041).
+    machine: rimaia_core::machine::MachineContext,
     /// `Some(pause)` once `finish_run` has been entered.
     seen: Mutex<Option<Option<DateTime<Utc>>>>,
 }
@@ -368,7 +473,7 @@ impl BoardPort for PauseWitness {
         finish: FinishRun,
     ) -> BoardFuture<'a, FinishReceipt> {
         Box::pin(async move {
-            let paused = pause::active_until(&self.board, self.board.clock.now()).await?;
+            let paused = pause::active_until(&self.machine, self.machine.clock.now()).await?;
             *self.seen.lock().expect("the witness lock") = Some(paused);
             self.inner.finish_run(lease, run_id, finish).await
         })
@@ -465,6 +570,11 @@ impl Fixture {
         &self.harness.context
     }
 
+    /// This machine's own state, over the harness's machine store (task 041).
+    fn machine(&self) -> &rimaia_core::machine::MachineContext {
+        self.harness.machine()
+    }
+
     fn config(&self) -> RunnerConfig {
         RunnerConfig {
             program: self.cli.program(),
@@ -484,7 +594,7 @@ impl Fixture {
     ) -> rimaia_core::Result<rimaia_core::runner::Started> {
         claim_manual_start(
             self.board(config).as_ref(),
-            self.ctx(),
+            self.machine(),
             &self.paths,
             config,
             &InFlight::new(),
@@ -505,6 +615,7 @@ impl Fixture {
             TEST_TIMEOUT,
             run_task(
                 board,
+                self.machine(),
                 self.ctx(),
                 &self.paths,
                 config,
@@ -516,6 +627,25 @@ impl Fixture {
         .expect("a run must finish inside the test timeout")
     }
 
+    /// Another ready task in the fixture's repository.
+    async fn add_task(&self, title: &str) -> String {
+        let repository_id = self.detail().await.task.repository_id;
+        tasks::create_task(
+            self.ctx(),
+            NewTask {
+                repository_id,
+                title: title.to_string(),
+                plan: Some("1. Implement it".to_string()),
+                extra_instructions: None,
+                column: Some(BoardColumn::Ready),
+                links: vec![],
+            },
+        )
+        .await
+        .expect("create a ready task")
+        .id
+    }
+
     async fn detail(&self) -> tasks::TaskDetail {
         tasks::get_task(self.ctx(), &self.task_id)
             .await
@@ -523,7 +653,7 @@ impl Fixture {
     }
 
     async fn paused_until(&self) -> Option<DateTime<Utc>> {
-        pause::active_until(self.ctx(), self.harness.clock.now())
+        pause::active_until(self.machine(), self.harness.clock.now())
             .await
             .expect("read the usage-limit pause")
     }

@@ -29,14 +29,20 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use pretty_assertions::assert_eq;
-use rimaia_core::db::{BoardColumn, Repository, RunState, Task};
+use rimaia_core::db::{BoardColumn, MutationSource, Repository, RunState, Task};
+use rimaia_core::mcp::requests::{ArchiveTaskRequest, MoveTaskRequest};
+use rimaia_core::mcp::RimaiaServer;
 use rimaia_core::repo::{self, NewRepository};
+use rimaia_core::review;
 use rimaia_core::tasks::{self, NewTask};
-use rimaia_core::testing::{TempRepo, TestContext};
+use rimaia_core::testing::{self, TempRepo, TestContext};
 use rimaia_core::worktree::{
     self, AutoCleanup, BranchDisposition, ForceRemoval, RemovalAuthorization,
 };
 use rimaia_core::ServiceContext;
+use rmcp::handler::server::wrapper::Parameters;
+use serde::de::DeserializeOwned;
+use serde_json::json;
 
 /// The last component of every fixture's `worktree_root`. The space is
 /// load-bearing — see the module docs.
@@ -632,7 +638,7 @@ async fn auto_cleanup_is_off_by_default() {
     let f = Fixture::new().await;
 
     assert_eq!(
-        worktree::auto_cleanup(f.ctx())
+        worktree::auto_cleanup(f.machine())
             .await
             .expect("read the policy"),
         AutoCleanup::Off
@@ -660,7 +666,7 @@ async fn moving_a_task_to_done_keeps_its_worktree_while_the_policy_is_off() {
 #[tokio::test]
 async fn enabling_the_policy_removes_the_worktree_when_the_card_reaches_done() {
     let f = Fixture::new().await;
-    worktree::set_auto_cleanup(f.ctx(), AutoCleanup::OnDoneAcknowledged)
+    worktree::set_auto_cleanup(f.machine(), AutoCleanup::OnDoneAcknowledged)
         .await
         .expect("enable auto cleanup");
     let task = f.task("Add the parser").await;
@@ -683,7 +689,7 @@ async fn auto_removal_never_deletes_a_branch_and_never_forces() {
     // otherwise be overriding. Both halves are asserted at once: the dirty
     // worktree survives (no force), and so does its branch.
     let f = Fixture::new().await;
-    worktree::set_auto_cleanup(f.ctx(), AutoCleanup::OnDoneAcknowledged)
+    worktree::set_auto_cleanup(f.machine(), AutoCleanup::OnDoneAcknowledged)
         .await
         .expect("enable auto cleanup");
     let task = f.task("Add the parser").await;
@@ -723,7 +729,7 @@ async fn automatic_removal_leaves_a_running_task_alone() {
     // it could plausibly be bypassed: nobody is watching, and the card is
     // moving for some other reason.
     let f = Fixture::new().await;
-    worktree::set_auto_cleanup(f.ctx(), AutoCleanup::OnDoneAcknowledged)
+    worktree::set_auto_cleanup(f.machine(), AutoCleanup::OnDoneAcknowledged)
         .await
         .expect("enable auto cleanup");
     let task = f.task("Add the parser").await;
@@ -734,6 +740,147 @@ async fn automatic_removal_leaves_a_running_task_alone() {
 
     assert!(PathBuf::from(&worktree.path).exists());
     assert_eq!(f.linked_worktrees().len(), 1);
+}
+
+// ---------------------------------------------------------------------------
+// The removal is this machine's reaction (task 041)
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn moving_to_done_removes_the_worktree_through_the_command_and_the_mcp_tool() {
+    // The policy is a runner key and the worktree is on this machine, so the
+    // board service reacts only when it is handed the machine. The command
+    // hands it the shell's; the MCP tool hands it its `LocalTools`' machine.
+    // One function behind both doors (ADR-0006).
+    let f = Fixture::new().await;
+    worktree::set_auto_cleanup(f.machine(), AutoCleanup::OnDoneAcknowledged)
+        .await
+        .expect("enable auto cleanup");
+    let by_command = f.task("Moved by the command").await;
+    let by_tool = f.task("Moved by the tool").await;
+    let command_worktree = worktree::prepare(f.ctx(), &by_command.id)
+        .await
+        .expect("prepare");
+    let tool_worktree = worktree::prepare(f.ctx(), &by_tool.id)
+        .await
+        .expect("prepare");
+
+    // What `commands::tasks::move_task` calls.
+    f.move_to_done(&by_command.id).await;
+    f.server()
+        .move_task(Parameters(request::<MoveTaskRequest>(json!({
+            "task_id": by_tool.id,
+            "column": "done",
+        }))))
+        .await
+        .expect("the tool moves the card");
+
+    for (task, worktree) in [(&by_command, &command_worktree), (&by_tool, &tool_worktree)] {
+        assert!(!PathBuf::from(&worktree.path).exists(), "{}", task.title);
+        assert_eq!(
+            f.reload(&task.id).await.worktree_path,
+            None,
+            "{}",
+            task.title
+        );
+    }
+    assert!(f.linked_worktrees().is_empty());
+}
+
+#[tokio::test]
+async fn approving_removes_the_worktree_through_the_command_and_the_mcp_tool() {
+    let f = Fixture::new().await;
+    worktree::set_auto_cleanup(f.machine(), AutoCleanup::OnDoneAcknowledged)
+        .await
+        .expect("enable auto cleanup");
+    let by_command = f.task("Approved by the command").await;
+    let by_tool = f.task("Approved by the tool").await;
+    let command_worktree = worktree::prepare(f.ctx(), &by_command.id)
+        .await
+        .expect("prepare");
+    let tool_worktree = worktree::prepare(f.ctx(), &by_tool.id)
+        .await
+        .expect("prepare");
+    f.move_to_review(&by_command.id).await;
+    f.move_to_review(&by_tool.id).await;
+
+    // What `commands::review::approve_task` calls.
+    review::approve(f.ctx(), Some(f.machine()), &by_command.id)
+        .await
+        .expect("the command approves");
+    f.server()
+        .approve_task(Parameters(request::<ArchiveTaskRequest>(json!({
+            "task_id": by_tool.id,
+        }))))
+        .await
+        .expect("the tool approves");
+
+    for (task, worktree) in [(&by_command, &command_worktree), (&by_tool, &tool_worktree)] {
+        assert_eq!(
+            f.reload(&task.id).await.column,
+            BoardColumn::Done,
+            "{}",
+            task.title
+        );
+        assert!(!PathBuf::from(&worktree.path).exists(), "{}", task.title);
+        assert_eq!(
+            f.reload(&task.id).await.worktree_path,
+            None,
+            "{}",
+            task.title
+        );
+    }
+}
+
+#[tokio::test]
+async fn without_a_machine_moving_to_done_and_approving_leave_the_worktree() {
+    // A server's call until task 054: the board write alone, with the policy
+    // on and nothing on this machine touched.
+    let f = Fixture::new().await;
+    worktree::set_auto_cleanup(f.machine(), AutoCleanup::OnDoneAcknowledged)
+        .await
+        .expect("enable auto cleanup");
+    let moved = f.task("Moved with no machine").await;
+    let approved = f.task("Approved with no machine").await;
+    let moved_worktree = worktree::prepare(f.ctx(), &moved.id)
+        .await
+        .expect("prepare");
+    let approved_worktree = worktree::prepare(f.ctx(), &approved.id)
+        .await
+        .expect("prepare");
+    f.move_to_review(&approved.id).await;
+
+    let after = f.bottom_of(BoardColumn::Done, &moved.id).await;
+    tasks::move_task(
+        f.ctx(),
+        None,
+        &moved.id,
+        BoardColumn::Done,
+        None,
+        after.as_deref(),
+    )
+    .await
+    .expect("the move is the board write alone");
+    review::approve(f.ctx(), None, &approved.id)
+        .await
+        .expect("the approval is the board write alone");
+
+    for (task, worktree) in [(&moved, &moved_worktree), (&approved, &approved_worktree)] {
+        assert_eq!(
+            f.reload(&task.id).await.column,
+            BoardColumn::Done,
+            "{}",
+            task.title
+        );
+        assert!(PathBuf::from(&worktree.path).exists(), "{}", task.title);
+        assert_eq!(
+            f.reload(&task.id).await.worktree_path.as_deref(),
+            Some(worktree.path.as_str()),
+            "{}",
+            task.title
+        );
+    }
+    assert_eq!(f.linked_worktrees().len(), 2);
 }
 
 // ---------------------------------------------------------------------------
@@ -855,6 +1002,12 @@ impl Fixture {
         &self.harness.context
     }
 
+    /// This machine, as the shell hands it to the board services that react on
+    /// it (task 041).
+    fn machine(&self) -> &rimaia_core::machine::MachineContext {
+        self.harness.machine()
+    }
+
     async fn task(&self, title: &str) -> Task {
         tasks::create_task(
             self.ctx(),
@@ -891,6 +1044,7 @@ impl Fixture {
         let after = self.bottom_of(BoardColumn::Done, task_id).await;
         tasks::move_task(
             self.ctx(),
+            Some(self.machine()),
             task_id,
             BoardColumn::Done,
             None,
@@ -917,10 +1071,37 @@ impl Fixture {
         .rfind(|id| id != excluding)
     }
 
+    /// Into `in_review`, where a verdict can be given, as a finished run
+    /// would leave it.
+    async fn move_to_review(&self, task_id: &str) {
+        let after = self.bottom_of(BoardColumn::InReview, task_id).await;
+        tasks::move_task(
+            self.ctx(),
+            Some(self.machine()),
+            task_id,
+            BoardColumn::InReview,
+            None,
+            after.as_deref(),
+        )
+        .await
+        .expect("move the task to review");
+    }
+
+    /// The operator's MCP server over this fixture's board and machine, as
+    /// the shell builds it.
+    fn server(&self) -> RimaiaServer {
+        RimaiaServer::new(
+            self.ctx().with_source(MutationSource::Mcp),
+            testing::doctor::provider(),
+            Some(testing::doctor::local_tools(self.machine())),
+        )
+    }
+
     async fn move_back_to_ready(&self, task_id: &str) {
         let after = self.bottom_of(BoardColumn::Ready, task_id).await;
         tasks::move_task(
             self.ctx(),
+            Some(self.machine()),
             task_id,
             BoardColumn::Ready,
             None,
@@ -1005,4 +1186,9 @@ fn git<S: AsRef<OsStr>>(dir: &Path, args: &[S]) -> String {
     }
 
     String::from_utf8_lossy(&output.stdout).trim().to_owned()
+}
+
+/// An MCP request DTO from the JSON a client would send.
+fn request<T: DeserializeOwned>(value: serde_json::Value) -> T {
+    serde_json::from_value(value).expect("a well-formed request")
 }

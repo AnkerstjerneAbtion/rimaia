@@ -221,14 +221,14 @@ pub async fn delete_task(state: State<'_, AppState>, id: String) -> Result<()> {
 /// Refused for a `running` or `waiting_retry` task, with no force to pass.
 #[tauri::command]
 pub async fn archive_task(state: State<'_, AppState>, id: String) -> Result<ArchivedTask> {
-    tasks::archive_task(&state.context, &id).await
+    tasks::archive_task(&state.context, Some(&state.machine), &id).await
 }
 
 /// Archives the board's hand-picked set, reporting refusals instead of
 /// aborting on the first one (seam-contract D20 point 2, D26.3).
 #[tauri::command]
 pub async fn archive_tasks(state: State<'_, AppState>, ids: Vec<String>) -> Result<ArchiveReport> {
-    tasks::archive_tasks(&state.context, &ids).await
+    tasks::archive_tasks(&state.context, Some(&state.machine), &ids).await
 }
 
 /// Puts an archived task back in the column it was in. Nothing the cleanup
@@ -251,6 +251,7 @@ pub async fn move_task(
 ) -> Result<Task> {
     tasks::move_task(
         &state.context,
+        Some(&state.machine),
         &id,
         column,
         before_id.as_deref(),

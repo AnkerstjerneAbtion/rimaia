@@ -109,6 +109,7 @@ pub async fn retry_task_now(state: State<'_, AppState>, task_id: String) -> Resu
 /// The two buttons' shared half: the core preflight, then the spawn.
 async fn start_by_hand(state: &AppState, start: ManualStart) -> Result<()> {
     let context = state.context.clone();
+    let machine = state.machine.clone();
     // The process-wide config and board, not fresh defaults: the queue spawns
     // from these same values, and a button that configured its child
     // differently from the queue's would be a difference nothing on screen
@@ -120,7 +121,7 @@ async fn start_by_hand(state: &AppState, start: ManualStart) -> Result<()> {
 
     let Started { slot, claim } = claim_manual_start(
         board.as_ref(),
-        &context,
+        &machine,
         &paths,
         &config,
         &state.in_flight,
@@ -143,8 +144,16 @@ async fn start_by_hand(state: &AppState, start: ManualStart) -> Result<()> {
         // Held until the run has finished: the slot is what a second click,
         // the queue and Plan now all fail against.
         let _slot = slot;
-        if let Err(error) =
-            run_task(board.as_ref(), &context, &paths, &config, claim, request).await
+        if let Err(error) = run_task(
+            board.as_ref(),
+            &machine,
+            &context,
+            &paths,
+            &config,
+            claim,
+            request,
+        )
+        .await
         {
             tracing::error!(
                 %task_id, %error,

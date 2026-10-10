@@ -17,8 +17,10 @@ use crate::context::{ServiceContext, TeamScope};
 use crate::db::MutationSource;
 use crate::events::ChangeEvent;
 use crate::identity::{ensure_solo, SoloIdentity};
+use crate::machine::MachineContext;
 use crate::paths::AppPaths;
 use crate::runner::RunnerConfig;
+use crate::testing::machine::MemoryMachine;
 use crate::testing::{test_pool, TestClock};
 
 /// Where a [`TestContext`]'s clock starts unless the test says otherwise.
@@ -45,6 +47,9 @@ pub struct TestContext {
     /// [`ensure_solo`] the shell calls, so a test reads the ids rather than
     /// querying for them.
     pub solo: SoloIdentity,
+    /// This machine's own state, over a [`MemoryMachine`]. See
+    /// [`machine`](Self::machine).
+    machine: MachineContext,
 }
 
 impl TestContext {
@@ -77,13 +82,34 @@ impl TestContext {
             solo.user_id.clone(),
         );
         let changes = context.subscribe();
+        // The shell's shape (task 041): the board's own sender and the solo
+        // team, so a machine write reaches `changes` exactly as it reaches the
+        // window, and the same clock the board reads.
+        let machine = MachineContext {
+            store: Arc::new(MemoryMachine::new()),
+            clock: Arc::new(clock.clone()),
+            changes: context.changes.clone(),
+            event_team: solo.team_id.clone(),
+        };
 
         Self {
             context,
             changes,
             clock,
             solo,
+            machine,
         }
+    }
+
+    /// The machine context over this test's [`MemoryMachine`], sharing the
+    /// test's clock, change channel and solo team (task 041).
+    ///
+    /// One store per harness, so what a test writes through it is what the
+    /// code under test reads back. A test that asserts on `runner.db` itself
+    /// lives in `crates/runner/tests/` instead; one here asserts on behaviour,
+    /// and says "the machine store".
+    pub fn machine(&self) -> &MachineContext {
+        &self.machine
     }
 
     /// The board port over this test's own context (seam-contract D31 point

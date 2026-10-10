@@ -23,13 +23,13 @@ use crate::state::AppState;
 /// and a list without it would be a list nobody could check.
 #[tauri::command]
 pub async fn list_schedules(state: State<'_, AppState>) -> Result<Vec<ScheduleView>> {
-    schedule::list(&state.context).await
+    schedule::list(&state.machine).await
 }
 
 /// Creates a schedule, armed from now.
 #[tauri::command]
 pub async fn create_schedule(state: State<'_, AppState>, input: ScheduleInput) -> Result<Schedule> {
-    schedule::create(&state.context, input).await
+    schedule::create(&state.machine, input).await
 }
 
 /// Replaces a schedule's configuration, leaving its fire history alone.
@@ -39,7 +39,7 @@ pub async fn update_schedule(
     id: String,
     input: ScheduleInput,
 ) -> Result<Schedule> {
-    schedule::update(&state.context, &id, input).await
+    schedule::update(&state.machine, &id, input).await
 }
 
 /// Turns a schedule on or off without deleting its configuration (task 013's
@@ -55,12 +55,12 @@ pub async fn set_schedule_enabled(
     id: String,
     enabled: bool,
 ) -> Result<Schedule> {
-    schedule::set_enabled(&state.context, &id, enabled).await
+    schedule::set_enabled(&state.machine, &id, enabled).await
 }
 
 #[tauri::command]
 pub async fn delete_schedule(state: State<'_, AppState>, id: String) -> Result<()> {
-    schedule::delete(&state.context, &id).await
+    schedule::delete(&state.machine, &id).await
 }
 
 /// What this schedule would do if it fired now: which tasks will run, in what
@@ -73,7 +73,7 @@ pub async fn preview_schedule_preflight(
     state: State<'_, AppState>,
     id: String,
 ) -> Result<PreflightSummary> {
-    schedule::preview(&state.context, &id).await
+    schedule::preview(&state.machine, &state.context, &id).await
 }
 
 /// Every IANA zone name, for the picker.

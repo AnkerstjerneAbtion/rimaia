@@ -949,6 +949,7 @@ async fn a_pass_and_the_queue_cannot_start_two_processes_for_one_task() {
             .harness
             .board(&fixture.paths, &fixture.config(&FakeCli::silent()))
             .as_ref(),
+        fixture.harness.machine(),
         &fixture.harness.context,
         &fixture.paths,
         &fixture.config(&FakeCli::silent()),
@@ -1011,6 +1012,7 @@ async fn a_pass_cancelled_before_it_starts_spawns_nothing_and_says_it_was_cancel
             .harness
             .board(&fixture.paths, &fixture.config(&cli))
             .as_ref(),
+        fixture.harness.machine(),
         &fixture.harness.context,
         &fixture.paths,
         &fixture.config(&cli),
@@ -1046,6 +1048,7 @@ async fn a_pass_plans_an_eligible_card_and_reports_its_model_effort_and_rational
             .harness
             .board(&fixture.paths, &fixture.config(&cli))
             .as_ref(),
+        fixture.harness.machine(),
         &fixture.harness.context,
         &fixture.paths,
         &fixture.config(&cli),
@@ -1099,6 +1102,7 @@ async fn plan_selection(fixture: &StrategyFixture, selection: PlanSelection) -> 
             .harness
             .board(&fixture.paths, &fixture.config(&FakeCli::silent()))
             .as_ref(),
+        fixture.harness.machine(),
         &fixture.harness.context,
         &fixture.paths,
         &fixture.config(&FakeCli::silent()),
@@ -1474,8 +1478,8 @@ impl StrategyFixture {
             harness.context.clone(),
             0,
             handles.clone(),
-            testing::doctor::environment(),
-            testing::doctor::planner_access(),
+            testing::doctor::provider(),
+            Some(testing::doctor::local_tools(harness.machine())),
         )
         .await;
         tokio::spawn(task_handle.run());
@@ -1574,6 +1578,7 @@ impl StrategyFixture {
     ) -> rimaia_core::Result<Run> {
         run_task(
             board,
+            self.harness.machine(),
             &self.harness.context,
             &self.paths,
             config,

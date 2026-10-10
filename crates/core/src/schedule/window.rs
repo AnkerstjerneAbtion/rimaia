@@ -1,16 +1,17 @@
 //! The run window that is open right now: which schedule opened it, when it
 //! closes, and what configuration it runs under (ADR-0010's run windows).
 //!
-//! # One `settings` key, in D3's shape
+//! # One runner settings key, in D3's shape
 //!
-//! `active_run_window` holds a JSON [`RunWindow`], stored through task 006's
-//! accessor with the rules about the key in the module that has the rules —
+//! `active_run_window` holds a JSON [`RunWindow`], stored in this machine's
+//! store (since task 041) through `db::settings`' runner accessor, with the
+//! rules about the key in the module that has the rules —
 //! exactly as [`scheduler::state`](crate::scheduler::state) does for
 //! `queue_state`, [`capacity`](crate::scheduler::capacity) for `schedule_mode`
 //! and [`pause`](crate::scheduler::pause) for the usage-limit hold. Seam-contract
 //! D4 forbids a column, and a column would be wrong anyway: at most one window
-//! is open, so this is a singleton fact about the installation, which is what the
-//! `settings` table is.
+//! is open, so this is a singleton fact about the machine, which is what a
+//! runner setting is.
 //!
 //! **Stored rather than held in memory**, for the same reason `pause` gives. A
 //! window opened at 22:00 must still be open — and must still know it closes at
@@ -60,11 +61,11 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-use crate::context::ServiceContext;
 use crate::db::{settings, Schedule, ScheduleMode};
 use crate::error::Result;
+use crate::machine::MachineContext;
 
-/// The `settings` key holding the open [`RunWindow`], if there is one.
+/// The runner settings key holding the open [`RunWindow`], if there is one.
 pub const ACTIVE_RUN_WINDOW: &str = "active_run_window";
 
 /// The window a schedule opened, as stored.
@@ -121,16 +122,17 @@ impl RunWindow {
 
 /// The window that is open, or `None`.
 ///
-/// Tolerant, the way every `settings` read in this codebase is and for
+/// Tolerant, the way every settings read in this codebase is and for
 /// ADR-0003's reason: an unreadable value is read as "no window", which costs a
 /// night that runs under the default configuration rather than a queue that
 /// refuses to run at all. Note the direction — falling back to *no* window is
 /// the narrow reading, because a window is what *raises* concurrency above the
 /// default.
 ///
-/// Runner state, read from `settings` until task 041 moves it to `runner.db`.
-pub async fn active(ctx: &ServiceContext) -> Result<Option<RunWindow>> {
-    let Some(stored) = settings::get_runner(ctx, ACTIVE_RUN_WINDOW).await? else {
+/// An empty value is also no window: it is how a board before task 041
+/// spelled a closed one, and adoption copies it byte for byte.
+pub async fn active(machine: &MachineContext) -> Result<Option<RunWindow>> {
+    let Some(stored) = settings::get_runner(machine, ACTIVE_RUN_WINDOW).await? else {
         return Ok(None);
     };
     if stored.trim().is_empty() {
@@ -156,11 +158,11 @@ pub async fn active(ctx: &ServiceContext) -> Result<Option<RunWindow>> {
 /// has to guard: `tick_schedules` never reaches here with a window already open
 /// — it declines to reopen and says so — so the only way to overwrite one is a
 /// caller that meant to.
-pub async fn open(ctx: &ServiceContext, window: &RunWindow) -> Result<()> {
+pub async fn open(machine: &MachineContext, window: &RunWindow) -> Result<()> {
     let encoded = serde_json::to_string(window).map_err(|error| {
         crate::error::Error::internal(format!("could not record the run window: {error}"))
     })?;
-    settings::set_runner(ctx, ACTIVE_RUN_WINDOW, &encoded).await
+    settings::set_runner(machine, ACTIVE_RUN_WINDOW, &encoded).await
 }
 
 /// Closes whatever window was open.
@@ -168,14 +170,14 @@ pub async fn open(ctx: &ServiceContext, window: &RunWindow) -> Result<()> {
 /// Idempotent, and cheap when there is nothing to close: closing is called from
 /// `pause`, from `stop`, from the exit path and from the stop time arriving, and
 /// three of those four routinely run with no window open at all.
-pub async fn close(ctx: &ServiceContext) -> Result<()> {
-    if settings::get_runner(ctx, ACTIVE_RUN_WINDOW)
+pub async fn close(machine: &MachineContext) -> Result<()> {
+    if settings::get_runner(machine, ACTIVE_RUN_WINDOW)
         .await?
         .is_none()
     {
         return Ok(());
     }
-    settings::set_runner(ctx, ACTIVE_RUN_WINDOW, "").await
+    settings::clear_runner(machine, ACTIVE_RUN_WINDOW).await
 }
 
 #[cfg(test)]
@@ -203,7 +205,7 @@ mod tests {
     async fn a_queue_nobody_has_scheduled_has_no_window() {
         let harness = TestContext::new().await;
 
-        assert_eq!(active(&harness.context).await.expect("read the key"), None);
+        assert_eq!(active(harness.machine()).await.expect("read the key"), None);
     }
 
     #[tokio::test]
@@ -212,12 +214,12 @@ mod tests {
         // must still know the window closes at 06:00.
         let harness = TestContext::new().await;
 
-        open(&harness.context, &window())
+        open(harness.machine(), &window())
             .await
             .expect("open a window");
 
         assert_eq!(
-            active(&harness.context).await.expect("read it back"),
+            active(harness.machine()).await.expect("read it back"),
             Some(window()),
         );
     }
@@ -225,14 +227,14 @@ mod tests {
     #[tokio::test]
     async fn closing_leaves_no_window_and_is_safe_to_repeat() {
         let harness = TestContext::new().await;
-        open(&harness.context, &window())
+        open(harness.machine(), &window())
             .await
             .expect("open a window");
 
-        close(&harness.context).await.expect("close it");
-        close(&harness.context).await.expect("and again");
+        close(harness.machine()).await.expect("close it");
+        close(harness.machine()).await.expect("and again");
 
-        assert_eq!(active(&harness.context).await.expect("read"), None);
+        assert_eq!(active(harness.machine()).await.expect("read"), None);
     }
 
     #[tokio::test]
@@ -242,10 +244,10 @@ mod tests {
         // a `settings:changed` on every Pause for no reason.
         let harness = TestContext::new().await;
 
-        close(&harness.context).await.expect("close nothing");
+        close(harness.machine()).await.expect("close nothing");
 
         assert_eq!(
-            settings::get_runner(&harness.context, ACTIVE_RUN_WINDOW)
+            settings::get_runner(harness.machine(), ACTIVE_RUN_WINDOW)
                 .await
                 .expect("read the key"),
             None,
@@ -257,11 +259,11 @@ mod tests {
         let harness = TestContext::new().await;
 
         for nonsense in ["{", "null", "\"nightly\"", "{\"scheduleId\":\"x\"}"] {
-            settings::set_runner(&harness.context, ACTIVE_RUN_WINDOW, nonsense)
+            settings::set_runner(harness.machine(), ACTIVE_RUN_WINDOW, nonsense)
                 .await
                 .expect("store nonsense");
             assert_eq!(
-                active(&harness.context)
+                active(harness.machine())
                     .await
                     .expect("a bad row is not an error"),
                 None,

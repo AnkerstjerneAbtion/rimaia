@@ -5,7 +5,8 @@
 //! gives at its own: seam-contract D3 puts the rules about a key with the code
 //! that has the rules, and nothing outside this module has any business
 //! knowing what `mcp_port` means. Storage is the runner accessor of
-//! [`crate::db::settings`], so there is one `settings` reader and not two.
+//! [`crate::db::settings`], over this machine's store since task 041: the
+//! port is where *this machine* listens, so there is one reader and not two.
 //!
 //! Unseeded, like `run_environment`: an absent key *is* [`DEFAULT_PORT`], and
 //! a row only appears once the user has changed it. That is also what makes
@@ -13,12 +14,12 @@
 //! `claude mcp add` keeps working across launches because nothing rewrites the
 //! port behind them.
 
-use crate::context::ServiceContext;
 use crate::db::settings;
 use crate::error::{Error, Result};
+use crate::machine::MachineContext;
 use crate::mcp::DEFAULT_PORT;
 
-/// The `settings` key holding the listening port.
+/// The runner settings key holding the listening port.
 pub const MCP_PORT: &str = "mcp_port";
 
 /// The lowest port this app may ask for.
@@ -34,13 +35,11 @@ const LOWEST_USABLE_PORT: u16 = 1024;
 ///
 /// Tolerant rather than fallible, exactly as
 /// [`RunEnvironment`](crate::db::RunEnvironment) and `queue_state` are, and for
-/// the same reason: `settings.value` has no `CHECK` and the user is a supported
+/// the same reason: the stored value has no `CHECK` and the user is a supported
 /// writer of this file (ADR-0003). A typo hand-edited into the row costs a log
 /// line and the default, never a launch.
-///
-/// Runner state, read from `settings` until task 041 moves it to `runner.db`.
-pub async fn configured_port(ctx: &ServiceContext) -> Result<u16> {
-    let Some(stored) = settings::get_runner(ctx, MCP_PORT).await? else {
+pub async fn configured_port(machine: &MachineContext) -> Result<u16> {
+    let Some(stored) = settings::get_runner(machine, MCP_PORT).await? else {
         return Ok(DEFAULT_PORT);
     };
 
@@ -67,7 +66,7 @@ pub async fn configured_port(ctx: &ServiceContext) -> Result<u16> {
 ///
 /// This writes the setting and nothing else — restarting the listener on the
 /// new port is the shell's `set_mcp_port` command, which owns the handle.
-pub async fn set_configured_port(ctx: &ServiceContext, port: u16) -> Result<()> {
+pub async fn set_configured_port(machine: &MachineContext, port: u16) -> Result<()> {
     if port < LOWEST_USABLE_PORT {
         return Err(Error::invalid(format!(
             "port {port} is not usable: ports below {LOWEST_USABLE_PORT} need privileges Rimaia \
@@ -75,7 +74,7 @@ pub async fn set_configured_port(ctx: &ServiceContext, port: u16) -> Result<()> 
         )));
     }
 
-    settings::set_runner(ctx, MCP_PORT, &port.to_string()).await
+    settings::set_runner(machine, MCP_PORT, &port.to_string()).await
 }
 
 #[cfg(test)]
@@ -90,14 +89,14 @@ mod tests {
         let harness = TestContext::new().await;
 
         assert_eq!(
-            settings::get_runner(&harness.context, MCP_PORT)
+            settings::get_runner(harness.machine(), MCP_PORT)
                 .await
                 .expect("read the key"),
             None,
             "the key is deliberately unseeded"
         );
         assert_eq!(
-            configured_port(&harness.context)
+            configured_port(harness.machine())
                 .await
                 .expect("read the default"),
             DEFAULT_PORT
@@ -108,19 +107,19 @@ mod tests {
     async fn a_stored_port_round_trips() {
         let harness = TestContext::new().await;
 
-        set_configured_port(&harness.context, 4599)
+        set_configured_port(harness.machine(), 4599)
             .await
             .expect("store a port");
 
         assert_eq!(
-            settings::get_runner(&harness.context, MCP_PORT)
+            settings::get_runner(harness.machine(), MCP_PORT)
                 .await
                 .expect("read the row"),
             Some("4599".to_string()),
             "stored as digits, so the row is legible in the sqlite3 CLI"
         );
         assert_eq!(
-            configured_port(&harness.context)
+            configured_port(harness.machine())
                 .await
                 .expect("read it back"),
             4599
@@ -132,12 +131,12 @@ mod tests {
         let harness = TestContext::new().await;
 
         for typo in ["four thousand", "", "70000", "-1", "80"] {
-            settings::set_runner(&harness.context, MCP_PORT, typo)
+            settings::set_runner(harness.machine(), MCP_PORT, typo)
                 .await
                 .expect("store a typo");
 
             assert_eq!(
-                configured_port(&harness.context)
+                configured_port(harness.machine())
                     .await
                     .expect("read it back"),
                 DEFAULT_PORT,
@@ -150,7 +149,7 @@ mod tests {
     async fn a_port_below_1024_is_refused() {
         let harness = TestContext::new().await;
 
-        let error = set_configured_port(&harness.context, 80)
+        let error = set_configured_port(harness.machine(), 80)
             .await
             .expect_err("a privileged port is refused");
 
@@ -160,7 +159,7 @@ mod tests {
              Pick a port between 1024 and 65535."
         );
         assert_eq!(
-            settings::get_runner(&harness.context, MCP_PORT)
+            settings::get_runner(harness.machine(), MCP_PORT)
                 .await
                 .expect("read the key"),
             None,
@@ -174,7 +173,7 @@ mod tests {
         // only way a second window learns the port moved (ADR-0018).
         let mut harness = TestContext::new().await;
 
-        set_configured_port(&harness.context, 4600)
+        set_configured_port(harness.machine(), 4600)
             .await
             .expect("store a port");
 

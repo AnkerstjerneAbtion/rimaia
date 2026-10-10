@@ -9,8 +9,9 @@
 //!
 //! What stays off the port is runner-owned state (D31 point 14): the run
 //! window, the usage-limit pause, capacity, the queue switch and the run
-//! environment are read through `ServiceContext` until task 041 moves them,
-//! and never cross it.
+//! environment are this machine's, read through
+//! [`MachineContext`](crate::machine::MachineContext) since task 041, and never
+//! cross it.
 
 pub mod in_process;
 pub mod port;

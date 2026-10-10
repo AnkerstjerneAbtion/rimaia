@@ -79,6 +79,7 @@ use crate::db::settings::{self, RunEnvironment};
 use crate::db::Repository;
 use crate::db::{new_id, ExitClass, Run, RunKind, RunStatus};
 use crate::error::{Error, Result};
+use crate::machine::MachineContext;
 use crate::mcp::{Grant, RunGrant, RunHandles, Tool, RUN_MCP_SERVER_NAME};
 use crate::paths::AppPaths;
 use crate::repo;
@@ -751,10 +752,17 @@ pub(crate) fn implementation_intent<'a>(
 /// the next `start_run`, are the named residual (ADR-0017's 2026-10-09
 /// amendment): the board could not be written, or nothing was alive to write
 /// it.
+///
+/// `machine` is this machine's own state (task 041): the run environment, the
+/// run window and the usage-limit pause, and the clock. `prepare_ctx` is a
+/// board context held for one call and nothing else: [`worktree::prepare`]
+/// still reads the task, the repository and the base ref through it, and
+/// task 044 removes it once `RunContext::base` carries what that call needs.
 #[tracing::instrument(skip_all, fields(task_id = %claim.lease.task_id))]
 pub async fn run_task(
     board: &dyn BoardPort,
-    ctx: &ServiceContext,
+    machine: &MachineContext,
+    prepare_ctx: &ServiceContext,
     paths: &AppPaths,
     config: &RunnerConfig,
     claim: Claim,
@@ -769,7 +777,8 @@ pub async fn run_task(
     } = claim;
     let phases = Phases {
         board,
-        ctx,
+        machine,
+        prepare_ctx,
         paths,
         config,
         lease: &lease,
@@ -830,7 +839,8 @@ async fn run_implementation(
 ) -> Result<FinishReceipt> {
     let Phases {
         board,
-        ctx,
+        machine,
+        prepare_ctx,
         paths,
         config,
         lease,
@@ -847,7 +857,7 @@ async fn run_implementation(
     .await?;
     // Runner-owned, and read once, so the run is negotiated against the same
     // value it is then spawned with.
-    let run_environment = released(board, lease, settings::run_environment(ctx).await).await?;
+    let run_environment = released(board, lease, settings::run_environment(machine).await).await?;
 
     // Rimaia's conversation id, minted before anything exists so a resume works
     // even against a provider whose child dies before announcing itself
@@ -891,7 +901,7 @@ async fn run_implementation(
         board,
         lease,
         prepare_worktree(
-            ctx,
+            prepare_ctx,
             request.in_flight.as_ref(),
             &context.repository.id,
             &task_id,
@@ -923,7 +933,7 @@ async fn run_implementation(
         let resolved = strategy::resolve(
             board,
             lease,
-            ctx,
+            machine,
             paths,
             config,
             &context,
@@ -1028,7 +1038,7 @@ async fn run_implementation(
         notes: &[],
     };
 
-    let executed = execute(board, lease, ctx, paths, config, attempt).await;
+    let executed = execute(board, lease, machine, paths, config, attempt).await;
     phases
         .finish(
             &run_id,
@@ -1043,7 +1053,9 @@ async fn run_implementation(
 #[derive(Clone, Copy)]
 struct Phases<'a> {
     board: &'a dyn BoardPort,
-    ctx: &'a ServiceContext,
+    machine: &'a MachineContext,
+    /// For [`worktree::prepare`] and nothing else, until task 044.
+    prepare_ctx: &'a ServiceContext,
     paths: &'a AppPaths,
     config: &'a RunnerConfig,
     lease: &'a LeaseRef,
@@ -1167,7 +1179,7 @@ impl Phases<'_> {
         let mut executed = execute(
             self.board,
             self.lease,
-            self.ctx,
+            self.machine,
             self.paths,
             self.config,
             attempt,
@@ -1227,7 +1239,7 @@ impl Phases<'_> {
             pending.base = review.implementation.clone();
         }
 
-        let run_environment = settings::run_environment(self.ctx)
+        let run_environment = settings::run_environment(self.machine)
             .await
             .map_err(|error| error.to_string())?;
         repo::ensure_unattended_runs_allowed(&context.repository)
@@ -1540,7 +1552,7 @@ impl Phases<'_> {
         // amendment of 2026-10-09).
         if usage_limited {
             if let Some(reset) = outcome.usage_limit_resets_at {
-                hold_new_starts_until(self.ctx, task_id, run_id, reset).await;
+                hold_new_starts_until(self.machine, task_id, run_id, reset).await;
             }
         }
 
@@ -1556,7 +1568,7 @@ impl Phases<'_> {
                     outcome,
                     head_sha: capture.head_sha,
                     bundle: capture.bundle,
-                    window_closes_at: run_window_closes_at(self.ctx, task_id, run_id).await,
+                    window_closes_at: run_window_closes_at(self.machine, task_id, run_id).await,
                     transcript,
                 },
             )
@@ -1584,7 +1596,7 @@ impl Phases<'_> {
         // `note_usage_limit` only ever lengthens the pause.
         if usage_limited {
             if let Some(until) = resume_after {
-                hold_new_starts_until(self.ctx, task_id, run_id, until).await;
+                hold_new_starts_until(self.machine, task_id, run_id, until).await;
             }
         }
 
@@ -1646,11 +1658,11 @@ async fn give_back(board: &dyn BoardPort, lease: &LeaseRef) {
 /// ADR-0011's unbounded retry rather than inventing a cap out of a database
 /// hiccup.
 async fn run_window_closes_at(
-    ctx: &ServiceContext,
+    machine: &MachineContext,
     task_id: &str,
     run_id: &str,
 ) -> Option<DateTime<Utc>> {
-    match crate::schedule::window::active(ctx).await {
+    match crate::schedule::window::active(machine).await {
         Ok(window) => window.and_then(|window| window.closes_at),
         Err(error) => {
             tracing::warn!(
@@ -1668,12 +1680,12 @@ async fn run_window_closes_at(
 /// pause that could not be written costs at worst one start into a closed
 /// window.
 async fn hold_new_starts_until(
-    ctx: &ServiceContext,
+    machine: &MachineContext,
     task_id: &str,
     run_id: &str,
     until: DateTime<Utc>,
 ) {
-    if let Err(error) = pause::note_usage_limit(ctx, until).await {
+    if let Err(error) = pause::note_usage_limit(machine, until).await {
         tracing::error!(
             %task_id, %run_id, %error,
             "could not record the usage-limit pause; the queue may start into a closed window",
@@ -1781,7 +1793,7 @@ fn override_as_fatal(outcome: &mut RunOutcome, message: String) {
 pub async fn execute(
     board: &dyn BoardPort,
     lease: &LeaseRef,
-    ctx: &ServiceContext,
+    machine: &MachineContext,
     paths: &AppPaths,
     config: &RunnerConfig,
     attempt: Attempt<'_>,
@@ -1791,13 +1803,18 @@ pub async fn execute(
     // on after every line, because the stream owns no reference to a board
     // and a tail it could not hand over costs nothing (D14).
     let (tails, tail_inbox) = mpsc::channel::<RunTail>();
-    let mut stream = EventStream::create(ctx, paths, attempt.task_id, attempt.run_id)?
-        .driven_by(config.provider.clone())
-        // Before the first line is read, so nothing unredacted reaches the
-        // transcript on disk or the D14 live tail. Redacting on read would
-        // leave the secret in the file, which is the only copy that matters.
-        .redacting(attempt.credentials.redactor.clone())
-        .forwarding_tail(tails);
+    let mut stream = EventStream::forwarding(
+        machine.clock.clone(),
+        paths,
+        attempt.task_id,
+        attempt.run_id,
+        tails,
+    )?
+    .driven_by(config.provider.clone())
+    // Before the first line is read, so nothing unredacted reaches the
+    // transcript on disk or the D14 live tail. Redacting on read would leave
+    // the secret in the file, which is the only copy that matters.
+    .redacting(attempt.credentials.redactor.clone());
 
     // Before the child exists, so the record of what this run was allowed to be
     // is there even if the spawn fails. A warning rather than a refusal is the

@@ -212,6 +212,7 @@ use crate::db::MutationSource;
 use crate::doctor;
 use crate::error::{Error, Result};
 use crate::events::ChangeEvent;
+use crate::machine::MachineContext;
 use crate::paths::AppPaths;
 use crate::runner::{probe_cli, run_task, CancelSignal, RunRequest, RunTrigger, RunnerConfig};
 use crate::schedule::window::{self, RunWindow};
@@ -312,8 +313,15 @@ pub struct QueueTask {
 /// `board` is where the queue claims, releases and has its runs report (D31
 /// point 8). The shell builds one in `setup()` over the same provider as
 /// `runner` and hands clones to everything that starts a process.
+///
+/// `machine` is where this machine's own state is (task 041): the switch, the
+/// capacity, the run window, the usage-limit pause and the schedules, all read
+/// and written through it and never through `ctx`. `ctx` is the board's, for
+/// the plan the queue selects from, until task 042 moves selection behind the
+/// port.
 pub fn build(
     board: Arc<dyn BoardPort>,
+    machine: MachineContext,
     ctx: ServiceContext,
     paths: AppPaths,
     runner: RunnerConfig,
@@ -337,6 +345,7 @@ pub fn build(
     // same `Arc` it already holds, so nothing about its own use changed.
     let shared = Arc::new(Shared {
         ctx,
+        machine,
         paths,
         runner,
         signals,
@@ -374,7 +383,12 @@ impl QueueHandle {
     /// It is deliberately **not** in the loop's own `try_step` — see this
     /// module's header and `doctor`'s, and seam-contract D22.
     pub async fn start(&self) -> Result<()> {
-        let report = doctor::run(&self.shared.ctx, &self.shared.doctor_environment()).await?;
+        let report = doctor::run(
+            &self.shared.machine,
+            &self.shared.ctx,
+            &self.shared.doctor_environment(),
+        )
+        .await?;
         if report.is_blocking() {
             tracing::warn!(
                 blocking = report.blocking().count(),
@@ -421,7 +435,7 @@ impl QueueHandle {
     /// schedule is the standing instruction that produces them.
     pub async fn pause(&self) -> Result<()> {
         self.set(QueueState::Paused).await?;
-        window::close(&self.shared.ctx).await
+        window::close(&self.shared.machine).await
     }
 
     /// Pause, plus cancel whatever *the queue* is running.
@@ -447,14 +461,14 @@ impl QueueHandle {
 
     /// The whole picture, for the Runs view.
     pub async fn status(&self) -> Result<QueueStatus> {
-        let ctx = &self.shared.ctx;
+        let machine = &self.shared.machine;
         Ok(QueueStatus {
-            state: state::queue_state(ctx).await?,
+            state: state::queue_state(machine).await?,
             running_task_ids: self.in_flight_task_ids(),
-            plan: selection::plan(ctx).await?,
+            plan: selection::plan(&self.shared.ctx).await?,
             last_step_error: self.shared.step_error(),
-            usage_limit_pause_until: pause::active_until(ctx, ctx.clock.now()).await?,
-            window: window::active(ctx).await?,
+            usage_limit_pause_until: pause::active_until(machine, machine.clock.now()).await?,
+            window: window::active(machine).await?,
         })
     }
 
@@ -497,7 +511,7 @@ impl QueueHandle {
     }
 
     async fn set(&self, to: QueueState) -> Result<()> {
-        state::set_queue_state(&self.shared.ctx, to).await?;
+        state::set_queue_state(&self.shared.machine, to).await?;
         tracing::info!(
             state = to.as_str(),
             "the run queue was told to change state"
@@ -513,6 +527,10 @@ impl QueueTask {
     /// started.
     pub async fn run(self) {
         let mut signals = self.shared.signals.subscribe();
+        // The board's channel, which in solo is also the machine's: a
+        // `MachineContext` carries the board's sender until task 048, so a
+        // schedule edited or a switch flipped wakes this loop as a card
+        // moved does.
         let mut changes = self.shared.ctx.subscribe();
         let mut releases = self.shared.in_flight.releases();
         // The runs this queue is supervising. Owned by the loop rather than by
@@ -523,7 +541,7 @@ impl QueueTask {
         // Held once rather than reached for through the context on every
         // iteration: the timer future below outlives the borrow of `self` that
         // `select!` would otherwise need.
-        let clock = Arc::clone(&self.shared.ctx.clock);
+        let clock = Arc::clone(&self.shared.machine.clock);
 
         tracing::info!("the run queue is watching the board");
 
@@ -661,9 +679,9 @@ impl QueueTask {
     }
 
     async fn try_tick_schedules(&self) -> Result<Step> {
-        let ctx = &self.shared.ctx;
-        let now = ctx.clock.now();
-        let open = window::active(ctx).await?;
+        let machine = &self.shared.machine;
+        let now = machine.clock.now();
+        let open = window::active(machine).await?;
 
         // 1. Close first, before anything selects.
         if let Some(window) = &open {
@@ -676,7 +694,7 @@ impl QueueTask {
         //    produce one window and *which* of them owns the night has to be
         //    the same answer on every pass and after every restart.
         let mut wake: Option<DateTime<Utc>> = open.as_ref().and_then(|window| window.closes_at);
-        for schedule in schedule::enabled(ctx).await? {
+        for schedule in schedule::enabled(machine).await? {
             // Per row, not per pass: one unreadable row must not stop every
             // other schedule being looked at. The row is named, because the
             // operator has to know which one to fix.
@@ -709,7 +727,7 @@ impl QueueTask {
                             "a schedule came due while another schedule's window is still open; \
                              not opening a second one",
                         );
-                        schedule::record_fire(ctx, &schedule.id, now).await?;
+                        schedule::record_fire(machine, &schedule.id, now).await?;
                         return Ok(Step::Worked);
                     }
                     return self
@@ -768,9 +786,9 @@ impl QueueTask {
     /// tidies, rather than a running queue with no window, which would spend the
     /// morning working the board under the default configuration.
     async fn close_window(&self, window: &RunWindow) -> Result<Step> {
-        let ctx = &self.shared.ctx;
-        state::set_queue_state(ctx, QueueState::Paused).await?;
-        window::close(ctx).await?;
+        let machine = &self.shared.machine;
+        state::set_queue_state(machine, QueueState::Paused).await?;
+        window::close(machine).await?;
 
         tracing::info!(
             schedule = %window.schedule_name,
@@ -803,11 +821,12 @@ impl QueueTask {
         closes_at: Option<DateTime<Utc>>,
         now: DateTime<Utc>,
     ) -> Result<Step> {
-        let ctx = &self.shared.ctx;
+        let machine = &self.shared.machine;
 
-        let report = doctor::run(ctx, &self.shared.doctor_environment()).await?;
+        let report =
+            doctor::run(machine, &self.shared.ctx, &self.shared.doctor_environment()).await?;
         if report.is_blocking() {
-            schedule::record_fire(ctx, &schedule.id, now).await?;
+            schedule::record_fire(machine, &schedule.id, now).await?;
             let summary = report.blocking_summary();
             tracing::error!(
                 schedule = %schedule.name,
@@ -818,17 +837,16 @@ impl QueueTask {
             self.shared.record_schedule_error(summary);
             // So the Runs view re-reads and shows it. `queue_state` was not
             // written, so nothing else on this path would have announced
-            // anything at all. A machine-local fact with no team column: it
-            // names the context's one team until task 048 splits machine-local
-            // events off the team channel.
-            ctx.publish(ChangeEvent::settings(ctx.scope.sole()?.clone()));
+            // anything at all. A machine event on the board's channel, under
+            // `event_team`, until task 048 gives machine events `LocalEvents`.
+            machine.publish(ChangeEvent::settings);
             return Ok(Step::Worked);
         }
 
         // Computed, never stored, and the same object the evening's Preview
         // button showed — so the log line a morning review reads and the
         // sentence the user read before leaving came from one function.
-        match preflight::preview(ctx, &schedule.id).await {
+        match preflight::preview(machine, &self.shared.ctx, &schedule.id).await {
             Ok(summary) => tracing::info!(
                 schedule = %schedule.name,
                 will_start = summary.startable(),
@@ -851,10 +869,10 @@ impl QueueTask {
         }
 
         let window = RunWindow::opened_by(schedule, now, closes_at);
-        window::open(ctx, &window).await?;
-        schedule::record_fire(ctx, &schedule.id, now).await?;
+        window::open(machine, &window).await?;
+        schedule::record_fire(machine, &schedule.id, now).await?;
         self.shared.clear_schedule_error();
-        state::set_queue_state(ctx, QueueState::Running).await?;
+        state::set_queue_state(machine, QueueState::Running).await?;
 
         tracing::info!(
             schedule = %window.schedule_name,
@@ -870,8 +888,9 @@ impl QueueTask {
 
     async fn try_step(&self, runs: &mut JoinSet<()>) -> Result<Step> {
         let ctx = &self.shared.ctx;
+        let machine = &self.shared.machine;
 
-        if state::queue_state(ctx).await? != QueueState::Running {
+        if state::queue_state(machine).await? != QueueState::Running {
             return Ok(Step::Idle);
         }
 
@@ -881,7 +900,7 @@ impl QueueTask {
         // buys by making sequential mode `global = 1`. In-flight runs are
         // deliberately untouched: a run mid-edit when *another* task hit a wall
         // has done nothing wrong, and this is a rule about starting.
-        if let Some(until) = pause::active_until(ctx, ctx.clock.now()).await? {
+        if let Some(until) = pause::active_until(machine, machine.clock.now()).await? {
             tracing::debug!(
                 until = %until.to_rfc3339(),
                 "the run queue is holding new starts until the usage window reopens",
@@ -892,7 +911,7 @@ impl QueueTask {
         // Read fresh every pass, never held: the operator may flip the mode or
         // raise a repository's cap at 23:00 with runs already in flight, and
         // the pass after that write is the one that has to notice.
-        let capacity = capacity::resolve(ctx).await?;
+        let capacity = capacity::resolve(machine, ctx).await?;
         let plan = selection::plan(ctx).await?;
         let batch = selection::next_batch(
             &plan,
@@ -1054,6 +1073,7 @@ impl QueueTask {
 
             runs.spawn(supervise(
                 Arc::clone(&self.shared.board),
+                machine.clone(),
                 ctx.clone(),
                 self.shared.paths.clone(),
                 self.shared.runner.clone(),
@@ -1085,7 +1105,7 @@ impl QueueTask {
         if cancel.is_cancelled() || self.shared.is_shutting_down() {
             return Ok(true);
         }
-        Ok(state::queue_state(&self.shared.ctx).await? != QueueState::Running)
+        Ok(state::queue_state(&self.shared.machine).await? != QueueState::Running)
     }
 }
 
@@ -1096,15 +1116,17 @@ impl QueueTask {
 /// outlive the loop itself, so anything it could reach through `&self` would be
 /// a lifetime the borrow checker has to be argued out of and a shared field two
 /// concurrent supervisors could disagree over. Everything it needs is cheap to
-/// clone and already designed to be — [`ServiceContext`], [`AppPaths`] and
-/// [`RunnerConfig`] are all handles.
+/// clone and already designed to be — [`MachineContext`], [`ServiceContext`],
+/// [`AppPaths`] and [`RunnerConfig`] are all handles.
 ///
 /// The lease is dropped **last**, after `run_task` has returned and after any
 /// release. Dropping it earlier would wake the loop while `finish_run`'s own
 /// writes were still landing, and the pass it woke would read a board that had
 /// not finished changing.
+#[allow(clippy::too_many_arguments)]
 async fn supervise(
     board: Arc<dyn BoardPort>,
+    machine: MachineContext,
     ctx: ServiceContext,
     paths: AppPaths,
     runner: RunnerConfig,
@@ -1115,7 +1137,17 @@ async fn supervise(
     let task_id = claim.lease.task_id.clone();
     let lease_ref = claim.lease.clone();
 
-    match run_task(board.as_ref(), &ctx, &paths, &runner, claim, request).await {
+    match run_task(
+        board.as_ref(),
+        &machine,
+        &ctx,
+        &paths,
+        &runner,
+        claim,
+        request,
+    )
+    .await
+    {
         Ok(run) => tracing::info!(
             %task_id,
             run_id = %run.id,
@@ -1175,7 +1207,12 @@ impl Step {
 
 /// What the control surface and the loop share.
 struct Shared {
+    /// The board's context, for the plan the queue selects from and the
+    /// worktree a run prepares, until tasks 042 and 044.
     ctx: ServiceContext,
+    /// This machine's own state: everything the queue decides with that is
+    /// not on the board (task 041).
+    machine: MachineContext,
     /// Where state lives. Read by the loop when it starts a run, and by
     /// [`QueueHandle::start`]'s preflight, which asks whether it is writable
     /// and how much room is left on it.
@@ -1359,6 +1396,7 @@ mod tests {
         let (root, paths, runner) = crate::testing::doctor::passing_queue_environment();
         let (handle, task) = build(
             harness.board(&paths, &runner),
+            harness.machine().clone(),
             harness.context.clone(),
             paths,
             runner,
@@ -1374,25 +1412,25 @@ mod tests {
 
         handle.start().await.expect("start the queue");
         assert_eq!(
-            state::queue_state(&harness.context).await.expect("read"),
+            state::queue_state(harness.machine()).await.expect("read"),
             QueueState::Running
         );
 
         handle.pause().await.expect("pause the queue");
         assert_eq!(
-            state::queue_state(&harness.context).await.expect("read"),
+            state::queue_state(harness.machine()).await.expect("read"),
             QueueState::Paused
         );
 
         handle.resume().await.expect("resume the queue");
         assert_eq!(
-            state::queue_state(&harness.context).await.expect("read"),
+            state::queue_state(harness.machine()).await.expect("read"),
             QueueState::Running
         );
 
         handle.stop().await.expect("stop the queue");
         assert_eq!(
-            state::queue_state(&harness.context).await.expect("read"),
+            state::queue_state(harness.machine()).await.expect("read"),
             QueueState::Paused,
             "stop is pause plus a cancellation, not a third state"
         );

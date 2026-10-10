@@ -842,7 +842,9 @@ impl std::fmt::Debug for RunProgress {
 /// fixture corpus replayable without spawning anything or spending a token
 /// (ADR-0015).
 pub struct EventStream {
-    context: ServiceContext,
+    /// What stamps the stream's own observations.
+    clock: Arc<dyn Clock>,
+    /// Where tail snapshots go. See [`TailSink`].
     /// Who decides what a line means (ADR-0026). Defaulted rather than required,
     /// so no existing call site had to learn that a provider exists — see
     /// [`driven_by`](Self::driven_by).
@@ -859,9 +861,19 @@ pub struct EventStream {
     /// live tail. Empty for every repository without a credential, which is the
     /// common case and costs one `is_empty` per line.
     redactor: Redactor,
-    /// Where tail snapshots go instead of [`ServiceContext::publish_tail`],
-    /// when somebody asked. See [`forwarding_tail`](Self::forwarding_tail).
-    tail_outbox: Option<std::sync::mpsc::Sender<RunTail>>,
+    tail: TailSink,
+}
+
+/// Where an [`EventStream`]'s tail snapshots go.
+enum TailSink {
+    /// A context's D14 channel, through
+    /// [`ServiceContext::publish_tail`]: what a stream built with
+    /// [`EventStream::create`] does.
+    Context(ServiceContext),
+    /// A channel whoever drives the stream drains: the runner's, whose tail
+    /// reaches the board through the board port (D31 point 7). See
+    /// [`EventStream::forwarding`].
+    Outbox(std::sync::mpsc::Sender<RunTail>),
 }
 
 impl EventStream {
@@ -876,19 +888,53 @@ impl EventStream {
         task_id: &str,
         run_id: &str,
     ) -> Result<Self> {
+        Self::open(
+            context.clock.clone(),
+            TailSink::Context(context.clone()),
+            paths,
+            task_id,
+            run_id,
+        )
+    }
+
+    /// Opens the transcript and starts the clock, handing every tail snapshot
+    /// to `outbox` instead of publishing it on a context's D14 channel.
+    ///
+    /// For the runner, whose tail reaches the board through the board port
+    /// (seam-contract D31 point 7): the stream holds no reference to a board,
+    /// and from task 041 no board context either, so whoever drives it drains
+    /// `outbox` and passes each snapshot on. A dropped receiver is a watcher
+    /// that stopped watching, which a dropped tail costs nothing for (D14).
+    pub fn forwarding(
+        clock: Arc<dyn Clock>,
+        paths: &AppPaths,
+        task_id: &str,
+        run_id: &str,
+        outbox: std::sync::mpsc::Sender<RunTail>,
+    ) -> Result<Self> {
+        Self::open(clock, TailSink::Outbox(outbox), paths, task_id, run_id)
+    }
+
+    fn open(
+        clock: Arc<dyn Clock>,
+        tail: TailSink,
+        paths: &AppPaths,
+        task_id: &str,
+        run_id: &str,
+    ) -> Result<Self> {
         Ok(Self {
-            context: context.clone(),
+            progress: RunProgress::new(run_id, clock.clone()),
+            clock,
             provider: Arc::new(ClaudeProvider),
             transcript: Transcript::create(paths, task_id, run_id)?,
             stderr: StderrLog::new(paths, task_id, run_id),
-            progress: RunProgress::new(run_id, context.clock.clone()),
             init: None,
             usage: None,
             result: None,
             redactor: Redactor::none(),
             malformed_lines: 0,
             denied_tool_calls: 0,
-            tail_outbox: None,
+            tail,
         })
     }
 
@@ -920,19 +966,6 @@ impl EventStream {
     /// caller means [`Redactor::none`] — which is what `create` already gives.
     pub fn redacting(mut self, redactor: Redactor) -> Self {
         self.redactor = redactor;
-        self
-    }
-
-    /// Hands every tail snapshot to `outbox` instead of publishing it on the
-    /// context's D14 channel.
-    ///
-    /// For the runner, whose tail reaches the board through the board port
-    /// (seam-contract D31 point 7): the stream holds no reference to a board,
-    /// so whoever drives it drains `outbox` and passes each snapshot on. A
-    /// builder in the style of [`driven_by`](Self::driven_by), so every caller
-    /// that says nothing keeps publishing where it always did.
-    pub fn forwarding_tail(mut self, outbox: std::sync::mpsc::Sender<RunTail>) -> Self {
-        self.tail_outbox = Some(outbox);
         self
     }
 
@@ -991,13 +1024,13 @@ impl EventStream {
 
         if self.progress.observe(&event) {
             let tail = self.progress.tail();
-            match &self.tail_outbox {
+            match &self.tail {
                 // A receiver that has gone is a watcher that stopped watching,
                 // which a dropped tail message costs nothing for (D14).
-                Some(outbox) => {
+                TailSink::Outbox(outbox) => {
                     let _ = outbox.send(tail);
                 }
-                None => self.context.publish_tail(tail),
+                TailSink::Context(context) => context.publish_tail(tail),
             }
         }
 
@@ -1041,7 +1074,7 @@ impl EventStream {
     fn observe_usage(&mut self, window: UsageWindow) {
         let report = UsageReport {
             window,
-            observed_at: self.context.clock.now(),
+            observed_at: self.clock.now(),
         };
 
         let latched = self

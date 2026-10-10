@@ -440,9 +440,10 @@ async fn a_reject_over_mcp_writes_what_the_service_writes() {
         twins.push(task.id);
     }
 
-    let direct = rimaia_core::review::reject(&h.context, &twins[0], "Wrong approach.")
-        .await
-        .expect("reject through the service");
+    let direct =
+        rimaia_core::review::reject(&h.context, Some(h.machine()), &twins[0], "Wrong approach.")
+            .await
+            .expect("reject through the service");
     let Json(over_mcp) = server(&h)
         .reject_task(Parameters(request::<ReviewNoteRequest>(json!({
             "task_id": twins[1],
@@ -768,7 +769,7 @@ async fn unarchiving_over_mcp_hands_back_the_whole_card() {
     let h = TestContext::new().await;
     let repository_id = seed_repository(&h.context.pool, "rimaia", "/tmp/rimaia").await;
     let task = create_ready(&h, &repository_id, "Back on the board").await;
-    tasks::archive_task(&h.context, &task.id)
+    tasks::archive_task(&h.context, Some(h.machine()), &task.id)
         .await
         .expect("archive");
 
@@ -1311,8 +1312,8 @@ const NOW: &str = "2026-08-20T02:00:00+00:00";
 fn server(h: &TestContext) -> RimaiaServer {
     RimaiaServer::new(
         h.context.with_source(MutationSource::Mcp),
-        testing::doctor::environment(),
-        testing::doctor::planner_access(),
+        testing::doctor::provider(),
+        Some(testing::doctor::local_tools(h.machine())),
     )
 }
 

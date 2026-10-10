@@ -27,7 +27,7 @@ use crate::state::AppState;
 #[tauri::command]
 pub async fn run_doctor(state: State<'_, AppState>) -> Result<DoctorReport> {
     let environment = doctor::Environment::for_runner(state.paths.clone(), &state.runner);
-    doctor::run(&state.context, &environment).await
+    doctor::run(&state.machine, &state.context, &environment).await
 }
 
 /// Records that the first-run walkthrough is done with, or deliberately skipped.
@@ -37,7 +37,7 @@ pub async fn run_doctor(state: State<'_, AppState>) -> Result<DoctorReport> {
 /// a screen back that the user can already open.
 #[tauri::command]
 pub async fn dismiss_onboarding(state: State<'_, AppState>) -> Result<()> {
-    db::settings::set_onboarding_dismissed(&state.context, true).await
+    db::settings::set_onboarding_dismissed(&state.machine, true).await
 }
 
 /// Puts one warning down, and answers with the whole set afterwards (task 027).
@@ -52,7 +52,7 @@ pub async fn dismiss_doctor_warning(
     state: State<'_, AppState>,
     dismissal: Dismissal,
 ) -> Result<Vec<Dismissal>> {
-    doctor::dismiss(&state.context, dismissal).await
+    doctor::dismiss(&state.machine, dismissal).await
 }
 
 /// Brings one back, including a dismissal that no longer matches any row.
@@ -61,5 +61,5 @@ pub async fn restore_doctor_warning(
     state: State<'_, AppState>,
     dismissal: Dismissal,
 ) -> Result<Vec<Dismissal>> {
-    doctor::restore(&state.context, &dismissal).await
+    doctor::restore(&state.machine, &dismissal).await
 }

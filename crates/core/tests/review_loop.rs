@@ -995,6 +995,7 @@ async fn a_review_waiting_on_a_usage_limit_is_resumed_by_the_queue_as_a_review()
     let mut changes = fixture.ctx().subscribe();
     let (queue, loop_task) = scheduler::build(
         fixture.board(&config),
+        fixture.machine().clone(),
         fixture.ctx().clone(),
         fixture.paths.clone(),
         config,
@@ -1018,7 +1019,7 @@ async fn a_review_waiting_on_a_usage_limit_is_resumed_by_the_queue_as_a_review()
     let in_flight = InFlight::new();
     let started = claim_manual_start(
         board.as_ref(),
-        fixture.ctx(),
+        fixture.machine(),
         &fixture.paths,
         &config,
         &in_flight,
@@ -1202,7 +1203,7 @@ async fn a_resumed_fix_on_a_provider_that_cannot_continue_opens_a_fresh_one_and_
     };
     let board = fixture.board(&config);
     let spy = Spy::new(board.clone());
-    *spy.isolates_after_first_finish.lock().expect("the spy") = Some(fixture.ctx().clone());
+    *spy.isolates_after_first_finish.lock().expect("the spy") = Some(fixture.machine().clone());
     let claim = claim_run(&spy, &task, RunTrigger::Manual, false)
         .await
         .expect("claim the task");
@@ -1458,8 +1459,8 @@ impl Fixture {
             harness.context.clone(),
             0,
             handles.clone(),
-            testing::doctor::environment(),
-            testing::doctor::planner_access(),
+            testing::doctor::provider(),
+            Some(testing::doctor::local_tools(harness.machine())),
         )
         .await;
         tokio::spawn(served.run());
@@ -1482,6 +1483,11 @@ impl Fixture {
         &self.harness.context
     }
 
+    /// This machine's own state, over the harness's machine store (task 041).
+    fn machine(&self) -> &rimaia_core::machine::MachineContext {
+        self.harness.machine()
+    }
+
     fn config(&self) -> RunnerConfig {
         RunnerConfig {
             program: self.cli.program(),
@@ -1498,8 +1504,8 @@ impl Fixture {
     fn operator(&self) -> RimaiaServer {
         RimaiaServer::new(
             self.ctx().with_source(rimaia_core::db::MutationSource::Mcp),
-            testing::doctor::environment(),
-            testing::doctor::planner_access(),
+            testing::doctor::provider(),
+            Some(testing::doctor::local_tools(self.machine())),
         )
     }
 
@@ -1561,7 +1567,15 @@ impl Fixture {
             .expect("claim the task");
         tokio::time::timeout(
             TEST_TIMEOUT,
-            run_task(board, self.ctx(), &self.paths, config, claim, request),
+            run_task(
+                board,
+                self.machine(),
+                self.ctx(),
+                &self.paths,
+                config,
+                claim,
+                request,
+            ),
         )
         .await
         .expect("a run must finish inside the test timeout")
@@ -1573,6 +1587,7 @@ impl Fixture {
             TEST_TIMEOUT,
             run_task(
                 board,
+                self.machine(),
                 self.ctx(),
                 &self.paths,
                 config,
@@ -1751,7 +1766,7 @@ struct Spy {
     forgets_implementation: Mutex<bool>,
     /// Switches the run environment to `strict_local` once the first run has
     /// finished.
-    isolates_after_first_finish: Mutex<Option<ServiceContext>>,
+    isolates_after_first_finish: Mutex<Option<rimaia_core::machine::MachineContext>>,
 }
 
 impl Spy {

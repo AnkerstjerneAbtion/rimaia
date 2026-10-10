@@ -124,3 +124,23 @@ pub fn planner_access() -> crate::runner::strategy::PlannerAccess {
         board: std::sync::Arc::new(crate::testing::board::Unwired),
     }
 }
+
+/// This machine's local tools for a test MCP server that never plans: the
+/// test's own machine store, [`environment`] and [`planner_access`] (task 041).
+///
+/// For `RimaiaServer::new`, `RimaiaServer::scoped` and `mcp::build`, which
+/// serve the local router only when handed one. A test that plans builds its
+/// own from [`passing_queue_environment`], for [`planner_access`]'s reason.
+pub fn local_tools(machine: &crate::machine::MachineContext) -> crate::mcp::server::LocalTools {
+    crate::mcp::server::LocalTools {
+        machine: machine.clone(),
+        doctor: environment(),
+        planner: planner_access(),
+    }
+}
+
+/// The provider a test MCP server's board tools read the catalogue through:
+/// [`environment`]'s, which is Claude Code's (task 041).
+pub fn provider() -> std::sync::Arc<dyn crate::runner::provider::AgentProvider> {
+    environment().provider
+}

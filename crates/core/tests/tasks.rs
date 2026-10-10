@@ -486,8 +486,8 @@ async fn the_cards_last_run_is_the_newest_row_of_any_kind() {
     // `get_task` over MCP says which kind its `last_run` was.
     let server = RimaiaServer::new(
         h.context.with_source(MutationSource::Mcp),
-        testing::doctor::environment(),
-        testing::doctor::planner_access(),
+        testing::doctor::provider(),
+        Some(testing::doctor::local_tools(h.machine())),
     );
     let request: GetTaskRequest =
         serde_json::from_value(serde_json::json!({ "task_id": task.id })).expect("a request");
@@ -589,9 +589,16 @@ async fn a_dependency_in_review_satisfies_and_one_in_ready_does_not() {
     // The card must *name* it, not merely flag it.
     assert_eq!(waiting.blocking_title.as_deref(), Some("blocker"));
 
-    tasks::move_task(&h.context, &blocker.id, BoardColumn::InReview, None, None)
-        .await
-        .expect("file the blocker for review");
+    tasks::move_task(
+        &h.context,
+        Some(h.machine()),
+        &blocker.id,
+        BoardColumn::InReview,
+        None,
+        None,
+    )
+    .await
+    .expect("file the blocker for review");
 
     let unblocked = list_one(&h, &repository_id, &dependent.id).await;
     assert!(!unblocked.blocked_by_incomplete);
@@ -612,9 +619,16 @@ async fn a_hand_finished_dependency_in_done_satisfies_without_any_run() {
     let dependent = create_ready(&h, &repository_id, "dependent", "plan").await;
     seed_dependency(&h.context.pool, &dependent.id, &blocker.id).await;
 
-    tasks::move_task(&h.context, &blocker.id, BoardColumn::Done, None, None)
-        .await
-        .expect("drag the blocker to done");
+    tasks::move_task(
+        &h.context,
+        Some(h.machine()),
+        &blocker.id,
+        BoardColumn::Done,
+        None,
+        None,
+    )
+    .await
+    .expect("drag the blocker to done");
 
     let summary = list_one(&h, &repository_id, &dependent.id).await;
 
@@ -647,9 +661,16 @@ async fn a_dependency_dragged_back_out_of_in_review_blocks_its_dependents_again(
     )
     .await;
 
-    tasks::move_task(&h.context, &blocker.id, BoardColumn::InReview, None, None)
-        .await
-        .expect("file the blocker for review");
+    tasks::move_task(
+        &h.context,
+        Some(h.machine()),
+        &blocker.id,
+        BoardColumn::InReview,
+        None,
+        None,
+    )
+    .await
+    .expect("file the blocker for review");
     assert!(
         !list_one(&h, &repository_id, &dependent.id)
             .await
@@ -661,6 +682,7 @@ async fn a_dependency_dragged_back_out_of_in_review_blocks_its_dependents_again(
     // that is not empty.
     tasks::move_task(
         &h.context,
+        Some(h.machine()),
         &blocker.id,
         BoardColumn::Ready,
         Some(&dependent.id),
@@ -761,9 +783,16 @@ async fn blocking_reason_lists_only_the_unsatisfied_dependencies() {
     let finished = create_ready(&h, &repository_id, "already reviewed", "plan").await;
     seed_dependency(&h.context.pool, &dependent.id, &waiting.id).await;
     seed_dependency(&h.context.pool, &dependent.id, &finished.id).await;
-    tasks::move_task(&h.context, &finished.id, BoardColumn::InReview, None, None)
-        .await
-        .expect("file the finished one for review");
+    tasks::move_task(
+        &h.context,
+        Some(h.machine()),
+        &finished.id,
+        BoardColumn::InReview,
+        None,
+        None,
+    )
+    .await
+    .expect("file the finished one for review");
 
     let blocking = tasks::blocking_reason(&h.context, &dependent.id)
         .await
@@ -1335,6 +1364,7 @@ async fn moving_a_task_to_the_top_of_its_own_column_reorders_it() {
     h.clock.advance(chrono::Duration::minutes(1));
     let moved = tasks::move_task(
         &h.context,
+        Some(h.machine()),
         &second.id,
         BoardColumn::Ready,
         None,
@@ -1377,9 +1407,16 @@ async fn moving_a_task_to_a_different_column_changes_its_column_and_position() {
     let repository_id = seed_repository(&h.context.pool).await;
     let task = create_ready(&h, &repository_id, "task", "plan").await;
 
-    let moved = tasks::move_task(&h.context, &task.id, BoardColumn::InReview, None, None)
-        .await
-        .expect("move into an empty column");
+    let moved = tasks::move_task(
+        &h.context,
+        Some(h.machine()),
+        &task.id,
+        BoardColumn::InReview,
+        None,
+        None,
+    )
+    .await
+    .expect("move into an empty column");
 
     assert_eq!(moved.column, BoardColumn::InReview);
     assert_eq!(moved.position, 0.0);
@@ -1404,9 +1441,16 @@ async fn moving_to_ready_without_a_plan_is_refused() {
     .expect("create a task with no plan");
     h.changes.try_recv().ok();
 
-    let error = tasks::move_task(&h.context, &task.id, BoardColumn::Ready, None, None)
-        .await
-        .expect_err("moving to ready without a plan must be refused");
+    let error = tasks::move_task(
+        &h.context,
+        Some(h.machine()),
+        &task.id,
+        BoardColumn::Ready,
+        None,
+        None,
+    )
+    .await
+    .expect_err("moving to ready without a plan must be refused");
 
     assert_eq!(error.code(), ErrorCode::Invalid);
     assert!(
@@ -1441,9 +1485,16 @@ async fn moving_to_done_is_always_allowed_even_without_a_plan() {
     .await
     .expect("create a task with no plan");
 
-    let moved = tasks::move_task(&h.context, &task.id, BoardColumn::Done, None, None)
-        .await
-        .expect("moving to done must be allowed regardless of plan");
+    let moved = tasks::move_task(
+        &h.context,
+        Some(h.machine()),
+        &task.id,
+        BoardColumn::Done,
+        None,
+        None,
+    )
+    .await
+    .expect("moving to done must be allowed regardless of plan");
 
     assert_eq!(moved.column, BoardColumn::Done);
 }
@@ -1469,6 +1520,7 @@ async fn a_neighbour_from_a_different_column_is_refused() {
 
     let error = tasks::move_task(
         &h.context,
+        Some(h.machine()),
         &task.id,
         BoardColumn::Ready,
         Some(&in_not_ready.id),
@@ -1497,9 +1549,16 @@ async fn naming_no_neighbours_in_a_nonempty_column_is_refused() {
     .await;
     let task = create_ready(&h, &repository_id, "moving", "plan").await;
 
-    let error = tasks::move_task(&h.context, &task.id, BoardColumn::InReview, None, None)
-        .await
-        .expect_err("ambiguous placement must be refused rather than guessed");
+    let error = tasks::move_task(
+        &h.context,
+        Some(h.machine()),
+        &task.id,
+        BoardColumn::InReview,
+        None,
+        None,
+    )
+    .await
+    .expect_err("ambiguous placement must be refused rather than guessed");
 
     assert_eq!(error.code(), ErrorCode::Invalid);
 }
@@ -1529,6 +1588,7 @@ async fn a_forced_rebalance_still_lands_the_task_between_its_neighbours() {
 
     let moved = tasks::move_task(
         &h.context,
+        Some(h.machine()),
         &moving.id,
         BoardColumn::Ready,
         Some(&lower.id),

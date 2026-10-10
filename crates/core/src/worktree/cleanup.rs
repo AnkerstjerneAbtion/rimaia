@@ -50,12 +50,14 @@ use super::{git, safety, ForceRemoval};
 use crate::context::ServiceContext;
 use crate::db::{settings, BoardColumn, RunState};
 use crate::error::{Error, Result};
+use crate::machine::MachineContext;
 
-/// The `settings` key holding task 016's auto-removal policy.
+/// The runner settings key holding task 016's auto-removal policy.
 ///
 /// Owned here rather than in [`crate::db::settings`], in the shape D3 fixed and
-/// D16.2 repeated: storage goes through `settings::get_runner`/`set_runner`, but what the key
-/// means and what an absent one means live with the module that acts on it.
+/// D16.2 repeated: storage goes through `settings::get_runner`/`set_runner`,
+/// over this machine's store since task 041, but what the key means and what an
+/// absent one means live with the module that acts on it.
 pub const AUTO_CLEANUP: &str = "worktree_auto_cleanup";
 
 /// Whether a task reaching `done` takes its worktree with it.
@@ -256,17 +258,17 @@ pub struct CleanupReport {
 /// Whether a task reaching `done` takes its worktree with it. Absent means
 /// [`AutoCleanup::Off`].
 ///
-/// Runner state, read from `settings` until task 041 moves it to `runner.db`.
-pub async fn auto_cleanup(ctx: &ServiceContext) -> Result<AutoCleanup> {
-    Ok(settings::get_runner(ctx, AUTO_CLEANUP)
+/// This machine's own policy: the worktrees it removes are on this machine.
+pub async fn auto_cleanup(machine: &MachineContext) -> Result<AutoCleanup> {
+    Ok(settings::get_runner(machine, AUTO_CLEANUP)
         .await?
         .as_deref()
         .map(AutoCleanup::from_stored)
         .unwrap_or_default())
 }
 
-pub async fn set_auto_cleanup(ctx: &ServiceContext, value: AutoCleanup) -> Result<()> {
-    settings::set_runner(ctx, AUTO_CLEANUP, value.as_str()).await
+pub async fn set_auto_cleanup(machine: &MachineContext, value: AutoCleanup) -> Result<()> {
+    settings::set_runner(machine, AUTO_CLEANUP, value.as_str()).await
 }
 
 // ---------------------------------------------------------------------------
@@ -587,7 +589,14 @@ async fn sweep<'a>(
     Ok(report)
 }
 
-/// Task 016's optional policy, firing from [`crate::tasks::move_task`].
+/// Task 016's optional policy, this machine's reaction to a task entering
+/// `done` through [`crate::tasks::move_task`] or a review approval.
+///
+/// It takes the machine as well as the board, because the policy is this
+/// machine's (a runner key) and the worktree is on this machine; a caller with
+/// no machine, a server, does not call it at all (task 041). The worktree path
+/// is still read off the board's row until task 066 moves it to the worktree
+/// record.
 ///
 /// **Best effort, and deliberately silent about failure.** The user moved a
 /// card; that move succeeded and is committed. A cleanup that a guard refused —
@@ -599,8 +608,12 @@ async fn sweep<'a>(
 /// branch always kept. An automatic action gets strictly less authority than a
 /// human clicking a button, because there is nobody to read the refusal it
 /// would otherwise be overriding.
-pub(crate) async fn auto_remove_on_done(ctx: &ServiceContext, task_id: &str) {
-    match auto_cleanup(ctx).await {
+pub(crate) async fn auto_remove_on_done(
+    ctx: &ServiceContext,
+    machine: &MachineContext,
+    task_id: &str,
+) {
+    match auto_cleanup(machine).await {
         Ok(AutoCleanup::Off) => return,
         Ok(AutoCleanup::OnDoneAcknowledged) => {}
         Err(error) => {

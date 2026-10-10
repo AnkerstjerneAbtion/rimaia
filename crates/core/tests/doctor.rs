@@ -603,6 +603,7 @@ async fn a_blocking_report_refuses_to_start_the_queue_and_writes_no_queue_state(
     };
     let (queue, _task) = scheduler::build(
         harness.board(&paths, &runner),
+        harness.machine().clone(),
         harness.context.clone(),
         paths,
         runner,
@@ -621,7 +622,7 @@ async fn a_blocking_report_refuses_to_start_the_queue_and_writes_no_queue_state(
     // The half-done state this ordering exists to prevent: a queue that says it
     // is running while nothing will ever start.
     assert_eq!(
-        scheduler::queue_state(&harness.context)
+        scheduler::queue_state(harness.machine())
             .await
             .expect("the queue state must be readable"),
         QueueState::Paused,
@@ -647,7 +648,7 @@ async fn dismissing_every_row_still_refuses_to_start_the_queue_and_writes_no_que
 
     // Every row on the report, not only the warnings — the point is that even
     // an unusually determined user cannot dismiss their way past the gate.
-    let report = rimaia_core::doctor::run(&harness.context, &environment)
+    let report = rimaia_core::doctor::run(harness.machine(), &harness.context, &environment)
         .await
         .expect("the report must be readable");
     assert!(
@@ -655,13 +656,14 @@ async fn dismissing_every_row_still_refuses_to_start_the_queue_and_writes_no_que
         "this test needs a blocking environment"
     );
     for result in &report.results {
-        rimaia_core::doctor::dismiss(&harness.context, result.dismissal())
+        rimaia_core::doctor::dismiss(harness.machine(), result.dismissal())
             .await
             .expect("the dismissal must store");
     }
 
     let (queue, _task) = scheduler::build(
         harness.board(&paths, &runner),
+        harness.machine().clone(),
         harness.context.clone(),
         paths,
         runner,
@@ -678,7 +680,7 @@ async fn dismissing_every_row_still_refuses_to_start_the_queue_and_writes_no_que
         "the refusal must carry the same remediation it always did: {refusal}"
     );
     assert_eq!(
-        scheduler::queue_state(&harness.context)
+        scheduler::queue_state(harness.machine())
             .await
             .expect("the queue state must be readable"),
         QueueState::Paused,
@@ -702,16 +704,20 @@ async fn a_healthy_installation_starts_the_queue_even_with_warnings_outstanding(
     };
     let (queue, _task) = scheduler::build(
         harness.board(&paths, &runner),
+        harness.machine().clone(),
         harness.context.clone(),
         paths.clone(),
         runner.clone(),
         InFlight::new(),
     );
 
-    let report =
-        rimaia_core::doctor::run(&harness.context, &Environment::for_runner(paths, &runner))
-            .await
-            .expect("the report must be readable");
+    let report = rimaia_core::doctor::run(
+        harness.machine(),
+        &harness.context,
+        &Environment::for_runner(paths, &runner),
+    )
+    .await
+    .expect("the report must be readable");
     assert!(
         report
             .results
@@ -724,7 +730,7 @@ async fn a_healthy_installation_starts_the_queue_even_with_warnings_outstanding(
     queue.start().await.expect("a warning must not refuse");
 
     assert_eq!(
-        scheduler::queue_state(&harness.context)
+        scheduler::queue_state(harness.machine())
             .await
             .expect("the queue state must be readable"),
         QueueState::Running,
@@ -854,25 +860,25 @@ async fn a_dismissal_survives_a_restart_and_a_recheck() {
     let harness = TestContext::new().await;
     let row = warn_about(Check::McpPort, "nothing is listening on 4517.");
 
-    let stored = rimaia_core::doctor::dismiss(&harness.context, row.dismissal())
+    let stored = rimaia_core::doctor::dismiss(harness.machine(), row.dismissal())
         .await
         .expect("the dismissal must store");
     assert_eq!(stored, vec![row.dismissal()]);
 
     // A second press of Dismiss is not a second entry.
-    let stored = rimaia_core::doctor::dismiss(&harness.context, row.dismissal())
+    let stored = rimaia_core::doctor::dismiss(harness.machine(), row.dismissal())
         .await
         .expect("dismissing twice must be idempotent");
     assert_eq!(stored, vec![row.dismissal()]);
 
     assert_eq!(
-        rimaia_core::db::settings::doctor_dismissals(&harness.context)
+        rimaia_core::db::settings::doctor_dismissals(harness.machine())
             .await
             .expect("a fresh read is what a restart does"),
         vec![row.dismissal()]
     );
 
-    let cleared = rimaia_core::doctor::restore(&harness.context, &row.dismissal())
+    let cleared = rimaia_core::doctor::restore(harness.machine(), &row.dismissal())
         .await
         .expect("the dismissal must clear");
     assert_eq!(cleared, Vec::new());
@@ -880,23 +886,27 @@ async fn a_dismissal_survives_a_restart_and_a_recheck() {
 
 #[tokio::test]
 async fn a_hand_edited_dismissals_row_costs_a_warning_rather_than_a_launch() {
-    // ADR-0003 counts hand-editing the file as supported, and `settings` has no
-    // CHECK on `value`. The `run_environment` precedent: warn and fall back.
+    // ADR-0003 counts hand-editing the file as supported, and `runner_settings`
+    // has no CHECK on `value`. The `run_environment` precedent: warn and fall back.
     let harness = TestContext::new().await;
 
-    rimaia_core::testing::settings::set(&harness.context, "doctor_dismissals", "not json at all")
-        .await
-        .expect("store a typo");
+    rimaia_core::testing::settings::set_runner(
+        harness.machine(),
+        "doctor_dismissals",
+        "not json at all",
+    )
+    .await
+    .expect("store a typo");
     assert_eq!(
-        rimaia_core::db::settings::doctor_dismissals(&harness.context)
+        rimaia_core::db::settings::doctor_dismissals(harness.machine())
             .await
             .expect("an unreadable value must not fail the read"),
         Vec::new()
     );
 
     // One bad element, the rest intact — the two failures are different sizes.
-    rimaia_core::testing::settings::set(
-        &harness.context,
+    rimaia_core::testing::settings::set_runner(
+        harness.machine(),
         "doctor_dismissals",
         r#"[{"check":"not_a_check","repository":null,"detail":"x"},
             {"check":"mcp_port","repository":null,"detail":"nothing is listening."}]"#,
@@ -904,7 +914,7 @@ async fn a_hand_edited_dismissals_row_costs_a_warning_rather_than_a_launch() {
     .await
     .expect("store a half-good value");
 
-    let read = rimaia_core::db::settings::doctor_dismissals(&harness.context)
+    let read = rimaia_core::db::settings::doctor_dismissals(harness.machine())
         .await
         .expect("one bad element must not lose the rest");
     assert_eq!(read.len(), 1);
@@ -924,7 +934,7 @@ async fn the_doctor_reads_its_dismissals_from_settings_on_every_run() {
     let environment = Environment::for_runner(paths, &runner);
 
     // The unbound MCP port is a real warning on a report nothing has touched.
-    let before = rimaia_core::doctor::run(&harness.context, &environment)
+    let before = rimaia_core::doctor::run(harness.machine(), &harness.context, &environment)
         .await
         .expect("the report must be readable");
     let mcp_port = before
@@ -936,11 +946,11 @@ async fn the_doctor_reads_its_dismissals_from_settings_on_every_run() {
     assert_eq!(mcp_port.status, CheckStatus::Warn);
     assert!(!mcp_port.dismissed);
 
-    rimaia_core::doctor::dismiss(&harness.context, mcp_port.dismissal())
+    rimaia_core::doctor::dismiss(harness.machine(), mcp_port.dismissal())
         .await
         .expect("the dismissal must store");
 
-    let after = rimaia_core::doctor::run(&harness.context, &environment)
+    let after = rimaia_core::doctor::run(harness.machine(), &harness.context, &environment)
         .await
         .expect("the report must be readable");
     assert!(

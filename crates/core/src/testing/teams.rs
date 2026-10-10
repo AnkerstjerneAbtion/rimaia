@@ -41,7 +41,8 @@ use crate::db::{BoardColumn, MutationSource, Repository, RunKind};
 use crate::doctor;
 use crate::events::{ChangeEvent, RunId, RunnerId, TaskId, TeamId, UserId};
 use crate::identity::create_personal_team;
-use crate::mcp::RunHandles;
+use crate::machine::MachineContext;
+use crate::mcp::{LocalTools, RunHandles};
 use crate::paths::AppPaths;
 use crate::repo::{self, NewRepository};
 use crate::review::{FindingSeverity, FindingStatus};
@@ -51,6 +52,7 @@ use crate::scheduler::InFlight;
 use crate::strategy::settings::repository_default_key;
 use crate::tasks::{self, NewTask, NewTaskLink};
 use crate::testing::credentials::MemoryStore;
+use crate::testing::machine::MemoryMachine;
 use crate::testing::runs::{seed_finding, SeededFinding};
 use crate::testing::{test_epoch, test_pool, FakeCli, TempRepo, TestClock};
 
@@ -149,6 +151,9 @@ pub struct TwoTeams {
     pub runner: RunnerConfig,
     pub in_flight: InFlight,
     pub paths: AppPaths,
+    /// The one machine both teams' work runs on, over a `MemoryMachine`,
+    /// announcing on the shared channel under team A (task 041).
+    pub machine: MachineContext,
     _data: TempDir,
     doctor: doctor::Environment,
     _doctor_root: TempDir,
@@ -212,6 +217,12 @@ impl TwoTeams {
         let (doctor_root, mut doctor) = crate::testing::doctor::temp_environment();
         doctor.programs.agent = runner.program.clone();
         doctor.run_handles = handles.clone();
+        let machine = MachineContext {
+            store: Arc::new(MemoryMachine::new()),
+            clock: Arc::new(clock.clone()),
+            changes: a.changes.clone(),
+            event_team: personal_a.team_id.clone(),
+        };
 
         Self {
             a,
@@ -226,6 +237,7 @@ impl TwoTeams {
             runner,
             in_flight: InFlight::new(),
             paths,
+            machine,
             _data: data,
             doctor,
             _doctor_root: doctor_root,
@@ -255,6 +267,16 @@ impl TwoTeams {
             runner: self.runner.clone(),
             in_flight: self.in_flight.clone(),
             board: self.board(ctx),
+        }
+    }
+
+    /// This machine's local MCP tools for a server over `ctx`: the fixture's
+    /// machine, [`doctor`](Self::doctor) and [`planner`](Self::planner).
+    pub fn local(&self, ctx: &ServiceContext) -> LocalTools {
+        LocalTools {
+            machine: self.machine.clone(),
+            doctor: self.doctor(),
+            planner: self.planner(ctx),
         }
     }
 
@@ -491,7 +513,7 @@ async fn arrange(
     let in_review = task("in review", BoardColumn::InReview).await;
     let done = task("done", BoardColumn::Done).await;
     let archived = task("archived", BoardColumn::Done).await;
-    tasks::archive_task(ctx, &archived)
+    tasks::archive_task(ctx, None, &archived)
         .await
         .expect("archive a task");
 

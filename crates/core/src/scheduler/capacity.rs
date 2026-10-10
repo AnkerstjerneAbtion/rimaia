@@ -1,15 +1,16 @@
 //! How many runs the queue may have in flight, and how many of them may be in
 //! any one repository (ADR-0010's Modes and Selection).
 //!
-//! # Two settings keys, not two `schedules` columns
+//! # Two runner settings keys, not two `schedules` columns
 //!
 //! `schedules` has carried `mode` and `max_concurrency` since the initial
 //! schema and nothing reads either; task 013 is what gives a *named schedule*
 //! its own configuration. Task 012 needs the numbers now and takes them as
-//! `settings` keys in the shape seam-contract D3 fixes and
+//! settings keys in the shape seam-contract D3 fixes and
 //! [`state`](super::state) already uses for `queue_state`: storage through
-//! [`db::settings`](crate::db::settings), the rules about the key here, in the
-//! module that has the rules.
+//! [`db::settings`](crate::db::settings)' runner accessor, in this machine's
+//! store since task 041, the rules about the key here, in the module that has
+//! the rules.
 //!
 //! # The reconciliation D21 left open, and how 013 settled it
 //!
@@ -62,6 +63,7 @@ use std::collections::HashMap;
 use crate::context::ServiceContext;
 use crate::db::{settings, ScheduleMode};
 use crate::error::{Error, Result};
+use crate::machine::MachineContext;
 use crate::repo;
 use crate::schedule::window;
 use crate::scheduler::inflight::CONCURRENCY_CEILING;
@@ -131,13 +133,11 @@ pub struct RunCapacity {
     pub ceiling: usize,
 }
 
-/// The queue's configured capacity, as stored.
-///
-/// Runner state, read from `settings` until task 041 moves it to `runner.db`.
-pub async fn configured(ctx: &ServiceContext) -> Result<RunCapacity> {
+/// The queue's configured capacity, as stored in this machine's store.
+pub async fn configured(machine: &MachineContext) -> Result<RunCapacity> {
     Ok(RunCapacity {
-        mode: schedule_mode(ctx).await?,
-        max_concurrency: max_concurrency(ctx).await?,
+        mode: schedule_mode(machine).await?,
+        max_concurrency: max_concurrency(machine).await?,
         ceiling: CONCURRENCY_CEILING,
     })
 }
@@ -149,8 +149,12 @@ pub async fn configured(ctx: &ServiceContext) -> Result<RunCapacity> {
 /// settings keys when there is one — see this module's header for why that
 /// direction and not the other. One place decides, so the loop needs no branch
 /// and neither mode has a special case.
-pub async fn resolve(ctx: &ServiceContext) -> Result<Resolved> {
-    let window = window::active(ctx).await?;
+///
+/// The mode, the global limit and the window are this machine's, from
+/// `machine`. Each repository's own cap is still read off the board's
+/// repository rows through `board` until task 066 moves it to the checkout.
+pub async fn resolve(machine: &MachineContext, board: &ServiceContext) -> Result<Resolved> {
+    let window = window::active(machine).await?;
     let (mode, limit) = match &window {
         Some(window) => (
             window.mode,
@@ -161,7 +165,10 @@ pub async fn resolve(ctx: &ServiceContext) -> Result<Resolved> {
             // which row to fix.
             usable_repository_concurrency(&window.schedule_name, window.max_concurrency),
         ),
-        None => (schedule_mode(ctx).await?, max_concurrency(ctx).await?),
+        None => (
+            schedule_mode(machine).await?,
+            max_concurrency(machine).await?,
+        ),
     };
 
     let global = match mode {
@@ -174,7 +181,7 @@ pub async fn resolve(ctx: &ServiceContext) -> Result<Resolved> {
         ScheduleMode::Parallel => limit,
     };
 
-    let per_repository = repo::list(ctx)
+    let per_repository = repo::list(board)
         .await?
         .into_iter()
         .map(|repository| {
@@ -192,10 +199,8 @@ pub async fn resolve(ctx: &ServiceContext) -> Result<Resolved> {
 }
 
 /// The queue's default mode. An absent key is [`ScheduleMode::Sequential`].
-///
-/// Runner state, read from `settings` until task 041 moves it to `runner.db`.
-pub async fn schedule_mode(ctx: &ServiceContext) -> Result<ScheduleMode> {
-    Ok(settings::get_runner(ctx, SCHEDULE_MODE)
+pub async fn schedule_mode(machine: &MachineContext) -> Result<ScheduleMode> {
+    Ok(settings::get_runner(machine, SCHEDULE_MODE)
         .await?
         .as_deref()
         .map(mode_from_stored)
@@ -208,8 +213,8 @@ pub async fn schedule_mode(ctx: &ServiceContext) -> Result<ScheduleMode> {
 /// Total rather than fallible, unlike [`set_max_concurrency`]: an enum off the
 /// wire has already been validated by serde, so there is no out-of-range value
 /// left for this to refuse.
-pub async fn set_schedule_mode(ctx: &ServiceContext, mode: ScheduleMode) -> Result<()> {
-    settings::set_runner(ctx, SCHEDULE_MODE, mode.as_str()).await
+pub async fn set_schedule_mode(machine: &MachineContext, mode: ScheduleMode) -> Result<()> {
+    settings::set_runner(machine, SCHEDULE_MODE, mode.as_str()).await
 }
 
 /// How many runs [`ScheduleMode::Parallel`] allows at once, clamped to
@@ -220,10 +225,8 @@ pub async fn set_schedule_mode(ctx: &ServiceContext, mode: ScheduleMode) -> Resu
 /// Settings panel shows and the number the queue obeys are the same one. The
 /// registry still enforces the ceiling itself — two doors, one rule, no gap
 /// between them.
-///
-/// Runner state, read from `settings` until task 041 moves it to `runner.db`.
-pub async fn max_concurrency(ctx: &ServiceContext) -> Result<usize> {
-    let Some(stored) = settings::get_runner(ctx, MAX_CONCURRENCY).await? else {
+pub async fn max_concurrency(machine: &MachineContext) -> Result<usize> {
+    let Some(stored) = settings::get_runner(machine, MAX_CONCURRENCY).await? else {
         return Ok(DEFAULT_MAX_CONCURRENCY);
     };
 
@@ -255,14 +258,14 @@ pub async fn max_concurrency(ctx: &ServiceContext) -> Result<usize> {
 /// [`QueueState::Paused`](super::QueueState), which is a switch the user
 /// already has and which the Runs view already explains. Two ways to stop the
 /// queue would be two things to check when it is not running.
-pub async fn set_max_concurrency(ctx: &ServiceContext, value: usize) -> Result<()> {
+pub async fn set_max_concurrency(machine: &MachineContext, value: usize) -> Result<()> {
     if !(1..=CONCURRENCY_CEILING).contains(&value) {
         return Err(Error::invalid(format!(
             "Rimaia will supervise between 1 and {CONCURRENCY_CEILING} runs at once, not {value}. \
              To start nothing at all, pause the queue."
         )));
     }
-    settings::set_runner(ctx, MAX_CONCURRENCY, &value.to_string()).await
+    settings::set_runner(machine, MAX_CONCURRENCY, &value.to_string()).await
 }
 
 /// A stored mode, or the safe one for anything else. See the module header on
@@ -321,11 +324,14 @@ mod tests {
         let harness = TestContext::new().await;
 
         assert_eq!(
-            schedule_mode(&harness.context).await.expect("read"),
+            schedule_mode(harness.machine()).await.expect("read"),
             ScheduleMode::Sequential
         );
         assert_eq!(
-            resolve(&harness.context).await.expect("resolve").global,
+            resolve(harness.machine(), &harness.context)
+                .await
+                .expect("resolve")
+                .global,
             1,
             "the default configuration is exactly what task 009 shipped"
         );
@@ -338,24 +344,36 @@ mod tests {
         // is deliberately left alone, so flipping back to `parallel` restores
         // the four the user chose.
         let harness = TestContext::new().await;
-        set_max_concurrency(&harness.context, 4)
+        set_max_concurrency(harness.machine(), 4)
             .await
             .expect("store a global limit");
-        set_schedule_mode(&harness.context, ScheduleMode::Sequential)
+        set_schedule_mode(harness.machine(), ScheduleMode::Sequential)
             .await
             .expect("stay sequential");
 
-        assert_eq!(resolve(&harness.context).await.expect("resolve").global, 1);
         assert_eq!(
-            max_concurrency(&harness.context).await.expect("read"),
+            resolve(harness.machine(), &harness.context)
+                .await
+                .expect("resolve")
+                .global,
+            1
+        );
+        assert_eq!(
+            max_concurrency(harness.machine()).await.expect("read"),
             4,
             "the number the user chose is remembered, not overwritten",
         );
 
-        set_schedule_mode(&harness.context, ScheduleMode::Parallel)
+        set_schedule_mode(harness.machine(), ScheduleMode::Parallel)
             .await
             .expect("turn parallelism on");
-        assert_eq!(resolve(&harness.context).await.expect("resolve").global, 4);
+        assert_eq!(
+            resolve(harness.machine(), &harness.context)
+                .await
+                .expect("resolve")
+                .global,
+            4
+        );
     }
 
     #[tokio::test]
@@ -364,12 +382,12 @@ mod tests {
         // value cannot spawn ten agents" — enforced on the read as well as in
         // the registry, so the panel and the queue agree on the number.
         let harness = TestContext::new().await;
-        settings::set_runner(&harness.context, MAX_CONCURRENCY, "40")
+        settings::set_runner(harness.machine(), MAX_CONCURRENCY, "40")
             .await
             .expect("store a value no form would send");
 
         assert_eq!(
-            max_concurrency(&harness.context).await.expect("read"),
+            max_concurrency(harness.machine()).await.expect("read"),
             CONCURRENCY_CEILING
         );
     }
@@ -379,18 +397,18 @@ mod tests {
         let harness = TestContext::new().await;
 
         assert_eq!(
-            max_concurrency(&harness.context)
+            max_concurrency(harness.machine())
                 .await
                 .expect("an absent key"),
             DEFAULT_MAX_CONCURRENCY
         );
 
         for nonsense in ["two", "", "0", "-1", "2.5"] {
-            settings::set_runner(&harness.context, MAX_CONCURRENCY, nonsense)
+            settings::set_runner(harness.machine(), MAX_CONCURRENCY, nonsense)
                 .await
                 .expect("store nonsense");
             assert_eq!(
-                max_concurrency(&harness.context)
+                max_concurrency(harness.machine())
                     .await
                     .expect("a bad row is not an error"),
                 DEFAULT_MAX_CONCURRENCY,
@@ -404,12 +422,12 @@ mod tests {
         // The direction of the fallback is the decision, exactly as it is for
         // `queue_state`: a typo must not widen what an unattended queue spawns.
         let harness = TestContext::new().await;
-        settings::set_runner(&harness.context, SCHEDULE_MODE, "Parallel")
+        settings::set_runner(harness.machine(), SCHEDULE_MODE, "Parallel")
             .await
             .expect("store a typo");
 
         assert_eq!(
-            schedule_mode(&harness.context).await.expect("read"),
+            schedule_mode(harness.machine()).await.expect("read"),
             ScheduleMode::Sequential
         );
     }
@@ -419,7 +437,7 @@ mod tests {
         let harness = TestContext::new().await;
 
         for refused in [0, CONCURRENCY_CEILING + 1] {
-            let error = set_max_concurrency(&harness.context, refused)
+            let error = set_max_concurrency(harness.machine(), refused)
                 .await
                 .expect_err("a form must not be able to send this");
             assert!(
@@ -429,7 +447,7 @@ mod tests {
         }
 
         assert_eq!(
-            settings::get_runner(&harness.context, MAX_CONCURRENCY)
+            settings::get_runner(harness.machine(), MAX_CONCURRENCY)
                 .await
                 .expect("read the key"),
             None,

@@ -96,7 +96,7 @@ async fn archiving_a_running_task_is_refused() {
     f.set_run_state(&task.id, RunState::Queued).await;
     f.set_run_state(&task.id, RunState::Running).await;
 
-    let error = tasks::archive_task(f.ctx(), &task.id)
+    let error = tasks::archive_task(f.ctx(), Some(f.machine()), &task.id)
         .await
         .expect_err("a running task must not be archived");
 
@@ -117,7 +117,7 @@ async fn archiving_a_waiting_retry_task_is_refused() {
     f.set_run_state(&task.id, RunState::Running).await;
     f.set_run_state(&task.id, RunState::WaitingRetry).await;
 
-    let error = tasks::archive_task(f.ctx(), &task.id)
+    let error = tasks::archive_task(f.ctx(), Some(f.machine()), &task.id)
         .await
         .expect_err("a task waiting to retry must not be archived");
 
@@ -218,6 +218,7 @@ async fn a_bulk_archive_reports_refusals_instead_of_aborting() {
 
     let report = tasks::archive_tasks(
         f.ctx(),
+        Some(f.machine()),
         &[first.id.clone(), running.id.clone(), third.id.clone()],
     )
     .await
@@ -239,7 +240,7 @@ async fn a_bulk_archive_reports_refusals_instead_of_aborting() {
 async fn a_bulk_archive_of_nothing_is_refused_rather_than_reporting_an_empty_success() {
     let f = Fixture::new().await;
 
-    let error = tasks::archive_tasks(f.ctx(), &[])
+    let error = tasks::archive_tasks(f.ctx(), Some(f.machine()), &[])
         .await
         .expect_err("an empty selection is a caller mistake");
 
@@ -449,7 +450,7 @@ async fn a_script_that_never_exits_is_killed_at_the_timeout() {
         }
     });
 
-    let archived = tasks::archive_task(f.ctx(), &task.id)
+    let archived = tasks::archive_task(f.ctx(), Some(f.machine()), &task.id)
         .await
         .expect("the archive itself succeeds regardless of the script");
     ticker.abort();
@@ -587,6 +588,12 @@ impl Fixture {
         &self.harness.context
     }
 
+    /// This machine, as the shell hands it to the board services that react on
+    /// it (task 041).
+    fn machine(&self) -> &rimaia_core::machine::MachineContext {
+        self.harness.machine()
+    }
+
     async fn task(&self, title: &str) -> Task {
         self.task_in(title, BoardColumn::Ready).await
     }
@@ -608,7 +615,7 @@ impl Fixture {
     }
 
     async fn archive(&self, task_id: &str) -> rimaia_core::tasks::ArchivedTask {
-        tasks::archive_task(self.ctx(), task_id)
+        tasks::archive_task(self.ctx(), Some(self.machine()), task_id)
             .await
             .expect("archive")
     }

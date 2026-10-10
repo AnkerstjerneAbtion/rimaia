@@ -12,11 +12,10 @@ use std::time::Duration;
 
 use rimaia_core::board::{BoardPort, InProcessBoard};
 use rimaia_core::db::MutationSource;
-use rimaia_core::doctor;
+use rimaia_core::machine::MachineContext;
 use rimaia_core::mcp::{self, McpState, RunHandles};
 use rimaia_core::runner::events::RunTail;
 use rimaia_core::runner::process::DEFAULT_GRACE_PERIOD;
-use rimaia_core::runner::strategy::PlannerAccess;
 use rimaia_core::runner::RunnerConfig;
 use rimaia_core::scheduler::{self, InFlight};
 use rimaia_core::{
@@ -29,7 +28,7 @@ use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
 use tokio::sync::broadcast;
 use tokio::sync::broadcast::error::RecvError;
 
-use crate::state::{AppState, RunTails};
+use crate::state::{local_tools, AppState, RunTails};
 
 /// The label of the one window `tauri.conf.json` declares. Spelled out because
 /// that file leaves it implicit and Tauri fills it in — an unlabelled window
@@ -181,7 +180,7 @@ pub fn run() {
             // and this machine's one-time adoption out of the board into it
             // (seam-contract D28, "The runner set"). After the context, because
             // adoption reads the board through it; before anything reads
-            // machine state, so task 041's readers find it adopted. Each fails
+            // machine state, so every reader finds it adopted. Each fails
             // like its neighbours (D11), naming runner.db in the log line. The
             // second step's name is neutral on purpose: when it is a refusal of a
             // runner.db from another board, nothing was copied, and the name the
@@ -212,9 +211,18 @@ pub fn run() {
                 report_startup_failure(app.handle(), STEP, Some(&logs_dir), &err);
                 return Err(err.into());
             }
-            // Nothing reads the store yet: task 041, its first reader, keeps it in
-            // `AppState`. Until then it closes here, adopted.
-            drop(runner_store);
+            // This machine's own state, behind the port core reaches it through
+            // (task 041): built once, here, over the store just adopted into,
+            // and handed to everything that reads or writes it. Its events ride
+            // the board's channel under the solo team until task 048 gives them
+            // `LocalEvents`, so the window hears a runner key or a schedule
+            // exactly as it did when they lived in rimaia.db.
+            let machine = MachineContext {
+                store: Arc::new(runner_store.clone()),
+                clock: Arc::new(SystemClock),
+                changes: context.changes.clone(),
+                event_team: solo.team_id.clone(),
+            };
 
             // Nothing is running yet — the process that set any of this is the one
             // that just died — so whatever `survey` finds is history, not a live
@@ -364,6 +372,7 @@ pub fn run() {
             ));
             let (queue, queue_task) = scheduler::build(
                 Arc::clone(&board_port),
+                machine.clone(),
                 context.clone(),
                 paths.clone(),
                 runner.clone(),
@@ -379,9 +388,9 @@ pub fn run() {
             // `subscribe()`.
             tauri::async_runtime::spawn(notify::announce_run_windows(
                 app.handle().clone(),
-                context.clone(),
+                machine.clone(),
                 queue.clone(),
-                context.subscribe(),
+                machine.changes.subscribe(),
             ));
 
             // Task 010's MCP server (ADR-0006). Last of the startup steps on
@@ -390,7 +399,7 @@ pub fn run() {
             // reach the board until every repair this startup was going to
             // make has been made — `reconcile_interrupted`, `worktree::reconcile`
             // and the queue's own construction all sit above it.
-            let mcp_port = tauri::async_runtime::block_on(mcp::configured_port(&context))
+            let mcp_port = tauri::async_runtime::block_on(mcp::configured_port(&machine))
                 .unwrap_or_else(|error| {
                     tracing::warn!(
                         %error,
@@ -403,23 +412,17 @@ pub fn run() {
                 context.clone(),
                 mcp_port,
                 run_handles.clone(),
-                // The shell's own paths and runner, not `Programs::default` —
-                // so `run_doctor` over MCP reports on the same `claude` binary
-                // and the same data directory the window does. ADR-0021's
-                // parity is only worth having if both surfaces answer about the
-                // same installation.
-                doctor::Environment::for_runner(paths.clone(), &runner),
-                // Task 023, and ADR-0021's named gap closed: the MCP server can
-                // now start a planner, because everything it needs to — the data
-                // directory, the `claude` the runner would spawn, and the one
-                // in-flight registry every other door takes leases from — is
-                // reachable from `rimaia-core` and handed in here.
-                PlannerAccess {
-                    paths: paths.clone(),
-                    runner: runner.clone(),
-                    in_flight: in_flight.clone(),
-                    board: Arc::clone(&board_port),
-                },
+                runner.provider.clone(),
+                // This machine's tools (task 041): a solo shell has a machine,
+                // so both doors serve every tool they served before, and a run
+                // calling a local one gets its scope's refusal.
+                Some(local_tools(
+                    &machine,
+                    &paths,
+                    &runner,
+                    &in_flight,
+                    &board_port,
+                )),
             ));
             let mcp_status = mcp_handle.status();
             match mcp_status.state {
@@ -446,6 +449,8 @@ pub fn run() {
             app.manage(AppState {
                 context,
                 solo,
+                runner_store,
+                machine,
                 paths,
                 in_flight,
                 tails,

@@ -427,6 +427,7 @@ async fn reordering_the_board_mid_queue_changes_what_runs_next() {
     once_the_run_is_live(tail).await;
     tasks::move_task(
         fixture.ctx(),
+        None,
         &charlie,
         BoardColumn::Ready,
         Some(&alpha),
@@ -1472,6 +1473,7 @@ async fn a_starter_that_claims_before_it_spawns_never_produces_a_second_process(
 
     let button = {
         let ctx = fixture.ctx().clone();
+        let machine = fixture.machine().clone();
         let paths = fixture.paths.clone();
         let runner = fixture.runner();
         let board = fixture.harness.board(&paths, &runner);
@@ -1488,6 +1490,7 @@ async fn a_starter_that_claims_before_it_spawns_never_produces_a_second_process(
             Some(
                 run_task(
                     board.as_ref(),
+                    &machine,
                     &ctx,
                     &paths,
                     &runner,
@@ -1872,7 +1875,7 @@ async fn a_launch_offers_a_crashed_run_for_resume_and_starts_nothing_until_the_q
 
     // (3) The exit path's write, replayed: this is the state a previous launch
     // left behind, whatever it had been doing.
-    scheduler::set_queue_state(fixture.ctx(), QueueState::Paused)
+    scheduler::set_queue_state(fixture.machine(), QueueState::Paused)
         .await
         .expect("quitting always stops the queue");
 
@@ -2498,6 +2501,7 @@ async fn retry_now_starts_a_waiting_task_before_its_deadline() {
         .session_id;
     run_task(
         board.as_ref(),
+        fixture.machine(),
         fixture.ctx(),
         &fixture.paths,
         &fixture.runner(),
@@ -3145,7 +3149,7 @@ async fn disabling_a_schedule_stops_it_firing_without_deleting_it() {
 
     // And switching it back on is all it takes.
     let mut changes = fixture.ctx().subscribe();
-    scheduler_schedule::set_enabled(fixture.ctx(), &schedule, true)
+    scheduler_schedule::set_enabled(fixture.machine(), &schedule, true)
         .await
         .expect("turn it back on");
 
@@ -3310,7 +3314,7 @@ async fn a_schedule_firing_tonight_does_not_resume_a_run_last_night_crashed_on()
     .expect("open the run the crash interrupted");
 
     // The launch after the crash: D15's exit-path write, then the repair.
-    scheduler::set_queue_state(fixture.ctx(), QueueState::Paused)
+    scheduler::set_queue_state(fixture.machine(), QueueState::Paused)
         .await
         .expect("quitting always stops the queue");
     let report = startup::survey(fixture.ctx())
@@ -3680,6 +3684,11 @@ impl Fixture {
         &self.harness.context
     }
 
+    /// This machine's own state, over the harness's machine store (task 041).
+    fn machine(&self) -> &rimaia_core::machine::MachineContext {
+        self.harness.machine()
+    }
+
     fn runner(&self) -> RunnerConfig {
         RunnerConfig {
             program: self.cli.program(),
@@ -3710,6 +3719,7 @@ impl Fixture {
     fn build_queue(&self, in_flight: InFlight) -> (QueueHandle, scheduler::QueueTask) {
         scheduler::build(
             self.harness.board(&self.paths, &self.runner()),
+            self.harness.machine().clone(),
             self.harness.context.clone(),
             self.paths.clone(),
             self.runner(),
@@ -3720,7 +3730,7 @@ impl Fixture {
     /// Parallel mode with `limit` slots — the two settings keys, written
     /// through the same accessors the Settings panel and the MCP tool use.
     async fn set_parallel(&self, limit: usize) {
-        capacity::set_schedule_mode(self.ctx(), ScheduleMode::Parallel)
+        capacity::set_schedule_mode(self.machine(), ScheduleMode::Parallel)
             .await
             .expect("turn parallelism on");
         self.set_max_concurrency(limit).await;
@@ -3729,7 +3739,7 @@ impl Fixture {
     /// The stored limit, without touching the mode — so a test can prove
     /// sequential ignores it.
     async fn set_max_concurrency(&self, limit: usize) {
-        capacity::set_max_concurrency(self.ctx(), limit)
+        capacity::set_max_concurrency(self.machine(), limit)
             .await
             .expect("store the global limit");
     }
@@ -3793,6 +3803,7 @@ impl Fixture {
     fn spawn_queue_with_runner(&self, runner: RunnerConfig) -> QueueHandle {
         let (handle, task) = scheduler::build(
             self.harness.board(&self.paths, &runner),
+            self.harness.machine().clone(),
             self.harness.context.clone(),
             self.paths.clone(),
             runner,
@@ -3803,7 +3814,7 @@ impl Fixture {
     }
 
     async fn add_schedule(&self, input: ScheduleInput) -> String {
-        scheduler_schedule::create(self.ctx(), input)
+        scheduler_schedule::create(self.machine(), input)
             .await
             .expect("create a schedule")
             .id
@@ -3816,30 +3827,32 @@ impl Fixture {
     /// is the behaviour every other test relies on, and there is no reason to
     /// add a service function whose only caller would be this line.
     async fn arm_schedule(&self, id: &str, armed_at: DateTime<Utc>) {
-        sqlx::query!(
-            "UPDATE schedules SET armed_at = ?2 WHERE id = ?1",
-            id,
-            armed_at
-        )
-        .execute(&self.ctx().pool)
-        .await
-        .expect("back-date a schedule");
+        let schedule = self.schedule(id).await;
+        let back_dated = rimaia_core::db::Schedule {
+            armed_at: Some(armed_at),
+            ..schedule
+        };
+        self.machine()
+            .store
+            .update_schedule(&back_dated)
+            .await
+            .expect("back-date a schedule");
     }
 
     async fn schedule(&self, id: &str) -> rimaia_core::db::Schedule {
-        scheduler_schedule::get(self.ctx(), id)
+        scheduler_schedule::get(self.machine(), id)
             .await
             .expect("read a schedule")
     }
 
     async fn queue_state(&self) -> QueueState {
-        scheduler::queue_state(self.ctx())
+        scheduler::queue_state(self.machine())
             .await
             .expect("read the queue state")
     }
 
     async fn window(&self) -> Option<RunWindow> {
-        rimaia_core::schedule::window::active(self.ctx())
+        rimaia_core::schedule::window::active(self.machine())
             .await
             .expect("read the run window")
     }

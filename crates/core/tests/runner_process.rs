@@ -763,7 +763,7 @@ async fn a_run_never_hands_the_child_an_inherited_claude_variable_in_either_mode
 
     for environment in [RunEnvironment::Inherit, RunEnvironment::StrictLocal] {
         let fixture = RunnerFixture::new().await;
-        settings::set_run_environment(&fixture.harness.context, environment)
+        settings::set_run_environment(fixture.harness.machine(), environment)
             .await
             .expect("choose the run environment");
         let cli = FakeCli::replaying("success", 0);
@@ -788,7 +788,7 @@ async fn strict_local_is_the_only_mode_that_reaches_the_cli_as_isolation_flags()
     // that one pins the vector, this one proves the vector is what a real
     // process is actually handed, read back off the child's own `argv`.
     let fixture = RunnerFixture::new().await;
-    settings::set_run_environment(&fixture.harness.context, RunEnvironment::StrictLocal)
+    settings::set_run_environment(fixture.harness.machine(), RunEnvironment::StrictLocal)
         .await
         .expect("choose the run environment");
     let cli = FakeCli::replaying("success", 0);
@@ -1477,6 +1477,7 @@ async fn the_prompt_is_composed_from_the_task_as_it_reads_after_the_worktree_exi
 
     run_task(
         board.as_ref(),
+        fixture.harness.machine(),
         &fixture.harness.context,
         &fixture.paths,
         &config,
@@ -1847,7 +1848,7 @@ impl RunnerFixture {
     ) -> rimaia_core::Result<Started> {
         claim_manual_start(
             self.harness.board(&self.paths, config).as_ref(),
-            &self.harness.context,
+            self.harness.machine(),
             &self.paths,
             config,
             &InFlight::new(),
@@ -1870,6 +1871,7 @@ impl RunnerFixture {
         let board = self.harness.board(&self.paths, config);
         run_task(
             board.as_ref(),
+            self.harness.machine(),
             &self.harness.context,
             &self.paths,
             config,
@@ -1890,6 +1892,7 @@ impl RunnerFixture {
         let claim = claim_run(board.as_ref(), &self.task_id, trigger, false).await?;
         run_task(
             board.as_ref(),
+            self.harness.machine(),
             &self.harness.context,
             &self.paths,
             config,

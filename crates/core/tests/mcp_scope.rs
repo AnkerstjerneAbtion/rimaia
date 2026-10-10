@@ -707,7 +707,7 @@ async fn nothing_task_012_added_is_reachable_from_a_run_either() {
     );
 
     // And none of them wrote anything on the way to being refused.
-    let capacity = capacity::configured(&h.context)
+    let capacity = capacity::configured(h.machine())
         .await
         .expect("read the capacity back");
     assert_eq!(capacity.mode, ScheduleMode::Sequential);
@@ -735,7 +735,7 @@ async fn nothing_task_013_added_is_reachable_from_a_run_either() {
     let h = TestContext::new().await;
     let repository_id = seed_repository(&h.context.pool, "rimaia", "/tmp/rimaia").await;
     let mine = create_task(&h, &repository_id, "Mine").await;
-    let existing = schedule::create(&h.context, nightly())
+    let existing = schedule::create(h.machine(), nightly())
         .await
         .expect("a schedule the operator made");
     let run = scoped(&h, &mine.id);
@@ -804,7 +804,7 @@ async fn nothing_task_013_added_is_reachable_from_a_run_either() {
 
     // And none of them wrote anything on the way to being refused: the one
     // schedule that existed is still there, still enabled, still unedited.
-    let after = schedule::list(&h.context).await.expect("read them back");
+    let after = schedule::list(h.machine()).await.expect("read them back");
     assert_eq!(after.len(), 1);
     assert_eq!(after[0].schedule.id, existing.id);
     assert_eq!(after[0].schedule.name, "Nightly");
@@ -885,7 +885,7 @@ async fn a_run_cannot_silence_the_doctor_about_the_machine_it_is_running_on() {
 
     // And neither wrote on the way to being refused.
     assert_eq!(
-        rimaia_core::db::settings::doctor_dismissals(&h.context)
+        rimaia_core::db::settings::doctor_dismissals(h.machine())
             .await
             .expect("read the key"),
         Vec::new()
@@ -900,8 +900,8 @@ async fn the_operator_dismisses_and_restores_a_doctor_warning_over_mcp() {
     let h = TestContext::new().await;
     let operator = RimaiaServer::new(
         h.context.clone(),
-        testing::doctor::environment(),
-        testing::doctor::planner_access(),
+        testing::doctor::provider(),
+        Some(testing::doctor::local_tools(h.machine())),
     );
 
     let warning = json!({
@@ -944,8 +944,8 @@ async fn the_operator_reads_and_writes_schedules_over_mcp() {
     let h = TestContext::new().await;
     let operator = RimaiaServer::new(
         h.context.clone(),
-        testing::doctor::environment(),
-        testing::doctor::planner_access(),
+        testing::doctor::provider(),
+        Some(testing::doctor::local_tools(h.machine())),
     );
 
     let created = json_of::<ScheduleView>(
@@ -1046,8 +1046,8 @@ async fn a_schedule_the_operator_configures_badly_is_refused_with_the_reason() {
     let h = TestContext::new().await;
     let operator = RimaiaServer::new(
         h.context.clone(),
-        testing::doctor::environment(),
-        testing::doctor::planner_access(),
+        testing::doctor::provider(),
+        Some(testing::doctor::local_tools(h.machine())),
     );
 
     let refused = as_result(
@@ -1094,8 +1094,8 @@ async fn the_operator_reads_and_writes_the_run_capacity_over_mcp() {
     let repository_id = seed_repository(&h.context.pool, "rimaia", "/tmp/rimaia").await;
     let operator = RimaiaServer::new(
         h.context.clone(),
-        testing::doctor::environment(),
-        testing::doctor::planner_access(),
+        testing::doctor::provider(),
+        Some(testing::doctor::local_tools(h.machine())),
     );
 
     let after_mode = operator
@@ -1155,7 +1155,7 @@ async fn the_operator_reads_and_writes_the_run_capacity_over_mcp() {
         message(&refused),
     );
     assert_eq!(
-        capacity::configured(&h.context)
+        capacity::configured(h.machine())
             .await
             .expect("read it back")
             .max_concurrency,
@@ -1173,8 +1173,8 @@ async fn the_operator_reads_and_writes_the_strategy_configuration_over_mcp() {
     let h = TestContext::new().await;
     let operator = RimaiaServer::new(
         h.context.clone(),
-        testing::doctor::environment(),
-        testing::doctor::planner_access(),
+        testing::doctor::provider(),
+        Some(testing::doctor::local_tools(h.machine())),
     );
 
     let stored: StrategyApprovalView = json_of(
@@ -1224,8 +1224,8 @@ async fn strategy_defaults_are_read_and_written_per_repository_or_globally_by_on
     let h = TestContext::new().await;
     let operator = RimaiaServer::new(
         h.context.clone(),
-        testing::doctor::environment(),
-        testing::doctor::planner_access(),
+        testing::doctor::provider(),
+        Some(testing::doctor::local_tools(h.machine())),
     );
     let repository_id = seed_repository(&h.context.pool, "rimaia", "/tmp/rimaia").await;
 
@@ -1323,8 +1323,8 @@ async fn a_proposal_is_accepted_and_cleared_over_mcp_exactly_as_the_panel_does_i
 
     let operator = RimaiaServer::new(
         h.context.clone(),
-        testing::doctor::environment(),
-        testing::doctor::planner_access(),
+        testing::doctor::provider(),
+        Some(testing::doctor::local_tools(h.machine())),
     );
 
     let accepted = ok(operator
@@ -1712,8 +1712,8 @@ async fn the_operator_cannot_write_a_finding() {
     let mine = create_task(&h, &repository_id, "Mine").await;
     let operator = RimaiaServer::new(
         h.context.with_source(MutationSource::Mcp),
-        testing::doctor::environment(),
-        testing::doctor::planner_access(),
+        testing::doctor::provider(),
+        Some(testing::doctor::local_tools(h.machine())),
     );
 
     let recorded = as_result(
@@ -1791,6 +1791,156 @@ async fn the_run_scoped_server_reports_its_own_name() {
 }
 
 // ---------------------------------------------------------------------------
+// Board tools in core, machine tools injected by the host (task 041)
+// ---------------------------------------------------------------------------
+
+/// The 22 tools that inspect, reconfigure or spawn on this machine: the local
+/// router, as task 041's Scope names it.
+const LOCAL_TOOLS: [&str; 22] = [
+    "run_doctor",
+    "dismiss_onboarding",
+    "dismiss_doctor_warning",
+    "restore_doctor_warning",
+    "get_repository_credential_status",
+    "list_worktrees",
+    "get_worktree_auto_cleanup",
+    "set_worktree_auto_cleanup",
+    "set_repository_on_archive",
+    "get_run_capacity",
+    "set_schedule_mode",
+    "set_max_concurrency",
+    "set_repository_max_concurrency",
+    "list_schedules",
+    "create_schedule",
+    "update_schedule",
+    "set_schedule_enabled",
+    "delete_schedule",
+    "preview_schedule_preflight",
+    "list_timezones",
+    "plan_task_strategy",
+    "plan_tasks_strategy",
+];
+
+/// Every tool name a client listing `url` is offered, sorted.
+async fn listed_tools(url: &str) -> Vec<String> {
+    let client = ()
+        .serve(StreamableHttpClientTransport::with_client(
+            reqwest::Client::default(),
+            StreamableHttpClientTransportConfig::with_uri(url.to_string()),
+        ))
+        .await
+        .expect("the server answers `initialize`");
+    let mut names: Vec<String> = client
+        .list_all_tools()
+        .await
+        .expect("the server lists its tools")
+        .into_iter()
+        .map(|tool| tool.name.to_string())
+        .collect();
+    let _ = client.cancel().await;
+    names.sort();
+    names
+}
+
+/// Every tool `Tool::ALL` declares, sorted, less any in `excluding`.
+fn declared_tools(excluding: &[&str]) -> Vec<String> {
+    let mut names: Vec<String> = Tool::ALL
+        .into_iter()
+        .map(|tool| tool.as_str().to_string())
+        .filter(|name| !excluding.contains(&name.as_str()))
+        .collect();
+    names.sort();
+    names
+}
+
+#[tokio::test]
+async fn a_server_without_a_machine_lists_no_machine_tool() {
+    // Task 046's server and task 060's hosted `/mcp` pass `None`: a host with
+    // no machine serves the board router alone, and a local tool is not a
+    // refusal there but a tool that does not exist.
+    let h = TestContext::new().await;
+    let (handle, server) = mcp::build(
+        h.context.clone(),
+        0,
+        RunHandles::default(),
+        testing::doctor::provider(),
+        None,
+    )
+    .await;
+    let server = tokio::spawn(server.run());
+    let url = handle.url().expect("the server is listening");
+
+    let listed = listed_tools(&url).await;
+
+    assert_eq!(
+        listed,
+        declared_tools(&LOCAL_TOOLS),
+        "exactly the board router"
+    );
+    for local in LOCAL_TOOLS {
+        assert!(
+            !listed.iter().any(|name| name == local),
+            "{local} is listed"
+        );
+    }
+
+    let client = ()
+        .serve(StreamableHttpClientTransport::with_client(
+            reqwest::Client::default(),
+            StreamableHttpClientTransportConfig::with_uri(url.clone()),
+        ))
+        .await
+        .expect("the server answers `initialize`");
+    for local in ["run_doctor", "list_schedules", "plan_task_strategy"] {
+        let error = client
+            .call_tool(CallToolRequestParams::new(local))
+            .await
+            .expect_err("a tool this server does not have is not a tool result");
+        assert!(
+            error.to_string().contains("tool not found"),
+            "{local}: an unknown-tool error, not a refusal: {error}"
+        );
+    }
+    let _ = client.cancel().await;
+
+    handle.shutdown();
+    server.await.expect("the server task ends");
+}
+
+#[tokio::test]
+async fn with_a_machine_both_doors_list_every_tool_and_a_run_is_refused_a_local_one() {
+    // The shell passes `Some` to both constructors. `tools/list` is not
+    // filtered by scope, so a run is still offered all 22, and calling one is
+    // `RunScope`'s refusal in today's sentence, never an unknown tool.
+    let h = TestContext::new().await;
+    let handles = RunHandles::default();
+    let (handle, server) = serving(&h, &handles).await;
+    let operator = handle.url().expect("the server is listening");
+    let grant = handles.grant("task-1", &h.solo.team_id, Grant::Strategy);
+    let run = scoped_url(&handles, &grant);
+
+    assert_eq!(listed_tools(&operator).await, declared_tools(&[]));
+    assert_eq!(listed_tools(&run).await, declared_tools(&[]));
+
+    let client = ()
+        .serve(StreamableHttpClientTransport::with_client(
+            reqwest::Client::default(),
+            StreamableHttpClientTransportConfig::with_uri(run.clone()),
+        ))
+        .await
+        .expect("a run's own handle answers `initialize`");
+    let refused = client
+        .call_tool(CallToolRequestParams::new("run_doctor"))
+        .await
+        .expect("a refusal is a tool result");
+    assert_refusal(&refused, &not_available("run_doctor", "task-1"));
+    let _ = client.cancel().await;
+
+    handle.shutdown();
+    server.await.expect("the server task ends");
+}
+
+// ---------------------------------------------------------------------------
 // Fixtures
 // ---------------------------------------------------------------------------
 
@@ -1809,8 +1959,8 @@ fn scoped(h: &TestContext, task_id: &str) -> RimaiaServer {
 fn scoped_as(h: &TestContext, task_id: &str, grant: Grant) -> RimaiaServer {
     RimaiaServer::scoped(
         h.context.with_source(MutationSource::Mcp),
-        testing::doctor::environment(),
-        testing::doctor::planner_access(),
+        testing::doctor::provider(),
+        Some(testing::doctor::local_tools(h.machine())),
         RunScope::Run {
             task_id: task_id.to_string(),
             grant,
@@ -1861,8 +2011,8 @@ async fn serving(
         h.context.clone(),
         0,
         handles.clone(),
-        testing::doctor::environment(),
-        testing::doctor::planner_access(),
+        testing::doctor::provider(),
+        Some(testing::doctor::local_tools(h.machine())),
     )
     .await;
     (handle, tokio::spawn(task.run()))
@@ -2012,8 +2162,8 @@ async fn create_task(h: &TestContext, repository_id: &str, title: &str) -> rimai
 async fn board(h: &TestContext, repository_id: &str) -> Vec<String> {
     let listed: TaskListView = match RimaiaServer::new(
         h.context.clone(),
-        testing::doctor::environment(),
-        testing::doctor::planner_access(),
+        testing::doctor::provider(),
+        Some(testing::doctor::local_tools(h.machine())),
     )
     .list_tasks(Parameters(request::<ListTasksRequest>(
         json!({ "repository_id": repository_id }),

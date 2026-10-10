@@ -42,6 +42,7 @@ use serde::Serialize;
 use crate::context::ServiceContext;
 use crate::db::ScheduleMode;
 use crate::error::Result;
+use crate::machine::MachineContext;
 use crate::schedule::{self, fire};
 use crate::scheduler::selection::{self, QueueEntry};
 
@@ -96,9 +97,16 @@ impl PreflightSummary {
 }
 
 /// What `schedule_id` would do, against the board as it is right now.
-pub async fn preview(ctx: &ServiceContext, schedule_id: &str) -> Result<PreflightSummary> {
-    let schedule = schedule::get(ctx, schedule_id).await?;
-    let now = ctx.clock.now();
+///
+/// The schedule is this machine's, from `machine`; the plan is the board's,
+/// read through `board` with the same [`selection::plan`] the queue calls.
+pub async fn preview(
+    machine: &MachineContext,
+    board: &ServiceContext,
+    schedule_id: &str,
+) -> Result<PreflightSummary> {
+    let schedule = schedule::get(machine, schedule_id).await?;
+    let now = machine.clock.now();
 
     let next_fire_at = fire::next_fire_at(&schedule, now)?;
     // Measured from the occurrence the schedule would honour, not from `now`,
@@ -119,6 +127,6 @@ pub async fn preview(ctx: &ServiceContext, schedule_id: &str) -> Result<Prefligh
         closes_at,
         mode: schedule.mode,
         max_concurrency: schedule.max_concurrency,
-        plan: selection::plan(ctx).await?,
+        plan: selection::plan(board).await?,
     })
 }

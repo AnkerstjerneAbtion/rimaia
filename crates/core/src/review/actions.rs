@@ -17,6 +17,7 @@ use crate::context::ServiceContext;
 use crate::db::{BoardColumn, RunState, Task};
 use crate::error::{Error, Result};
 use crate::events::ChangeEvent;
+use crate::machine::MachineContext;
 use crate::tasks::service::{
     ensure_ready_has_a_plan, fetch_task_row, move_within, task_row, team_of_task, Destination,
 };
@@ -61,6 +62,10 @@ impl Action {
 }
 
 /// `in_review` to the bottom of `done`.
+///
+/// Given a machine, the auto-removal policy then runs on it, as it does after
+/// a drag into `done`; with `None`, a server's call, the approval is the board
+/// write alone (task 041, the shape `tasks::move_task` takes).
 #[tracing::instrument(
     skip_all,
     fields(
@@ -69,13 +74,19 @@ impl Action {
         task_id = %id,
     )
 )]
-pub async fn approve(ctx: &ServiceContext, id: &str) -> Result<Task> {
-    decide(ctx, id, Action::Approve, None).await?;
+pub async fn approve(
+    ctx: &ServiceContext,
+    machine: Option<&MachineContext>,
+    id: &str,
+) -> Result<Task> {
+    decide(ctx, None, id, Action::Approve, None).await?;
 
     // The auto-removal policy is a rule of the transition into `done`, and
     // approving is that transition (D20 point 3), so it runs here exactly as it
     // does after a drag — after the commit, and unable to fail the approval.
-    cleanup::auto_remove_on_done(ctx, id).await;
+    if let Some(machine) = machine {
+        cleanup::auto_remove_on_done(ctx, machine, id).await;
+    }
     task_row(ctx, id).await
 }
 
@@ -92,7 +103,7 @@ pub async fn approve(ctx: &ServiceContext, id: &str) -> Result<Task> {
     )
 )]
 pub async fn request_changes(ctx: &ServiceContext, id: &str, note: &str) -> Result<ReviewOutcome> {
-    decide(ctx, id, Action::RequestChanges, Some(note)).await
+    decide(ctx, None, id, Action::RequestChanges, Some(note)).await
 }
 
 /// `in_review` to the bottom of `ready`, the note appended, and the work set
@@ -103,6 +114,11 @@ pub async fn request_changes(ctx: &ServiceContext, id: &str, note: &str) -> Resu
 /// done (D20 point 6). Reusing its name would have the next run push onto a
 /// remote branch holding the rejected commits and fail as a non-fast-forward in
 /// the middle of an unattended night.
+///
+/// The worktree's removal is this machine's half, and comes before the
+/// transaction because it can refuse a dirty worktree. It runs only given a
+/// machine (task 041); with `None`, a server's call, it is skipped, and the
+/// board write stands alone.
 #[tracing::instrument(
     skip_all,
     fields(
@@ -111,12 +127,20 @@ pub async fn request_changes(ctx: &ServiceContext, id: &str, note: &str) -> Resu
         task_id = %id,
     )
 )]
-pub async fn reject(ctx: &ServiceContext, id: &str, note: &str) -> Result<ReviewOutcome> {
-    decide(ctx, id, Action::Reject, Some(note)).await
+pub async fn reject(
+    ctx: &ServiceContext,
+    machine: Option<&MachineContext>,
+    id: &str,
+    note: &str,
+) -> Result<ReviewOutcome> {
+    decide(ctx, machine, id, Action::Reject, Some(note)).await
 }
 
+/// `machine` is read only by a reject, whose worktree removal is this
+/// machine's half.
 async fn decide(
     ctx: &ServiceContext,
+    machine: Option<&MachineContext>,
     id: &str,
     action: Action,
     note: Option<&str>,
@@ -124,7 +148,9 @@ async fn decide(
     let task = task_row(ctx, id).await?;
     ensure_decidable(&task, action, note)?;
 
-    if action == Action::Reject {
+    if action == Action::Reject && machine.is_some() {
+        // The paths are still read off the board's row; task 066 moves them
+        // to the worktree record and the checkout.
         set_aside_worktree(ctx, &task).await?;
     }
 

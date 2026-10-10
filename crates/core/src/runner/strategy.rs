@@ -62,6 +62,7 @@ use crate::context::ServiceContext;
 use crate::db::settings::RunEnvironment;
 use crate::db::{new_id, BoardColumn, ExitClass, Repository, StrategyMode};
 use crate::error::{Error, Result};
+use crate::machine::MachineContext;
 use crate::mcp::{Grant, RUN_MCP_SERVER_NAME};
 use crate::paths::AppPaths;
 use crate::scheduler::{InFlight, Lease, LeaseOwner, LeaseRefused};
@@ -127,7 +128,7 @@ pub enum Resolution {
 pub async fn resolve(
     board: &dyn BoardPort,
     lease: &LeaseRef,
-    ctx: &ServiceContext,
+    machine: &MachineContext,
     paths: &AppPaths,
     config: &RunnerConfig,
     context: &RunContext,
@@ -138,7 +139,11 @@ pub async fn resolve(
         return Ok(ready(&context.task, &context.strategy));
     }
 
-    match plan(board, lease, ctx, paths, config, context, worktree, cancel).await? {
+    match plan(
+        board, lease, machine, paths, config, context, worktree, cancel,
+    )
+    .await?
+    {
         Planned::Wrote => {
             // Re-read rather than trusting what we sent: `set_task_strategy` is
             // the single writer, and what it *stored* — after its own
@@ -224,7 +229,7 @@ enum Planned {
 async fn plan(
     board: &dyn BoardPort,
     lease: &LeaseRef,
-    ctx: &ServiceContext,
+    machine: &MachineContext,
     paths: &AppPaths,
     config: &RunnerConfig,
     context: &RunContext,
@@ -301,12 +306,12 @@ async fn plan(
     // never by parsing what the run printed. Printed JSON would be a second
     // writer with its own parser, duplicating every invariant
     // `set_task_strategy` enforces, which is the exact ADR-0006 defect.
-    let before = ctx.clock.now();
+    let before = machine.clock.now();
 
     let outcome = super::execute(
         board,
         lease,
-        ctx,
+        machine,
         paths,
         config,
         Attempt {
@@ -626,9 +631,14 @@ pub async fn claim_for_planning(
 /// The `Plan` claim is released on every path, after the last strategy write
 /// and before the slot drops. Before task 043 that changes nothing on the board
 /// (a strategy claim took no edge); from 043 it is what deletes the lease row.
+///
+/// `machine` is this machine's own state and clock. `prepare_ctx` is a board
+/// context held for [`worktree::prepare`](crate::worktree::prepare) and
+/// nothing else, as `run_task`'s is, until task 044 removes it.
 pub async fn plan_claimed(
     board: &dyn BoardPort,
-    ctx: &ServiceContext,
+    machine: &MachineContext,
+    prepare_ctx: &ServiceContext,
     paths: &AppPaths,
     config: &RunnerConfig,
     claim: PlannerClaim,
@@ -636,7 +646,7 @@ pub async fn plan_claimed(
     let cancel = claim.cancel_signal();
     let PlannerClaim { slot, claim } = claim;
 
-    let outcome = plan_under(board, ctx, paths, config, &claim, &cancel).await;
+    let outcome = plan_under(board, machine, prepare_ctx, paths, config, &claim, &cancel).await;
 
     if let Err(error) = board.release(&claim.lease).await {
         tracing::warn!(task_id = %claim.lease.task_id, %error, "could not release a planner's claim");
@@ -648,7 +658,8 @@ pub async fn plan_claimed(
 
 async fn plan_under(
     board: &dyn BoardPort,
-    ctx: &ServiceContext,
+    machine: &MachineContext,
+    prepare_ctx: &ServiceContext,
     paths: &AppPaths,
     config: &RunnerConfig,
     claim: &Claim,
@@ -661,12 +672,12 @@ async fn plan_under(
     // operator's (ADR-0005). `prepare` is idempotent, so a task that already has
     // one is unchanged and a task that does not gets the same worktree its
     // implementation run would have used.
-    let worktree = crate::worktree::prepare(ctx, task_id).await?;
+    let worktree = crate::worktree::prepare(prepare_ctx, task_id).await?;
 
     match plan(
         board,
         lease,
-        ctx,
+        machine,
         paths,
         config,
         &claim.context,
@@ -946,6 +957,7 @@ pub async fn selected_tasks(
 #[allow(clippy::too_many_arguments)]
 pub async fn plan_all(
     board: &dyn BoardPort,
+    machine: &MachineContext,
     ctx: &ServiceContext,
     paths: &AppPaths,
     config: &RunnerConfig,
@@ -978,7 +990,7 @@ pub async fn plan_all(
             // pressed on the queue must not kill a preflight they started
             // deliberately.
             match claim_for_planning(board, in_flight, &task_id, LeaseOwner::Manual).await? {
-                Ok(claim) => plan_claimed(board, ctx, paths, config, claim).await?,
+                Ok(claim) => plan_claimed(board, machine, ctx, paths, config, claim).await?,
                 Err(skip) => PlanOutcome::Skipped(skip),
             }
         };

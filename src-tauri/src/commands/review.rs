@@ -23,7 +23,7 @@ use crate::state::AppState;
 /// `in_review` to the bottom of `done`.
 #[tauri::command]
 pub async fn approve_task(state: State<'_, AppState>, task_id: String) -> Result<Task> {
-    review::approve(&state.context, &task_id).await
+    review::approve(&state.context, Some(&state.machine), &task_id).await
 }
 
 /// Back to `ready` for a fresh start: the worktree is removed and the branch is
@@ -34,7 +34,7 @@ pub async fn reject_task(
     task_id: String,
     note: String,
 ) -> Result<ReviewOutcome> {
-    review::reject(&state.context, &task_id, &note).await
+    review::reject(&state.context, Some(&state.machine), &task_id, &note).await
 }
 
 /// Back to `ready` to continue on the reviewed commits. The note is required.

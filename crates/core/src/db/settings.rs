@@ -14,10 +14,10 @@
 //! a key of any other: [`get_team`]/[`set_team`] over `team_settings`, for one
 //! team in the context's scope; [`get_user`]/[`set_user`] over
 //! `user_settings`, for the context's actor; and [`get_runner`]/[`set_runner`]
-//! over the legacy `settings` table, which still holds machine state until
-//! tasks 040 and 041 move it. A team or user key written through a service
-//! never touches its legacy `settings` row again; those rows stay, unread, for
-//! task 065 to drop with the table.
+//! over the machine store, `runner.db`'s `runner_settings` (task 041), through
+//! a [`MachineContext`] rather than the board's context. A key written through
+//! a service never touches its legacy `settings` row again; those rows stay,
+//! unread, for task 065 to drop with the table.
 //!
 //! Writes publish [`Change::Settings`](crate::events::Change::Settings) after the row is committed
 //! (ADR-0018). The event carries no key: the whole table is a handful of rows
@@ -31,6 +31,7 @@ use crate::db::Setting;
 use crate::doctor::Check;
 use crate::error::{Error, Result};
 use crate::events::ChangeEvent;
+use crate::machine::MachineContext;
 
 /// The global instructions prepended to every composed run prompt (ADR-0009).
 ///
@@ -77,7 +78,9 @@ If you cannot complete the task, stop, commit what you have, and explain what is
 /// (seam-contract D28 part 4): what this computer runs, when, and how.
 ///
 /// Task 038's migration leaves these out of `team_settings`, spelled in SQL as
-/// this list is spelled here, and task 040 copies them into `runner.db`.
+/// this list is spelled here, task 040 copies them into `runner.db`, and from
+/// task 041 every reader and writer reaches them through [`get_runner`] and
+/// [`set_runner`].
 /// `every_settings_key_has_the_placement_the_migration_gave_it` is what keeps
 /// the two spellings from drifting.
 pub const RUNNER_KEYS: [&str; 10] = [
@@ -136,7 +139,8 @@ pub enum Placement {
     Team,
     /// `user_settings`: one of [`USER_KEYS`].
     User,
-    /// `runner.db` (task 040): one of [`RUNNER_KEYS`].
+    /// `runner.db`'s `runner_settings`, behind the machine store (tasks 040
+    /// and 041): one of [`RUNNER_KEYS`].
     Runner,
 }
 
@@ -393,17 +397,37 @@ pub(crate) async fn set_user_in(
     Ok(())
 }
 
-/// The value of a runner key, from the legacy `settings` table.
+/// One runner key's value, from the machine store, or `None` when this
+/// machine never wrote it.
 ///
-/// Machine state stays where it is, unfiltered, until task 040 copies it into
-/// `runner.db` and task 041 moves its readers; 041 deletes this pair. It takes
-/// the context anyway, so nothing reaches the store without one.
-pub(crate) async fn get_runner(ctx: &ServiceContext, key: &str) -> Result<Option<String>> {
+/// Storage only: what an absent or unreadable value means is decided by the
+/// accessor that owns the key, next to the code with the rules (D3).
+pub(crate) async fn get_runner(machine: &MachineContext, key: &str) -> Result<Option<String>> {
     ensure_placed(key, Placement::Runner)?;
-    let value = sqlx::query_scalar!("SELECT value FROM settings WHERE key = ?1", key)
-        .fetch_optional(&ctx.pool)
-        .await?;
-    Ok(value)
+    machine.store.get_setting(key).await
+}
+
+/// Writes one runner key into the machine store, and announces it.
+pub(crate) async fn set_runner(machine: &MachineContext, key: &str, value: &str) -> Result<()> {
+    ensure_placed(key, Placement::Runner)?;
+    machine.store.set_setting(key, value).await?;
+
+    // A machine event on the board's channel, under `event_team`, until task
+    // 048 gives machine events `LocalEvents`.
+    machine.publish(ChangeEvent::settings);
+    Ok(())
+}
+
+/// Removes one runner key from the machine store, so it reads as absent, and
+/// announces it.
+pub(crate) async fn clear_runner(machine: &MachineContext, key: &str) -> Result<()> {
+    ensure_placed(key, Placement::Runner)?;
+    machine.store.clear_setting(key).await?;
+
+    // A machine event on the board's channel, under `event_team`, until task
+    // 048 gives machine events `LocalEvents`.
+    machine.publish(ChangeEvent::settings);
+    Ok(())
 }
 
 /// Every runner-placed row of the legacy `settings` table: what task 040's
@@ -414,10 +438,9 @@ pub(crate) async fn get_runner(ctx: &ServiceContext, key: &str) -> Result<Option
 /// A key the board does not hold is not returned: absent already means "the
 /// default" to every accessor, and the copy keeps it absent.
 ///
-/// It takes the context and ignores its scope, as [`get_runner`] does:
-/// machine state belongs to no team. One query of its own rather than a loop
-/// over [`get_runner`], because task 041 deletes that accessor and this
-/// outlives it. Task 065 deletes this with the table.
+/// It takes the board's context and ignores its scope: machine state belongs
+/// to no team. Used only by task 040's adoption step; nothing else reads the
+/// board's copies of these keys. Task 065 deletes this with the table.
 pub async fn runner_placed(ctx: &ServiceContext) -> Result<Vec<Setting>> {
     let rows = sqlx::query_as!(Setting, "SELECT key, value FROM settings ORDER BY key")
         .fetch_all(&ctx.pool)
@@ -426,27 +449,6 @@ pub async fn runner_placed(ctx: &ServiceContext) -> Result<Vec<Setting>> {
         .into_iter()
         .filter(|row| placement(&row.key) == Placement::Runner)
         .collect())
-}
-
-/// Writes a runner key into the legacy `settings` table, and announces it.
-///
-/// The event names the context's one team, read before the write so a scope
-/// of several is refused untouched. Machine state has no team: task 041 moves
-/// it into `runner.db`, and task 048 moves its event off the team channel.
-pub(crate) async fn set_runner(ctx: &ServiceContext, key: &str, value: &str) -> Result<()> {
-    ensure_placed(key, Placement::Runner)?;
-    let team_id = ctx.scope.sole()?.clone();
-    sqlx::query!(
-        "INSERT INTO settings (key, value) VALUES (?1, ?2)
-         ON CONFLICT (key) DO UPDATE SET value = excluded.value",
-        key,
-        value,
-    )
-    .execute(&ctx.pool)
-    .await?;
-
-    ctx.publish(ChangeEvent::settings(team_id));
-    Ok(())
 }
 
 /// The base instructions of the context's one team, or the empty string when
@@ -483,17 +485,17 @@ pub async fn set_base_instructions(ctx: &ServiceContext, value: &str) -> Result<
 /// How much configuration a run inherits. Absent means
 /// [`RunEnvironment::Inherit`], which is ADR-0004's amendment's default.
 ///
-/// Runner state, read from `settings` until task 041 moves it.
-pub async fn run_environment(ctx: &ServiceContext) -> Result<RunEnvironment> {
-    Ok(get_runner(ctx, RUN_ENVIRONMENT)
+/// This machine's own setting, read from the machine store.
+pub async fn run_environment(machine: &MachineContext) -> Result<RunEnvironment> {
+    Ok(get_runner(machine, RUN_ENVIRONMENT)
         .await?
         .as_deref()
         .map(RunEnvironment::from_stored)
         .unwrap_or_default())
 }
 
-pub async fn set_run_environment(ctx: &ServiceContext, value: RunEnvironment) -> Result<()> {
-    set_runner(ctx, RUN_ENVIRONMENT, value.as_str()).await
+pub async fn set_run_environment(machine: &MachineContext, value: RunEnvironment) -> Result<()> {
+    set_runner(machine, RUN_ENVIRONMENT, value.as_str()).await
 }
 
 /// Whether the user has already been through, or deliberately skipped, task
@@ -511,14 +513,14 @@ pub async fn set_run_environment(ctx: &ServiceContext, value: RunEnvironment) ->
 /// tolerance every other key here applies: a hand-edited row is a reason to show
 /// one extra screen, never a reason to fail a launch.
 ///
-/// Runner state, read from `settings` until task 041 moves it.
-pub async fn onboarding_dismissed(ctx: &ServiceContext) -> Result<bool> {
-    Ok(get_runner(ctx, ONBOARDING_DISMISSED).await?.as_deref() == Some("true"))
+/// This machine's own setting, read from the machine store.
+pub async fn onboarding_dismissed(machine: &MachineContext) -> Result<bool> {
+    Ok(get_runner(machine, ONBOARDING_DISMISSED).await?.as_deref() == Some("true"))
 }
 
-pub async fn set_onboarding_dismissed(ctx: &ServiceContext, value: bool) -> Result<()> {
+pub async fn set_onboarding_dismissed(machine: &MachineContext, value: bool) -> Result<()> {
     set_runner(
-        ctx,
+        machine,
         ONBOARDING_DISMISSED,
         if value { "true" } else { "false" },
     )
@@ -597,15 +599,15 @@ pub struct Dismissal {
 /// Every dismissal the user has recorded, in the order they recorded them.
 ///
 /// Tolerant of a hand-edited row for the reason [`RunEnvironment::from_stored`]
-/// is: `settings` has no `CHECK` on `value`, the user is a supported writer of
+/// is: `runner_settings` has no `CHECK` on `value`, the user is a supported writer of
 /// this file (ADR-0003), and a typo in a *presentation* preference must never
 /// cost a launch. Tolerant twice over, because the two failures are different
 /// sizes — a value that is not an array at all falls back to "nothing
 /// dismissed", and one unparseable element is skipped while the rest stand.
 ///
-/// Runner state, read from `settings` until task 041 moves it.
-pub async fn doctor_dismissals(ctx: &ServiceContext) -> Result<Vec<Dismissal>> {
-    let Some(raw) = get_runner(ctx, DOCTOR_DISMISSALS).await? else {
+/// This machine's own setting, read from the machine store.
+pub async fn doctor_dismissals(machine: &MachineContext) -> Result<Vec<Dismissal>> {
+    let Some(raw) = get_runner(machine, DOCTOR_DISMISSALS).await? else {
         return Ok(Vec::new());
     };
 
@@ -632,7 +634,7 @@ pub async fn doctor_dismissals(ctx: &ServiceContext) -> Result<Vec<Dismissal>> {
         .collect())
 }
 
-pub async fn set_doctor_dismissals(ctx: &ServiceContext, value: &[Dismissal]) -> Result<()> {
+pub async fn set_doctor_dismissals(machine: &MachineContext, value: &[Dismissal]) -> Result<()> {
     // Mapped rather than unwrapped, the way `strategy::settings` writes its
     // own JSON key: seam-contract D8 keeps `ErrorCode` closed, so a failure
     // that cannot happen for this shape still travels as `Internal` instead of
@@ -641,7 +643,7 @@ pub async fn set_doctor_dismissals(ctx: &ServiceContext, value: &[Dismissal]) ->
         Error::internal(format!("a doctor dismissal did not serialize: {error}"))
     })?;
 
-    set_runner(ctx, DOCTOR_DISMISSALS, &json).await
+    set_runner(machine, DOCTOR_DISMISSALS, &json).await
 }
 
 #[cfg(test)]
@@ -776,10 +778,11 @@ mod tests {
             set_user(&h.context, ONBOARDING_DISMISSED, "true")
                 .await
                 .err(),
-            get_runner(&h.context, BASE_INSTRUCTIONS).await.err(),
-            set_runner(&h.context, SUBSCRIPTION_MONTHLY_USD, "1")
+            get_runner(h.machine(), BASE_INSTRUCTIONS).await.err(),
+            set_runner(h.machine(), SUBSCRIPTION_MONTHLY_USD, "1")
                 .await
                 .err(),
+            clear_runner(h.machine(), BASE_INSTRUCTIONS).await.err(),
         ];
         // The test pool holds one connection, so the two that take one go
         // last, on a connection held only for them.
@@ -829,13 +832,15 @@ mod tests {
         let h = TestContext::new().await;
 
         assert_eq!(
-            get_runner(&h.context, RUN_ENVIRONMENT)
+            get_runner(h.machine(), RUN_ENVIRONMENT)
                 .await
                 .expect("read the key"),
             None
         );
         assert_eq!(
-            run_environment(&h.context).await.expect("read the default"),
+            run_environment(h.machine())
+                .await
+                .expect("read the default"),
             RunEnvironment::Inherit
         );
     }
@@ -844,19 +849,19 @@ mod tests {
     async fn a_stored_run_environment_round_trips_through_its_spelling() {
         let h = TestContext::new().await;
 
-        set_run_environment(&h.context, RunEnvironment::StrictLocal)
+        set_run_environment(h.machine(), RunEnvironment::StrictLocal)
             .await
             .expect("store strict_local");
 
         assert_eq!(
-            get_runner(&h.context, RUN_ENVIRONMENT)
+            get_runner(h.machine(), RUN_ENVIRONMENT)
                 .await
                 .expect("read the row"),
             Some("strict_local".to_string()),
             "the stored spelling has to stay legible in the sqlite3 CLI"
         );
         assert_eq!(
-            run_environment(&h.context).await.expect("read it back"),
+            run_environment(h.machine()).await.expect("read it back"),
             RunEnvironment::StrictLocal
         );
     }
@@ -866,12 +871,12 @@ mod tests {
         // The row a user typed into the sqlite3 CLI. A queue must survive it.
         let h = TestContext::new().await;
 
-        set_runner(&h.context, RUN_ENVIRONMENT, "strictlocal")
+        set_runner(h.machine(), RUN_ENVIRONMENT, "strictlocal")
             .await
             .expect("store a typo");
 
         assert_eq!(
-            run_environment(&h.context).await.expect("read it back"),
+            run_environment(h.machine()).await.expect("read it back"),
             RunEnvironment::Inherit
         );
     }

@@ -611,8 +611,8 @@ async fn implementation_and_review_loop_spend_sum_to_total_spend() {
     // ADR-0021: the agent's door reports what the window's door reports.
     let server = RimaiaServer::new(
         fixture.harness.context.with_source(MutationSource::Mcp),
-        testing::doctor::environment(),
-        testing::doctor::planner_access(),
+        testing::doctor::provider(),
+        Some(testing::doctor::local_tools(fixture.harness.machine())),
     );
     let request: AnalyticsRequest =
         serde_json::from_value(serde_json::json!({})).expect("an empty period");

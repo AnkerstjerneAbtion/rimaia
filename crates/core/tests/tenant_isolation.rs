@@ -1220,11 +1220,11 @@ async fn board() -> Board {
         stop_at: Some("06:00".to_string()),
         enabled: false,
     };
-    let schedule = schedule::create(&teams.a, nightly("Nightly"))
+    let schedule = schedule::create(&teams.machine, nightly("Nightly"))
         .await
         .expect("a schedule")
         .id;
-    let doomed_schedule = schedule::create(&teams.a, nightly("Doomed"))
+    let doomed_schedule = schedule::create(&teams.machine, nightly("Doomed"))
         .await
         .expect("a schedule to delete")
         .id;
@@ -1244,8 +1244,8 @@ async fn serving(
         ctx.clone(),
         0,
         teams.handles.clone(),
-        teams.doctor(),
-        teams.planner(ctx),
+        teams.doctor().provider,
+        Some(teams.local(ctx)),
     )
     .await;
     (handle, tokio::spawn(task.run()))

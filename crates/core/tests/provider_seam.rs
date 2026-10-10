@@ -238,7 +238,7 @@ async fn a_provider_that_cannot_deny_a_tool_refuses_an_unattended_run() {
 
     let error = claim_manual_start(
         fixture.harness.board(&fixture.paths, &config).as_ref(),
-        &fixture.harness.context,
+        fixture.harness.machine(),
         &fixture.paths,
         &config,
         &InFlight::new(),

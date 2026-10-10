@@ -222,7 +222,7 @@ pub async fn cleanup_merged_worktrees(state: State<'_, AppState>) -> Result<Clea
 /// somebody turned it on.
 #[tauri::command]
 pub async fn get_worktree_auto_cleanup(state: State<'_, AppState>) -> Result<AutoCleanup> {
-    worktree::auto_cleanup(&state.context).await
+    worktree::auto_cleanup(&state.machine).await
 }
 
 /// Sets that policy. The `on` value is spelled `on_done_acknowledged` on the
@@ -234,5 +234,5 @@ pub async fn set_worktree_auto_cleanup(
     state: State<'_, AppState>,
     setting: AutoCleanup,
 ) -> Result<()> {
-    worktree::set_auto_cleanup(&state.context, setting).await
+    worktree::set_auto_cleanup(&state.machine, setting).await
 }

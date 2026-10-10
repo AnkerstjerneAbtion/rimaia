@@ -17,6 +17,7 @@ use rimaia_core::board::RunContext;
 use rimaia_core::db::settings::{self, placement, Placement, ALL_KEYS};
 use rimaia_core::db::{BoardColumn, RunState};
 use rimaia_core::events::Change;
+use rimaia_core::machine::MachineContext;
 use rimaia_core::repo::{self, NewRepository};
 use rimaia_core::review::{self, findings, FindingResolution};
 use rimaia_core::review_loop::config as review_config;
@@ -78,7 +79,7 @@ async fn a_foreign_id_is_answered_exactly_as_a_missing_one() {
 
     probe!("get_task", b.ready, |id| tasks::get_task(a, id).await);
     probe!("move_task", b.ready, |id| {
-        tasks::move_task(a, id, BoardColumn::NotReady, None, None).await
+        tasks::move_task(a, None, id, BoardColumn::NotReady, None, None).await
     });
     probe!("set_task_dependencies (the task)", b.in_review, |id| {
         tasks::set_task_dependencies(a, id, &[]).await
@@ -116,9 +117,11 @@ async fn a_foreign_id_is_answered_exactly_as_a_missing_one() {
             .await
             .map(|claimed| claimed.is_ok())
     });
-    probe!("approve", b.in_review, |id| review::approve(a, id).await);
+    probe!("approve", b.in_review, |id| review::approve(a, None, id)
+        .await);
     probe!("reject", b.in_review, |id| review::reject(
         a,
+        None,
         id,
         "Not this."
     )
@@ -458,15 +461,39 @@ async fn a_run_is_forbidden_what_its_own_team_forbids() {
     assert_eq!(limits.disallowed_tools, expected_tools);
 }
 
-/// Writes `legacy`, `team` and `user` into the three stores for `key`: the
-/// legacy row, team A's row and A's owner's row.
-async fn plant(t: &TwoTeams, key: &str, legacy: &str, team: &str, user: &str) {
+/// Writes `runner`, `team` and `user` into the three stores for `key`: the
+/// machine store, team A's row and A's owner's row.
+///
+/// The legacy `settings` row is planted too, as an upgraded install still
+/// holds it: with `runner` for a team or user key, so a reader that fell back
+/// to it would read back the runner's value and fail, and with a stale copy
+/// for a runner key, which task 041 moved to the machine store, so a reader
+/// still on the board would read back neither.
+async fn plant(
+    t: &TwoTeams,
+    machine: &MachineContext,
+    key: &str,
+    runner: &str,
+    team: &str,
+    user: &str,
+) {
+    let legacy = match placement(key) {
+        Placement::Runner => {
+            machine
+                .store
+                .set_setting(key, runner)
+                .await
+                .expect("plant the runner row");
+            format!("the board's stale copy of {key}")
+        }
+        Placement::Team | Placement::User => runner.to_string(),
+    };
     sqlx::query(
         "INSERT INTO settings (key, value) VALUES (?1, ?2)
          ON CONFLICT (key) DO UPDATE SET value = excluded.value",
     )
     .bind(key)
-    .bind(legacy)
+    .bind(&legacy)
     .execute(&t.a.pool)
     .await
     .expect("plant the legacy row");
@@ -500,9 +527,9 @@ fn instant(rfc3339: &str) -> DateTime<Utc> {
 /// the typed reader would render it, is the one read back. Exactly one may
 /// match, so a key whose values cannot all differ plants its odd one out in
 /// the store it expects.
-fn store_of(read: &str, legacy: &str, team: &str, user: &str) -> Placement {
+fn store_of(read: &str, runner: &str, team: &str, user: &str) -> Placement {
     let matches: Vec<Placement> = [
-        (legacy, Placement::Runner),
+        (runner, Placement::Runner),
         (team, Placement::Team),
         (user, Placement::User),
     ]
@@ -529,6 +556,8 @@ async fn every_settings_key_reads_from_the_store_d28_places_it_in() {
     // pin: the accessors are crate-private.)
     let t = TwoTeams::new().await;
     let a = &t.a;
+    // This machine's store, which runner keys are read from since task 041.
+    let m = &t.machine;
     let now = t.clock.now();
     let per_repository = repository_default_key(&t.team_a.repository.id);
     let keys: Vec<&str> = ALL_KEYS
@@ -543,7 +572,7 @@ async fn every_settings_key_reads_from_the_store_d28_places_it_in() {
         let (planted, rendered, read): ([String; 3], [String; 3], String) = match key {
             settings::BASE_INSTRUCTIONS | DISALLOWED_TOOLS | review_config::REVIEW_INSTRUCTIONS => {
                 let values = ["legacy".to_string(), "team".to_string(), "user".to_string()];
-                plant(&t, key, &values[0], &values[1], &values[2]).await;
+                plant(&t, m, key, &values[0], &values[1], &values[2]).await;
                 let read = match key {
                     settings::BASE_INSTRUCTIONS => settings::base_instructions(a).await,
                     DISALLOWED_TOOLS => process::disallowed_tools(a, &t.team_a.team_id)
@@ -562,7 +591,7 @@ async fn every_settings_key_reads_from_the_store_d28_places_it_in() {
                     r#"{"efforts":[]}"#.to_string(),
                     r#"{"planner":{}}"#.to_string(),
                 ];
-                plant(&t, key, &values[0], &values[1], &values[2]).await;
+                plant(&t, m, key, &values[0], &values[1], &values[2]).await;
                 let read = catalogue::stored_text(a)
                     .await
                     .expect("read")
@@ -571,7 +600,7 @@ async fn every_settings_key_reads_from_the_store_d28_places_it_in() {
             }
             STRATEGY_DEFAULT => {
                 let planted = ["legacy", "team", "user"].map(|v| format!(r#"{{"model":"{v}"}}"#));
-                plant(&t, key, &planted[0], &planted[1], &planted[2]).await;
+                plant(&t, m, key, &planted[0], &planted[1], &planted[2]).await;
                 let read = strategy_settings::global_default(a)
                     .await
                     .expect("read")
@@ -581,7 +610,7 @@ async fn every_settings_key_reads_from_the_store_d28_places_it_in() {
             }
             key if key == per_repository => {
                 let planted = ["legacy", "team", "user"].map(|v| format!(r#"{{"effort":"{v}"}}"#));
-                plant(&t, key, &planted[0], &planted[1], &planted[2]).await;
+                plant(&t, m, key, &planted[0], &planted[1], &planted[2]).await;
                 let read = strategy_settings::repository_default(a, &t.team_a.repository.id)
                     .await
                     .expect("read")
@@ -591,7 +620,7 @@ async fn every_settings_key_reads_from_the_store_d28_places_it_in() {
             }
             STRATEGY_APPROVAL => {
                 let planted = ["automatic", "manual", "automatic"].map(String::from);
-                plant(&t, key, &planted[0], &planted[1], &planted[2]).await;
+                plant(&t, m, key, &planted[0], &planted[1], &planted[2]).await;
                 let read = match strategy_settings::approval(a).await.expect("read") {
                     StrategyApproval::Automatic => "automatic",
                     StrategyApproval::Manual => "manual",
@@ -601,7 +630,7 @@ async fn every_settings_key_reads_from_the_store_d28_places_it_in() {
             }
             MAX_TURNS => {
                 let planted = ["11", "22", "33"].map(String::from);
-                plant(&t, key, &planted[0], &planted[1], &planted[2]).await;
+                plant(&t, m, key, &planted[0], &planted[1], &planted[2]).await;
                 let read = process::max_turns(a, &t.team_a.team_id)
                     .await
                     .expect("read")
@@ -610,7 +639,7 @@ async fn every_settings_key_reads_from_the_store_d28_places_it_in() {
             }
             review_config::REVIEW_CONFIG => {
                 let planted = [1, 2, 3].map(|n| format!(r#"{{"max_review_loops":{n}}}"#));
-                plant(&t, key, &planted[0], &planted[1], &planted[2]).await;
+                plant(&t, m, key, &planted[0], &planted[1], &planted[2]).await;
                 let read = review_config::get_review_settings(a)
                     .await
                     .expect("read")
@@ -622,7 +651,7 @@ async fn every_settings_key_reads_from_the_store_d28_places_it_in() {
             }
             settings::SUBSCRIPTION_MONTHLY_USD => {
                 let planted = ["1", "2", "3"].map(String::from);
-                plant(&t, key, &planted[0], &planted[1], &planted[2]).await;
+                plant(&t, m, key, &planted[0], &planted[1], &planted[2]).await;
                 let read = settings::subscription_monthly_usd(a)
                     .await
                     .expect("read")
@@ -637,7 +666,7 @@ async fn every_settings_key_reads_from_the_store_d28_places_it_in() {
                     "2026-08-03T00:00:00Z",
                 ]
                 .map(String::from);
-                plant(&t, key, &planted[0], &planted[1], &planted[2]).await;
+                plant(&t, m, key, &planted[0], &planted[1], &planted[2]).await;
                 let read = review::digest::seen_through(a)
                     .await
                     .expect("read")
@@ -647,14 +676,14 @@ async fn every_settings_key_reads_from_the_store_d28_places_it_in() {
             }
             settings::RUN_ENVIRONMENT => {
                 let planted = ["strict_local", "inherit", "inherit"].map(String::from);
-                plant(&t, key, &planted[0], &planted[1], &planted[2]).await;
-                let read = settings::run_environment(a).await.expect("read").as_str();
+                plant(&t, m, key, &planted[0], &planted[1], &planted[2]).await;
+                let read = settings::run_environment(m).await.expect("read").as_str();
                 (planted.clone(), planted, read.to_string())
             }
             rimaia_core::mcp::MCP_PORT => {
                 let planted = ["4600", "4601", "4602"].map(String::from);
-                plant(&t, key, &planted[0], &planted[1], &planted[2]).await;
-                let read = rimaia_core::mcp::configured_port(a)
+                plant(&t, m, key, &planted[0], &planted[1], &planted[2]).await;
+                let read = rimaia_core::mcp::configured_port(m)
                     .await
                     .expect("read")
                     .to_string();
@@ -662,8 +691,8 @@ async fn every_settings_key_reads_from_the_store_d28_places_it_in() {
             }
             rimaia_core::scheduler::capacity::MAX_CONCURRENCY => {
                 let planted = ["3", "4", "5"].map(String::from);
-                plant(&t, key, &planted[0], &planted[1], &planted[2]).await;
-                let read = rimaia_core::scheduler::capacity::max_concurrency(a)
+                plant(&t, m, key, &planted[0], &planted[1], &planted[2]).await;
+                let read = rimaia_core::scheduler::capacity::max_concurrency(m)
                     .await
                     .expect("read")
                     .to_string();
@@ -671,8 +700,8 @@ async fn every_settings_key_reads_from_the_store_d28_places_it_in() {
             }
             rimaia_core::scheduler::capacity::SCHEDULE_MODE => {
                 let planted = ["parallel", "sequential", "sequential"].map(String::from);
-                plant(&t, key, &planted[0], &planted[1], &planted[2]).await;
-                let read = rimaia_core::scheduler::capacity::schedule_mode(a)
+                plant(&t, m, key, &planted[0], &planted[1], &planted[2]).await;
+                let read = rimaia_core::scheduler::capacity::schedule_mode(m)
                     .await
                     .expect("read")
                     .as_str();
@@ -680,8 +709,8 @@ async fn every_settings_key_reads_from_the_store_d28_places_it_in() {
             }
             rimaia_core::scheduler::QUEUE_STATE => {
                 let planted = ["running", "paused", "paused"].map(String::from);
-                plant(&t, key, &planted[0], &planted[1], &planted[2]).await;
-                let read = rimaia_core::scheduler::queue_state(a)
+                plant(&t, m, key, &planted[0], &planted[1], &planted[2]).await;
+                let read = rimaia_core::scheduler::queue_state(m)
                     .await
                     .expect("read")
                     .as_str();
@@ -694,8 +723,8 @@ async fn every_settings_key_reads_from_the_store_d28_places_it_in() {
                         r#"{{"scheduleId":"s","scheduleName":"{name}","openedAt":"2026-08-20T01:00:00Z","closesAt":null,"mode":"parallel","maxConcurrency":2}}"#
                     )
                 });
-                plant(&t, key, &planted[0], &planted[1], &planted[2]).await;
-                let read = rimaia_core::schedule::window::active(a)
+                plant(&t, m, key, &planted[0], &planted[1], &planted[2]).await;
+                let read = rimaia_core::schedule::window::active(m)
                     .await
                     .expect("read")
                     .expect("an open window")
@@ -705,8 +734,8 @@ async fn every_settings_key_reads_from_the_store_d28_places_it_in() {
             rimaia_core::scheduler::pause::USAGE_LIMIT_PAUSE_UNTIL => {
                 let instants = [1, 2, 3].map(|hours| now + Duration::hours(hours));
                 let planted = instants.map(|at| at.to_rfc3339());
-                plant(&t, key, &planted[0], &planted[1], &planted[2]).await;
-                let read = rimaia_core::scheduler::pause::active_until(a, now)
+                plant(&t, m, key, &planted[0], &planted[1], &planted[2]).await;
+                let read = rimaia_core::scheduler::pause::active_until(m, now)
                     .await
                     .expect("read")
                     .expect("a pause")
@@ -715,8 +744,8 @@ async fn every_settings_key_reads_from_the_store_d28_places_it_in() {
             }
             rimaia_core::worktree::cleanup::AUTO_CLEANUP => {
                 let planted = ["on_done_acknowledged", "off", "off"].map(String::from);
-                plant(&t, key, &planted[0], &planted[1], &planted[2]).await;
-                let read = rimaia_core::worktree::cleanup::auto_cleanup(a)
+                plant(&t, m, key, &planted[0], &planted[1], &planted[2]).await;
+                let read = rimaia_core::worktree::cleanup::auto_cleanup(m)
                     .await
                     .expect("read")
                     .as_str();
@@ -727,8 +756,8 @@ async fn every_settings_key_reads_from_the_store_d28_places_it_in() {
                 let planted = details.map(|detail| {
                     format!(r#"[{{"check":"git","repository":null,"detail":"{detail}"}}]"#)
                 });
-                plant(&t, key, &planted[0], &planted[1], &planted[2]).await;
-                let read = settings::doctor_dismissals(a)
+                plant(&t, m, key, &planted[0], &planted[1], &planted[2]).await;
+                let read = settings::doctor_dismissals(m)
                     .await
                     .expect("read")
                     .into_iter()
@@ -739,8 +768,8 @@ async fn every_settings_key_reads_from_the_store_d28_places_it_in() {
             }
             settings::ONBOARDING_DISMISSED => {
                 let planted = ["true", "false", "false"].map(String::from);
-                plant(&t, key, &planted[0], &planted[1], &planted[2]).await;
-                let read = settings::onboarding_dismissed(a).await.expect("read");
+                plant(&t, m, key, &planted[0], &planted[1], &planted[2]).await;
+                let read = settings::onboarding_dismissed(m).await.expect("read");
                 (planted.clone(), planted, read.to_string())
             }
             other => panic!("no reader for the settings key {other}: add it here"),
@@ -812,7 +841,7 @@ async fn the_digest_marker_is_written_to_the_actors_user_settings_row() {
     // Team A's only `in_review` task, approved: the queue is empty, so the
     // marker moves to now, on the same row.
     t.drain_changes();
-    review::approve(&t.a, &t.team_a.in_review)
+    review::approve(&t.a, None, &t.team_a.in_review)
         .await
         .expect("approve team A's task");
     assert_eq!(
@@ -846,7 +875,7 @@ async fn the_review_that_empties_its_teams_queue_advances_the_marker_whatever_an
         let before_b = t.snapshot_b().await;
         let ctx = if scope == "a" { &t.a } else { &t.both };
 
-        review::approve(ctx, &t.team_a.in_review)
+        review::approve(ctx, None, &t.team_a.in_review)
             .await
             .expect("approve team A's last task in review");
 
@@ -870,7 +899,7 @@ async fn another_teams_empty_queue_does_not_advance_the_marker() {
         another_in_review(&t.a, &t.team_a.repository.id, "more A work").await;
         let ctx = if scope == "a" { &t.a } else { &t.both };
 
-        review::approve(ctx, &t.team_a.in_review)
+        review::approve(ctx, None, &t.team_a.in_review)
             .await
             .expect("approve one of team A's two");
 
@@ -893,9 +922,9 @@ async fn a_refused_verdict_on_another_teams_task_leaves_every_marker_where_it_wa
     };
     let before = markers().await;
 
-    let foreign = review::approve(&t.a, &t.team_b.in_review).await;
+    let foreign = review::approve(&t.a, None, &t.team_b.in_review).await;
     let missing_id = TwoTeams::never_issued();
-    let missing = review::approve(&t.a, &missing_id).await;
+    let missing = review::approve(&t.a, None, &missing_id).await;
 
     assert_eq!(
         answer(&foreign, &t.team_b.in_review),

@@ -637,6 +637,7 @@ mod end_to_end {
                 TEST_TIMEOUT,
                 run_task(
                     board.as_ref(),
+                    self.machine(),
                     self.ctx(),
                     &self.paths,
                     &config,
@@ -969,6 +970,11 @@ impl Fixture {
 
     fn ctx(&self) -> &ServiceContext {
         &self.harness.context
+    }
+
+    /// This machine's own state, over the harness's machine store (task 041).
+    fn machine(&self) -> &rimaia_core::machine::MachineContext {
+        self.harness.machine()
     }
 
     async fn task(&self) -> rimaia_core::db::Task {

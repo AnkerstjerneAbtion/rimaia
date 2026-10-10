@@ -143,6 +143,7 @@ impl Fixture {
         let claim = claim_run(board.as_ref(), &self.task_id, RunTrigger::Queued, false).await?;
         run_task(
             board.as_ref(),
+            self.harness.machine(),
             &self.harness.context,
             &self.paths,
             &config,

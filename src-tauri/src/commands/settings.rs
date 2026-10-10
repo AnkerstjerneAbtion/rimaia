@@ -34,12 +34,12 @@ pub async fn set_base_instructions(state: State<'_, AppState>, value: String) ->
 
 #[tauri::command]
 pub async fn get_run_environment(state: State<'_, AppState>) -> Result<RunEnvironment> {
-    settings::run_environment(&state.context).await
+    settings::run_environment(&state.machine).await
 }
 
 #[tauri::command]
 pub async fn set_run_environment(state: State<'_, AppState>, value: RunEnvironment) -> Result<()> {
-    settings::set_run_environment(&state.context, value).await
+    settings::set_run_environment(&state.machine, value).await
 }
 
 /// What runs on this machine have actually cost, so the environment toggle can

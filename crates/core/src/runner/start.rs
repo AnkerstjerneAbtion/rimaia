@@ -6,9 +6,9 @@
 //! with what it returns; nothing about the order below is theirs to get wrong.
 
 use crate::board::{BoardPort, Claim, ClaimTarget};
-use crate::context::ServiceContext;
 use crate::db::settings;
 use crate::error::{Error, Result};
+use crate::machine::MachineContext;
 use crate::paths::AppPaths;
 use crate::repo;
 use crate::scheduler::{InFlight, Lease, LeaseOwner};
@@ -51,9 +51,11 @@ pub struct Started {
 /// answered in the sentence each button has always given. A review or fix
 /// waiting to be resumed is claimed like any retry, and `run_task` enters the
 /// loop at that kind (task 021).
+///
+/// The run environment it negotiates with is this machine's, from `machine`.
 pub async fn claim_manual_start(
     board: &dyn BoardPort,
-    ctx: &ServiceContext,
+    machine: &MachineContext,
     paths: &AppPaths,
     config: &RunnerConfig,
     in_flight: &InFlight,
@@ -71,7 +73,7 @@ pub async fn claim_manual_start(
 
     repo::ensure_unattended_runs_allowed(&preview.repository)?;
 
-    let run_environment = settings::run_environment(ctx).await?;
+    let run_environment = settings::run_environment(machine).await?;
     let home = paths.provider_home(config.provider.id(), &start.task_id);
     let intent = implementation_intent(
         &preview,

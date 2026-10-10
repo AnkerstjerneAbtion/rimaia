@@ -915,6 +915,7 @@ async fn two_runs_finishing_at_once_land_on_distinct_positions_in_in_review() {
     for task_id in [&second, &third] {
         tasks::move_task(
             &fixture.harness.context,
+            None,
             task_id,
             BoardColumn::InReview,
             Some(&bottom),

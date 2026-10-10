@@ -28,6 +28,7 @@ use crate::db::{
 };
 use crate::error::{Error, Result};
 use crate::events::{ChangeEvent, TeamId};
+use crate::machine::MachineContext;
 use crate::review_loop::{self, ReviewConfig, ReviewLoopSummary};
 use crate::strategy::{effective_strategy, EffectiveStrategy, StrategyOrigin};
 use crate::tasks::position::{position_between, rebalance_column, rebalanced_positions, Placement};
@@ -811,6 +812,17 @@ pub struct ArchiveReport {
 /// outcome is carried back on [`ArchivedTask::cleanup`] rather than logged,
 /// because unlike `auto_remove_on_done` the user asked for this one.
 ///
+/// # The cleanup is this machine's reaction, and needs a machine
+///
+/// The repository's on-archive action deletes or runs something on the
+/// machine that holds the worktree, so it runs only when the caller hands in
+/// that machine (task 041): `Some` from the shell and the solo MCP server.
+/// With `None`, which is a server's call until task 054 gives it a way to ask
+/// the runner, the archive is the board write alone and the report says
+/// [`OnArchiveOutcome::Nothing`]. The Tauri command and the board MCP tool
+/// both call this one function, so ADR-0006's one-function-two-doors rule
+/// holds without the board service reading machine state.
+///
 /// # The one guard, and why it has no override
 ///
 /// `running` and `waiting_retry` refuse, with no flag anywhere that makes them
@@ -830,7 +842,11 @@ pub struct ArchiveReport {
         task_id = %id,
     )
 )]
-pub async fn archive_task(ctx: &ServiceContext, id: &str) -> Result<ArchivedTask> {
+pub async fn archive_task(
+    ctx: &ServiceContext,
+    machine: Option<&MachineContext>,
+    id: &str,
+) -> Result<ArchivedTask> {
     let task = task_row(ctx, id).await?;
 
     if crate::worktree::cleanup::is_live(task.run_state) {
@@ -869,7 +885,12 @@ pub async fn archive_task(ctx: &ServiceContext, id: &str) -> Result<ArchivedTask
 
     ctx.publish(ChangeEvent::tasks(team_id.clone(), [id.to_string()]));
 
-    let cleanup = crate::archive::run_on_archive(ctx, &task).await;
+    // The reaction still reads its policy and paths off the board's row; task
+    // 066 moves those reads to the checkout and the worktree record.
+    let cleanup = match machine {
+        Some(_) => crate::archive::run_on_archive(ctx, &task).await,
+        None => OnArchiveOutcome::Nothing,
+    };
     if cleanup.needs_attention() {
         tracing::info!(task_id = %id, ?cleanup, "an archive's cleanup did not go cleanly");
     }
@@ -947,14 +968,18 @@ pub async fn unarchive_task(ctx: &ServiceContext, id: &str) -> Result<Task> {
         count = ids.len(),
     )
 )]
-pub async fn archive_tasks(ctx: &ServiceContext, ids: &[String]) -> Result<ArchiveReport> {
+pub async fn archive_tasks(
+    ctx: &ServiceContext,
+    machine: Option<&MachineContext>,
+    ids: &[String],
+) -> Result<ArchiveReport> {
     if ids.is_empty() {
         return Err(Error::invalid("name at least one task to archive"));
     }
 
     let mut report = ArchiveReport::default();
     for id in ids {
-        match archive_task(ctx, id).await {
+        match archive_task(ctx, machine, id).await {
             Ok(archived) => report.archived.push(archived),
             Err(error) => {
                 // The title is worth a second read: a report that named ten
@@ -998,6 +1023,22 @@ pub async fn archive_tasks(ctx: &ServiceContext, ids: &[String]) -> Result<Archi
 /// Refuses to land in [`BoardColumn::Ready`] with no plan. Landing in
 /// [`BoardColumn::Done`] is always allowed from anywhere — the user is in
 /// charge of their own board.
+///
+/// # Entering `done` is a reaction on this machine
+///
+/// Task 016's optional auto-removal runs after a move into `done`, here
+/// rather than in a command so that the board and the MCP server get it
+/// identically (ADR-0006). Its policy is a runner key and its worktree is on
+/// this machine, so it runs only when the caller hands in the machine (task
+/// 041); with `None` the move is the board write alone. After the commit and
+/// the publish, and returning nothing: the move has already succeeded, and a
+/// cleanup a guard refuses must not be able to report it as having failed.
+///
+/// **This is the one edge from `tasks` to `worktree`**, and it runs the other
+/// way from every existing one: `worktree` reads tasks and calls
+/// `set_run_state`. Rust permits the cycle within a crate and the direction is
+/// the honest one (the policy belongs to the transition, not to the
+/// directory), and seam-contract D20 names it.
 #[tracing::instrument(
     skip_all,
     fields(
@@ -1009,6 +1050,7 @@ pub async fn archive_tasks(ctx: &ServiceContext, ids: &[String]) -> Result<Archi
 )]
 pub async fn move_task(
     ctx: &ServiceContext,
+    machine: Option<&MachineContext>,
     id: &str,
     column: BoardColumn,
     before_id: Option<&str>,
@@ -1018,7 +1060,7 @@ pub async fn move_task(
         return Err(Error::invalid("a task cannot be moved next to itself"));
     }
 
-    move_into_column(
+    let moved = move_into_column(
         ctx,
         id,
         column,
@@ -1027,7 +1069,13 @@ pub async fn move_task(
             after_id,
         },
     )
-    .await
+    .await?;
+
+    if let (Some(machine), BoardColumn::Done) = (machine, column) {
+        crate::worktree::cleanup::auto_remove_on_done(ctx, machine, id).await;
+    }
+
+    Ok(moved)
 }
 
 /// Appends a task to the bottom of `column`, with the neighbour looked up
@@ -1099,28 +1147,7 @@ async fn move_into_column(
         team_id,
         std::iter::once(id.to_string()).chain(rebalanced_ids.into_iter().filter(|rid| rid != id)),
     ));
-    let updated = task_row(ctx, id).await?;
-
-    // Task 016's optional auto-removal, here rather than in a command so that
-    // the board and the MCP server get it identically (ADR-0006) — a policy
-    // enforced in one adapter and not the other is the bug that ADR exists to
-    // prevent, and "the worktree disappears when I move the card" would be a
-    // conspicuous one to only half-have.
-    //
-    // **This is the one edge from `tasks` to `worktree`**, and it runs the
-    // other way from every existing one: `worktree` reads tasks and calls
-    // `set_run_state`. Rust permits the cycle within a crate and the direction
-    // is the honest one — the policy belongs to the transition, not to the
-    // directory — but it is worth naming, so seam-contract D20 does.
-    //
-    // After the commit and after the publish, and returning nothing: the move
-    // has already succeeded, and a cleanup a guard refuses must not be able to
-    // report it as having failed.
-    if column == BoardColumn::Done {
-        crate::worktree::cleanup::auto_remove_on_done(ctx, id).await;
-    }
-
-    Ok(updated)
+    task_row(ctx, id).await
 }
 
 /// The move itself, inside a transaction the caller holds and commits.

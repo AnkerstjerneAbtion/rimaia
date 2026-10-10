@@ -5,7 +5,8 @@
 //! > start.
 //!
 //! ADR-0011 says that and does not say where it lives. It lives here, as one
-//! `settings` key in the shape seam-contract D3 fixes and [`state`](super::state)
+//! runner settings key (in `runner.db` since task 041) in the shape
+//! seam-contract D3 fixes and [`state`](super::state)
 //! and [`capacity`](super::capacity) already use: storage through task 006's
 //! accessor, the rules about the key in the module that has the rules.
 //!
@@ -33,18 +34,18 @@
 
 use chrono::{DateTime, Utc};
 
-use crate::context::ServiceContext;
 use crate::db::settings;
 use crate::error::Result;
+use crate::machine::MachineContext;
 
-/// The `settings` key holding the instant new starts are held until.
+/// The runner settings key holding the instant new starts are held until.
 pub const USAGE_LIMIT_PAUSE_UNTIL: &str = "usage_limit_pause_until";
 
 /// When new starts are held until, or `None` when they are not.
 ///
 /// `now` is a parameter rather than a clock read, so this stays a pure question
 /// about the stored row and the caller's instant — the queue already has one
-/// from [`ServiceContext::clock`](crate::ServiceContext), and a second read
+/// from [`MachineContext::clock`](crate::machine::MachineContext), and a second read
 /// inside here could disagree with the one the same pass used for selection.
 ///
 /// A stored value that is absent, unparseable or already past all read as "not
@@ -53,12 +54,13 @@ pub const USAGE_LIMIT_PAUSE_UNTIL: &str = "usage_limit_pause_until";
 /// file, and a queue that refused to run all night over a typo in the `sqlite3`
 /// CLI is the worse outcome.
 ///
-/// Runner state, read from `settings` until task 041 moves it to `runner.db`.
+/// This machine's own hold, read from the machine store: a usage limit is the
+/// account's, and the account is the one this machine's runs spend.
 pub async fn active_until(
-    ctx: &ServiceContext,
+    machine: &MachineContext,
     now: DateTime<Utc>,
 ) -> Result<Option<DateTime<Utc>>> {
-    let Some(stored) = settings::get_runner(ctx, USAGE_LIMIT_PAUSE_UNTIL).await? else {
+    let Some(stored) = settings::get_runner(machine, USAGE_LIMIT_PAUSE_UNTIL).await? else {
         return Ok(None);
     };
 
@@ -79,8 +81,8 @@ pub async fn active_until(
 /// header. Writes nothing when the stored value is already later, so a second
 /// limit inside one window costs no `settings:changed` event and cannot move a
 /// deadline the Runs view is already showing.
-pub async fn note_usage_limit(ctx: &ServiceContext, until: DateTime<Utc>) -> Result<()> {
-    let existing = match settings::get_runner(ctx, USAGE_LIMIT_PAUSE_UNTIL).await? {
+pub async fn note_usage_limit(machine: &MachineContext, until: DateTime<Utc>) -> Result<()> {
+    let existing = match settings::get_runner(machine, USAGE_LIMIT_PAUSE_UNTIL).await? {
         Some(stored) => stored.trim().parse::<DateTime<Utc>>().ok(),
         None => None,
     };
@@ -93,7 +95,7 @@ pub async fn note_usage_limit(ctx: &ServiceContext, until: DateTime<Utc>) -> Res
         until = %until.to_rfc3339(),
         "a run hit a usage limit; holding new starts until the window reopens",
     );
-    settings::set_runner(ctx, USAGE_LIMIT_PAUSE_UNTIL, &until.to_rfc3339()).await
+    settings::set_runner(machine, USAGE_LIMIT_PAUSE_UNTIL, &until.to_rfc3339()).await
 }
 
 /// Lifts the hold.
@@ -102,8 +104,8 @@ pub async fn note_usage_limit(ctx: &ServiceContext, until: DateTime<Utc>) -> Res
 /// pause at all — [`active_until`] compares against `now` for exactly that
 /// reason, so nothing has to remember to clean up at 06:00. This exists for the
 /// operator who wants the row gone, and for tests.
-pub async fn clear(ctx: &ServiceContext) -> Result<()> {
-    settings::set_runner(ctx, USAGE_LIMIT_PAUSE_UNTIL, "").await
+pub async fn clear(machine: &MachineContext) -> Result<()> {
+    settings::clear_runner(machine, USAGE_LIMIT_PAUSE_UNTIL).await
 }
 
 #[cfg(test)]
@@ -121,7 +123,7 @@ mod tests {
         let harness = TestContext::new().await;
 
         assert_eq!(
-            active_until(&harness.context, at("2026-08-20T02:00:00Z"))
+            active_until(harness.machine(), at("2026-08-20T02:00:00Z"))
                 .await
                 .expect("read the key"),
             None
@@ -135,12 +137,12 @@ mod tests {
         let harness = TestContext::new().await;
         let until = at("2026-08-20T06:00:00Z");
 
-        note_usage_limit(&harness.context, until)
+        note_usage_limit(harness.machine(), until)
             .await
             .expect("record the limit");
 
         assert_eq!(
-            active_until(&harness.context, at("2026-08-20T02:00:00Z"))
+            active_until(harness.machine(), at("2026-08-20T02:00:00Z"))
                 .await
                 .expect("read it back"),
             Some(until),
@@ -152,23 +154,23 @@ mod tests {
         let harness = TestContext::new().await;
         let now = at("2026-08-20T02:00:00Z");
 
-        note_usage_limit(&harness.context, at("2026-08-20T06:00:00Z"))
+        note_usage_limit(harness.machine(), at("2026-08-20T06:00:00Z"))
             .await
             .expect("the first wall");
-        note_usage_limit(&harness.context, at("2026-08-20T05:00:00Z"))
+        note_usage_limit(harness.machine(), at("2026-08-20T05:00:00Z"))
             .await
             .expect("a second wall reporting an earlier reset");
 
         assert_eq!(
-            active_until(&harness.context, now).await.expect("read"),
+            active_until(harness.machine(), now).await.expect("read"),
             Some(at("2026-08-20T06:00:00Z")),
         );
 
-        note_usage_limit(&harness.context, at("2026-08-20T07:00:00Z"))
+        note_usage_limit(harness.machine(), at("2026-08-20T07:00:00Z"))
             .await
             .expect("a later wall");
         assert_eq!(
-            active_until(&harness.context, now).await.expect("read"),
+            active_until(harness.machine(), now).await.expect("read"),
             Some(at("2026-08-20T07:00:00Z")),
         );
     }
@@ -178,12 +180,12 @@ mod tests {
         // Nothing has to remember to clear it at 06:00, which is what keeps a
         // crashed launch from leaving the queue paused forever.
         let harness = TestContext::new().await;
-        note_usage_limit(&harness.context, at("2026-08-20T06:00:00Z"))
+        note_usage_limit(harness.machine(), at("2026-08-20T06:00:00Z"))
             .await
             .expect("record the limit");
 
         assert_eq!(
-            active_until(&harness.context, at("2026-08-20T06:00:01Z"))
+            active_until(harness.machine(), at("2026-08-20T06:00:01Z"))
                 .await
                 .expect("read"),
             None
@@ -195,11 +197,11 @@ mod tests {
         let harness = TestContext::new().await;
 
         for nonsense in ["soon", "", "1787224800"] {
-            settings::set_runner(&harness.context, USAGE_LIMIT_PAUSE_UNTIL, nonsense)
+            settings::set_runner(harness.machine(), USAGE_LIMIT_PAUSE_UNTIL, nonsense)
                 .await
                 .expect("store nonsense");
             assert_eq!(
-                active_until(&harness.context, at("2026-08-20T02:00:00Z"))
+                active_until(harness.machine(), at("2026-08-20T02:00:00Z"))
                     .await
                     .expect("a bad row is not an error"),
                 None,
@@ -211,14 +213,14 @@ mod tests {
     #[tokio::test]
     async fn clearing_lifts_the_hold() {
         let harness = TestContext::new().await;
-        note_usage_limit(&harness.context, at("2026-08-20T06:00:00Z"))
+        note_usage_limit(harness.machine(), at("2026-08-20T06:00:00Z"))
             .await
             .expect("record the limit");
 
-        clear(&harness.context).await.expect("lift the hold");
+        clear(harness.machine()).await.expect("lift the hold");
 
         assert_eq!(
-            active_until(&harness.context, at("2026-08-20T02:00:00Z"))
+            active_until(harness.machine(), at("2026-08-20T02:00:00Z"))
                 .await
                 .expect("read"),
             None

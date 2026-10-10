@@ -76,7 +76,9 @@ async fn approve_moves_the_task_to_the_bottom_of_done() {
     let finished = f.task("Already done", BoardColumn::Done).await;
     let id = f.task("Review me", BoardColumn::InReview).await;
 
-    let approved = review::approve(f.ctx(), &id).await.expect("approve");
+    let approved = review::approve(f.ctx(), Some(f.machine()), &id)
+        .await
+        .expect("approve");
 
     assert_eq!(approved.column, BoardColumn::Done);
     let done: Vec<String> = f
@@ -197,7 +199,9 @@ async fn reject_and_request_changes_refuse_a_failed_task_and_say_to_retry() {
         let f = Fixture::new().await;
         let id = f.task("Needs attention", BoardColumn::InReview).await;
         f.set(&id, &format!("run_state = '{state}'")).await;
-        review::approve(f.ctx(), &id).await.expect("approve");
+        review::approve(f.ctx(), Some(f.machine()), &id)
+            .await
+            .expect("approve");
     }
 }
 
@@ -411,7 +415,7 @@ async fn reject_returns_every_dependent_and_marks_the_ones_that_built_on_it() {
         .await;
     let waiting = f.dependent("Waiting", &base).await;
 
-    let outcome = review::reject(f.ctx(), &base, "Wrong approach.")
+    let outcome = review::reject(f.ctx(), Some(f.machine()), &base, "Wrong approach.")
         .await
         .expect("reject");
 
@@ -806,8 +810,8 @@ async fn a_looped_task_is_one_digest_entry() {
     // ADR-0021: the agent's door carries the same two fields.
     let server = rimaia_core::mcp::RimaiaServer::new(
         f.ctx().with_source(rimaia_core::db::MutationSource::Mcp),
-        rimaia_core::testing::doctor::environment(),
-        rimaia_core::testing::doctor::planner_access(),
+        rimaia_core::testing::doctor::provider(),
+        Some(rimaia_core::testing::doctor::local_tools(f.machine())),
     );
     let rmcp::handler::server::wrapper::Json(view) = server
         .get_review_digest()
@@ -1039,13 +1043,20 @@ async fn a_review_that_leaves_tasks_in_review_does_not_advance_the_marker() {
 async fn emptying_in_review_by_a_drag_or_an_archive_does_not_advance_the_marker() {
     let f = Fixture::new().await;
     let dragged = f.task("Dragged", BoardColumn::InReview).await;
-    tasks::move_task(f.ctx(), &dragged, BoardColumn::Done, None, None)
-        .await
-        .expect("drag to done");
+    tasks::move_task(
+        f.ctx(),
+        Some(f.machine()),
+        &dragged,
+        BoardColumn::Done,
+        None,
+        None,
+    )
+    .await
+    .expect("drag to done");
     assert_eq!(f.marker().await, None);
 
     let archived = f.task("Archived", BoardColumn::InReview).await;
-    tasks::archive_task(f.ctx(), &archived)
+    tasks::archive_task(f.ctx(), Some(f.machine()), &archived)
         .await
         .expect("archive");
     assert_eq!(f.marker().await, None);
@@ -1148,7 +1159,7 @@ mod end_to_end {
         let branch = reviewed.branch.clone().expect("a branch");
         let rejected_commit = git(&checkout, &["rev-parse", "HEAD"]);
 
-        let outcome = review::reject(f.ctx(), &id, "Wrong approach.")
+        let outcome = review::reject(f.ctx(), Some(f.machine()), &id, "Wrong approach.")
             .await
             .expect("reject");
 
@@ -1207,7 +1218,7 @@ mod end_to_end {
         let checkout = PathBuf::from(reviewed.worktree_path.clone().expect("a worktree"));
 
         std::fs::write(checkout.join("one.txt"), "x\n").expect("a stray file");
-        let one = review::reject(f.ctx(), &id, "No.")
+        let one = review::reject(f.ctx(), Some(f.machine()), &id, "No.")
             .await
             .expect_err("dirty");
         assert_eq!(
@@ -1218,7 +1229,7 @@ mod end_to_end {
         );
 
         std::fs::write(checkout.join("two.txt"), "y\n").expect("another stray file");
-        let two = review::reject(f.ctx(), &id, "No.")
+        let two = review::reject(f.ctx(), Some(f.machine()), &id, "No.")
             .await
             .expect_err("dirty");
         assert_eq!(
@@ -1251,7 +1262,7 @@ mod end_to_end {
         let checkout = PathBuf::from(f.reload(&id).await.worktree_path.expect("a worktree"));
         std::fs::remove_dir_all(&checkout).expect("remove the directory behind the app's back");
 
-        let outcome = review::reject(f.ctx(), &id, "Start over.")
+        let outcome = review::reject(f.ctx(), Some(f.machine()), &id, "Start over.")
             .await
             .expect("nothing on disk is nothing to lose");
 
@@ -1263,7 +1274,7 @@ mod end_to_end {
     #[tokio::test]
     async fn approving_with_auto_cleanup_on_removes_the_worktree_exactly_as_a_drag_to_done_does() {
         let f = Fixture::new().await;
-        worktree::set_auto_cleanup(f.ctx(), AutoCleanup::OnDoneAcknowledged)
+        worktree::set_auto_cleanup(f.machine(), AutoCleanup::OnDoneAcknowledged)
             .await
             .expect("enable auto cleanup");
         let cli = FakeCli::new();
@@ -1274,7 +1285,9 @@ mod end_to_end {
         let checkout = PathBuf::from(f.reload(&id).await.worktree_path.expect("a worktree"));
         assert!(checkout.exists());
 
-        let approved = review::approve(f.ctx(), &id).await.expect("approve");
+        let approved = review::approve(f.ctx(), Some(f.machine()), &id)
+            .await
+            .expect("approve");
 
         assert_eq!(approved.column, BoardColumn::Done);
         assert!(!checkout.exists());
@@ -1293,7 +1306,7 @@ mod end_to_end {
         let before = f.reload(&id).await;
         let checkout = PathBuf::from(before.worktree_path.clone().expect("a worktree"));
 
-        let error = review::reject(f.ctx(), &id, "Wrong approach.")
+        let error = review::reject(f.ctx(), Some(f.machine()), &id, "Wrong approach.")
             .await
             .expect_err("no plan, so it cannot go back to ready");
 
@@ -1321,6 +1334,7 @@ mod end_to_end {
                 TEST_TIMEOUT,
                 run_task(
                     board.as_ref(),
+                    self.machine(),
                     self.ctx(),
                     &self.paths,
                     &config,
@@ -1422,6 +1436,12 @@ impl Fixture {
         &self.harness.context
     }
 
+    /// This machine, as the shell hands it to the board services that react on
+    /// it (task 041).
+    fn machine(&self) -> &rimaia_core::machine::MachineContext {
+        self.harness.machine()
+    }
+
     async fn task(&self, title: &str, column: BoardColumn) -> String {
         self.task_in(&self.repository_id, title, column).await
     }
@@ -1517,11 +1537,15 @@ impl Fixture {
 
     async fn decide(&self, verdict: Verdict, task_id: &str, note: &str) -> rimaia_core::Result<()> {
         match verdict {
-            Verdict::Approve => review::approve(self.ctx(), task_id).await.map(drop),
+            Verdict::Approve => review::approve(self.ctx(), Some(self.machine()), task_id)
+                .await
+                .map(drop),
             Verdict::RequestChanges => review::request_changes(self.ctx(), task_id, note)
                 .await
                 .map(drop),
-            Verdict::Reject => review::reject(self.ctx(), task_id, note).await.map(drop),
+            Verdict::Reject => review::reject(self.ctx(), Some(self.machine()), task_id, note)
+                .await
+                .map(drop),
         }
     }
 

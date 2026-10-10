@@ -1320,6 +1320,12 @@ impl Fixture {
         &self.harness.context
     }
 
+    /// This machine, as the shell hands it to the board services that react on
+    /// it (task 041).
+    fn machine(&self) -> &rimaia_core::machine::MachineContext {
+        self.harness.machine()
+    }
+
     /// The `worktree_root` in the form the service records paths under —
     /// resolved, because on macOS a `TempDir` sits under a symlinked `/var`.
     fn root(&self) -> PathBuf {
@@ -1493,9 +1499,16 @@ async fn move_to(f: &Fixture, task_id: &str, column: BoardColumn) {
         .map(|summary| summary.task.id.clone())
         .next_back();
 
-    tasks::move_task(f.ctx(), task_id, column, bottom.as_deref(), None)
-        .await
-        .expect("file the card");
+    tasks::move_task(
+        f.ctx(),
+        Some(f.machine()),
+        task_id,
+        column,
+        bottom.as_deref(),
+        None,
+    )
+    .await
+    .expect("file the card");
 }
 
 /// What ADR-0008 calls satisfying a dependency: the card reaches `in_review`.

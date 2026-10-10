@@ -19,6 +19,15 @@
 //! over the same [`ServiceContext`]; the only difference is the value of its
 //! `scope` field.
 //!
+//! # Board tools in core, machine tools injected by the host
+//!
+//! Since task 041 the server's tools are two routers. The board router needs
+//! only a `ServiceContext`; the local router holds the tools that inspect,
+//! reconfigure or spawn on this machine (ADR-0035 point 6), and is served only
+//! when [`build`] is handed a [`LocalTools`]. The shell passes `Some`, so solo
+//! serves every tool it served before; a server with no machine passes `None`
+//! and serves no machine tool at all.
+//!
 //! # Loopback is not configurable
 //!
 //! [`build`] binds `127.0.0.1` as a literal. ADR-0006 makes the *port*
@@ -64,9 +73,8 @@ use tokio::sync::watch;
 
 use crate::context::{ServiceContext, TeamScope};
 use crate::db::MutationSource;
-use crate::doctor;
 use crate::error::{Error, Result};
-use crate::runner::strategy::PlannerAccess;
+use crate::runner::provider::AgentProvider;
 
 pub mod error;
 pub mod requests;
@@ -77,7 +85,7 @@ pub mod settings;
 
 pub use error::ToolError;
 pub use scope::{Grant, GrantKind, RunAccess, RunGrant, RunHandles, RunScope, Tool};
-pub use server::RimaiaServer;
+pub use server::{LocalTools, RimaiaServer};
 pub use settings::{configured_port, set_configured_port, MCP_PORT};
 
 use scope::RUN_ROUTE_PREFIX;
@@ -182,17 +190,15 @@ struct Routes {
 struct RunRoute {
     ctx: ServiceContext,
     handles: RunHandles,
-    /// Carried even though every doctor tool is `Refused` to a run: the scoped
-    /// server is the *same type* as the operator's, so it needs the same
-    /// fields, and the refusal comes from [`RunScope::authorize`] rather than
-    /// from the value being absent. A scope enforced by a missing field would
-    /// be a second mechanism — and the one that fails open the day someone
-    /// gives the field a default.
-    doctor: doctor::Environment,
-    /// Carried for the same reason, and with the same refusal (task 023):
-    /// `plan_task_strategy` and `plan_tasks_strategy` are `Refused` to a run,
-    /// and the refusal is `authorize`'s rather than an absent field's.
-    planner: PlannerAccess,
+    provider: Arc<dyn AgentProvider>,
+    /// Carried even though every local tool is `Refused` to a run: the scoped
+    /// server is the *same type* as the operator's and offers the same list
+    /// (`tools/list` is not filtered by scope, `scope.rs`'s header), and the
+    /// refusal comes from [`RunScope::authorize`] rather than from the tool
+    /// being absent. A scope enforced by a missing router would be a second
+    /// mechanism, and a run would read an unknown tool where today it reads
+    /// the refusal's sentence.
+    local: Option<LocalTools>,
 }
 
 struct Shared {
@@ -219,12 +225,18 @@ struct Shared {
 /// every bind — including the rebind `set_mcp_port` performs at runtime. That
 /// is what makes a scoped URL truthful and what removes the ordering constraint
 /// between `scheduler::build` and this one (seam-contract D17.4).
+///
+/// `provider` is the agent CLI whose catalogue the board tools read (see
+/// [`RimaiaServer`]'s field). `local` is this machine's tools, served on both
+/// doors when `Some`. `None` serves the board router alone: what task 046's
+/// server and task 060's hosted `/mcp` pass, where a local tool is an unknown
+/// tool.
 pub async fn build(
     ctx: ServiceContext,
     port: u16,
     handles: RunHandles,
-    doctor: doctor::Environment,
-    planner: PlannerAccess,
+    provider: Arc<dyn AgentProvider>,
+    local: Option<LocalTools>,
 ) -> (McpHandle, McpTask) {
     // Every write this server makes is an agent's, not the user's (ADR-0019).
     // Re-sourced here, once, so no handler has to remember.
@@ -250,8 +262,8 @@ pub async fn build(
                 Some(listener),
                 Some(streamable_service(
                     ctx.clone(),
-                    doctor.clone(),
-                    planner.clone(),
+                    provider.clone(),
+                    local.clone(),
                 )),
             )
         }
@@ -302,8 +314,8 @@ pub async fn build(
         run: RunRoute {
             ctx,
             handles,
-            doctor,
-            planner,
+            provider,
+            local,
         },
     });
 
@@ -420,8 +432,8 @@ async fn dispatch(
     // point 5), whatever the operator's context reaches.
     scoped_service(
         route.ctx.with_scope(TeamScope::one(team_id)),
-        route.doctor.clone(),
-        route.planner.clone(),
+        route.provider.clone(),
+        route.local.clone(),
         scope,
     )
     .handle(request)
@@ -436,21 +448,21 @@ async fn dispatch(
 /// configuration than the other.
 pub(crate) fn streamable_service(
     ctx: ServiceContext,
-    doctor: doctor::Environment,
-    planner: PlannerAccess,
+    provider: Arc<dyn AgentProvider>,
+    local: Option<LocalTools>,
 ) -> StreamableHttpService<RimaiaServer, LocalSessionManager> {
-    service_over(move || RimaiaServer::new(ctx.clone(), doctor.clone(), planner.clone()))
+    service_over(move || RimaiaServer::new(ctx.clone(), provider.clone(), local.clone()))
 }
 
 /// The same transport, serving one run's scoped view of the same services.
 fn scoped_service(
     ctx: ServiceContext,
-    doctor: doctor::Environment,
-    planner: PlannerAccess,
+    provider: Arc<dyn AgentProvider>,
+    local: Option<LocalTools>,
     scope: RunScope,
 ) -> StreamableHttpService<RimaiaServer, LocalSessionManager> {
     service_over(move || {
-        RimaiaServer::scoped(ctx.clone(), doctor.clone(), planner.clone(), scope.clone())
+        RimaiaServer::scoped(ctx.clone(), provider.clone(), local.clone(), scope.clone())
     })
 }
 
@@ -563,8 +575,8 @@ mod tests {
             harness.context.clone(),
             0,
             RunHandles::default(),
-            crate::testing::doctor::environment(),
-            crate::testing::doctor::planner_access(),
+            Arc::new(crate::runner::provider::ClaudeProvider),
+            Some(crate::testing::doctor::local_tools(harness.machine())),
         )
         .await;
         assert_eq!(handle.status().state, McpState::Listening);
@@ -625,8 +637,8 @@ mod tests {
             harness.context.clone(),
             taken,
             handles.clone(),
-            crate::testing::doctor::environment(),
-            crate::testing::doctor::planner_access(),
+            Arc::new(crate::runner::provider::ClaudeProvider),
+            Some(crate::testing::doctor::local_tools(harness.machine())),
         )
         .await;
 
