@@ -147,8 +147,8 @@ pub struct QueueEntry {
     /// When ADR-0011's policy scheduled this task's next attempt.
     ///
     /// **Populated only for a task in `waiting_retry`**, which is what makes it
-    /// safe for `try_step` to read `resume_after.is_some()` as "this entry is a
-    /// resume": a task that failed last night and was started again by hand
+    /// safe for the `ClaimTarget::Next` body to read `resume_after.is_some()` as
+    /// "this entry is a resume": a task that failed last night and was started again by hand
     /// still has an old deadline on its last run, and copying it here
     /// unconditionally would make a fresh start look like a continuation.
     ///

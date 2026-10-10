@@ -33,8 +33,9 @@
 
 use rimaia_core::machine::MachineContext;
 use rimaia_core::schedule::window::{self, RunWindow};
-use rimaia_core::scheduler::{QueueHandle, QueueState};
+use rimaia_core::scheduler::QueueState;
 use rimaia_core::{Change, ChangeEvent};
+use rimaia_runner::queue::QueueHandle;
 use tauri::AppHandle;
 use tauri_plugin_notification::NotificationExt;
 use tokio::sync::broadcast;

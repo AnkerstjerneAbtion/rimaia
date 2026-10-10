@@ -22,6 +22,7 @@ use rimaia_core::{
     db, identity, startup, worktree, AppPaths, Change, ChangeEvent, Error, ServiceContext,
     SystemClock, TeamScope,
 };
+use rimaia_runner::queue::SoloBoard;
 use rimaia_runner::{adopt, RunnerStore};
 use tauri::{Emitter, Manager, RunEvent};
 use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
@@ -341,7 +342,7 @@ pub fn run() {
             // waiting on.
             //
             // Task 020's two shared values are built here, ahead of the queue,
-            // rather than inside `scheduler::build`, because each is shared
+            // rather than inside `rimaia_runner::queue::build`, because each is shared
             // with something the queue knows nothing about (see `AppState`'s
             // own docs): the `RunnerConfig` with every other starter, so a
             // manual "Run now" and the queue cannot spawn differently
@@ -374,13 +375,17 @@ pub fn run() {
                 runner.provider.clone(),
                 solo.runner_id.clone(),
             ));
-            let (queue, queue_task) = scheduler::build(
-                Arc::clone(&board_port),
+            // The loop is the runner crate's (task 042). It claims through the
+            // port, wakes on the board's channel, and reads the board only
+            // through `SoloBoard`'s four named reads.
+            let (queue, queue_task) = rimaia_runner::queue::build(
                 machine.clone(),
-                context.clone(),
+                Arc::clone(&board_port),
+                context.subscribe(),
+                SoloBoard::new(context.clone()),
+                in_flight.clone(),
                 paths.clone(),
                 runner.clone(),
-                in_flight.clone(),
             );
             tauri::async_runtime::spawn(queue_task.run());
 
@@ -778,7 +783,7 @@ pub fn run() {
 ///
 /// `queue.shutdown()` runs **first** and, by itself, cancels nothing — it
 /// only stops the queue's loop from claiming *more* tasks once the ones it is
-/// supervising end (`scheduler::queue`'s own module doc explains why racing
+/// supervising end (`rimaia_runner::queue`'s own module doc explains why racing
 /// that loop's next claim against this exit path, instead of ordering against
 /// it, would leave a task claimed with nobody left supervising it). Cancelling
 /// the runs actually in flight is `AppState::cancel_everything` right after,

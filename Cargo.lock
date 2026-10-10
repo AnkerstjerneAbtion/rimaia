@@ -3737,6 +3737,8 @@ dependencies = [
  "chrono",
  "pretty_assertions",
  "rimaia-core",
+ "rimaia-runner",
+ "serde_json",
  "sqlx",
  "tempfile",
  "tokio",

@@ -572,8 +572,8 @@ impl FakeCli {
 
     /// Makes every future `--version` probe block until
     /// [`release_version_probe`](Self::release_version_probe) is called —
-    /// widening, for a test, the window `try_step` leaves open between
-    /// registering its `CancelSignal` and actually claiming a task. The probe
+    /// widening, for a test, the window the runner loop's `try_step` leaves
+    /// open between reading the switch and actually claiming a task. The probe
     /// otherwise answers instantly, which is correct for every other test and
     /// exactly why this is opt-in rather than the default.
     pub fn hold_version_probe(&self) {
@@ -583,6 +583,32 @@ impl FakeCli {
     /// Releases a probe blocked by [`hold_version_probe`](Self::hold_version_probe).
     pub fn release_version_probe(&self) {
         std::fs::write(self.path("version-go"), "").expect("release the version-probe gate");
+    }
+
+    /// Whether a `--version` probe is blocked on
+    /// [`hold_version_probe`](Self::hold_version_probe) right now, or has been:
+    /// the stand-in marks the hold as it enters it.
+    pub fn version_probe_is_held(&self) -> bool {
+        self.path("version-held").exists()
+    }
+
+    /// How many `--version` probes this stand-in has answered after the first
+    /// `auth`, which is the line between the preflight doctor and everything
+    /// after it — the runner loop's probe and a run's own (see
+    /// [`write_script`](Self::write_script) on why `auth` draws that line).
+    /// The doctor's first probe, before it asks `auth`, is not counted.
+    pub fn returned_probes(&self) -> usize {
+        self.count_lines("probes")
+    }
+
+    /// How many `--version` probes this stand-in was asked for at all, the
+    /// doctor's included.
+    pub fn version_probes(&self) -> usize {
+        self.count_lines("version-probes")
+    }
+
+    fn count_lines(&self, name: &str) -> usize {
+        self.read(name).map_or(0, |log| log.lines().count())
     }
 
     /// Every subcommand this stand-in was asked for and does not implement.
@@ -703,9 +729,12 @@ impl FakeCli {
         let script = format!(
             "#!/bin/sh\n\
              if [ \"$1\" = '--version' ]; then\n\
+             printf 'probe\\n' >> '{dir}/version-probes'\n\
              if [ -f '{dir}/version-hold' ] && [ -f '{dir}/auth-seen' ]; then\n\
+             : > '{dir}/version-held'\n\
              while [ ! -f '{dir}/version-go' ]; do sleep 0.02; done\n\
              fi\n\
+             if [ -f '{dir}/auth-seen' ]; then printf 'probe\\n' >> '{dir}/probes'; fi\n\
              echo '{version}'; exit 0\n\
              fi\n\
              {auth}\

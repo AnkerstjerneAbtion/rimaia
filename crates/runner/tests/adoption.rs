@@ -11,20 +11,53 @@ use pretty_assertions::assert_eq;
 use rimaia_core::db::settings::{placement, Placement, ALL_KEYS, RUNNER_KEYS, RUN_ENVIRONMENT};
 use rimaia_core::db::{OnArchive, Schedule, ScheduleMode};
 use rimaia_core::machine::{Checkout, MachineStore, WorktreeRecord};
+use rimaia_core::runner::limits::{DISALLOWED_TOOLS, MAX_TURNS};
 use rimaia_core::strategy::settings::repository_default_key;
-use rimaia_core::testing::db::pre_team_mode_board;
+use rimaia_core::testing::db::{pre_team_mode_board, settings_of_team, settings_of_user};
 use rimaia_core::testing::{test_epoch, TestClock};
 use rimaia_core::{AppPaths, Clock, ErrorCode};
 use rimaia_runner::adopt::adopt_board;
 use rimaia_runner::RunnerStore;
 use sqlx::SqlitePool;
 
-use common::{dump, open_board, store_legacy_setting, BOARD_TABLES, RUNNER_TABLES};
+use common::{board_tables, dump, open_board, store_legacy_setting, RUNNER_TABLES};
 
 /// Values a careless copy would mangle: JSON, a trailing newline, quotes and
 /// non-ASCII text, so "byte for byte" means something.
 fn awkward_value(key: &str) -> String {
     format!("{{\"key\":\"{key}\",\"note\":\"it's — ünïcode\"}}\n")
+}
+
+#[tokio::test]
+async fn a_fresh_adoption_leaves_both_runner_limit_keys_absent() {
+    // Task 042: the runner's `max_turns` and `disallowed_tools` are overrides
+    // of the team's, and D28 part 4's stricter override starts out absent. The
+    // board's legacy table holds the team's values under the same two names,
+    // and copying them would make the team's value the runner's.
+    let dir = tempfile::tempdir().expect("temp dir");
+    let paths = AppPaths::new(dir.path());
+    let clock = TestClock::new(test_epoch());
+    let (board, solo) = open_board(&dir.path().join("rimaia.db"), &clock).await;
+    store_legacy_setting(&board.pool, MAX_TURNS, "41").await;
+    store_legacy_setting(&board.pool, DISALLOWED_TOOLS, "Bash(rm:*)").await;
+    let store = RunnerStore::open(&dir.path().join("runner.db"))
+        .await
+        .expect("open the store");
+
+    adopt_board(&board, &store, &solo, &paths)
+        .await
+        .expect("the first launch adopts");
+
+    for key in [MAX_TURNS, DISALLOWED_TOOLS] {
+        assert_eq!(
+            store
+                .get_setting(key)
+                .await
+                .expect("read the runner's store"),
+            None,
+            "{key} is never adopted",
+        );
+    }
 }
 
 #[tokio::test]
@@ -44,7 +77,7 @@ async fn the_runner_adopts_the_board_once() {
     let store = RunnerStore::open(&dir.path().join("runner.db"))
         .await
         .expect("open the store");
-    let board_before = dump(&board.pool, &BOARD_TABLES).await;
+    let board_before = dump_board(&board.pool).await;
 
     adopt_board(&board, &store, &solo, &paths)
         .await
@@ -156,7 +189,7 @@ async fn the_runner_adopts_the_board_once() {
         ]
     );
     assert_eq!(
-        dump(&board.pool, &BOARD_TABLES).await,
+        dump_board(&board.pool).await,
         board_before,
         "adoption never writes the board"
     );
@@ -173,7 +206,7 @@ async fn the_runner_adopts_the_board_once() {
         .expect("rename the board's schedules");
     clock.advance(Duration::hours(1));
     let runner_after_first = dump(store.pool(), &RUNNER_TABLES).await;
-    let board_after_change = dump(&board.pool, &BOARD_TABLES).await;
+    let board_after_change = dump_board(&board.pool).await;
 
     adopt_board(&board, &store, &solo, &paths)
         .await
@@ -184,7 +217,7 @@ async fn the_runner_adopts_the_board_once() {
         runner_after_first,
         "nothing is copied twice, and adopted_at keeps its first instant"
     );
-    assert_eq!(dump(&board.pool, &BOARD_TABLES).await, board_after_change);
+    assert_eq!(dump_board(&board.pool).await, board_after_change);
 }
 
 /// The repository with every per-machine column set.
@@ -350,18 +383,8 @@ async fn every_settings_key_lands_in_exactly_one_store() {
         .await
         .expect("the upgraded install adopts");
 
-    let team: Vec<(String, String)> =
-        sqlx::query_as("SELECT key, value FROM team_settings WHERE team_id = ?1")
-            .bind(&solo.team_id)
-            .fetch_all(&board.pool)
-            .await
-            .expect("read team_settings");
-    let user: Vec<(String, String)> =
-        sqlx::query_as("SELECT key, value FROM user_settings WHERE user_id = ?1")
-            .bind(&solo.user_id)
-            .fetch_all(&board.pool)
-            .await
-            .expect("read user_settings");
+    let team = settings_of_team(&board.pool, &solo.team_id).await;
+    let user = settings_of_user(&board.pool, &solo.user_id).await;
     let runner = runner_settings(store.pool()).await;
     // Placement has no order, so each store is named by its spelling.
     let store_of = |placed: Placement| format!("{placed:?}");
@@ -414,7 +437,7 @@ async fn a_runner_store_from_another_board_is_refused() {
     let (second_board, second_solo) = open_board(&dir.path().join("rimaia-fresh.db"), &clock).await;
     store_legacy_setting(&second_board.pool, RUN_ENVIRONMENT, "inherit").await;
     let runner_before = dump(store.pool(), &RUNNER_TABLES).await;
-    let board_before = dump(&second_board.pool, &BOARD_TABLES).await;
+    let board_before = dump_board(&second_board.pool).await;
     clock.advance(Duration::hours(1));
 
     let error = adopt_board(&second_board, &store, &second_solo, &paths)
@@ -432,7 +455,7 @@ async fn a_runner_store_from_another_board_is_refused() {
         )
     );
     assert_eq!(dump(store.pool(), &RUNNER_TABLES).await, runner_before);
-    assert_eq!(dump(&second_board.pool, &BOARD_TABLES).await, board_before);
+    assert_eq!(dump_board(&second_board.pool).await, board_before);
 }
 
 async fn runner_settings(pool: &SqlitePool) -> Vec<(String, String)> {
@@ -468,4 +491,11 @@ async fn adoptions(pool: &SqlitePool) -> Vec<(String, DateTime<Utc>)> {
     .into_iter()
     .map(|row| (row.step, row.adopted_at))
     .collect()
+}
+
+/// Every board table, dumped: what adoption must leave exactly as it was.
+async fn dump_board(pool: &SqlitePool) -> Vec<(String, Vec<String>)> {
+    let tables = board_tables(pool).await;
+    let tables: Vec<&str> = tables.iter().map(String::as_str).collect();
+    dump(pool, &tables).await
 }

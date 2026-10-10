@@ -11,7 +11,8 @@
 //! [`preview`] calls [`selection::plan`] verbatim and reports what it returns —
 //! the same order, the same [`queue_position`], the same [`SkipReason`] and the
 //! same [`explanation`]. Not "the same rules": literally the same function, the
-//! one `try_step` itself calls on every pass. A second implementation of
+//! one the queue's `ClaimTarget::Next` claim runs on every pass, over the same
+//! repositories `scheduler::view::for_runner` lists. A second implementation of
 //! eligibility that agreed with the first today is a second implementation that
 //! disagrees with it in a month, and a preflight that lies is worse than no
 //! preflight — the whole point is that the user trusts it enough to walk away.
@@ -98,13 +99,16 @@ impl PreflightSummary {
 
 /// What `schedule_id` would do, against the board as it is right now.
 ///
-/// The schedule and the consent are this machine's, from `machine`; the plan is
-/// the board's, read through `board` with the same [`selection::plan`] the queue
-/// calls.
+/// The schedule is this machine's, from `machine`. The plan is the board's,
+/// read through `board` with the same [`selection::plan`] the queue's claim
+/// runs, over `repositories`: the list `scheduler::view::for_runner` builds,
+/// which is what the runner sends with every `ClaimTarget::Next`. Both doors,
+/// the Tauri command and the local MCP handler, build it there (task 042).
 pub async fn preview(
     machine: &MachineContext,
     board: &ServiceContext,
     schedule_id: &str,
+    repositories: &[String],
 ) -> Result<PreflightSummary> {
     let schedule = schedule::get(machine, schedule_id).await?;
     let now = machine.clock.now();
@@ -128,10 +132,6 @@ pub async fn preview(
         closes_at,
         mode: schedule.mode,
         max_concurrency: schedule.max_concurrency,
-        plan: selection::plan(
-            board,
-            &crate::machine::consented_repositories(machine).await?,
-        )
-        .await?,
+        plan: selection::plan(board, &repositories.iter().cloned().collect()).await?,
     })
 }

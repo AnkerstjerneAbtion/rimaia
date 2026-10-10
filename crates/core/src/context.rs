@@ -219,7 +219,7 @@ pub struct ServiceContext {
     /// Resolved once, at the edge that built the context: solo's shell from
     /// its [`SoloIdentity`](crate::identity::SoloIdentity), and later a
     /// server's session, an MCP token or a runner's lease. A clone keeps it, so
-    /// `mcp::build` and `scheduler::build` inherit the shell's.
+    /// `mcp::build` and `rimaia_runner::queue::build` inherit the shell's.
     pub scope: TeamScope,
     /// The user every mutation through this context is made for (ADR-0030
     /// point 8).
@@ -271,7 +271,7 @@ impl ServiceContext {
 
     /// The same context, attributing its mutations to `source` (ADR-0019).
     ///
-    /// Called once per subsystem at construction — `scheduler::build` and
+    /// Called once per subsystem at construction — `rimaia_runner::queue::build` and
     /// `mcp::build` each do it — so the shell hands one context to both and
     /// never thinks about the field again.
     ///

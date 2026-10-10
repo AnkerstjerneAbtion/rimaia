@@ -9,8 +9,9 @@ use rimaia_core::mcp::{LocalTools, McpHandle, RunHandles};
 use rimaia_core::runner::events::RunTail;
 use rimaia_core::runner::strategy::PlannerAccess;
 use rimaia_core::runner::{CancelSignal, RunnerConfig};
-use rimaia_core::scheduler::{InFlight, QueueHandle};
+use rimaia_core::scheduler::InFlight;
 use rimaia_core::{AppPaths, ServiceContext};
+use rimaia_runner::queue::QueueHandle;
 use rimaia_runner::RunnerStore;
 
 /// Everything a command needs, built once at startup and managed by Tauri.
@@ -25,7 +26,7 @@ use rimaia_runner::RunnerStore;
 ///
 /// `in_flight` is which tasks this process has a `claude` child for, and it is
 /// **`rimaia-core`'s** — `scheduler::inflight::InFlight`, held here as a clone
-/// of the same value `scheduler::build` was given. It used to be two maps that
+/// of the same value `rimaia_runner::queue::build` was given. It used to be two maps that
 /// could not see each other: a `cancels: HashMap` here for what a button
 /// started, and a private `Option` inside the queue for what the scheduler
 /// started, wired together by an `attach_queue` back-reference. That put the

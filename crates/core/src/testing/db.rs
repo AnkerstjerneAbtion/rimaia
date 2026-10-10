@@ -133,6 +133,42 @@ pub async fn pre_team_mode_board(file: &Path) -> SqlitePool {
     pool
 }
 
+/// Every table in a board database, by name, in a stable order: what a test
+/// dumps when it asserts some step wrote none of them.
+///
+/// Read from the schema rather than listed, so a runner-crate test can make
+/// that assertion without naming board tables itself (task 042: nothing under
+/// `crates/runner/` names the team and user settings tables).
+pub async fn board_tables(pool: &SqlitePool) -> Vec<String> {
+    sqlx::query_scalar(
+        "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' \
+         ORDER BY name",
+    )
+    .fetch_all(pool)
+    .await
+    .expect("read the board's tables")
+}
+
+/// Every settings row the board stores for `team_id`, read past every
+/// accessor, as `(key, value)` sorted by key.
+pub async fn settings_of_team(pool: &SqlitePool, team_id: &str) -> Vec<(String, String)> {
+    sqlx::query_as("SELECT key, value FROM team_settings WHERE team_id = ?1 ORDER BY key")
+        .bind(team_id)
+        .fetch_all(pool)
+        .await
+        .expect("read the team's settings")
+}
+
+/// Every settings row the board stores for `user_id`, read past every
+/// accessor, as `(key, value)` sorted by key.
+pub async fn settings_of_user(pool: &SqlitePool, user_id: &str) -> Vec<(String, String)> {
+    sqlx::query_as("SELECT key, value FROM user_settings WHERE user_id = ?1 ORDER BY key")
+        .bind(user_id)
+        .fetch_all(pool)
+        .await
+        .expect("read the user's settings")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

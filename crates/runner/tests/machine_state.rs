@@ -425,7 +425,7 @@ async fn runner_setting(pool: &SqlitePool, key: &str) -> Option<String> {
 async fn a_schedule_opens_its_window_from_the_runner_store() {
     use rimaia_core::board::{BoardPort, InProcessBoard};
     use rimaia_core::schedule::{self, ScheduleInput};
-    use rimaia_core::scheduler::{self, InFlight};
+    use rimaia_core::scheduler::InFlight;
     use rimaia_core::testing::doctor::passing_queue_environment;
 
     let dir = tempfile::tempdir().expect("temp dir");
@@ -462,13 +462,14 @@ async fn a_schedule_opens_its_window_from_the_runner_store() {
     let board_before = dump(&board.pool, &["settings", "schedules"]).await;
 
     let mut changes = board.subscribe();
-    let (queue, loop_task) = scheduler::build(
-        board_port,
+    let (queue, loop_task) = rimaia_runner::queue::build(
         machine.clone(),
-        board.clone(),
+        board_port,
+        board.subscribe(),
+        rimaia_runner::queue::SoloBoard::new(board.clone()),
+        InFlight::new(),
         paths,
         runner,
-        InFlight::new(),
     );
     let looping = tokio::spawn(loop_task.run());
 

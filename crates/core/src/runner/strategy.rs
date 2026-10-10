@@ -12,7 +12,7 @@
 //!
 //! # Why it hangs off `run_task` and not the scheduler
 //!
-//! [`commands::runs::start_task_run`] and [`scheduler::queue::try_step`] both
+//! [`commands::runs::start_task_run`] and `rimaia_runner::queue`'s `try_step` both
 //! call [`run_task`](super::run_task), and nothing else does. Hooking into the
 //! scheduler would mean a manual "Run now" on a `planned` task silently skips
 //! planning — the same class of defect as a business rule enforced in one

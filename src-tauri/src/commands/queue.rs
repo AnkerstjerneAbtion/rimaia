@@ -1,6 +1,6 @@
 //! Tauri commands for the run queue (task 009; ADR-0010, ADR-0007).
 //!
-//! Thin over `rimaia_core::scheduler::QueueHandle`, exactly like every other
+//! Thin over `rimaia_runner::queue::QueueHandle`, exactly like every other
 //! command module (ADR-0006): every rule — selection, the claim, what a
 //! `ready` task is skipped for — lives in `rimaia-core`, and task 010's MCP
 //! server drives the same queue through the same handle, not through this
@@ -10,6 +10,7 @@
 use rimaia_core::db::ScheduleMode;
 use rimaia_core::scheduler::{capacity, QueueStatus, RunCapacity};
 use rimaia_core::Result;
+use rimaia_runner::queue;
 use tauri::State;
 
 use crate::state::AppState;
@@ -47,7 +48,7 @@ pub async fn stop_queue(state: State<'_, AppState>) -> Result<()> {
 /// order with the reason the queue will pass over each one it cannot start.
 #[tauri::command]
 pub async fn get_queue_status(state: State<'_, AppState>) -> Result<QueueStatus> {
-    state.queue.status().await
+    queue::status_with_plan(&state.queue).await
 }
 
 /// How many runs the queue may have in flight, as configured (ADR-0010).

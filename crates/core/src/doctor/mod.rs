@@ -10,11 +10,11 @@
 //!
 //! This module runs at three moments and no others: when the window opens, when
 //! the user presses Re-check, and immediately before the queue is told to start
-//! — [`QueueHandle::start`](crate::scheduler::QueueHandle::start), which is also
+//! — `rimaia_runner::queue::QueueHandle::start`, which is also
 //! what task 013's scheduled start will call before flipping the switch.
 //!
 //! It deliberately does **not** run inside
-//! [`scheduler::queue`](crate::scheduler::queue)'s step loop. That loop wakes on
+//! `rimaia_runner::queue`'s step loop. That loop wakes on
 //! every change event, so a doctor there would be eight subprocess spawns per
 //! card drag. The one check that genuinely must happen per step is already there
 //! and stays there: `probe_cli` before the claim, for task 008's stated reason.
@@ -336,7 +336,7 @@ impl DoctorReport {
     /// **Deliberately blind to `dismissed`**, along with [`blocking`](Self::blocking)
     /// and [`blocking_summary`](Self::blocking_summary). Task 027's dismissal is
     /// presentation; the refusal on
-    /// [`QueueHandle::start`](crate::scheduler::QueueHandle::start) is the rule
+    /// `rimaia_runner::queue::QueueHandle::start` is the rule
     /// (D22 point 1, ADR-0006), and a user who dismissed every row still meets
     /// the same refusal with the same words. `crates/core/tests/doctor.rs` and
     /// `tests/scheduler.rs` both assert it, because this is the one thing a

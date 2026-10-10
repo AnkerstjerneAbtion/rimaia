@@ -1042,7 +1042,9 @@ async fn the_task_stays_running_between_phases_and_moves_to_in_review_once() {
 
 #[tokio::test]
 async fn a_review_waiting_on_a_usage_limit_is_resumed_by_the_queue_as_a_review() {
-    // The queue's half.
+    // The queue's half: the claim the runner loop makes, `Next`, over the view
+    // it sends (task 042). The board picks the due review and resumes it as
+    // itself; the loop only hands the claim to `run_task`.
     let fixture = Fixture::new().await;
     fixture.waits_in_a_review_on_a_usage_limit().await;
     let review = fixture.rows().await[1].clone();
@@ -1050,19 +1052,20 @@ async fn a_review_waiting_on_a_usage_limit_is_resumed_by_the_queue_as_a_review()
     fixture.advance_past(review.resume_after.expect("a deadline"));
 
     let config = fixture.config();
-    let mut changes = fixture.ctx().subscribe();
-    let (queue, loop_task) = scheduler::build(
-        fixture.board(&config),
-        fixture.machine().clone(),
-        fixture.ctx().clone(),
-        fixture.paths.clone(),
-        config,
-        InFlight::new(),
-    );
-    tokio::spawn(loop_task.run());
-    queue.start().await.expect("start the queue");
-    fixture.wait_until_in_review(&mut changes).await;
-    queue.shutdown();
+    let board = fixture.board(&config);
+    let (repositories, capacity) = scheduler::for_runner(fixture.machine(), &InFlight::new())
+        .await
+        .expect("the runner's view");
+    let claim = board
+        .claim(ClaimTarget::Next {
+            capacity,
+            repositories,
+            wait: Duration::ZERO,
+        })
+        .await
+        .expect("claim")
+        .expect("the due review is the next task");
+    fixture.run_claimed(board.as_ref(), &config, claim).await;
 
     fixture.assert_resumed_as_a_review(&review).await;
 
@@ -1751,22 +1754,6 @@ impl Fixture {
             detail.review_loop.expect("the loop").verdict,
             Verdict::Clean
         );
-    }
-
-    async fn wait_until_in_review(
-        &self,
-        changes: &mut tokio::sync::broadcast::Receiver<ChangeEvent>,
-    ) {
-        tokio::time::timeout(TEST_TIMEOUT, async {
-            loop {
-                if self.detail().await.task.column == BoardColumn::InReview {
-                    return;
-                }
-                let _ = changes.recv().await;
-            }
-        })
-        .await
-        .expect("the task reaches in_review");
     }
 
     /// The task `running`, its implementation succeeded, and a review left

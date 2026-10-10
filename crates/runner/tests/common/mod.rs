@@ -21,17 +21,11 @@ use rimaia_core::testing::TestClock;
 use rimaia_core::{ServiceContext, TeamScope};
 use sqlx::SqlitePool;
 
-/// The board tables adoption must never write.
-pub const BOARD_TABLES: [&str; 8] = [
-    "settings",
-    "team_settings",
-    "user_settings",
-    "solo_identity",
-    "runners",
-    "repositories",
-    "tasks",
-    "schedules",
-];
+/// The board tables adoption must never write: every one of them, read from
+/// the board's schema.
+pub async fn board_tables(pool: &SqlitePool) -> Vec<String> {
+    rimaia_core::testing::db::board_tables(pool).await
+}
 
 /// The runner set's tables.
 pub const RUNNER_TABLES: [&str; 7] = [

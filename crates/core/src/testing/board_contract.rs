@@ -1381,8 +1381,7 @@ pub mod cases {
         );
         let claims: Vec<Claim> = [first, second]
             .into_iter()
-            .map(|claim| claim.expect("a lost race is not an error"))
-            .flatten()
+            .filter_map(|claim| claim.expect("a lost race is not an error"))
             .collect();
 
         assert_same(claims.len(), 1, "exactly one runner holds the task");

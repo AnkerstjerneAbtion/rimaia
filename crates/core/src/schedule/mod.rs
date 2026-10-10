@@ -27,7 +27,7 @@
 //!
 //! Nothing in this module waits, and nothing in it starts a queue. The wake is a
 //! third arm of the queue's own `select!` (see
-//! [`queue`](crate::scheduler::queue)'s header), because ADR-0010 makes the
+//! `rimaia_runner::queue`'s header), because ADR-0010 makes the
 //! scheduler the only component allowed to move a task into `running` and a
 //! second task calling `QueueHandle::start` would be a second decider racing
 //! `try_step`'s own switch re-checks. This module answers questions; the loop

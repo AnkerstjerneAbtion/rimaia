@@ -538,15 +538,7 @@ async fn an_unattended_run_needs_this_runners_consent() {
     );
     assert_eq!(detail.last_run, None);
 
-    let (queue, _loop) = scheduler::build(
-        board.clone(),
-        f.harness.machine().clone(),
-        f.ctx().clone(),
-        f.paths.clone(),
-        config.clone(),
-        in_flight.clone(),
-    );
-    let plan = queue.status().await.expect("the queue's status").plan;
+    let plan = queue_plan(&f, &in_flight).await;
     let entry = plan
         .iter()
         .find(|entry| entry.task_id == task)
@@ -565,7 +557,7 @@ async fn an_unattended_run_needs_this_runners_consent() {
         .await
         .expect("give the consent");
 
-    let plan = queue.status().await.expect("the queue's status").plan;
+    let plan = queue_plan(&f, &in_flight).await;
     let entry = plan
         .iter()
         .find(|entry| entry.task_id == task)
@@ -607,7 +599,6 @@ async fn an_unattended_run_needs_this_runners_consent() {
         "{:?}",
         run.error_message
     );
-    queue.shutdown();
 }
 
 // ---------------------------------------------------------------------------
@@ -937,4 +928,17 @@ impl Fixture {
 /// The request an agent would send, deserialized through the real schema.
 fn request<T: serde::de::DeserializeOwned>(value: Value) -> T {
     serde_json::from_value(value).expect("a well-formed request deserializes")
+}
+
+/// The plan the runner loop's status shows and its `Next` claims act on: the
+/// board's plan over the repositories `scheduler::view::for_runner` lists
+/// (task 042). The loop itself is `rimaia_runner`'s, which a core test cannot
+/// name.
+async fn queue_plan(f: &Fixture, in_flight: &InFlight) -> Vec<scheduler::QueueEntry> {
+    let (repositories, _) = scheduler::for_runner(f.harness.machine(), in_flight)
+        .await
+        .expect("the runner's view");
+    scheduler::plan(f.ctx(), &repositories.into_iter().collect())
+        .await
+        .expect("the plan")
 }

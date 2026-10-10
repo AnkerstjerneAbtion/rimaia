@@ -1584,10 +1584,17 @@ there in the morning unless somebody acts. A run cannot call it."
     ) -> Result<Json<PreflightView>, ToolError> {
         self.scope.authorize(Tool::PreviewSchedulePreflight, None)?;
         let local = self.local()?;
+        let (repositories, _) =
+            scheduler::view::for_runner(&local.machine, &local.planner.in_flight).await?;
         Ok(Json(
-            schedule::preview(&local.machine, &self.ctx, &request.schedule_id)
-                .await?
-                .into(),
+            schedule::preview(
+                &local.machine,
+                &self.ctx,
+                &request.schedule_id,
+                &repositories,
+            )
+            .await?
+            .into(),
         ))
     }
 

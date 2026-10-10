@@ -34,7 +34,7 @@ use rimaia_core::runner::{
 };
 use rimaia_core::schedule::window::{self, RunWindow};
 use rimaia_core::scheduler::retry::{self, USAGE_LIMIT_MAX_JITTER};
-use rimaia_core::scheduler::{self, pause, InFlight, ResumePoint};
+use rimaia_core::scheduler::{pause, InFlight, ResumePoint};
 use rimaia_core::tasks::strategy::StrategyPlan;
 use rimaia_core::tasks::{self, NewTask};
 use rimaia_core::testing::board::claim_run;
@@ -197,25 +197,13 @@ async fn run_task_releases_a_claim_whose_context_no_longer_negotiates() {
         program: fixture.cli.program_for(ProviderId::Ledger),
         ..RunnerConfig::default()
     };
-    let (queue, task) = scheduler::build(
-        fixture.board(&config),
-        fixture.machine().clone(),
-        fixture.ctx().clone(),
-        fixture.paths.clone(),
-        config,
-        InFlight::new(),
+    // The claim the queue makes negotiates nothing: the board grants it, and
+    // the runner's own negotiation is the first to refuse.
+    let refused = fixture.run(fixture.board(&config).as_ref(), &config).await;
+    assert!(
+        refused.is_err(),
+        "a run whose provider cannot honour it is refused"
     );
-    tokio::spawn(task.run());
-    let mut changes = fixture.ctx().subscribe();
-
-    queue.start().await.expect("start the queue");
-    tokio::time::timeout(TEST_TIMEOUT, async {
-        while fixture.detail().await.task.run_state != RunState::Failed {
-            changes.recv().await.ok();
-        }
-    })
-    .await
-    .expect("the claimed task was never released");
 
     let detail = fixture.detail().await;
     assert_eq!(detail.task.run_state, RunState::Failed);
@@ -225,8 +213,6 @@ async fn run_task_releases_a_claim_whose_context_no_longer_negotiates() {
         Vec::<String>::new(),
         "nothing was spawned"
     );
-
-    queue.shutdown();
 }
 
 // ---------------------------------------------------------------------------
@@ -314,109 +300,6 @@ async fn a_usage_limit_that_outlasts_the_run_window_still_holds_new_starts_until
     assert_eq!(run.exit_class, Some(ExitClass::UsageLimit));
     assert_eq!(run.resume_after, None, "the reset outlasts the run window");
     assert_eq!(fixture.paused_until().await, Some(reported_reset()));
-}
-
-#[tokio::test]
-async fn a_usage_limit_pause_is_held_by_the_runner() {
-    // Task 041: the pause is this machine's, so a run hitting a wall writes it
-    // to the machine store, the board's legacy copy of the key is left exactly
-    // as it was, and the queue reads the machine's hold, starting nothing
-    // until the clock passes it.
-    let fixture = Fixture::new().await;
-    sqlx::query("INSERT INTO settings (key, value) VALUES (?1, 'the board copy')")
-        .bind(pause::USAGE_LIMIT_PAUSE_UNTIL)
-        .execute(&fixture.ctx().pool)
-        .await
-        .expect("plant the board's legacy row");
-    fixture
-        .cli
-        .replays_on_attempt(&fixture.task_id, 1, "usage-limit", 143);
-    let config = fixture.config();
-
-    let run = fixture
-        .run(fixture.board(&config).as_ref(), &config)
-        .await
-        .expect("the attempt is recorded");
-
-    assert_eq!(run.exit_class, Some(ExitClass::UsageLimit));
-    let held_until = run.resume_after.expect("a usage limit is retried");
-    assert_eq!(fixture.paused_until().await, Some(held_until));
-    assert_eq!(
-        fixture
-            .machine()
-            .store
-            .get_setting(pause::USAGE_LIMIT_PAUSE_UNTIL)
-            .await
-            .expect("read the machine store"),
-        Some(held_until.to_rfc3339()),
-    );
-    assert_eq!(
-        board_row(fixture.ctx(), pause::USAGE_LIMIT_PAUSE_UNTIL).await,
-        Some("the board copy".to_string()),
-        "the board's row is unchanged"
-    );
-
-    // A second ready task, which a free slot would start at once if nothing
-    // held it.
-    let held = fixture.add_task("Would burn a start").await;
-    let (queue, loop_task) = scheduler::build(
-        fixture.board(&config),
-        fixture.machine().clone(),
-        fixture.ctx().clone(),
-        fixture.paths.clone(),
-        config,
-        InFlight::new(),
-    );
-    tokio::spawn(loop_task.run());
-    let mut changes = fixture.ctx().subscribe();
-    queue.start().await.expect("start the queue");
-    converge().await;
-
-    assert_eq!(
-        fixture.cli.started(),
-        vec![fixture.task_id.clone()],
-        "nothing starts while the machine holds new starts"
-    );
-    assert_eq!(
-        queue
-            .status()
-            .await
-            .expect("read the status")
-            .usage_limit_pause_until,
-        Some(held_until)
-    );
-
-    fixture
-        .harness
-        .clock
-        .set(held_until + TimeDelta::minutes(1));
-    tokio::time::timeout(TEST_TIMEOUT, async {
-        while !fixture.cli.started().contains(&held) {
-            changes.recv().await.ok();
-        }
-    })
-    .await
-    .expect("the queue starts once the clock passes the hold");
-
-    queue.shutdown();
-}
-
-/// The board's legacy `settings` row for `key`, read past every accessor.
-async fn board_row(ctx: &ServiceContext, key: &str) -> Option<String> {
-    sqlx::query_scalar("SELECT value FROM settings WHERE key = ?1")
-        .bind(key)
-        .fetch_optional(&ctx.pool)
-        .await
-        .expect("read the board's legacy row")
-}
-
-/// Gives the queue's loop every chance to act on what it has already been
-/// told, without waiting on a clock: a start it was going to make has been
-/// made once this returns.
-async fn converge() {
-    for _ in 0..2_000 {
-        tokio::task::yield_now().await;
-    }
 }
 
 /// A board that reads the usage-limit pause the moment `finish_run` is
@@ -626,25 +509,6 @@ impl Fixture {
         )
         .await
         .expect("a run must finish inside the test timeout")
-    }
-
-    /// Another ready task in the fixture's repository.
-    async fn add_task(&self, title: &str) -> String {
-        let repository_id = self.detail().await.task.repository_id;
-        tasks::create_task(
-            self.ctx(),
-            NewTask {
-                repository_id,
-                title: title.to_string(),
-                plan: Some("1. Implement it".to_string()),
-                extra_instructions: None,
-                column: Some(BoardColumn::Ready),
-                links: vec![],
-            },
-        )
-        .await
-        .expect("create a ready task")
-        .id
     }
 
     async fn detail(&self) -> tasks::TaskDetail {

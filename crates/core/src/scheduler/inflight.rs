@@ -56,13 +56,13 @@
 //! it personally has a child for. Both exist because they answer different
 //! questions.
 //!
-//! Not the board's lease either. From task 042 "lease" means only the board's
-//! (`board::LeaseRef`, `LeasePurpose`, and task 043's `runner_leases`); this is
-//! the runner's local slot, and the two are held at once from the claim to the
-//! end of a run. A manual start takes its slot before its claim, because a
-//! person named the task. The runner loop takes its slot after the claim,
-//! because the board chooses the task and the loop does not know which one it
-//! is getting until the claim returns (seam-contract D19's 2026-10-10
+//! Not the board's hold on a task either: that is named in [`crate::board`]
+//! and, from task 043, stored by it, and the word for it belongs to the board
+//! alone. This is the runner's local slot, and from the claim to the end of a
+//! run both are held at once. A manual start takes its slot before its claim,
+//! because a person named the task. The runner loop takes its slot after the
+//! claim, because the board chooses the task and the loop does not know which
+//! one it is getting until the claim returns (seam-contract D19's 2026-10-10
 //! amendment).
 //!
 //! # Why it is in `rimaia-core` and not in the runner crate

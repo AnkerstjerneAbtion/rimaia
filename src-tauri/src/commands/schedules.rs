@@ -6,11 +6,12 @@
 //! call the same functions without passing through here.
 //!
 //! Nothing in this file starts a queue. The timer is a third arm of the
-//! scheduler's own `select!` — see `rimaia_core::scheduler::queue`'s header on
+//! scheduler's own `select!` — see `rimaia_runner::queue`'s header on
 //! why it is not a second task, and why it is emphatically not a command.
 
 use rimaia_core::db::Schedule;
 use rimaia_core::schedule::{self, PreflightSummary, ScheduleInput, ScheduleView};
+use rimaia_core::scheduler;
 use rimaia_core::Result;
 use tauri::State;
 
@@ -66,14 +67,16 @@ pub async fn delete_schedule(state: State<'_, AppState>, id: String) -> Result<(
 /// What this schedule would do if it fired now: which tasks will run, in what
 /// order, and which are blocked and why.
 ///
-/// The evening button. Computed from `selection::plan` — the same function the
-/// queue loop itself calls — so it cannot drift from what actually happens.
+/// The evening button. Computed from `selection::plan` over the repositories
+/// `scheduler::view::for_runner` lists — the same function and the same list
+/// the queue's claim uses — so it cannot drift from what actually happens.
 #[tauri::command]
 pub async fn preview_schedule_preflight(
     state: State<'_, AppState>,
     id: String,
 ) -> Result<PreflightSummary> {
-    schedule::preview(&state.machine, &state.context, &id).await
+    let (repositories, _) = scheduler::view::for_runner(&state.machine, &state.in_flight).await?;
+    schedule::preview(&state.machine, &state.context, &id, &repositories).await
 }
 
 /// Every IANA zone name, for the picker.

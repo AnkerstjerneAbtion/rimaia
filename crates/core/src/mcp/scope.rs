@@ -739,7 +739,7 @@ impl RunScope {
 ///
 /// Cheap to clone; every clone mints, resolves and revokes against the same
 /// table. The shell builds one before either subsystem and hands it to both,
-/// which is what removes the ordering constraint between `scheduler::build` and
+/// which is what removes the ordering constraint between `rimaia_runner::queue::build` and
 /// [`mcp::build`](crate::mcp::build) — neither has to exist before the other
 /// for the runner to have somewhere to mint tokens.
 #[derive(Clone, Default)]
@@ -860,7 +860,7 @@ impl RunHandles {
     }
 
     /// `std::sync::Mutex` rather than tokio's, for the reason
-    /// `scheduler::queue`'s `Shared` gives at its own: it is only ever held
+    /// the runner loop's `Shared` gives at its own: it is only ever held
     /// across a hash-map operation, never across an `await`. A poisoned lock is
     /// recovered rather than propagated — a panic somewhere else must not turn
     /// every later run's handle into a panic of its own.

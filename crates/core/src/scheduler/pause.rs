@@ -19,7 +19,8 @@
 //!
 //! # It does not stop what is already running
 //!
-//! [`active_until`] is read by `try_step` **before** the plan, so both modes
+//! [`active_until`] is read by the runner loop's `try_step` **before** it asks
+//! the board for anything, so both modes
 //! honour it by construction and neither has a branch for it. Nothing here
 //! cancels anything: a run mid-edit when *another* task hits a limit has done
 //! nothing wrong, and killing it would throw away work to enforce a rule about

@@ -48,7 +48,7 @@ pub fn temp_environment() -> (TempDir, Environment) {
 ///
 /// **`claude` is a prerequisite, not a dependency (ADR-0004): it is installed on
 /// a developer's machine and absent from a CI runner.** Since task 018,
-/// [`QueueHandle::start`](crate::scheduler::QueueHandle::start) runs the doctor,
+/// `rimaia_runner::queue::QueueHandle::start` runs the doctor,
 /// which spawns that binary — so a test that starts a queue against
 /// `RunnerConfig::default()`, whose `program` is a bare `claude` resolved on
 /// `PATH`, passes locally and fails on CI. That is not a flake; it is the test

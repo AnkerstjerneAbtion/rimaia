@@ -3,7 +3,7 @@
 //! ADR-0010: "Queue state survives an app restart by being derived from the
 //! database." So this is a stored runner setting (in `runner.db` since task
 //! 041) and not a field on
-//! [`QueueHandle`](super::QueueHandle) — a queue the user started at 18:30 is
+//! `rimaia_runner::queue::QueueHandle` — a queue the user started at 18:30 is
 //! still started at 03:00 after the app was force-quit at midnight, and the
 //! loop reads this on its next pass rather than remembering it.
 //!

@@ -208,7 +208,7 @@ struct Shared {
 
 /// Binds the server and hands back the handle to keep and the task to spawn.
 ///
-/// The same split as `scheduler::build`, for the same reason: the caller owns
+/// The same split as `rimaia_runner::queue::build`, for the same reason: the caller owns
 /// the runtime, and the handle has to exist before the task does so the shell
 /// can wire a command to it inside one `setup()` hook.
 ///
@@ -224,7 +224,7 @@ struct Shared {
 /// runner, so this function can tell it where the server actually landed on
 /// every bind — including the rebind `set_mcp_port` performs at runtime. That
 /// is what makes a scoped URL truthful and what removes the ordering constraint
-/// between `scheduler::build` and this one (seam-contract D17.4).
+/// between `rimaia_runner::queue::build` and this one (seam-contract D17.4).
 ///
 /// `provider` is the agent CLI whose catalogue the board tools read (see
 /// [`RimaiaServer`]'s field). `local` is this machine's tools, served on both
