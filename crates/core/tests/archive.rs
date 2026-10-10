@@ -301,6 +301,44 @@ async fn the_remove_worktree_preset_refuses_a_dirty_worktree_and_archives_anyway
 }
 
 #[tokio::test]
+async fn archiving_without_a_machine_reports_nothing_and_leaves_the_worktree() {
+    // A server's call until task 054: the archive is the board write alone,
+    // so the repository's cleanup never runs, even with the preset that would
+    // otherwise reclaim the checkout. Both doors, the single and the bulk.
+    let f = Fixture::new().await;
+    f.set_on_archive(OnArchive::RemoveWorktree, None).await;
+    let single = f.task("Archived alone with no machine").await;
+    let bulk = f.task("Archived in bulk with no machine").await;
+    let single_worktree = worktree::prepare(f.ctx(), &single.id)
+        .await
+        .expect("prepare");
+    let bulk_worktree = worktree::prepare(f.ctx(), &bulk.id).await.expect("prepare");
+
+    let archived = tasks::archive_task(f.ctx(), None, &single.id)
+        .await
+        .expect("the archive is the board write alone");
+    let report = tasks::archive_tasks(f.ctx(), None, std::slice::from_ref(&bulk.id))
+        .await
+        .expect("the bulk archive is the board write alone");
+
+    assert_eq!(archived.cleanup, OnArchiveOutcome::Nothing);
+    assert_eq!(report.refused.len(), 0);
+    assert_eq!(report.archived.len(), 1);
+    assert_eq!(report.archived[0].cleanup, OnArchiveOutcome::Nothing);
+    for (task, prepared) in [(&single, &single_worktree), (&bulk, &bulk_worktree)] {
+        let after = f.reload(&task.id).await;
+        assert!(after.archived_at.is_some(), "{}", task.title);
+        assert!(Path::new(&prepared.path).exists(), "{}", task.title);
+        assert_eq!(
+            after.worktree_path.as_deref(),
+            Some(prepared.path.as_str()),
+            "{}",
+            task.title
+        );
+    }
+}
+
+#[tokio::test]
 async fn a_task_that_never_ran_has_nothing_to_clean_up() {
     let f = Fixture::new().await;
     f.set_on_archive(OnArchive::RemoveWorktree, None).await;

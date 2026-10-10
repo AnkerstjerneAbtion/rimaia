@@ -1253,6 +1253,32 @@ mod end_to_end {
     }
 
     #[tokio::test]
+    async fn rejecting_without_a_machine_leaves_the_worktree_on_disk() {
+        // A server's call until task 054: the worktree's removal is this
+        // machine's half, so with no machine it is skipped — and so is the
+        // dirty-worktree refusal that guards it. The board write stands alone.
+        let f = Fixture::new().await;
+        let cli = FakeCli::new();
+        let id = f.main_task.clone();
+        cli.replays(&id, "success", 0);
+        f.run(&cli, &id).await.expect("the run");
+        let reviewed = f.reload(&id).await;
+        let checkout = PathBuf::from(reviewed.worktree_path.clone().expect("a worktree"));
+        std::fs::write(checkout.join("stray.txt"), "x\n").expect("a stray file");
+
+        let outcome = review::reject(f.ctx(), None, &id, "Wrong approach.")
+            .await
+            .expect("no machine, so nothing on disk to refuse over");
+
+        assert_eq!(outcome.task.column, BoardColumn::Ready);
+        assert_eq!(outcome.task.branch, None);
+        assert_eq!(outcome.set_aside_branch, reviewed.branch);
+        assert!(checkout.exists(), "the directory is left on disk");
+        assert!(checkout.join("stray.txt").exists(), "and so is its work");
+        assert_eq!(outcome.task.worktree_path, reviewed.worktree_path);
+    }
+
+    #[tokio::test]
     async fn a_rejected_task_whose_worktree_was_already_removed_is_rejected_without_git_errors() {
         let f = Fixture::new().await;
         let cli = FakeCli::new();
