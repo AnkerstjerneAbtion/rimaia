@@ -583,6 +583,117 @@ async fn a_repository_not_set_up_on_this_computer_refuses_every_checkout_setter(
     }
 }
 
+// The default branch is constrained on write (task 073, seam-contract D37):
+// every prompt renders it, so it must not be able to carry a sentence.
+
+async fn refused_default_branch(branch: &str) -> String {
+    let h = TestContext::new().await;
+    let repository = register_temp_repo(&h).await;
+
+    let error = repo::update(
+        &h.context,
+        &repository.id,
+        RepositoryPatch {
+            default_branch: Some(branch.to_string()),
+            ..Default::default()
+        },
+    )
+    .await
+    .expect_err("the default branch must be refused");
+    assert_eq!(error.code(), rimaia_core::ErrorCode::Invalid);
+    assert_eq!(
+        repo::get(&h.context, &repository.id)
+            .await
+            .expect("read it back")
+            .default_branch,
+        "main",
+        "a refused edit writes nothing"
+    );
+    error.to_string()
+}
+
+#[tokio::test]
+async fn a_default_branch_that_is_not_a_branch_name_is_refused() {
+    assert_eq!(
+        refused_default_branch("main..release").await,
+        "the default branch \"main..release\" is refused: a default branch is a valid git branch \
+         name, with no whitespace, of at most 100 bytes"
+    );
+    // `--branch` expands this to whatever was checked out before, inside a
+    // repository. Only a name git prints back unchanged counts.
+    assert_eq!(
+        refused_default_branch("@{-1}").await,
+        "the default branch \"@{-1}\" is refused: a default branch is a valid git branch name, \
+         with no whitespace, of at most 100 bytes"
+    );
+}
+
+#[tokio::test]
+async fn a_default_branch_with_whitespace_git_admits_is_refused() {
+    // Git refuses an ASCII space, but not a no-break one. The refusal quotes
+    // the value escaped, so whitespace nobody can see is named.
+    assert_eq!(
+        refused_default_branch("main\u{a0}and\u{a0}then\u{a0}push").await,
+        "the default branch \"main\\u{a0}and\\u{a0}then\\u{a0}push\" is refused: a default branch is \
+         a valid git branch name, with no whitespace, of at most 100 bytes"
+    );
+}
+
+#[tokio::test]
+async fn a_default_branch_longer_than_a_hundred_bytes_is_refused() {
+    let long = "b".repeat(101);
+    assert_eq!(
+        refused_default_branch(&long).await,
+        format!(
+            "the default branch \"{long}\" is refused: a default branch is a valid git branch \
+             name, with no whitespace, of at most 100 bytes"
+        )
+    );
+}
+
+#[tokio::test]
+async fn a_default_branch_of_exactly_a_hundred_bytes_with_a_slash_is_kept() {
+    let h = TestContext::new().await;
+    let repository = register_temp_repo(&h).await;
+    let branch = format!("release/{}", "v".repeat(92));
+
+    let updated = repo::update(
+        &h.context,
+        &repository.id,
+        RepositoryPatch {
+            default_branch: Some(branch.clone()),
+            ..Default::default()
+        },
+    )
+    .await
+    .expect("a valid branch name of 100 bytes");
+
+    assert_eq!(updated.default_branch, branch);
+}
+
+#[tokio::test]
+async fn registering_a_repository_whose_default_branch_breaks_the_rule_is_refused() {
+    // Registration's own discovery is held to the same rule: the current
+    // branch is the last link of the fallback chain, and git allows it long.
+    let h = TestContext::new().await;
+    let worktrees_dir = scratch_dir("rimaia-worktrees-");
+    let long = "t".repeat(120);
+    let repo = init_repo_on_branch(&long);
+    commit(repo.path(), "f.txt", "hello");
+
+    let error = register(&h.context, h.machine(), worktrees_dir.path(), repo.path())
+        .await
+        .expect_err("a default branch the rule refuses must be refused at registration");
+
+    assert_eq!(
+        error.to_string(),
+        format!(
+            "the default branch \"{long}\" is refused: a default branch is a valid git branch \
+             name, with no whitespace, of at most 100 bytes"
+        )
+    );
+}
+
 #[tokio::test]
 async fn updating_a_repository_with_a_blank_name_is_refused() {
     let h = TestContext::new().await;

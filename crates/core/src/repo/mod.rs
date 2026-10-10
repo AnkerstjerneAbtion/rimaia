@@ -238,7 +238,7 @@ pub async fn register(
     ensure_not_already_registered(machine, &path).await?;
     validate_is_a_registrable_git_repository(&canonical).await?;
     validate_has_at_least_one_commit(&canonical).await?;
-    let default_branch = resolve_default_branch(&canonical).await?;
+    let default_branch = require_default_branch(resolve_default_branch(&canonical).await?).await?;
 
     let name = match new.name {
         Some(name) => require_non_empty(name, "name")?,
@@ -313,7 +313,9 @@ async fn ensure_not_already_registered(machine: &MachineContext, path: &str) -> 
 
 /// Applies `patch` to an already-registered repository. Unlike [`register`],
 /// this does not re-run git validation — a default branch typed by hand is
-/// the user overriding what registration found, not a second discovery.
+/// the user overriding what registration found, not a second discovery. It is
+/// held to [`DEFAULT_BRANCH_RULE`] all the same, which asks nothing of the
+/// clone: the value only has to be a name.
 ///
 /// The read and the write run in one transaction, the same shape
 /// `tasks::update_task` uses for its own read-modify-write: two autocommit
@@ -330,7 +332,8 @@ pub async fn update(ctx: &ServiceContext, id: &str, patch: RepositoryPatch) -> R
         repository.name = require_non_empty(name, "name")?;
     }
     if let Some(default_branch) = patch.default_branch {
-        repository.default_branch = require_non_empty(default_branch, "default branch")?;
+        let default_branch = require_non_empty(default_branch, "default branch")?;
+        repository.default_branch = require_default_branch(default_branch).await?;
     }
 
     let team_id = sqlx::query_scalar!(
@@ -783,6 +786,40 @@ async fn resolve_default_branch(path: &Path) -> Result<String> {
             path.display()
         ))
     })
+}
+
+/// What a repository's default branch may be, as the sentence a refusal and
+/// the doctor render (seam-contract D37).
+///
+/// Every prompt renders the default branch, `- Base ref:` and the system
+/// append's "never push to" among them, so in a shared team it must be
+/// constrained on write to something that cannot carry a sentence. Git's own
+/// rule refuses ASCII spaces and control characters but admits Unicode
+/// whitespace, hence the second clause.
+pub const DEFAULT_BRANCH_RULE: &str =
+    "a default branch is a valid git branch name, with no whitespace, of at most 100 bytes";
+
+const MAX_DEFAULT_BRANCH_BYTES: usize = 100;
+
+/// Whether `branch` satisfies [`DEFAULT_BRANCH_RULE`].
+pub async fn is_valid_default_branch(branch: &str) -> Result<bool> {
+    if branch.len() > MAX_DEFAULT_BRANCH_BYTES || branch.chars().any(char::is_whitespace) {
+        return Ok(false);
+    }
+    git::is_branch_name(branch).await
+}
+
+/// `branch`, or the `Invalid` refusal naming the field and
+/// [`DEFAULT_BRANCH_RULE`]. Both doors that write a default branch,
+/// [`register`] and [`update`], go through here.
+async fn require_default_branch(branch: String) -> Result<String> {
+    if is_valid_default_branch(&branch).await? {
+        Ok(branch)
+    } else {
+        Err(Error::invalid(format!(
+            "the default branch {branch:?} is refused: {DEFAULT_BRANCH_RULE}"
+        )))
+    }
 }
 
 /// Where a repository named `name` keeps its worktrees when nobody chose:
