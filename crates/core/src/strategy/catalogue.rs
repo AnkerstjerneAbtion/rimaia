@@ -28,6 +28,7 @@ use serde::{Deserialize, Serialize};
 use crate::context::ServiceContext;
 use crate::db::settings;
 use crate::error::{Error, Result};
+use crate::runner::provider::ProviderId;
 
 /// The `settings` key holding the catalogue, as JSON.
 pub const STRATEGY_CATALOGUE: &str = "strategy_catalogue";
@@ -173,20 +174,70 @@ pub async fn catalogue_for(
     team_id: &str,
     provider: &dyn crate::runner::provider::AgentProvider,
 ) -> Result<Catalogue> {
+    resolved_over(ctx, team_id, provider.default_catalogue()).await
+}
+
+/// [`catalogue_for`], for a caller that holds a provider's identity rather
+/// than the provider: selection's plan, whose runner view carries a
+/// [`ProviderId`] (task 067). The same document, filled from the same
+/// defaults, since [`ProviderId::default_catalogue`] is the provider's own.
+pub async fn catalogue_for_provider(
+    ctx: &ServiceContext,
+    team_id: &str,
+    provider: ProviderId,
+) -> Result<Catalogue> {
+    resolved_over(ctx, team_id, provider.default_catalogue()).await
+}
+
+/// The team's stored catalogue filled from `default`, or `default` itself
+/// when the key is absent or will not parse.
+async fn resolved_over(ctx: &ServiceContext, team_id: &str, default: Catalogue) -> Result<Catalogue> {
     let Some(stored) = settings::get_team(ctx, team_id, STRATEGY_CATALOGUE).await? else {
-        return Ok(provider.default_catalogue());
+        return Ok(default);
     };
 
     Ok(match parse_raw(&stored) {
-        Ok(raw) => resolve(raw, provider),
+        Ok(raw) => resolve(raw, default),
         Err(message) => {
             tracing::warn!(
                 error = message,
                 "unparseable strategy_catalogue; falling back to the built-in one"
             );
-            provider.default_catalogue()
+            default
         }
     })
+}
+
+/// Whether a runner whose provider is `provider` can run `model`, given the
+/// catalogue the board resolves for that provider (ADR-0031 point 1, task
+/// 067's model rule).
+///
+/// `false` only when `model` is **not** an id in `resolved` **and** it **is**
+/// an id in the default catalogue of some other provider this build knows.
+/// That is the case ADR-0031 guards against, a card set to one provider's
+/// model reaching another provider's runner. A model no provider claims runs:
+/// `tasks.model` is free text, and Claude runs a full id (`claude-…`) that no
+/// catalogue lists, so a narrower reading would skip tomorrow a card that
+/// runs tonight.
+///
+/// **A known limitation.** `strategy_catalogue` is one stored document per
+/// team, not one per provider, and [`resolve`] fills it from the provider's
+/// defaults field by field. Once a team edits `models` to list Claude's
+/// models, every provider's resolved catalogue lists them, so this answers
+/// `true` for a Ledger runner too, and one Claude-oriented edit turns the
+/// rule off for every other provider's runners. That is accepted while no
+/// second production provider exists. The follow-up is a catalogue per
+/// provider, which needs an ADR-0028 amendment, because ADR-0028 places
+/// `strategy_catalogue` as one team setting (seam-contract D31, "What task
+/// 067 decided"). A unit case pins today's behaviour so that change is made
+/// deliberately.
+pub fn runs_on(model: &str, provider: ProviderId, resolved: &Catalogue) -> bool {
+    let lists = |catalogue: &Catalogue| catalogue.models.iter().any(|entry| entry.id == model);
+    lists(resolved)
+        || !ProviderId::ALL
+            .iter()
+            .filter(|other| **other != provider)
+            .any(|other| lists(&other.default_catalogue()))
 }
 
 /// The context's one team's catalogue as the text the operator typed, or
@@ -239,8 +290,7 @@ fn parse_raw(stored: &str) -> std::result::Result<RawCatalogue, String> {
 /// they are allowed to do, and silently restoring the default would be the
 /// same defect [`crate::db::settings::base_instructions`] documents about a
 /// field a user cleared.
-fn resolve(raw: RawCatalogue, provider: &dyn crate::runner::provider::AgentProvider) -> Catalogue {
-    let default = provider.default_catalogue();
+fn resolve(raw: RawCatalogue, default: Catalogue) -> Catalogue {
     Catalogue {
         models: raw.models.unwrap_or(default.models),
         efforts: raw.efforts.unwrap_or(default.efforts),
@@ -429,6 +479,84 @@ mod tests {
             None,
             "a refused write stores nothing"
         );
+    }
+
+    // Task 067's model rule. Ledger's defaults are `steady` and `swift`,
+    // Claude's `opus`, `sonnet` and `haiku`.
+
+    #[test]
+    fn a_model_in_the_runners_catalogue_runs() {
+        assert!(runs_on(
+            "steady",
+            ProviderId::Ledger,
+            &ProviderId::Ledger.default_catalogue()
+        ));
+        assert!(runs_on(
+            "opus",
+            ProviderId::ClaudeCode,
+            &ProviderId::ClaudeCode.default_catalogue()
+        ));
+    }
+
+    #[test]
+    fn another_providers_default_model_does_not_run() {
+        assert!(!runs_on(
+            "opus",
+            ProviderId::Ledger,
+            &ProviderId::Ledger.default_catalogue()
+        ));
+        assert!(!runs_on(
+            "swift",
+            ProviderId::ClaudeCode,
+            &ProviderId::ClaudeCode.default_catalogue()
+        ));
+    }
+
+    #[test]
+    fn a_model_no_provider_lists_runs() {
+        // A full model id reaches the CLI as it always has: nothing claims it,
+        // so nothing says it belongs to another provider.
+        for provider in ProviderId::ALL.iter().copied() {
+            assert!(
+                runs_on("claude-opus-4-5", provider, &provider.default_catalogue()),
+                "{provider}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_edited_catalogue_that_lists_another_providers_model_runs() {
+        let edited = Catalogue {
+            models: entries(&[("opus", "Opus"), ("swift", "Swift")]),
+            ..ProviderId::ClaudeCode.default_catalogue()
+        };
+
+        assert!(runs_on("swift", ProviderId::ClaudeCode, &edited));
+    }
+
+    #[tokio::test]
+    async fn an_edited_catalogue_listing_claudes_models_lets_a_ledger_runner_take_them() {
+        // The known limitation, pinned: one stored document per team, filled
+        // from each provider's defaults, so a Claude-oriented edit lists
+        // Claude's models for a Ledger runner too and the rule stops firing.
+        // A catalogue per provider (an ADR-0028 amendment) changes this
+        // answer, and should change this test with it.
+        let h = TestContext::new().await;
+        settings::set_team(
+            &h.context,
+            &h.solo.team_id,
+            STRATEGY_CATALOGUE,
+            Some(r#"{"models": [{"id": "opus", "label": "Opus"}]}"#),
+        )
+        .await
+        .expect("store a Claude-oriented edit");
+
+        let for_ledger = catalogue_for_provider(&h.context, &h.solo.team_id, ProviderId::Ledger)
+            .await
+            .expect("resolve the catalogue for Ledger");
+
+        assert_eq!(for_ledger.models, entries(&[("opus", "Opus")]));
+        assert!(runs_on("opus", ProviderId::Ledger, &for_ledger));
     }
 
     #[tokio::test]

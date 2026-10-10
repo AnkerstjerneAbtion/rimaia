@@ -140,11 +140,42 @@ pub enum ProviderId {
 }
 
 impl ProviderId {
+    /// Every provider this build knows, the test-only one included when it is
+    /// compiled (task 067's model rule asks each of them whether it claims a
+    /// model).
+    pub const ALL: &'static [ProviderId] = &[
+        Self::ClaudeCode,
+        #[cfg(feature = "testing")]
+        Self::Ledger,
+    ];
+
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::ClaudeCode => "claude-code",
             #[cfg(feature = "testing")]
             Self::Ledger => "ledger",
+        }
+    }
+
+    /// The provider's own [`AgentProvider::default_catalogue`], for a caller
+    /// that holds the identity and not the provider: the board, which over
+    /// HTTP learns a runner's provider as this value (seam-contract D31 point
+    /// 10).
+    pub fn default_catalogue(self) -> Catalogue {
+        match self {
+            Self::ClaudeCode => ClaudeProvider.default_catalogue(),
+            #[cfg(feature = "testing")]
+            Self::Ledger => crate::testing::provider::Ledger.default_catalogue(),
+        }
+    }
+
+    /// The provider's own [`AgentProvider::display_name`], for the same
+    /// caller: a refusal names the provider in the words a person reads.
+    pub fn display_name(self) -> &'static str {
+        match self {
+            Self::ClaudeCode => ClaudeProvider.display_name(),
+            #[cfg(feature = "testing")]
+            Self::Ledger => crate::testing::provider::Ledger.display_name(),
         }
     }
 }
