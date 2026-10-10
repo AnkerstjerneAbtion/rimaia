@@ -863,6 +863,19 @@ async fn run_implementation(
     )
     .await?;
 
+    // This runner's consent, read again at the last point before the spawn,
+    // after the worktree and the composition (ADR-0032 point 4, task 045). The
+    // prelude's read is the cheap early answer; this one is the decision,
+    // because a planner may have run for minutes since, and the board is not
+    // trusted to have honoured the repositories this runner listed.
+    released(
+        board,
+        machine,
+        lease,
+        repo::ensure_unattended_runs_allowed(machine, repository).await,
+    )
+    .await?;
+
     // Minted here rather than by the row (D10): the report is idempotent by
     // id, which is what lets task 056 hold it in an outbox.
     let run_id = new_id();
@@ -1302,6 +1315,13 @@ impl Phases<'_> {
             .await
             .map_err(|error| error.to_string())?;
         probe_cli(config.provider.as_ref(), &config.program)
+            .await
+            .map_err(|error| error.to_string())?;
+
+        // The consent read again at the last point before the spawn, after the
+        // composition (ADR-0032 point 4, task 045): the read above is the early
+        // answer, and this one is what a phase `Continue` started spawns on.
+        repo::ensure_unattended_runs_allowed(self.machine, &context.repository)
             .await
             .map_err(|error| error.to_string())?;
 

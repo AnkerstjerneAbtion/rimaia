@@ -477,8 +477,11 @@ pub fn allows_unattended_runs(checkout: &Checkout) -> bool {
 /// message rather than a second one invented at the call site.
 ///
 /// The runner's half only (D31's table). A repository with no checkout here
-/// is refused as [`machine::not_set_up`]; the team ceiling's check on the claim
-/// is task 045's.
+/// is refused as [`machine::not_set_up`]; the team ceiling is the claim's
+/// (`board::lease::eligible`, task 045). Every spawn path calls this again at
+/// the last point before the agent process starts, because the board is not
+/// trusted to have honoured the repositories a runner listed (ADR-0032 point
+/// 4).
 pub async fn ensure_unattended_runs_allowed(
     machine: &MachineContext,
     repository: &Repository,

@@ -316,6 +316,14 @@ async fn plan(
     // transcript beside the implementation's. See this module's header.
     let transcript_id = format!("{STRATEGY_TRANSCRIPT_PREFIX}{}", new_id());
 
+    // This runner's consent, read at the last point before the spawn (ADR-0032
+    // point 4, task 045). Plan now judged it on a preview before it claimed,
+    // and the board is not trusted to have honoured it since: a refusal is a
+    // failed planner, recorded on the card, and its claim goes back.
+    if let Err(refusal) = crate::repo::ensure_unattended_runs_allowed(machine, repository).await {
+        return Ok(Planned::Failed(refusal.to_string()));
+    }
+
     // Read *before* the spawn, and compared against the task's own
     // `strategy_updated_at` afterwards. This is how "did the planner actually
     // call the tool" is answered — by asking the single writer whether it wrote,
