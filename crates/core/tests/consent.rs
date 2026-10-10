@@ -10,7 +10,9 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use pretty_assertions::assert_eq;
-use rimaia_core::board::{Claim, ClaimTarget, LeasePurpose, LeaseRef, LeaseTerm, NextStep};
+use rimaia_core::board::{
+    Claim, ClaimTarget, LeasePurpose, LeaseRef, LeaseTerm, NextStep, PreviewOf,
+};
 use rimaia_core::consent::eligibility::RunnerEligibility;
 use rimaia_core::consent::pieces::{ContentKind, MissingReason};
 use rimaia_core::consent::{self, EligibilityStatus, MissingPiece, TaskConsent, TeamCeiling};
@@ -28,12 +30,15 @@ use rimaia_core::review_loop::config as review_config;
 use rimaia_core::runner::events::TokenUsage;
 use rimaia_core::runner::outcome::{RunOutcome, SpawnedAs};
 use rimaia_core::runner::provider::ClaudeProvider;
-use rimaia_core::runner::{RunTrigger, RunnerConfig};
+use rimaia_core::runner::strategy::{claim_for_planning, PlannerClaim};
+use rimaia_core::runner::{RunTrigger, RunnerConfig, Starter};
+use rimaia_core::scheduler::{InFlight, SlotOwner};
 use rimaia_core::tasks::{
     self, NewTask, NewTaskLink, Patch, StrategyPhase, StrategyPlan, StrategyWorkflow,
     TaskLinkPatch, TaskPatch,
 };
 use rimaia_core::testing::db::insert_runner;
+use rimaia_core::testing::provider::Ledger;
 use rimaia_core::testing::shared::{add_member, Member, SharedTeam};
 use rimaia_core::testing::{TempRepo, TestContext};
 use rimaia_core::{board, Clock, ErrorCode, ServiceContext};
@@ -571,6 +576,81 @@ async fn an_inline_planned_implementation_needs_consent_to_the_base_instructions
 }
 
 #[tokio::test]
+async fn plan_now_is_judged_on_the_planner_alone_and_not_the_implementation_after_it() {
+    let team = SharedTeam::new().await;
+    let task = team.task(&team.alice, "Alpha", Some(&team.alice)).await;
+    plan_inline(&team.alice, &task).await;
+    settings::set_base_instructions(&team.bob.ctx, "Use tabs.")
+        .await
+        .expect("Bob edits the team's base instructions");
+    let alices = team.board(&team.alice);
+    assert_eq!(
+        refusal(&team, &team.alice, &task).await,
+        "the team's base instructions was changed by @bob, and you have not accepted that \
+         revision. Accept it, or trust @bob's changes.",
+        "arranged: a fresh start would run the implementation too, and is refused"
+    );
+
+    // Plan now composes the planner alone, which reads no base instructions,
+    // so the starter's preview must not refuse what `claim(Plan)` grants.
+    let claimed = plan_now(&team, &team.alice, alices.as_ref(), &task).await;
+
+    assert_eq!(claimed.task_id(), task);
+    assert_eq!(
+        lease_purpose(&team, &task).await,
+        "strategy",
+        "a planner's lease"
+    );
+    alices
+        .release(claimed.lease())
+        .await
+        .expect("give the planner back");
+}
+
+#[tokio::test]
+async fn plan_now_on_a_planned_card_set_to_another_providers_model_is_not_refused_by_the_model_rule(
+) {
+    let team = SharedTeam::new().await;
+    let task = team.task(&team.alice, "Alpha", Some(&team.alice)).await;
+    plan_inline(&team.alice, &task).await;
+    tasks::set_task_strategy(
+        &team.alice.ctx,
+        &task,
+        strategy("opus", "Build", "Build it."),
+        StrategySource::User,
+    )
+    .await
+    .expect("Alice plans it on Claude's opus");
+    let ledger: Arc<dyn board::BoardPort> = Arc::new(board::InProcessBoard::new(
+        team.alice.ctx.clone(),
+        team.paths.clone(),
+        Arc::new(Ledger),
+        team.alice.runner_id.clone(),
+        LeaseTerm::Never,
+    ));
+    let refused = ledger
+        .claim(run_now(&task))
+        .await
+        .expect_err("arranged: the implementation is refused by the model rule");
+    assert_eq!(refused.code(), ErrorCode::Invalid, "{refused}");
+
+    // The planner chooses from Ledger's own catalogue, so the card's model is
+    // not the planner's: Plan now re-plans it.
+    let claimed = plan_now(&team, &team.alice, ledger.as_ref(), &task).await;
+
+    assert_eq!(claimed.task_id(), task);
+    assert_eq!(
+        lease_purpose(&team, &task).await,
+        "strategy",
+        "a planner's lease"
+    );
+    ledger
+        .release(claimed.lease())
+        .await
+        .expect("give the planner back");
+}
+
+#[tokio::test]
 async fn review_instructions_edited_after_a_continue_are_never_composed() {
     let team = SharedTeam::new().await;
     turn_the_loop_on(&team.alice).await;
@@ -730,7 +810,7 @@ async fn revoking_trust_stops_the_next_claim() {
         .expect("trust Bob");
     edit_plan(&team.bob, &task, "1. Alpha, Bob's way").await;
     team.board(&team.alice)
-        .preview(&task)
+        .preview(&task, PreviewOf::Run)
         .await
         .expect("Bob's changes count while Alice trusts him");
 
@@ -1489,7 +1569,7 @@ async fn a_dependency_commit_from_another_owners_runner_needs_trust_or_acceptanc
         .await
         .expect("trust Alice");
     team.board(&team.bob)
-        .preview(&task)
+        .preview(&task, PreviewOf::Run)
         .await
         .expect("trusting the commit's owner consents");
     consent::set_trust(&team.bob.ctx, &team.team_id, &team.alice.user_id, false)
@@ -2145,6 +2225,36 @@ async fn plan_inline(by: &Member, task: &str) {
     )
     .await
     .expect("planned mode");
+}
+
+/// `member` presses Plan now on `task`, through the function the command and
+/// both MCP tools call, with `port` serving their runner.
+async fn plan_now(
+    team: &SharedTeam,
+    member: &Member,
+    port: &dyn board::BoardPort,
+    task: &str,
+) -> PlannerClaim {
+    claim_for_planning(
+        Starter::at_runner(&member.ctx, &member.runner_id),
+        port,
+        &team.machine,
+        &InFlight::new(),
+        task,
+        SlotOwner::Manual,
+    )
+    .await
+    .unwrap_or_else(|error| panic!("Plan now is refused: {error}"))
+    .unwrap_or_else(|skip| panic!("Plan now is skipped: {}", skip.message()))
+}
+
+/// The purpose `task`'s one lease is held as.
+async fn lease_purpose(team: &SharedTeam, task: &str) -> String {
+    sqlx::query_scalar("SELECT purpose FROM runner_leases WHERE task_id = ?1")
+        .bind(task)
+        .fetch_one(&team.alice.ctx.pool)
+        .await
+        .expect("read the lease's purpose")
 }
 
 /// How many leases `task` has.

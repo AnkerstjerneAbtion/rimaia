@@ -12,8 +12,8 @@ use chrono::TimeDelta;
 use pretty_assertions::assert_eq;
 use rimaia_core::board::{
     BoardMethod, BoardPort, Claim, ClaimTarget, FinishReceipt, FinishRun, FreeCapacity, Heartbeat,
-    InProcessBoard, LeasePurpose, LeaseRef, LeaseTerm, NextStep, RunContext, StartRun, TeamLimits,
-    TranscriptAck, TranscriptChunk, TranscriptEnd,
+    InProcessBoard, LeasePurpose, LeaseRef, LeaseTerm, NextStep, PreviewOf, RunContext, StartRun,
+    TeamLimits, TranscriptAck, TranscriptChunk, TranscriptEnd,
 };
 use rimaia_core::db::{BoardColumn, ExitClass, RunKind, RunStatus};
 use rimaia_core::repo::{self, NewRepository};
@@ -266,7 +266,10 @@ async fn every_board_dto_round_trips_through_json() {
     .await
     .expect("create a task");
 
-    let context: RunContext = board.preview(&task.id).await.expect("preview");
+    let context: RunContext = board
+        .preview(&task.id, PreviewOf::Run)
+        .await
+        .expect("preview");
     let target = ClaimTarget::Run {
         task_id: task.id.clone(),
         trigger: RunTrigger::Manual,
@@ -327,6 +330,8 @@ async fn every_board_dto_round_trips_through_json() {
 
     round_trips(&claim.lease);
     round_trips(&LeasePurpose::Strategy);
+    round_trips(&PreviewOf::Run);
+    round_trips(&PreviewOf::Plan);
     round_trips(&target);
     round_trips(&ClaimTarget::Plan {
         task_id: task.id.clone(),

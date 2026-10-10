@@ -20,8 +20,8 @@ use super::lease::LeaseTerm;
 use super::port::{BoardFuture, BoardPort};
 use super::service::{self, Runner};
 use super::types::{
-    Claim, ClaimTarget, FinishReceipt, FinishRun, Heartbeat, LeaseRef, RunContext, StartRun,
-    TranscriptAck, TranscriptChunk,
+    Claim, ClaimTarget, FinishReceipt, FinishRun, Heartbeat, LeaseRef, PreviewOf, RunContext,
+    StartRun, TranscriptAck, TranscriptChunk,
 };
 
 /// The board, in process.
@@ -76,8 +76,8 @@ impl InProcessBoard {
 }
 
 impl BoardPort for InProcessBoard {
-    fn preview<'a>(&'a self, task_id: &'a str) -> BoardFuture<'a, RunContext> {
-        Box::pin(service::preview(&self.ctx, self.runner(), task_id))
+    fn preview<'a>(&'a self, task_id: &'a str, of: PreviewOf) -> BoardFuture<'a, RunContext> {
+        Box::pin(service::preview(&self.ctx, self.runner(), task_id, of))
     }
 
     fn claim<'a>(&'a self, target: ClaimTarget) -> BoardFuture<'a, Option<Claim>> {

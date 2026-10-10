@@ -14,7 +14,7 @@ use chrono::{DateTime, Duration, Utc};
 use pretty_assertions::assert_eq;
 use rimaia_core::analytics::{self, Period};
 use rimaia_core::board::service::{team_disallowed_tools, team_max_turns};
-use rimaia_core::board::RunContext;
+use rimaia_core::board::{PreviewOf, RunContext};
 use rimaia_core::db::settings::{self, placement, Placement, ALL_KEYS};
 use rimaia_core::db::{BoardColumn, RunState};
 use rimaia_core::events::Change;
@@ -433,7 +433,7 @@ async fn registering_a_clone_this_machine_already_maps_reveals_no_team() {
 /// whose scope reaches both teams.
 async fn context_for_team_a(t: &TwoTeams) -> RunContext {
     t.board(&t.both)
-        .preview(&t.team_a.ready)
+        .preview(&t.team_a.ready, PreviewOf::Run)
         .await
         .expect("preview team A's task")
 }

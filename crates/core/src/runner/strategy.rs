@@ -57,7 +57,7 @@ use std::collections::HashSet;
 use std::path::Path;
 use std::sync::Arc;
 
-use crate::board::{BoardPort, Claim, ClaimTarget, LeaseRef, RunContext};
+use crate::board::{BoardPort, Claim, ClaimTarget, LeaseRef, PreviewOf, RunContext};
 use crate::context::ServiceContext;
 use crate::db::settings::RunEnvironment;
 use crate::db::{new_id, BoardColumn, ExitClass, Repository, StrategyMode};
@@ -637,7 +637,7 @@ pub async fn claim_for_planning(
     owner: SlotOwner,
 ) -> Result<std::result::Result<PlannerClaim, PlanSkip>> {
     starter.authorize().await?;
-    let preview = board.preview(task_id).await?;
+    let preview = board.preview(task_id, PreviewOf::Plan).await?;
     let repository = &preview.repository;
 
     // This runner's consent, off its checkout (task 066). A repository with no

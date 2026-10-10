@@ -22,7 +22,7 @@ use rimaia_core::board::lease::{self, Lease, LeaseState};
 use rimaia_core::board::OwnerPresence;
 use rimaia_core::board::{
     BoardFuture, BoardPort, Claim, ClaimTarget, FinishReceipt, FinishRun, Heartbeat,
-    InProcessBoard, LeasePurpose, LeaseRef, LeaseTerm, NextStep, RunContext, StartRun,
+    InProcessBoard, LeasePurpose, LeaseRef, LeaseTerm, NextStep, PreviewOf, RunContext, StartRun,
     TranscriptAck, TranscriptChunk, TranscriptEnd,
 };
 use rimaia_core::db::{
@@ -1930,8 +1930,8 @@ impl Witness {
 }
 
 impl BoardPort for Witness {
-    fn preview<'a>(&'a self, task_id: &'a str) -> BoardFuture<'a, RunContext> {
-        self.inner.preview(task_id)
+    fn preview<'a>(&'a self, task_id: &'a str, of: PreviewOf) -> BoardFuture<'a, RunContext> {
+        self.inner.preview(task_id, of)
     }
 
     fn claim<'a>(&'a self, target: ClaimTarget) -> BoardFuture<'a, Option<Claim>> {

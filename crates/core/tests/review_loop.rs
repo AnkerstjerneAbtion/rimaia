@@ -22,7 +22,7 @@ use pretty_assertions::assert_eq;
 use rimaia_core::board::OwnerPresence;
 use rimaia_core::board::{
     BoardFuture, BoardPort, Claim, ClaimTarget, FinishReceipt, FinishRun, Heartbeat, LeaseRef,
-    RunContext, StartRun, TranscriptAck, TranscriptChunk,
+    PreviewOf, RunContext, StartRun, TranscriptAck, TranscriptChunk,
 };
 use rimaia_core::credentials::{CredentialAccess, CredentialStore, Secret};
 use rimaia_core::db::settings::{self, RunEnvironment};
@@ -1208,7 +1208,7 @@ async fn a_resumed_fix_with_no_implementation_session_opens_a_fresh_one_and_says
 
     let context = fixture
         .board(&config)
-        .preview(&task)
+        .preview(&task, PreviewOf::Run)
         .await
         .expect("the task's context");
     let mut review = context.review.expect("the loop's context");
@@ -1289,7 +1289,10 @@ async fn a_resumed_fix_on_a_provider_that_cannot_continue_opens_a_fresh_one_and_
     );
     assert_ne!(fix.session_id, rows[1].session_id, "not the review's");
 
-    let context = board.preview(&task).await.expect("the task's context");
+    let context = board
+        .preview(&task, PreviewOf::Run)
+        .await
+        .expect("the task's context");
     let review = context.review.expect("the loop's context");
     assert!(
         review.implementation.is_some(),
@@ -1849,8 +1852,8 @@ impl Spy {
 }
 
 impl BoardPort for Spy {
-    fn preview<'a>(&'a self, task_id: &'a str) -> BoardFuture<'a, RunContext> {
-        self.inner.preview(task_id)
+    fn preview<'a>(&'a self, task_id: &'a str, of: PreviewOf) -> BoardFuture<'a, RunContext> {
+        self.inner.preview(task_id, of)
     }
 
     fn claim<'a>(&'a self, target: ClaimTarget) -> BoardFuture<'a, Option<Claim>> {

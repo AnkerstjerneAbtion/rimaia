@@ -11,7 +11,7 @@
 //! [`claim_for_planning`](super::strategy::claim_for_planning) hand it to
 //! [`authorize_start`] before anything else.
 
-use crate::board::{authorize_start, BoardPort, Claim, ClaimTarget, OwnerPresence};
+use crate::board::{authorize_start, BoardPort, Claim, ClaimTarget, OwnerPresence, PreviewOf};
 use crate::context::ServiceContext;
 use crate::db::settings;
 use crate::error::{Error, Result};
@@ -106,7 +106,7 @@ pub async fn claim_manual_start(
     start: ManualStart,
 ) -> Result<Started> {
     let trigger = starter.authorize().await?;
-    let preview = board.preview(&start.task_id).await?;
+    let preview = board.preview(&start.task_id, PreviewOf::Run).await?;
 
     // `acquire_unbounded`, not `acquire`: the concurrency caps bound what the
     // *scheduler* starts, and a start its owner named is not the

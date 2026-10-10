@@ -15,8 +15,8 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use pretty_assertions::assert_eq;
-use rimaia_core::board::LeaseRef;
 use rimaia_core::board::OwnerPresence;
+use rimaia_core::board::{LeaseRef, PreviewOf};
 use rimaia_core::consent;
 use rimaia_core::db::{BoardColumn, MutationSource, RunState};
 use rimaia_core::mcp::requests::{GetTaskConsentRequest, GetTaskRequest, ListTasksRequest};
@@ -438,7 +438,7 @@ async fn a_new_worktree_writes_its_branch_through_the_board_port() {
     let context = f
         .harness
         .board(&f.paths, &RunnerConfig::default())
-        .preview(&task)
+        .preview(&task, PreviewOf::Run)
         .await
         .expect("preview");
 

@@ -12,7 +12,9 @@ use std::sync::Arc;
 use chrono::{DateTime, Utc};
 use tokio::sync::broadcast::Receiver;
 
-use crate::board::{lease, BoardPort, InProcessBoard, LeaseTerm, OwnerPresence, RunContext};
+use crate::board::{
+    lease, BoardPort, InProcessBoard, LeaseTerm, OwnerPresence, PreviewOf, RunContext,
+};
 use crate::context::{ServiceContext, TeamScope};
 use crate::db::MutationSource;
 use crate::events::ChangeEvent;
@@ -169,7 +171,10 @@ impl TestContext {
         &self,
         task_id: &str,
     ) -> crate::Result<crate::worktree::Worktree> {
-        let context = self.preview_board().preview(task_id).await?;
+        let context = self
+            .preview_board()
+            .preview(task_id, PreviewOf::Run)
+            .await?;
         self.prepare_worktree_from(&context).await
     }
 

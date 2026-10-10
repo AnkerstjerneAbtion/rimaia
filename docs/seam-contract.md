@@ -5392,6 +5392,12 @@ Amendments, as 043 set the precedent; point 2's trait gains no method.
   `Phase(strategy)`. `Route::{Assigned, Pool}` orders `Next`: the owner's tasks in board
   order, then the pool's. `preview` asks it with `StrategyCeiling::default()` and refuses as
   `Invalid` with the same sentence, so a starter's preview and its claim agree.
+- **`preview` names the claim it stands in for.** `BoardPort::preview(task_id, of:
+  PreviewOf)`, with `PreviewOf::{Run, Plan}` in `board::types`: a parameter, not a method.
+  `Run` judges what a claim would compose now, as above. `Plan` judges `Phase(strategy)`, as
+  `claim(Plan)` does, so Plan now's preview refuses nothing its claim grants (D36 point 3):
+  not the base instructions an inline planner's implementation reads, and not the model
+  rule, which exempts `strategy`. Of the starters, only `claim_for_planning` passes `Plan`.
 - **`run_context` ends a lease whose consent was lost.** It reads the context first, then,
   inside the fence's transaction, re-checks consent for what the lease composes next:
   `lease::composes(purpose, run_state)`, which is `PlannerThenImplementation` for a `strategy`

@@ -49,27 +49,36 @@ use crate::worktree::base_ref;
 
 use super::lease::{self, Candidate, ClaimRequest, Door, Edges, LeaseTerm, PhaseModels};
 use super::types::{
-    Claim, ClaimTarget, FinishReceipt, FinishRun, FreeCapacity, Heartbeat, LeaseRef, NextStep,
-    RunAuthorship, RunContext, StartRun, TeamLimits, TranscriptAck, TranscriptChunk,
+    Claim, ClaimTarget, FinishReceipt, FinishRun, FreeCapacity, Heartbeat, LeasePurpose, LeaseRef,
+    NextStep, PreviewOf, RunAuthorship, RunContext, StartRun, TeamLimits, TranscriptAck,
+    TranscriptChunk,
 };
 use crate::consent::ceiling::StrategyCeiling;
+use crate::consent::pieces::Composes;
 use crate::consent::{self, Composition};
 use crate::db::RunKind;
 
 /// The context a claim of `task_id` would carry. Writes nothing.
 ///
 /// Refuses, with the claim's own sentence, a task `lease::eligible` would
-/// refuse this runner for what a claim would compose now (task 045): the
-/// inline planner's claim includes the implementation after it. It takes no
-/// ceiling: it passes `StrategyCeiling::default()`, so it reports eligibility
-/// and consent refusals only, and a ceiling refusal comes from the claim.
+/// refuse this runner for what the claim `of` names would compose (task
+/// 045): a `Run` claim's inline planner includes the implementation after
+/// it, and a `Plan` claim composes the planner alone, which the model rule
+/// exempts and which reads no base instructions (seam-contract D36 point 3).
+/// It takes no ceiling: it passes `StrategyCeiling::default()`, so it
+/// reports eligibility and consent refusals only, and a ceiling refusal
+/// comes from the claim.
 pub async fn preview(
     ctx: &ServiceContext,
     runner: Runner<'_>,
     task_id: &str,
+    of: PreviewOf,
 ) -> Result<RunContext> {
     let context = read_context(ctx, runner, task_id).await?;
-    let composes = consent::composes_now(ctx, &context.task.task).await?;
+    let composes = match of {
+        PreviewOf::Run => consent::composes_now(ctx, &context.task.task).await?,
+        PreviewOf::Plan => Composes::Phase(LeasePurpose::Strategy),
+    };
     let composition = Composition::of(&context);
     let models = PhaseModels::of(&context);
     let ceiling = StrategyCeiling::default();

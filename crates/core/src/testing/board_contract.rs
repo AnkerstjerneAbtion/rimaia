@@ -39,7 +39,8 @@ use crate::board::lease;
 use crate::board::service::{authorize_start, OwnerPresence};
 use crate::board::{
     BoardMethod, BoardPort, Claim, ClaimTarget, FinishRun, FreeCapacity, Heartbeat, LeasePurpose,
-    LeaseRef, LeaseTerm, NextStep, StartRun, TranscriptChunk, TranscriptEnd, LEASE_LIFETIME,
+    LeaseRef, LeaseTerm, NextStep, PreviewOf, StartRun, TranscriptChunk, TranscriptEnd,
+    LEASE_LIFETIME,
 };
 use crate::clock::Clock;
 use crate::consent::{self, eligibility::RunnerEligibility};
@@ -398,7 +399,10 @@ async fn run_count(board: &ServiceContext, task_id: &str) -> usize {
 /// port without a line here does not compile.
 async fn call(runner: &dyn BoardPort, method: BoardMethod, lease: &LeaseRef) -> Result<()> {
     match method {
-        BoardMethod::Preview => runner.preview(&lease.task_id).await.map(drop),
+        BoardMethod::Preview => runner
+            .preview(&lease.task_id, PreviewOf::Run)
+            .await
+            .map(drop),
         BoardMethod::Claim => runner
             .claim(run_target(&lease.task_id, false))
             .await
@@ -760,7 +764,10 @@ pub mod cases {
             .await
             .expect("read the task");
 
-        let preview = runner.preview(&task_id).await.expect("preview");
+        let preview = runner
+            .preview(&task_id, PreviewOf::Run)
+            .await
+            .expect("preview");
 
         assert_same(
             tasks::get_task(harness.board(), &task_id)

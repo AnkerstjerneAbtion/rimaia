@@ -25,7 +25,7 @@ use std::time::Duration;
 use pretty_assertions::assert_eq;
 use rimaia_core::board::{
     BoardFuture, BoardPort, Claim, ClaimTarget, FinishReceipt, FinishRun, FreeCapacity, Heartbeat,
-    LeaseRef, OwnerPresence, RunContext, StartRun, TranscriptAck, TranscriptChunk,
+    LeaseRef, OwnerPresence, PreviewOf, RunContext, StartRun, TranscriptAck, TranscriptChunk,
 };
 use rimaia_core::db::{BoardColumn, ExitClass, RunKind, RunState, StrategyMode};
 use rimaia_core::mcp::{self, McpHandle, RunHandles};
@@ -488,8 +488,8 @@ struct EditBetweenReadAndClaim {
 }
 
 impl BoardPort for EditBetweenReadAndClaim {
-    fn preview<'a>(&'a self, task_id: &'a str) -> BoardFuture<'a, RunContext> {
-        self.inner.preview(task_id)
+    fn preview<'a>(&'a self, task_id: &'a str, of: PreviewOf) -> BoardFuture<'a, RunContext> {
+        self.inner.preview(task_id, of)
     }
 
     fn claim<'a>(&'a self, target: ClaimTarget) -> BoardFuture<'a, Option<Claim>> {
@@ -497,7 +497,7 @@ impl BoardPort for EditBetweenReadAndClaim {
             let ClaimTarget::Plan { task_id, .. } = &target else {
                 return self.inner.claim(target).await;
             };
-            let read = self.inner.preview(task_id).await?;
+            let read = self.inner.preview(task_id, PreviewOf::Plan).await?;
             tasks::update_task(
                 &self.ctx,
                 task_id,

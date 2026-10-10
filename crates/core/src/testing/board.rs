@@ -8,7 +8,7 @@ use std::path::Path;
 
 use crate::board::{
     BoardFuture, BoardPort, Claim, ClaimTarget, FinishReceipt, FinishRun, Heartbeat, LeaseRef,
-    RunContext, StartRun, TranscriptAck, TranscriptChunk, TranscriptEnd,
+    PreviewOf, RunContext, StartRun, TranscriptAck, TranscriptChunk, TranscriptEnd,
 };
 use crate::db::{new_id, RunKind};
 use crate::error::{Error, Result};
@@ -39,7 +39,7 @@ fn refused<'a, T: Send + 'a>() -> BoardFuture<'a, T> {
 }
 
 impl BoardPort for Unwired {
-    fn preview<'a>(&'a self, _task_id: &'a str) -> BoardFuture<'a, RunContext> {
+    fn preview<'a>(&'a self, _task_id: &'a str, _of: PreviewOf) -> BoardFuture<'a, RunContext> {
         refused()
     }
 

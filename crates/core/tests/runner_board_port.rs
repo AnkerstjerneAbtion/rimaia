@@ -22,7 +22,7 @@ use pretty_assertions::assert_eq;
 use rimaia_core::board::OwnerPresence;
 use rimaia_core::board::{
     BaseDependency, BoardFuture, BoardPort, Claim, ClaimTarget, FinishReceipt, FinishRun,
-    Heartbeat, LeasePurpose, LeaseRef, RunBase, RunContext, StartRun, TranscriptAck,
+    Heartbeat, LeasePurpose, LeaseRef, PreviewOf, RunBase, RunContext, StartRun, TranscriptAck,
     TranscriptChunk,
 };
 use rimaia_core::db::{BoardColumn, ExitClass, Run, RunKind, RunState, RunStatus, ScheduleMode};
@@ -252,7 +252,10 @@ async fn the_run_context_carries_the_base_the_board_resolved() {
     let before = fixture.detail().await;
     while fixture.harness.changes.try_recv().is_ok() {}
 
-    let preview = board.preview(&fixture.task_id).await.expect("preview");
+    let preview = board
+        .preview(&fixture.task_id, PreviewOf::Run)
+        .await
+        .expect("preview");
 
     assert_eq!(preview.base, expected);
     assert_eq!(fixture.detail().await, before, "preview writes nothing");
@@ -425,8 +428,8 @@ struct PauseWitness {
 }
 
 impl BoardPort for PauseWitness {
-    fn preview<'a>(&'a self, task_id: &'a str) -> BoardFuture<'a, RunContext> {
-        self.inner.preview(task_id)
+    fn preview<'a>(&'a self, task_id: &'a str, of: PreviewOf) -> BoardFuture<'a, RunContext> {
+        self.inner.preview(task_id, of)
     }
 
     fn claim<'a>(&'a self, target: ClaimTarget) -> BoardFuture<'a, Option<Claim>> {

@@ -140,6 +140,20 @@ pub enum ClaimTarget {
     },
 }
 
+/// Which named claim a [`preview`](super::BoardPort::preview) stands in
+/// for, so the preview judges what that claim would compose (task 045,
+/// seam-contract D36 point 3). `Next` has no preview: the board picks its task.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum PreviewOf {
+    /// [`ClaimTarget::Run`]: what a claim would compose now, which for a fresh
+    /// start that needs planning is the inline planner and the implementation
+    /// after it.
+    Run,
+    /// [`ClaimTarget::Plan`]: the planner alone.
+    Plan,
+}
+
 /// What a runner can still take on, sent with every
 /// [`ClaimTarget::Next`].
 ///

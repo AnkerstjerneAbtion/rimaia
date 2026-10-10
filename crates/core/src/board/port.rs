@@ -10,8 +10,8 @@ use crate::runner::events::RunTail;
 use crate::tasks::strategy::StrategyPlan;
 
 use super::types::{
-    Claim, ClaimTarget, FinishReceipt, FinishRun, Heartbeat, LeaseRef, RunContext, StartRun,
-    TranscriptAck, TranscriptChunk,
+    Claim, ClaimTarget, FinishReceipt, FinishRun, Heartbeat, LeaseRef, PreviewOf, RunContext,
+    StartRun, TranscriptAck, TranscriptChunk,
 };
 
 /// What every fallible port method returns.
@@ -29,9 +29,10 @@ pub type BoardFuture<'a, T> = Pin<Box<dyn Future<Output = Result<T>> + Send + 'a
 pub trait BoardPort: Send + Sync + 'static {
     // Scoped by the runner the adapter was built for, never by a request field.
 
-    /// The context a claim would return. Writes nothing, and is advisory: a
-    /// run is composed from its claim, never from a preview.
-    fn preview<'a>(&'a self, task_id: &'a str) -> BoardFuture<'a, RunContext>;
+    /// The context a claim would return, refused as the claim `of` names
+    /// would refuse it. Writes nothing, and is advisory: a run is composed
+    /// from its claim, never from a preview.
+    fn preview<'a>(&'a self, task_id: &'a str, of: PreviewOf) -> BoardFuture<'a, RunContext>;
 
     /// The single path for every process a runner starts. `None` is a claim
     /// lost to another starter, and never an error.
