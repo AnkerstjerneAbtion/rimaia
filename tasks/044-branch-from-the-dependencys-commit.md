@@ -6,6 +6,7 @@ status: ready
 depends_on: ["043"]
 adrs: ["0033", "0008"]
 size: S
+landed: "#34"
 ---
 
 # Branch from the dependency's commit
