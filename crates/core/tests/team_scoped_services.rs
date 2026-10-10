@@ -4,8 +4,9 @@
 //! `tenant_isolation.rs` proves the doors; this proves the rules behind them:
 //! a foreign id answered as a missing one, the three cross-team references
 //! refused at write time, the entity-less refusal, settings read from the
-//! store D28 places them in, the digest marker on the actor's own row, and the
-//! aggregates over the caller's teams alone.
+//! store D28 places them in, the digest marker on the actor's own row, the
+//! aggregates over the caller's teams alone, and the run history, worktree
+//! inventory and log pruning, which reach files on disk by a team's ids.
 
 use std::path::Path;
 
@@ -990,4 +991,219 @@ async fn the_startup_survey_reports_only_its_scopes_tasks() {
         sorted(vec![t.team_a.ready.clone(), t.team_b.ready.clone()])
     );
     assert_eq!(report.missing_run_logs.len(), 6);
+}
+
+// ---------------------------------------------------------------------------
+// Run history and the files behind it
+// ---------------------------------------------------------------------------
+
+/// `ids`, sorted, so two listings compare as sets.
+fn sorted_ids(ids: impl IntoIterator<Item = String>) -> Vec<String> {
+    let mut ids: Vec<String> = ids.into_iter().collect();
+    ids.sort();
+    ids
+}
+
+#[tokio::test]
+async fn the_run_history_lists_only_the_callers_teams_runs() {
+    let t = TwoTeams::new().await;
+    let a_runs = sorted_ids([
+        t.team_a.implementation_run.clone(),
+        t.team_a.review_run.clone(),
+        t.team_a.fix_run.clone(),
+    ]);
+
+    let listed = runs::list_runs(&t.a, runs::RunFilter::default())
+        .await
+        .expect("team A's history");
+    assert_eq!(
+        sorted_ids(listed.into_iter().map(|entry| entry.run.id)),
+        a_runs
+    );
+
+    // Entity-less, so a context reaching two teams is refused rather than
+    // handed a merged history.
+    let refusal = runs::list_runs(&t.both, runs::RunFilter::default())
+        .await
+        .expect_err("list_runs under both");
+    assert_eq!(refusal.code(), ErrorCode::Invalid);
+    let message = refusal.to_string();
+    assert!(message.contains(&t.team_a.team_id), "{message}");
+    assert!(message.contains(&t.team_b.team_id), "{message}");
+
+    // A task's history is joined to the task in scope: another team's task
+    // has none, exactly as a never-issued one has none.
+    let foreign = runs::list_runs_for_task(&t.a, &t.team_b.in_review)
+        .await
+        .expect("a foreign task's history");
+    let missing = runs::list_runs_for_task(&t.a, &TwoTeams::never_issued())
+        .await
+        .expect("a never-issued task's history");
+    assert_eq!(foreign, Vec::new());
+    assert_eq!(missing, Vec::new());
+    let own = runs::list_runs_for_task(&t.a, &t.team_a.in_review)
+        .await
+        .expect("team A's task's history");
+    assert_eq!(sorted_ids(own.into_iter().map(|run| run.id)), a_runs);
+}
+
+#[tokio::test]
+async fn the_worktree_inventory_lists_only_its_teams_worktrees() {
+    let t = TwoTeams::new().await;
+
+    let inventory = rimaia_core::worktree::cleanup::inventory(&t.a)
+        .await
+        .expect("team A's inventory");
+    assert_eq!(
+        inventory
+            .entries
+            .iter()
+            .map(|entry| entry.task_id.clone())
+            .collect::<Vec<_>>(),
+        vec![t.team_a.in_review.clone()]
+    );
+
+    let refusal = rimaia_core::worktree::cleanup::inventory(&t.both)
+        .await
+        .expect_err("inventory under both");
+    assert_eq!(refusal.code(), ErrorCode::Invalid);
+    let message = refusal.to_string();
+    assert!(message.contains(&t.team_a.team_id), "{message}");
+    assert!(message.contains(&t.team_b.team_id), "{message}");
+}
+
+/// One team's files under `<data>/runs/<task-id>/`: a transcript and a stderr
+/// log per run, and a planner transcript stamped long before the faked clock.
+struct TeamFiles {
+    transcripts: Vec<std::path::PathBuf>,
+    planner: std::path::PathBuf,
+}
+
+impl TeamFiles {
+    fn all(&self) -> Vec<&Path> {
+        self.transcripts
+            .iter()
+            .map(|path| path.as_path())
+            .chain(std::iter::once(self.planner.as_path()))
+            .collect()
+    }
+}
+
+fn write_team_files(t: &TwoTeams, team: &rimaia_core::testing::teams::TeamBoard) -> TeamFiles {
+    let mut transcripts = Vec::new();
+    for run_id in [&team.implementation_run, &team.review_run, &team.fix_run] {
+        let transcript =
+            rimaia_core::runner::events::transcript_path(&t.paths, &team.in_review, run_id);
+        std::fs::create_dir_all(transcript.parent().expect("a task directory"))
+            .expect("create the task's log directory");
+        std::fs::write(&transcript, "a transcript").expect("write a transcript");
+        let stderr = transcript.with_file_name(format!("{run_id}.stderr.log"));
+        std::fs::write(&stderr, "a stderr log").expect("write a stderr log");
+        transcripts.push(transcript);
+        transcripts.push(stderr);
+    }
+
+    let planner = t.paths.runs_dir().join(&team.in_review).join(format!(
+        "{}0000-0000-4000-8000-000000000000.jsonl",
+        rimaia_core::runner::STRATEGY_TRANSCRIPT_PREFIX
+    ));
+    std::fs::write(&planner, "a planner's transcript").expect("write a planner transcript");
+    // Older than any criterion's cutoff and the sweep's one-hour floor, by the
+    // faked clock: only the scope can keep it.
+    let long_ago = t.clock.now() - Duration::days(30);
+    std::fs::File::options()
+        .write(true)
+        .open(&planner)
+        .expect("reopen the planner transcript")
+        .set_times(std::fs::FileTimes::new().set_modified(long_ago.into()))
+        .expect("stamp the planner transcript");
+
+    TeamFiles {
+        transcripts,
+        planner,
+    }
+}
+
+#[tokio::test]
+async fn pruning_logs_never_deletes_another_teams_files() {
+    for criterion in ["by age", "by task"] {
+        let t = TwoTeams::new().await;
+        let a_files = write_team_files(&t, &t.team_a);
+        let b_files = write_team_files(&t, &t.team_b);
+        let rows_before = t.snapshot_b().await;
+
+        let pruned = runs::prune_logs(
+            &t.a,
+            &t.paths,
+            match criterion {
+                "by age" => runs::PruneCriterion::OlderThanDays(0),
+                _ => runs::PruneCriterion::Task(t.team_a.in_review.clone()),
+            },
+        )
+        .await
+        .expect("prune team A's logs");
+
+        assert_eq!(pruned.runs_pruned, 3, "{criterion}");
+        assert_eq!(pruned.strategy_transcripts_pruned, 1, "{criterion}");
+        for path in a_files.all() {
+            assert!(!path.exists(), "{criterion}: {} survived", path.display());
+        }
+        for path in b_files.all() {
+            assert!(path.exists(), "{criterion}: {} went", path.display());
+        }
+        assert_eq!(t.snapshot_b().await, rows_before, "{criterion}");
+    }
+}
+
+#[tokio::test]
+async fn pruning_another_teams_task_prunes_nothing() {
+    let t = TwoTeams::new().await;
+    let b_files = write_team_files(&t, &t.team_b);
+
+    let foreign = runs::prune_logs(
+        &t.a,
+        &t.paths,
+        runs::PruneCriterion::Task(t.team_b.in_review.clone()),
+    )
+    .await
+    .expect("prune a foreign task");
+    let missing = runs::prune_logs(
+        &t.a,
+        &t.paths,
+        runs::PruneCriterion::Task(TwoTeams::never_issued()),
+    )
+    .await
+    .expect("prune a never-issued task");
+
+    // Answered as a task with no runs is: nothing pruned, no error.
+    for result in [&foreign, &missing] {
+        assert_eq!(result.runs_pruned, 0);
+        assert_eq!(result.strategy_transcripts_pruned, 0);
+        assert_eq!(result.bytes_freed, 0);
+    }
+    for path in b_files.all() {
+        assert!(path.exists(), "{} went", path.display());
+    }
+}
+
+#[tokio::test]
+async fn a_store_that_cannot_answer_fails_a_prune_by_task_having_deleted_nothing() {
+    // The scope check is not a "not found" to swallow: a store error is the
+    // call's error, raised before any file is touched.
+    let t = TwoTeams::new().await;
+    let a_files = write_team_files(&t, &t.team_a);
+    t.a.pool.close().await;
+
+    let error = runs::prune_logs(
+        &t.a,
+        &t.paths,
+        runs::PruneCriterion::Task(t.team_a.in_review.clone()),
+    )
+    .await
+    .expect_err("a closed store");
+
+    assert_ne!(error.code(), ErrorCode::NotFound);
+    for path in a_files.all() {
+        assert!(path.exists(), "{} went", path.display());
+    }
 }

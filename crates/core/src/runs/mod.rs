@@ -67,7 +67,7 @@ use sqlx::{FromRow, Row};
 
 use crate::context::ServiceContext;
 use crate::db::{Run, RunKind, RunStatus};
-use crate::error::{Error, Result};
+use crate::error::{Error, ErrorCode, Result};
 use crate::paths::AppPaths;
 use crate::worktree::{CommitSummary, DiffStat};
 use bundle::{BundleFile, StoredBundle};
@@ -514,6 +514,18 @@ pub async fn prune_logs(
     paths: &AppPaths,
     criterion: PruneCriterion,
 ) -> Result<PruneResult> {
+    // Resolved before any file is touched, so a store that cannot answer fails
+    // the call having deleted nothing, rather than being read as "not this
+    // caller's task" halfway through a prune that already did work.
+    let named_task_in_scope = match &criterion {
+        PruneCriterion::OlderThanDays(_) => false,
+        PruneCriterion::Task(task_id) => match crate::tasks::service::team_of(ctx, task_id).await {
+            Ok(_) => true,
+            Err(error) if error.code() == ErrorCode::NotFound => false,
+            Err(error) => return Err(error),
+        },
+    };
+
     let log_paths: Vec<String> = match &criterion {
         PruneCriterion::OlderThanDays(days) => {
             let cutoff = ctx.clock.now() - chrono::Duration::days(*days);
@@ -552,7 +564,7 @@ pub async fn prune_logs(
         result.runs_pruned += 1;
     }
 
-    let strategy = prune_strategy_transcripts(ctx, paths, &criterion).await;
+    let strategy = prune_strategy_transcripts(ctx, paths, &criterion, named_task_in_scope).await;
     result.strategy_transcripts_pruned = strategy.count;
     result.bytes_freed += strategy.bytes;
     Ok(result)
@@ -593,6 +605,7 @@ async fn prune_strategy_transcripts(
     ctx: &ServiceContext,
     paths: &AppPaths,
     criterion: &PruneCriterion,
+    named_task_in_scope: bool,
 ) -> SweptTranscripts {
     let floor = ctx.clock.now() - STRATEGY_TRANSCRIPT_FLOOR;
     let (directories, cutoff) = match criterion {
@@ -606,11 +619,12 @@ async fn prune_strategy_transcripts(
         // Only a task the scope holds: its directory is named by the id, and
         // another team's planner transcripts are not this caller's to sweep.
         // A task the scope does not hold prunes nothing, exactly as a task
-        // with no runs does.
-        PruneCriterion::Task(task_id) => match crate::tasks::service::team_of(ctx, task_id).await {
-            Ok(_) => (vec![paths.runs_dir().join(task_id)], floor),
-            Err(_) => (Vec::new(), floor),
-        },
+        // with no runs does. [`prune_logs`] asked which, before deleting
+        // anything.
+        PruneCriterion::Task(task_id) if named_task_in_scope => {
+            (vec![paths.runs_dir().join(task_id)], floor)
+        }
+        PruneCriterion::Task(_) => (Vec::new(), floor),
     };
 
     let mut swept = SweptTranscripts::default();
