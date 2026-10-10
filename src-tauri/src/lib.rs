@@ -23,6 +23,7 @@ use rimaia_core::{
     db, identity, startup, worktree, AppPaths, Change, ChangeEvent, Error, ServiceContext,
     SystemClock, TeamScope,
 };
+use rimaia_runner::{adopt, RunnerStore};
 use tauri::{Emitter, Manager, RunEvent};
 use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
 use tokio::sync::broadcast;
@@ -175,6 +176,42 @@ pub fn run() {
                 TeamScope::one(solo.team_id.clone()),
                 solo.user_id.clone(),
             );
+
+            // The runner's own store, beside the board (ADR-0028 points 3 and 4),
+            // and this machine's one-time adoption out of the board into it
+            // (seam-contract D28, "The runner set"). After the context, because
+            // adoption reads the board through it; before anything reads
+            // machine state, so task 041's readers find it adopted. Each fails
+            // like its neighbours (D11), naming runner.db in the log line. The
+            // second step's name is neutral on purpose: when it is a refusal of a
+            // runner.db from another board, nothing was copied, and the name the
+            // user sees must still be true.
+            let runner_db_file = paths.runner_db_file();
+            let runner_store =
+                match tauri::async_runtime::block_on(RunnerStore::open(&runner_db_file)) {
+                    Ok(store) => store,
+                    Err(err) => {
+                        log_startup_failure("open the runner store", &runner_db_file, &err);
+                        report_startup_failure(
+                            app.handle(),
+                            "open the runner store",
+                            Some(&logs_dir),
+                            &err,
+                        );
+                        return Err(err.into());
+                    }
+                };
+            if let Err(err) =
+                tauri::async_runtime::block_on(adopt::adopt_board(&context, &runner_store, &solo))
+            {
+                const STEP: &str = "adopt this machine's state into the runner store";
+                log_startup_failure(STEP, &runner_db_file, &err);
+                report_startup_failure(app.handle(), STEP, Some(&logs_dir), &err);
+                return Err(err.into());
+            }
+            // Nothing reads the store yet: task 041, its first reader, keeps it in
+            // `AppState`. Until then it closes here, adopted.
+            drop(runner_store);
 
             // Nothing is running yet — the process that set any of this is the one
             // that just died — so whatever `survey` finds is history, not a live
