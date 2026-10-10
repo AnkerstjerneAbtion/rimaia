@@ -473,8 +473,13 @@ async fn a_schedule_opens_its_window_from_the_runner_store() {
     let looping = tokio::spawn(loop_task.run());
 
     clock.set(fires_at + Duration::seconds(5));
+    // Until the queue is running as well as the window open: the fire writes
+    // the window first and the queue state after it, so waiting on the window
+    // alone races the second write.
     tokio::time::timeout(std::time::Duration::from_secs(30), async {
-        while window::active(&machine).await.expect("read").is_none() {
+        while window::active(&machine).await.expect("read").is_none()
+            || state::queue_state(&machine).await.expect("read") != QueueState::Running
+        {
             changes.recv().await.ok();
         }
     })
