@@ -9,8 +9,12 @@
 //! journal and no file to create. The pragmas that *are* behaviour, foreign keys
 //! and the busy timeout, are shared with production rather than restated.
 
+use std::path::{Path, PathBuf};
+
+use sqlx::migrate::Migrator;
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use sqlx::{SqliteConnection, SqlitePool};
+use tempfile::TempDir;
 
 use crate::clock::Clock;
 use crate::db::{migrate, BUSY_TIMEOUT};
@@ -75,6 +79,58 @@ pub async fn insert_runner(
     .await
     .expect("a runner for an existing user must insert");
     runner_id
+}
+
+/// The version of task 038's team-mode rebuild: every board migration older
+/// than this is the schema an install had before team mode.
+pub const TEAM_MODE_REBUILD_VERSION: &str = "20261003120000";
+
+/// A directory holding copies of the board migrations whose file names `keep`
+/// accepts, for a test that applies part of the board set through sqlx's
+/// public `Migrator::new`.
+///
+/// The returned directory only has to outlive `Migrator::new`, which reads
+/// every file into memory.
+pub fn board_migrations(keep: impl Fn(&str) -> bool) -> TempDir {
+    let source = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../src-tauri/migrations");
+    let dir = tempfile::Builder::new()
+        .prefix("rimaia-migrations-")
+        .tempdir()
+        .expect("a scratch directory");
+    for entry in std::fs::read_dir(&source).expect("read the board migrations") {
+        let path: PathBuf = entry.expect("a directory entry").path();
+        let name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .expect("a UTF-8 file name")
+            .to_string();
+        if name.ends_with(".sql") && keep(&name) {
+            std::fs::copy(&path, dir.path().join(&name)).expect("copy a migration");
+        }
+    }
+    dir
+}
+
+/// A file board at `file`, at the schema every install had before task 038's
+/// rebuild: every board migration older than [`TEAM_MODE_REBUILD_VERSION`],
+/// applied through sqlx's public API and never through hand-written DDL that
+/// could drift from what an install actually holds.
+///
+/// One builder for every test that starts from that schema (038's rebuild
+/// test, 040's settings-placement test), so no two of them can build two
+/// different old boards. Opened through [`crate::db::connect`], so a later
+/// `db::migrate` on the same pool is exactly the launch that upgrades it.
+pub async fn pre_team_mode_board(file: &Path) -> SqlitePool {
+    let older = board_migrations(|name| name < TEAM_MODE_REBUILD_VERSION);
+    let migrator = Migrator::new(older.path())
+        .await
+        .expect("read the pre-rebuild migrations");
+    let pool = crate::db::connect(file).await.expect("open the board");
+    migrator
+        .run(&pool)
+        .await
+        .expect("the pre-rebuild migrations apply");
+    pool
 }
 
 #[cfg(test)]

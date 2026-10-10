@@ -9,8 +9,6 @@
 //! copies of the files that came before it, never by hand-written DDL that
 //! could drift from what an install actually holds.
 
-use std::path::{Path, PathBuf};
-
 use pretty_assertions::assert_eq;
 use rimaia_core::db;
 use rimaia_core::db::settings::{
@@ -23,15 +21,13 @@ use rimaia_core::strategy::catalogue::STRATEGY_CATALOGUE;
 use rimaia_core::strategy::settings::{
     repository_default_key, STRATEGY_APPROVAL, STRATEGY_DEFAULT,
 };
+use rimaia_core::testing::db::{board_migrations, pre_team_mode_board, TEAM_MODE_REBUILD_VERSION};
 use rimaia_core::testing::{test_epoch, test_pool, TestClock};
 use sqlx::migrate::Migrator;
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use sqlx::SqlitePool;
 use tempfile::TempDir;
 use uuid::Uuid;
-
-/// The rebuild's version: every board file older than this is "before".
-const REBUILD_VERSION: &str = "20261003120000";
 
 const REPOSITORY: &str = "3f2b1c00-0000-4000-8000-000000000001";
 
@@ -43,7 +39,7 @@ const REPOSITORY: &str = "3f2b1c00-0000-4000-8000-000000000001";
 async fn the_team_mode_rebuild_keeps_every_row() {
     let dir = scratch_dir();
     let file = dir.path().join("rimaia.db");
-    let before = pre_rebuild_board(&file).await;
+    let before = pre_team_mode_board(&file).await;
     fill_every_table(&before).await;
     let tables = board_tables(&before).await;
     let mut snapshots = Vec::new();
@@ -172,9 +168,9 @@ async fn the_rebuild_refuses_to_run_over_a_cascade() {
     // tasks` would cascade into `runs`.
     let dir = scratch_dir();
     let file = dir.path().join("rimaia.db");
-    let pool = pre_rebuild_board(&file).await;
+    let pool = pre_team_mode_board(&file).await;
     insert_repository_task_and_run(&pool).await;
-    let every_file = migrations_dir(|_| true);
+    let every_file = board_migrations(|_| true);
     let migrator = Migrator::new(every_file.path())
         .await
         .expect("read every board migration");
@@ -202,7 +198,7 @@ async fn a_dangling_reference_stops_the_rebuild_and_keeps_the_board() {
     // can hold. The rebuild must not guess which team it belongs to.
     let dir = scratch_dir();
     let file = dir.path().join("rimaia.db");
-    pre_rebuild_board(&file).await.close().await;
+    pre_team_mode_board(&file).await.close().await;
     let unchecked = SqlitePoolOptions::new()
         .max_connections(1)
         .connect_with(
@@ -241,7 +237,7 @@ async fn a_dangling_reference_stops_the_rebuild_and_keeps_the_board() {
     assert_eq!(rebuilt, 0, "the whole file rolled back");
     let recorded: i64 =
         sqlx::query_scalar("SELECT count(*) FROM _sqlx_migrations WHERE version = ?1")
-            .bind(REBUILD_VERSION.parse::<i64>().expect("a version"))
+            .bind(TEAM_MODE_REBUILD_VERSION.parse::<i64>().expect("a version"))
             .fetch_one(&pool)
             .await
             .expect("read the bookkeeping");
@@ -260,7 +256,7 @@ async fn ensure_solo_and_adoption_build_the_same_identity() {
     // something a team must own), one created at first launch.
     let dir = scratch_dir();
     let file = dir.path().join("rimaia.db");
-    let before = pre_rebuild_board(&file).await;
+    let before = pre_team_mode_board(&file).await;
     sqlx::query(
         "INSERT INTO repositories (id, name, path, default_branch, worktree_root, created_at)
          VALUES (?1, 'rimaia', '/tmp/rimaia', 'main', '/tmp/rimaia-worktrees',
@@ -446,43 +442,6 @@ fn scratch_dir() -> TempDir {
         .prefix("rimaia-team-mode-")
         .tempdir()
         .expect("a scratch directory")
-}
-
-/// The board's migrations, as `crates/core/build.rs` watches them.
-fn board_migrations() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("../../src-tauri/migrations")
-}
-
-/// A directory holding copies of the board migrations `keep` accepts.
-fn migrations_dir(keep: impl Fn(&str) -> bool) -> TempDir {
-    let dir = scratch_dir();
-    for entry in std::fs::read_dir(board_migrations()).expect("read the migrations") {
-        let path = entry.expect("a directory entry").path();
-        let name = path
-            .file_name()
-            .and_then(|name| name.to_str())
-            .expect("a UTF-8 file name")
-            .to_string();
-        if name.ends_with(".sql") && keep(&name) {
-            std::fs::copy(&path, dir.path().join(&name)).expect("copy a migration");
-        }
-    }
-    dir
-}
-
-/// A file board at the schema every install had before the rebuild: every
-/// board migration older than it, applied through sqlx's public API.
-async fn pre_rebuild_board(file: &Path) -> SqlitePool {
-    let older = migrations_dir(|name| name < REBUILD_VERSION);
-    let migrator = Migrator::new(older.path())
-        .await
-        .expect("read the pre-rebuild migrations");
-    let pool = db::connect(file).await.expect("open the board");
-    migrator
-        .run(&pool)
-        .await
-        .expect("the pre-rebuild migrations apply");
-    pool
 }
 
 async fn insert_repository_task_and_run(pool: &SqlitePool) {
