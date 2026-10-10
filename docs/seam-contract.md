@@ -437,6 +437,25 @@ invalid case produces its own specific message" is a sentence, not a code.
 
 **Binds.** 003, 004, 006, 007, 008, 009.
 
+### Amendment, 2026-10-10 — `Conflict`, the fencing code (task 043)
+
+ADR-0031 point 3 asks for this amendment: a report under a lease that is not the current one is
+refused with a code of its own. `ErrorCode` gains **`Conflict`**, serialised `"conflict"`, built
+with `Error::conflict(..)`, and `src/types.ts`'s union gains `"conflict"` with no rendering
+change, because no solo path can produce it.
+
+It means **only** "your lease is not the current one": the task exists in the lease's team, and
+its lease row is gone, or has another generation, or another runner (`board::lease::current`). A
+task that does not exist, or is outside the lease's team, stays `NotFound` in the sentence a
+never-issued task gets (D31 point 3). A refusal a person reads stays `Invalid`, the pinned-task
+refusal included. Nothing may treat `Conflict` as a lost race: a fenced report is not one, and
+D31 point 11 gives it its one reaction (task 053).
+
+It is the first of D32 point 3's three variants; task 046 adds `unauthenticated` and
+`upgrade_required`, on the same terms.
+
+**Binds.** 043, 046, 052, 053, 056.
+
 ## D9 — What "interrupted" is
 
 **Question.** Task 009 must show one `interrupted` task after a crash. ADR-0007 fixes seven run
@@ -5153,6 +5172,96 @@ What task 042 pinned building `Next`'s body and moving the loop.
   for one claim" case is the lease form of that one.
 
 **Binds.** 043, 045, 052, 053, 058, 059.
+
+### Amendment, 2026-10-10 — what task 043 decided
+
+Task 043 made the lease real, in process, before a network is in front of it. None of this
+changes point 2's trait.
+
+- **`tasks::run_state::transition(conn, clock, id, from, to)`** is the one conditional write of
+  `run_state`: it checks the edge, runs `UPDATE … WHERE id = ? AND run_state = ?from` inside the
+  caller's transaction, and answers whether a row moved. It never commits or publishes.
+  `set_run_state` is `BEGIN IMMEDIATE`, read, `transition` from the value it read, commit,
+  publish, with its messages unchanged. `tasks/run_state.rs` stays the only file that writes the
+  column.
+- **The claim is one transaction** (`board::lease::claim`): `BEGIN IMMEDIATE`, the task re-read,
+  `eligible`, the edges through `transition`, `lease_generation + 1`, the `runner_leases` row,
+  one commit, one `ChangeEvent`. The edges: `idle`, `failed` or `cancelled` → `queued` →
+  `running` for a fresh start; `queued` → `running` for a task with no lease row (only a build
+  older than 043, and task 057's `release_pin`, leave one there); `waiting_retry` → `running` for
+  a resume; none for `Plan`. A task that already has a lease row, or whose state no longer has
+  the edge, is lost (`Ok(None)`), and a lost `Next` moves on to the next entry. Everything the
+  claim returns (the context, the team, the resume point) is read before the transaction opens,
+  because the transaction reads nothing over the pool.
+- **The purposes.** `Plan` is `strategy`. A resume is the purpose of the kind that was waiting
+  (D29 point 3). A fresh start is `strategy` when `needs_planning(task, effective.mode)` holds,
+  which is ADR-0016's inline planner (ADR-0031 point 1), and `implementation` otherwise.
+  `start_run` moves the purpose to the run's kind and sets `run_id` under the same generation
+  (D29 point 1). `run_task` runs the inline planner exactly when `Claim::purpose` is `strategy`
+  and derives nothing itself.
+- **The fence, `board::lease::current`,** runs inside the transaction of the first write each
+  lease method guards (`run_context`, which writes nothing, is fenced in a transaction of its
+  own and then read). A task that does not exist or is outside the lease's team is `NotFound`; a
+  task with no lease row, or another generation or runner, is `Conflict` (D8's 043 amendment).
+  `finish_run` is fenced in both of its transactions: the one that closes the row (with "already
+  finalized" kept after the fence, point 12) and the one that lands the task. The attempt
+  history it decides `resume_after` from is read before the first opens.
+- **`publish_tail` is not fenced in process.** It is synchronous and the fence is async, and D14
+  makes a stale tail worth nothing. Task 052's async handler drops a tail whose lease `current`
+  refuses.
+- **`release` is keyed on the run state, not the purpose.** In one transaction: the fence, a
+  task still `running` taken to `failed`, the lease deleted. A `Plan` claim's task is not
+  `running`, so its run state is left alone; an inline planner's lands `failed`.
+- **`finish_run` lands the task, the lease and the pin in one transaction** (`lease::land`,
+  over `outcome::land_within`, which also makes the column move and the run-state write one
+  transaction for every caller). `Released` deletes the lease. `Continue` keeps it after
+  `eligible(conn, task, holder, next)` for the next phase's purpose; a refusal answers
+  `Released` and lands the task in `in_review`, as a finish that does not continue lands it.
+  Tasks 067 and 045 add to that one call, never a second. A `Continue` publishes nothing,
+  because nothing visible changed.
+- **Eligibility is one function, `board::lease::eligible(conn, task, runner, purpose)`.** Its
+  one rule in 043 is pinning: a task pinned to another runner is not this runner's, for every
+  purpose. `selection::plan` takes a `RunnerView` (the runner's id, its `ProviderId` for 067,
+  and its listed repositories) and leaves an ineligible task out before positions are
+  numbered, with no `SkipReason`, so `status_with_plan` and `claim(Next)` agree; the claim
+  transaction asks again. `claim(Run)` and `claim(Plan)` refuse it as `Invalid`: "this task is
+  pinned to <label>, which has its worktree and the agent's conversation. Only that runner can
+  run it until someone chooses to run it elsewhere."
+- **The pin and its three writers.** Only `board::lease` writes `tasks.pinned_runner_id`. In
+  043, `finish_run` sets it to the holder when the closed run is `interrupted` or the task lands
+  `waiting_retry`, and clears it when the pinned runner's finish lands anywhere else. A
+  `Continue`, `give_up`, a cancel, an edit and a move leave it. Task 053's expiry and task 057's
+  `release_pin` are the other two writers.
+- **`LeaseTerm::{Never, Renewable(d)}` and `LEASE_LIFETIME`** (three minutes) live in
+  `board/lease.rs` and nowhere else. `InProcessBoard::new` takes the term; the solo host passes
+  `Never`, which writes `expires_at` NULL. The heartbeat renews, in one transaction, each listed
+  lease current for this runner to `now + d` (a `Never` lease stays NULL) and answers the rest in
+  `fenced`; `cancel` stays empty in process. It has no production caller until 053.
+- **The harness.** Point 13's `Harness` gains `start_with(term)`, and `start()` is
+  `start_with(LeaseTerm::Never)`. The in-process harness serves a board in a `TempDir` file over
+  `db::connect`'s multi-connection pool (`TestContext::over_file`), so the race between the two
+  runners is real. 052's HTTP harness inherits the requirement.
+- **`held_leases` on `MachineStore`**: record (replacing a task's earlier record), set run and
+  purpose, forget, list, with their cases in `machine_store_contract!`. The rules are
+  `machine::leases`. Every starter records after its claim returns and before it spawns
+  (`runner::start::record_claim`, from the manual starter, `claim_for_planning` and the loop's
+  `try_step`); `run_task` notes the run after `start_run`, notes no run and the next purpose
+  after a `Continue`, and forgets the lease on a `Released` finish or a release whose answer
+  says the board holds no such lease.
+- **Per-runner reconcile** (`scheduler::reconcile`). `reconcile_held(board, machine)` settles
+  this runner's records through the port: an open run finished as interrupted (which pins it),
+  no run released, a run the board already closed released, and a record the board answers
+  `Conflict` or `NotFound` dropped untouched. Then **the solo arm**,
+  `reconcile_unrecorded(ctx, runner_id, held)`: leases the board holds for this runner that its
+  record does not (a crash between the claim's commit and the record), and tasks in `running` or
+  `queued`, or with a run still open, that no lease names (a build older than 043). **Team mode
+  has neither set**: the first expires on the server (053), the second cannot be written once the
+  claim writes the edges and the lease together, and 065 is where its query can go. Then
+  `worktree::reconcile`, never before the lease steps. `ReconciliationReport` loses
+  `tasks_left_running`, and the shell's two steps are named "reconcile the leases this runner
+  held" and "reconcile runs no lease recorded" (D11).
+
+**Binds.** 044, 045, 052, 053, 055, 056, 057, 058, 060, 061, 065, 067.
 
 ---
 
