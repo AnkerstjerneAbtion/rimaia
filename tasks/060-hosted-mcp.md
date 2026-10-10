@@ -167,8 +167,9 @@ wildcard arm. A tool added later does not compile until someone decides.
   `set_strategy_catalogue`, `get_strategy_defaults`, `set_strategy_defaults`,
   `get_strategy_approval`, `set_strategy_approval`, `plan_tasks_strategy` and
   `get_analytics`. Add every tool from 033 to 059 whose handler reaches `TeamScope::sole()`
-  or 039's single-team refusal: at least 034's digest reads, 021's team review settings and
-  045's trust-list and ceiling tools. Check each against its handler; do not copy this list.
+  or 039's single-team refusal: at least 034's digest reads and 021's team review settings.
+  045's trust-list tools moved to 061 (045's Notes, "The split"), which applies this rule to
+  them. Check each against its handler; do not copy this list.
 - **`false`: an id in the request determines the team, or the tool is about the person.**
   These include `get_task`, `update_task`, `move_task`, the link, dependency and strategy
   tools on one task, `plan_task_strategy`, 045's `assign_task`, 051's team tools (they take a

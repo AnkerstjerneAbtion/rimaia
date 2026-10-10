@@ -58,30 +58,31 @@ reviewable in the app afterwards.
 | 45 | [044](044-branch-from-the-dependencys-commit.md) | Branch from the dependency's commit | v0.5 | 043 | #34 |
 | 46 | [067](067-the-model-rule-and-who-may-start-a-run.md) | The model rule, and who may start a run | v0.5 | 043 | #34 |
 | 47 | [045](045-consent-and-eligibility.md) | Consent and eligibility | v0.5 | 021, 039, 043, 044, 067 | — |
-| 48 | [046](046-the-server-crate-and-one-command-registry.md) | The server crate and one command registry | v0.5 | 028, 037, 045 | — |
-| 49 | [047](047-identity.md) | Identity: sign-in, sessions and tokens | v0.5 | 046 | — |
-| 50 | [048](048-events-over-sse.md) | Change events over SSE, filtered by team | v0.5 | 047 | — |
-| 51 | [049](049-frontend-transport.md) | A frontend transport per command kind | v0.5 | 048, 028, 017 | — |
-| 52 | [050](050-the-web-shell.md) | The web shell | v0.5 | 049 | — |
-| 53 | [051](051-teams-invitations-and-roles.md) | Teams, invitations and roles | v0.5 | 050 | — |
-| 54 | [052](052-the-runner-protocol-and-an-http-board-adapter.md) | The runner protocol and an HTTP board adapter | v0.5 | 051 | — |
-| 55 | [070](070-a-context-that-acts-for-nobody.md) | A context that acts for nobody | v0.5 | 045, 046, 048, 051, 052 | — |
-| 56 | [053](053-leases-across-the-network.md) | Leases across the network | v0.5 | 052, 070 | — |
-| 57 | [054](054-repositories-by-remote.md) | Repositories by remote, checkouts by runner | v0.5 | 052, 053 | — |
-| 58 | [055](055-the-run-scoped-proxy-and-consent-laundering.md) | The run-scoped proxy, and runs that cannot launder consent | v0.5 | 053, 054 | — |
-| 59 | [056](056-transcripts-leave-the-machine.md) | Transcripts leave the machine | v0.5 | 053, 054, 055, 066 | — |
-| 60 | [068](068-transcript-retention-on-the-server.md) | Transcript retention on the server | v0.5 | 056 | — |
-| 61 | [057](057-push-postcondition-and-run-elsewhere.md) | Push postcondition, and run elsewhere | v0.5 | 053, 054, 056 | — |
-| 62 | [058](058-the-headless-runner.md) | The headless runner | v0.5 | 055, 056, 057 | — |
-| 63 | [059](059-desktop-connected-mode.md) | Desktop connected mode | v0.5 | 058 | — |
-| 64 | [060](060-hosted-mcp.md) | Hosted MCP | v0.5 | 055, 059, 068 | — |
-| 65 | [071](071-close-the-hosted-mcp-parity-gaps.md) | Close the hosted MCP parity gaps | v0.5 | 060 | — |
-| 66 | [061](061-assignment-consent-and-runners-in-the-interface.md) | Assignment and consent in the interface | v0.5 | 045, 059, 060 | — |
-| 67 | [069](069-runners-in-the-interface.md) | Runners in the interface | v0.5 | 061 | — |
-| 68 | [062](062-hosting.md) | Hosting, backups and observability | v0.5 | 056, 058, 060, 068 | — |
-| 69 | [063](063-a-signed-desktop-updater.md) | A signed desktop updater | v0.5 | 059, 061, 069 | — |
-| 70 | [064](064-docs-and-ci-final-pass.md) | Docs, CLAUDE.md and CI final pass | v0.5 | 060, 061, 062, 063, 069, 071 | — |
-| 71 | [065](065-drop-retired-columns.md) | Drop retired columns | v0.5 | 064 | — |
+| 48 | [072](072-the-strategy-ceiling-at-spawn-and-what-the-agent-is-told.md) | The strategy ceiling at spawn, and what the agent is told | v0.5 | 045 | — |
+| 49 | [046](046-the-server-crate-and-one-command-registry.md) | The server crate and one command registry | v0.5 | 028, 037, 045, 072 | — |
+| 50 | [047](047-identity.md) | Identity: sign-in, sessions and tokens | v0.5 | 046 | — |
+| 51 | [048](048-events-over-sse.md) | Change events over SSE, filtered by team | v0.5 | 047 | — |
+| 52 | [049](049-frontend-transport.md) | A frontend transport per command kind | v0.5 | 048, 028, 017 | — |
+| 53 | [050](050-the-web-shell.md) | The web shell | v0.5 | 049 | — |
+| 54 | [051](051-teams-invitations-and-roles.md) | Teams, invitations and roles | v0.5 | 050 | — |
+| 55 | [052](052-the-runner-protocol-and-an-http-board-adapter.md) | The runner protocol and an HTTP board adapter | v0.5 | 051 | — |
+| 56 | [070](070-a-context-that-acts-for-nobody.md) | A context that acts for nobody | v0.5 | 045, 046, 048, 051, 052 | — |
+| 57 | [053](053-leases-across-the-network.md) | Leases across the network | v0.5 | 052, 070 | — |
+| 58 | [054](054-repositories-by-remote.md) | Repositories by remote, checkouts by runner | v0.5 | 052, 053 | — |
+| 59 | [055](055-the-run-scoped-proxy-and-consent-laundering.md) | The run-scoped proxy, and runs that cannot launder consent | v0.5 | 053, 054 | — |
+| 60 | [056](056-transcripts-leave-the-machine.md) | Transcripts leave the machine | v0.5 | 053, 054, 055, 066 | — |
+| 61 | [068](068-transcript-retention-on-the-server.md) | Transcript retention on the server | v0.5 | 056 | — |
+| 62 | [057](057-push-postcondition-and-run-elsewhere.md) | Push postcondition, and run elsewhere | v0.5 | 053, 054, 056 | — |
+| 63 | [058](058-the-headless-runner.md) | The headless runner | v0.5 | 055, 056, 057 | — |
+| 64 | [059](059-desktop-connected-mode.md) | Desktop connected mode | v0.5 | 058 | — |
+| 65 | [060](060-hosted-mcp.md) | Hosted MCP | v0.5 | 055, 059, 068 | — |
+| 66 | [071](071-close-the-hosted-mcp-parity-gaps.md) | Close the hosted MCP parity gaps | v0.5 | 060 | — |
+| 67 | [061](061-assignment-consent-and-runners-in-the-interface.md) | Assignment and consent in the interface | v0.5 | 045, 059, 060 | — |
+| 68 | [069](069-runners-in-the-interface.md) | Runners in the interface | v0.5 | 061, 072 | — |
+| 69 | [062](062-hosting.md) | Hosting, backups and observability | v0.5 | 056, 058, 060, 068 | — |
+| 70 | [063](063-a-signed-desktop-updater.md) | A signed desktop updater | v0.5 | 059, 061, 069 | — |
+| 71 | [064](064-docs-and-ci-final-pass.md) | Docs, CLAUDE.md and CI final pass | v0.5 | 060, 061, 062, 063, 069, 071 | — |
+| 72 | [065](065-drop-retired-columns.md) | Drop retired columns | v0.5 | 064 | — |
 
 ## Before task 001
 

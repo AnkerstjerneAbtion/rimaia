@@ -3,7 +3,7 @@ id: "069"
 title: Runners in the interface
 milestone: v0.5
 status: ready
-depends_on: ["061"]
+depends_on: ["061", "072"]
 adrs: ["0031", "0033", "0034", "0032", "0024", "0012"]
 size: L
 ---
@@ -238,11 +238,11 @@ design (054), so no detail or remediation is shown.
 `This machine's limits`, rendered whenever the capabilities name a local runner, solo
 included. In the browser it is not shown.
 
-- **Strategy ceiling** (045's `get_strategy_ceiling` / `set_strategy_ceiling`). `Models` is
+- **Strategy ceiling** (072's `get_strategy_ceiling` / `set_strategy_ceiling`). `Models` is
   `Any model` or a checked subset of the team's catalogue models, in catalogue order.
   `Highest effort` is `No limit` or one of the catalogue's efforts, cheapest first. `Any
   model` stores `models: null`, and `No limit` stores `max_effort: null`. Under them,
-  `ceilingNote(ceiling, catalogue)` in `src/lib/runners.ts`, because 045's `judge` fills
+  `ceilingNote(ceiling, catalogue)` in `src/lib/runners.ts`, because 045's `judge` (072 at spawn) fills
   only what a ceiling names:
 
   | Models | Highest effort | Note |
@@ -422,15 +422,15 @@ in `src/views/settings/`: `RepositoriesSection.tsx` (`UNATTENDED_RUNS_GRANT`),
 **Migration:** none.
 
 **What the chain provides.** 043 and 053: the lease, the pin and `runners.last_seen_at`.
-045: the strategy ceiling commands and `set_repository_unattended_ceiling`. 042: the runner
+045: `set_repository_unattended_ceiling`. 072: the strategy ceiling commands. 042: the runner
 limit keys and their readers. 050: `list_runners`, `RunnersSection` and its gates. 051:
 memberships. 052: `runnerId` on Run now and Retry. 054: `list_repository_runners`,
 `list_runner_doctor_reports`, `Repository.remote`, `TaskDetail.archiveOutcome`, the mapping
 commands and the board `register_repository`. 057: `run_task_elsewhere`,
 `list_run_elsewhere_targets` and the inventory's `fencedAt`. 059: `localRunnerId`. 061: the
 batched-read pattern, `UserRef` and the `team` scenarios. `depends_on` names 061, which
-reaches all of them. If one is not where this file says, stop and ask rather than build a
-second copy.
+reaches all of them but 072, so it names 072 too. If one is not where this file says, stop
+and ask rather than build a second copy.
 
 **References to 061 that are this task's.** Written before the split: 042 (the limits
 control), 043 and 053 (holder and pin), 045 (the ceiling control, and its doors if 045's

@@ -67,6 +67,19 @@ and acceptance") has nothing to click without it.
 
 ## Scope
 
+**0. First commit: the doors for trust and eligibility (045's second cut).** 045 wrote the
+services `consent::set_trust`, `consent::list_trusted` and `consent::set_runner_eligibility`
+with their tests, and left their doors here (045's Notes, "The split"). Three board commands
+in `src-tauri/src/commands/`, registered in both `generate_handler!` lists, wrapped in
+`src/lib/commands.ts`, and exposed as MCP tools with the same names: `set_author_trust`,
+`list_trusted_authors` and `set_runner_eligibility`. Each is a thin adapter, refused to runs in
+`Tool::run_access`, added to 039's two-team registry test and to D32's appendix, and given a
+solo fixture row: `set_author_trust` and `set_runner_eligibility` answer success without
+changing the seed, and `list_trusted_authors` answers `[]`. **`set_author_trust` is the one
+that matters:** a run that could trust would launder consent through its own handle. The
+hosted MCP tools follow 060's `team` rule for each, checked against its handler. These land
+in one commit before anything below, with the tests in "The doors" under Acceptance criteria.
+
 **1. The board read carries assignment, the plan request and the viewer's consent.** A
 D12 amendment, following 037's pattern exactly: `list_tasks` runs `TASK_SUMMARY_SELECT`,
 then a fixed number of batched reads keyed by task id, then Rust functions per task in
@@ -337,6 +350,10 @@ Rust tests use the real SQLite harness, 039's `TwoTeams` and 038's builders, and
 `@tauri-apps/api/core` and at 049's HTTP mock, never at the wrappers, and assert exact
 command names, arguments and strings.
 
+- **The doors** (Scope 0): `a_run_cannot_trust_through_its_handle`, `set_author_trust` refused
+  on the run-scoped route for every grant; `every_registered_tool_has_a_run_scope_decision`
+  and 039's registry test cover all three; 028's fixture coverage test passes with their rows,
+  `fixtures.test.ts` unmodified; and D32's appendix lists them.
 - **The board read**, in a new `crates/core/tests/team_board.rs`:
   - `the_card_and_get_task_consent_agree_on_what_is_missing`: for every listed task whose
     `consent` is `Some`, `missing` equals `get_task_consent`'s missing pieces less the two
@@ -471,9 +488,10 @@ control). Then the seam entries:
 
 **What the chain provides.**
 
-- **045:** `assign_task`, `accept_content`, `set_author_trust`, `list_trusted_authors`,
-  `set_runner_eligibility`, `get_task_consent`; `pieces_for`, `consents`, `decide` and the
-  input loader; the refusal sentences; `Task`'s authorship fields.
+- **045:** `assign_task`, `accept_content`, `get_task_consent`; the services behind
+  `set_author_trust`, `list_trusted_authors` and `set_runner_eligibility`, whose doors are
+  Scope 0's; `pieces_for`, `consents`, `decide` and the input loader; the refusal sentences;
+  `Task`'s authorship fields.
 - **044:** `choose` over rows, and `BaseDependency::run_id`.
 - **021 and 037:** the override rule inside `pieces_for(Review)`, `review_loop` on the
   summary, `OpenFindingsList`, `ReviewSection`.
@@ -489,9 +507,9 @@ control). Then the seam entries:
 is named. Every other task above is ordered before 059. If any of these is not where this
 file says, stop and ask rather than build a second copy.
 
-**If a neighbour took its cut.** 045's second cut moves the doors for trust and
-eligibility into this task's first commit, exactly as 045's Scope 10 describes them (the
-ceiling's doors go to 069). 060's first cut moves `request_task_strategy` and
+**If a neighbour took its cut.** 045's second cut fired: the doors for trust and
+eligibility are Scope 0. The team ceiling's door stayed in 045, and the strategy ceiling's
+commands went to 072. 060's first cut moves `request_task_strategy` and
 `request_tasks_strategy` here, as 060's Scope 5 describes them, with their registry,
 fixture and appendix rows. Its second moves the token dialog's `claude mcp add` line here.
 Each arrives with that task's tests and strings, unchanged.

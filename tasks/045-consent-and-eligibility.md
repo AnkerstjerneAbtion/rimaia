@@ -26,13 +26,14 @@ hold, and all four are checked in `board::lease::eligible`, the one function 043
   runner's own consent is still checked by the runner, in its own store, before it spawns.
 - **The runner's strategy ceiling (point 3's last paragraph).** The model and effort the
   run would use are within what this runner allows. This is a cost control, not consent.
+  The claim refuses with it here; judging again at spawn and filling an absent choice are
+  072's.
 
-The prompt then states the two facts point 7 names: who wrote the plan revision being
-executed, and whose machine and credentials it runs on.
+`RunContext` carries the two facts point 7 names: who wrote the plan revision being executed,
+and whose machine and credentials it runs on. Task 072 puts them in the prompt.
 
 **In solo nothing changes that anyone can see.** Every piece of content is the solo user's,
-every task is in their personal team, the runner has no strategy ceiling, and a personal
-team's prompt is byte for byte what it was.
+every task is in their personal team, and the runner has no strategy ceiling.
 
 ## Why now
 
@@ -271,13 +272,13 @@ checkouts in `repositories`, and leaves the re-check to this task. Its test
 `the_queue_offers_the_board_only_consented_repositories` is built by 042, in
 `crates/runner/tests/queue.rs`, and stays 042's. At the last point
 before the agent process starts, after composition and `prepare`, in the process that
-spawns it, the runner reads `checkouts.unattended_consent` (066) and its strategy ceiling again, and
-calls `ceiling::judge` on the phase's strategy from the context. It spawns with that result
-(Scope 8). A refusal releases, records the reason as the run's refusal, and spawns nothing.
+spawns it, the runner reads `checkouts.unattended_consent` (066) again. A refusal releases,
+records the reason as the run's refusal, and spawns nothing. Task 072 adds the strategy
+ceiling to the same point.
 This holds for the queue, Run now, Retry now and Plan now, and for every phase a `Continue`
 starts. The runner store reaches that point by the route 041 gave `run_environment`, read
-when each run starts. The board is not trusted to have honoured `repositories` or the
-claim's ceiling, which is why the re-check exists.
+when each run starts. The board is not trusted to have honoured `repositories`, which is why
+the re-check exists.
 
 **8. The runner's strategy ceiling.** A runner setting in `runner.db`'s `runner_settings`
 (ADR-0028 point 2's table), key `strategy_ceiling`, JSON:
@@ -298,6 +299,7 @@ Absent means no ceiling, which is every existing install. The rule, as
   cheapest first. An effort the catalogue does not list exceeds every ceiling.
 - **An absent choice is filled.** No model anywhere means the first of `models`. No effort
   means `max_effort`. The filled half's origin is a new `StrategyOrigin::RunnerCeiling`.
+  `judge` implements this; the runner that spawns with the filled result is 072's.
 - It applies to every purpose: the effective strategy for implementation and fix, the
   planner budget for strategy, and 021's review model and effort for review.
 
@@ -305,15 +307,10 @@ Absent means no ceiling, which is every existing install. The rule, as
 the ceiling travels with the claim, as ADR-0031 point 1 sends the provider:
 `ClaimTarget::Next`, `Run` and `Plan` each gain `ceiling: StrategyCeiling`, and so does
 `FinishRun`, for the phase a `Continue` would start. All are `#[serde(default)]`. `eligible`
-calls `judge` and uses only its refusal. The runner calls `judge` again at spawn (Scope 7)
-and spawns with its result. So `RunnerCeiling` appears only in the strategy a runner spawns
-with, never in the board's per-task resolution: `TaskSummary` and `TaskDetail`'s
-`effectiveOrigin` cannot carry it, and `src/types.ts`'s `StrategyOrigin` does not gain it.
+calls `judge` and uses only its refusal. Judging again at spawn, spawning with the result,
+and the local commands that read and write the ceiling are 072's.
 
-Local commands `get_strategy_ceiling` and `set_strategy_ceiling`, plus a local MCP tool
-through 041's host-injected surface, read and write it.
-
-**9. What the agent is told (point 7).** `RunContext` gains `authorship:
+**9. The authorship facts (point 7).** `RunContext` gains `authorship:
 Option<RunAuthorship>`, filled board-side from the lease's runner:
 
 ```rust
@@ -326,50 +323,36 @@ pub struct RunAuthorship {
 ```
 
 It is `None` in a personal team, where every author and the machine's owner are one person
-and the facts would say nothing. `runner::prompt`'s shared `task_context`, which every
-composer with a `# Task context` section uses, gains a parameter for it. When it is `Some`,
-two lines follow `- Base ref:` and come before `- Links:`, exactly:
+and the facts would say nothing. Rendering it into the prompt is 072's.
 
-```
-- Plan revision: 4, written by @alice
-- Running on: @bob's runner "Mac mini", with @bob's credentials
-```
-
-A deleted author renders as `written by a former member`. Nothing goes into
-`--append-system-prompt`, because these facts describe the situation, and are not rules the
-agent must obey (ADR-0009). `compose_resume_prompt` and 021's continuation are unchanged,
-because a resumed session already holds them. The persisted `runs.prompt` carries the lines,
-which is what makes the transcript honest.
-
-**10. Doors (ADR-0021 parity, ADR-0006).** Seven board commands in `src-tauri/src/commands/`,
+**10. Doors (ADR-0021 parity, ADR-0006).** Four board commands in `src-tauri/src/commands/`,
 registered in both `generate_handler!` lists, wrapped in `src/lib/commands.ts`, and exposed
 as MCP tools with the same names:
 
 - `assign_task`
 - `accept_content` (`teamId`, optional `taskId`, `kind`, `revision`)
-- `set_author_trust` and `list_trusted_authors`
-- `set_runner_eligibility`
 - `set_repository_unattended_ceiling`
 - `get_task_consent`
 
-Plus the two local commands from Scope 8. Each is a thin adapter over the service above.
-Every one of them is refused to runs in `Tool::run_access`. **`accept_content` and
-`set_author_trust` are the ones that matter:** a run that could accept or trust would
-launder consent through its own handle. Each is added to 039's two-team registry test and to
-D32's appendix (D32 point 8). A refusal crosses the boundary as the one error type (D8).
+Each is a thin adapter over the service above. Every one of them is refused to runs in
+`Tool::run_access`. **`accept_content` is the one that matters:** a run that could accept
+would launder consent through its own handle. Each is added to 039's two-team registry test
+and to D32's appendix (D32 point 8). A refusal crosses the boundary as the one error type
+(D8).
+
+The doors for trust and eligibility (`set_author_trust`, `list_trusted_authors`,
+`set_runner_eligibility`) are 061's first commit, over the services this task writes; the
+strategy ceiling's local commands are 072's (Notes, "Size").
 
 **Fixtures.** 028's rule is that every command `commands.ts` sends has a row in the fixture
 table in `src/dev/fixtures/`, and its coverage test fails on a wrapper without one. So all
-nine wrappers get a row, and fixture mode is a solo board, so each answers the solo shape:
+four wrappers get a row, and fixture mode is a solo board, so each answers the solo shape:
 
-- `assign_task`, `accept_content`, `set_author_trust`, `set_runner_eligibility` and
-  `set_strategy_ceiling` answer success without changing the seed, as every fixture write
-  does (028).
-- `list_trusted_authors` answers `[]`: in solo there is nobody else to trust.
+- `assign_task` and `accept_content` answer success without changing the seed, as every
+  fixture write does (028).
 - `get_task_consent` answers the solo `TaskConsent` for any task: `Assigned`, no pin, the
   team ceiling not consulted, and no missing piece. `TaskConsent` is in `src/types.ts`, so
   the row is typed against it.
-- `get_strategy_ceiling` answers no ceiling, which is every existing install.
 - `set_repository_unattended_ceiling` answers an explicit `invalid` refusal with Scope 11's
   personal-team sentence, because that is what a solo board says to it.
 
@@ -502,7 +485,6 @@ not allow unattended runs in this repository`.
   - `a_consent_lost_before_composition_ends_the_lease_and_answers_conflict`: no
     `runner_leases` row remains, and the task is where `release` lands it;
   - `a_fix_phase_whose_findings_lost_consent_is_released_instead_of_continued`;
-  - `a_review_phase_reached_through_continue_with_a_model_outside_the_ceiling_is_released`;
   - `a_team_that_forbids_unattended_runs_blocks_every_runner`;
   - `a_personal_team_ignores_the_ceiling_column`, on the default `start`.
 - Ceiling unit tests in `consent/ceiling.rs`:
@@ -514,25 +496,16 @@ not allow unattended runs in this repository`.
   string.
 - Runner tests, with a real git repository in a `TempDir` and the fixture CLI stream:
   `a_runner_refuses_to_spawn_where_it_never_consented_even_when_the_board_claims_it`, for
-  the queue, Run now, Plan now and a phase started by `Continue`, and
-  `a_ceiling_lowered_after_the_claim_refuses_the_spawn`. Each time the fixture CLI is never
-  invoked and the lease is released.
-- Prompt tests assert whole strings (CLAUDE.md):
-  - `a_team_prompt_states_who_wrote_the_plan_and_whose_machine_runs_it`, for
-    `compose_prompt`, the strategy prompt, and 021's review and fix prompts. Each expected
-    string contains the two lines from Scope 9 verbatim;
-  - `a_deleted_author_is_named_a_former_member`;
-  - `a_personal_team_prompt_is_unchanged`. Every pre-existing exact-string prompt test
-    passes with its expected string untouched.
-- `a_run_cannot_accept_or_trust_through_its_handle`: `accept_content` and `set_author_trust`
-  are refused on the run-scoped route for every grant.
+  the queue, Run now, Plan now and a phase started by `Continue`. Each time the fixture CLI
+  is never invoked and the lease is released.
+- `a_run_cannot_accept_through_its_handle`: `accept_content` is refused on the run-scoped
+  route for every grant.
   `every_registered_tool_has_a_run_scope_decision` and 039's registry test both cover every
   new tool and command.
 - 028's `it("has an answer or an explicit refusal for every command commands.ts sends")`
-  passes with a row for each of the nine commands, answering as Scope 10's Fixtures list
-  says: `assign_task`, `accept_content`, `set_author_trust`, `list_trusted_authors`,
-  `set_runner_eligibility`, `set_repository_unattended_ceiling`, `get_task_consent`,
-  `get_strategy_ceiling` and `set_strategy_ceiling`. `fixtures.test.ts` itself is
+  passes with a row for each of the four commands, answering as Scope 10's Fixtures list
+  says: `assign_task`, `accept_content`, `set_repository_unattended_ceiling` and
+  `get_task_consent`. `fixtures.test.ts` itself is
   unmodified, `npm run typecheck` passes with the rows typed against `src/types.ts`, and
   028's bundle test still finds no fixture in the production build.
 - **Solo is unchanged.** No existing test's behavioural assertion changes. The diffs are
@@ -609,9 +582,12 @@ has nowhere to go.
 - 055: the mark in place, so its part of point 6 only removes surfaces.
 - 057: a reassigned pin that "run elsewhere" releases, and Scope 11's sentences.
 - 060: `assign_task` exposed unchanged; the task id determines the team.
-- 061: `get_task_consent`, `list_trusted_authors`, the runner policy and the ceiling, with
-  every refusal sentence and queue label already written, and a solo fixture row for each
-  of the nine commands for its `team` scenarios to extend.
+- 061: `get_task_consent`, the trust and eligibility services to put doors on in its first
+  commit, every refusal sentence and queue label already written, and a solo fixture row
+  for each of the four commands for its `team` scenarios to extend.
+- 069: `set_repository_unattended_ceiling` to render.
+- 072: `judge`, the claim's ceiling, the runner's consent re-check to add the ceiling beside,
+  and `RunContext::authorship` to render.
 
 **Size.** L, at the upper edge of one session: roughly 60 lines of SQL, 1,200 of consent,
 eligibility and ceiling code with its unit tests, 900 of claim, service and runner tests,
@@ -630,3 +606,19 @@ order:
 
 Never cut the mark, the claim checks, or the runner's re-check. Those are the property the
 task exists for.
+
+**The split, 2026-10-10.** The diff passed the limit at about 3,940 lines with roughly half
+the task left, and was estimated at about 6,500 finished, 5,500 even after both cuts. Both
+cuts fired, and Scope 9's prompt change went with the first:
+
+- **To 072** (new, placed directly after this task): the runner's spawn-time `judge` and the
+  fill, `get_strategy_ceiling`/`set_strategy_ceiling` and their local MCP tool, the ceiling
+  contract case, `a_ceiling_lowered_after_the_claim_refuses_the_spawn`, and the two prompt
+  lines with their tests.
+- **To 061's first commit:** the doors for trust and eligibility, with their fixture rows and
+  their half of the run-scope test (`a_run_cannot_trust_through_its_handle`).
+- **Stays here:** everything the ceiling already had when the split was made, because the
+  claim already refuses with it: `consent::ceiling::judge` and its unit tests, the `ceiling`
+  fields on the three `ClaimTarget`s and `FinishRun`, the `strategy_ceiling` key in
+  `runner.db`, and `StrategyOrigin::RunnerCeiling`. And `set_repository_unattended_ceiling`'s
+  door, which 051 and 060 build on before 069 renders it.

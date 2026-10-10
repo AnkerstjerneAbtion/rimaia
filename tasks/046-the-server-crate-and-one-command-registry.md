@@ -3,7 +3,7 @@ id: "046"
 title: The server crate and one command registry
 milestone: v0.5
 status: ready
-depends_on: ["028", "037", "045"]
+depends_on: ["028", "037", "045", "072"]
 adrs: ["0023", "0027", "0029", "0030", "0034", "0037"]
 size: L
 ---

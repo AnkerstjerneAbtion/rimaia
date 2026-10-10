@@ -6671,6 +6671,7 @@ An implementation task reads the entries its number appears in, before writing c
 | [043](../tasks/043-runner-leases.md) | D4 · D6 · D8 · D9 · D10 · D11 · D14 · D15 · D17 · D19 · D21 · D23 · D27 · D28 · D29 · D30 · D31 · D32 · D33 |
 | [044](../tasks/044-branch-from-the-dependencys-commit.md) | D4 · D5 · D8 · D18 · D20 · D28 · D29 · D31 · D32 · D33 |
 | [045](../tasks/045-consent-and-eligibility.md) | D2 · D3 · D4 · D6 · D8 · D10 · D12 · D16 · D17 · D21 · D23 · D27 · D28 · D29 · D30 · D31 · D32 · D33 · D34 |
+| [072](../tasks/072-the-strategy-ceiling-at-spawn-and-what-the-agent-is-told.md) | D3 · D8 · D10 · D28 · D30 · D31 · D32, and 045's entry |
 | [046](../tasks/046-the-server-crate-and-one-command-registry.md) | D2 · D4 · D6 · D7 · D8 · D10 · D11 · D16 · D20 · D26 · D28 · D29 · D31 · D32 · D33 · D34 |
 | [047](../tasks/047-identity.md) | D4 · D6 · D8 · D10 · D11 · D28 · D31 · D32 · D33 · D34 |
 | [048](../tasks/048-events-over-sse.md) | D2 · D4 · D6 · D7 · D8 · D10 · D14 · D24 · D28 · D31 · D32 · D33 · D34 |

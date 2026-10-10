@@ -394,7 +394,7 @@ because it lives on the server's `runners` row and `runner_identity` does not ca
 (D28).
 
 **8. What `run` does not decide.** Capacity, the per-repository cap, the usage-limit pause,
-windows and the strategy ceiling are the runner settings 041, 042 and 045 already read from
+windows and the strategy ceiling are the runner settings 041, 042, 045 and 072 already read from
 `runner.db`, and the loop obeys them unchanged. The go signal is the service running. An
 enabled schedule in `runner.db` still fires through 042's `tick_schedules`, but a headless
 runner has no command to create one (Out of scope), so in practice there is none.
