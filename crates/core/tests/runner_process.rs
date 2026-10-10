@@ -657,7 +657,7 @@ async fn an_unset_blocklist_is_the_default_and_an_emptied_one_is_no_blocklist() 
     let harness = TestContext::new().await;
 
     assert_eq!(
-        disallowed_tools(&harness.context.pool)
+        disallowed_tools(&harness.context, &harness.solo.team_id)
             .await
             .expect("read the default"),
         DEFAULT_DISALLOWED_TOOLS
@@ -666,7 +666,7 @@ async fn an_unset_blocklist_is_the_default_and_an_emptied_one_is_no_blocklist() 
             .collect::<Vec<_>>()
     );
 
-    settings::set(
+    rimaia_core::testing::settings::set(
         &harness.context,
         DISALLOWED_TOOLS,
         "Bash(git push --force:*)\n\n  Bash(rm -rf /:*)  \n",
@@ -674,7 +674,7 @@ async fn an_unset_blocklist_is_the_default_and_an_emptied_one_is_no_blocklist() 
     .await
     .expect("store a list");
     assert_eq!(
-        disallowed_tools(&harness.context.pool)
+        disallowed_tools(&harness.context, &harness.solo.team_id)
             .await
             .expect("read it back"),
         vec![
@@ -684,11 +684,11 @@ async fn an_unset_blocklist_is_the_default_and_an_emptied_one_is_no_blocklist() 
         "blank lines and padding are formatting, not patterns"
     );
 
-    settings::set(&harness.context, DISALLOWED_TOOLS, "")
+    rimaia_core::testing::settings::set(&harness.context, DISALLOWED_TOOLS, "")
         .await
         .expect("empty the list");
     assert_eq!(
-        disallowed_tools(&harness.context.pool)
+        disallowed_tools(&harness.context, &harness.solo.team_id)
             .await
             .expect("read it back"),
         Vec::<String>::new()
@@ -1959,7 +1959,7 @@ impl RunnerFixture {
         let repository = repo::get(&self.harness.context, &self.repository_id)
             .await
             .expect("read the repository");
-        let base = settings::base_instructions(&self.harness.context.pool)
+        let base = settings::base_instructions(&self.harness.context)
             .await
             .expect("read the base instructions");
 

@@ -40,7 +40,6 @@ pub mod window;
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use sqlx::SqlitePool;
 
 use crate::context::ServiceContext;
 use crate::db::{new_id, Schedule, ScheduleMode};
@@ -132,7 +131,7 @@ pub struct ScheduleInput {
 /// reason: a list the user is reading must not move under them.
 pub async fn list(ctx: &ServiceContext) -> Result<Vec<ScheduleView>> {
     let now = ctx.clock.now();
-    Ok(rows(&ctx.pool)
+    Ok(rows(ctx)
         .await?
         .into_iter()
         .map(|schedule| ScheduleView::of(schedule, now))
@@ -146,15 +145,18 @@ pub async fn list(ctx: &ServiceContext) -> Result<Vec<ScheduleView>> {
 /// one wins has to be the same answer on every pass and after every restart, or
 /// a rename would silently change which of two overlapping schedules owns the
 /// night.
-pub async fn enabled(pool: &SqlitePool) -> Result<Vec<Schedule>> {
-    Ok(rows(pool)
+///
+/// Machine state, read unfiltered until task 041 moves `schedules` to the
+/// runner.
+pub async fn enabled(ctx: &ServiceContext) -> Result<Vec<Schedule>> {
+    Ok(rows(ctx)
         .await?
         .into_iter()
         .filter(|schedule| schedule.enabled)
         .collect())
 }
 
-async fn rows(pool: &SqlitePool) -> Result<Vec<Schedule>> {
+async fn rows(ctx: &ServiceContext) -> Result<Vec<Schedule>> {
     let schedules = sqlx::query_as!(
         Schedule,
         r#"
@@ -167,17 +169,20 @@ async fn rows(pool: &SqlitePool) -> Result<Vec<Schedule>> {
         ORDER BY name ASC, id ASC
         "#
     )
-    .fetch_all(pool)
+    .fetch_all(&ctx.pool)
     .await?;
     Ok(schedules)
 }
 
 /// One schedule by id, or `Error::not_found`.
+///
+/// Machine state, read unfiltered until task 041 moves `schedules` to the
+/// runner.
 pub async fn get(ctx: &ServiceContext, id: &str) -> Result<Schedule> {
-    fetch(&ctx.pool, id).await
+    fetch(ctx, id).await
 }
 
-async fn fetch(pool: &SqlitePool, id: &str) -> Result<Schedule> {
+async fn fetch(ctx: &ServiceContext, id: &str) -> Result<Schedule> {
     sqlx::query_as!(
         Schedule,
         r#"
@@ -190,7 +195,7 @@ async fn fetch(pool: &SqlitePool, id: &str) -> Result<Schedule> {
         "#,
         id,
     )
-    .fetch_optional(pool)
+    .fetch_optional(&ctx.pool)
     .await?
     .ok_or_else(|| Error::not_found(format!("no schedule with id {id}")))
 }
@@ -202,8 +207,9 @@ async fn fetch(pool: &SqlitePool, id: &str) -> Result<Schedule> {
 /// immediately, for an occurrence an hour older than the row itself. The user
 /// who typed "every night at 22:00" at 23:00 meant tomorrow.
 pub async fn create(ctx: &ServiceContext, input: ScheduleInput) -> Result<Schedule> {
-    // `schedules` has no team column: until task 041 moves it to the runner,
-    // its events name the context's one team.
+    // `schedules` is machine state with no team: task 041 moves it to the
+    // runner and task 048 moves its events off the team channel, so until then
+    // they name the context's one team, asked before anything is written.
     let team_id = ctx.scope.sole()?.clone();
     let input = validate(input)?;
     let id = new_id();
@@ -230,7 +236,7 @@ pub async fn create(ctx: &ServiceContext, input: ScheduleInput) -> Result<Schedu
     .execute(&ctx.pool)
     .await?;
 
-    let schedule = fetch(&ctx.pool, &id).await?;
+    let schedule = fetch(ctx, &id).await?;
     ctx.publish(ChangeEvent::schedules(team_id, [id]));
     Ok(schedule)
 }
@@ -243,10 +249,11 @@ pub async fn create(ctx: &ServiceContext, input: ScheduleInput) -> Result<Schedu
 /// that was off — which is [`set_enabled`]'s rule, applied here so the two doors
 /// cannot disagree about what enabling means.
 pub async fn update(ctx: &ServiceContext, id: &str, input: ScheduleInput) -> Result<Schedule> {
-    // `schedules` has no team column: until task 041 moves it to the runner,
-    // its events name the context's one team.
+    // `schedules` is machine state with no team: task 041 moves it to the
+    // runner and task 048 moves its events off the team channel, so until then
+    // they name the context's one team, asked before anything is written.
     let team_id = ctx.scope.sole()?.clone();
-    let existing = fetch(&ctx.pool, id).await?;
+    let existing = fetch(ctx, id).await?;
     let input = validate(input)?;
     let mode = input.mode.as_str();
     // Re-arming on an edit that switches a schedule on, for exactly the reason
@@ -279,7 +286,7 @@ pub async fn update(ctx: &ServiceContext, id: &str, input: ScheduleInput) -> Res
     .execute(&ctx.pool)
     .await?;
 
-    let schedule = fetch(&ctx.pool, id).await?;
+    let schedule = fetch(ctx, id).await?;
     ctx.publish(ChangeEvent::schedules(team_id, [id.to_string()]));
     Ok(schedule)
 }
@@ -293,12 +300,13 @@ pub async fn update(ctx: &ServiceContext, id: &str, input: ScheduleInput) -> Res
 /// there is nothing to protect against — a disabled schedule is not due for
 /// anything.
 pub async fn set_enabled(ctx: &ServiceContext, id: &str, enabled: bool) -> Result<Schedule> {
-    // `schedules` has no team column: until task 041 moves it to the runner,
-    // its events name the context's one team.
+    // `schedules` is machine state with no team: task 041 moves it to the
+    // runner and task 048 moves its events off the team channel, so until then
+    // they name the context's one team, asked before anything is written.
     let team_id = ctx.scope.sole()?.clone();
     let armed_at = match enabled {
         true => Some(ctx.clock.now()),
-        false => fetch(&ctx.pool, id).await?.armed_at,
+        false => fetch(ctx, id).await?.armed_at,
     };
 
     let changed = sqlx::query!(
@@ -314,7 +322,7 @@ pub async fn set_enabled(ctx: &ServiceContext, id: &str, enabled: bool) -> Resul
         return Err(Error::not_found(format!("no schedule with id {id}")));
     }
 
-    let schedule = fetch(&ctx.pool, id).await?;
+    let schedule = fetch(ctx, id).await?;
     ctx.publish(ChangeEvent::schedules(team_id, [id.to_string()]));
     Ok(schedule)
 }
@@ -330,8 +338,9 @@ pub async fn set_enabled(ctx: &ServiceContext, id: &str, enabled: bool) -> Resul
 /// module that is not a user action, which is why it is not on the command
 /// surface at all.
 pub async fn record_fire(ctx: &ServiceContext, id: &str, now: DateTime<Utc>) -> Result<()> {
-    // `schedules` has no team column: until task 041 moves it to the runner,
-    // its events name the context's one team.
+    // `schedules` is machine state with no team: task 041 moves it to the
+    // runner and task 048 moves its events off the team channel, so until then
+    // they name the context's one team, asked before anything is written.
     let team_id = ctx.scope.sole()?.clone();
     sqlx::query!(
         "UPDATE schedules SET last_fired_at = ?2 WHERE id = ?1",
@@ -353,8 +362,9 @@ pub async fn record_fire(ctx: &ServiceContext, id: &str, now: DateTime<Utc>) -> 
 /// tomorrow. Closing the window is Stop's job, and the user pressing Stop is a
 /// different sentence from the user tidying up a list.
 pub async fn delete(ctx: &ServiceContext, id: &str) -> Result<()> {
-    // `schedules` has no team column: until task 041 moves it to the runner,
-    // its events name the context's one team.
+    // `schedules` is machine state with no team: task 041 moves it to the
+    // runner and task 048 moves its events off the team channel, so until then
+    // they name the context's one team, asked before anything is written.
     let team_id = ctx.scope.sole()?.clone();
     let changed = sqlx::query!("DELETE FROM schedules WHERE id = ?1", id)
         .execute(&ctx.pool)
@@ -741,7 +751,7 @@ mod tests {
             "turning it off arms nothing"
         );
         assert_eq!(
-            enabled(&harness.context.pool).await.expect("read").len(),
+            enabled(&harness.context).await.expect("read").len(),
             0,
             "and the loop stops seeing it",
         );
@@ -757,7 +767,7 @@ mod tests {
             Some(harness.clock.now()),
             "a month spent off is not a month of nights to catch up on",
         );
-        assert_eq!(enabled(&harness.context.pool).await.expect("read").len(), 1);
+        assert_eq!(enabled(&harness.context).await.expect("read").len(), 1);
     }
 
     #[tokio::test]

@@ -18,10 +18,10 @@ use std::collections::HashMap;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use sqlx::sqlite::SqliteRow;
-use sqlx::{FromRow, Row, SqliteConnection, SqlitePool};
+use sqlx::{FromRow, Row, SqliteConnection};
 
 use crate::archive::OnArchiveOutcome;
-use crate::context::ServiceContext;
+use crate::context::{ScopedTx, ServiceContext};
 use crate::db::{
     new_id, BoardColumn, ExitClass, MutationSource, Run, RunKind, RunState, RunStatus,
     StrategyMode, StrategySource, Task, TaskLink,
@@ -283,14 +283,15 @@ pub async fn create_task(ctx: &ServiceContext, input: NewTask) -> Result<Task> {
     let plan = normalize_plan(input.plan);
     ensure_ready_has_a_plan(column, &plan, &input.title)?;
 
-    let mut tx = ctx.pool.begin().await?;
+    let mut tx = ctx.begin().await?;
 
     // The repository's team, read in this transaction: a task belongs to the
     // team its repository does (ADR-0029 point 1), never to one taken from the
-    // scope, which may name several. The composite foreign key on
-    // `(repository_id, team_id)` is the store's backstop for a writer that
-    // gets this wrong.
-    let team_id = crate::repo::team_of_repository(&mut *tx, &input.repository_id).await?;
+    // scope, which may name several. The lookup is scoped, so another team's
+    // repository is as missing as one never registered. The composite foreign
+    // key on `(repository_id, team_id)` is the store's backstop for a writer
+    // that gets this wrong.
+    let team_id = crate::repo::team_of_repository(&mut tx, &input.repository_id).await?;
     let (position, rebalanced_ids) =
         append_task_position(&mut tx, &input.repository_id, column).await?;
     let id = new_id();
@@ -345,7 +346,7 @@ pub async fn create_task(ctx: &ServiceContext, input: NewTask) -> Result<Task> {
         team_id,
         std::iter::once(id.clone()).chain(rebalanced_ids.into_iter().filter(|rid| rid != &id)),
     ));
-    let created = fetch_task_row(&ctx.pool, &id).await?;
+    let created = task_row(ctx, &id).await?;
     Ok(created)
 }
 
@@ -353,7 +354,9 @@ pub async fn create_task(ctx: &ServiceContext, input: NewTask) -> Result<Task> {
 /// what it depends on, its most recent run (by attempt number), and the
 /// strategy a run would actually spawn with (see [`apply_effective_strategy`]).
 pub async fn get_task(ctx: &ServiceContext, id: &str) -> Result<TaskDetail> {
-    let task = fetch_task_row(&ctx.pool, id).await?;
+    // The scoped read is the gate: everything below reads by this task's id,
+    // and only once the scope has held it.
+    let task = task_row(ctx, id).await?;
 
     let links = sqlx::query_as!(
         TaskLink,
@@ -372,13 +375,13 @@ pub async fn get_task(ctx: &ServiceContext, id: &str) -> Result<TaskDetail> {
     .fetch_all(&ctx.pool)
     .await?;
 
-    let last_run = fetch_last_run(&ctx.pool, id).await?;
+    let last_run = fetch_last_run(ctx, id).await?;
 
     let defaults = defaults_for_repository(ctx, &task.repository_id).await?;
     let effective = effective_strategy(&task, &defaults.repository, &defaults.global);
     let effective_origin = strongest_origin(&effective);
 
-    let review = review_loop::config::resolve(&ctx.pool, id, &task.repository_id).await?;
+    let review = review_loop::config::resolve(ctx, id, &task.repository_id).await?;
     let review_loop = review_loop::summary_for(ctx, id, &review.config).await?;
 
     Ok(TaskDetail {
@@ -409,8 +412,13 @@ pub async fn get_task(ctx: &ServiceContext, id: &str) -> Result<TaskDetail> {
 /// path rather than `query_as!`: the macro needs a query whose shape is
 /// fixed at compile time, and which `WHERE` clauses apply here depends on
 /// which fields of `filter` are `Some` (seam-contract D5).
+///
+/// Entity-less, so it reads one team's board (ADR-0035 point 2): a context
+/// that reaches several is refused rather than handed a merged one.
 pub async fn list_tasks(ctx: &ServiceContext, filter: TaskFilter) -> Result<Vec<TaskSummary>> {
+    let team_id = ctx.scope.sole()?.clone();
     let mut sql = String::from(TASK_SUMMARY_SELECT);
+    sql.push_str(" AND t.team_id = ?");
     if filter.repository_id.is_some() {
         sql.push_str(" AND t.repository_id = ?");
     }
@@ -435,7 +443,7 @@ pub async fn list_tasks(ctx: &ServiceContext, filter: TaskFilter) -> Result<Vec<
         " ORDER BY t.repository_id ASC, t.board_column ASC, t.position ASC, t.created_at ASC, t.id ASC",
     );
 
-    let mut query = sqlx::query_as::<_, TaskSummary>(&sql);
+    let mut query = sqlx::query_as::<_, TaskSummary>(&sql).bind(team_id);
     if let Some(repository_id) = filter.repository_id {
         query = query.bind(repository_id);
     }
@@ -616,16 +624,17 @@ fn strongest_origin(effective: &EffectiveStrategy) -> StrategyOrigin {
     )
 )]
 pub async fn update_task(ctx: &ServiceContext, id: &str, patch: TaskPatch) -> Result<Task> {
-    let mut tx = ctx.pool.begin().await?;
-    let current = fetch_task_row(&mut *tx, id).await?;
-    let team_id = team_of_task(&mut *tx, id).await?;
+    let mut tx = ctx.begin().await?;
+    let current = fetch_task_row(&mut tx, id).await?;
+    let team_id = team_of_task(&mut tx, id).await?;
 
     // Resolved before the patch's own columns are folded in, because it is
     // the one field whose new value depends on rows other than this task's:
     // the destination repository has to exist, nothing may have tied the task
     // to its current one, and the position it lands on is read out of the
     // destination column.
-    let placement = resolve_repository_placement(&mut tx, &current, patch.repository_id).await?;
+    let placement =
+        resolve_repository_placement(&mut tx, &current, &team_id, patch.repository_id).await?;
 
     let title = match patch.title {
         Some(title) => {
@@ -683,7 +692,7 @@ pub async fn update_task(ctx: &ServiceContext, id: &str, patch: TaskPatch) -> Re
         std::iter::once(id.to_string())
             .chain(placement.rebalanced_ids.into_iter().filter(|rid| rid != id)),
     ));
-    let updated = fetch_task_row(&ctx.pool, id).await?;
+    let updated = task_row(ctx, id).await?;
     Ok(updated)
 }
 
@@ -706,10 +715,10 @@ pub async fn update_task(ctx: &ServiceContext, id: &str, patch: TaskPatch) -> Re
     )
 )]
 pub async fn delete_task(ctx: &ServiceContext, id: &str) -> Result<()> {
-    let mut tx = ctx.pool.begin().await?;
-    fetch_task_row(&mut *tx, id).await?;
+    let mut tx = ctx.begin().await?;
+    fetch_task_row(&mut tx, id).await?;
 
-    let mut dependents: Vec<String> = super::dependencies::dependents_in(&mut *tx, id)
+    let mut dependents: Vec<String> = super::dependencies::dependents_in(&mut tx, id)
         .await?
         .into_iter()
         .map(|dependent| dependent.title)
@@ -822,7 +831,7 @@ pub struct ArchiveReport {
     )
 )]
 pub async fn archive_task(ctx: &ServiceContext, id: &str) -> Result<ArchivedTask> {
-    let task = fetch_task_row(&ctx.pool, id).await?;
+    let task = task_row(ctx, id).await?;
 
     if crate::worktree::cleanup::is_live(task.run_state) {
         return Err(Error::invalid(format!(
@@ -901,7 +910,7 @@ pub async fn archive_task(ctx: &ServiceContext, id: &str) -> Result<ArchivedTask
     )
 )]
 pub async fn unarchive_task(ctx: &ServiceContext, id: &str) -> Result<Task> {
-    let task = fetch_task_row(&ctx.pool, id).await?;
+    let task = task_row(ctx, id).await?;
     if task.archived_at.is_none() {
         return Ok(task);
     }
@@ -916,7 +925,7 @@ pub async fn unarchive_task(ctx: &ServiceContext, id: &str) -> Result<Task> {
     .await?;
 
     ctx.publish(ChangeEvent::tasks(team_id, [id.to_string()]));
-    fetch_task_row(&ctx.pool, id).await
+    task_row(ctx, id).await
 }
 
 /// Archives every task in `ids`, reporting what it would not touch.
@@ -951,7 +960,9 @@ pub async fn archive_tasks(ctx: &ServiceContext, ids: &[String]) -> Result<Archi
                 // The title is worth a second read: a report that named ten
                 // uuids would be unreadable, and the row may be gone entirely,
                 // in which case the id is genuinely all there is to say.
-                let title = fetch_task_row(&ctx.pool, id)
+                // Scoped like every read: another team's id reads as a
+                // missing one, and gets its id back rather than its title.
+                let title = task_row(ctx, id)
                     .await
                     .map(|task| task.title)
                     .unwrap_or_else(|_| id.clone());
@@ -1074,9 +1085,9 @@ async fn move_into_column(
     column: BoardColumn,
     destination: Destination<'_>,
 ) -> Result<Task> {
-    let mut tx = ctx.pool.begin_with("BEGIN IMMEDIATE").await?;
+    let mut tx = ctx.begin_immediate().await?;
     let rebalanced_ids = move_within(ctx, &mut tx, id, column, destination).await?;
-    let team_id = team_of_task(&mut *tx, id).await?;
+    let team_id = team_of_task(&mut tx, id).await?;
 
     tx.commit().await?;
 
@@ -1088,7 +1099,7 @@ async fn move_into_column(
         team_id,
         std::iter::once(id.to_string()).chain(rebalanced_ids.into_iter().filter(|rid| rid != id)),
     ));
-    let updated = fetch_task_row(&ctx.pool, id).await?;
+    let updated = task_row(ctx, id).await?;
 
     // Task 016's optional auto-removal, here rather than in a command so that
     // the board and the MCP server get it identically (ADR-0006) — a policy
@@ -1120,12 +1131,12 @@ async fn move_into_column(
 /// forced rebalance renumbered, which the caller publishes alongside its own.
 pub(crate) async fn move_within(
     ctx: &ServiceContext,
-    tx: &mut SqliteConnection,
+    tx: &mut ScopedTx,
     id: &str,
     column: BoardColumn,
     destination: Destination<'_>,
 ) -> Result<Vec<String>> {
-    let task = fetch_task_row(&mut *tx, id).await?;
+    let task = fetch_task_row(tx, id).await?;
 
     ensure_ready_has_a_plan(column, &task.plan, &task.title)?;
 
@@ -1144,15 +1155,8 @@ pub(crate) async fn move_within(
         Destination::Bottom => (bottom.as_deref(), None),
     };
 
-    let (position, rebalanced_ids) = resolve_task_position(
-        &mut *tx,
-        &task.repository_id,
-        column,
-        id,
-        before_id,
-        after_id,
-    )
-    .await?;
+    let (position, rebalanced_ids) =
+        resolve_task_position(tx, &task.repository_id, column, id, before_id, after_id).await?;
 
     let now = ctx.clock.now();
     sqlx::query!(
@@ -1162,7 +1166,7 @@ pub(crate) async fn move_within(
         now,
         id,
     )
-    .execute(&mut *tx)
+    .execute(&mut **tx)
     .await?;
     Ok(rebalanced_ids)
 }
@@ -1256,8 +1260,9 @@ struct RepositoryPlacement {
 /// so no reader ever sees the row filed under a repository it has no position
 /// in.
 async fn resolve_repository_placement(
-    tx: &mut SqliteConnection,
+    tx: &mut ScopedTx,
     current: &Task,
+    current_team: &str,
     requested: Option<String>,
 ) -> Result<RepositoryPlacement> {
     let unchanged = || RepositoryPlacement {
@@ -1273,11 +1278,11 @@ async fn resolve_repository_placement(
         return Ok(unchanged());
     }
 
-    ensure_repository_exists(&mut *tx, &repository_id).await?;
-    ensure_repository_is_reassignable(&mut *tx, current).await?;
+    ensure_repository_is_in_the_tasks_team(tx, &repository_id, current_team).await?;
+    ensure_repository_is_reassignable(tx, current).await?;
 
     let (position, rebalanced_ids) =
-        append_task_position(&mut *tx, &repository_id, current.column).await?;
+        append_task_position(tx, &repository_id, current.column).await?;
 
     Ok(RepositoryPlacement {
         repository_id,
@@ -1286,24 +1291,30 @@ async fn resolve_repository_placement(
     })
 }
 
-/// The schema's foreign key already refuses a `repository_id` naming nothing,
-/// but as a constraint violation the user cannot read. This is the message
-/// they get instead — deliberately the same sentence, and the same
-/// [`Error::not_found`], that `repo::get` answers the identical question
-/// with, so "that repository id does not exist" does not depend on which door
-/// asked (ADR-0006).
-async fn ensure_repository_exists(tx: &mut SqliteConnection, repository_id: &str) -> Result<()> {
-    let count: i64 = sqlx::query_scalar!(
-        "SELECT count(*) FROM repositories WHERE id = ?1",
-        repository_id,
-    )
-    .fetch_one(&mut *tx)
-    .await?;
-
-    if count == 0 {
-        return Err(Error::not_found(format!(
-            "no repository with id {repository_id}"
-        )));
+/// The destination repository has to be one the scope holds, and in the
+/// task's own team.
+///
+/// One outside the scope is `NotFound`, in the sentence `repo::get` answers a
+/// repository that was never registered with, so "that repository id does not
+/// exist" depends neither on which door asked (ADR-0006) nor on whether
+/// another team has one by that id (ADR-0029 point 5). The schema's foreign
+/// key would refuse a missing one too, but as a constraint violation nobody
+/// can read.
+///
+/// One inside the scope but in another team is refused outright: a task does
+/// not move between teams (ADR-0029), whatever its history, which is why this
+/// is checked before D13's worktree-and-runs guard. The composite foreign key
+/// on `(repository_id, team_id)` is the store's backstop; this is the service's.
+async fn ensure_repository_is_in_the_tasks_team(
+    tx: &mut ScopedTx,
+    repository_id: &str,
+    task_team: &str,
+) -> Result<()> {
+    let repository_team = crate::repo::team_of_repository(tx, repository_id).await?;
+    if repository_team != task_team {
+        return Err(Error::invalid(
+            "a task cannot move to another team; copy it instead",
+        ));
     }
     Ok(())
 }
@@ -1329,7 +1340,7 @@ async fn ensure_repository_exists(tx: &mut SqliteConnection, repository_id: &str
 /// The worktree is checked first: it is already on the row where the run count
 /// is a query, and when both hold it is the more useful of the two messages —
 /// it names a place on disk the user can go and look at.
-async fn ensure_repository_is_reassignable(tx: &mut SqliteConnection, task: &Task) -> Result<()> {
+async fn ensure_repository_is_reassignable(tx: &mut ScopedTx, task: &Task) -> Result<()> {
     if let Some(worktree_path) = &task.worktree_path {
         return Err(Error::invalid(format!(
             "cannot move \"{title}\" to another repository: it already has a worktree at {worktree_path}",
@@ -1339,7 +1350,7 @@ async fn ensure_repository_is_reassignable(tx: &mut SqliteConnection, task: &Tas
 
     let run_count: i64 =
         sqlx::query_scalar!("SELECT count(*) FROM runs WHERE task_id = ?1", task.id)
-            .fetch_one(&mut *tx)
+            .fetch_one(&mut **tx)
             .await?;
 
     if run_count > 0 {
@@ -1364,14 +1375,27 @@ async fn ensure_repository_is_reassignable(tx: &mut SqliteConnection, task: &Tas
 // Row access shared with `run_state` and `links`
 // ---------------------------------------------------------------------------
 
-/// The one place a task row is read back — used both inside a transaction
-/// (`&mut *tx`, before a write that depends on the current row) and against
-/// the bare pool (after a commit, to hand the caller the row it just
-/// produced). Generic over [`sqlx::Executor`] rather than fixed to
-/// `&mut SqliteConnection` the way [`rebalance_column`] is: nothing here
-/// requires the caller's transaction the way a renumber does, so the
-/// flexibility is free.
-pub(crate) async fn fetch_task_row<'e, E>(executor: E, id: &str) -> Result<Task>
+/// A task row inside the caller's transaction, before a write that depends on
+/// the current row.
+///
+/// Scoped in the query by the transaction's own scope, so a task of another
+/// team is `NotFound` with the very sentence a never-issued id gets: an error
+/// that differed would be a way to probe which ids exist (seam-contract D8,
+/// ADR-0035 point 2).
+pub(crate) async fn fetch_task_row(tx: &mut ScopedTx, id: &str) -> Result<Task> {
+    let scope = tx.scope().json();
+    select_task_row(&mut **tx, &scope, id).await
+}
+
+/// A task row over the pool, scoped to the context: a plain read, or the row
+/// a committed write hands back to its caller.
+pub(crate) async fn task_row(ctx: &ServiceContext, id: &str) -> Result<Task> {
+    select_task_row(&ctx.pool, &ctx.scope.json(), id).await
+}
+
+/// The one task-row query. Generic over [`sqlx::Executor`] so the two entry
+/// points above share it; private, so nothing reaches it without a scope.
+async fn select_task_row<'e, E>(executor: E, scope: &str, id: &str) -> Result<Task>
 where
     E: sqlx::Executor<'e, Database = sqlx::Sqlite>,
 {
@@ -1385,8 +1409,9 @@ where
             created_at AS "created_at: DateTime<Utc>", updated_at AS "updated_at: DateTime<Utc>",
             source AS "source: MutationSource",
             archived_at AS "archived_at: DateTime<Utc>"
-           FROM tasks WHERE id = ?1"#,
+           FROM tasks WHERE id = ?1 AND team_id IN (SELECT value FROM json_each(?2))"#,
         id,
+        scope,
     )
     .fetch_optional(executor)
     .await?
@@ -1394,36 +1419,57 @@ where
 }
 
 /// The team task `id` belongs to, in the sentence [`fetch_task_row`] uses for
-/// a task that is not there.
+/// a task the scope does not hold.
 ///
 /// For a publish (ADR-0034 point 3): an event names the written row's own
 /// team, read beside the write, never one assumed from the context's scope.
-pub(crate) async fn team_of_task<'e, E>(executor: E, id: &str) -> Result<TeamId>
+pub(crate) async fn team_of_task(tx: &mut ScopedTx, id: &str) -> Result<TeamId> {
+    let scope = tx.scope().json();
+    select_task_team(&mut **tx, &scope, id).await
+}
+
+/// [`team_of_task`] over the pool.
+pub(crate) async fn team_of(ctx: &ServiceContext, id: &str) -> Result<TeamId> {
+    select_task_team(&ctx.pool, &ctx.scope.json(), id).await
+}
+
+async fn select_task_team<'e, E>(executor: E, scope: &str, id: &str) -> Result<TeamId>
 where
     E: sqlx::Executor<'e, Database = sqlx::Sqlite>,
 {
-    sqlx::query_scalar!("SELECT team_id FROM tasks WHERE id = ?1", id)
-        .fetch_optional(executor)
-        .await?
-        .ok_or_else(|| Error::not_found(format!("no task with id {id}")))
+    sqlx::query_scalar!(
+        "SELECT team_id FROM tasks WHERE id = ?1 AND team_id IN (SELECT value FROM json_each(?2))",
+        id,
+        scope,
+    )
+    .fetch_optional(executor)
+    .await?
+    .ok_or_else(|| Error::not_found(format!("no task with id {id}")))
 }
 
-async fn fetch_last_run(pool: &SqlitePool, task_id: &str) -> Result<Option<Run>> {
+/// The task's newest run of any kind, joined to the task in the context's
+/// scope.
+async fn fetch_last_run(ctx: &ServiceContext, task_id: &str) -> Result<Option<Run>> {
+    let scope = ctx.scope.json();
     // `log_path!`: every run a solo board holds was opened on this machine,
     // which always fills it. Task 066 retires this reader.
     let run = sqlx::query_as!(
         Run,
-        r#"SELECT id, task_id, attempt, kind AS "kind: RunKind", status AS "status: RunStatus",
-            session_id, prompt,
-            started_at AS "started_at: DateTime<Utc>", ended_at AS "ended_at: DateTime<Utc>",
-            exit_class AS "exit_class: ExitClass", error_message, num_turns, cost_usd,
-            log_path AS "log_path!", pr_url, resume_after AS "resume_after: DateTime<Utc>", base_ref,
-            model, effort, run_environment, input_tokens, output_tokens,
-            cache_read_tokens, cache_creation_tokens, head_sha, base_sha
-           FROM runs WHERE task_id = ?1 ORDER BY attempt DESC LIMIT 1"#,
+        r#"SELECT r.id, r.task_id, r.attempt, r.kind AS "kind: RunKind",
+            r.status AS "status: RunStatus", r.session_id, r.prompt,
+            r.started_at AS "started_at: DateTime<Utc>", r.ended_at AS "ended_at: DateTime<Utc>",
+            r.exit_class AS "exit_class: ExitClass", r.error_message, r.num_turns, r.cost_usd,
+            r.log_path AS "log_path!", r.pr_url, r.resume_after AS "resume_after: DateTime<Utc>",
+            r.base_ref, r.model, r.effort, r.run_environment, r.input_tokens, r.output_tokens,
+            r.cache_read_tokens, r.cache_creation_tokens, r.head_sha, r.base_sha
+           FROM runs r
+           JOIN tasks t ON t.id = r.task_id
+          WHERE r.task_id = ?1 AND t.team_id IN (SELECT value FROM json_each(?2))
+          ORDER BY r.attempt DESC LIMIT 1"#,
         task_id,
+        scope,
     )
-    .fetch_optional(pool)
+    .fetch_optional(&ctx.pool)
     .await?;
     Ok(run)
 }
@@ -1442,16 +1488,16 @@ async fn fetch_last_run(pool: &SqlitePool, task_id: &str) -> Result<Option<Run>>
 /// way — empty on the common path where no rebalance was needed. The caller
 /// publishes these alongside the new task's own id.
 async fn append_task_position(
-    tx: &mut SqliteConnection,
+    tx: &mut ScopedTx,
     repository_id: &str,
     column: BoardColumn,
 ) -> Result<(f64, Vec<String>)> {
-    let last = last_task_position(&mut *tx, repository_id, column, None).await?;
+    let last = last_task_position(tx, repository_id, column, None).await?;
     match position_between(last, None) {
         Placement::At(position) => Ok((position, Vec::new())),
         Placement::NeedsRebalance => {
             let rebalanced_ids = rebalance_column(tx, repository_id, column).await?;
-            let last = last_task_position(&mut *tx, repository_id, column, None).await?;
+            let last = last_task_position(tx, repository_id, column, None).await?;
             match position_between(last, None) {
                 Placement::At(position) => Ok((position, rebalanced_ids)),
                 Placement::NeedsRebalance => Err(Error::internal(
@@ -1468,7 +1514,7 @@ async fn append_task_position(
 /// The second element is every id [`rebalance_column`] renumbered along the
 /// way — see [`append_task_position`]'s identical note.
 async fn resolve_task_position(
-    tx: &mut SqliteConnection,
+    tx: &mut ScopedTx,
     repository_id: &str,
     column: BoardColumn,
     moving_id: &str,
@@ -1476,14 +1522,14 @@ async fn resolve_task_position(
     after_id: Option<&str>,
 ) -> Result<(f64, Vec<String>)> {
     let (before_position, after_position) =
-        task_neighbour_positions(&mut *tx, repository_id, column, before_id, after_id).await?;
+        task_neighbour_positions(tx, repository_id, column, before_id, after_id).await?;
 
     if before_position.is_none() && after_position.is_none() {
         // `position_between(None, None)` is only "an empty column" by its own
         // doc comment. Naming no neighbour at all is legal here on exactly
         // that condition; anywhere else it is ambiguous rather than
         // "append", so it is refused instead of guessed.
-        if task_column_has_other_rows(&mut *tx, repository_id, column, moving_id).await? {
+        if task_column_has_other_rows(tx, repository_id, column, moving_id).await? {
             return Err(Error::invalid(
                 "moving a task with neither a before nor an after neighbour is only valid when the destination column is empty",
             ));
@@ -1496,8 +1542,7 @@ async fn resolve_task_position(
         Placement::NeedsRebalance => {
             let rebalanced_ids = rebalance_column(tx, repository_id, column).await?;
             let (before_position, after_position) =
-                task_neighbour_positions(&mut *tx, repository_id, column, before_id, after_id)
-                    .await?;
+                task_neighbour_positions(tx, repository_id, column, before_id, after_id).await?;
             match position_between(before_position, after_position) {
                 Placement::At(position) => Ok((position, rebalanced_ids)),
                 Placement::NeedsRebalance => Err(Error::internal(

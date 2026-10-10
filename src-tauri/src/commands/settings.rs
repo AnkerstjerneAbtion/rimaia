@@ -20,7 +20,7 @@ use crate::state::AppState;
 
 #[tauri::command]
 pub async fn get_base_instructions(state: State<'_, AppState>) -> Result<String> {
-    settings::base_instructions(&state.context.pool).await
+    settings::base_instructions(&state.context).await
 }
 
 /// Replaces `settings.base_instructions`. Never touches a run already
@@ -34,7 +34,7 @@ pub async fn set_base_instructions(state: State<'_, AppState>, value: String) ->
 
 #[tauri::command]
 pub async fn get_run_environment(state: State<'_, AppState>) -> Result<RunEnvironment> {
-    settings::run_environment(&state.context.pool).await
+    settings::run_environment(&state.context).await
 }
 
 #[tauri::command]
@@ -51,7 +51,7 @@ pub async fn set_run_environment(state: State<'_, AppState>, value: RunEnvironme
 /// as the expensive one.
 #[tauri::command]
 pub async fn get_run_cost_summary(state: State<'_, AppState>) -> Result<RunCostSummary> {
-    outcome::observed_run_cost(&state.context.pool, state.runner.provider.as_ref()).await
+    outcome::observed_run_cost(&state.context, state.runner.provider.as_ref()).await
 }
 
 /// The prompt `task_id` would receive right now, composed the same way task
@@ -69,7 +69,7 @@ pub async fn preview_composed_prompt(
     state: State<'_, AppState>,
     task_id: String,
 ) -> Result<String> {
-    let base = settings::base_instructions(&state.context.pool).await?;
+    let base = settings::base_instructions_for_task(&state.context, &task_id).await?;
     let detail = tasks::get_task(&state.context, &task_id).await?;
     let repository = repo::get(&state.context, &detail.task.repository_id).await?;
     let guidance = prompt::StrategyGuidance::for_task(&detail);

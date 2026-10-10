@@ -127,7 +127,7 @@ async fn a_successful_implementation_with_the_loop_off_lands_exactly_as_before()
 async fn the_loop_is_off_on_a_fresh_database() {
     let fixture = Fixture::new().await;
 
-    let settings = review_config::get_review_settings(&fixture.ctx().pool)
+    let settings = review_config::get_review_settings(fixture.ctx())
         .await
         .expect("read the global settings");
     assert_eq!(settings.instructions, "");
@@ -220,7 +220,7 @@ async fn enabling_the_loop_requires_the_cost_acknowledged_spelling() {
     let detail = fixture.detail().await;
     assert_eq!(detail.review_config, review_config::ReviewConfig::default());
     assert_eq!(
-        review_config::get_review_settings(&fixture.ctx().pool)
+        review_config::get_review_settings(fixture.ctx())
             .await
             .expect("read")
             .config,
@@ -233,7 +233,7 @@ async fn a_hand_edited_true_in_stored_config_reads_as_off() {
     // D17.2's tolerance: a value that does not parse reads as nothing set,
     // which is off. A typo must not enable a spend.
     let fixture = Fixture::new().await;
-    settings::set(
+    rimaia_core::testing::settings::set(
         fixture.ctx(),
         review_config::REVIEW_CONFIG,
         r#"{"enabled": true}"#,
@@ -712,7 +712,7 @@ async fn a_review_refused_before_spawn_is_recorded_as_a_failed_review_row() {
             reason: UnreviewedReason::ReviewFailed
         }
     );
-    let report = startup::survey(&fixture.ctx().pool)
+    let report = startup::survey(fixture.ctx())
         .await
         .expect("survey the store");
     assert_eq!(report.missing_run_logs, Vec::<String>::new());
@@ -1267,7 +1267,7 @@ async fn a_review_left_open_by_a_crash_is_reconciled_into_in_review_or_a_review_
     // With retry budget left: offered for resume, as a review.
     let fixture = Fixture::new().await;
     fixture.open_review_left_by_a_crash(0).await;
-    let report = startup::survey(&fixture.ctx().pool).await.expect("survey");
+    let report = startup::survey(fixture.ctx()).await.expect("survey");
     scheduler::reconcile_interrupted(fixture.ctx(), &report)
         .await
         .expect("reconcile");
@@ -1290,7 +1290,7 @@ async fn a_review_left_open_by_a_crash_is_reconciled_into_in_review_or_a_review_
     fixture
         .open_review_left_by_a_crash(scheduler::MAX_TRANSIENT_ATTEMPTS as usize)
         .await;
-    let report = startup::survey(&fixture.ctx().pool).await.expect("survey");
+    let report = startup::survey(fixture.ctx()).await.expect("survey");
     scheduler::reconcile_interrupted(fixture.ctx(), &report)
         .await
         .expect("reconcile");

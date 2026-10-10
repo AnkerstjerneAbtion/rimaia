@@ -25,7 +25,7 @@ use std::path::{Path, PathBuf};
 
 use serde::Serialize;
 
-use crate::context::ServiceContext;
+use crate::context::{ScopedTx, ServiceContext};
 use crate::db::Repository;
 use crate::error::{Error, Result};
 use crate::events::{ChangeEvent, TeamId};
@@ -76,9 +76,13 @@ pub struct RemoteInfo {
     pub gh_ready: Option<bool>,
 }
 
-/// Every registered repository, alphabetically — the order the Settings list
-/// shows them in.
+/// Every repository the context's one team registered, alphabetically — the
+/// order the Settings list shows them in.
+///
+/// Entity-less, so it acts on one team (ADR-0035 point 2): a context that
+/// reaches several is refused rather than handed a mixed list.
 pub async fn list(ctx: &ServiceContext) -> Result<Vec<Repository>> {
+    let team_id = ctx.scope.sole()?;
     // `path!` and `worktree_root!`: every repository a solo board holds was
     // registered from this machine, which always fills both. Task 066 retires
     // this reader for one that has no local paths.
@@ -92,28 +96,32 @@ pub async fn list(ctx: &ServiceContext) -> Result<Vec<Repository>> {
                credential_added_at AS "credential_added_at: chrono::DateTime<chrono::Utc>",
                on_archive AS "on_archive: crate::db::OnArchive", on_archive_script
         FROM repositories
+        WHERE team_id = ?1
         ORDER BY name ASC, created_at ASC
-        "#
+        "#,
+        team_id,
     )
     .fetch_all(&ctx.pool)
     .await?;
     Ok(repositories)
 }
 
-/// One repository by id. `Error::not_found` when there is none — task 003's
-/// removal and edit paths both start here, so both get that message for free
-/// rather than reimplementing "does this id exist".
+/// One repository by id. `Error::not_found` when there is none in the
+/// context's scope — task 003's removal and edit paths both start here, so
+/// both get that message for free rather than reimplementing "does this id
+/// exist", and another team's repository gets exactly the same one.
 pub async fn get(ctx: &ServiceContext, id: &str) -> Result<Repository> {
-    fetch_repository_row(&ctx.pool, id).await
+    fetch_repository_row(&ctx.pool, &ctx.scope.json(), id).await
 }
 
 /// The one place a repository row is read back — used both inside a
 /// transaction (`&mut *tx`, before a write that depends on the current row,
 /// the way [`update`] does) and against the bare pool (a plain [`get`]).
-/// Generic over [`sqlx::Executor`] for the same reason
-/// `tasks::service::fetch_task_row` is: nothing here requires the caller's
-/// transaction, so the flexibility is free.
-async fn fetch_repository_row<'e, E>(executor: E, id: &str) -> Result<Repository>
+///
+/// Scoped in the query, never fetched and compared after: `scope` is
+/// [`TeamScope::json`](crate::TeamScope::json), and a row outside it is not
+/// there.
+async fn fetch_repository_row<'e, E>(executor: E, scope: &str, id: &str) -> Result<Repository>
 where
     E: sqlx::Executor<'e, Database = sqlx::Sqlite>,
 {
@@ -129,28 +137,45 @@ where
                credential_added_at AS "credential_added_at: chrono::DateTime<chrono::Utc>",
                on_archive AS "on_archive: crate::db::OnArchive", on_archive_script
         FROM repositories
-        WHERE id = ?1
+        WHERE id = ?1 AND team_id IN (SELECT value FROM json_each(?2))
         "#,
         id,
+        scope,
     )
     .fetch_optional(executor)
     .await?
     .ok_or_else(|| Error::not_found(format!("no repository with id {id}")))
 }
 
-/// The team repository `id` belongs to, in the sentence
-/// [`fetch_repository_row`] uses for one that is not there.
+/// The team repository `id` belongs to, inside the caller's transaction, in
+/// the sentence [`fetch_repository_row`] uses for one the scope does not hold.
 ///
 /// What a task created in it is owned by (ADR-0029 point 1), and what an
 /// event about it names (ADR-0034 point 3).
-pub(crate) async fn team_of_repository<'e, E>(executor: E, id: &str) -> Result<TeamId>
+pub(crate) async fn team_of_repository(tx: &mut ScopedTx, id: &str) -> Result<TeamId> {
+    let scope = tx.scope().json();
+    select_team(&mut **tx, &scope, id).await
+}
+
+/// [`team_of_repository`] over the pool: the team whose settings a
+/// repository-level read or write goes to.
+pub(crate) async fn team_of(ctx: &ServiceContext, id: &str) -> Result<TeamId> {
+    select_team(&ctx.pool, &ctx.scope.json(), id).await
+}
+
+async fn select_team<'e, E>(executor: E, scope: &str, id: &str) -> Result<TeamId>
 where
     E: sqlx::Executor<'e, Database = sqlx::Sqlite>,
 {
-    sqlx::query_scalar!("SELECT team_id FROM repositories WHERE id = ?1", id)
-        .fetch_optional(executor)
-        .await?
-        .ok_or_else(|| Error::not_found(format!("no repository with id {id}")))
+    sqlx::query_scalar!(
+        "SELECT team_id FROM repositories
+         WHERE id = ?1 AND team_id IN (SELECT value FROM json_each(?2))",
+        id,
+        scope,
+    )
+    .fetch_optional(executor)
+    .await?
+    .ok_or_else(|| Error::not_found(format!("no repository with id {id}")))
 }
 
 /// Validates and registers a local repository.
@@ -181,10 +206,16 @@ pub async fn register(
     worktrees_dir: &Path,
     new: NewRepository,
 ) -> Result<Repository> {
+    // A repository is the root of what a team owns, so there is no parent row
+    // to take its team from: the request has to name exactly one (ADR-0029
+    // point 5). Read before anything else, so a scope of several teams is
+    // refused rather than half-applied.
+    let team_id = ctx.scope.sole()?.clone();
+
     let requested = Path::new(&new.path);
     let canonical = validate_directory(requested).await?;
     let path = path_to_string(&canonical)?;
-    ensure_not_already_registered(ctx, &path).await?;
+    ensure_not_already_registered(ctx, &team_id, &path).await?;
     validate_is_a_registrable_git_repository(&canonical).await?;
     validate_has_at_least_one_commit(&canonical).await?;
     let default_branch = resolve_default_branch(&canonical).await?;
@@ -198,11 +229,6 @@ pub async fn register(
         None => path_to_string(&worktrees_dir.join(naming::slugify(&name)))?,
     };
 
-    // A repository is the root of what a team owns, so there is no parent row
-    // to take its team from: the request has to name exactly one (ADR-0029
-    // point 5). Read before anything is written, so a scope of several teams
-    // is refused rather than half-applied.
-    let team_id = ctx.scope.sole()?.clone();
     let id = crate::db::new_id();
     let created_at = ctx.clock.now();
 
@@ -236,10 +262,23 @@ pub async fn register(
 /// registered twice. It may not — two rows naming one directory would give
 /// the Settings list two identical entries, and let task 007 create
 /// worktrees for "different" repositories against the one git repository.
-async fn ensure_not_already_registered(ctx: &ServiceContext, path: &str) -> Result<()> {
-    let count: i64 = sqlx::query_scalar!("SELECT count(*) FROM repositories WHERE path = ?1", path)
-        .fetch_one(&ctx.pool)
-        .await?;
+///
+/// **Within one team.** Refusing a directory because another team registered
+/// it would tell this one that the other exists (ADR-0029 point 5). One
+/// directory registered by two teams on one machine is task 054's to re-key
+/// by remote, not this check's to forbid.
+async fn ensure_not_already_registered(
+    ctx: &ServiceContext,
+    team_id: &str,
+    path: &str,
+) -> Result<()> {
+    let count: i64 = sqlx::query_scalar!(
+        "SELECT count(*) FROM repositories WHERE path = ?1 AND team_id = ?2",
+        path,
+        team_id,
+    )
+    .fetch_one(&ctx.pool)
+    .await?;
 
     if count > 0 {
         return Err(Error::invalid(format!("{path} is already registered")));
@@ -258,8 +297,9 @@ async fn ensure_not_already_registered(ctx: &ServiceContext, path: &str) -> Resu
 /// server and the scheduler as writers that can all touch a repository "at
 /// the same moment").
 pub async fn update(ctx: &ServiceContext, id: &str, patch: RepositoryPatch) -> Result<Repository> {
-    let mut tx = ctx.pool.begin().await?;
-    let mut repository = fetch_repository_row(&mut *tx, id).await?;
+    let mut tx = ctx.begin().await?;
+    let scope = tx.scope().json();
+    let mut repository = fetch_repository_row(&mut *tx, &scope, id).await?;
 
     if let Some(name) = patch.name {
         repository.name = require_non_empty(name, "name")?;
@@ -414,7 +454,12 @@ pub fn ensure_unattended_runs_allowed(repository: &Repository) -> Result<()> {
 /// two statements later has not thrown that configuration away on its way to
 /// the refusal.
 pub async fn remove(ctx: &ServiceContext, id: &str) -> Result<()> {
-    let mut tx = ctx.pool.begin().await?;
+    let mut tx = ctx.begin().await?;
+
+    // Looked up first, in the scope, so another team's repository is refused
+    // as a missing one rather than with a count of tasks it has no business
+    // hearing about.
+    let team_id = team_of_repository(&mut tx, id).await?;
 
     let task_count = sqlx::query_scalar!(
         r#"SELECT count(*) AS "count!: i64" FROM tasks WHERE repository_id = ?1"#,
@@ -438,20 +483,14 @@ pub async fn remove(ctx: &ServiceContext, id: &str) -> Result<()> {
         )));
     }
 
-    let Some(team_id) = sqlx::query_scalar!(
-        "DELETE FROM repositories WHERE id = ?1 RETURNING team_id",
-        id
-    )
-    .fetch_optional(&mut *tx)
-    .await?
-    else {
-        return Err(Error::not_found(format!("no repository with id {id}")));
-    };
+    sqlx::query!("DELETE FROM repositories WHERE id = ?1", id)
+        .execute(&mut *tx)
+        .await?;
 
     // Spelled through the module that owns the key, not with a `format!` here:
     // two spellings of `strategy_default.<id>` would leak a row per removed
     // repository and nothing would ever notice (seam-contract D3, D17.1).
-    crate::strategy::settings::delete_repository_default(&mut *tx, id).await?;
+    crate::strategy::settings::delete_repository_default(&mut tx, &team_id, id).await?;
 
     tx.commit().await?;
     ctx.publish(ChangeEvent::repositories(team_id, [id.to_string()]));

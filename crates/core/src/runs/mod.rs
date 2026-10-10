@@ -152,8 +152,13 @@ SELECT r.*,
 
 /// Every run matching `filter`, newest first — the global Runs view's
 /// history list, filterable by repository, outcome and date range.
+///
+/// Entity-less, so it reads one team's history (ADR-0035 point 2): a context
+/// that reaches several is refused rather than handed a merged one.
 pub async fn list_runs(ctx: &ServiceContext, filter: RunFilter) -> Result<Vec<RunListEntry>> {
+    let team_id = ctx.scope.sole()?.clone();
     let mut sql = String::from(RUN_LIST_SELECT);
+    sql.push_str(" AND t.team_id = ?");
     if filter.repository_id.is_some() {
         sql.push_str(" AND rep.id = ?");
     }
@@ -171,7 +176,7 @@ pub async fn list_runs(ctx: &ServiceContext, filter: RunFilter) -> Result<Vec<Ru
     }
     sql.push_str(" ORDER BY r.started_at DESC");
 
-    let mut query = sqlx::query_as::<_, RunListEntry>(&sql);
+    let mut query = sqlx::query_as::<_, RunListEntry>(&sql).bind(team_id);
     if let Some(repository_id) = filter.repository_id {
         query = query.bind(repository_id);
     }
@@ -196,13 +201,18 @@ pub async fn list_runs(ctx: &ServiceContext, filter: RunFilter) -> Result<Vec<Ru
 }
 
 /// Every run of `task_id`, newest attempt first — the task detail panel's
-/// history list.
+/// history list. Joined to the task in the context's scope: a run inherits its
+/// team through its task (ADR-0029 point 1).
 pub async fn list_runs_for_task(ctx: &ServiceContext, task_id: &str) -> Result<Vec<Run>> {
-    let runs =
-        sqlx::query_as::<_, Run>("SELECT * FROM runs WHERE task_id = ?1 ORDER BY attempt DESC")
-            .bind(task_id)
-            .fetch_all(&ctx.pool)
-            .await?;
+    let runs = sqlx::query_as::<_, Run>(
+        "SELECT r.* FROM runs r JOIN tasks t ON t.id = r.task_id
+          WHERE r.task_id = ?1 AND t.team_id IN (SELECT value FROM json_each(?2))
+          ORDER BY r.attempt DESC",
+    )
+    .bind(task_id)
+    .bind(ctx.scope.json())
+    .fetch_all(&ctx.pool)
+    .await?;
     Ok(runs)
 }
 
@@ -369,12 +379,18 @@ pub async fn log_path_to_reveal(ctx: &ServiceContext, run_id: &str) -> Result<Pa
     Ok(PathBuf::from(run.log_path))
 }
 
+/// A run by id, joined to its task in the context's scope: another team's run
+/// is as missing as one never opened, in the same sentence.
 async fn fetch_run(ctx: &ServiceContext, run_id: &str) -> Result<Run> {
-    sqlx::query_as::<_, Run>("SELECT * FROM runs WHERE id = ?1")
-        .bind(run_id)
-        .fetch_optional(&ctx.pool)
-        .await?
-        .ok_or_else(|| Error::not_found(format!("no run with id {run_id}")))
+    sqlx::query_as::<_, Run>(
+        "SELECT r.* FROM runs r JOIN tasks t ON t.id = r.task_id
+          WHERE r.id = ?1 AND t.team_id IN (SELECT value FROM json_each(?2))",
+    )
+    .bind(run_id)
+    .bind(ctx.scope.json())
+    .fetch_optional(&ctx.pool)
+    .await?
+    .ok_or_else(|| Error::not_found(format!("no run with id {run_id}")))
 }
 
 /// True only for a clean "not found" — [`crate::startup::survey`]'s own
@@ -502,9 +518,12 @@ pub async fn prune_logs(
         PruneCriterion::OlderThanDays(days) => {
             let cutoff = ctx.clock.now() - chrono::Duration::days(*days);
             sqlx::query_scalar(
-                "SELECT log_path FROM runs WHERE started_at < ?1 AND ended_at IS NOT NULL",
+                "SELECT r.log_path FROM runs r JOIN tasks t ON t.id = r.task_id
+                  WHERE r.started_at < ?1 AND r.ended_at IS NOT NULL
+                    AND t.team_id IN (SELECT value FROM json_each(?2))",
             )
             .bind(cutoff)
+            .bind(ctx.scope.json())
             .fetch_all(&ctx.pool)
             .await?
         }
@@ -516,9 +535,12 @@ pub async fn prune_logs(
             // runner is writing to — and this is the criterion the panel
             // exposes as a button, so it is the reachable one.
             sqlx::query_scalar(
-                "SELECT log_path FROM runs WHERE task_id = ?1 AND ended_at IS NOT NULL",
+                "SELECT r.log_path FROM runs r JOIN tasks t ON t.id = r.task_id
+                  WHERE r.task_id = ?1 AND r.ended_at IS NOT NULL
+                    AND t.team_id IN (SELECT value FROM json_each(?2))",
             )
             .bind(task_id)
+            .bind(ctx.scope.json())
             .fetch_all(&ctx.pool)
             .await?
         }
@@ -576,9 +598,19 @@ async fn prune_strategy_transcripts(
     let (directories, cutoff) = match criterion {
         PruneCriterion::OlderThanDays(days) => {
             let by_age = ctx.clock.now() - chrono::Duration::days(*days);
-            (task_log_directories(paths).await, by_age.min(floor))
+            (
+                outside_other_teams(ctx, task_log_directories(paths).await).await,
+                by_age.min(floor),
+            )
         }
-        PruneCriterion::Task(task_id) => (vec![paths.runs_dir().join(task_id)], floor),
+        // Only a task the scope holds: its directory is named by the id, and
+        // another team's planner transcripts are not this caller's to sweep.
+        // A task the scope does not hold prunes nothing, exactly as a task
+        // with no runs does.
+        PruneCriterion::Task(task_id) => match crate::tasks::service::team_of(ctx, task_id).await {
+            Ok(_) => (vec![paths.runs_dir().join(task_id)], floor),
+            Err(_) => (Vec::new(), floor),
+        },
     };
 
     let mut swept = SweptTranscripts::default();
@@ -630,6 +662,40 @@ async fn prune_strategy_transcripts(
     }
 
     swept
+}
+
+/// The directories of `directories` that do not belong to a task of a team
+/// outside the context's scope: the scope's own tasks, and directories whose
+/// task row is gone, which nobody else can claim either.
+///
+/// Asked in SQL, by the directory's name, so another team's task is excluded
+/// without this caller ever reading which team it is.
+async fn outside_other_teams(ctx: &ServiceContext, directories: Vec<PathBuf>) -> Vec<PathBuf> {
+    let scope = ctx.scope.json();
+    let mut kept = Vec::with_capacity(directories.len());
+    for directory in directories {
+        let Some(task_id) = directory.file_name().and_then(|name| name.to_str()) else {
+            continue;
+        };
+        let foreign = sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM tasks
+              WHERE id = ?1 AND team_id NOT IN (SELECT value FROM json_each(?2))",
+        )
+        .bind(task_id)
+        .bind(&scope)
+        .fetch_one(&ctx.pool)
+        .await;
+        match foreign {
+            Ok(0) => kept.push(directory),
+            Ok(_) => {}
+            Err(error) => tracing::warn!(
+                path = %directory.display(),
+                %error,
+                "could not tell whose planner transcripts these are; leaving them",
+            ),
+        }
+    }
+    kept
 }
 
 /// Every per-task subdirectory of `<data>/runs`, which is the same traversal

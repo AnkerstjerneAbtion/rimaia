@@ -41,6 +41,7 @@ pub mod fixtures;
 pub mod provider;
 pub mod repo;
 pub mod runs;
+pub mod settings;
 
 pub use cli::{open_gate, FakeCli, WorktreeAction};
 pub use clock::TestClock;

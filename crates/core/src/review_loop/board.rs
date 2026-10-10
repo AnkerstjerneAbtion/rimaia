@@ -45,9 +45,11 @@ pub async fn summaries(
     repository_ids.sort();
     repository_ids.dedup();
 
-    let global = config::global_config(&ctx.pool).await?;
-    let task_configs = config::task_configs_for(&ctx.pool, &task_ids).await?;
-    let repository_configs = config::repository_configs_for(&ctx.pool, &repository_ids).await?;
+    // The board read is one team's (`list_tasks` asks for the sole team), so
+    // every card inherits that team's global level.
+    let global = config::global_config_for(ctx, ctx.scope.sole()?).await?;
+    let task_configs = config::task_configs_for(ctx, &task_ids).await?;
+    let repository_configs = config::repository_configs_for(ctx, &repository_ids).await?;
     let mut rows = findings::loop_rows_for(ctx, &task_ids).await?;
     let mut found = findings::list_for(ctx, &task_ids).await?;
 

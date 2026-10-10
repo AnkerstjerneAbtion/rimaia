@@ -36,7 +36,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::board::NextStep;
-use crate::context::ServiceContext;
+use crate::context::{ScopedTx, ServiceContext};
 use crate::db::{new_id, BoardColumn, ExitClass, Run, RunKind, RunState, RunStatus};
 use crate::error::{Error, Result};
 use crate::events::ChangeEvent;
@@ -685,14 +685,15 @@ pub(crate) async fn insert_run(
         .into_owned();
     let started_at = ctx.clock.now();
 
-    let mut tx = ctx.pool.begin().await?;
+    let mut tx = ctx.begin().await?;
 
     // The foreign key would refuse a task that does not exist, but as a
     // constraint violation nobody can read. Same sentence `tasks::get_task`
-    // answers the identical question with.
+    // answers the identical question with, and the same for a task outside the
+    // context's scope.
     // The task's team doubles as that check: a run belongs to its task's team
     // (ADR-0029 point 1), and the events below name it.
-    let team_id = team_of_task(&mut *tx, &new_run.task_id).await?;
+    let team_id = team_of_task(&mut tx, &new_run.task_id).await?;
 
     // Inside the transaction, because `idx_runs_task_attempt` is UNIQUE on
     // `(task_id, attempt)`: two writers racing to claim a task must not both
@@ -741,7 +742,7 @@ pub(crate) async fn insert_run(
     ctx.publish(ChangeEvent::runs(team_id.clone(), [id.clone()]));
     ctx.publish(ChangeEvent::tasks(team_id, [new_run.task_id.clone()]));
 
-    fetch_run_row(&ctx.pool, &id).await
+    fetch_run_row(&ctx.pool, &ctx.scope.json(), &id).await
 }
 
 /// Closes the `runs` row and applies the outcome to the task, with no run
@@ -799,10 +800,11 @@ pub async fn finish_run_within(
 ) -> Result<(Run, NextStep)> {
     let ended_at = ctx.clock.now();
 
-    let mut tx = ctx.pool.begin().await?;
-    let run = fetch_run_row(&mut *tx, run_id).await?;
+    let mut tx = ctx.begin().await?;
+    let scope = tx.scope().json();
+    let run = fetch_run_row(&mut *tx, &scope, run_id).await?;
     // A run's team is its task's.
-    let team_id = team_of_task(&mut *tx, &run.task_id).await?;
+    let team_id = team_of_task(&mut tx, &run.task_id).await?;
     if run.ended_at.is_some() {
         return Err(Error::invalid(format!(
             "run {run_id} has already been finalized"
@@ -862,7 +864,10 @@ pub async fn finish_run_within(
 
     let next = apply_to_task(ctx, &run, outcome, window_closes_at).await?;
 
-    Ok((fetch_run_row(&ctx.pool, run_id).await?, next))
+    Ok((
+        fetch_run_row(&ctx.pool, &ctx.scope.json(), run_id).await?,
+        next,
+    ))
 }
 
 /// Inserts `capture`'s bundle, when it has one and a head commit to anchor it.
@@ -872,7 +877,7 @@ pub async fn finish_run_within(
 /// that names no commit describes nothing the row can be checked against. It
 /// is dropped with a warning — never stored, and never a failed finish.
 async fn insert_bundle(
-    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    tx: &mut ScopedTx,
     run_id: &str,
     capture: &RunCapture,
     created_at: DateTime<Utc>,
@@ -950,8 +955,8 @@ async fn apply_to_task(
     outcome: &RunOutcome,
     window_closes_at: Option<DateTime<Utc>>,
 ) -> Result<NextStep> {
-    let task = crate::tasks::service::fetch_task_row(&ctx.pool, &run.task_id).await?;
-    let resolved = review_loop::config::resolve(&ctx.pool, &task.id, &task.repository_id).await?;
+    let task = crate::tasks::service::task_row(ctx, &run.task_id).await?;
+    let resolved = review_loop::config::resolve(ctx, &task.id, &task.repository_id).await?;
     let rows = findings::loop_rows(ctx, &task.id).await?;
     let all = findings::list(ctx, &task.id, None).await?;
 
@@ -1010,9 +1015,10 @@ async fn move_to_in_review(ctx: &ServiceContext, task_id: &str) -> Result<()> {
 
 /// The one place a `runs` row is read back — inside a transaction before the
 /// write that depends on it, and against the pool afterwards to hand the caller
-/// what was actually stored. Generic over the executor for the same reason
-/// `tasks::service::fetch_task_row` is.
-async fn fetch_run_row<'e, E>(executor: E, id: &str) -> Result<Run>
+/// what was actually stored. Joined to its task in `scope`
+/// ([`TeamScope::json`](crate::TeamScope::json)): a run inherits its team
+/// through its task, so another team's run is as missing as one never opened.
+async fn fetch_run_row<'e, E>(executor: E, scope: &str, id: &str) -> Result<Run>
 where
     E: sqlx::Executor<'e, Database = sqlx::Sqlite>,
 {
@@ -1020,15 +1026,17 @@ where
     // machine, which always fills it. Task 066 retires this reader.
     sqlx::query_as!(
         Run,
-        r#"SELECT id, task_id, attempt, kind AS "kind: RunKind", status AS "status: RunStatus",
-            session_id, prompt,
-            started_at AS "started_at: DateTime<Utc>", ended_at AS "ended_at: DateTime<Utc>",
-            exit_class AS "exit_class: ExitClass", error_message, num_turns, cost_usd,
-            log_path AS "log_path!", pr_url, resume_after AS "resume_after: DateTime<Utc>", base_ref,
-            model, effort, run_environment, input_tokens, output_tokens,
-            cache_read_tokens, cache_creation_tokens, head_sha, base_sha
-           FROM runs WHERE id = ?1"#,
+        r#"SELECT r.id, r.task_id, r.attempt, r.kind AS "kind: RunKind",
+            r.status AS "status: RunStatus", r.session_id, r.prompt,
+            r.started_at AS "started_at: DateTime<Utc>", r.ended_at AS "ended_at: DateTime<Utc>",
+            r.exit_class AS "exit_class: ExitClass", r.error_message, r.num_turns, r.cost_usd,
+            r.log_path AS "log_path!", r.pr_url, r.resume_after AS "resume_after: DateTime<Utc>",
+            r.base_ref, r.model, r.effort, r.run_environment, r.input_tokens, r.output_tokens,
+            r.cache_read_tokens, r.cache_creation_tokens, r.head_sha, r.base_sha
+           FROM runs r JOIN tasks t ON t.id = r.task_id
+          WHERE r.id = ?1 AND t.team_id IN (SELECT value FROM json_each(?2))"#,
         id,
+        scope,
     )
     .fetch_optional(executor)
     .await?
@@ -1196,15 +1204,23 @@ pub struct RunCostSummary {
 /// Only runs that reported a cost count. A cancelled run that died before its
 /// `result` has `NULL` here, and treating that as zero would drag the answer
 /// toward nothing.
+///
+/// An aggregate over the runs of every team in the context's scope (D32's
+/// appendix), never another team's.
 pub async fn observed_run_cost(
-    pool: &sqlx::SqlitePool,
+    ctx: &ServiceContext,
     provider: &dyn crate::runner::provider::AgentProvider,
 ) -> Result<RunCostSummary> {
+    let scope = ctx.scope.json();
     let costs: Vec<f64> = sqlx::query_scalar!(
-        r#"SELECT cost_usd AS "cost_usd!: f64" FROM runs
-           WHERE cost_usd IS NOT NULL AND cost_usd > 0 ORDER BY cost_usd ASC"#,
+        r#"SELECT r.cost_usd AS "cost_usd!: f64"
+             FROM runs r JOIN tasks t ON t.id = r.task_id
+            WHERE t.team_id IN (SELECT value FROM json_each(?1))
+              AND r.cost_usd IS NOT NULL AND r.cost_usd > 0
+            ORDER BY r.cost_usd ASC"#,
+        scope,
     )
-    .fetch_all(pool)
+    .fetch_all(&ctx.pool)
     .await?;
 
     let sample_size = costs.len() as i64;

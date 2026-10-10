@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE repositories SET review_config = ?1 WHERE id = ?2 AND team_id = ?3",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": []
+  },
+  "hash": "2e562fa1a9ce0b44b2074817fbd504326283a83f6d9b5f1afeb63f7cd01ba7d6"
+}

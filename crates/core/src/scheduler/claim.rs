@@ -223,11 +223,15 @@ pub async fn give_up(ctx: &ServiceContext, task_id: &str) -> Result<()> {
 }
 
 /// A read, not a second writer: the scheduler never issues an `UPDATE tasks`
-/// (see this module's parent). `None` for a task that no longer exists.
+/// (see this module's parent). `None` for a task that no longer exists, or
+/// that the context's scope does not hold: the two are answered alike.
 async fn current_run_state(ctx: &ServiceContext, task_id: &str) -> Result<Option<RunState>> {
+    let scope = ctx.scope.json();
     let run_state = sqlx::query_scalar!(
-        r#"SELECT run_state AS "run_state: RunState" FROM tasks WHERE id = ?1"#,
+        r#"SELECT run_state AS "run_state: RunState" FROM tasks
+            WHERE id = ?1 AND team_id IN (SELECT value FROM json_each(?2))"#,
         task_id,
+        scope,
     )
     .fetch_optional(&ctx.pool)
     .await?;

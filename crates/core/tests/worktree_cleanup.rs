@@ -632,7 +632,7 @@ async fn auto_cleanup_is_off_by_default() {
     let f = Fixture::new().await;
 
     assert_eq!(
-        worktree::auto_cleanup(&f.ctx().pool)
+        worktree::auto_cleanup(f.ctx())
             .await
             .expect("read the policy"),
         AutoCleanup::Off

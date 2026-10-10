@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT run_state AS \"run_state: RunState\" FROM tasks\n            WHERE id = ?1 AND team_id IN (SELECT value FROM json_each(?2))",
+  "describe": {
+    "columns": [
+      {
+        "name": "run_state: RunState",
+        "ordinal": 0,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "27b652c8629572456a74b8d49086d49ee4dee2360c2c43dd90db98f014d55ec6"
+}

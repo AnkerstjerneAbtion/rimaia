@@ -100,11 +100,11 @@ pub async fn announce_run_windows(
 /// The open window, or `None` — plus the switch, because a window that is open
 /// while the queue is paused is not a queue that is working.
 async fn current(ctx: &ServiceContext) -> Option<RunWindow> {
-    let window = window::active(&ctx.pool).await.unwrap_or_else(|error| {
+    let window = window::active(ctx).await.unwrap_or_else(|error| {
         tracing::debug!(%error, "could not read the run window for a notification");
         None
     });
-    let running = rimaia_core::scheduler::queue_state(&ctx.pool)
+    let running = rimaia_core::scheduler::queue_state(ctx)
         .await
         .map(|state| state == QueueState::Running)
         .unwrap_or(false);

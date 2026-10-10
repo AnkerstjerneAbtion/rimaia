@@ -59,7 +59,6 @@
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use sqlx::SqlitePool;
 
 use crate::context::ServiceContext;
 use crate::db::{settings, Schedule, ScheduleMode};
@@ -128,8 +127,10 @@ impl RunWindow {
 /// refuses to run at all. Note the direction — falling back to *no* window is
 /// the narrow reading, because a window is what *raises* concurrency above the
 /// default.
-pub async fn active(pool: &SqlitePool) -> Result<Option<RunWindow>> {
-    let Some(stored) = settings::get(pool, ACTIVE_RUN_WINDOW).await? else {
+///
+/// Runner state, read from `settings` until task 041 moves it to `runner.db`.
+pub async fn active(ctx: &ServiceContext) -> Result<Option<RunWindow>> {
+    let Some(stored) = settings::get_runner(ctx, ACTIVE_RUN_WINDOW).await? else {
         return Ok(None);
     };
     if stored.trim().is_empty() {
@@ -159,7 +160,7 @@ pub async fn open(ctx: &ServiceContext, window: &RunWindow) -> Result<()> {
     let encoded = serde_json::to_string(window).map_err(|error| {
         crate::error::Error::internal(format!("could not record the run window: {error}"))
     })?;
-    settings::set(ctx, ACTIVE_RUN_WINDOW, &encoded).await
+    settings::set_runner(ctx, ACTIVE_RUN_WINDOW, &encoded).await
 }
 
 /// Closes whatever window was open.
@@ -168,16 +169,19 @@ pub async fn open(ctx: &ServiceContext, window: &RunWindow) -> Result<()> {
 /// `pause`, from `stop`, from the exit path and from the stop time arriving, and
 /// three of those four routinely run with no window open at all.
 pub async fn close(ctx: &ServiceContext) -> Result<()> {
-    if settings::get(&ctx.pool, ACTIVE_RUN_WINDOW).await?.is_none() {
+    if settings::get_runner(ctx, ACTIVE_RUN_WINDOW)
+        .await?
+        .is_none()
+    {
         return Ok(());
     }
-    settings::set(ctx, ACTIVE_RUN_WINDOW, "").await
+    settings::set_runner(ctx, ACTIVE_RUN_WINDOW, "").await
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::testing::{test_pool, TestContext};
+    use crate::testing::TestContext;
     use pretty_assertions::assert_eq;
 
     fn at(rfc3339: &str) -> DateTime<Utc> {
@@ -197,9 +201,9 @@ mod tests {
 
     #[tokio::test]
     async fn a_queue_nobody_has_scheduled_has_no_window() {
-        let pool = test_pool().await;
+        let harness = TestContext::new().await;
 
-        assert_eq!(active(&pool).await.expect("read the key"), None);
+        assert_eq!(active(&harness.context).await.expect("read the key"), None);
     }
 
     #[tokio::test]
@@ -213,7 +217,7 @@ mod tests {
             .expect("open a window");
 
         assert_eq!(
-            active(&harness.context.pool).await.expect("read it back"),
+            active(&harness.context).await.expect("read it back"),
             Some(window()),
         );
     }
@@ -228,7 +232,7 @@ mod tests {
         close(&harness.context).await.expect("close it");
         close(&harness.context).await.expect("and again");
 
-        assert_eq!(active(&harness.context.pool).await.expect("read"), None);
+        assert_eq!(active(&harness.context).await.expect("read"), None);
     }
 
     #[tokio::test]
@@ -241,7 +245,7 @@ mod tests {
         close(&harness.context).await.expect("close nothing");
 
         assert_eq!(
-            settings::get(&harness.context.pool, ACTIVE_RUN_WINDOW)
+            settings::get_runner(&harness.context, ACTIVE_RUN_WINDOW)
                 .await
                 .expect("read the key"),
             None,
@@ -253,11 +257,11 @@ mod tests {
         let harness = TestContext::new().await;
 
         for nonsense in ["{", "null", "\"nightly\"", "{\"scheduleId\":\"x\"}"] {
-            settings::set(&harness.context, ACTIVE_RUN_WINDOW, nonsense)
+            settings::set_runner(&harness.context, ACTIVE_RUN_WINDOW, nonsense)
                 .await
                 .expect("store nonsense");
             assert_eq!(
-                active(&harness.context.pool)
+                active(&harness.context)
                     .await
                     .expect("a bad row is not an error"),
                 None,

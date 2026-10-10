@@ -28,7 +28,7 @@ use rmcp::model::{Implementation, ServerCapabilities, ServerInfo};
 use rmcp::{tool, tool_handler, tool_router, ServerHandler};
 
 use crate::analytics::{self, Period};
-use crate::context::ServiceContext;
+use crate::context::{ServiceContext, TeamScope};
 use crate::db::{BoardColumn, StrategySource};
 use crate::doctor;
 use crate::mcp::error::ToolError;
@@ -312,7 +312,7 @@ capture columns is partly unrecorded rather than cheaper."
         self.scope.authorize(Tool::GetAnalytics, None)?;
 
         let report = analytics::analytics(
-            &self.ctx.pool,
+            &self.ctx,
             Period {
                 from: request.from,
                 to: request.to,
@@ -332,7 +332,7 @@ the comparison must not be drawn rather than that it is free."
         self.scope.authorize(Tool::GetSubscriptionCost, None)?;
 
         Ok(Json(SubscriptionCostView {
-            monthly_usd: db::settings::subscription_monthly_usd(&self.ctx.pool).await?,
+            monthly_usd: db::settings::subscription_monthly_usd(&self.ctx).await?,
         }))
     }
 
@@ -349,7 +349,7 @@ analytics page can show spend as a share of it. Call it only when the user state
 
         db::settings::set_subscription_monthly_usd(&self.ctx, request.monthly_usd).await?;
         Ok(Json(SubscriptionCostView {
-            monthly_usd: db::settings::subscription_monthly_usd(&self.ctx.pool).await?,
+            monthly_usd: db::settings::subscription_monthly_usd(&self.ctx).await?,
         }))
     }
 
@@ -703,7 +703,7 @@ placeholders left unexpanded; those are substituted per task when a run actually
         // Deliberately the stored template, not a composed preview: composing
         // needs a task and a repository (ADR-0009), and an agent asking "what
         // will be prepended to my plan?" has no task yet.
-        let base_instructions = db::settings::base_instructions(&self.ctx.pool).await?;
+        let base_instructions = db::settings::base_instructions(&self.ctx).await?;
 
         Ok(Json(BaseInstructionsView {
             base_instructions,
@@ -728,7 +728,7 @@ told about."
     pub async fn get_strategy_catalogue(&self) -> Result<Json<Catalogue>, ToolError> {
         self.scope.authorize(Tool::GetStrategyCatalogue, None)?;
         Ok(Json(
-            strategy::catalogue::catalogue(&self.ctx.pool, self.doctor.provider.as_ref()).await?,
+            strategy::catalogue::catalogue(&self.ctx, self.doctor.provider.as_ref()).await?,
         ))
     }
 
@@ -745,7 +745,7 @@ before it is stored, so an unparseable one is refused and the previous catalogue
         self.scope.authorize(Tool::SetStrategyCatalogue, None)?;
         strategy::catalogue::set_catalogue(&self.ctx, &request.catalogue).await?;
         Ok(Json(
-            strategy::catalogue::catalogue(&self.ctx.pool, self.doctor.provider.as_ref()).await?,
+            strategy::catalogue::catalogue(&self.ctx, self.doctor.provider.as_ref()).await?,
         ))
     }
 
@@ -761,9 +761,9 @@ repository's defaults, or the global ones beneath them when `repository_id` is o
         self.scope.authorize(Tool::GetStrategyDefaults, None)?;
         Ok(Json(match request.repository_id.as_deref() {
             Some(repository_id) => {
-                strategy::settings::repository_default(&self.ctx.pool, repository_id).await?
+                strategy::settings::repository_default(&self.ctx, repository_id).await?
             }
-            None => strategy::settings::global_default(&self.ctx.pool).await?,
+            None => strategy::settings::global_default(&self.ctx).await?,
         }))
     }
 
@@ -802,7 +802,7 @@ overnight — `manual` will stop the queue at every planned task."
     pub async fn get_strategy_approval(&self) -> Result<Json<StrategyApprovalView>, ToolError> {
         self.scope.authorize(Tool::GetStrategyApproval, None)?;
         Ok(Json(StrategyApprovalView {
-            approval: strategy::settings::approval(&self.ctx.pool).await?,
+            approval: strategy::settings::approval(&self.ctx).await?,
         }))
     }
 
@@ -878,7 +878,7 @@ usually the explanation for a large `worktrees` directory."
     ) -> Result<Json<WorktreeAutoCleanupView>, ToolError> {
         self.scope.authorize(Tool::GetWorktreeAutoCleanup, None)?;
         Ok(Json(WorktreeAutoCleanupView {
-            setting: worktree::auto_cleanup(&self.ctx.pool).await?,
+            setting: worktree::auto_cleanup(&self.ctx).await?,
         }))
     }
 
@@ -1141,7 +1141,7 @@ A repository and a task can each override any field."
     pub async fn get_review_settings(&self) -> Result<Json<ReviewSettings>, ToolError> {
         self.scope.authorize(Tool::GetReviewSettings, None)?;
         Ok(Json(
-            review_loop::config::get_review_settings(&self.ctx.pool).await?,
+            review_loop::config::get_review_settings(&self.ctx).await?,
         ))
     }
 
@@ -1159,12 +1159,8 @@ actually do, rather than working the precedence out yourself."
     ) -> Result<Json<ReviewLevel>, ToolError> {
         self.scope.authorize(Tool::GetReviewLevel, None)?;
         Ok(Json(
-            review_loop::config::get_review_level(
-                &self.ctx.pool,
-                request.level,
-                request.id.as_deref(),
-            )
-            .await?,
+            review_loop::config::get_review_level(&self.ctx, request.level, request.id.as_deref())
+                .await?,
         ))
     }
 
@@ -1313,7 +1309,7 @@ even though sequential always runs exactly one."
     )]
     pub async fn get_run_capacity(&self) -> Result<Json<RunCapacityView>, ToolError> {
         self.scope.authorize(Tool::GetRunCapacity, None)?;
-        Ok(Json(capacity::configured(&self.ctx.pool).await?.into()))
+        Ok(Json(capacity::configured(&self.ctx).await?.into()))
     }
 
     #[tool(
@@ -1329,7 +1325,7 @@ limit says."
     ) -> Result<Json<RunCapacityView>, ToolError> {
         self.scope.authorize(Tool::SetScheduleMode, None)?;
         capacity::set_schedule_mode(&self.ctx, request.mode).await?;
-        Ok(Json(capacity::configured(&self.ctx.pool).await?.into()))
+        Ok(Json(capacity::configured(&self.ctx).await?.into()))
     }
 
     #[tool(
@@ -1344,7 +1340,7 @@ clamped. It bounds the queue in total; each repository still holds at most its o
     ) -> Result<Json<RunCapacityView>, ToolError> {
         self.scope.authorize(Tool::SetMaxConcurrency, None)?;
         capacity::set_max_concurrency(&self.ctx, request.max_concurrency).await?;
-        Ok(Json(capacity::configured(&self.ctx.pool).await?.into()))
+        Ok(Json(capacity::configured(&self.ctx).await?.into()))
     }
 
     #[tool(
@@ -1516,8 +1512,11 @@ impl RimaiaServer {
         column: BoardColumn,
     ) -> Result<Option<String>, ToolError> {
         let task = tasks::get_task(&self.ctx, task_id).await?;
+        // The column is the task's own team's: the move names an entity, so
+        // it needs no sole team even under a context that reaches several.
+        let team_id = tasks::service::team_of(&self.ctx, task_id).await?;
         let column_tasks = tasks::list_tasks(
-            &self.ctx,
+            &self.ctx.with_scope(TeamScope::one(team_id)),
             TaskFilter {
                 repository_id: Some(task.task.repository_id.clone()),
                 column: Some(column),

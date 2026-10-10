@@ -1112,9 +1112,7 @@ mod end_to_end {
             is_ancestor(&checkout, &reviewed_commit, "HEAD"),
             "the reviewed commit is an ancestor of the new HEAD"
         );
-        let base = settings::base_instructions(&f.ctx().pool)
-            .await
-            .expect("base");
+        let base = settings::base_instructions(f.ctx()).await.expect("base");
         assert_eq!(
             cli.stdin(&id, 2),
             format!(
@@ -1185,9 +1183,7 @@ mod end_to_end {
             !is_ancestor(&fresh, &rejected_commit, "HEAD"),
             "the new branch does not contain the rejected commit"
         );
-        let base = settings::base_instructions(&f.ctx().pool)
-            .await
-            .expect("base");
+        let base = settings::base_instructions(f.ctx()).await.expect("base");
         assert_eq!(
             cli.stdin(&id, 2),
             format!(
@@ -1530,7 +1526,7 @@ impl Fixture {
     }
 
     async fn marker(&self) -> Option<DateTime<Utc>> {
-        review::digest::seen_through(&self.ctx().pool)
+        review::digest::seen_through(self.ctx())
             .await
             .expect("read the marker")
     }

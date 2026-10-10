@@ -14,11 +14,7 @@
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, HashMap, HashSet};
 
-use chrono::{DateTime, Duration, SecondsFormat, Utc};
-use serde::Serialize;
-use sqlx::SqliteConnection;
-
-use crate::context::ServiceContext;
+use crate::context::{ScopedTx, ServiceContext};
 use crate::db::{settings, BoardColumn, RunKind, RunState, RunStatus};
 use crate::error::{Error, Result};
 use crate::events::ChangeEvent;
@@ -28,6 +24,8 @@ use crate::review_loop;
 use crate::scheduler::selection::{skip_reason, SkipReason};
 use crate::tasks::dependencies::compare_dependency_order;
 use crate::tasks::{list_tasks, TaskFilter, TaskSummary};
+use chrono::{DateTime, Duration, SecondsFormat, Utc};
+use serde::Serialize;
 
 /// How far back a digest looks when no review has ever been finished.
 pub const DIGEST_DEFAULT_WINDOW: Duration = Duration::hours(24);
@@ -142,11 +140,12 @@ pub struct Digest {
     pub totals: DigestTotals,
 }
 
-/// The marker, or `None` when no review has been finished. An unreadable value
-/// reads as absent, as every settings accessor tolerates a hand-edited row.
-pub async fn seen_through(pool: &sqlx::SqlitePool) -> Result<Option<DateTime<Utc>>> {
+/// The context's actor's marker, or `None` when they have not finished a
+/// review. An unreadable value reads as absent, as every settings accessor
+/// tolerates a hand-edited row.
+pub async fn seen_through(ctx: &ServiceContext) -> Result<Option<DateTime<Utc>>> {
     Ok(parse_marker(
-        settings::get(pool, REVIEW_DIGEST_SEEN_THROUGH).await?,
+        settings::get_user(ctx, REVIEW_DIGEST_SEEN_THROUGH).await?,
     ))
 }
 
@@ -164,16 +163,22 @@ fn parse_marker(stored: Option<String>) -> Option<DateTime<Utc>> {
     }
 }
 
-/// Stores `max(current, to)` through the caller's transaction and returns what
-/// is stored. Nothing moves the marker backwards. Does not publish.
+/// Stores `max(current, to)` as the context's actor's marker, through the
+/// caller's transaction, and returns what is stored. Nothing moves the marker
+/// backwards. Does not publish.
+///
+/// Always the actor's row: a verdict never moves the marker of whoever
+/// triggered the run or owns the card.
 pub(crate) async fn advance_marker(
-    conn: &mut SqliteConnection,
+    ctx: &ServiceContext,
+    tx: &mut ScopedTx,
     to: DateTime<Utc>,
 ) -> Result<DateTime<Utc>> {
-    let current = parse_marker(settings::get_in(&mut *conn, REVIEW_DIGEST_SEEN_THROUGH).await?);
+    let current = parse_marker(settings::get_user_in(ctx, tx, REVIEW_DIGEST_SEEN_THROUGH).await?);
     let stored = current.map_or(to, |current| current.max(to));
-    settings::set_in(
-        &mut *conn,
+    settings::set_user_in(
+        ctx,
+        tx,
         REVIEW_DIGEST_SEEN_THROUGH,
         &stored.to_rfc3339_opts(SecondsFormat::AutoSi, true),
     )
@@ -192,14 +197,16 @@ pub async fn mark_seen(ctx: &ServiceContext, through: DateTime<Utc>) -> Result<D
         ));
     }
 
-    // The marker is a `settings` row, which has no team column until task 039
-    // moves it to `user_settings`: the event names the context's one team.
+    // The marker is the actor's user setting, but a change event needs a team
+    // until task 048's `Audience::User`, and this call names no entity to take
+    // one from: it asks for the context's one team, before anything is
+    // written, so a scope of several is refused untouched.
     let team_id = ctx.scope.sole()?.clone();
 
     // Read and write in one transaction, so two concurrent calls cannot
     // interleave and leave the smaller value behind.
-    let mut tx = ctx.pool.begin_with("BEGIN IMMEDIATE").await?;
-    let stored = advance_marker(&mut tx, through).await?;
+    let mut tx = ctx.begin_immediate().await?;
+    let stored = advance_marker(ctx, &mut tx, through).await?;
     tx.commit().await?;
 
     ctx.publish(ChangeEvent::settings(team_id));
@@ -230,9 +237,14 @@ impl WindowRun {
 /// What the queue did in `(since, until]`, plus what is still running.
 ///
 /// `until` is now; `since` is the marker, or [`DIGEST_DEFAULT_WINDOW`] before it.
+///
+/// Entity-less, so it reads one team's queue (ADR-0035 point 2): the team whose
+/// `in_review` a verdict empties when it advances the marker. The window's
+/// start is the actor's own marker.
 pub async fn digest(ctx: &ServiceContext) -> Result<Digest> {
+    let team_id = ctx.scope.sole()?.clone();
     let until = ctx.clock.now();
-    let since = seen_through(&ctx.pool)
+    let since = seen_through(ctx)
         .await?
         .unwrap_or(until - DIGEST_DEFAULT_WINDOW);
 
@@ -244,12 +256,14 @@ pub async fn digest(ctx: &ServiceContext) -> Result<Digest> {
                   r.ended_at AS "ended_at: DateTime<Utc>",
                   r.cost_usd, r.error_message, r.pr_url
              FROM runs r JOIN tasks t ON t.id = r.task_id
-            WHERE t.archived_at IS NULL
+            WHERE t.team_id = ?3
+              AND t.archived_at IS NULL
               AND (r.status = 'running'
                    OR (r.ended_at IS NOT NULL AND r.ended_at > ?1 AND r.ended_at <= ?2))
             ORDER BY r.task_id, r.attempt"#,
         since,
         until,
+        team_id,
     )
     .fetch_all(&ctx.pool)
     .await?;
@@ -375,11 +389,14 @@ fn run_backed_entry(summary: &TaskSummary, rows: &[&WindowRun]) -> DigestEntry {
 /// a review that hit a limit and resumed.
 async fn review_loops(ctx: &ServiceContext) -> Result<HashMap<String, DigestLoop>> {
     let rows_by_task = findings::loop_rows_on_the_board(ctx).await?;
+    let scope = ctx.scope.json();
     let open = sqlx::query!(
         r#"SELECT f.task_id AS "task_id!", count(*) AS "open!: i64"
              FROM review_findings f JOIN tasks t ON t.id = f.task_id
-            WHERE t.archived_at IS NULL AND f.status = 'open'
+            WHERE t.team_id IN (SELECT value FROM json_each(?1))
+              AND t.archived_at IS NULL AND f.status = 'open'
             GROUP BY f.task_id"#,
+        scope,
     )
     .fetch_all(&ctx.pool)
     .await?;

@@ -36,7 +36,6 @@
 use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
-use sqlx::SqlitePool;
 
 use crate::context::ServiceContext;
 use crate::db::settings;
@@ -316,31 +315,50 @@ pub struct Resolved {
     pub task: TaskReview,
 }
 
-pub async fn review_instructions(pool: &SqlitePool) -> Result<String> {
-    Ok(settings::get(pool, REVIEW_INSTRUCTIONS)
+/// One team's global review instructions, or the empty string.
+pub async fn review_instructions_for(ctx: &ServiceContext, team_id: &str) -> Result<String> {
+    Ok(settings::get_team(ctx, team_id, REVIEW_INSTRUCTIONS)
         .await?
         .unwrap_or_default())
 }
 
-pub async fn global_config(pool: &SqlitePool) -> Result<ReviewConfig> {
+/// One team's global [`ReviewConfig`].
+pub async fn global_config_for(ctx: &ServiceContext, team_id: &str) -> Result<ReviewConfig> {
     Ok(ReviewConfig::from_stored(
-        settings::get(pool, REVIEW_CONFIG).await?.as_deref(),
+        settings::get_team(ctx, team_id, REVIEW_CONFIG)
+            .await?
+            .as_deref(),
     ))
 }
 
-pub async fn get_review_settings(pool: &SqlitePool) -> Result<ReviewSettings> {
+/// The context's one team's global review settings, as Settings shows them.
+pub async fn get_review_settings(ctx: &ServiceContext) -> Result<ReviewSettings> {
+    get_review_settings_for(ctx, ctx.scope.sole()?).await
+}
+
+/// One team's global review settings: what a loop on that team's task
+/// inherits, whichever teams the context reaches.
+pub async fn get_review_settings_for(
+    ctx: &ServiceContext,
+    team_id: &str,
+) -> Result<ReviewSettings> {
     Ok(ReviewSettings {
-        instructions: review_instructions(pool).await?,
-        config: global_config(pool).await?,
+        instructions: review_instructions_for(ctx, team_id).await?,
+        config: global_config_for(ctx, team_id).await?,
     })
 }
 
-pub async fn repository_config(pool: &SqlitePool, repository_id: &str) -> Result<ReviewConfig> {
+/// One repository's own configuration, in the context's scope: another team's
+/// repository is as missing as one never registered.
+pub async fn repository_config(ctx: &ServiceContext, repository_id: &str) -> Result<ReviewConfig> {
+    let scope = ctx.scope.json();
     let stored: Option<Option<String>> = sqlx::query_scalar!(
-        "SELECT review_config FROM repositories WHERE id = ?1",
+        "SELECT review_config FROM repositories
+          WHERE id = ?1 AND team_id IN (SELECT value FROM json_each(?2))",
         repository_id,
+        scope,
     )
-    .fetch_optional(pool)
+    .fetch_optional(&ctx.pool)
     .await?;
     let stored =
         stored.ok_or_else(|| Error::not_found(format!("no repository with id {repository_id}")))?;
@@ -348,20 +366,23 @@ pub async fn repository_config(pool: &SqlitePool, repository_id: &str) -> Result
 }
 
 /// [`repository_config`] for the listed repositories, keyed by id, in one
-/// read: the board's form (task 037). A repository that does not exist has no
-/// entry, which reads as nothing set.
+/// read: the board's form (task 037). A repository that does not exist, or
+/// that the scope does not hold, has no entry, which reads as nothing set.
 pub async fn repository_configs_for(
-    pool: &SqlitePool,
+    ctx: &ServiceContext,
     repository_ids: &[String],
 ) -> Result<HashMap<String, ReviewConfig>> {
     let ids = ids_as_json(repository_ids)?;
+    let scope = ctx.scope.json();
     let rows = sqlx::query!(
         r#"SELECT id AS "id!", review_config
              FROM repositories
-            WHERE id IN (SELECT value FROM json_each(?1))"#,
+            WHERE id IN (SELECT value FROM json_each(?1))
+              AND team_id IN (SELECT value FROM json_each(?2))"#,
         ids,
+        scope,
     )
-    .fetch_all(pool)
+    .fetch_all(&ctx.pool)
     .await?;
     Ok(rows
         .into_iter()
@@ -376,19 +397,22 @@ pub async fn repository_configs_for(
 
 /// The listed tasks' own [`ReviewConfig`]s, keyed by id, in one read: the
 /// board's form of [`task_review`], without the instructions a card has no use
-/// for (task 037).
+/// for (task 037). Only tasks in the context's scope.
 pub async fn task_configs_for(
-    pool: &SqlitePool,
+    ctx: &ServiceContext,
     task_ids: &[String],
 ) -> Result<HashMap<String, ReviewConfig>> {
     let ids = ids_as_json(task_ids)?;
+    let scope = ctx.scope.json();
     let rows = sqlx::query!(
         r#"SELECT id AS "id!", review_config
              FROM tasks
-            WHERE id IN (SELECT value FROM json_each(?1))"#,
+            WHERE id IN (SELECT value FROM json_each(?1))
+              AND team_id IN (SELECT value FROM json_each(?2))"#,
         ids,
+        scope,
     )
-    .fetch_all(pool)
+    .fetch_all(&ctx.pool)
     .await?;
     Ok(rows
         .into_iter()
@@ -406,12 +430,16 @@ fn ids_as_json(ids: &[String]) -> Result<String> {
         .map_err(|error| Error::internal(format!("ids did not serialize: {error}")))
 }
 
-pub async fn task_review(pool: &SqlitePool, task_id: &str) -> Result<TaskReview> {
+/// One task's own review settings, in the context's scope.
+pub async fn task_review(ctx: &ServiceContext, task_id: &str) -> Result<TaskReview> {
+    let scope = ctx.scope.json();
     let row = sqlx::query!(
-        "SELECT review_instructions, review_config FROM tasks WHERE id = ?1",
+        "SELECT review_instructions, review_config FROM tasks
+          WHERE id = ?1 AND team_id IN (SELECT value FROM json_each(?2))",
         task_id,
+        scope,
     )
-    .fetch_optional(pool)
+    .fetch_optional(&ctx.pool)
     .await?
     .ok_or_else(|| Error::not_found(format!("no task with id {task_id}")))?;
     Ok(TaskReview {
@@ -422,10 +450,13 @@ pub async fn task_review(pool: &SqlitePool, task_id: &str) -> Result<TaskReview>
 
 /// `task_id`'s effective loop settings, read fresh. Called at every phase
 /// boundary, so a setting changed mid-loop takes effect at the next one.
-pub async fn resolve(pool: &SqlitePool, task_id: &str, repository_id: &str) -> Result<Resolved> {
-    let task = task_review(pool, task_id).await?;
-    let repository = repository_config(pool, repository_id).await?;
-    let global = get_review_settings(pool).await?;
+///
+/// The global level is the task's own team's, read through its repository.
+pub async fn resolve(ctx: &ServiceContext, task_id: &str, repository_id: &str) -> Result<Resolved> {
+    let task = task_review(ctx, task_id).await?;
+    let repository = repository_config(ctx, repository_id).await?;
+    let team_id = crate::repo::team_of(ctx, repository_id).await?;
+    let global = get_review_settings_for(ctx, &team_id).await?;
 
     Ok(Resolved {
         config: effective(&task.config, &repository, &global.config),
@@ -485,35 +516,39 @@ impl From<&EffectiveReviewConfig> for ReviewConfig {
 
 /// `level`'s own settings, what it inherits and what it resolves to. `id` is
 /// the repository's or the task's, and refused for the global level.
+///
+/// Each level inherits from its own team's global settings: the context's one
+/// team for the global level, and the repository's or the task's team for the
+/// other two, looked up in the context's scope.
 pub async fn get_review_level(
-    pool: &SqlitePool,
+    ctx: &ServiceContext,
     level: ReviewLevelName,
     id: Option<&str>,
 ) -> Result<ReviewLevel> {
     let nothing = ReviewConfig::default();
-    let global = global_config(pool).await?;
     let (own, above) = match (level, id) {
-        (ReviewLevelName::Global, None) => {
-            (global.clone(), effective(&nothing, &nothing, &nothing))
-        }
+        (ReviewLevelName::Global, None) => (
+            global_config_for(ctx, ctx.scope.sole()?).await?,
+            effective(&nothing, &nothing, &nothing),
+        ),
         (ReviewLevelName::Global, Some(_)) => {
             return Err(Error::invalid(
                 "the global review level takes no id; name a repository or a task for those",
             ))
         }
-        (ReviewLevelName::Repository, Some(id)) => (
-            repository_config(pool, id).await?,
-            effective(&nothing, &nothing, &global),
-        ),
+        (ReviewLevelName::Repository, Some(id)) => {
+            let own = repository_config(ctx, id).await?;
+            let team_id = crate::repo::team_of(ctx, id).await?;
+            let global = global_config_for(ctx, &team_id).await?;
+            (own, effective(&nothing, &nothing, &global))
+        }
         (ReviewLevelName::Task, Some(id)) => {
-            let repository_id =
-                sqlx::query_scalar!("SELECT repository_id FROM tasks WHERE id = ?1", id)
-                    .fetch_optional(pool)
-                    .await?
-                    .ok_or_else(|| Error::not_found(format!("no task with id {id}")))?;
-            let repository = repository_config(pool, &repository_id).await?;
+            let task = crate::tasks::service::task_row(ctx, id).await?;
+            let repository = repository_config(ctx, &task.repository_id).await?;
+            let team_id = crate::repo::team_of(ctx, &task.repository_id).await?;
+            let global = global_config_for(ctx, &team_id).await?;
             (
-                task_review(pool, id).await?.config,
+                task_review(ctx, id).await?.config,
                 effective(&nothing, &repository, &global),
             )
         }
@@ -545,19 +580,23 @@ pub async fn set_review_settings(
     instructions: &str,
     config: serde_json::Value,
 ) -> Result<ReviewSettings> {
-    let config =
-        ReviewConfig::from_door(config, &catalogue::catalogue(&ctx.pool, provider).await?)?;
-    let stored = config.to_stored()?.unwrap_or_else(|| "{}".to_string());
-    // Both keys are `settings` rows, which have no team column until task 039
-    // moves them to `team_settings`: the event names the context's one team.
+    // Entity-less, so it acts on the context's one team, asked before anything
+    // is read or written.
     let team_id = ctx.scope.sole()?.clone();
+    let config = ReviewConfig::from_door(
+        config,
+        &catalogue::catalogue_for(ctx, &team_id, provider).await?,
+    )?;
+    let stored = config.to_stored()?.unwrap_or_else(|| "{}".to_string());
 
-    let mut tx = ctx.pool.begin().await?;
-    settings::set_in(&mut *tx, REVIEW_INSTRUCTIONS, instructions).await?;
-    settings::set_in(&mut *tx, REVIEW_CONFIG, &stored).await?;
-    tx.commit().await?;
+    // Two writes through the one team-settings writer rather than one
+    // transaction of raw statements: `set_team` is where task 045's revision
+    // and task 051's owner check land, and each write announces itself. The
+    // configuration goes second, so a failure between the two leaves the loop
+    // as it was configured with new instructions, never the other way round.
+    settings::set_team(ctx, &team_id, REVIEW_INSTRUCTIONS, instructions).await?;
+    settings::set_team(ctx, &team_id, REVIEW_CONFIG, &stored).await?;
 
-    ctx.publish(ChangeEvent::settings(team_id));
     Ok(ReviewSettings {
         instructions: instructions.to_string(),
         config,
@@ -580,22 +619,23 @@ pub async fn set_repository_review_config(
     repository_id: &str,
     config: serde_json::Value,
 ) -> Result<ReviewConfig> {
-    let config =
-        ReviewConfig::from_door(config, &catalogue::catalogue(&ctx.pool, provider).await?)?;
+    // The repository's team, looked up in the scope before anything else: its
+    // catalogue is what a review model is checked against.
+    let team_id = crate::repo::team_of(ctx, repository_id).await?;
+    let config = ReviewConfig::from_door(
+        config,
+        &catalogue::catalogue_for(ctx, &team_id, provider).await?,
+    )?;
     let stored = config.to_stored()?;
 
-    let Some(team_id) = sqlx::query_scalar!(
-        "UPDATE repositories SET review_config = ?1 WHERE id = ?2 RETURNING team_id",
+    sqlx::query!(
+        "UPDATE repositories SET review_config = ?1 WHERE id = ?2 AND team_id = ?3",
         stored,
         repository_id,
+        team_id,
     )
-    .fetch_optional(&ctx.pool)
-    .await?
-    else {
-        return Err(Error::not_found(format!(
-            "no repository with id {repository_id}"
-        )));
-    };
+    .execute(&ctx.pool)
+    .await?;
 
     ctx.publish(ChangeEvent::repositories(
         team_id,
@@ -624,26 +664,28 @@ pub async fn set_task_review(
     instructions: Option<String>,
     config: serde_json::Value,
 ) -> Result<TaskReview> {
-    let config =
-        ReviewConfig::from_door(config, &catalogue::catalogue(&ctx.pool, provider).await?)?;
+    // The task's team, looked up in the scope before anything else: its
+    // catalogue is what a review model is checked against.
+    let team_id = crate::tasks::service::team_of(ctx, task_id).await?;
+    let config = ReviewConfig::from_door(
+        config,
+        &catalogue::catalogue_for(ctx, &team_id, provider).await?,
+    )?;
     let stored = config.to_stored()?;
     let instructions = instructions.filter(|text| !text.trim().is_empty());
     let now = ctx.clock.now();
 
-    let Some(team_id) = sqlx::query_scalar!(
+    sqlx::query!(
         "UPDATE tasks SET review_instructions = ?1, review_config = ?2, updated_at = ?3
-          WHERE id = ?4
-          RETURNING team_id",
+          WHERE id = ?4 AND team_id = ?5",
         instructions,
         stored,
         now,
         task_id,
+        team_id,
     )
-    .fetch_optional(&ctx.pool)
-    .await?
-    else {
-        return Err(Error::not_found(format!("no task with id {task_id}")));
-    };
+    .execute(&ctx.pool)
+    .await?;
 
     ctx.publish(ChangeEvent::tasks(team_id, [task_id.to_string()]));
     Ok(TaskReview {

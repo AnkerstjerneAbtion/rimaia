@@ -141,8 +141,9 @@ const KILL: &str = "kill";
 /// The `settings` key holding the tool blocklist (ADR-0012 point 3: "the list is
 /// a setting so it can grow with experience").
 ///
-/// Read through [`settings::get`] rather than through SQL of this module's own,
-/// which is seam-contract D3's rule. The key constant sits here rather than in
+/// Read through [`settings::get_team`] rather than through SQL of this module's
+/// own, which is seam-contract D3's rule, and for the team that owns the task:
+/// a run is forbidden what its own team forbids. The key constant sits here rather than in
 /// [`settings`] because the vocabulary is the runner's — the stored value is
 /// written in the active provider's own rule language, and nothing outside this
 /// module has any business knowing its shape.
@@ -316,8 +317,10 @@ const RIMAIA_TOOL_SURFACE: ForbiddenOperation = ForbiddenOperation::RimaiaToolSu
 /// An explicitly empty setting means an empty list — the operator turning the
 /// blocklist off is a thing they are allowed to do, and silently restoring the
 /// default would be the same defect `settings::base_instructions` documents.
-pub async fn disallowed_tools(pool: &sqlx::SqlitePool) -> Result<Vec<String>> {
-    let Some(stored) = settings::get(pool, DISALLOWED_TOOLS).await? else {
+///
+/// `team_id`'s value only; the runner's stricter override is task 042's.
+pub async fn disallowed_tools(ctx: &ServiceContext, team_id: &str) -> Result<Vec<String>> {
+    let Some(stored) = settings::get_team(ctx, team_id, DISALLOWED_TOOLS).await? else {
         return Ok(DEFAULT_DISALLOWED_TOOLS
             .iter()
             .map(|pattern| (*pattern).to_string())
@@ -378,8 +381,11 @@ pub(crate) fn forbidden_operations(
 /// reason — but note what "tolerant" costs here and does not: an unusable value
 /// falls back to a budget that is generous, never to *no* budget, because "no
 /// budget" is the runaway ADR-0011 asked for a bound against.
-pub async fn max_turns(pool: &sqlx::SqlitePool) -> Result<u32> {
-    let Some(stored) = settings::get(pool, MAX_TURNS).await? else {
+///
+/// `team_id`'s value only, the team that owns the task: the runner's stricter
+/// override is task 042's.
+pub async fn max_turns(ctx: &ServiceContext, team_id: &str) -> Result<u32> {
+    let Some(stored) = settings::get_team(ctx, team_id, MAX_TURNS).await? else {
         return Ok(DEFAULT_MAX_TURNS);
     };
 
@@ -841,8 +847,7 @@ async fn run_implementation(
     .await?;
     // Runner-owned, and read once, so the run is negotiated against the same
     // value it is then spawned with.
-    let run_environment =
-        released(board, lease, settings::run_environment(&ctx.pool).await).await?;
+    let run_environment = released(board, lease, settings::run_environment(ctx).await).await?;
 
     // Rimaia's conversation id, minted before anything exists so a resume works
     // even against a provider whose child dies before announcing itself
@@ -1222,7 +1227,7 @@ impl Phases<'_> {
             pending.base = review.implementation.clone();
         }
 
-        let run_environment = settings::run_environment(&self.ctx.pool)
+        let run_environment = settings::run_environment(self.ctx)
             .await
             .map_err(|error| error.to_string())?;
         repo::ensure_unattended_runs_allowed(&context.repository)
@@ -1280,7 +1285,9 @@ impl Phases<'_> {
                 Tool::ResolveReviewFinding,
             ),
         };
-        let grant = config.run_handles.grant(task_id, grant);
+        let grant = config
+            .run_handles
+            .grant(task_id, &self.lease.team_id, grant);
         let url = config.run_handles.endpoint_for(&grant).ok_or_else(|| {
             format!(
                 "The {noun} needs Rimaia's MCP server, which is not listening (see Settings → MCP)."
@@ -1643,7 +1650,7 @@ async fn run_window_closes_at(
     task_id: &str,
     run_id: &str,
 ) -> Option<DateTime<Utc>> {
-    match crate::schedule::window::active(&ctx.pool).await {
+    match crate::schedule::window::active(ctx).await {
         Ok(window) => window.and_then(|window| window.closes_at),
         Err(error) => {
             tracing::warn!(

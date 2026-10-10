@@ -62,7 +62,7 @@ use serde::Serialize;
 use tokio::net::TcpListener;
 use tokio::sync::watch;
 
-use crate::context::ServiceContext;
+use crate::context::{ServiceContext, TeamScope};
 use crate::db::MutationSource;
 use crate::doctor;
 use crate::error::{Error, Result};
@@ -408,15 +408,18 @@ async fn dispatch(
     Path(token): Path<String>,
     request: Request,
 ) -> Response {
-    let Some(scope @ RunScope::Run { .. }) = route.handles.resolve(&token) else {
+    let Some((scope @ RunScope::Run { .. }, team_id)) = route.handles.resolve_with_team(&token)
+    else {
         // A bare 404 with no body. An unknown token and a revoked one must be
         // indistinguishable, and neither may hint that some *other* token would
         // have worked — this route is not an oracle for which runs exist.
         return StatusCode::NOT_FOUND.into_response();
     };
 
+    // Every call through the handle runs under its task's one team (ADR-0029
+    // point 5), whatever the operator's context reaches.
     scoped_service(
-        route.ctx.clone(),
+        route.ctx.with_scope(TeamScope::one(team_id)),
         route.doctor.clone(),
         route.planner.clone(),
         scope,

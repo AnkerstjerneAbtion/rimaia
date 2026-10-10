@@ -1065,7 +1065,7 @@ async fn a_review_level_says_what_it_inherits_and_what_it_resolves_to() {
     assert_eq!(
         global,
         review_config::get_review_level(
-            &h.context.pool,
+            &h.context,
             rimaia_core::review_loop::ReviewLevelName::Global,
             None
         )
@@ -1151,7 +1151,7 @@ async fn the_review_settings_answer_the_same_over_mcp_and_the_tauri_command() {
         }))))
         .await
         .expect("the operator configures the loop");
-    let window = review_config::get_review_settings(&h.context.pool)
+    let window = review_config::get_review_settings(&h.context)
         .await
         .expect("the window's read");
     assert_eq!(written, window);
@@ -1245,7 +1245,7 @@ async fn max_review_loops_above_five_is_refused() {
 async fn a_review_model_outside_the_catalogue_is_refused() {
     let h = TestContext::new().await;
     let provider = rimaia_core::runner::provider::ClaudeProvider;
-    let catalogue = rimaia_core::strategy::catalogue::catalogue(&h.context.pool, &provider)
+    let catalogue = rimaia_core::strategy::catalogue::catalogue(&h.context, &provider)
         .await
         .expect("the catalogue");
     let listed_model = catalogue.models[0].id.clone();

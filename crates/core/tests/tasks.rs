@@ -13,9 +13,7 @@
 
 use chrono::{DateTime, Utc};
 use pretty_assertions::assert_eq;
-use rimaia_core::db::{
-    settings, BoardColumn, ExitClass, MutationSource, RunKind, RunState, RunStatus,
-};
+use rimaia_core::db::{BoardColumn, ExitClass, MutationSource, RunKind, RunState, RunStatus};
 use rimaia_core::mcp::requests::GetTaskRequest;
 use rimaia_core::mcp::RimaiaServer;
 use rimaia_core::review::{FindingSeverity, FindingStatus};
@@ -1799,7 +1797,7 @@ async fn reordering_links_places_one_between_two_others() {
 
 /// The loop is on for everyone, the way the global checkbox turns it on.
 async fn turn_the_loop_on_globally(h: &TestContext) {
-    settings::set(
+    rimaia_core::testing::settings::set(
         &h.context,
         review_config::REVIEW_CONFIG,
         r#"{"enabled":"on_cost_acknowledged"}"#,

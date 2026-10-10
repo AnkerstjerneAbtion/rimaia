@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT f.task_id AS \"task_id!\", count(*) AS \"open!: i64\"\n             FROM review_findings f JOIN tasks t ON t.id = f.task_id\n            WHERE t.team_id IN (SELECT value FROM json_each(?1))\n              AND t.archived_at IS NULL AND f.status = 'open'\n            GROUP BY f.task_id",
+  "describe": {
+    "columns": [
+      {
+        "name": "task_id!",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "open!: i64",
+        "ordinal": 1,
+        "type_info": "Null"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      null
+    ]
+  },
+  "hash": "f6cfdae57ccef9bdfc89292fa507a0f724ba2e2646961e8bc3381d161d525f22"
+}

@@ -44,7 +44,7 @@ use crate::error::{Error, Result};
 use crate::events::ChangeEvent;
 use crate::strategy::settings as strategy_settings;
 use crate::strategy::{effective_strategy, StrategyDefaults};
-use crate::tasks::service::{fetch_task_row, team_of_task};
+use crate::tasks::service::{fetch_task_row, task_row, team_of_task};
 
 /// The envelope version this build writes. Stamped by
 /// [`set_task_strategy`], never taken from the caller — a proposal that
@@ -361,15 +361,15 @@ pub async fn set_task_strategy(
     let plan = plan.repaired();
     let stored = plan.to_stored()?;
 
-    // Read outside the transaction: `strategy::settings` takes the pool, and
-    // holding a write transaction open across two more reads to defend against
+    // Read outside the transaction: `strategy::settings` reads over the pool,
+    // and holding a write transaction open across two more reads to defend against
     // a settings change landing in the same millisecond would cost more than
     // the race is worth. The defaults are configuration a human edits, not a
     // value another writer moves under us.
     let defaults = resolved_defaults(ctx, task_id).await?;
 
-    let mut tx = ctx.pool.begin().await?;
-    let current = fetch_task_row(&mut *tx, task_id).await?;
+    let mut tx = ctx.begin().await?;
+    let current = fetch_task_row(&mut tx, task_id).await?;
 
     if source == StrategySource::Planner {
         let mode = effective_strategy(&current, &defaults.repository, &defaults.global).mode;
@@ -397,7 +397,7 @@ pub async fn set_task_strategy(
     .execute(&mut *tx)
     .await?;
 
-    let team_id = team_of_task(&mut *tx, task_id).await?;
+    let team_id = team_of_task(&mut tx, task_id).await?;
     tx.commit().await?;
 
     // Publish before the read-back, exactly as `create_task` does and for its
@@ -406,7 +406,7 @@ pub async fn set_task_strategy(
     // also how the panel learns a planner wrote back mid-run, which is the only
     // signal there is — the strategy run has no `runs` row to watch.
     ctx.publish(ChangeEvent::tasks(team_id, [task_id.to_string()]));
-    fetch_task_row(&ctx.pool, task_id).await
+    task_row(ctx, task_id).await
 }
 
 /// Takes authorship of a recorded proposal: `strategy_source` flips
@@ -432,8 +432,8 @@ pub async fn set_task_strategy(
     )
 )]
 pub async fn accept_task_strategy(ctx: &ServiceContext, task_id: &str) -> Result<Task> {
-    let mut tx = ctx.pool.begin().await?;
-    let current = fetch_task_row(&mut *tx, task_id).await?;
+    let mut tx = ctx.begin().await?;
+    let current = fetch_task_row(&mut tx, task_id).await?;
 
     if current.strategy_plan.is_none() {
         return Err(Error::invalid(format!(
@@ -453,11 +453,11 @@ pub async fn accept_task_strategy(ctx: &ServiceContext, task_id: &str) -> Result
     .execute(&mut *tx)
     .await?;
 
-    let team_id = team_of_task(&mut *tx, task_id).await?;
+    let team_id = team_of_task(&mut tx, task_id).await?;
     tx.commit().await?;
 
     ctx.publish(ChangeEvent::tasks(team_id, [task_id.to_string()]));
-    fetch_task_row(&ctx.pool, task_id).await
+    task_row(ctx, task_id).await
 }
 
 /// Forgets the recorded proposal — the panel's "Re-plan", and the **only**
@@ -484,8 +484,8 @@ pub async fn accept_task_strategy(ctx: &ServiceContext, task_id: &str) -> Result
     )
 )]
 pub async fn clear_task_strategy(ctx: &ServiceContext, task_id: &str) -> Result<Task> {
-    let mut tx = ctx.pool.begin().await?;
-    fetch_task_row(&mut *tx, task_id).await?;
+    let mut tx = ctx.begin().await?;
+    fetch_task_row(&mut tx, task_id).await?;
 
     let now = ctx.clock.now();
     sqlx::query!(
@@ -497,11 +497,11 @@ pub async fn clear_task_strategy(ctx: &ServiceContext, task_id: &str) -> Result<
     .execute(&mut *tx)
     .await?;
 
-    let team_id = team_of_task(&mut *tx, task_id).await?;
+    let team_id = team_of_task(&mut tx, task_id).await?;
     tx.commit().await?;
 
     ctx.publish(ChangeEvent::tasks(team_id, [task_id.to_string()]));
-    fetch_task_row(&ctx.pool, task_id).await
+    task_row(ctx, task_id).await
 }
 
 /// The two levels of default that stand behind one task, read together.
@@ -520,19 +520,24 @@ pub(super) struct ResolvedDefaults {
 /// the row in hand before it starts its transaction — which is the order
 /// [`set_task_strategy`] needs, since the settings accessors take the pool.
 async fn resolved_defaults(ctx: &ServiceContext, task_id: &str) -> Result<ResolvedDefaults> {
-    let task = fetch_task_row(&ctx.pool, task_id).await?;
+    let task = task_row(ctx, task_id).await?;
     defaults_for_repository(ctx, &task.repository_id).await
 }
 
 /// The same, for a repository already known — the board read's path, where one
 /// query answered for fifty cards and the repository ids are on them.
+///
+/// Both levels are the repository's own team's, which is the task's: the
+/// defaults a card resolves through are the ones its team configured, whichever
+/// teams the context reaches.
 pub(super) async fn defaults_for_repository(
     ctx: &ServiceContext,
     repository_id: &str,
 ) -> Result<ResolvedDefaults> {
+    let team_id = crate::repo::team_of(ctx, repository_id).await?;
     Ok(ResolvedDefaults {
-        repository: strategy_settings::repository_default(&ctx.pool, repository_id).await?,
-        global: strategy_settings::global_default(&ctx.pool).await?,
+        repository: strategy_settings::repository_default(ctx, repository_id).await?,
+        global: strategy_settings::global_default_for(ctx, &team_id).await?,
     })
 }
 

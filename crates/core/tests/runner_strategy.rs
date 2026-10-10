@@ -408,7 +408,7 @@ async fn each_run_is_sent_its_own_prompt_and_the_proposal_reaches_the_implementa
     // links, and the planner changed none of them.
     let detail = fixture.detail().await;
     let repository = fixture.repository().await;
-    let catalogue = strategy::catalogue::catalogue(&fixture.harness.context.pool, &ClaudeProvider)
+    let catalogue = strategy::catalogue::catalogue(&fixture.harness.context, &ClaudeProvider)
         .await
         .expect("the catalogue");
 
@@ -422,7 +422,7 @@ async fn each_run_is_sent_its_own_prompt_and_the_proposal_reaches_the_implementa
             "subagents",
         )
     );
-    let base = settings::base_instructions(&fixture.harness.context.pool)
+    let base = settings::base_instructions(&fixture.harness.context)
         .await
         .expect("the base instructions");
     assert!(!base.trim().is_empty(), "an empty template proves nothing");
@@ -473,7 +473,7 @@ async fn the_planner_prompt_names_the_branch_prepare_created() {
         .branch
         .clone()
         .expect("prepare created the branch");
-    let catalogue = strategy::catalogue::catalogue(&fixture.harness.context.pool, &ClaudeProvider)
+    let catalogue = strategy::catalogue::catalogue(&fixture.harness.context, &ClaudeProvider)
         .await
         .expect("the catalogue");
     let expected = compose_strategy_prompt(

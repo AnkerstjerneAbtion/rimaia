@@ -8,14 +8,18 @@
 //!
 //! # Scope
 //!
-//! A method that takes a [`LeaseRef`] refuses a task that does not exist with
-//! `NotFound`, and one that also takes a run id refuses a run of another task
-//! the same way. That is all "scoped by `lease`" means before task 043: there
-//! is no lease row to compare a generation against yet, so no `Conflict` (D8).
+//! A method that takes a [`LeaseRef`] runs under the adapter's context
+//! narrowed to the lease's team, and only after checking the adapter's scope
+//! contains that team (D31 point 13). It refuses a task that does not exist,
+//! or that is not in the lease's team, with `NotFound`, in the sentence a
+//! never-issued task gets, and one that also takes a run id refuses a run of
+//! another task the same way. That is all "scoped by `lease`" means before
+//! task 043: there is no lease row to compare a generation against yet, so no
+//! `Conflict` (D8).
 
 use chrono::{DateTime, Utc};
 
-use crate::context::ServiceContext;
+use crate::context::{ServiceContext, TeamScope};
 use crate::db::{settings, StrategySource};
 use crate::error::{Error, ErrorCode, Result};
 use crate::paths::AppPaths;
@@ -75,7 +79,7 @@ pub async fn claim(
     };
     // The lease's team is the task's own row's (D31 point 2), read with the
     // rest, before any edge.
-    let team_id = match tasks::team_of_task(&ctx.pool, &task_id).await {
+    let team_id = match tasks::service::team_of(ctx, &task_id).await {
         Ok(team_id) => team_id,
         Err(error) if error.code() == ErrorCode::NotFound => return Ok(None),
         Err(error) => return Err(error),
@@ -133,12 +137,14 @@ pub async fn run_context(
     provider: &dyn AgentProvider,
     lease: &LeaseRef,
 ) -> Result<RunContext> {
+    let ctx = &lease_context(ctx, lease)?;
     read_context(ctx, provider, &lease.task_id).await
 }
 
 /// Writes `tasks.branch` and nothing else: the worktree path is the runner's
 /// (ADR-0028 point 2). No production caller until task 066.
 pub async fn record_branch(ctx: &ServiceContext, lease: &LeaseRef, branch: &str) -> Result<()> {
+    let ctx = &lease_context(ctx, lease)?;
     ensure_task(ctx, &lease.task_id).await?;
 
     let now = ctx.clock.now();
@@ -165,6 +171,7 @@ pub async fn start_run(
     lease: &LeaseRef,
     run: StartRun,
 ) -> Result<()> {
+    let ctx = &lease_context(ctx, lease)?;
     ensure_task(ctx, &lease.task_id).await?;
 
     outcome::insert_run(
@@ -192,6 +199,7 @@ pub async fn append_transcript(
     lease: &LeaseRef,
     chunk: TranscriptChunk,
 ) -> Result<TranscriptAck> {
+    let ctx = &lease_context(ctx, lease)?;
     ensure_task(ctx, &lease.task_id).await?;
     ensure_run_of_task(ctx, &lease.task_id, &chunk.run_id).await?;
 
@@ -200,8 +208,13 @@ pub async fn append_transcript(
     })
 }
 
-pub fn publish_tail(ctx: &ServiceContext, _lease: &LeaseRef, tail: RunTail) {
-    ctx.publish_tail(tail);
+/// Drops a tail for a lease whose team the adapter's scope does not hold:
+/// synchronous and infallible, it has no `NotFound` to answer with, and a
+/// dropped tail costs nothing (D14).
+pub fn publish_tail(ctx: &ServiceContext, lease: &LeaseRef, tail: RunTail) {
+    if ctx.scope.contains(&lease.team_id) {
+        ctx.publish_tail(tail);
+    }
 }
 
 /// Closes the run and lands the task, deciding `resume_after` here, and
@@ -219,6 +232,7 @@ pub async fn finish_run(
     run_id: &str,
     finish: FinishRun,
 ) -> Result<FinishReceipt> {
+    let ctx = &lease_context(ctx, lease)?;
     ensure_task(ctx, &lease.task_id).await?;
     ensure_run_of_task(ctx, &lease.task_id, run_id).await?;
 
@@ -296,6 +310,7 @@ async fn decide_resume_after(
 /// read one from, and a strategy lease meets a `running` task only when a
 /// crash stranded it, which the next launch's reconcile fails anyway.
 pub async fn release(ctx: &ServiceContext, lease: &LeaseRef) -> Result<()> {
+    let ctx = &lease_context(ctx, lease)?;
     ensure_task(ctx, &lease.task_id).await?;
     edges::release(ctx, &lease.task_id).await;
     Ok(())
@@ -306,6 +321,7 @@ pub async fn record_strategy(
     lease: &LeaseRef,
     plan: StrategyPlan,
 ) -> Result<()> {
+    let ctx = &lease_context(ctx, lease)?;
     ensure_task(ctx, &lease.task_id).await?;
     set_task_strategy(ctx, &lease.task_id, plan, StrategySource::Planner).await?;
     Ok(())
@@ -317,6 +333,7 @@ pub async fn record_review_findings(
     run_id: &str,
     findings: Vec<NewReviewFinding>,
 ) -> Result<()> {
+    let ctx = &lease_context(ctx, lease)?;
     ensure_task(ctx, &lease.task_id).await?;
     ensure_run_of_task(ctx, &lease.task_id, run_id).await?;
     findings::record(ctx, &lease.task_id, run_id, findings).await?;
@@ -331,19 +348,23 @@ async fn read_context(
 ) -> Result<RunContext> {
     let task = tasks::get_task(ctx, task_id).await?;
     let repository = crate::repo::get(ctx, &task.task.repository_id).await?;
-    let base_instructions = settings::base_instructions(&ctx.pool).await?;
+    // Every team setting below is the task's own team's, so the prompt, the
+    // planner's catalogue and the run's limits all come from the team that
+    // owns the card, whichever teams the context reaches.
+    let team_id = tasks::service::team_of(ctx, task_id).await?;
+    let base_instructions = settings::base_instructions_for(ctx, &team_id).await?;
 
-    let global = strategy::settings::global_default(&ctx.pool).await?;
-    let per_repository = strategy::settings::repository_default(&ctx.pool, &repository.id).await?;
+    let global = strategy::settings::global_default_for(ctx, &team_id).await?;
+    let per_repository = strategy::settings::repository_default(ctx, &repository.id).await?;
     let strategy = strategy::effective_strategy(&task.task, &per_repository, &global);
 
-    let catalogue = catalogue::catalogue(&ctx.pool, provider).await?;
+    let catalogue = catalogue::catalogue_for(ctx, &team_id, provider).await?;
     let limits = TeamLimits {
-        max_turns: process::max_turns(&ctx.pool).await?,
-        disallowed_tools: stored_disallowed_tools(ctx).await?,
+        max_turns: process::max_turns(ctx, &team_id).await?,
+        disallowed_tools: stored_disallowed_tools(ctx, &team_id).await?,
     };
 
-    let resolved = review_loop::config::resolve(&ctx.pool, task_id, &repository.id).await?;
+    let resolved = review_loop::config::resolve(ctx, task_id, &repository.id).await?;
     let review = review_loop::context(ctx, task_id, resolved).await?;
 
     Ok(RunContext {
@@ -360,8 +381,11 @@ async fn read_context(
 /// The stored blocklist as rules, one per non-blank line, or `None` when it
 /// was never set. `runner::process::disallowed_tools` documents why an
 /// explicitly empty setting is an empty list rather than the default.
-async fn stored_disallowed_tools(ctx: &ServiceContext) -> Result<Option<Vec<String>>> {
-    Ok(settings::get(&ctx.pool, DISALLOWED_TOOLS)
+async fn stored_disallowed_tools(
+    ctx: &ServiceContext,
+    team_id: &str,
+) -> Result<Option<Vec<String>>> {
+    Ok(settings::get_team(ctx, team_id, DISALLOWED_TOOLS)
         .await?
         .map(|stored| {
             stored
@@ -373,25 +397,42 @@ async fn stored_disallowed_tools(ctx: &ServiceContext) -> Result<Option<Vec<Stri
         }))
 }
 
-/// `NotFound` for a lease on a task that does not exist, in the sentence
-/// `tasks::get_task` answers the same question with.
-async fn ensure_task(ctx: &ServiceContext, task_id: &str) -> Result<()> {
-    let exists: i64 = sqlx::query_scalar!("SELECT count(*) FROM tasks WHERE id = ?1", task_id)
-        .fetch_one(&ctx.pool)
-        .await?;
-    if exists == 0 {
-        return Err(Error::not_found(format!("no task with id {task_id}")));
+/// The context a lease's calls run under: the adapter's, narrowed to the
+/// lease's team (D31 point 13).
+///
+/// Narrowed only after checking the adapter's scope contains that team, so a
+/// lease naming another team is `NotFound` in the sentence a never-issued task
+/// gets, never a refusal that names a team. A lease naming the right team on
+/// another team's task is refused by the scoped query in [`ensure_task`].
+fn lease_context(ctx: &ServiceContext, lease: &LeaseRef) -> Result<ServiceContext> {
+    if !ctx.scope.contains(&lease.team_id) {
+        return Err(Error::not_found(format!(
+            "no task with id {}",
+            lease.task_id
+        )));
     }
+    Ok(ctx.with_scope(TeamScope::one(lease.team_id.clone())))
+}
+
+/// `NotFound` for a lease on a task that does not exist in the context's
+/// scope, in the sentence `tasks::get_task` answers the same question with.
+async fn ensure_task(ctx: &ServiceContext, task_id: &str) -> Result<()> {
+    tasks::service::team_of(ctx, task_id).await?;
     Ok(())
 }
 
 /// `NotFound` for a run that does not exist or belongs to another task: the
 /// lease bounds what a call may touch, and a run outside it is not there.
 async fn ensure_run_of_task(ctx: &ServiceContext, task_id: &str, run_id: &str) -> Result<()> {
-    let owner: Option<String> =
-        sqlx::query_scalar!("SELECT task_id FROM runs WHERE id = ?1", run_id)
-            .fetch_optional(&ctx.pool)
-            .await?;
+    let scope = ctx.scope.json();
+    let owner: Option<String> = sqlx::query_scalar!(
+        "SELECT r.task_id FROM runs r JOIN tasks t ON t.id = r.task_id
+          WHERE r.id = ?1 AND t.team_id IN (SELECT value FROM json_each(?2))",
+        run_id,
+        scope,
+    )
+    .fetch_optional(&ctx.pool)
+    .await?;
     match owner {
         Some(owner) if owner == task_id => Ok(()),
         Some(_) => Err(Error::not_found(format!(

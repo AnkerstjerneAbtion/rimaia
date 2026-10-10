@@ -327,8 +327,8 @@ pub async fn summary_for(
 /// The single-task loader for [`history::phases`]. Task 037 adds the command
 /// and the tool that reach it.
 pub async fn history(ctx: &ServiceContext, task_id: &str) -> Result<ReviewHistory> {
-    let task = crate::tasks::service::fetch_task_row(&ctx.pool, task_id).await?;
-    let resolved = config::resolve(&ctx.pool, task_id, &task.repository_id).await?;
+    let task = crate::tasks::service::task_row(ctx, task_id).await?;
+    let resolved = config::resolve(ctx, task_id, &task.repository_id).await?;
     let rows = findings::loop_rows(ctx, task_id).await?;
     let all = findings::list(ctx, task_id, None).await?;
     Ok(phases(&rows, &all, &resolved.config))

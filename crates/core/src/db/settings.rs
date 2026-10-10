@@ -1,4 +1,4 @@
-//! The typed view of the `settings` key/value table (seam-contract D3).
+//! The typed view of the settings stores (seam-contract D3, D28 part 4).
 //!
 //! [`Setting`](crate::db::Setting) is the row and nothing more. *Which* keys
 //! exist, what each one holds, and what an absent key means are business rules,
@@ -7,14 +7,26 @@
 //! SQL of its own, so `inherit | strict_local` is parsed in one place instead of
 //! two.
 //!
+//! # Three stores, one placement
+//!
+//! [`placement`] says where each key lives (ADR-0028 point 2), and every read
+//! and write goes through the accessor pair for that placement, which refuses
+//! a key of any other: [`get_team`]/[`set_team`] over `team_settings`, for one
+//! team in the context's scope; [`get_user`]/[`set_user`] over
+//! `user_settings`, for the context's actor; and [`get_runner`]/[`set_runner`]
+//! over the legacy `settings` table, which still holds machine state until
+//! tasks 040 and 041 move it. A team or user key written through a service
+//! never touches its legacy `settings` row again; those rows stay, unread, for
+//! task 065 to drop with the table.
+//!
 //! Writes publish [`Change::Settings`](crate::events::Change::Settings) after the row is committed
 //! (ADR-0018). The event carries no key: the whole table is a handful of rows
 //! and every consumer re-reads all of it.
 
 use serde::{Deserialize, Serialize};
-use sqlx::SqlitePool;
+use sqlx::SqliteConnection;
 
-use crate::context::ServiceContext;
+use crate::context::{ScopedTx, ServiceContext};
 use crate::doctor::Check;
 use crate::error::{Error, Result};
 use crate::events::ChangeEvent;
@@ -86,6 +98,34 @@ pub const RUNNER_KEYS: [&str; 10] = [
 pub const USER_KEYS: [&str; 2] = [
     SUBSCRIPTION_MONTHLY_USD,
     crate::review::digest::REVIEW_DIGEST_SEEN_THROUGH,
+];
+
+/// Every key constant in the crate, for the tests that walk them all: 038's
+/// placement test, and the one that reads each key back from the store its
+/// placement names. A repository's strategy default has no constant (D17.2),
+/// so each test names one for its own repository.
+#[cfg(any(test, feature = "testing"))]
+pub const ALL_KEYS: [&str; 20] = [
+    BASE_INSTRUCTIONS,
+    crate::strategy::catalogue::STRATEGY_CATALOGUE,
+    crate::strategy::settings::STRATEGY_DEFAULT,
+    crate::strategy::settings::STRATEGY_APPROVAL,
+    crate::runner::process::MAX_TURNS,
+    crate::runner::process::DISALLOWED_TOOLS,
+    crate::review_loop::config::REVIEW_INSTRUCTIONS,
+    crate::review_loop::config::REVIEW_CONFIG,
+    SUBSCRIPTION_MONTHLY_USD,
+    crate::review::digest::REVIEW_DIGEST_SEEN_THROUGH,
+    RUN_ENVIRONMENT,
+    crate::mcp::settings::MCP_PORT,
+    crate::scheduler::capacity::MAX_CONCURRENCY,
+    crate::scheduler::capacity::SCHEDULE_MODE,
+    crate::scheduler::state::QUEUE_STATE,
+    crate::schedule::window::ACTIVE_RUN_WINDOW,
+    crate::scheduler::pause::USAGE_LIMIT_PAUSE_UNTIL,
+    crate::worktree::cleanup::AUTO_CLEANUP,
+    DOCTOR_DISMISSALS,
+    ONBOARDING_DISMISSED,
 ];
 
 /// Where a settings key lives once `settings` is split (ADR-0028 point 2).
@@ -175,84 +215,241 @@ impl RunEnvironment {
     }
 }
 
-/// The stored value for `key`, or `None` when no row has ever been written.
+/// `Internal` for an accessor handed a key of another placement.
 ///
-/// Takes a pool rather than a [`ServiceContext`] because a read has nothing to
-/// publish and nothing to time, and startup wants one before a context exists.
-/// Prefer the typed readers below — they are where an absent key gets its
-/// meaning.
-pub async fn get(pool: &SqlitePool, key: &str) -> Result<Option<String>> {
-    get_in(pool, key).await
+/// A wiring bug, never something a user did: every key's placement is fixed
+/// by [`placement`], and each accessor serves one store.
+fn ensure_placed(key: &str, expected: Placement) -> Result<()> {
+    let actual = placement(key);
+    if actual != expected {
+        return Err(Error::internal(format!(
+            "`{key}` is a {actual:?} setting, so it cannot be read or written as a {expected:?} one"
+        )));
+    }
+    Ok(())
 }
 
-/// Writes `key`, creating the row or replacing the value, and announces it.
+/// `NotFound` for a team outside the context's scope, in the sentence a team
+/// that was never created would get: a team the caller cannot reach is not
+/// there, as far as it can tell (ADR-0035 point 2).
+fn ensure_team_in_scope(ctx: &ServiceContext, team_id: &str) -> Result<()> {
+    if !ctx.scope.contains(team_id) {
+        return Err(Error::not_found(format!("no team with id {team_id}")));
+    }
+    Ok(())
+}
+
+/// One team's value for a team key (ADR-0028 point 2), or `None` when that
+/// team never wrote it.
+pub(crate) async fn get_team(
+    ctx: &ServiceContext,
+    team_id: &str,
+    key: &str,
+) -> Result<Option<String>> {
+    ensure_placed(key, Placement::Team)?;
+    ensure_team_in_scope(ctx, team_id)?;
+    let value = sqlx::query_scalar!(
+        "SELECT value FROM team_settings WHERE team_id = ?1 AND key = ?2",
+        team_id,
+        key,
+    )
+    .fetch_optional(&ctx.pool)
+    .await?;
+    Ok(value)
+}
+
+/// Writes one team's value for a team key, and announces it to that team.
+///
+/// **The one writer of `team_settings`.** Task 045 adds the revision and
+/// authorship columns here and task 051 the owner check, so a key added later
+/// inherits both without anyone having to remember them.
 ///
 /// One statement, so the `execute` *is* the commit; the publication still
-/// follows it rather than preceding it, because ADR-0018's rule is about what a
-/// subscriber can read when it re-reads.
+/// follows it, because ADR-0018's rule is about what a subscriber can read
+/// when it re-reads.
+pub(crate) async fn set_team(
+    ctx: &ServiceContext,
+    team_id: &str,
+    key: &str,
+    value: &str,
+) -> Result<()> {
+    ensure_placed(key, Placement::Team)?;
+    ensure_team_in_scope(ctx, team_id)?;
+    sqlx::query!(
+        "INSERT INTO team_settings (team_id, key, value) VALUES (?1, ?2, ?3)
+         ON CONFLICT (team_id, key) DO UPDATE SET value = excluded.value",
+        team_id,
+        key,
+        value,
+    )
+    .execute(&ctx.pool)
+    .await?;
+
+    ctx.publish(ChangeEvent::settings(team_id.to_string()));
+    Ok(())
+}
+
+/// Deletes one team's row for a team key inside the caller's transaction,
+/// publishing nothing.
 ///
-/// `settings` has no team column until task 039 moves its readers to
-/// `team_settings` and `user_settings`, so the event names the context's one
-/// team, read before the write so a scope of several is refused untouched.
-pub async fn set(ctx: &ServiceContext, key: &str, value: &str) -> Result<()> {
+/// For the one key that has an owner row elsewhere, a repository's strategy
+/// default (D17.1): removing the repository removes its default in the same
+/// transaction, and the caller's own event covers it. A delete leaves no row
+/// for task 045's revision to describe, which is why it is not [`set_team`].
+pub(crate) async fn remove_team(tx: &mut ScopedTx, team_id: &str, key: &str) -> Result<()> {
+    ensure_placed(key, Placement::Team)?;
+    if !tx.scope().contains(team_id) {
+        return Err(Error::not_found(format!("no team with id {team_id}")));
+    }
+    sqlx::query!(
+        "DELETE FROM team_settings WHERE team_id = ?1 AND key = ?2",
+        team_id,
+        key,
+    )
+    .execute(&mut **tx)
+    .await?;
+    Ok(())
+}
+
+/// The context's actor's value for a user key (ADR-0030 point 8), whatever the
+/// scope, or `None` when they never wrote it.
+pub(crate) async fn get_user(ctx: &ServiceContext, key: &str) -> Result<Option<String>> {
+    let mut conn = ctx.pool.acquire().await?;
+    get_user_in(ctx, &mut conn, key).await
+}
+
+/// Writes the context's actor's value for a user key, and announces it.
+///
+/// The event names the context's one team, read before the write so a scope
+/// of several is refused untouched: a change event needs a team until task
+/// 048's `Audience::User` gives a person's own settings an audience of their
+/// own, and that is where this refusal ends.
+pub(crate) async fn set_user(ctx: &ServiceContext, key: &str, value: &str) -> Result<()> {
     let team_id = ctx.scope.sole()?.clone();
-    set_in(&ctx.pool, key, value).await?;
+    let mut conn = ctx.pool.acquire().await?;
+    set_user_in(ctx, &mut conn, key, value).await?;
+    drop(conn);
 
     ctx.publish(ChangeEvent::settings(team_id));
     Ok(())
 }
 
-/// [`set`]'s write without its announcement, over any executor.
+/// [`get_user`]'s statement, on a connection the caller's transaction holds.
 ///
-/// For a caller that writes a key inside a transaction it already holds — a
-/// review action advancing its digest marker with the move that earned it — and
-/// that publishes [`ChangeEvent::settings`] itself, after its own commit.
-/// Everything else goes through [`set`], so there is still one statement for a
-/// key whichever path writes it.
-pub async fn set_in<'e, E>(executor: E, key: &str, value: &str) -> Result<()>
-where
-    E: sqlx::Executor<'e, Database = sqlx::Sqlite>,
-{
+/// Takes the context for its actor and nothing else, never its pool: the read
+/// belongs to the caller's transaction (a review verdict, `mark_seen`).
+pub async fn get_user_in(
+    ctx: &ServiceContext,
+    conn: &mut SqliteConnection,
+    key: &str,
+) -> Result<Option<String>> {
+    ensure_placed(key, Placement::User)?;
+    let value = sqlx::query_scalar!(
+        "SELECT value FROM user_settings WHERE user_id = ?1 AND key = ?2",
+        ctx.actor,
+        key,
+    )
+    .fetch_optional(&mut *conn)
+    .await?;
+    Ok(value)
+}
+
+/// [`set_user`]'s statement, on a connection the caller's transaction holds,
+/// publishing nothing: the caller announces after its own commit.
+///
+/// **The one statement that writes `user_settings`.** The row is always the
+/// context's actor's, never the row of whoever triggered a run or owns a
+/// card, so a teammate's review never moves another person's marker.
+pub async fn set_user_in(
+    ctx: &ServiceContext,
+    conn: &mut SqliteConnection,
+    key: &str,
+    value: &str,
+) -> Result<()> {
+    ensure_placed(key, Placement::User)?;
+    sqlx::query!(
+        "INSERT INTO user_settings (user_id, key, value) VALUES (?1, ?2, ?3)
+         ON CONFLICT (user_id, key) DO UPDATE SET value = excluded.value",
+        ctx.actor,
+        key,
+        value,
+    )
+    .execute(&mut *conn)
+    .await?;
+    Ok(())
+}
+
+/// The value of a runner key, from the legacy `settings` table.
+///
+/// Machine state stays where it is, unfiltered, until task 040 copies it into
+/// `runner.db` and task 041 moves its readers; 041 deletes this pair. It takes
+/// the context anyway, so nothing reaches the store without one.
+pub(crate) async fn get_runner(ctx: &ServiceContext, key: &str) -> Result<Option<String>> {
+    ensure_placed(key, Placement::Runner)?;
+    let value = sqlx::query_scalar!("SELECT value FROM settings WHERE key = ?1", key)
+        .fetch_optional(&ctx.pool)
+        .await?;
+    Ok(value)
+}
+
+/// Writes a runner key into the legacy `settings` table, and announces it.
+///
+/// The event names the context's one team, read before the write so a scope
+/// of several is refused untouched. Machine state has no team: task 041 moves
+/// it into `runner.db`, and task 048 moves its event off the team channel.
+pub(crate) async fn set_runner(ctx: &ServiceContext, key: &str, value: &str) -> Result<()> {
+    ensure_placed(key, Placement::Runner)?;
+    let team_id = ctx.scope.sole()?.clone();
     sqlx::query!(
         "INSERT INTO settings (key, value) VALUES (?1, ?2)
          ON CONFLICT (key) DO UPDATE SET value = excluded.value",
         key,
         value,
     )
-    .execute(executor)
+    .execute(&ctx.pool)
     .await?;
+
+    ctx.publish(ChangeEvent::settings(team_id));
     Ok(())
 }
 
-/// [`get`] over any executor, so a read-then-write can share one transaction.
-pub async fn get_in<'e, E>(executor: E, key: &str) -> Result<Option<String>>
-where
-    E: sqlx::Executor<'e, Database = sqlx::Sqlite>,
-{
-    let value = sqlx::query_scalar!("SELECT value FROM settings WHERE key = ?1", key)
-        .fetch_optional(executor)
-        .await?;
-    Ok(value)
-}
-
-/// The global base instructions, or the empty string when the key is absent.
+/// The base instructions of the context's one team, or the empty string when
+/// the key is absent.
 ///
 /// Empty and absent mean the same thing on purpose: both compose a prompt with
 /// no base-instructions section (ADR-0009). Notably *not*
-/// [`DEFAULT_BASE_INSTRUCTIONS`] — the seed is the migration's job, and handing
-/// the default back on a read would quietly undo a user who cleared the field.
-pub async fn base_instructions(pool: &SqlitePool) -> Result<String> {
-    Ok(get(pool, BASE_INSTRUCTIONS).await?.unwrap_or_default())
+/// [`DEFAULT_BASE_INSTRUCTIONS`] — the seed is the team's creation's job, and
+/// handing the default back on a read would quietly undo a user who cleared
+/// the field.
+pub async fn base_instructions(ctx: &ServiceContext) -> Result<String> {
+    base_instructions_for(ctx, ctx.scope.sole()?).await
+}
+
+/// One team's base instructions: what a run of that team's task composes
+/// with, whichever teams the context reaches.
+pub async fn base_instructions_for(ctx: &ServiceContext, team_id: &str) -> Result<String> {
+    Ok(get_team(ctx, team_id, BASE_INSTRUCTIONS)
+        .await?
+        .unwrap_or_default())
+}
+
+/// The base instructions a run of `task_id` composes with: its own team's,
+/// after the task is looked up in the context's scope.
+pub async fn base_instructions_for_task(ctx: &ServiceContext, task_id: &str) -> Result<String> {
+    let team_id = crate::tasks::service::team_of(ctx, task_id).await?;
+    base_instructions_for(ctx, &team_id).await
 }
 
 pub async fn set_base_instructions(ctx: &ServiceContext, value: &str) -> Result<()> {
-    set(ctx, BASE_INSTRUCTIONS, value).await
+    set_team(ctx, ctx.scope.sole()?, BASE_INSTRUCTIONS, value).await
 }
 
 /// How much configuration a run inherits. Absent means
 /// [`RunEnvironment::Inherit`], which is ADR-0004's amendment's default.
-pub async fn run_environment(pool: &SqlitePool) -> Result<RunEnvironment> {
-    Ok(get(pool, RUN_ENVIRONMENT)
+///
+/// Runner state, read from `settings` until task 041 moves it.
+pub async fn run_environment(ctx: &ServiceContext) -> Result<RunEnvironment> {
+    Ok(get_runner(ctx, RUN_ENVIRONMENT)
         .await?
         .as_deref()
         .map(RunEnvironment::from_stored)
@@ -260,7 +457,7 @@ pub async fn run_environment(pool: &SqlitePool) -> Result<RunEnvironment> {
 }
 
 pub async fn set_run_environment(ctx: &ServiceContext, value: RunEnvironment) -> Result<()> {
-    set(ctx, RUN_ENVIRONMENT, value.as_str()).await
+    set_runner(ctx, RUN_ENVIRONMENT, value.as_str()).await
 }
 
 /// Whether the user has already been through, or deliberately skipped, task
@@ -277,12 +474,14 @@ pub async fn set_run_environment(ctx: &ServiceContext, value: RunEnvironment) ->
 /// Anything other than the string this module writes reads as `false`, the same
 /// tolerance every other key here applies: a hand-edited row is a reason to show
 /// one extra screen, never a reason to fail a launch.
-pub async fn onboarding_dismissed(pool: &SqlitePool) -> Result<bool> {
-    Ok(get(pool, ONBOARDING_DISMISSED).await?.as_deref() == Some("true"))
+///
+/// Runner state, read from `settings` until task 041 moves it.
+pub async fn onboarding_dismissed(ctx: &ServiceContext) -> Result<bool> {
+    Ok(get_runner(ctx, ONBOARDING_DISMISSED).await?.as_deref() == Some("true"))
 }
 
 pub async fn set_onboarding_dismissed(ctx: &ServiceContext, value: bool) -> Result<()> {
-    set(
+    set_runner(
         ctx,
         ONBOARDING_DISMISSED,
         if value { "true" } else { "false" },
@@ -290,7 +489,8 @@ pub async fn set_onboarding_dismissed(ctx: &ServiceContext, value: bool) -> Resu
     .await
 }
 
-/// What the user pays for their Claude subscription each month, or `None`.
+/// What the context's actor pays for their Claude subscription each month, or
+/// `None`. A user setting: answered under any scope (ADR-0030 point 8).
 ///
 /// **`None` is the answer the page needs**, not `0.0`: task 024 renders the
 /// comparison only once there is a figure to compare against, and presents it
@@ -299,8 +499,8 @@ pub async fn set_onboarding_dismissed(ctx: &ServiceContext, value: bool) -> Resu
 /// A stored value that is not a number, or is negative, reads as absent — the
 /// `run_environment` tolerance applied to a figure: a hand-edited row costs a
 /// warning and a missing panel, never a page that will not open.
-pub async fn subscription_monthly_usd(pool: &SqlitePool) -> Result<Option<f64>> {
-    let Some(raw) = get(pool, SUBSCRIPTION_MONTHLY_USD).await? else {
+pub async fn subscription_monthly_usd(ctx: &ServiceContext) -> Result<Option<f64>> {
+    let Some(raw) = get_user(ctx, SUBSCRIPTION_MONTHLY_USD).await? else {
         return Ok(None);
     };
 
@@ -316,20 +516,21 @@ pub async fn subscription_monthly_usd(pool: &SqlitePool) -> Result<Option<f64>> 
     }
 }
 
-/// Stores it, or clears it.
+/// Stores it, or clears it, for the context's actor.
 ///
 /// Refuses a negative or non-finite figure rather than storing one the reader
 /// would then have to ignore: this arrives from a form, and the place to say
-/// "that is not a monthly cost" is at the field.
+/// "that is not a monthly cost" is at the field. Refused under a context that
+/// reaches several teams, by [`set_user`], until task 048's `Audience::User`.
 pub async fn set_subscription_monthly_usd(ctx: &ServiceContext, value: Option<f64>) -> Result<()> {
     match value {
         Some(value) if !value.is_finite() || value < 0.0 => Err(Error::invalid(
             "a monthly subscription cost has to be zero or more",
         )),
-        Some(value) => set(ctx, SUBSCRIPTION_MONTHLY_USD, &value.to_string()).await,
+        Some(value) => set_user(ctx, SUBSCRIPTION_MONTHLY_USD, &value.to_string()).await,
         // Cleared rather than deleted: the key/value table has no delete, and
         // an empty string reads as absent through the parser above.
-        None => set(ctx, SUBSCRIPTION_MONTHLY_USD, "").await,
+        None => set_user(ctx, SUBSCRIPTION_MONTHLY_USD, "").await,
     }
 }
 
@@ -365,8 +566,10 @@ pub struct Dismissal {
 /// cost a launch. Tolerant twice over, because the two failures are different
 /// sizes — a value that is not an array at all falls back to "nothing
 /// dismissed", and one unparseable element is skipped while the rest stand.
-pub async fn doctor_dismissals(pool: &SqlitePool) -> Result<Vec<Dismissal>> {
-    let Some(raw) = get(pool, DOCTOR_DISMISSALS).await? else {
+///
+/// Runner state, read from `settings` until task 041 moves it.
+pub async fn doctor_dismissals(ctx: &ServiceContext) -> Result<Vec<Dismissal>> {
+    let Some(raw) = get_runner(ctx, DOCTOR_DISMISSALS).await? else {
         return Ok(Vec::new());
     };
 
@@ -402,7 +605,7 @@ pub async fn set_doctor_dismissals(ctx: &ServiceContext, value: &[Dismissal]) ->
         Error::internal(format!("a doctor dismissal did not serialize: {error}"))
     })?;
 
-    set(ctx, DOCTOR_DISMISSALS, &json).await
+    set_runner(ctx, DOCTOR_DISMISSALS, &json).await
 }
 
 #[cfg(test)]
@@ -411,17 +614,28 @@ mod tests {
     use crate::testing::{test_pool, TestContext};
     use pretty_assertions::assert_eq;
 
+    /// The legacy row for `key`, read past every accessor: what a test
+    /// compares a split store against.
+    async fn legacy_row(pool: &sqlx::SqlitePool, key: &str) -> Option<String> {
+        sqlx::query_scalar!("SELECT value FROM settings WHERE key = ?1", key)
+            .fetch_optional(pool)
+            .await
+            .expect("read the legacy row")
+    }
+
     #[tokio::test]
     async fn the_migration_seeds_the_default_base_instructions_byte_for_byte() {
         // The pin that keeps `DEFAULT_BASE_INSTRUCTIONS` and the migration's SQL
         // literal from drifting. Asserted as one exact string rather than by
         // substring, because "restore the default" in Settings has to produce
-        // the same bytes a first launch did.
+        // the same bytes a first launch did. The migration seeds the legacy
+        // row, which 038's adoption compares byte for byte; a new team's row is
+        // seeded from the constant.
         let pool = test_pool().await;
 
         assert_eq!(
-            base_instructions(&pool).await.expect("read the seed"),
-            DEFAULT_BASE_INSTRUCTIONS
+            legacy_row(&pool, BASE_INSTRUCTIONS).await.as_deref(),
+            Some(DEFAULT_BASE_INSTRUCTIONS)
         );
     }
 
@@ -429,10 +643,10 @@ mod tests {
     async fn the_seeded_default_is_the_four_sentences_task_006_specifies() {
         // The other half of the pin: the constant itself, spelled out here so a
         // reworded instruction has to be a deliberate edit in two places.
-        let pool = test_pool().await;
+        let h = TestContext::new().await;
 
         assert_eq!(
-            base_instructions(&pool).await.expect("read the seed"),
+            base_instructions(&h.context).await.expect("read the seed"),
             "Commit as you work, with focused commits and clear messages.\n\
              Run the project's tests and linters before you finish.\n\
              When the work is complete, push the branch and open a pull request describing what changed and why.\n\
@@ -442,9 +656,9 @@ mod tests {
 
     #[tokio::test]
     async fn base_instructions_a_user_cleared_stay_cleared() {
-        // The visible consequence of seeding in a migration instead of at every
-        // launch. If this ever starts failing, someone has added an
-        // insert-if-absent and the migration's header is now a lie.
+        // The visible consequence of seeding at the team's creation instead of
+        // at every launch. If this ever starts failing, someone has added an
+        // insert-if-absent and the seed's comment is now a lie.
         let h = TestContext::new().await;
 
         set_base_instructions(&h.context, "")
@@ -452,9 +666,7 @@ mod tests {
             .expect("clear the field");
 
         assert_eq!(
-            base_instructions(&h.context.pool)
-                .await
-                .expect("read it back"),
+            base_instructions(&h.context).await.expect("read it back"),
             ""
         );
     }
@@ -468,13 +680,12 @@ mod tests {
             .expect("edit the field");
 
         assert_eq!(
-            base_instructions(&h.context.pool)
-                .await
-                .expect("read it back"),
+            base_instructions(&h.context).await.expect("read it back"),
             "Open a draft PR, never a ready one."
         );
         let rows: i64 = sqlx::query_scalar!(
-            "SELECT count(*) FROM settings WHERE key = ?1",
+            "SELECT count(*) FROM team_settings WHERE team_id = ?1 AND key = ?2",
+            h.solo.team_id,
             BASE_INSTRUCTIONS
         )
         .fetch_one(&h.context.pool)
@@ -484,15 +695,106 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn an_unseeded_run_environment_reads_as_inherit() {
-        let pool = test_pool().await;
+    async fn a_team_setting_written_after_the_split_never_touches_the_legacy_table() {
+        let h = TestContext::new().await;
+        sqlx::query!(
+            "INSERT INTO settings (key, value) VALUES (?1, 'stale legacy instructions')
+             ON CONFLICT (key) DO UPDATE SET value = excluded.value",
+            BASE_INSTRUCTIONS
+        )
+        .execute(&h.context.pool)
+        .await
+        .expect("plant a stale legacy row");
+
+        set_base_instructions(&h.context, "Open a draft PR.")
+            .await
+            .expect("write the team's value");
 
         assert_eq!(
-            get(&pool, RUN_ENVIRONMENT).await.expect("read the key"),
+            legacy_row(&h.context.pool, BASE_INSTRUCTIONS)
+                .await
+                .as_deref(),
+            Some("stale legacy instructions"),
+            "the legacy row is left for 065, unwritten"
+        );
+        assert_eq!(
+            base_instructions(&h.context).await.expect("read it back"),
+            "Open a draft PR.",
+            "and never read"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_accessor_handed_a_key_of_another_placement_is_an_internal_error() {
+        // A wiring bug, so it reads as one rather than as a refusal a user
+        // could act on.
+        let h = TestContext::new().await;
+        let team = h.solo.team_id.clone();
+
+        let mut refusals = vec![
+            get_team(&h.context, &team, RUN_ENVIRONMENT).await.err(),
+            set_team(&h.context, &team, SUBSCRIPTION_MONTHLY_USD, "1")
+                .await
+                .err(),
+            get_user(&h.context, BASE_INSTRUCTIONS).await.err(),
+            set_user(&h.context, ONBOARDING_DISMISSED, "true").await.err(),
+            get_runner(&h.context, BASE_INSTRUCTIONS).await.err(),
+            set_runner(&h.context, SUBSCRIPTION_MONTHLY_USD, "1")
+                .await
+                .err(),
+        ];
+        // The test pool holds one connection, so the two that take one go
+        // last, on a connection held only for them.
+        let mut conn = h.context.pool.acquire().await.expect("a connection");
+        refusals.push(
+            get_user_in(&h.context, &mut conn, RUN_ENVIRONMENT)
+                .await
+                .err(),
+        );
+        refusals.push(
+            set_user_in(&h.context, &mut conn, BASE_INSTRUCTIONS, "x")
+                .await
+                .err(),
+        );
+
+        for refusal in refusals {
+            assert_eq!(
+                refusal.expect("a key of another placement").code(),
+                crate::ErrorCode::Internal
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_team_outside_the_scope_is_not_found_to_the_team_accessors() {
+        let h = TestContext::new().await;
+        let elsewhere = "3f2b1c00-0000-4000-8000-0000000000b2";
+
+        for error in [
+            get_team(&h.context, elsewhere, BASE_INSTRUCTIONS)
+                .await
+                .expect_err("a team the context cannot reach"),
+            set_team(&h.context, elsewhere, BASE_INSTRUCTIONS, "x")
+                .await
+                .expect_err("a team the context cannot reach"),
+        ] {
+            assert_eq!(error.code(), crate::ErrorCode::NotFound);
+            assert_eq!(error.to_string(), format!("no team with id {elsewhere}"));
+        }
+    }
+
+    #[tokio::test]
+    async fn an_unseeded_run_environment_reads_as_inherit() {
+        let h = TestContext::new().await;
+
+        assert_eq!(
+            get_runner(&h.context, RUN_ENVIRONMENT)
+                .await
+                .expect("read the key"),
             None
         );
         assert_eq!(
-            run_environment(&pool).await.expect("read the default"),
+            run_environment(&h.context).await.expect("read the default"),
             RunEnvironment::Inherit
         );
     }
@@ -506,16 +808,14 @@ mod tests {
             .expect("store strict_local");
 
         assert_eq!(
-            get(&h.context.pool, RUN_ENVIRONMENT)
+            get_runner(&h.context, RUN_ENVIRONMENT)
                 .await
                 .expect("read the row"),
             Some("strict_local".to_string()),
             "the stored spelling has to stay legible in the sqlite3 CLI"
         );
         assert_eq!(
-            run_environment(&h.context.pool)
-                .await
-                .expect("read it back"),
+            run_environment(&h.context).await.expect("read it back"),
             RunEnvironment::StrictLocal
         );
     }
@@ -525,14 +825,12 @@ mod tests {
         // The row a user typed into the sqlite3 CLI. A queue must survive it.
         let h = TestContext::new().await;
 
-        set(&h.context, RUN_ENVIRONMENT, "strictlocal")
+        set_runner(&h.context, RUN_ENVIRONMENT, "strictlocal")
             .await
             .expect("store a typo");
 
         assert_eq!(
-            run_environment(&h.context.pool)
-                .await
-                .expect("read it back"),
+            run_environment(&h.context).await.expect("read it back"),
             RunEnvironment::Inherit
         );
     }
@@ -605,6 +903,15 @@ mod tests {
             .map(|(key, _)| (*key, placement(key)))
             .collect();
         assert_eq!(placed, expected.to_vec());
+
+        // The same list the store test walks, so a key added to one and not
+        // the other is a failure here.
+        let constants: Vec<&str> = expected
+            .iter()
+            .map(|(key, _)| *key)
+            .filter(|key| *key != per_repository.as_str())
+            .collect();
+        assert_eq!(constants, ALL_KEYS.to_vec());
 
         // The spellings the migration's SQL lists, so a key moved between the
         // lists here without the SQL following is a failure, not a drift.

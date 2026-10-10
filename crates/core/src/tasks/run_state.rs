@@ -39,7 +39,7 @@ use crate::context::ServiceContext;
 use crate::db::{RunState, Task};
 use crate::error::{Error, Result};
 use crate::events::ChangeEvent;
-use crate::tasks::service::{fetch_task_row, team_of_task};
+use crate::tasks::service::{fetch_task_row, task_row, team_of_task};
 
 /// Whether ADR-0007's run-state machine allows moving from `from` to `to`.
 pub fn is_legal_run_state_transition(from: RunState, to: RunState) -> bool {
@@ -142,8 +142,8 @@ pub fn is_legal_run_state_transition(from: RunState, to: RunState) -> bool {
 /// *is* covered by `busy_timeout`, so it always reaches its own read seeing
 /// whatever the first writer already committed rather than racing it.
 pub async fn set_run_state(ctx: &ServiceContext, id: &str, to: RunState) -> Result<Task> {
-    let mut tx = ctx.pool.begin_with("BEGIN IMMEDIATE").await?;
-    let current = fetch_task_row(&mut *tx, id).await?;
+    let mut tx = ctx.begin_immediate().await?;
+    let current = fetch_task_row(&mut tx, id).await?;
 
     if !is_legal_run_state_transition(current.run_state, to) {
         return Err(Error::invalid(format!(
@@ -163,14 +163,14 @@ pub async fn set_run_state(ctx: &ServiceContext, id: &str, to: RunState) -> Resu
     .execute(&mut *tx)
     .await?;
 
-    let team_id = team_of_task(&mut *tx, id).await?;
+    let team_id = team_of_task(&mut tx, id).await?;
     tx.commit().await?;
 
     // Publish before the read-back: the row is already committed, so a
     // failure in `fetch_task_row` below must not cost the notification for a
     // mutation that already happened (ADR-0018).
     ctx.publish(ChangeEvent::tasks(team_id, [id.to_string()]));
-    let updated = fetch_task_row(&ctx.pool, id).await?;
+    let updated = task_row(ctx, id).await?;
     Ok(updated)
 }
 

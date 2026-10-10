@@ -151,19 +151,30 @@ async fn a_claims_lease_names_the_tasks_team() {
     let h = TestContext::new().await;
     let data = scratch_dir();
     let paths = AppPaths::new(data.path());
-    let board = h.board(&paths, &RunnerConfig::default());
     let second = second_team(&h).await;
+    // A board serving a runner that reaches both teams: since task 039 a board
+    // scoped to one team cannot see the other's task at all, so this is the
+    // board whose lease could name the wrong team if it took it from the scope.
+    let both = h.context.with_scope(
+        TeamScope::of([h.solo.team_id.clone(), second.team_id.clone()]).expect("two teams"),
+    );
+    let board = InProcessBoard::new(
+        both.clone(),
+        paths.clone(),
+        RunnerConfig::default().provider,
+        h.solo.runner_id.clone(),
+    );
     let solo_fixture = Registered::new(&h.context).await;
     let other_fixture =
         Registered::new(&h.context.with_scope(TeamScope::one(second.team_id.clone()))).await;
 
     for (fixture, team) in [
         (solo_fixture, h.solo.team_id.clone()),
-        // The board's context is scoped to the solo team; the lease still
-        // names the task's own team, because it is read off the task's row.
+        // The board's context reaches both teams; the lease names the task's
+        // own team, because it is read off the task's row.
         (other_fixture, second.team_id.clone()),
     ] {
-        let task_id = fixture.task(&h.context, "Claim me").await;
+        let task_id = fixture.task(&both, "Claim me").await;
 
         let claim = board
             .claim(run_now(&task_id))

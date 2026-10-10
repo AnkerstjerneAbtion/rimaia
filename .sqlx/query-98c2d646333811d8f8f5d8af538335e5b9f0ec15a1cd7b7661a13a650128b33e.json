@@ -1,0 +1,92 @@
+{
+  "db_name": "SQLite",
+  "query": "\n        SELECT id, name, path AS \"path!\", default_branch, worktree_root AS \"worktree_root!\",\n               allow_unattended_runs,\n               max_concurrency, created_at AS \"created_at: chrono::DateTime<chrono::Utc>\",\n               credential_login, credential_label,\n               credential_added_at AS \"credential_added_at: chrono::DateTime<chrono::Utc>\",\n               on_archive AS \"on_archive: crate::db::OnArchive\", on_archive_script\n        FROM repositories\n        WHERE team_id = ?1\n        ORDER BY name ASC, created_at ASC\n        ",
+  "describe": {
+    "columns": [
+      {
+        "name": "id",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "name",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "path!",
+        "ordinal": 2,
+        "type_info": "Text"
+      },
+      {
+        "name": "default_branch",
+        "ordinal": 3,
+        "type_info": "Text"
+      },
+      {
+        "name": "worktree_root!",
+        "ordinal": 4,
+        "type_info": "Text"
+      },
+      {
+        "name": "allow_unattended_runs",
+        "ordinal": 5,
+        "type_info": "Bool"
+      },
+      {
+        "name": "max_concurrency",
+        "ordinal": 6,
+        "type_info": "Integer"
+      },
+      {
+        "name": "created_at: chrono::DateTime<chrono::Utc>",
+        "ordinal": 7,
+        "type_info": "Text"
+      },
+      {
+        "name": "credential_login",
+        "ordinal": 8,
+        "type_info": "Text"
+      },
+      {
+        "name": "credential_label",
+        "ordinal": 9,
+        "type_info": "Text"
+      },
+      {
+        "name": "credential_added_at: chrono::DateTime<chrono::Utc>",
+        "ordinal": 10,
+        "type_info": "Text"
+      },
+      {
+        "name": "on_archive: crate::db::OnArchive",
+        "ordinal": 11,
+        "type_info": "Text"
+      },
+      {
+        "name": "on_archive_script",
+        "ordinal": 12,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false,
+      true,
+      false,
+      true,
+      false,
+      false,
+      false,
+      true,
+      true,
+      true,
+      false,
+      true
+    ]
+  },
+  "hash": "98c2d646333811d8f8f5d8af538335e5b9f0ec15a1cd7b7661a13a650128b33e"
+}

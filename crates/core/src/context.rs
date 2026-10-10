@@ -29,7 +29,7 @@
 use std::fmt;
 use std::sync::Arc;
 
-use sqlx::SqlitePool;
+use sqlx::{SqliteConnection, SqlitePool};
 use tokio::sync::broadcast;
 
 use crate::clock::Clock;
@@ -47,7 +47,9 @@ use crate::runner::events::{RunTail, TAIL_CHANNEL_CAPACITY};
 /// and kept sorted and deduplicated, so two scopes naming the same teams
 /// compare equal.
 ///
-/// Task 038 carries the scope; task 039 makes every service honour it.
+/// Every service filters by it (task 039): a lookup by id outside it is
+/// answered exactly as a never-issued id is, and a list never returns a row
+/// from outside it.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct TeamScope {
     teams: Arc<[TeamId]>,
@@ -89,18 +91,93 @@ impl TeamScope {
 
     /// The one team in scope, or `Invalid` when there are several.
     ///
-    /// For a write that creates a team-owned row with nothing to take the team
-    /// from: registering a repository, and a settings write until task 039
-    /// gives `settings` a team. Anything with a parent row takes the parent's
+    /// For a call that names no entity and acts on one team (ADR-0035 point
+    /// 2): listing a board, registering a repository, a team setting, the
+    /// queue's selection. Anything that names an entity takes the entity's
     /// team instead, because a scope of several teams cannot say which.
+    ///
+    /// The refusal lists the reachable teams by id, in the scope's order. Ids
+    /// rather than names: this reads nothing, every personal team is named
+    /// `Personal`, and the scope is the caller's own teams, so the ids reveal
+    /// nothing it could not already reach.
     pub fn sole(&self) -> Result<&TeamId> {
         match self.teams.as_ref() {
             [team] => Ok(team),
             teams => Err(Error::invalid(format!(
-                "this request can reach {} teams, so it has to say which one it means",
-                teams.len()
+                "this needs one team, and the request reaches {}: {}",
+                teams.len(),
+                teams.join(", ")
             ))),
         }
+    }
+
+    /// The scope as a JSON array of ids, for a query to read with
+    /// `team_id IN (SELECT value FROM json_each(?))`.
+    ///
+    /// One bind whatever the number of teams, so a scoped query is a fixed
+    /// statement the offline cache can check (seam-contract D5), and the
+    /// filter is in the query rather than a comparison made in Rust after a
+    /// fetch (task 039).
+    pub fn json(&self) -> String {
+        serde_json::to_string(self.teams.as_ref())
+            .expect("a list of strings always serializes to JSON")
+    }
+}
+
+/// A transaction opened through a [`ServiceContext`], carrying the scope its
+/// queries filter by.
+///
+/// The only way a helper outside its own module reaches the store partway
+/// through someone else's transaction: a review verdict moves its card, a run
+/// opens under its task. Such a helper takes `&mut ScopedTx` rather than a
+/// bare connection, so it cannot be handed a connection with no scope behind
+/// it, and it filters by [`scope`](Self::scope) like every other service.
+/// `no_service_takes_a_pool_without_a_scope` is the test that holds the line.
+///
+/// It is always a real transaction, which a bare `&mut SqliteConnection` is
+/// not: a pooled connection in autocommit satisfies that type just as well,
+/// and `tasks::position::rebalance_column` documents what a renumber outside
+/// one costs.
+///
+/// Derefs to the connection, so a private helper that takes
+/// `&mut SqliteConnection` is handed `&mut tx` exactly as it was handed a
+/// `sqlx::Transaction`.
+pub struct ScopedTx {
+    tx: sqlx::Transaction<'static, sqlx::Sqlite>,
+    scope: TeamScope,
+}
+
+impl ScopedTx {
+    /// The teams this transaction's queries may touch: its context's.
+    pub fn scope(&self) -> &TeamScope {
+        &self.scope
+    }
+
+    pub async fn commit(self) -> Result<()> {
+        self.tx.commit().await?;
+        Ok(())
+    }
+}
+
+impl std::ops::Deref for ScopedTx {
+    type Target = SqliteConnection;
+
+    fn deref(&self) -> &Self::Target {
+        &self.tx
+    }
+}
+
+impl std::ops::DerefMut for ScopedTx {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.tx
+    }
+}
+
+impl fmt::Debug for ScopedTx {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ScopedTx")
+            .field("scope", &self.scope)
+            .finish_non_exhaustive()
     }
 }
 
@@ -215,6 +292,23 @@ impl ServiceContext {
             scope,
             ..self.clone()
         }
+    }
+
+    /// Opens a deferred transaction scoped to this context's teams.
+    pub async fn begin(&self) -> Result<ScopedTx> {
+        Ok(ScopedTx {
+            tx: self.pool.begin().await?,
+            scope: self.scope.clone(),
+        })
+    }
+
+    /// Opens a `BEGIN IMMEDIATE` transaction scoped to this context's teams,
+    /// for a read the write after it depends on (see `tasks::set_run_state`).
+    pub async fn begin_immediate(&self) -> Result<ScopedTx> {
+        Ok(ScopedTx {
+            tx: self.pool.begin_with("BEGIN IMMEDIATE").await?,
+            scope: self.scope.clone(),
+        })
     }
 
     /// A receiver for every event published from here on.
@@ -615,6 +709,37 @@ mod tests {
         assert_eq!(
             two.sole().expect_err("two teams have no sole one").code(),
             crate::ErrorCode::Invalid
+        );
+    }
+
+    #[test]
+    fn the_sole_team_refusal_lists_the_reachable_teams_in_order() {
+        let two = TeamScope::of([
+            OTHER_TEAM.to_string(),
+            "3f2b1c00-0000-4000-8000-0000000000a1".to_string(),
+        ])
+        .expect("two teams");
+
+        assert_eq!(
+            two.sole().expect_err("two teams").to_string(),
+            format!(
+                "this needs one team, and the request reaches 2: \
+                 3f2b1c00-0000-4000-8000-0000000000a1, {OTHER_TEAM}"
+            )
+        );
+    }
+
+    #[test]
+    fn a_scope_binds_as_a_json_array_of_its_teams() {
+        let two = TeamScope::of([
+            OTHER_TEAM.to_string(),
+            "3f2b1c00-0000-4000-8000-0000000000a1".to_string(),
+        ])
+        .expect("two teams");
+
+        assert_eq!(
+            two.json(),
+            format!(r#"["3f2b1c00-0000-4000-8000-0000000000a1","{OTHER_TEAM}"]"#)
         );
     }
 

@@ -54,6 +54,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 
 use crate::db::new_id;
 use crate::error::{Error, Result};
+use crate::events::TeamId;
 use crate::mcp::MCP_PATH;
 
 /// Where the scoped route hangs, relative to [`MCP_PATH`].
@@ -741,7 +742,17 @@ struct Table {
     /// business, and `None` means nothing is listening.
     endpoint: Option<String>,
     /// Token → what it was minted for. One entry per live [`RunGrant`].
-    granted: HashMap<String, (String, Grant)>,
+    granted: HashMap<String, Granted>,
+}
+
+/// One live token's entry: the task, the task's team and the grant.
+struct Granted {
+    task_id: String,
+    /// Read from the task's row by whoever minted the grant, so the scoped
+    /// route serves every call under a context of this one team, whatever the
+    /// runner serving it can reach (ADR-0029 point 5).
+    team_id: TeamId,
+    grant: Grant,
 }
 
 impl RunHandles {
@@ -764,14 +775,23 @@ impl RunHandles {
     /// Mints a token for one run, for the purpose `grant` names, valid until
     /// the returned [`RunGrant`] is dropped.
     ///
+    /// `team_id` is the task's own team, from the task's row: the route serves
+    /// the handle under a context scoped to that one team, so a handle never
+    /// sees more than one team even on a runner that serves several.
+    ///
     /// A hyphenated v4 UUID, like every other id in this app. Unguessable by
     /// accident rather than by an adversary — see this module's header on what
     /// the token is for.
-    pub fn grant(&self, task_id: &str, grant: Grant) -> RunGrant {
+    pub fn grant(&self, task_id: &str, team_id: &str, grant: Grant) -> RunGrant {
         let token = new_id();
-        self.lock()
-            .granted
-            .insert(token.clone(), (task_id.to_string(), grant));
+        self.lock().granted.insert(
+            token.clone(),
+            Granted {
+                task_id: task_id.to_string(),
+                team_id: team_id.to_string(),
+                grant,
+            },
+        );
 
         RunGrant {
             token,
@@ -785,13 +805,21 @@ impl RunHandles {
     /// The two are deliberately indistinguishable: the route answers both with
     /// a bare 404, so this surface is not an oracle for which tokens exist.
     pub fn resolve(&self, token: &str) -> Option<RunScope> {
-        self.lock()
-            .granted
-            .get(token)
-            .map(|(task_id, grant)| RunScope::Run {
-                task_id: task_id.clone(),
-                grant: grant.clone(),
-            })
+        self.resolve_with_team(token).map(|(scope, _)| scope)
+    }
+
+    /// [`resolve`](Self::resolve), with the team the scoped route narrows its
+    /// context to.
+    pub fn resolve_with_team(&self, token: &str) -> Option<(RunScope, TeamId)> {
+        self.lock().granted.get(token).map(|granted| {
+            (
+                RunScope::Run {
+                    task_id: granted.task_id.clone(),
+                    grant: granted.grant.clone(),
+                },
+                granted.team_id.clone(),
+            )
+        })
     }
 
     /// The scoped URL a run holding `grant` reaches Rimaia on, or `None` when
@@ -894,6 +922,8 @@ mod tests {
     use super::*;
     use pretty_assertions::assert_eq;
 
+    const TEAM: &str = "3f2b1c00-0000-4000-8000-0000000000a1";
+
     fn bound() -> RunHandles {
         let handles = RunHandles::default();
         handles.set_endpoint(Some("http://127.0.0.1:4517".to_string()));
@@ -904,7 +934,7 @@ mod tests {
     fn a_granted_token_resolves_to_its_own_task() {
         let handles = bound();
 
-        let grant = handles.grant("task-1", Grant::Strategy);
+        let grant = handles.grant("task-1", TEAM, Grant::Strategy);
 
         assert_eq!(
             handles.resolve(grant.token()),
@@ -922,6 +952,7 @@ mod tests {
 
         let review = handles.grant(
             "task-1",
+            TEAM,
             Grant::Review {
                 run_id: "run-7".to_string(),
             },
@@ -948,7 +979,7 @@ mod tests {
         // handle to a task behind.
         let handles = bound();
         let token = {
-            let grant = handles.grant("task-1", Grant::Strategy);
+            let grant = handles.grant("task-1", TEAM, Grant::Strategy);
             grant.token().to_string()
         };
 
@@ -961,8 +992,8 @@ mod tests {
         // be revoked by whichever run finished first.
         let handles = bound();
 
-        let first = handles.grant("task-1", Grant::Strategy);
-        let second = handles.grant("task-1", Grant::Strategy);
+        let first = handles.grant("task-1", TEAM, Grant::Strategy);
+        let second = handles.grant("task-1", TEAM, Grant::Strategy);
 
         assert_ne!(first.token(), second.token());
         assert!(handles.resolve(first.token()).is_some());
@@ -972,7 +1003,7 @@ mod tests {
     #[test]
     fn the_scoped_endpoint_names_the_bound_port_and_the_run_s_own_token() {
         let handles = bound();
-        let grant = handles.grant("task-1", Grant::Strategy);
+        let grant = handles.grant("task-1", TEAM, Grant::Strategy);
 
         assert_eq!(
             handles.endpoint_for(&grant),
@@ -989,7 +1020,7 @@ mod tests {
         // no handle, and the caller refuses to start a planner rather than
         // starting one that cannot answer.
         let handles = RunHandles::default();
-        let grant = handles.grant("task-1", Grant::Strategy);
+        let grant = handles.grant("task-1", TEAM, Grant::Strategy);
 
         assert_eq!(handles.endpoint(), None);
         assert_eq!(handles.endpoint_for(&grant), None);
@@ -1001,7 +1032,7 @@ mod tests {
         // startup: `commands::mcp::set_mcp_port` rebinds at runtime, and a
         // captured URL would send the next planner at a dead port.
         let handles = bound();
-        let grant = handles.grant("task-1", Grant::Strategy);
+        let grant = handles.grant("task-1", TEAM, Grant::Strategy);
 
         handles.set_endpoint(Some("http://127.0.0.1:4600".to_string()));
 
@@ -1009,6 +1040,20 @@ mod tests {
             .endpoint_for(&grant)
             .expect("an endpoint is bound")
             .starts_with("http://127.0.0.1:4600/mcp/run/"));
+    }
+
+    #[test]
+    fn a_token_resolves_to_the_team_its_task_belongs_to() {
+        let handles = bound();
+
+        let grant = handles.grant("task-1", TEAM, Grant::Strategy);
+
+        assert_eq!(
+            handles
+                .resolve_with_team(grant.token())
+                .map(|(_, team_id)| team_id),
+            Some(TEAM.to_string())
+        );
     }
 
     #[test]

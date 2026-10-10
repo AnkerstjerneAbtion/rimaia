@@ -656,9 +656,13 @@ async fn correct_run_state(ctx: &ServiceContext, task: &Task) -> Result<Option<R
 /// at its own last-run join: `ended_at` is NULL while a run is in flight, and
 /// the run in flight is precisely the one whose base a status call is about.
 async fn recorded_base_ref(ctx: &ServiceContext, task_id: &str) -> Result<Option<String>> {
+    let scope = ctx.scope.json();
     let recorded = sqlx::query_scalar!(
-        "SELECT base_ref FROM runs WHERE task_id = ?1 ORDER BY attempt DESC LIMIT 1",
+        "SELECT r.base_ref FROM runs r JOIN tasks t ON t.id = r.task_id
+          WHERE r.task_id = ?1 AND t.team_id IN (SELECT value FROM json_each(?2))
+          ORDER BY r.attempt DESC LIMIT 1",
         task_id,
+        scope,
     )
     .fetch_optional(&ctx.pool)
     .await?
@@ -831,13 +835,16 @@ async fn write_worktree_columns(
     worktree_path: Option<&str>,
 ) -> Result<()> {
     let now = ctx.clock.now();
+    let scope = ctx.scope.json();
     let team_id = sqlx::query_scalar!(
-        "UPDATE tasks SET branch = ?1, worktree_path = ?2, updated_at = ?3 WHERE id = ?4
+        "UPDATE tasks SET branch = ?1, worktree_path = ?2, updated_at = ?3
+          WHERE id = ?4 AND team_id IN (SELECT value FROM json_each(?5))
          RETURNING team_id",
         branch,
         worktree_path,
         now,
         task_id,
+        scope,
     )
     .fetch_optional(&ctx.pool)
     .await?;

@@ -59,8 +59,6 @@
 
 use std::collections::HashMap;
 
-use sqlx::SqlitePool;
-
 use crate::context::ServiceContext;
 use crate::db::{settings, ScheduleMode};
 use crate::error::{Error, Result};
@@ -134,10 +132,12 @@ pub struct RunCapacity {
 }
 
 /// The queue's configured capacity, as stored.
-pub async fn configured(pool: &SqlitePool) -> Result<RunCapacity> {
+///
+/// Runner state, read from `settings` until task 041 moves it to `runner.db`.
+pub async fn configured(ctx: &ServiceContext) -> Result<RunCapacity> {
     Ok(RunCapacity {
-        mode: schedule_mode(pool).await?,
-        max_concurrency: max_concurrency(pool).await?,
+        mode: schedule_mode(ctx).await?,
+        max_concurrency: max_concurrency(ctx).await?,
         ceiling: CONCURRENCY_CEILING,
     })
 }
@@ -150,7 +150,7 @@ pub async fn configured(pool: &SqlitePool) -> Result<RunCapacity> {
 /// direction and not the other. One place decides, so the loop needs no branch
 /// and neither mode has a special case.
 pub async fn resolve(ctx: &ServiceContext) -> Result<Resolved> {
-    let window = window::active(&ctx.pool).await?;
+    let window = window::active(ctx).await?;
     let (mode, limit) = match &window {
         Some(window) => (
             window.mode,
@@ -161,10 +161,7 @@ pub async fn resolve(ctx: &ServiceContext) -> Result<Resolved> {
             // which row to fix.
             usable_repository_concurrency(&window.schedule_name, window.max_concurrency),
         ),
-        None => (
-            schedule_mode(&ctx.pool).await?,
-            max_concurrency(&ctx.pool).await?,
-        ),
+        None => (schedule_mode(ctx).await?, max_concurrency(ctx).await?),
     };
 
     let global = match mode {
@@ -195,8 +192,10 @@ pub async fn resolve(ctx: &ServiceContext) -> Result<Resolved> {
 }
 
 /// The queue's default mode. An absent key is [`ScheduleMode::Sequential`].
-pub async fn schedule_mode(pool: &SqlitePool) -> Result<ScheduleMode> {
-    Ok(settings::get(pool, SCHEDULE_MODE)
+///
+/// Runner state, read from `settings` until task 041 moves it to `runner.db`.
+pub async fn schedule_mode(ctx: &ServiceContext) -> Result<ScheduleMode> {
+    Ok(settings::get_runner(ctx, SCHEDULE_MODE)
         .await?
         .as_deref()
         .map(mode_from_stored)
@@ -210,7 +209,7 @@ pub async fn schedule_mode(pool: &SqlitePool) -> Result<ScheduleMode> {
 /// wire has already been validated by serde, so there is no out-of-range value
 /// left for this to refuse.
 pub async fn set_schedule_mode(ctx: &ServiceContext, mode: ScheduleMode) -> Result<()> {
-    settings::set(ctx, SCHEDULE_MODE, mode.as_str()).await
+    settings::set_runner(ctx, SCHEDULE_MODE, mode.as_str()).await
 }
 
 /// How many runs [`ScheduleMode::Parallel`] allows at once, clamped to
@@ -221,8 +220,10 @@ pub async fn set_schedule_mode(ctx: &ServiceContext, mode: ScheduleMode) -> Resu
 /// Settings panel shows and the number the queue obeys are the same one. The
 /// registry still enforces the ceiling itself — two doors, one rule, no gap
 /// between them.
-pub async fn max_concurrency(pool: &SqlitePool) -> Result<usize> {
-    let Some(stored) = settings::get(pool, MAX_CONCURRENCY).await? else {
+///
+/// Runner state, read from `settings` until task 041 moves it to `runner.db`.
+pub async fn max_concurrency(ctx: &ServiceContext) -> Result<usize> {
+    let Some(stored) = settings::get_runner(ctx, MAX_CONCURRENCY).await? else {
         return Ok(DEFAULT_MAX_CONCURRENCY);
     };
 
@@ -261,7 +262,7 @@ pub async fn set_max_concurrency(ctx: &ServiceContext, value: usize) -> Result<(
              To start nothing at all, pause the queue."
         )));
     }
-    settings::set(ctx, MAX_CONCURRENCY, &value.to_string()).await
+    settings::set_runner(ctx, MAX_CONCURRENCY, &value.to_string()).await
 }
 
 /// A stored mode, or the safe one for anything else. See the module header on
@@ -312,7 +313,7 @@ fn usable_repository_concurrency(name: &str, stored: i64) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::testing::{test_pool, TestContext};
+    use crate::testing::TestContext;
     use pretty_assertions::assert_eq;
 
     #[tokio::test]
@@ -320,7 +321,7 @@ mod tests {
         let harness = TestContext::new().await;
 
         assert_eq!(
-            schedule_mode(&harness.context.pool).await.expect("read"),
+            schedule_mode(&harness.context).await.expect("read"),
             ScheduleMode::Sequential
         );
         assert_eq!(
@@ -346,7 +347,7 @@ mod tests {
 
         assert_eq!(resolve(&harness.context).await.expect("resolve").global, 1);
         assert_eq!(
-            max_concurrency(&harness.context.pool).await.expect("read"),
+            max_concurrency(&harness.context).await.expect("read"),
             4,
             "the number the user chose is remembered, not overwritten",
         );
@@ -363,32 +364,33 @@ mod tests {
         // value cannot spawn ten agents" — enforced on the read as well as in
         // the registry, so the panel and the queue agree on the number.
         let harness = TestContext::new().await;
-        settings::set(&harness.context, MAX_CONCURRENCY, "40")
+        settings::set_runner(&harness.context, MAX_CONCURRENCY, "40")
             .await
             .expect("store a value no form would send");
 
         assert_eq!(
-            max_concurrency(&harness.context.pool).await.expect("read"),
+            max_concurrency(&harness.context).await.expect("read"),
             CONCURRENCY_CEILING
         );
     }
 
     #[tokio::test]
     async fn a_hand_edited_max_concurrency_that_is_not_a_number_falls_back_rather_than_failing() {
-        let pool = test_pool().await;
         let harness = TestContext::new().await;
 
         assert_eq!(
-            max_concurrency(&pool).await.expect("an absent key"),
+            max_concurrency(&harness.context)
+                .await
+                .expect("an absent key"),
             DEFAULT_MAX_CONCURRENCY
         );
 
         for nonsense in ["two", "", "0", "-1", "2.5"] {
-            settings::set(&harness.context, MAX_CONCURRENCY, nonsense)
+            settings::set_runner(&harness.context, MAX_CONCURRENCY, nonsense)
                 .await
                 .expect("store nonsense");
             assert_eq!(
-                max_concurrency(&harness.context.pool)
+                max_concurrency(&harness.context)
                     .await
                     .expect("a bad row is not an error"),
                 DEFAULT_MAX_CONCURRENCY,
@@ -402,12 +404,12 @@ mod tests {
         // The direction of the fallback is the decision, exactly as it is for
         // `queue_state`: a typo must not widen what an unattended queue spawns.
         let harness = TestContext::new().await;
-        settings::set(&harness.context, SCHEDULE_MODE, "Parallel")
+        settings::set_runner(&harness.context, SCHEDULE_MODE, "Parallel")
             .await
             .expect("store a typo");
 
         assert_eq!(
-            schedule_mode(&harness.context.pool).await.expect("read"),
+            schedule_mode(&harness.context).await.expect("read"),
             ScheduleMode::Sequential
         );
     }
@@ -427,7 +429,7 @@ mod tests {
         }
 
         assert_eq!(
-            settings::get(&harness.context.pool, MAX_CONCURRENCY)
+            settings::get_runner(&harness.context, MAX_CONCURRENCY)
                 .await
                 .expect("read the key"),
             None,

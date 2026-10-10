@@ -368,7 +368,7 @@ impl BoardPort for PauseWitness {
         finish: FinishRun,
     ) -> BoardFuture<'a, FinishReceipt> {
         Box::pin(async move {
-            let paused = pause::active_until(&self.board.pool, self.board.clock.now()).await?;
+            let paused = pause::active_until(&self.board, self.board.clock.now()).await?;
             *self.seen.lock().expect("the witness lock") = Some(paused);
             self.inner.finish_run(lease, run_id, finish).await
         })
@@ -523,7 +523,7 @@ impl Fixture {
     }
 
     async fn paused_until(&self) -> Option<DateTime<Utc>> {
-        pause::active_until(&self.ctx().pool, self.harness.clock.now())
+        pause::active_until(self.ctx(), self.harness.clock.now())
             .await
             .expect("read the usage-limit pause")
     }

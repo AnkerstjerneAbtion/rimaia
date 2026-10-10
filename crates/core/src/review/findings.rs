@@ -39,7 +39,7 @@ use std::collections::HashMap;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-use crate::context::ServiceContext;
+use crate::context::{ScopedTx, ServiceContext};
 use crate::db::{new_id, ExitClass, RunKind, RunStatus};
 use crate::error::{Error, Result};
 use crate::events::ChangeEvent;
@@ -204,7 +204,7 @@ pub async fn record(
     let now = ctx.clock.now();
     // `BEGIN IMMEDIATE`: the run's checks below decide whether anything is
     // written, and a second call racing this one must see the first's witness.
-    let mut tx = ctx.pool.begin_with("BEGIN IMMEDIATE").await?;
+    let mut tx = ctx.begin_immediate().await?;
 
     let run = fetch_writer_run(&mut tx, review_run_id).await?;
     if run.kind != RunKind::Review {
@@ -289,7 +289,7 @@ pub async fn record(
     .fetch_all(&mut *tx)
     .await?;
 
-    let team_id = team_of_task(&mut *tx, task_id).await?;
+    let team_id = team_of_task(&mut tx, task_id).await?;
     tx.commit().await?;
     ctx.publish(ChangeEvent::tasks(team_id, [task_id.to_string()]));
     Ok(recorded)
@@ -331,7 +331,7 @@ pub async fn resolve(
     };
 
     let now = ctx.clock.now();
-    let mut tx = ctx.pool.begin_with("BEGIN IMMEDIATE").await?;
+    let mut tx = ctx.begin_immediate().await?;
 
     let finding = fetch_finding(&mut tx, finding_id).await?;
     if finding.task_id != task_id {
@@ -376,19 +376,21 @@ pub async fn resolve(
     .await?;
 
     let resolved = fetch_finding(&mut tx, finding_id).await?;
-    let team_id = team_of_task(&mut *tx, task_id).await?;
+    let team_id = team_of_task(&mut tx, task_id).await?;
     tx.commit().await?;
     ctx.publish(ChangeEvent::tasks(team_id, [task_id.to_string()]));
     Ok(resolved)
 }
 
 /// `task_id`'s findings, optionally of one status, in review order and then in
-/// the order the reviewer gave them.
+/// the order the reviewer gave them. A finding inherits its team through its
+/// task (ADR-0029 point 1), so only a task in the context's scope has any.
 pub async fn list(
     ctx: &ServiceContext,
     task_id: &str,
     status: Option<FindingStatus>,
 ) -> Result<Vec<ReviewFinding>> {
+    let scope = ctx.scope.json();
     let findings = sqlx::query_as!(
         ReviewFinding,
         r#"SELECT f.id AS "id!", f.task_id, f.review_run_id, f.ordinal,
@@ -399,10 +401,13 @@ pub async fn list(
                   f.resolved_at AS "resolved_at: DateTime<Utc>"
              FROM review_findings f
              JOIN runs r ON r.id = f.review_run_id
+             JOIN tasks t ON t.id = f.task_id
             WHERE f.task_id = ?1 AND (?2 IS NULL OR f.status = ?2)
+              AND t.team_id IN (SELECT value FROM json_each(?3))
             ORDER BY r.attempt, f.ordinal"#,
         task_id,
         status,
+        scope,
     )
     .fetch_all(&ctx.pool)
     .await?;
@@ -416,12 +421,17 @@ pub async fn list(
 /// `findings_recorded_at` and this module stays that column's one reader: a
 /// phase has recorded when any of its rows has it set (D30 point 7).
 pub async fn loop_rows(ctx: &ServiceContext, task_id: &str) -> Result<Vec<LoopRow>> {
+    let scope = ctx.scope.json();
     let rows = sqlx::query!(
-        r#"SELECT id AS "id!", kind AS "kind!: RunKind", attempt, status AS "status!: RunStatus",
-                  exit_class AS "exit_class: ExitClass", session_id AS "session_id!",
-                  head_sha, findings_recorded_at IS NOT NULL AS "findings_recorded!: bool"
-             FROM runs WHERE task_id = ?1 ORDER BY attempt"#,
+        r#"SELECT r.id AS "id!", r.kind AS "kind!: RunKind", r.attempt,
+                  r.status AS "status!: RunStatus", r.exit_class AS "exit_class: ExitClass",
+                  r.session_id AS "session_id!", r.head_sha,
+                  r.findings_recorded_at IS NOT NULL AS "findings_recorded!: bool"
+             FROM runs r JOIN tasks t ON t.id = r.task_id
+            WHERE r.task_id = ?1 AND t.team_id IN (SELECT value FROM json_each(?2))
+            ORDER BY r.attempt"#,
         task_id,
+        scope,
     )
     .fetch_all(&ctx.pool)
     .await?;
@@ -440,17 +450,19 @@ pub async fn loop_rows(ctx: &ServiceContext, task_id: &str) -> Result<Vec<LoopRo
         .collect())
 }
 
-/// [`loop_rows`] for every task still on the board, keyed by task id, in one
-/// read: the digest's batched form.
+/// [`loop_rows`] for every task still on the board in the context's scope,
+/// keyed by task id, in one read: the digest's batched form.
 pub async fn loop_rows_on_the_board(ctx: &ServiceContext) -> Result<HashMap<String, Vec<LoopRow>>> {
+    let scope = ctx.scope.json();
     let rows = sqlx::query!(
         r#"SELECT r.task_id AS "task_id!", r.id AS "id!", r.kind AS "kind!: RunKind", r.attempt,
                   r.status AS "status!: RunStatus", r.exit_class AS "exit_class: ExitClass",
                   r.session_id AS "session_id!", r.head_sha,
                   r.findings_recorded_at IS NOT NULL AS "findings_recorded!: bool"
              FROM runs r JOIN tasks t ON t.id = r.task_id
-            WHERE t.archived_at IS NULL
+            WHERE t.archived_at IS NULL AND t.team_id IN (SELECT value FROM json_each(?1))
             ORDER BY r.task_id, r.attempt"#,
+        scope,
     )
     .fetch_all(&ctx.pool)
     .await?;
@@ -482,15 +494,18 @@ pub async fn loop_rows_for(
     task_ids: &[String],
 ) -> Result<HashMap<String, Vec<LoopRow>>> {
     let ids = ids_as_json(task_ids)?;
+    let scope = ctx.scope.json();
     let rows = sqlx::query!(
-        r#"SELECT task_id AS "task_id!", id AS "id!", kind AS "kind!: RunKind", attempt,
-                  status AS "status!: RunStatus", exit_class AS "exit_class: ExitClass",
-                  session_id AS "session_id!", head_sha,
-                  findings_recorded_at IS NOT NULL AS "findings_recorded!: bool"
-             FROM runs
-            WHERE task_id IN (SELECT value FROM json_each(?1))
-            ORDER BY task_id, attempt"#,
+        r#"SELECT r.task_id AS "task_id!", r.id AS "id!", r.kind AS "kind!: RunKind", r.attempt,
+                  r.status AS "status!: RunStatus", r.exit_class AS "exit_class: ExitClass",
+                  r.session_id AS "session_id!", r.head_sha,
+                  r.findings_recorded_at IS NOT NULL AS "findings_recorded!: bool"
+             FROM runs r JOIN tasks t ON t.id = r.task_id
+            WHERE r.task_id IN (SELECT value FROM json_each(?1))
+              AND t.team_id IN (SELECT value FROM json_each(?2))
+            ORDER BY r.task_id, r.attempt"#,
         ids,
+        scope,
     )
     .fetch_all(&ctx.pool)
     .await?;
@@ -519,6 +534,7 @@ pub async fn list_for(
     task_ids: &[String],
 ) -> Result<HashMap<String, Vec<ReviewFinding>>> {
     let ids = ids_as_json(task_ids)?;
+    let scope = ctx.scope.json();
     let findings = sqlx::query_as!(
         ReviewFinding,
         r#"SELECT f.id AS "id!", f.task_id, f.review_run_id, f.ordinal,
@@ -529,9 +545,12 @@ pub async fn list_for(
                   f.resolved_at AS "resolved_at: DateTime<Utc>"
              FROM review_findings f
              JOIN runs r ON r.id = f.review_run_id
+             JOIN tasks t ON t.id = f.task_id
             WHERE f.task_id IN (SELECT value FROM json_each(?1))
+              AND t.team_id IN (SELECT value FROM json_each(?2))
             ORDER BY f.task_id, r.attempt, f.ordinal"#,
         ids,
+        scope,
     )
     .fetch_all(&ctx.pool)
     .await?;
@@ -558,10 +577,13 @@ pub async fn recorded_at(
     ctx: &ServiceContext,
     review_run_id: &str,
 ) -> Result<Option<DateTime<Utc>>> {
+    let scope = ctx.scope.json();
     let row = sqlx::query!(
-        r#"SELECT findings_recorded_at AS "findings_recorded_at: DateTime<Utc>"
-             FROM runs WHERE id = ?1"#,
+        r#"SELECT r.findings_recorded_at AS "findings_recorded_at: DateTime<Utc>"
+             FROM runs r JOIN tasks t ON t.id = r.task_id
+            WHERE r.id = ?1 AND t.team_id IN (SELECT value FROM json_each(?2))"#,
         review_run_id,
+        scope,
     )
     .fetch_optional(&ctx.pool)
     .await?
@@ -603,7 +625,7 @@ struct Rejection {
 /// itself stored `rejected`; pointing at the carry-over would nest one "Rejected
 /// earlier as" inside another, where the original names the fixer's reason.
 async fn standing_rejection(
-    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    tx: &mut ScopedTx,
     task_id: &str,
     fingerprint: &str,
 ) -> Result<Option<Rejection>> {
@@ -652,35 +674,40 @@ struct WriterRun {
     findings_recorded_at: Option<DateTime<Utc>>,
 }
 
-async fn fetch_writer_run(
-    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
-    run_id: &str,
-) -> Result<WriterRun> {
+/// A run by id, joined to its task in the transaction's scope: a run of
+/// another team is as missing as one never opened.
+async fn fetch_writer_run(tx: &mut ScopedTx, run_id: &str) -> Result<WriterRun> {
+    let scope = tx.scope().json();
     sqlx::query_as!(
         WriterRun,
-        r#"SELECT task_id, kind AS "kind: RunKind", status AS "status: RunStatus",
-                  findings_recorded_at AS "findings_recorded_at: DateTime<Utc>"
-             FROM runs WHERE id = ?1"#,
+        r#"SELECT r.task_id, r.kind AS "kind: RunKind", r.status AS "status: RunStatus",
+                  r.findings_recorded_at AS "findings_recorded_at: DateTime<Utc>"
+             FROM runs r JOIN tasks t ON t.id = r.task_id
+            WHERE r.id = ?1 AND t.team_id IN (SELECT value FROM json_each(?2))"#,
         run_id,
+        scope,
     )
     .fetch_optional(&mut **tx)
     .await?
     .ok_or_else(|| Error::not_found(format!("no run with id {run_id}")))
 }
 
-async fn fetch_finding(
-    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
-    finding_id: &str,
-) -> Result<ReviewFinding> {
+/// A finding by id, joined to its task in the transaction's scope: another
+/// team's finding is as missing as one never recorded.
+async fn fetch_finding(tx: &mut ScopedTx, finding_id: &str) -> Result<ReviewFinding> {
+    let scope = tx.scope().json();
     sqlx::query_as!(
         ReviewFinding,
-        r#"SELECT id AS "id!", task_id, review_run_id, ordinal,
-                  severity AS "severity: FindingSeverity", title, body, file, line, fingerprint,
-                  status AS "status: FindingStatus", resolution, resolved_by_run_id,
-                  created_at AS "created_at: DateTime<Utc>",
-                  resolved_at AS "resolved_at: DateTime<Utc>"
-             FROM review_findings WHERE id = ?1"#,
+        r#"SELECT f.id AS "id!", f.task_id, f.review_run_id, f.ordinal,
+                  f.severity AS "severity: FindingSeverity", f.title, f.body, f.file, f.line,
+                  f.fingerprint, f.status AS "status: FindingStatus", f.resolution,
+                  f.resolved_by_run_id,
+                  f.created_at AS "created_at: DateTime<Utc>",
+                  f.resolved_at AS "resolved_at: DateTime<Utc>"
+             FROM review_findings f JOIN tasks t ON t.id = f.task_id
+            WHERE f.id = ?1 AND t.team_id IN (SELECT value FROM json_each(?2))"#,
         finding_id,
+        scope,
     )
     .fetch_optional(&mut **tx)
     .await?

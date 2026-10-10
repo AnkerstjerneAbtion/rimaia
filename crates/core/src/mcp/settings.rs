@@ -4,16 +4,14 @@
 //! [`crate::db::settings`], for the reason `scheduler::state`'s `QUEUE_STATE`
 //! gives at its own: seam-contract D3 puts the rules about a key with the code
 //! that has the rules, and nothing outside this module has any business
-//! knowing what `mcp_port` means. Storage is still task 006's accessor, so
-//! there is one `settings` reader and not two.
+//! knowing what `mcp_port` means. Storage is the runner accessor of
+//! [`crate::db::settings`], so there is one `settings` reader and not two.
 //!
 //! Unseeded, like `run_environment`: an absent key *is* [`DEFAULT_PORT`], and
 //! a row only appears once the user has changed it. That is also what makes
 //! ADR-0006's "registration is one time" true — the URL a user pasted into
 //! `claude mcp add` keeps working across launches because nothing rewrites the
 //! port behind them.
-
-use sqlx::SqlitePool;
 
 use crate::context::ServiceContext;
 use crate::db::settings;
@@ -39,8 +37,10 @@ const LOWEST_USABLE_PORT: u16 = 1024;
 /// the same reason: `settings.value` has no `CHECK` and the user is a supported
 /// writer of this file (ADR-0003). A typo hand-edited into the row costs a log
 /// line and the default, never a launch.
-pub async fn configured_port(pool: &SqlitePool) -> Result<u16> {
-    let Some(stored) = settings::get(pool, MCP_PORT).await? else {
+///
+/// Runner state, read from `settings` until task 041 moves it to `runner.db`.
+pub async fn configured_port(ctx: &ServiceContext) -> Result<u16> {
+    let Some(stored) = settings::get_runner(ctx, MCP_PORT).await? else {
         return Ok(DEFAULT_PORT);
     };
 
@@ -75,27 +75,31 @@ pub async fn set_configured_port(ctx: &ServiceContext, port: u16) -> Result<()> 
         )));
     }
 
-    settings::set(ctx, MCP_PORT, &port.to_string()).await
+    settings::set_runner(ctx, MCP_PORT, &port.to_string()).await
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::testing::{test_pool, TestContext};
+    use crate::testing::TestContext;
     use crate::ChangeEvent;
     use pretty_assertions::assert_eq;
 
     #[tokio::test]
     async fn an_unconfigured_port_is_4517() {
-        let pool = test_pool().await;
+        let harness = TestContext::new().await;
 
         assert_eq!(
-            settings::get(&pool, MCP_PORT).await.expect("read the key"),
+            settings::get_runner(&harness.context, MCP_PORT)
+                .await
+                .expect("read the key"),
             None,
             "the key is deliberately unseeded"
         );
         assert_eq!(
-            configured_port(&pool).await.expect("read the default"),
+            configured_port(&harness.context)
+                .await
+                .expect("read the default"),
             DEFAULT_PORT
         );
     }
@@ -109,14 +113,14 @@ mod tests {
             .expect("store a port");
 
         assert_eq!(
-            settings::get(&harness.context.pool, MCP_PORT)
+            settings::get_runner(&harness.context, MCP_PORT)
                 .await
                 .expect("read the row"),
             Some("4599".to_string()),
             "stored as digits, so the row is legible in the sqlite3 CLI"
         );
         assert_eq!(
-            configured_port(&harness.context.pool)
+            configured_port(&harness.context)
                 .await
                 .expect("read it back"),
             4599
@@ -128,12 +132,12 @@ mod tests {
         let harness = TestContext::new().await;
 
         for typo in ["four thousand", "", "70000", "-1", "80"] {
-            settings::set(&harness.context, MCP_PORT, typo)
+            settings::set_runner(&harness.context, MCP_PORT, typo)
                 .await
                 .expect("store a typo");
 
             assert_eq!(
-                configured_port(&harness.context.pool)
+                configured_port(&harness.context)
                     .await
                     .expect("read it back"),
                 DEFAULT_PORT,
@@ -156,7 +160,7 @@ mod tests {
              Pick a port between 1024 and 65535."
         );
         assert_eq!(
-            settings::get(&harness.context.pool, MCP_PORT)
+            settings::get_runner(&harness.context, MCP_PORT)
                 .await
                 .expect("read the key"),
             None,

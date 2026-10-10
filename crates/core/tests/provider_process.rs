@@ -582,7 +582,7 @@ impl Fixture {
     /// Puts the task into ADR-0016's `planned` mode, so `run_task` would resolve
     /// a strategy before spawning the implementation run.
     async fn set_planned(&self) {
-        catalogue::catalogue(&self.harness.context.pool, &ClaudeProvider)
+        catalogue::catalogue(&self.harness.context, &ClaudeProvider)
             .await
             .expect("the seeded catalogue");
         tasks::update_task(

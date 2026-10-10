@@ -54,7 +54,7 @@ use crate::error::{Error, Result};
 /// The `settings` key holding task 016's auto-removal policy.
 ///
 /// Owned here rather than in [`crate::db::settings`], in the shape D3 fixed and
-/// D16.2 repeated: storage goes through `settings::get`/`set`, but what the key
+/// D16.2 repeated: storage goes through `settings::get_runner`/`set_runner`, but what the key
 /// means and what an absent one means live with the module that acts on it.
 pub const AUTO_CLEANUP: &str = "worktree_auto_cleanup";
 
@@ -255,8 +255,10 @@ pub struct CleanupReport {
 
 /// Whether a task reaching `done` takes its worktree with it. Absent means
 /// [`AutoCleanup::Off`].
-pub async fn auto_cleanup(pool: &sqlx::SqlitePool) -> Result<AutoCleanup> {
-    Ok(settings::get(pool, AUTO_CLEANUP)
+///
+/// Runner state, read from `settings` until task 041 moves it to `runner.db`.
+pub async fn auto_cleanup(ctx: &ServiceContext) -> Result<AutoCleanup> {
+    Ok(settings::get_runner(ctx, AUTO_CLEANUP)
         .await?
         .as_deref()
         .map(AutoCleanup::from_stored)
@@ -264,7 +266,7 @@ pub async fn auto_cleanup(pool: &sqlx::SqlitePool) -> Result<AutoCleanup> {
 }
 
 pub async fn set_auto_cleanup(ctx: &ServiceContext, value: AutoCleanup) -> Result<()> {
-    settings::set(ctx, AUTO_CLEANUP, value.as_str()).await
+    settings::set_runner(ctx, AUTO_CLEANUP, value.as_str()).await
 }
 
 // ---------------------------------------------------------------------------
@@ -280,7 +282,11 @@ pub async fn set_auto_cleanup(ctx: &ServiceContext, value: AutoCleanup) -> Resul
 /// helpfulness this module exists not to have. A path the row records and the
 /// disk does not is still listed, with `exists: false` — it is the thing
 /// reconciliation is for, and hiding it would hide the problem.
+///
+/// Entity-less, so it lists one team's worktrees (ADR-0035 point 2): a context
+/// that reaches several is refused rather than handed a merged inventory.
 pub async fn inventory(ctx: &ServiceContext) -> Result<WorktreeInventory> {
+    let team_id = ctx.scope.sole()?;
     // `repository_path!`: a task with a worktree on this machine belongs to a
     // repository registered from it, which always has a path. Task 066 retires
     // this reader, with the worktree paths themselves.
@@ -293,8 +299,9 @@ pub async fn inventory(ctx: &ServiceContext) -> Result<WorktreeInventory> {
                   r.default_branch
              FROM tasks t
              JOIN repositories r ON r.id = t.repository_id
-            WHERE t.worktree_path IS NOT NULL
-            ORDER BY r.name, t.title"#
+            WHERE t.worktree_path IS NOT NULL AND t.team_id = ?1
+            ORDER BY r.name, t.title"#,
+        team_id,
     )
     .fetch_all(&ctx.pool)
     .await?;
@@ -593,7 +600,7 @@ async fn sweep<'a>(
 /// human clicking a button, because there is nobody to read the refusal it
 /// would otherwise be overriding.
 pub(crate) async fn auto_remove_on_done(ctx: &ServiceContext, task_id: &str) {
-    match auto_cleanup(&ctx.pool).await {
+    match auto_cleanup(ctx).await {
         Ok(AutoCleanup::Off) => return,
         Ok(AutoCleanup::OnDoneAcknowledged) => {}
         Err(error) => {

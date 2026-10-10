@@ -621,7 +621,7 @@ async fn a_blocking_report_refuses_to_start_the_queue_and_writes_no_queue_state(
     // The half-done state this ordering exists to prevent: a queue that says it
     // is running while nothing will ever start.
     assert_eq!(
-        scheduler::queue_state(&harness.context.pool)
+        scheduler::queue_state(&harness.context)
             .await
             .expect("the queue state must be readable"),
         QueueState::Paused,
@@ -678,7 +678,7 @@ async fn dismissing_every_row_still_refuses_to_start_the_queue_and_writes_no_que
         "the refusal must carry the same remediation it always did: {refusal}"
     );
     assert_eq!(
-        scheduler::queue_state(&harness.context.pool)
+        scheduler::queue_state(&harness.context)
             .await
             .expect("the queue state must be readable"),
         QueueState::Paused,
@@ -724,7 +724,7 @@ async fn a_healthy_installation_starts_the_queue_even_with_warnings_outstanding(
     queue.start().await.expect("a warning must not refuse");
 
     assert_eq!(
-        scheduler::queue_state(&harness.context.pool)
+        scheduler::queue_state(&harness.context)
             .await
             .expect("the queue state must be readable"),
         QueueState::Running,
@@ -866,7 +866,7 @@ async fn a_dismissal_survives_a_restart_and_a_recheck() {
     assert_eq!(stored, vec![row.dismissal()]);
 
     assert_eq!(
-        rimaia_core::db::settings::doctor_dismissals(&harness.context.pool)
+        rimaia_core::db::settings::doctor_dismissals(&harness.context)
             .await
             .expect("a fresh read is what a restart does"),
         vec![row.dismissal()]
@@ -884,18 +884,18 @@ async fn a_hand_edited_dismissals_row_costs_a_warning_rather_than_a_launch() {
     // CHECK on `value`. The `run_environment` precedent: warn and fall back.
     let harness = TestContext::new().await;
 
-    rimaia_core::db::settings::set(&harness.context, "doctor_dismissals", "not json at all")
+    rimaia_core::testing::settings::set(&harness.context, "doctor_dismissals", "not json at all")
         .await
         .expect("store a typo");
     assert_eq!(
-        rimaia_core::db::settings::doctor_dismissals(&harness.context.pool)
+        rimaia_core::db::settings::doctor_dismissals(&harness.context)
             .await
             .expect("an unreadable value must not fail the read"),
         Vec::new()
     );
 
     // One bad element, the rest intact — the two failures are different sizes.
-    rimaia_core::db::settings::set(
+    rimaia_core::testing::settings::set(
         &harness.context,
         "doctor_dismissals",
         r#"[{"check":"not_a_check","repository":null,"detail":"x"},
@@ -904,7 +904,7 @@ async fn a_hand_edited_dismissals_row_costs_a_warning_rather_than_a_launch() {
     .await
     .expect("store a half-good value");
 
-    let read = rimaia_core::db::settings::doctor_dismissals(&harness.context.pool)
+    let read = rimaia_core::db::settings::doctor_dismissals(&harness.context)
         .await
         .expect("one bad element must not lose the rest");
     assert_eq!(read.len(), 1);

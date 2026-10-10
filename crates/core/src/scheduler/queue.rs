@@ -449,12 +449,12 @@ impl QueueHandle {
     pub async fn status(&self) -> Result<QueueStatus> {
         let ctx = &self.shared.ctx;
         Ok(QueueStatus {
-            state: state::queue_state(&ctx.pool).await?,
+            state: state::queue_state(ctx).await?,
             running_task_ids: self.in_flight_task_ids(),
             plan: selection::plan(ctx).await?,
             last_step_error: self.shared.step_error(),
-            usage_limit_pause_until: pause::active_until(&ctx.pool, ctx.clock.now()).await?,
-            window: window::active(&ctx.pool).await?,
+            usage_limit_pause_until: pause::active_until(ctx, ctx.clock.now()).await?,
+            window: window::active(ctx).await?,
         })
     }
 
@@ -663,7 +663,7 @@ impl QueueTask {
     async fn try_tick_schedules(&self) -> Result<Step> {
         let ctx = &self.shared.ctx;
         let now = ctx.clock.now();
-        let open = window::active(&ctx.pool).await?;
+        let open = window::active(ctx).await?;
 
         // 1. Close first, before anything selects.
         if let Some(window) = &open {
@@ -676,7 +676,7 @@ impl QueueTask {
         //    produce one window and *which* of them owns the night has to be
         //    the same answer on every pass and after every restart.
         let mut wake: Option<DateTime<Utc>> = open.as_ref().and_then(|window| window.closes_at);
-        for schedule in schedule::enabled(&ctx.pool).await? {
+        for schedule in schedule::enabled(ctx).await? {
             // Per row, not per pass: one unreadable row must not stop every
             // other schedule being looked at. The row is named, because the
             // operator has to know which one to fix.
@@ -871,7 +871,7 @@ impl QueueTask {
     async fn try_step(&self, runs: &mut JoinSet<()>) -> Result<Step> {
         let ctx = &self.shared.ctx;
 
-        if state::queue_state(&ctx.pool).await? != QueueState::Running {
+        if state::queue_state(ctx).await? != QueueState::Running {
             return Ok(Step::Idle);
         }
 
@@ -881,7 +881,7 @@ impl QueueTask {
         // buys by making sequential mode `global = 1`. In-flight runs are
         // deliberately untouched: a run mid-edit when *another* task hit a wall
         // has done nothing wrong, and this is a rule about starting.
-        if let Some(until) = pause::active_until(&ctx.pool, ctx.clock.now()).await? {
+        if let Some(until) = pause::active_until(ctx, ctx.clock.now()).await? {
             tracing::debug!(
                 until = %until.to_rfc3339(),
                 "the run queue is holding new starts until the usage window reopens",
@@ -1085,7 +1085,7 @@ impl QueueTask {
         if cancel.is_cancelled() || self.shared.is_shutting_down() {
             return Ok(true);
         }
-        Ok(state::queue_state(&self.shared.ctx.pool).await? != QueueState::Running)
+        Ok(state::queue_state(&self.shared.ctx).await? != QueueState::Running)
     }
 }
 
@@ -1374,33 +1374,25 @@ mod tests {
 
         handle.start().await.expect("start the queue");
         assert_eq!(
-            state::queue_state(&harness.context.pool)
-                .await
-                .expect("read"),
+            state::queue_state(&harness.context).await.expect("read"),
             QueueState::Running
         );
 
         handle.pause().await.expect("pause the queue");
         assert_eq!(
-            state::queue_state(&harness.context.pool)
-                .await
-                .expect("read"),
+            state::queue_state(&harness.context).await.expect("read"),
             QueueState::Paused
         );
 
         handle.resume().await.expect("resume the queue");
         assert_eq!(
-            state::queue_state(&harness.context.pool)
-                .await
-                .expect("read"),
+            state::queue_state(&harness.context).await.expect("read"),
             QueueState::Running
         );
 
         handle.stop().await.expect("stop the queue");
         assert_eq!(
-            state::queue_state(&harness.context.pool)
-                .await
-                .expect("read"),
+            state::queue_state(&harness.context).await.expect("read"),
             QueueState::Paused,
             "stop is pause plus a cancellation, not a third state"
         );

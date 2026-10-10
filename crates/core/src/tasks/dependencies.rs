@@ -27,14 +27,18 @@ use std::collections::{HashMap, HashSet};
 use chrono::{DateTime, Utc};
 use sqlx::SqliteConnection;
 
+use crate::context::ScopedTx;
 use crate::context::ServiceContext;
 use crate::db::{BoardColumn, MutationSource, RunState, StrategyMode, StrategySource, Task};
-use crate::error::{Error, Result};
+use crate::error::{Error, ErrorCode, Result};
 use crate::events::{per_team, ChangeEvent};
-use crate::tasks::service::{fetch_task_row, team_of_task};
+use crate::tasks::service::{fetch_task_row, task_row, team_of_task};
 
 /// The whole existing graph: task id -> the ids it depends on.
 type Edges = HashMap<String, Vec<String>>;
+
+/// How a cycle refusal names a task on the path that the caller cannot see.
+const UNSEEN_TASK: &str = "a task you cannot see";
 
 /// Replaces the whole set of tasks `task_id` is blocked by (ADR-0008).
 ///
@@ -64,8 +68,8 @@ pub async fn set_task_dependencies(
     task_id: &str,
     depends_on: &[String],
 ) -> Result<Vec<String>> {
-    let mut tx = ctx.pool.begin().await?;
-    let task = fetch_task_row(&mut *tx, task_id).await?;
+    let mut tx = ctx.begin().await?;
+    let task = fetch_task_row(&mut tx, task_id).await?;
 
     // Deduped preserving the caller's order, so the *first* offending id in
     // the request is the one an error names — an agent re-reading its own
@@ -78,8 +82,10 @@ pub async fn set_task_dependencies(
         }
         // Deliberately the same `no task with id {id}` sentence every other
         // not-found in this crate produces: which door asked does not change
-        // the answer (ADR-0006).
-        let dependency = fetch_task_row(&mut *tx, dependency_id).await?;
+        // the answer (ADR-0006), and neither does whether another team holds
+        // the id (ADR-0029 point 5). A task of another team that the scope
+        // does reach is refused just below, as another repository's.
+        let dependency = fetch_task_row(&mut tx, dependency_id).await?;
         if dependency.repository_id != task.repository_id {
             return Err(Error::invalid(format!(
                 "cannot make \"{title}\" depend on \"{other}\": they are in different \
@@ -91,8 +97,10 @@ pub async fn set_task_dependencies(
     }
 
     // One unscoped read of the whole table. It is one desktop user's board, and
-    // scoping it to a repository would hide a hand-written cross-repository
-    // edge from the walk — which is exactly the row the walk exists to catch.
+    // scoping it to a repository or a team would hide a hand-written
+    // cross-repository or cross-team edge from the walk — which is exactly the
+    // row the walk exists to catch. What the refusal *says* is scoped instead:
+    // see `cycle_error`.
     let edges = load_edges(&mut tx).await?;
 
     for dependency_id in &requested {
@@ -139,11 +147,19 @@ pub async fn set_task_dependencies(
     // Each id's team is read beside it, in this transaction, because nothing
     // here makes a dependency share its dependent's team: an edge across
     // teams is announced to each team separately (ADR-0034 point 3).
+    //
+    // An id the scope does not reach is left out: only a hand-written edge can
+    // have put one in `previous`, and announcing it would name a team this
+    // caller cannot see.
     let mut announced = Vec::new();
     for id in
         std::iter::once(task_id.to_string()).chain(symmetric_difference(&previous, &requested))
     {
-        announced.push((team_of_task(&mut *tx, &id).await?, id));
+        match team_of_task(&mut tx, &id).await {
+            Ok(team_id) => announced.push((team_id, id)),
+            Err(error) if error.code() == ErrorCode::NotFound => {}
+            Err(error) => return Err(error),
+        }
     }
 
     tx.commit().await?;
@@ -173,7 +189,11 @@ pub async fn set_task_dependencies(
 /// reading: "`position` ascends downwards". `created_at` then `id` break a
 /// position tie, which the schema permits, exactly as `rebalance_column`
 /// renumbers by.
+///
+/// Only tasks in the context's scope: a dependency outside it, which only a
+/// hand-written row can create, is not there as far as this caller can tell.
 pub async fn dependencies_of(ctx: &ServiceContext, task_id: &str) -> Result<Vec<Task>> {
+    let scope = ctx.scope.json();
     let mut rows = sqlx::query_as!(
         Task,
         r#"SELECT dep.id, dep.repository_id, dep.title, dep.plan, dep.extra_instructions,
@@ -188,8 +208,9 @@ pub async fn dependencies_of(ctx: &ServiceContext, task_id: &str) -> Result<Vec<
             dep.archived_at AS "archived_at: DateTime<Utc>"
            FROM task_dependencies d
            JOIN tasks dep ON dep.id = d.depends_on_task_id
-          WHERE d.task_id = ?1"#,
+          WHERE d.task_id = ?1 AND dep.team_id IN (SELECT value FROM json_each(?2))"#,
         task_id,
+        scope,
     )
     .fetch_all(&ctx.pool)
     .await?;
@@ -206,14 +227,22 @@ pub async fn dependencies_of(ctx: &ServiceContext, task_id: &str) -> Result<Vec<
 /// task that was built on this one is exactly what a reviewer rejecting it
 /// should hear about.
 pub async fn dependents_of(ctx: &ServiceContext, task_id: &str) -> Result<Vec<Task>> {
-    fetch_task_row(&ctx.pool, task_id).await?;
-    dependents_in(&ctx.pool, task_id).await
+    task_row(ctx, task_id).await?;
+    select_dependents(&ctx.pool, &ctx.scope.json(), task_id).await
 }
 
-/// [`dependents_of`]'s query, over any executor, so `delete_task` can ask it
-/// inside its own transaction and a review action inside its own. Does not
-/// check that `task_id` exists.
-pub(crate) async fn dependents_in<'e, E>(executor: E, task_id: &str) -> Result<Vec<Task>>
+/// [`dependents_of`]'s query inside the caller's transaction, so `delete_task`
+/// can ask it inside its own transaction and a review action inside its own.
+/// Does not check that `task_id` exists.
+pub(crate) async fn dependents_in(tx: &mut ScopedTx, task_id: &str) -> Result<Vec<Task>> {
+    let scope = tx.scope().json();
+    select_dependents(&mut **tx, &scope, task_id).await
+}
+
+/// Every direct dependent in `scope`. A dependent the scope does not reach is
+/// left out of the list; `delete_task`'s schema `RESTRICT` still refuses to
+/// orphan it.
+async fn select_dependents<'e, E>(executor: E, scope: &str, task_id: &str) -> Result<Vec<Task>>
 where
     E: sqlx::Executor<'e, Database = sqlx::Sqlite>,
 {
@@ -231,8 +260,9 @@ where
             dep.archived_at AS "archived_at: DateTime<Utc>"
            FROM task_dependencies d
            JOIN tasks dep ON dep.id = d.task_id
-          WHERE d.depends_on_task_id = ?1"#,
+          WHERE d.depends_on_task_id = ?1 AND dep.team_id IN (SELECT value FROM json_each(?2))"#,
         task_id,
+        scope,
     )
     .fetch_all(executor)
     .await?;
@@ -269,7 +299,7 @@ pub(crate) fn compare_dependency_order(left: &Task, right: &Task) -> Ordering {
 pub async fn blocking_reason(ctx: &ServiceContext, task_id: &str) -> Result<Vec<Task>> {
     // Reads the row first so an unknown id is `no task with id X` rather than
     // an empty list that reads as "nothing is blocking it".
-    fetch_task_row(&ctx.pool, task_id).await?;
+    task_row(ctx, task_id).await?;
 
     Ok(dependencies_of(ctx, task_id)
         .await?
@@ -310,16 +340,28 @@ async fn load_edges(tx: &mut SqliteConnection) -> Result<Edges> {
 /// Words, never an arrow: the direction of `→` in a dependency graph is
 /// exactly the thing a reader has to guess, and guessing wrong inverts the
 /// meaning of the sentence.
-async fn cycle_error(tx: &mut SqliteConnection, chain: &[String]) -> Result<Error> {
+///
+/// Titles are read in the transaction's scope. A task on the path that the
+/// scope does not hold, which only a hand-written cross-team row can put
+/// there, is written as [`UNSEEN_TASK`], with no id, title or team: the
+/// refusal still fires, because the cycle is real, but it tells this caller
+/// nothing about another team's board. A row that vanished between the walk
+/// and this read is written the same way. The message must not fail.
+async fn cycle_error(tx: &mut ScopedTx, chain: &[String]) -> Result<Error> {
+    let scope = tx.scope().json();
     let mut titles = Vec::with_capacity(chain.len());
     for id in chain {
-        let title = sqlx::query_scalar!("SELECT title FROM tasks WHERE id = ?1", id)
-            .fetch_optional(&mut *tx)
-            .await?
-            // A row that vanished between the walk and this read leaves the id,
-            // which is still enough to find it. The message must not fail.
-            .unwrap_or_else(|| id.clone());
-        titles.push(format!("\"{title}\""));
+        let title = sqlx::query_scalar!(
+            "SELECT title FROM tasks WHERE id = ?1 AND team_id IN (SELECT value FROM json_each(?2))",
+            id,
+            scope,
+        )
+        .fetch_optional(&mut **tx)
+        .await?;
+        titles.push(match title {
+            Some(title) => format!("\"{title}\""),
+            None => UNSEEN_TASK.to_string(),
+        });
     }
 
     Ok(Error::invalid(format!(

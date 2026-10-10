@@ -25,7 +25,7 @@ pub async fn get_analytics(
     from: Option<DateTime<Utc>>,
     to: Option<DateTime<Utc>>,
 ) -> Result<Analytics> {
-    analytics::analytics(&state.context.pool, Period { from, to }).await
+    analytics::analytics(&state.context, Period { from, to }).await
 }
 
 /// What the user says they pay per month, or `null` when they have not said.
@@ -35,7 +35,7 @@ pub async fn get_analytics(
 /// the other every time a run ends.
 #[tauri::command]
 pub async fn get_subscription_cost(state: State<'_, AppState>) -> Result<Option<f64>> {
-    settings::subscription_monthly_usd(&state.context.pool).await
+    settings::subscription_monthly_usd(&state.context).await
 }
 
 /// Stores it, or clears it with `null`. Refuses a negative figure at the field

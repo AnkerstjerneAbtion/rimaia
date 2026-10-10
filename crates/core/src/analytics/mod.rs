@@ -53,7 +53,9 @@
 use chrono::{DateTime, Datelike, NaiveDate, Utc};
 use serde::Serialize;
 use sqlx::sqlite::SqliteRow;
-use sqlx::{FromRow, Row, SqlitePool};
+use sqlx::{FromRow, Row};
+
+use crate::context::ServiceContext;
 
 use crate::db::settings;
 use crate::db::{BoardColumn, RunKind, RunStatus, StrategyMode};
@@ -254,8 +256,12 @@ pub struct Analytics {
 }
 
 /// Everything on the page, computed from `runs` at read time.
-pub async fn analytics(pool: &SqlitePool, period: Period) -> Result<Analytics> {
-    let runs = runs_in(pool, period).await?;
+///
+/// An aggregate, so it spans every team in the context's scope ("over the
+/// caller's teams' runs", D32's appendix) rather than asking for one, and
+/// never counts a run of a team outside it.
+pub async fn analytics(ctx: &ServiceContext, period: Period) -> Result<Analytics> {
+    let runs = runs_in(ctx, period).await?;
 
     let mut outcomes = RunOutcomes::default();
     let mut review_loop_outcomes = RunOutcomes::default();
@@ -389,11 +395,11 @@ pub async fn analytics(pool: &SqlitePool, period: Period) -> Result<Analytics> {
         unattended_hours,
         models: by_model,
         strategies: by_strategy,
-        planner_spend_usd: planner_spend(pool, period).await?,
+        planner_spend_usd: planner_spend(ctx, period).await?,
         implementation_spend_usd,
         review_loop_spend_usd,
         review_loop_outcomes,
-        subscription_monthly_usd: settings::subscription_monthly_usd(pool).await?,
+        subscription_monthly_usd: settings::subscription_monthly_usd(ctx).await?,
     })
 }
 
@@ -411,14 +417,14 @@ fn median(sorted: &[i64]) -> Option<i64> {
 /// the bounds are optional, so the predicate is not fixed at compile time — and
 /// the projection is narrow on purpose: `runs.prompt` is kilobytes a sum has no
 /// use for.
-async fn runs_in(pool: &SqlitePool, period: Period) -> Result<Vec<AnalyticsRun>> {
+async fn runs_in(ctx: &ServiceContext, period: Period) -> Result<Vec<AnalyticsRun>> {
     let mut sql = String::from(
         "SELECT r.id, r.task_id, r.kind, r.status, r.started_at, r.ended_at, r.cost_usd, r.model,
                 t.board_column AS task_column, t.title AS task_title,
                 t.strategy_mode AS task_strategy_mode
          FROM runs r
          JOIN tasks t ON t.id = r.task_id
-         WHERE 1 = 1",
+         WHERE t.team_id IN (SELECT value FROM json_each(?))",
     );
     if period.from.is_some() {
         sql.push_str(" AND r.started_at >= ?");
@@ -428,7 +434,7 @@ async fn runs_in(pool: &SqlitePool, period: Period) -> Result<Vec<AnalyticsRun>>
     }
     sql.push_str(" ORDER BY r.started_at ASC");
 
-    let mut query = sqlx::query_as::<_, AnalyticsRun>(&sql);
+    let mut query = sqlx::query_as::<_, AnalyticsRun>(&sql).bind(ctx.scope.json());
     if let Some(from) = period.from {
         query = query.bind(from);
     }
@@ -436,7 +442,7 @@ async fn runs_in(pool: &SqlitePool, period: Period) -> Result<Vec<AnalyticsRun>>
         query = query.bind(to);
     }
 
-    Ok(query.fetch_all(pool).await?)
+    Ok(query.fetch_all(&ctx.pool).await?)
 }
 
 /// What the planners cost, summed off the proposals they wrote.
@@ -448,10 +454,11 @@ async fn runs_in(pool: &SqlitePool, period: Period) -> Result<Vec<AnalyticsRun>>
 /// A proposal whose envelope will not parse contributes nothing rather than
 /// failing the page: the same tolerance every other reader of that column
 /// applies, and a hand-edited row is not a reason a chart cannot be drawn.
-async fn planner_spend(pool: &SqlitePool, period: Period) -> Result<f64> {
+async fn planner_spend(ctx: &ServiceContext, period: Period) -> Result<f64> {
     let mut sql = String::from(
         "SELECT strategy_plan FROM tasks
-         WHERE strategy_plan IS NOT NULL AND strategy_updated_at IS NOT NULL",
+         WHERE team_id IN (SELECT value FROM json_each(?))
+           AND strategy_plan IS NOT NULL AND strategy_updated_at IS NOT NULL",
     );
     if period.from.is_some() {
         sql.push_str(" AND strategy_updated_at >= ?");
@@ -460,7 +467,7 @@ async fn planner_spend(pool: &SqlitePool, period: Period) -> Result<f64> {
         sql.push_str(" AND strategy_updated_at < ?");
     }
 
-    let mut query = sqlx::query_scalar::<_, String>(&sql);
+    let mut query = sqlx::query_scalar::<_, String>(&sql).bind(ctx.scope.json());
     if let Some(from) = period.from {
         query = query.bind(from);
     }
@@ -469,7 +476,7 @@ async fn planner_spend(pool: &SqlitePool, period: Period) -> Result<f64> {
     }
 
     Ok(query
-        .fetch_all(pool)
+        .fetch_all(&ctx.pool)
         .await?
         .into_iter()
         .filter_map(|stored| StrategyPlan::from_stored(Some(&stored)))

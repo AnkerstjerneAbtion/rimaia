@@ -42,7 +42,7 @@ pub mod worktree;
 pub mod testing;
 
 pub use clock::{Clock, SystemClock};
-pub use context::{ServiceContext, TeamScope};
+pub use context::{ScopedTx, ServiceContext, TeamScope};
 pub use error::{Error, ErrorCode, Result};
 pub use events::{Change, ChangeEvent};
 pub use paths::AppPaths;

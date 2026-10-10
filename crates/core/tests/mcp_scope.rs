@@ -645,13 +645,13 @@ async fn nothing_adr_0021_added_is_reachable_from_a_run() {
 
     // And none of them wrote anything on the way to being refused.
     assert_eq!(
-        strategy::settings::approval(&h.context.pool)
+        strategy::settings::approval(&h.context)
             .await
             .expect("read the approval setting"),
         StrategyApproval::Automatic,
     );
     assert_eq!(
-        strategy::settings::global_default(&h.context.pool)
+        strategy::settings::global_default(&h.context)
             .await
             .expect("read the global defaults"),
         StrategyDefaults::default(),
@@ -707,7 +707,7 @@ async fn nothing_task_012_added_is_reachable_from_a_run_either() {
     );
 
     // And none of them wrote anything on the way to being refused.
-    let capacity = capacity::configured(&h.context.pool)
+    let capacity = capacity::configured(&h.context)
         .await
         .expect("read the capacity back");
     assert_eq!(capacity.mode, ScheduleMode::Sequential);
@@ -885,7 +885,7 @@ async fn a_run_cannot_silence_the_doctor_about_the_machine_it_is_running_on() {
 
     // And neither wrote on the way to being refused.
     assert_eq!(
-        rimaia_core::db::settings::doctor_dismissals(&h.context.pool)
+        rimaia_core::db::settings::doctor_dismissals(&h.context)
             .await
             .expect("read the key"),
         Vec::new()
@@ -1155,7 +1155,7 @@ async fn the_operator_reads_and_writes_the_run_capacity_over_mcp() {
         message(&refused),
     );
     assert_eq!(
-        capacity::configured(&h.context.pool)
+        capacity::configured(&h.context)
             .await
             .expect("read it back")
             .max_concurrency,
@@ -1407,7 +1407,7 @@ async fn a_token_stops_working_when_its_run_ends() {
     );
 
     let url = {
-        let grant = handles.grant("task-1", Grant::Strategy);
+        let grant = handles.grant("task-1", &h.solo.team_id, Grant::Strategy);
         let url = scoped_url(&handles, &grant);
 
         assert_eq!(
@@ -1444,7 +1444,7 @@ async fn a_real_client_at_a_scoped_url_is_refused_a_task_that_is_not_its_own() {
     let mine = create_task(&h, &repository_id, "Mine").await;
     let theirs = create_task(&h, &repository_id, "Someone else's").await;
 
-    let grant = handles.grant(&mine.id, Grant::Strategy);
+    let grant = handles.grant(&mine.id, &h.solo.team_id, Grant::Strategy);
     let url = scoped_url(&handles, &grant);
     let client = ()
         .serve(StreamableHttpClientTransport::with_client(
@@ -1766,7 +1766,7 @@ async fn the_run_scoped_server_reports_its_own_name() {
     let (handle, server) = serving(&h, &handles).await;
     let address = handle.status().bound_address.expect("a bound address");
 
-    let grant = handles.grant("task-1", Grant::Strategy);
+    let grant = handles.grant("task-1", &h.solo.team_id, Grant::Strategy);
     for (url, expected) in [
         (scoped_url(&handles, &grant), mcp::RUN_MCP_SERVER_NAME),
         (format!("http://{address}/mcp"), mcp::MCP_SERVER_NAME),

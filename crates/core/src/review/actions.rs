@@ -18,7 +18,7 @@ use crate::db::{BoardColumn, RunState, Task};
 use crate::error::{Error, Result};
 use crate::events::ChangeEvent;
 use crate::tasks::service::{
-    ensure_ready_has_a_plan, fetch_task_row, move_within, team_of_task, Destination,
+    ensure_ready_has_a_plan, fetch_task_row, move_within, task_row, team_of_task, Destination,
 };
 use crate::worktree::{self, cleanup, ForceRemoval};
 
@@ -76,7 +76,7 @@ pub async fn approve(ctx: &ServiceContext, id: &str) -> Result<Task> {
     // approving is that transition (D20 point 3), so it runs here exactly as it
     // does after a drag — after the commit, and unable to fail the approval.
     cleanup::auto_remove_on_done(ctx, id).await;
-    fetch_task_row(&ctx.pool, id).await
+    task_row(ctx, id).await
 }
 
 /// `in_review` to the bottom of `ready`, the note appended, and the worktree,
@@ -121,7 +121,7 @@ async fn decide(
     action: Action,
     note: Option<&str>,
 ) -> Result<ReviewOutcome> {
-    let task = fetch_task_row(&ctx.pool, id).await?;
+    let task = task_row(ctx, id).await?;
     ensure_decidable(&task, action, note)?;
 
     if action == Action::Reject {
@@ -130,9 +130,12 @@ async fn decide(
 
     // `BEGIN IMMEDIATE` for `move_into_column`'s reason: the reads below decide
     // what the writes do.
-    let mut tx = ctx.pool.begin_with("BEGIN IMMEDIATE").await?;
-    let task = fetch_task_row(&mut *tx, id).await?;
+    let mut tx = ctx.begin_immediate().await?;
+    let task = fetch_task_row(&mut tx, id).await?;
     ensure_decidable(&task, action, note)?;
+    // The verdict names an entity, so its team is the task's own, never one
+    // asked of the scope (ADR-0035 point 2).
+    let team_id = team_of_task(&mut tx, id).await?;
 
     let dependents = match action {
         Action::Approve => Vec::new(),
@@ -159,39 +162,42 @@ async fn decide(
     // Only a verdict that leaves nothing awaiting review means "the review is
     // finished". A drag or an archive does the same to the column and does not
     // count: the loop and an MCP client make those moves at 3 a.m.
+    //
+    // The queue counted is the acted-on task's team's (task 034's "caller's
+    // team's queue"): another team's `in_review` is neither counted nor
+    // revealed, whatever teams the context reaches.
     let in_review = sqlx::query_scalar!(
         r#"SELECT COUNT(*) AS "count!: i64" FROM tasks
-            WHERE board_column = 'in_review' AND archived_at IS NULL"#
+            WHERE team_id = ?1 AND board_column = 'in_review' AND archived_at IS NULL"#,
+        team_id,
     )
     .fetch_one(&mut *tx)
     .await?;
     let advanced_marker = in_review == 0;
-    // The digest marker is a `settings` row, which has no team column until
-    // task 039: its event names the context's one team, read before the write.
-    let marker_team = if advanced_marker {
-        let team_id = ctx.scope.sole()?.clone();
-        digest::advance_marker(&mut tx, ctx.clock.now()).await?;
-        Some(team_id)
-    } else {
-        None
-    };
-    let team_id = team_of_task(&mut *tx, id).await?;
+    // The marker is the context's actor's, written on this transaction so the
+    // move and the marker commit together or not at all.
+    if advanced_marker {
+        digest::advance_marker(ctx, &mut tx, ctx.clock.now()).await?;
+    }
 
     tx.commit().await?;
 
     ctx.publish(ChangeEvent::tasks(
-        team_id,
+        team_id.clone(),
         std::iter::once(id.to_string()).chain(rebalanced.into_iter().filter(|rid| rid != id)),
     ));
-    if let Some(marker_team) = marker_team {
-        ctx.publish(ChangeEvent::settings(marker_team));
+    // The marker is a user setting, and a change event needs a team until task
+    // 048's `Audience::User`: it names the acted-on task's team, the one its
+    // `Tasks` event names, so a verdict needs no sole team.
+    if advanced_marker {
+        ctx.publish(ChangeEvent::settings(team_id));
     }
 
     let set_aside_branch = (action == Action::Reject)
         .then(|| task.branch.clone())
         .flatten();
     Ok(ReviewOutcome {
-        task: fetch_task_row(&ctx.pool, id).await?,
+        task: task_row(ctx, id).await?,
         dependents,
         set_aside_branch,
     })

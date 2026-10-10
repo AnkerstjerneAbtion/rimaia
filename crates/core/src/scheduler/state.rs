@@ -14,7 +14,6 @@
 //! one `settings` reader and not two.
 
 use serde::{Deserialize, Serialize};
-use sqlx::SqlitePool;
 
 use crate::context::ServiceContext;
 use crate::db::settings;
@@ -82,8 +81,10 @@ impl QueueState {
 }
 
 /// Whether the queue is working. An absent key is [`QueueState::Paused`].
-pub async fn queue_state(pool: &SqlitePool) -> Result<QueueState> {
-    Ok(settings::get(pool, QUEUE_STATE)
+///
+/// Runner state, read from `settings` until task 041 moves it to `runner.db`.
+pub async fn queue_state(ctx: &ServiceContext) -> Result<QueueState> {
+    Ok(settings::get_runner(ctx, QUEUE_STATE)
         .await?
         .as_deref()
         .map(QueueState::from_stored)
@@ -93,27 +94,29 @@ pub async fn queue_state(pool: &SqlitePool) -> Result<QueueState> {
 /// Writes the switch and announces it (ADR-0018: `settings:changed` is what
 /// tells the Runs view to re-read the queue's status).
 pub async fn set_queue_state(ctx: &ServiceContext, state: QueueState) -> Result<()> {
-    settings::set(ctx, QUEUE_STATE, state.as_str()).await
+    settings::set_runner(ctx, QUEUE_STATE, state.as_str()).await
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::testing::{test_pool, TestContext};
+    use crate::testing::TestContext;
     use pretty_assertions::assert_eq;
 
     #[tokio::test]
     async fn a_queue_nobody_has_ever_started_is_paused() {
-        let pool = test_pool().await;
+        let harness = TestContext::new().await;
 
         assert_eq!(
-            settings::get(&pool, QUEUE_STATE)
+            settings::get_runner(&harness.context, QUEUE_STATE)
                 .await
                 .expect("read the key"),
             None
         );
         assert_eq!(
-            queue_state(&pool).await.expect("read the default"),
+            queue_state(&harness.context)
+                .await
+                .expect("read the default"),
             QueueState::Paused
         );
     }
@@ -130,15 +133,13 @@ mod tests {
             .expect("start the queue");
 
         assert_eq!(
-            settings::get(&harness.context.pool, QUEUE_STATE)
+            settings::get_runner(&harness.context, QUEUE_STATE)
                 .await
                 .expect("read the row"),
             Some("running".to_string()),
         );
         assert_eq!(
-            queue_state(&harness.context.pool)
-                .await
-                .expect("read it back"),
+            queue_state(&harness.context).await.expect("read it back"),
             QueueState::Running
         );
     }
@@ -149,14 +150,12 @@ mod tests {
         // CLI must not be able to start an unattended queue.
         let harness = TestContext::new().await;
 
-        settings::set(&harness.context, QUEUE_STATE, "Running")
+        settings::set_runner(&harness.context, QUEUE_STATE, "Running")
             .await
             .expect("store a typo");
 
         assert_eq!(
-            queue_state(&harness.context.pool)
-                .await
-                .expect("read it back"),
+            queue_state(&harness.context).await.expect("read it back"),
             QueueState::Paused
         );
     }

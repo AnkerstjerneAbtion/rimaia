@@ -9,9 +9,12 @@
 //! room again. That last property is task 002's own acceptance criterion —
 //! "`position_between` including the rebalance path" — end to end.
 
-use rimaia_core::db::{BoardColumn, RunState};
+use std::sync::Arc;
+
+use rimaia_core::db::{BoardColumn, MutationSource, RunState};
 use rimaia_core::tasks::{position_between, rebalance_column, Placement};
-use rimaia_core::testing::test_pool;
+use rimaia_core::testing::{test_epoch, test_pool, TestClock};
+use rimaia_core::{ServiceContext, TeamScope};
 use sqlx::SqlitePool;
 
 #[tokio::test]
@@ -250,7 +253,19 @@ const T3: &str = "2026-08-20T00:02:00+00:00";
 /// at one connection, and holding this one open would deadlock the next query
 /// rather than fail it.
 async fn rebalance(pool: &SqlitePool, repository_id: &str, column: BoardColumn) -> Vec<String> {
-    let mut tx = pool
+    // A renumber runs inside a transaction a context opened (task 039), so
+    // this builds the solo context the shell would over the same pool.
+    let solo = rimaia_core::identity::ensure_solo(pool, &TestClock::new(test_epoch()))
+        .await
+        .expect("a fresh board gets a solo identity");
+    let context = ServiceContext::new(
+        pool.clone(),
+        Arc::new(TestClock::new(test_epoch())),
+        MutationSource::System,
+        TeamScope::one(solo.team_id),
+        solo.user_id,
+    );
+    let mut tx = context
         .begin()
         .await
         .expect("the sole test connection must still be available");

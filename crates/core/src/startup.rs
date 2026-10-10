@@ -47,8 +47,8 @@
 //! merely has not mounted yet, and send the user chasing a repair for nothing.
 
 use serde::Serialize;
-use sqlx::SqlitePool;
 
+use crate::context::ServiceContext;
 use crate::db::RunState;
 use crate::error::Result;
 
@@ -90,11 +90,14 @@ impl ReconciliationReport {
 /// Surveys the database and the filesystem for state a previous run left
 /// behind, and logs a summary. Reports and repairs nothing — see the module
 /// docs for why that split is deliberate rather than provisional.
-pub async fn survey(pool: &SqlitePool) -> Result<ReconciliationReport> {
+///
+/// Only the context's teams' rows: the shell builds its context before it
+/// surveys, so a board that holds another team reports none of its tasks.
+pub async fn survey(ctx: &ServiceContext) -> Result<ReconciliationReport> {
     let report = ReconciliationReport {
-        tasks_left_running: tasks_left_running(pool).await?,
-        missing_worktrees: missing_worktrees(pool).await?,
-        missing_run_logs: missing_run_logs(pool).await?,
+        tasks_left_running: tasks_left_running(ctx).await?,
+        missing_worktrees: missing_worktrees(ctx).await?,
+        missing_run_logs: missing_run_logs(ctx).await?,
     };
 
     // The one useful thing a stub can do on its own: put what it found where
@@ -111,13 +114,17 @@ pub async fn survey(pool: &SqlitePool) -> Result<ReconciliationReport> {
     Ok(report)
 }
 
-async fn tasks_left_running(pool: &SqlitePool) -> Result<Vec<String>> {
+async fn tasks_left_running(ctx: &ServiceContext) -> Result<Vec<String>> {
+    let scope = ctx.scope.json();
     let ids = sqlx::query_scalar!(
-        "SELECT id FROM tasks WHERE run_state = ?1 OR run_state = ?2",
+        "SELECT id FROM tasks
+          WHERE (run_state = ?1 OR run_state = ?2)
+            AND team_id IN (SELECT value FROM json_each(?3))",
         RunState::Running,
         RunState::Queued,
+        scope,
     )
-    .fetch_all(pool)
+    .fetch_all(&ctx.pool)
     .await?;
     Ok(ids)
 }
@@ -134,12 +141,15 @@ struct WorktreeCandidate {
     worktree_path: String,
 }
 
-async fn missing_worktrees(pool: &SqlitePool) -> Result<Vec<String>> {
+async fn missing_worktrees(ctx: &ServiceContext) -> Result<Vec<String>> {
+    let scope = ctx.scope.json();
     let candidates = sqlx::query_as!(
         WorktreeCandidate,
-        r#"SELECT id, worktree_path AS "worktree_path!" FROM tasks WHERE worktree_path IS NOT NULL"#
+        r#"SELECT id, worktree_path AS "worktree_path!" FROM tasks
+            WHERE worktree_path IS NOT NULL AND team_id IN (SELECT value FROM json_each(?1))"#,
+        scope,
     )
-    .fetch_all(pool)
+    .fetch_all(&ctx.pool)
     .await?;
 
     let mut missing = Vec::new();
@@ -162,10 +172,16 @@ struct RunCandidate {
     log_path: Option<String>,
 }
 
-async fn missing_run_logs(pool: &SqlitePool) -> Result<Vec<String>> {
-    let candidates = sqlx::query_as!(RunCandidate, "SELECT id, log_path FROM runs")
-        .fetch_all(pool)
-        .await?;
+async fn missing_run_logs(ctx: &ServiceContext) -> Result<Vec<String>> {
+    let scope = ctx.scope.json();
+    let candidates = sqlx::query_as!(
+        RunCandidate,
+        "SELECT r.id, r.log_path FROM runs r JOIN tasks t ON t.id = r.task_id
+          WHERE t.team_id IN (SELECT value FROM json_each(?1))",
+        scope,
+    )
+    .fetch_all(&ctx.pool)
+    .await?;
 
     let mut missing = Vec::new();
     for candidate in candidates {
@@ -191,6 +207,7 @@ mod tests {
     use crate::testing::TestClock;
     use pretty_assertions::assert_eq;
     use rimaia_core::testing::test_pool;
+    use sqlx::SqlitePool;
 
     #[tokio::test]
     async fn a_task_left_running_is_reported() {
@@ -198,7 +215,9 @@ mod tests {
         let repository_id = insert_repository(&pool).await;
         let task_id = insert_task(&pool, &repository_id, RunState::Running, None).await;
 
-        let report = survey(&pool).await.expect("survey succeeds");
+        let report = survey(&context(&pool).await)
+            .await
+            .expect("survey succeeds");
 
         assert_eq!(report.tasks_left_running, vec![task_id]);
         assert!(report.missing_worktrees.is_empty());
@@ -216,7 +235,9 @@ mod tests {
         let repository_id = insert_repository(&pool).await;
         let task_id = insert_task(&pool, &repository_id, RunState::Queued, None).await;
 
-        let report = survey(&pool).await.expect("survey succeeds");
+        let report = survey(&context(&pool).await)
+            .await
+            .expect("survey succeeds");
 
         assert_eq!(report.tasks_left_running, vec![task_id]);
         assert!(report.missing_worktrees.is_empty());
@@ -240,7 +261,9 @@ mod tests {
             insert_task(&pool, &repository_id, RunState::Idle, Some(&worktree_path)).await;
         std::fs::remove_dir(&worktree_path).expect("delete the worktree, simulating a crash");
 
-        let report = survey(&pool).await.expect("survey succeeds");
+        let report = survey(&context(&pool).await)
+            .await
+            .expect("survey succeeds");
 
         assert_eq!(report.missing_worktrees, vec![task_id]);
         assert!(report.tasks_left_running.is_empty());
@@ -264,7 +287,9 @@ mod tests {
         )
         .await;
 
-        let report = survey(&pool).await.expect("survey succeeds");
+        let report = survey(&context(&pool).await)
+            .await
+            .expect("survey succeeds");
 
         assert!(report.missing_worktrees.is_empty());
     }
@@ -287,7 +312,9 @@ mod tests {
         )
         .await;
 
-        let report = survey(&pool).await.expect("survey succeeds");
+        let report = survey(&context(&pool).await)
+            .await
+            .expect("survey succeeds");
 
         assert_eq!(report.missing_run_logs, vec![run_id]);
         assert!(report.tasks_left_running.is_empty());
@@ -298,7 +325,9 @@ mod tests {
     async fn a_clean_database_surveys_to_an_empty_report() {
         let pool = test_pool().await;
 
-        let report = survey(&pool).await.expect("survey succeeds");
+        let report = survey(&context(&pool).await)
+            .await
+            .expect("survey succeeds");
 
         assert!(report.is_empty());
     }
@@ -312,7 +341,9 @@ mod tests {
         let repository_id = insert_repository(&pool).await;
         let task_id = insert_task(&pool, &repository_id, RunState::Running, None).await;
 
-        survey(&pool).await.expect("survey succeeds");
+        survey(&context(&pool).await)
+            .await
+            .expect("survey succeeds");
 
         let run_state: RunState = sqlx::query_scalar!(
             r#"SELECT run_state AS "run_state: RunState" FROM tasks WHERE id = ?"#,
@@ -343,6 +374,22 @@ mod tests {
             .await
             .expect("a fresh board gets a solo identity")
             .team_id
+    }
+
+    /// The context the shell surveys under: solo's, built from the same
+    /// `ensure_solo`.
+    async fn context(pool: &SqlitePool) -> crate::ServiceContext {
+        let solo =
+            crate::identity::ensure_solo(pool, &TestClock::new(crate::testing::test_epoch()))
+                .await
+                .expect("a fresh board gets a solo identity");
+        crate::ServiceContext::new(
+            pool.clone(),
+            std::sync::Arc::new(TestClock::new(crate::testing::test_epoch())),
+            crate::db::MutationSource::System,
+            crate::TeamScope::one(solo.team_id),
+            solo.user_id,
+        )
     }
 
     async fn insert_repository(pool: &SqlitePool) -> String {

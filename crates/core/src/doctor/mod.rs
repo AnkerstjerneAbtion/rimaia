@@ -491,8 +491,8 @@ impl Environment {
 /// on a panel can help with.
 pub async fn run(ctx: &ServiceContext, environment: &Environment) -> Result<DoctorReport> {
     let repositories = repo::list(ctx).await?;
-    let configured_port = mcp::configured_port(&ctx.pool).await?;
-    let dismissals = settings::doctor_dismissals(&ctx.pool).await?;
+    let configured_port = mcp::configured_port(ctx).await?;
+    let dismissals = settings::doctor_dismissals(ctx).await?;
     let provider = environment.provider.as_ref();
 
     let mut results = vec![
@@ -536,7 +536,7 @@ pub async fn run(ctx: &ServiceContext, environment: &Environment) -> Result<Doct
 /// every read instead, where it holds for rows written before it and rows
 /// hand-edited into the settings file alike.
 pub async fn dismiss(ctx: &ServiceContext, dismissal: Dismissal) -> Result<Vec<Dismissal>> {
-    let mut stored = settings::doctor_dismissals(&ctx.pool).await?;
+    let mut stored = settings::doctor_dismissals(ctx).await?;
     if !stored.contains(&dismissal) {
         stored.push(dismissal);
         settings::set_doctor_dismissals(ctx, &stored).await?;
@@ -550,7 +550,7 @@ pub async fn dismiss(ctx: &ServiceContext, dismissal: Dismissal) -> Result<Vec<D
 /// worth refusing: a stale entry is exactly what Settings → Environment exists
 /// to let the user clear.
 pub async fn restore(ctx: &ServiceContext, dismissal: &Dismissal) -> Result<Vec<Dismissal>> {
-    let mut stored = settings::doctor_dismissals(&ctx.pool).await?;
+    let mut stored = settings::doctor_dismissals(ctx).await?;
     let before = stored.len();
     stored.retain(|candidate| candidate != dismissal);
     if stored.len() != before {

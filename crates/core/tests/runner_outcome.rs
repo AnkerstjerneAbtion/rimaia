@@ -1565,7 +1565,7 @@ impl RunFixture {
         let repository = rimaia_core::repo::get(&self.harness.context, &self.repository_id)
             .await
             .expect("read the repository");
-        let base = settings::base_instructions(&self.harness.context.pool)
+        let base = settings::base_instructions(&self.harness.context)
             .await
             .expect("read the base instructions");
 

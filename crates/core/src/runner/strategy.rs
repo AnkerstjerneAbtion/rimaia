@@ -178,8 +178,10 @@ async fn effective_for(
     detail: &TaskDetail,
     repository: &Repository,
 ) -> Result<EffectiveStrategy> {
-    let global = strategy::settings::global_default(&ctx.pool).await?;
-    let per_repository = strategy::settings::repository_default(&ctx.pool, &repository.id).await?;
+    // The repository's team's defaults: the team that owns the card.
+    let team_id = crate::repo::team_of(ctx, &repository.id).await?;
+    let global = strategy::settings::global_default_for(ctx, &team_id).await?;
+    let per_repository = strategy::settings::repository_default(ctx, &repository.id).await?;
 
     Ok(strategy::effective_strategy(
         &detail.task,
@@ -237,7 +239,9 @@ async fn plan(
     // Minted before anything is spawned and dropped when this function returns,
     // whichever way it returns. The grant *is* the lifetime of the run's ability
     // to address Rimaia, so there is nothing to remember to revoke.
-    let grant = config.run_handles.grant(task_id, Grant::Strategy);
+    let grant = config
+        .run_handles
+        .grant(task_id, &lease.team_id, Grant::Strategy);
     let Some(url) = config.run_handles.endpoint_for(&grant) else {
         // Seam-contract D16.7 makes a busy MCP port non-fatal to startup, which
         // means a run can reach here with nothing listening. Spawning a planner

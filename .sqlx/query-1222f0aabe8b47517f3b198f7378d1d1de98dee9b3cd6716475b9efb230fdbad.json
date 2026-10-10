@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT id, worktree_path AS \"worktree_path!\" FROM tasks\n            WHERE worktree_path IS NOT NULL AND team_id IN (SELECT value FROM json_each(?1))",
+  "describe": {
+    "columns": [
+      {
+        "name": "id",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "worktree_path!",
+        "ordinal": 1,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      true
+    ]
+  },
+  "hash": "1222f0aabe8b47517f3b198f7378d1d1de98dee9b3cd6716475b9efb230fdbad"
+}

@@ -14,7 +14,7 @@
 //! model or effort arriving as a value flips the mode to `manual`. A command of
 //! its own would have been a second door onto a rule that has to hold at both.
 
-use rimaia_core::db::{settings, BoardColumn, Task};
+use rimaia_core::db::{BoardColumn, Task};
 use rimaia_core::runner::strategy::{
     PlanOutcome, PlanPass, PlanProgress, PlanResult, PlanSelection,
 };
@@ -79,11 +79,10 @@ pub struct ProviderInfoView {
 /// an empty box the user would have to fill in from the documentation.
 #[tauri::command]
 pub async fn get_strategy_catalogue(state: State<'_, AppState>) -> Result<StrategyCatalogueView> {
-    let pool = &state.context.pool;
-    // The key constant comes from the module that owns its meaning (D3), so
-    // there is no second spelling of it here to drift from that module's own
-    // reader and writer.
-    let stored = settings::get(pool, catalogue::STRATEGY_CATALOGUE).await?;
+    // The text as stored comes from the module that owns its meaning (D3), so
+    // there is no second reader of the key here to drift from that module's
+    // own reader and writer.
+    let stored = catalogue::stored_text(&state.context).await?;
 
     let provider = state.runner.provider.as_ref();
     let default_catalogue = provider.default_catalogue();
@@ -91,7 +90,7 @@ pub async fn get_strategy_catalogue(state: State<'_, AppState>) -> Result<Strate
         .map_err(|error| Error::internal(error.to_string()))?;
 
     Ok(StrategyCatalogueView {
-        catalogue: catalogue::catalogue(pool, provider).await?,
+        catalogue: catalogue::catalogue(&state.context, provider).await?,
         json: stored.unwrap_or_else(|| default_json.clone()),
         default_json,
         provider_info: ProviderInfoView {
@@ -131,9 +130,9 @@ pub async fn get_strategy_defaults(
 ) -> Result<StrategyDefaults> {
     match repository_id.as_deref() {
         Some(repository_id) => {
-            strategy_settings::repository_default(&state.context.pool, repository_id).await
+            strategy_settings::repository_default(&state.context, repository_id).await
         }
-        None => strategy_settings::global_default(&state.context.pool).await,
+        None => strategy_settings::global_default(&state.context).await,
     }
 }
 
@@ -161,7 +160,7 @@ pub async fn set_strategy_defaults(
 /// `automatic`.
 #[tauri::command]
 pub async fn get_strategy_approval(state: State<'_, AppState>) -> Result<StrategyApproval> {
-    strategy_settings::approval(&state.context.pool).await
+    strategy_settings::approval(&state.context).await
 }
 
 /// Stores the approval setting. **Nothing reads it yet** — the gate itself lands

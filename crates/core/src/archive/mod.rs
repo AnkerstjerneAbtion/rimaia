@@ -153,12 +153,15 @@ pub async fn set_repository_on_archive(
     };
 
     let stored = on_archive.as_str();
+    let scope = ctx.scope.json();
     let Some(team_id) = sqlx::query_scalar!(
-        "UPDATE repositories SET on_archive = ?1, on_archive_script = ?2 WHERE id = ?3
+        "UPDATE repositories SET on_archive = ?1, on_archive_script = ?2
+          WHERE id = ?3 AND team_id IN (SELECT value FROM json_each(?4))
          RETURNING team_id",
         stored,
         script,
         repository_id,
+        scope,
     )
     .fetch_optional(&ctx.pool)
     .await?

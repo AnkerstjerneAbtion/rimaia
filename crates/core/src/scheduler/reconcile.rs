@@ -219,9 +219,14 @@ async fn reconcile_one(ctx: &ServiceContext, task_id: &str) -> Result<()> {
 /// holding the claim. The loop is here because "realistically" is not an
 /// invariant, and a second orphaned row would otherwise stay open forever.
 async fn open_runs(ctx: &ServiceContext, task_id: &str) -> Result<Vec<String>> {
+    let scope = ctx.scope.json();
     let ids = sqlx::query_scalar!(
-        "SELECT id FROM runs WHERE task_id = ?1 AND ended_at IS NULL ORDER BY attempt ASC",
+        "SELECT r.id FROM runs r JOIN tasks t ON t.id = r.task_id
+          WHERE r.task_id = ?1 AND r.ended_at IS NULL
+            AND t.team_id IN (SELECT value FROM json_each(?2))
+          ORDER BY r.attempt ASC",
         task_id,
+        scope,
     )
     .fetch_all(&ctx.pool)
     .await?;
@@ -252,9 +257,12 @@ async fn open_runs(ctx: &ServiceContext, task_id: &str) -> Result<Vec<String>> {
 /// to kill" (the same edge cancel-one takes on it). Anything else is a task
 /// something already settled while this was running, and is left alone.
 async fn settle(ctx: &ServiceContext, task_id: &str) -> Result<()> {
+    let scope = ctx.scope.json();
     let run_state = sqlx::query_scalar!(
-        r#"SELECT run_state AS "run_state: RunState" FROM tasks WHERE id = ?1"#,
+        r#"SELECT run_state AS "run_state: RunState" FROM tasks
+            WHERE id = ?1 AND team_id IN (SELECT value FROM json_each(?2))"#,
         task_id,
+        scope,
     )
     .fetch_optional(&ctx.pool)
     .await?;
@@ -281,10 +289,14 @@ async fn settle(ctx: &ServiceContext, task_id: &str) -> Result<()> {
 /// that followed it, and a task whose latest attempt gave up is not rescued by
 /// something two walls ago having been retryable.
 async fn has_scheduled_resume(ctx: &ServiceContext, task_id: &str) -> Result<bool> {
+    let scope = ctx.scope.json();
     let resume_after: Option<Option<DateTime<Utc>>> = sqlx::query_scalar!(
-        r#"SELECT resume_after AS "resume_after: DateTime<Utc>"
-             FROM runs WHERE task_id = ?1 ORDER BY attempt DESC LIMIT 1"#,
+        r#"SELECT r.resume_after AS "resume_after: DateTime<Utc>"
+             FROM runs r JOIN tasks t ON t.id = r.task_id
+            WHERE r.task_id = ?1 AND t.team_id IN (SELECT value FROM json_each(?2))
+            ORDER BY r.attempt DESC LIMIT 1"#,
         task_id,
+        scope,
     )
     .fetch_optional(&ctx.pool)
     .await?;

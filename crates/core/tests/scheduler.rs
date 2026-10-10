@@ -1533,7 +1533,7 @@ async fn reopening_after_a_crash_shows_one_interrupted_task_and_leaves_the_rest_
     .await
     .expect("open the run the crash interrupted");
 
-    let report = startup::survey(&fixture.ctx().pool)
+    let report = startup::survey(fixture.ctx())
         .await
         .expect("survey the database");
     assert_eq!(
@@ -1598,7 +1598,7 @@ async fn a_task_claimed_before_its_run_row_existed_still_lands_failed() {
         .await
         .expect("claim the task");
 
-    let report = startup::survey(&fixture.ctx().pool)
+    let report = startup::survey(fixture.ctx())
         .await
         .expect("survey the database");
     let reconciled = scheduler::reconcile_interrupted(fixture.ctx(), &report)
@@ -1624,7 +1624,7 @@ async fn a_task_a_crash_caught_still_queued_is_not_stranded() {
     let crashed = fixture.add_task("Alpha").await;
     walk_to(&fixture, &crashed, RunState::Queued).await;
 
-    let report = startup::survey(&fixture.ctx().pool)
+    let report = startup::survey(fixture.ctx())
         .await
         .expect("survey the database");
     assert_eq!(
@@ -1672,7 +1672,7 @@ async fn reconciling_a_task_another_repair_already_settled_still_closes_its_run(
     scheduler::claim(fixture.ctx(), &crashed)
         .await
         .expect("claim the task");
-    let report = startup::survey(&fixture.ctx().pool)
+    let report = startup::survey(fixture.ctx())
         .await
         .expect("survey the database");
     start_run(
@@ -1714,7 +1714,7 @@ async fn a_clean_previous_exit_leaves_the_reconciliation_nothing_to_do() {
     let fixture = Fixture::new().await;
     fixture.add_task("Alpha").await;
 
-    let report = startup::survey(&fixture.ctx().pool)
+    let report = startup::survey(fixture.ctx())
         .await
         .expect("survey the database");
 
@@ -1738,7 +1738,7 @@ async fn a_reconciled_task_is_not_picked_up_again_by_the_queue() {
     scheduler::claim(fixture.ctx(), &crashed)
         .await
         .expect("claim the task");
-    let report = startup::survey(&fixture.ctx().pool)
+    let report = startup::survey(fixture.ctx())
         .await
         .expect("survey the database");
     scheduler::reconcile_interrupted(fixture.ctx(), &report)
@@ -1799,7 +1799,7 @@ async fn a_launch_offers_a_crashed_run_for_resume_and_starts_nothing_until_the_q
         .await
         .expect("quitting always stops the queue");
 
-    let report = startup::survey(&fixture.ctx().pool)
+    let report = startup::survey(fixture.ctx())
         .await
         .expect("survey the database");
     scheduler::reconcile_interrupted(fixture.ctx(), &report)
@@ -3236,7 +3236,7 @@ async fn a_schedule_firing_tonight_does_not_resume_a_run_last_night_crashed_on()
     scheduler::set_queue_state(fixture.ctx(), QueueState::Paused)
         .await
         .expect("quitting always stops the queue");
-    let report = startup::survey(&fixture.ctx().pool)
+    let report = startup::survey(fixture.ctx())
         .await
         .expect("survey the database");
     scheduler::reconcile_interrupted(fixture.ctx(), &report)
@@ -3321,7 +3321,7 @@ async fn a_schedule_that_does_open_a_window_resumes_exactly_what_start_would() {
     )
     .await
     .expect("open the run the crash interrupted");
-    let report = startup::survey(&fixture.ctx().pool)
+    let report = startup::survey(fixture.ctx())
         .await
         .expect("survey the database");
     scheduler::reconcile_interrupted(fixture.ctx(), &report)
@@ -3756,13 +3756,13 @@ impl Fixture {
     }
 
     async fn queue_state(&self) -> QueueState {
-        scheduler::queue_state(&self.ctx().pool)
+        scheduler::queue_state(self.ctx())
             .await
             .expect("read the queue state")
     }
 
     async fn window(&self) -> Option<RunWindow> {
-        rimaia_core::schedule::window::active(&self.ctx().pool)
+        rimaia_core::schedule::window::active(self.ctx())
             .await
             .expect("read the run window")
     }

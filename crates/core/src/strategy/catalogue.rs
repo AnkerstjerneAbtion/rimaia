@@ -24,7 +24,6 @@
 //! absent or will not parse.
 
 use serde::{Deserialize, Serialize};
-use sqlx::SqlitePool;
 
 use crate::context::ServiceContext;
 use crate::db::settings;
@@ -158,11 +157,23 @@ impl Default for Catalogue {
 /// reason: `settings.value` has no `CHECK` and the user is a supported writer
 /// of this file (ADR-0003). A brace hand-deleted in the `sqlite3` CLI costs a
 /// log line and the built-in list, never an overnight queue.
+///
+/// The context's one team's catalogue: what Settings shows and edits.
 pub async fn catalogue(
-    pool: &SqlitePool,
+    ctx: &ServiceContext,
     provider: &dyn crate::runner::provider::AgentProvider,
 ) -> Result<Catalogue> {
-    let Some(stored) = settings::get(pool, STRATEGY_CATALOGUE).await? else {
+    catalogue_for(ctx, ctx.scope.sole()?, provider).await
+}
+
+/// One team's catalogue: what a planner for that team's task chooses from,
+/// whichever teams the context reaches.
+pub async fn catalogue_for(
+    ctx: &ServiceContext,
+    team_id: &str,
+    provider: &dyn crate::runner::provider::AgentProvider,
+) -> Result<Catalogue> {
+    let Some(stored) = settings::get_team(ctx, team_id, STRATEGY_CATALOGUE).await? else {
         return Ok(provider.default_catalogue());
     };
 
@@ -176,6 +187,12 @@ pub async fn catalogue(
             provider.default_catalogue()
         }
     })
+}
+
+/// The context's one team's catalogue as the text the operator typed, or
+/// `None` when they never wrote one: what Settings opens its textarea on.
+pub async fn stored_text(ctx: &ServiceContext) -> Result<Option<String>> {
+    settings::get_team(ctx, ctx.scope.sole()?, STRATEGY_CATALOGUE).await
 }
 
 /// Stores the catalogue as the text the user typed, announcing it as a settings
@@ -195,7 +212,7 @@ pub async fn set_catalogue(ctx: &ServiceContext, json: &str) -> Result<()> {
     parse_raw(trimmed)
         .map_err(|message| Error::invalid(format!("the catalogue is not valid JSON: {message}")))?;
 
-    settings::set(ctx, STRATEGY_CATALOGUE, trimmed).await
+    settings::set_team(ctx, ctx.scope.sole()?, STRATEGY_CATALOGUE, trimmed).await
 }
 
 /// The catalogue as the operator wrote it — every field `Option`, so an absent
@@ -235,7 +252,7 @@ fn resolve(raw: RawCatalogue, provider: &dyn crate::runner::provider::AgentProvi
 mod tests {
     use super::*;
     use crate::runner::provider::{AgentProvider, ClaudeProvider};
-    use crate::testing::{test_pool, TestContext};
+    use crate::testing::TestContext;
     use pretty_assertions::assert_eq;
 
     fn entries(pairs: &[(&str, &str)]) -> Vec<CatalogueEntry> {
@@ -250,17 +267,17 @@ mod tests {
 
     #[tokio::test]
     async fn an_unconfigured_catalogue_is_the_providers_own_default() {
-        let pool = test_pool().await;
+        let h = TestContext::new().await;
 
         assert_eq!(
-            settings::get(&pool, STRATEGY_CATALOGUE)
+            settings::get_team(&h.context, &h.solo.team_id, STRATEGY_CATALOGUE)
                 .await
                 .expect("read the key"),
             None,
             "the key is deliberately unseeded"
         );
         assert_eq!(
-            catalogue(&pool, &ClaudeProvider)
+            catalogue(&h.context, &ClaudeProvider)
                 .await
                 .expect("read the default"),
             ClaudeProvider.default_catalogue()
@@ -282,12 +299,12 @@ mod tests {
             // a warning instead of a silently empty dropdown.
             r#"{"model": [{"id": "opus", "label": "Opus"}]}"#,
         ] {
-            settings::set(&h.context, STRATEGY_CATALOGUE, typo)
+            settings::set_team(&h.context, &h.solo.team_id, STRATEGY_CATALOGUE, typo)
                 .await
                 .expect("store a typo");
 
             assert_eq!(
-                catalogue(&h.context.pool, &ClaudeProvider)
+                catalogue(&h.context, &ClaudeProvider)
                     .await
                     .expect("read it back"),
                 ClaudeProvider.default_catalogue(),
@@ -304,11 +321,16 @@ mod tests {
         // provider.
         let h = TestContext::new().await;
 
-        settings::set(&h.context, STRATEGY_CATALOGUE, r#"{"models": []}"#)
-            .await
-            .expect("store an empty model list");
+        settings::set_team(
+            &h.context,
+            &h.solo.team_id,
+            STRATEGY_CATALOGUE,
+            r#"{"models": []}"#,
+        )
+        .await
+        .expect("store an empty model list");
 
-        let stored = catalogue(&h.context.pool, &ClaudeProvider)
+        let stored = catalogue(&h.context, &ClaudeProvider)
             .await
             .expect("read it back");
 
@@ -324,11 +346,16 @@ mod tests {
         // own pick.
         let h = TestContext::new().await;
 
-        settings::set(&h.context, STRATEGY_CATALOGUE, r#"{"planner": {}}"#)
-            .await
-            .expect("store a planner with no model");
+        settings::set_team(
+            &h.context,
+            &h.solo.team_id,
+            STRATEGY_CATALOGUE,
+            r#"{"planner": {}}"#,
+        )
+        .await
+        .expect("store a planner with no model");
 
-        let planner = catalogue(&h.context.pool, &ClaudeProvider)
+        let planner = catalogue(&h.context, &ClaudeProvider)
             .await
             .expect("read it back")
             .planner;
@@ -367,14 +394,14 @@ mod tests {
             .expect("store an edited catalogue");
 
         assert_eq!(
-            settings::get(&h.context.pool, STRATEGY_CATALOGUE)
+            settings::get_team(&h.context, &h.solo.team_id, STRATEGY_CATALOGUE)
                 .await
                 .expect("read the row"),
             Some(edited.to_string()),
             "the user's own formatting is what Settings shows them next time"
         );
         assert_eq!(
-            catalogue(&h.context.pool, &ClaudeProvider)
+            catalogue(&h.context, &ClaudeProvider)
                 .await
                 .expect("read it back")
                 .models,
@@ -396,7 +423,7 @@ mod tests {
             "the catalogue is not valid JSON: key must be a string at line 1 column 3"
         );
         assert_eq!(
-            settings::get(&h.context.pool, STRATEGY_CATALOGUE)
+            settings::get_team(&h.context, &h.solo.team_id, STRATEGY_CATALOGUE)
                 .await
                 .expect("read the key"),
             None,

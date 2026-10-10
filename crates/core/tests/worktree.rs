@@ -756,9 +756,7 @@ async fn a_worktree_deleted_behind_the_apps_back_is_reconciled_at_the_next_start
 
     // Exactly the hand-off `startup::survey`'s module doc describes: it reports
     // the ids, this acts on them.
-    let report = rimaia_core::startup::survey(&f.ctx().pool)
-        .await
-        .expect("survey");
+    let report = rimaia_core::startup::survey(f.ctx()).await.expect("survey");
     assert_eq!(report.missing_worktrees, vec![task.id.clone()]);
     let reconciled = worktree::reconcile(f.ctx(), &report.missing_worktrees).await;
 

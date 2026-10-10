@@ -14,9 +14,8 @@ pub mod findings;
 pub mod note;
 
 use serde::Serialize;
-use sqlx::SqliteConnection;
 
-use crate::context::ServiceContext;
+use crate::context::{ScopedTx, ServiceContext};
 use crate::db::{BoardColumn, RunState, Task};
 use crate::error::Result;
 use crate::tasks::dependencies::dependents_in;
@@ -49,19 +48,16 @@ pub struct Dependent {
 /// Every direct dependent of `task_id`, archived ones included, in ADR-0008's
 /// order, each marked with whether it already built on this task's work.
 pub async fn dependents(ctx: &ServiceContext, task_id: &str) -> Result<Vec<Dependent>> {
-    let task = fetch_task_row(&ctx.pool, task_id).await?;
-    let mut conn = ctx.pool.acquire().await?;
-    dependents_of_task(&mut conn, &task).await
+    let mut tx = ctx.begin().await?;
+    let task = fetch_task_row(&mut tx, task_id).await?;
+    dependents_of_task(&mut tx, &task).await
 }
 
-/// [`dependents`] over a connection the caller holds, so a review action reads
-/// them in the transaction that still has `task.branch` naming the reviewed
-/// branch.
-pub(crate) async fn dependents_of_task(
-    conn: &mut SqliteConnection,
-    task: &Task,
-) -> Result<Vec<Dependent>> {
-    let rows = dependents_in(&mut *conn, &task.id).await?;
+/// [`dependents`] inside a transaction the caller holds, so a review action
+/// reads them in the transaction that still has `task.branch` naming the
+/// reviewed branch. Only dependents in the transaction's scope.
+pub(crate) async fn dependents_of_task(tx: &mut ScopedTx, task: &Task) -> Result<Vec<Dependent>> {
+    let rows = dependents_in(tx, &task.id).await?;
 
     let mut dependents = Vec::with_capacity(rows.len());
     for row in rows {
@@ -90,7 +86,7 @@ pub(crate) async fn dependents_of_task(
             task.branch,
             task.id,
         )
-        .fetch_one(&mut *conn)
+        .fetch_one(&mut **tx)
         .await?;
 
         dependents.push(Dependent {

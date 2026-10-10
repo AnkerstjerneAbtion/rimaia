@@ -57,7 +57,7 @@ pub async fn get_queue_status(state: State<'_, AppState>) -> Result<QueueStatus>
 /// is three chances to draw it half-updated.
 #[tauri::command]
 pub async fn get_run_capacity(state: State<'_, AppState>) -> Result<RunCapacity> {
-    capacity::configured(&state.context.pool).await
+    capacity::configured(&state.context).await
 }
 
 /// Switches the queue between one run at a time and several (ADR-0010's Modes).
@@ -71,7 +71,7 @@ pub async fn set_schedule_mode(
     mode: ScheduleMode,
 ) -> Result<RunCapacity> {
     capacity::set_schedule_mode(&state.context, mode).await?;
-    capacity::configured(&state.context.pool).await
+    capacity::configured(&state.context).await
 }
 
 /// How many runs [`ScheduleMode::Parallel`] may have in flight at once.
@@ -81,5 +81,5 @@ pub async fn set_schedule_mode(
 #[tauri::command]
 pub async fn set_max_concurrency(state: State<'_, AppState>, value: usize) -> Result<RunCapacity> {
     capacity::set_max_concurrency(&state.context, value).await?;
-    capacity::configured(&state.context.pool).await
+    capacity::configured(&state.context).await
 }

@@ -71,7 +71,7 @@ pub async fn claim_manual_start(
 
     repo::ensure_unattended_runs_allowed(&preview.repository)?;
 
-    let run_environment = settings::run_environment(&ctx.pool).await?;
+    let run_environment = settings::run_environment(ctx).await?;
     let home = paths.provider_home(config.provider.id(), &start.task_id);
     let intent = implementation_intent(
         &preview,

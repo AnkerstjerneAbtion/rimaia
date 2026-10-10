@@ -210,7 +210,7 @@ impl Fixture {
     }
 
     async fn page(&self) -> analytics::Analytics {
-        analytics::analytics(&self.harness.context.pool, Period::default())
+        analytics::analytics(&self.harness.context, Period::default())
             .await
             .expect("the page is a read")
     }
@@ -396,7 +396,7 @@ async fn a_period_scopes_every_figure_and_two_adjacent_ones_never_share_a_run() 
 
     let boundary = fixture.harness.clock.now() - Duration::days(1);
     let earlier = analytics::analytics(
-        &fixture.harness.context.pool,
+        &fixture.harness.context,
         Period {
             from: None,
             to: Some(boundary),
@@ -405,7 +405,7 @@ async fn a_period_scopes_every_figure_and_two_adjacent_ones_never_share_a_run() 
     .await
     .expect("the earlier period");
     let later = analytics::analytics(
-        &fixture.harness.context.pool,
+        &fixture.harness.context,
         Period {
             from: Some(boundary),
             to: None,
@@ -451,7 +451,7 @@ async fn the_subscription_comparison_is_absent_until_the_user_gives_a_figure() {
 async fn a_hand_edited_subscription_row_reads_as_absent_rather_than_failing_the_page() {
     let fixture = Fixture::new().await;
 
-    settings::set(
+    rimaia_core::testing::settings::set(
         &fixture.harness.context,
         settings::SUBSCRIPTION_MONTHLY_USD,
         "twenty dollars",

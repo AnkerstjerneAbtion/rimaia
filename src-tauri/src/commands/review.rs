@@ -106,13 +106,13 @@ pub async fn get_review_level(
     level: ReviewLevelName,
     id: Option<String>,
 ) -> Result<ReviewLevel> {
-    review_config::get_review_level(&state.context.pool, level, id.as_deref()).await
+    review_config::get_review_level(&state.context, level, id.as_deref()).await
 }
 
 /// The global review instructions and loop configuration.
 #[tauri::command]
 pub async fn get_review_settings(state: State<'_, AppState>) -> Result<ReviewSettings> {
-    review_config::get_review_settings(&state.context.pool).await
+    review_config::get_review_settings(&state.context).await
 }
 
 /// Replaces the global review instructions and configuration.

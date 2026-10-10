@@ -30,9 +30,8 @@
 //! radio group that forgets its answer on relaunch is worse than no radio group.
 
 use serde::{Deserialize, Serialize};
-use sqlx::SqlitePool;
 
-use crate::context::ServiceContext;
+use crate::context::{ScopedTx, ServiceContext};
 use crate::db::{settings, StrategyMode};
 use crate::error::{Error, Result};
 
@@ -143,66 +142,79 @@ impl StrategyApproval {
     }
 }
 
-/// The defaults that apply when neither the task nor its repository says
-/// anything.
-pub async fn global_default(pool: &SqlitePool) -> Result<StrategyDefaults> {
-    defaults_at(pool, STRATEGY_DEFAULT).await
+/// The context's one team's defaults: what applies when neither a task nor
+/// its repository says anything, as Settings shows and edits it.
+pub async fn global_default(ctx: &ServiceContext) -> Result<StrategyDefaults> {
+    global_default_for(ctx, ctx.scope.sole()?).await
+}
+
+/// One team's defaults, for a task of that team whichever teams the context
+/// reaches.
+pub async fn global_default_for(ctx: &ServiceContext, team_id: &str) -> Result<StrategyDefaults> {
+    defaults_at(ctx, team_id, STRATEGY_DEFAULT).await
 }
 
 /// The defaults `repository_id` sets for every task in it — ADR-0016's "a repo
 /// of small tasks can default low without touching each card".
+///
+/// The repository is looked up first, in the context's scope, so another
+/// team's repository is `NotFound` exactly as one that was never registered,
+/// and its key is read from the repository's own team.
 pub async fn repository_default(
-    pool: &SqlitePool,
+    ctx: &ServiceContext,
     repository_id: &str,
 ) -> Result<StrategyDefaults> {
-    defaults_at(pool, &repository_default_key(repository_id)).await
+    let team_id = crate::repo::team_of(ctx, repository_id).await?;
+    defaults_at(ctx, &team_id, &repository_default_key(repository_id)).await
 }
 
 pub async fn set_global_default(ctx: &ServiceContext, value: &StrategyDefaults) -> Result<()> {
-    store_defaults(ctx, STRATEGY_DEFAULT, value).await
+    let team_id = ctx.scope.sole()?.clone();
+    store_defaults(ctx, &team_id, STRATEGY_DEFAULT, value).await
 }
 
+/// Stores `repository_id`'s defaults under the repository's own team, after
+/// the same scoped lookup [`repository_default`] makes.
 pub async fn set_repository_default(
     ctx: &ServiceContext,
     repository_id: &str,
     value: &StrategyDefaults,
 ) -> Result<()> {
-    store_defaults(ctx, &repository_default_key(repository_id), value).await
+    let team_id = crate::repo::team_of(ctx, repository_id).await?;
+    store_defaults(ctx, &team_id, &repository_default_key(repository_id), value).await
 }
 
 /// Removes `repository_id`'s defaults, leaving no orphan row behind (D17.1).
 ///
-/// Takes an executor rather than a [`ServiceContext`] so that
-/// [`crate::repo::remove`] can run it inside the transaction that deletes the
-/// repository itself: a removal refused because tasks still reference it must
-/// not have thrown the repository's configuration away on the way to the
-/// refusal. Nothing is published either — the caller already announces
+/// Runs inside the transaction that deletes the repository itself, so a
+/// removal refused because tasks still reference it has not thrown the
+/// repository's configuration away on the way to the refusal. Nothing is
+/// published either — the caller already announces
 /// [`ChangeEvent::repositories`](crate::ChangeEvent::repositories), and the
 /// only surface that renders this row is the repository row that just
 /// disappeared.
-pub async fn delete_repository_default<'e, E>(executor: E, repository_id: &str) -> Result<()>
-where
-    E: sqlx::SqliteExecutor<'e>,
-{
-    let key = repository_default_key(repository_id);
-    sqlx::query!("DELETE FROM settings WHERE key = ?1", key)
-        .execute(executor)
-        .await?;
-    Ok(())
+pub async fn delete_repository_default(
+    tx: &mut ScopedTx,
+    team_id: &str,
+    repository_id: &str,
+) -> Result<()> {
+    settings::remove_team(tx, team_id, &repository_default_key(repository_id)).await
 }
 
-/// How much of a proposal a human has to look at before it runs. Absent means
-/// [`StrategyApproval::Automatic`].
-pub async fn approval(pool: &SqlitePool) -> Result<StrategyApproval> {
-    Ok(settings::get(pool, STRATEGY_APPROVAL)
-        .await?
-        .as_deref()
-        .map(StrategyApproval::from_stored)
-        .unwrap_or_default())
+/// How much of a proposal a human has to look at before it runs, for the
+/// context's one team. Absent means [`StrategyApproval::Automatic`].
+pub async fn approval(ctx: &ServiceContext) -> Result<StrategyApproval> {
+    Ok(
+        settings::get_team(ctx, ctx.scope.sole()?, STRATEGY_APPROVAL)
+            .await?
+            .as_deref()
+            .map(StrategyApproval::from_stored)
+            .unwrap_or_default(),
+    )
 }
 
 pub async fn set_approval(ctx: &ServiceContext, value: StrategyApproval) -> Result<()> {
-    settings::set(ctx, STRATEGY_APPROVAL, value.as_str()).await
+    settings::set_team(ctx, ctx.scope.sole()?, STRATEGY_APPROVAL, value.as_str()).await
 }
 
 /// One reader and one absent-value rule for both levels of default.
@@ -211,8 +223,8 @@ pub async fn set_approval(ctx: &ServiceContext, value: StrategyApproval) -> Resu
 /// differ only here. That is the whole of D3's argument applied one level down:
 /// a second parser for the per-repository case is a second place for
 /// `"planned"` to stop meaning planned.
-async fn defaults_at(pool: &SqlitePool, key: &str) -> Result<StrategyDefaults> {
-    let Some(stored) = settings::get(pool, key).await? else {
+async fn defaults_at(ctx: &ServiceContext, team_id: &str, key: &str) -> Result<StrategyDefaults> {
+    let Some(stored) = settings::get_team(ctx, team_id, key).await? else {
         return Ok(StrategyDefaults::default());
     };
 
@@ -232,71 +244,37 @@ async fn defaults_at(pool: &SqlitePool, key: &str) -> Result<StrategyDefaults> {
 /// these are three form controls and never a textarea — there is no user
 /// formatting to preserve, and no way for the value to be invalid by the time
 /// it reaches this function.
-async fn store_defaults(ctx: &ServiceContext, key: &str, value: &StrategyDefaults) -> Result<()> {
+async fn store_defaults(
+    ctx: &ServiceContext,
+    team_id: &str,
+    key: &str,
+    value: &StrategyDefaults,
+) -> Result<()> {
     let json = serde_json::to_string(value).map_err(|error| {
         Error::internal(format!("the strategy default did not serialize: {error}"))
     })?;
 
-    settings::set(ctx, key, &json).await
+    settings::set_team(ctx, team_id, key, &json).await
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::testing::{test_pool, TempRepo, TestContext};
+    use crate::db::Repository;
+    use crate::testing::{TempRepo, TestContext};
     use crate::{repo, ChangeEvent};
     use pretty_assertions::assert_eq;
 
-    #[tokio::test]
-    async fn a_repository_default_is_stored_under_its_own_key_and_read_back() {
-        let h = TestContext::new().await;
-
-        set_repository_default(
-            &h.context,
-            "3f2b1c00-0000-4000-8000-000000000002",
-            &StrategyDefaults {
-                mode: StrategyMode::Manual,
-                model: Some("haiku".to_string()),
-                effort: Some("low".to_string()),
-            },
-        )
-        .await
-        .expect("store a repository default");
-
-        assert_eq!(
-            settings::get(
-                &h.context.pool,
-                "strategy_default.3f2b1c00-0000-4000-8000-000000000002"
-            )
-            .await
-            .expect("read the row"),
-            Some(r#"{"mode":"manual","model":"haiku","effort":"low"}"#.to_string()),
-            "the key names the repository, and the value stays legible in the sqlite3 CLI"
-        );
-        assert_eq!(
-            repository_default(&h.context.pool, "3f2b1c00-0000-4000-8000-000000000002")
-                .await
-                .expect("read it back"),
-            StrategyDefaults {
-                mode: StrategyMode::Manual,
-                model: Some("haiku".to_string()),
-                effort: Some("low".to_string()),
-            }
-        );
-        assert_eq!(
-            global_default(&h.context.pool)
-                .await
-                .expect("read the global default"),
-            StrategyDefaults::default(),
-            "one repository's opinion is not everyone's"
-        );
+    /// A real repository, because a repository default is read and written
+    /// only after the repository is looked up in the context's scope. The
+    /// source and worktrees directories live as long as the test does.
+    struct Registered {
+        repository: Repository,
+        _source: TempRepo,
+        _worktrees: tempfile::TempDir,
     }
 
-    #[tokio::test]
-    async fn removing_a_repository_removes_its_strategy_default_row() {
-        // A settings key is not a foreign key and nothing cascades (D17.1).
-        // Real git, because `repo::register` validates a real repository.
-        let h = TestContext::new().await;
+    async fn registered(h: &TestContext) -> Registered {
         let source = TempRepo::init();
         let worktrees = tempfile::Builder::new()
             .prefix("rimaia-worktrees-")
@@ -313,6 +291,91 @@ mod tests {
         )
         .await
         .expect("register a real repository");
+        Registered {
+            repository,
+            _source: source,
+            _worktrees: worktrees,
+        }
+    }
+
+    #[tokio::test]
+    async fn a_repository_default_is_stored_under_its_own_key_and_read_back() {
+        let h = TestContext::new().await;
+        let registered = registered(&h).await;
+        let repository_id = registered.repository.id.clone();
+
+        set_repository_default(
+            &h.context,
+            &repository_id,
+            &StrategyDefaults {
+                mode: StrategyMode::Manual,
+                model: Some("haiku".to_string()),
+                effort: Some("low".to_string()),
+            },
+        )
+        .await
+        .expect("store a repository default");
+
+        assert_eq!(
+            settings::get_team(
+                &h.context,
+                &h.solo.team_id,
+                &format!("strategy_default.{repository_id}")
+            )
+            .await
+            .expect("read the row"),
+            Some(r#"{"mode":"manual","model":"haiku","effort":"low"}"#.to_string()),
+            "the key names the repository, and the value stays legible in the sqlite3 CLI"
+        );
+        assert_eq!(
+            repository_default(&h.context, &repository_id)
+                .await
+                .expect("read it back"),
+            StrategyDefaults {
+                mode: StrategyMode::Manual,
+                model: Some("haiku".to_string()),
+                effort: Some("low".to_string()),
+            }
+        );
+        assert_eq!(
+            global_default(&h.context)
+                .await
+                .expect("read the global default"),
+            StrategyDefaults::default(),
+            "one repository's opinion is not everyone's"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_repository_default_for_an_unregistered_repository_is_not_found() {
+        // The repository is looked up first, so an id the scope does not hold
+        // is refused rather than stored under a key nothing will ever read.
+        let h = TestContext::new().await;
+        let missing = "3f2b1c00-0000-4000-8000-000000000002";
+
+        for error in [
+            repository_default(&h.context, missing)
+                .await
+                .expect_err("no such repository"),
+            set_repository_default(&h.context, missing, &StrategyDefaults::default())
+                .await
+                .expect_err("no such repository"),
+        ] {
+            assert_eq!(error.code(), crate::ErrorCode::NotFound);
+            assert_eq!(
+                error.to_string(),
+                format!("no repository with id {missing}")
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn removing_a_repository_removes_its_strategy_default_row() {
+        // A settings key is not a foreign key and nothing cascades (D17.1).
+        // Real git, because `repo::register` validates a real repository.
+        let h = TestContext::new().await;
+        let registered = registered(&h).await;
+        let repository = &registered.repository;
 
         set_repository_default(
             &h.context,
@@ -330,9 +393,13 @@ mod tests {
             .expect("removal with no referencing tasks must succeed");
 
         assert_eq!(
-            settings::get(&h.context.pool, &repository_default_key(&repository.id))
-                .await
-                .expect("look for the row"),
+            settings::get_team(
+                &h.context,
+                &h.solo.team_id,
+                &repository_default_key(&repository.id)
+            )
+            .await
+            .expect("look for the row"),
             None,
             "the orphan row has to go with the repository that owned it"
         );
@@ -343,22 +410,8 @@ mod tests {
         // The reason the delete runs inside `remove`'s transaction rather than
         // after it: a repository that is still referenced is still configured.
         let h = TestContext::new().await;
-        let source = TempRepo::init();
-        let worktrees = tempfile::Builder::new()
-            .prefix("rimaia-worktrees-")
-            .tempdir()
-            .expect("a worktrees directory");
-        let repository = repo::register(
-            &h.context,
-            worktrees.path(),
-            repo::NewRepository {
-                path: source.path().to_str().expect("a UTF-8 path").to_string(),
-                name: None,
-                worktree_root: None,
-            },
-        )
-        .await
-        .expect("register a real repository");
+        let registered = registered(&h).await;
+        let repository = &registered.repository;
 
         set_repository_default(
             &h.context,
@@ -388,7 +441,7 @@ mod tests {
             .expect_err("removal must be refused while a task references it");
 
         assert_eq!(
-            repository_default(&h.context.pool, &repository.id)
+            repository_default(&h.context, &repository.id)
                 .await
                 .expect("read it back"),
             StrategyDefaults {
@@ -400,17 +453,17 @@ mod tests {
 
     #[tokio::test]
     async fn an_absent_approval_setting_is_automatic() {
-        let pool = test_pool().await;
+        let h = TestContext::new().await;
 
         assert_eq!(
-            settings::get(&pool, STRATEGY_APPROVAL)
+            settings::get_team(&h.context, &h.solo.team_id, STRATEGY_APPROVAL)
                 .await
                 .expect("read the key"),
             None,
             "the key is deliberately unseeded"
         );
         assert_eq!(
-            approval(&pool).await.expect("read the default"),
+            approval(&h.context).await.expect("read the default"),
             StrategyApproval::Automatic
         );
     }
@@ -424,13 +477,13 @@ mod tests {
             .expect("store manual approval");
 
         assert_eq!(
-            settings::get(&h.context.pool, STRATEGY_APPROVAL)
+            settings::get_team(&h.context, &h.solo.team_id, STRATEGY_APPROVAL)
                 .await
                 .expect("read the row"),
             Some("manual".to_string())
         );
         assert_eq!(
-            approval(&h.context.pool).await.expect("read it back"),
+            approval(&h.context).await.expect("read it back"),
             StrategyApproval::Manual
         );
     }
@@ -439,28 +492,29 @@ mod tests {
     async fn a_hand_edited_approval_falls_back_to_automatic_instead_of_failing() {
         let h = TestContext::new().await;
 
-        settings::set(&h.context, STRATEGY_APPROVAL, "ask me")
+        settings::set_team(&h.context, &h.solo.team_id, STRATEGY_APPROVAL, "ask me")
             .await
             .expect("store a typo");
 
         assert_eq!(
-            approval(&h.context.pool).await.expect("read it back"),
+            approval(&h.context).await.expect("read it back"),
             StrategyApproval::Automatic
         );
     }
 
     #[tokio::test]
     async fn an_absent_default_is_no_opinion_at_either_level() {
-        let pool = test_pool().await;
+        let h = TestContext::new().await;
+        let registered = registered(&h).await;
 
         assert_eq!(
-            global_default(&pool)
+            global_default(&h.context)
                 .await
                 .expect("read the global default"),
             StrategyDefaults::default()
         );
         assert_eq!(
-            repository_default(&pool, "3f2b1c00-0000-4000-8000-000000000002")
+            repository_default(&h.context, &registered.repository.id)
                 .await
                 .expect("read a repository default"),
             StrategyDefaults::default()
@@ -477,12 +531,12 @@ mod tests {
 
         for key in [STRATEGY_DEFAULT, repository_key.as_str()] {
             for typo in ["", "{", r#"{"mode":"planed"}"#, r#"{"mdel":"opus"}"#] {
-                settings::set(&h.context, key, typo)
+                settings::set_team(&h.context, &h.solo.team_id, key, typo)
                     .await
                     .expect("store a typo");
 
                 assert_eq!(
-                    defaults_at(&h.context.pool, key)
+                    defaults_at(&h.context, &h.solo.team_id, key)
                         .await
                         .expect("read it back"),
                     StrategyDefaults::default(),
@@ -496,12 +550,17 @@ mod tests {
     async fn a_default_with_only_a_model_leaves_the_mode_alone() {
         let h = TestContext::new().await;
 
-        settings::set(&h.context, STRATEGY_DEFAULT, r#"{"model":"sonnet"}"#)
-            .await
-            .expect("store a partial default");
+        settings::set_team(
+            &h.context,
+            &h.solo.team_id,
+            STRATEGY_DEFAULT,
+            r#"{"model":"sonnet"}"#,
+        )
+        .await
+        .expect("store a partial default");
 
         assert_eq!(
-            global_default(&h.context.pool).await.expect("read it back"),
+            global_default(&h.context).await.expect("read it back"),
             StrategyDefaults {
                 mode: StrategyMode::Default,
                 model: Some("sonnet".to_string()),

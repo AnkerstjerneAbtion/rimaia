@@ -14,8 +14,7 @@ use std::path::{Path, PathBuf};
 use pretty_assertions::assert_eq;
 use rimaia_core::db;
 use rimaia_core::db::settings::{
-    self, placement, Placement, BASE_INSTRUCTIONS, DEFAULT_BASE_INSTRUCTIONS, RUNNER_KEYS,
-    USER_KEYS,
+    placement, Placement, BASE_INSTRUCTIONS, DEFAULT_BASE_INSTRUCTIONS, RUNNER_KEYS, USER_KEYS,
 };
 use rimaia_core::identity::{self, SoloIdentity};
 use rimaia_core::review_loop::config::{REVIEW_CONFIG, REVIEW_INSTRUCTIONS};
@@ -534,13 +533,12 @@ async fn fill_every_table(pool: &SqlitePool) {
             .await
             .expect("store a setting");
     }
-    settings::set_in(
-        pool,
-        BASE_INSTRUCTIONS,
-        "Open a draft PR, never a ready one.",
-    )
-    .await
-    .expect("edit the seeded instructions");
+    sqlx::query("UPDATE settings SET value = ?2 WHERE key = ?1")
+        .bind(BASE_INSTRUCTIONS)
+        .bind("Open a draft PR, never a ready one.")
+        .execute(pool)
+        .await
+        .expect("edit the seeded instructions");
 }
 
 const FILL: &str = "

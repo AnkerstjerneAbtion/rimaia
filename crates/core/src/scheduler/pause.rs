@@ -32,7 +32,6 @@
 //! is the failure this key exists to prevent, arrived at from the inside.
 
 use chrono::{DateTime, Utc};
-use sqlx::SqlitePool;
 
 use crate::context::ServiceContext;
 use crate::db::settings;
@@ -53,8 +52,13 @@ pub const USAGE_LIMIT_PAUSE_UNTIL: &str = "usage_limit_pause_until";
 /// and for the same ADR-0003 reason: the user is a supported writer of this
 /// file, and a queue that refused to run all night over a typo in the `sqlite3`
 /// CLI is the worse outcome.
-pub async fn active_until(pool: &SqlitePool, now: DateTime<Utc>) -> Result<Option<DateTime<Utc>>> {
-    let Some(stored) = settings::get(pool, USAGE_LIMIT_PAUSE_UNTIL).await? else {
+///
+/// Runner state, read from `settings` until task 041 moves it to `runner.db`.
+pub async fn active_until(
+    ctx: &ServiceContext,
+    now: DateTime<Utc>,
+) -> Result<Option<DateTime<Utc>>> {
+    let Some(stored) = settings::get_runner(ctx, USAGE_LIMIT_PAUSE_UNTIL).await? else {
         return Ok(None);
     };
 
@@ -76,7 +80,7 @@ pub async fn active_until(pool: &SqlitePool, now: DateTime<Utc>) -> Result<Optio
 /// limit inside one window costs no `settings:changed` event and cannot move a
 /// deadline the Runs view is already showing.
 pub async fn note_usage_limit(ctx: &ServiceContext, until: DateTime<Utc>) -> Result<()> {
-    let existing = match settings::get(&ctx.pool, USAGE_LIMIT_PAUSE_UNTIL).await? {
+    let existing = match settings::get_runner(ctx, USAGE_LIMIT_PAUSE_UNTIL).await? {
         Some(stored) => stored.trim().parse::<DateTime<Utc>>().ok(),
         None => None,
     };
@@ -89,7 +93,7 @@ pub async fn note_usage_limit(ctx: &ServiceContext, until: DateTime<Utc>) -> Res
         until = %until.to_rfc3339(),
         "a run hit a usage limit; holding new starts until the window reopens",
     );
-    settings::set(ctx, USAGE_LIMIT_PAUSE_UNTIL, &until.to_rfc3339()).await
+    settings::set_runner(ctx, USAGE_LIMIT_PAUSE_UNTIL, &until.to_rfc3339()).await
 }
 
 /// Lifts the hold.
@@ -99,13 +103,13 @@ pub async fn note_usage_limit(ctx: &ServiceContext, until: DateTime<Utc>) -> Res
 /// reason, so nothing has to remember to clean up at 06:00. This exists for the
 /// operator who wants the row gone, and for tests.
 pub async fn clear(ctx: &ServiceContext) -> Result<()> {
-    settings::set(ctx, USAGE_LIMIT_PAUSE_UNTIL, "").await
+    settings::set_runner(ctx, USAGE_LIMIT_PAUSE_UNTIL, "").await
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::testing::{test_pool, TestContext};
+    use crate::testing::TestContext;
     use pretty_assertions::assert_eq;
 
     fn at(rfc3339: &str) -> DateTime<Utc> {
@@ -114,10 +118,10 @@ mod tests {
 
     #[tokio::test]
     async fn a_queue_that_has_never_hit_a_wall_is_not_paused() {
-        let pool = test_pool().await;
+        let harness = TestContext::new().await;
 
         assert_eq!(
-            active_until(&pool, at("2026-08-20T02:00:00Z"))
+            active_until(&harness.context, at("2026-08-20T02:00:00Z"))
                 .await
                 .expect("read the key"),
             None
@@ -136,7 +140,7 @@ mod tests {
             .expect("record the limit");
 
         assert_eq!(
-            active_until(&harness.context.pool, at("2026-08-20T02:00:00Z"))
+            active_until(&harness.context, at("2026-08-20T02:00:00Z"))
                 .await
                 .expect("read it back"),
             Some(until),
@@ -156,9 +160,7 @@ mod tests {
             .expect("a second wall reporting an earlier reset");
 
         assert_eq!(
-            active_until(&harness.context.pool, now)
-                .await
-                .expect("read"),
+            active_until(&harness.context, now).await.expect("read"),
             Some(at("2026-08-20T06:00:00Z")),
         );
 
@@ -166,9 +168,7 @@ mod tests {
             .await
             .expect("a later wall");
         assert_eq!(
-            active_until(&harness.context.pool, now)
-                .await
-                .expect("read"),
+            active_until(&harness.context, now).await.expect("read"),
             Some(at("2026-08-20T07:00:00Z")),
         );
     }
@@ -183,7 +183,7 @@ mod tests {
             .expect("record the limit");
 
         assert_eq!(
-            active_until(&harness.context.pool, at("2026-08-20T06:00:01Z"))
+            active_until(&harness.context, at("2026-08-20T06:00:01Z"))
                 .await
                 .expect("read"),
             None
@@ -195,11 +195,11 @@ mod tests {
         let harness = TestContext::new().await;
 
         for nonsense in ["soon", "", "1787224800"] {
-            settings::set(&harness.context, USAGE_LIMIT_PAUSE_UNTIL, nonsense)
+            settings::set_runner(&harness.context, USAGE_LIMIT_PAUSE_UNTIL, nonsense)
                 .await
                 .expect("store nonsense");
             assert_eq!(
-                active_until(&harness.context.pool, at("2026-08-20T02:00:00Z"))
+                active_until(&harness.context, at("2026-08-20T02:00:00Z"))
                     .await
                     .expect("a bad row is not an error"),
                 None,
@@ -218,7 +218,7 @@ mod tests {
         clear(&harness.context).await.expect("lift the hold");
 
         assert_eq!(
-            active_until(&harness.context.pool, at("2026-08-20T02:00:00Z"))
+            active_until(&harness.context, at("2026-08-20T02:00:00Z"))
                 .await
                 .expect("read"),
             None

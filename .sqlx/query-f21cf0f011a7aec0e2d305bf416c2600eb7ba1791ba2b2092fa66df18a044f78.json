@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT count(*) FROM repositories WHERE path = ?1 AND team_id = ?2",
+  "describe": {
+    "columns": [
+      {
+        "name": "count(*)",
+        "ordinal": 0,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "f21cf0f011a7aec0e2d305bf416c2600eb7ba1791ba2b2092fa66df18a044f78"
+}

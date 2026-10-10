@@ -41,8 +41,8 @@ pub struct LeaseRef {
     pub generation: i64,
     /// The task's team, read from its row at claim (D31 point 2). The runner
     /// store cannot join the board, so the lease carries it on every report.
-    /// Narrowing the context to it is task 039's; the server treats it as a
-    /// claim to verify, never as an input.
+    /// The board narrows its context to it only after checking its own scope
+    /// contains it (D31 point 13): a claim to verify, never an input.
     pub team_id: TeamId,
 }
 

@@ -154,28 +154,9 @@ pub fn run() {
                     }
                 };
 
-            // Nothing is running yet — the process that set any of this is the one
-            // that just died — so whatever `survey` finds is history, not a live
-            // condition. It logs its own warning when the report isn't empty and
-            // otherwise only reads (see its module docs); repairing a stuck
-            // `running` task, a vanished worktree or a missing run log belongs to
-            // tasks 004, 007 and 008 respectively, not to startup.
-            let report = match tauri::async_runtime::block_on(startup::survey(&pool)) {
-                Ok(report) => report,
-                Err(err) => {
-                    log_startup_failure("startup survey", &paths.db_file(), &err);
-                    report_startup_failure(
-                        app.handle(),
-                        "survey what the last launch left behind",
-                        Some(&logs_dir),
-                        &err,
-                    );
-                    return Err(err.into());
-                }
-            };
-
             // One `ServiceContext` for the whole process (ADR-0018): the pool
-            // above, a system clock, and a fresh change-event sender. Every
+            // above, moved in here and never touched bare again, a system
+            // clock, and a fresh change-event sender. Every
             // `rimaia-core` service task 003 onward calls goes through this,
             // never a bare pool — that is what makes the MCP server (task 010)
             // a second caller of the same rules instead of a second
@@ -194,6 +175,27 @@ pub fn run() {
                 TeamScope::one(solo.team_id.clone()),
                 solo.user_id.clone(),
             );
+
+            // Nothing is running yet — the process that set any of this is the one
+            // that just died — so whatever `survey` finds is history, not a live
+            // condition. It logs its own warning when the report isn't empty and
+            // otherwise only reads (see its module docs); repairing a stuck
+            // `running` task, a vanished worktree or a missing run log belongs to
+            // tasks 004, 007 and 008 respectively, not to startup. It runs under
+            // the context, so it reports only the solo team's rows (task 039).
+            let report = match tauri::async_runtime::block_on(startup::survey(&context)) {
+                Ok(report) => report,
+                Err(err) => {
+                    log_startup_failure("startup survey", &paths.db_file(), &err);
+                    report_startup_failure(
+                        app.handle(),
+                        "survey what the last launch left behind",
+                        Some(&logs_dir),
+                        &err,
+                    );
+                    return Err(err.into());
+                }
+            };
 
             // Subscribed once, here, for the life of the app (ADR-0018): the
             // shell is the only thing that turns a `ChangeEvent` into a Tauri
@@ -348,7 +350,7 @@ pub fn run() {
             // reach the board until every repair this startup was going to
             // make has been made — `reconcile_interrupted`, `worktree::reconcile`
             // and the queue's own construction all sit above it.
-            let mcp_port = tauri::async_runtime::block_on(mcp::configured_port(&context.pool))
+            let mcp_port = tauri::async_runtime::block_on(mcp::configured_port(&context))
                 .unwrap_or_else(|error| {
                     tracing::warn!(
                         %error,

@@ -118,14 +118,16 @@ pub async fn resume_point(ctx: &ServiceContext, task_id: &str) -> Result<Option<
 /// Newest row first, of every kind. The order is what makes "count backwards
 /// while the kind and session match" a single pass.
 async fn attempt_rows(ctx: &ServiceContext, task_id: &str) -> Result<Vec<AttemptRow>> {
+    let scope = ctx.scope.json();
     let rows = sqlx::query!(
-        r#"SELECT kind AS "kind!: RunKind",
-                  session_id AS "session_id!: String",
-                  exit_class AS "exit_class: ExitClass"
-             FROM runs
-            WHERE task_id = ?1
-            ORDER BY attempt DESC"#,
+        r#"SELECT r.kind AS "kind!: RunKind",
+                  r.session_id AS "session_id!: String",
+                  r.exit_class AS "exit_class: ExitClass"
+             FROM runs r JOIN tasks t ON t.id = r.task_id
+            WHERE r.task_id = ?1 AND t.team_id IN (SELECT value FROM json_each(?2))
+            ORDER BY r.attempt DESC"#,
         task_id,
+        scope,
     )
     .fetch_all(&ctx.pool)
     .await?;

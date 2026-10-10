@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE tasks SET review_instructions = ?1, review_config = ?2, updated_at = ?3\n          WHERE id = ?4 AND team_id = ?5",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 5
+    },
+    "nullable": []
+  },
+  "hash": "33367c1a000d9d0c9b936eb3e3ccc23e4d917ca8b2c1c03840173a67f720c7e4"
+}
