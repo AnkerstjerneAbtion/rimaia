@@ -1,6 +1,6 @@
 {
   "db_name": "SQLite",
-  "query": "SELECT id, repository_id, title, plan, extra_instructions,\n            board_column AS \"column: BoardColumn\", position, run_state AS \"run_state: RunState\",\n            branch, strategy_mode AS \"strategy_mode: StrategyMode\", model, effort,\n            strategy_plan, strategy_source AS \"strategy_source: StrategySource\",\n            strategy_updated_at AS \"strategy_updated_at: DateTime<Utc>\",\n            created_at AS \"created_at: DateTime<Utc>\", updated_at AS \"updated_at: DateTime<Utc>\",\n            source AS \"source: MutationSource\",\n            archived_at AS \"archived_at: DateTime<Utc>\"\n           FROM tasks WHERE id = ?1 AND team_id IN (SELECT value FROM json_each(?2))",
+  "query": "SELECT id, repository_id, title, plan, extra_instructions,\n            board_column AS \"column: BoardColumn\", position, run_state AS \"run_state: RunState\",\n            branch, strategy_mode AS \"strategy_mode: StrategyMode\", model, effort,\n            strategy_plan, strategy_source AS \"strategy_source: StrategySource\",\n            strategy_updated_at AS \"strategy_updated_at: DateTime<Utc>\",\n            created_at AS \"created_at: DateTime<Utc>\", updated_at AS \"updated_at: DateTime<Utc>\",\n            source AS \"source: MutationSource\",\n            archived_at AS \"archived_at: DateTime<Utc>\",\n            created_by, assignee_id, assigned_by, plan_revision, plan_updated_by\n           FROM tasks WHERE id = ?1 AND team_id IN (SELECT value FROM json_each(?2))",
   "describe": {
     "columns": [
       {
@@ -97,6 +97,31 @@
         "name": "archived_at: DateTime<Utc>",
         "ordinal": 18,
         "type_info": "Text"
+      },
+      {
+        "name": "created_by",
+        "ordinal": 19,
+        "type_info": "Text"
+      },
+      {
+        "name": "assignee_id",
+        "ordinal": 20,
+        "type_info": "Text"
+      },
+      {
+        "name": "assigned_by",
+        "ordinal": 21,
+        "type_info": "Text"
+      },
+      {
+        "name": "plan_revision",
+        "ordinal": 22,
+        "type_info": "Integer"
+      },
+      {
+        "name": "plan_updated_by",
+        "ordinal": 23,
+        "type_info": "Text"
       }
     ],
     "parameters": {
@@ -121,8 +146,13 @@
       false,
       false,
       false,
+      true,
+      true,
+      true,
+      true,
+      false,
       true
     ]
   },
-  "hash": "d45697259a9aa895ab896923a847e00244c4384c4287b0a239dc24e6c4c14100"
+  "hash": "8d3fe77ba204b6f1bedab6e41f418113cc8b2f51eea4d213129f135d415eb553"
 }

@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO runner_pool_teams (runner_id, team_id) VALUES (?1, ?2)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "2ef183dafe68e5095233a53513600944c434f90573ab2fcc51b43ec5c4d1e188"
+}

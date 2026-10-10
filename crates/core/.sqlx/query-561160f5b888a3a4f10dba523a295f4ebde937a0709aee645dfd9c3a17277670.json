@@ -1,6 +1,6 @@
 {
   "db_name": "SQLite",
-  "query": "SELECT dep.id, dep.repository_id, dep.title, dep.plan, dep.extra_instructions,\n            dep.board_column AS \"column: BoardColumn\", dep.position,\n            dep.run_state AS \"run_state: RunState\", dep.branch,\n            dep.strategy_mode AS \"strategy_mode: StrategyMode\", dep.model, dep.effort,\n            dep.strategy_plan, dep.strategy_source AS \"strategy_source: StrategySource\",\n            dep.strategy_updated_at AS \"strategy_updated_at: DateTime<Utc>\",\n            dep.created_at AS \"created_at: DateTime<Utc>\",\n            dep.updated_at AS \"updated_at: DateTime<Utc>\",\n            dep.source AS \"source: MutationSource\",\n            dep.archived_at AS \"archived_at: DateTime<Utc>\"\n           FROM task_dependencies d\n           JOIN tasks dep ON dep.id = d.depends_on_task_id\n          WHERE d.task_id = ?1 AND dep.team_id IN (SELECT value FROM json_each(?2))",
+  "query": "SELECT dep.id, dep.repository_id, dep.title, dep.plan, dep.extra_instructions,\n            dep.board_column AS \"column: BoardColumn\", dep.position,\n            dep.run_state AS \"run_state: RunState\", dep.branch,\n            dep.strategy_mode AS \"strategy_mode: StrategyMode\", dep.model, dep.effort,\n            dep.strategy_plan, dep.strategy_source AS \"strategy_source: StrategySource\",\n            dep.strategy_updated_at AS \"strategy_updated_at: DateTime<Utc>\",\n            dep.created_at AS \"created_at: DateTime<Utc>\",\n            dep.updated_at AS \"updated_at: DateTime<Utc>\",\n            dep.source AS \"source: MutationSource\",\n            dep.archived_at AS \"archived_at: DateTime<Utc>\",\n            dep.created_by, dep.assignee_id, dep.assigned_by, dep.plan_revision,\n            dep.plan_updated_by\n           FROM task_dependencies d\n           JOIN tasks dep ON dep.id = d.depends_on_task_id\n          WHERE d.task_id = ?1 AND dep.team_id IN (SELECT value FROM json_each(?2))",
   "describe": {
     "columns": [
       {
@@ -97,6 +97,31 @@
         "name": "archived_at: DateTime<Utc>",
         "ordinal": 18,
         "type_info": "Text"
+      },
+      {
+        "name": "created_by",
+        "ordinal": 19,
+        "type_info": "Text"
+      },
+      {
+        "name": "assignee_id",
+        "ordinal": 20,
+        "type_info": "Text"
+      },
+      {
+        "name": "assigned_by",
+        "ordinal": 21,
+        "type_info": "Text"
+      },
+      {
+        "name": "plan_revision",
+        "ordinal": 22,
+        "type_info": "Integer"
+      },
+      {
+        "name": "plan_updated_by",
+        "ordinal": 23,
+        "type_info": "Text"
       }
     ],
     "parameters": {
@@ -121,8 +146,13 @@
       false,
       false,
       false,
+      true,
+      true,
+      true,
+      true,
+      false,
       true
     ]
   },
-  "hash": "7395dfd0f34f54f111076c9e48b71cd809c09849f9f026f397cb6fc020262cef"
+  "hash": "561160f5b888a3a4f10dba523a295f4ebde937a0709aee645dfd9c3a17277670"
 }

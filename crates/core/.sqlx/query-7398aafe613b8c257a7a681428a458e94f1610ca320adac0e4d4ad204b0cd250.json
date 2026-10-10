@@ -1,0 +1,38 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT l.task_id, l.purpose AS \"purpose: LeasePurpose\", l.runner_id, t.team_id\n             FROM runner_leases l\n             JOIN runners r ON r.id = l.runner_id\n             JOIN tasks t ON t.id = l.task_id\n            WHERE r.user_id = ?1\n              AND (l.expires_at IS NULL OR l.expires_at > ?2)\n            ORDER BY l.task_id",
+  "describe": {
+    "columns": [
+      {
+        "name": "task_id",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "purpose: LeasePurpose",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "runner_id",
+        "ordinal": 2,
+        "type_info": "Text"
+      },
+      {
+        "name": "team_id",
+        "ordinal": 3,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "7398aafe613b8c257a7a681428a458e94f1610ca320adac0e4d4ad204b0cd250"
+}

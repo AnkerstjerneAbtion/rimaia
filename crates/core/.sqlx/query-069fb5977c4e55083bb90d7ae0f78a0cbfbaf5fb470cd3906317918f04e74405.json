@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT r.runner_id, ru.user_id AS \"owner?\"\n             FROM runs r LEFT JOIN runners ru ON ru.id = r.runner_id\n            WHERE r.id = ?1",
+  "describe": {
+    "columns": [
+      {
+        "name": "runner_id",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "owner?",
+        "ordinal": 1,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      true,
+      false
+    ]
+  },
+  "hash": "069fb5977c4e55083bb90d7ae0f78a0cbfbaf5fb470cd3906317918f04e74405"
+}

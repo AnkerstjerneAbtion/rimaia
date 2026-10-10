@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT t.personal_user_id, m.role AS \"role?\"\n             FROM teams t\n             LEFT JOIN team_memberships m ON m.team_id = t.id AND m.user_id = ?2\n            WHERE t.id = ?1",
+  "describe": {
+    "columns": [
+      {
+        "name": "personal_user_id",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "role?",
+        "ordinal": 1,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      true,
+      false
+    ]
+  },
+  "hash": "9e41616b8b69b9c538e19d05e87f6a008192edfc14d51359a393a165390929a0"
+}

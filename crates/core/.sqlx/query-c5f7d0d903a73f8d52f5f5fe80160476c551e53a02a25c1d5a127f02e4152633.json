@@ -1,0 +1,38 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT tm.personal_user_id, a.login AS \"plan_author?\",\n                  o.login AS \"runner_owner?\", r.label AS \"runner_label?\"\n             FROM tasks t\n             JOIN teams tm ON tm.id = t.team_id\n             LEFT JOIN users a ON a.id = t.plan_updated_by\n             LEFT JOIN runners r ON r.id = ?2\n             LEFT JOIN users o ON o.id = r.user_id\n            WHERE t.id = ?1",
+  "describe": {
+    "columns": [
+      {
+        "name": "personal_user_id",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "plan_author?",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "runner_owner?",
+        "ordinal": 2,
+        "type_info": "Text"
+      },
+      {
+        "name": "runner_label?",
+        "ordinal": 3,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      true,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "c5f7d0d903a73f8d52f5f5fe80160476c551e53a02a25c1d5a127f02e4152633"
+}

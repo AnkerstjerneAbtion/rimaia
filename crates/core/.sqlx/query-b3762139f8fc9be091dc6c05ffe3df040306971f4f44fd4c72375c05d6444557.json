@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO team_settings (team_id, key, value, revision, updated_by, updated_at)\n         VALUES (?1, ?2, ?3, 1, ?4, ?5)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 5
+    },
+    "nullable": []
+  },
+  "hash": "b3762139f8fc9be091dc6c05ffe3df040306971f4f44fd4c72375c05d6444557"
+}

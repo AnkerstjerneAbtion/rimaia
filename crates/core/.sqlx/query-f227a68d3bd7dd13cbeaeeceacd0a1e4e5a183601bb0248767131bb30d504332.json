@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT OR IGNORE INTO trusted_authors (user_id, team_id, trusted_user_id, created_at)\n             VALUES (?1, ?2, ?3, ?4)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 4
+    },
+    "nullable": []
+  },
+  "hash": "f227a68d3bd7dd13cbeaeeceacd0a1e4e5a183601bb0248767131bb30d504332"
+}

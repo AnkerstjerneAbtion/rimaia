@@ -1,6 +1,6 @@
 {
   "db_name": "SQLite",
-  "query": "SELECT id, repository_id, title, plan, extra_instructions,\n            board_column AS \"column: BoardColumn\", position, run_state AS \"run_state: RunState\",\n            branch, strategy_mode AS \"strategy_mode: StrategyMode\", model, effort,\n            strategy_plan, strategy_source AS \"strategy_source: StrategySource\",\n            strategy_updated_at AS \"strategy_updated_at: DateTime<Utc>\",\n            created_at AS \"created_at: DateTime<Utc>\", updated_at AS \"updated_at: DateTime<Utc>\",\n            source AS \"source: MutationSource\",\n            archived_at AS \"archived_at: DateTime<Utc>\"\n           FROM tasks WHERE id = ?1",
+  "query": "SELECT dep.id, dep.repository_id, dep.title, dep.plan, dep.extra_instructions,\n            dep.board_column AS \"column: BoardColumn\", dep.position,\n            dep.run_state AS \"run_state: RunState\", dep.branch,\n            dep.strategy_mode AS \"strategy_mode: StrategyMode\", dep.model, dep.effort,\n            dep.strategy_plan, dep.strategy_source AS \"strategy_source: StrategySource\",\n            dep.strategy_updated_at AS \"strategy_updated_at: DateTime<Utc>\",\n            dep.created_at AS \"created_at: DateTime<Utc>\",\n            dep.updated_at AS \"updated_at: DateTime<Utc>\",\n            dep.source AS \"source: MutationSource\",\n            dep.archived_at AS \"archived_at: DateTime<Utc>\",\n            dep.created_by, dep.assignee_id, dep.assigned_by, dep.plan_revision,\n            dep.plan_updated_by\n           FROM task_dependencies d\n           JOIN tasks dep ON dep.id = d.task_id\n          WHERE d.depends_on_task_id = ?1 AND dep.team_id IN (SELECT value FROM json_each(?2))",
   "describe": {
     "columns": [
       {
@@ -97,10 +97,35 @@
         "name": "archived_at: DateTime<Utc>",
         "ordinal": 18,
         "type_info": "Text"
+      },
+      {
+        "name": "created_by",
+        "ordinal": 19,
+        "type_info": "Text"
+      },
+      {
+        "name": "assignee_id",
+        "ordinal": 20,
+        "type_info": "Text"
+      },
+      {
+        "name": "assigned_by",
+        "ordinal": 21,
+        "type_info": "Text"
+      },
+      {
+        "name": "plan_revision",
+        "ordinal": 22,
+        "type_info": "Integer"
+      },
+      {
+        "name": "plan_updated_by",
+        "ordinal": 23,
+        "type_info": "Text"
       }
     ],
     "parameters": {
-      "Right": 1
+      "Right": 2
     },
     "nullable": [
       false,
@@ -121,8 +146,13 @@
       false,
       false,
       false,
+      true,
+      true,
+      true,
+      true,
+      false,
       true
     ]
   },
-  "hash": "760aa877aab736e52984fdde68c74d628a8310a5d25e52c2ee1f88d4d652b584"
+  "hash": "99c4428100fcbce70993e9f41006ecff1d261e726803bef9a29ad055f32083ca"
 }

@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "DELETE FROM runner_pool_teams WHERE runner_id = ?1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": []
+  },
+  "hash": "a5fe2e2e282f8da0c11136bdda6fc63ba85871f565e68a66ff13620c6da6b69c"
+}

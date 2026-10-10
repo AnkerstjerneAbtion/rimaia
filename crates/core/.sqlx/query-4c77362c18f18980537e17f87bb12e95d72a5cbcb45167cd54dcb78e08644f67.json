@@ -1,0 +1,74 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT team_id, plan, extra_instructions, plan_revision, plan_updated_by,\n                  plan_written_during_run AS \"plan_written_during_run: bool\",\n                  review_instructions, review_instructions_revision,\n                  review_instructions_updated_by,\n                  review_instructions_written_during_run\n                      AS \"review_instructions_written_during_run: bool\"\n             FROM tasks WHERE id = ?1",
+  "describe": {
+    "columns": [
+      {
+        "name": "team_id",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "plan",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "extra_instructions",
+        "ordinal": 2,
+        "type_info": "Text"
+      },
+      {
+        "name": "plan_revision",
+        "ordinal": 3,
+        "type_info": "Integer"
+      },
+      {
+        "name": "plan_updated_by",
+        "ordinal": 4,
+        "type_info": "Text"
+      },
+      {
+        "name": "plan_written_during_run: bool",
+        "ordinal": 5,
+        "type_info": "Bool"
+      },
+      {
+        "name": "review_instructions",
+        "ordinal": 6,
+        "type_info": "Text"
+      },
+      {
+        "name": "review_instructions_revision",
+        "ordinal": 7,
+        "type_info": "Integer"
+      },
+      {
+        "name": "review_instructions_updated_by",
+        "ordinal": 8,
+        "type_info": "Text"
+      },
+      {
+        "name": "review_instructions_written_during_run: bool",
+        "ordinal": 9,
+        "type_info": "Bool"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      true,
+      true,
+      false,
+      true,
+      false,
+      true,
+      false,
+      true,
+      false
+    ]
+  },
+  "hash": "4c77362c18f18980537e17f87bb12e95d72a5cbcb45167cd54dcb78e08644f67"
+}

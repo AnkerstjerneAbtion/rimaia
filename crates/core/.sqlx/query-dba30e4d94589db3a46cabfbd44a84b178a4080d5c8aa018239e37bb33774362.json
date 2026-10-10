@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE repositories SET allow_unattended_runs = ?1 WHERE id = ?2",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "dba30e4d94589db3a46cabfbd44a84b178a4080d5c8aa018239e37bb33774362"
+}
