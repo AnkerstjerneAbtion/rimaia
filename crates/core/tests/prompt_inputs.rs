@@ -9,15 +9,24 @@
 //! appear, and a class 4 one must not. Any other canary in a prompt fails the
 //! test too: a field added later is decided in D37 before it is listed here.
 //!
+//! A runner is a writer too: it is one member's machine, and what it reports
+//! is rendered on another's. The second case writes the runner's reports as
+//! canaries through the board port, from one runner, and composes from the
+//! other's context.
+//!
 //! The solo case writes the same canaries in a personal team, where every
 //! author is the runner's owner, and asserts the prompts are what they were
 //! before task 073.
 
 use pretty_assertions::assert_eq;
-use rimaia_core::board::{ClaimTarget, RunContext};
-use rimaia_core::db::{settings, BoardColumn, StrategySource};
+use rimaia_core::board::{ClaimTarget, FinishRun, PreviewOf, RunContext, StartRun, TranscriptEnd};
+use rimaia_core::db::{
+    new_id, settings, BoardColumn, ExitClass, RunKind, RunStatus, StrategySource,
+};
 use rimaia_core::repo::{self, NewRepository, RepositoryPatch};
 use rimaia_core::review_loop::config as review_config;
+use rimaia_core::runner::events::TokenUsage;
+use rimaia_core::runner::outcome::{RunOutcome, SpawnedAs};
 use rimaia_core::runner::prompt::{
     compose_fix_continuation, compose_fix_prompt, compose_fix_resume, compose_prompt,
     compose_resume_prompt, compose_review_prompt, compose_review_resume,
@@ -26,13 +35,15 @@ use rimaia_core::runner::prompt::{
 };
 use rimaia_core::runner::provider::ClaudeProvider;
 use rimaia_core::runner::{RunTrigger, RunnerConfig};
+use rimaia_core::runs::bundle::{BundleFile, PatchInclusion, ReviewBundle};
 use rimaia_core::strategy::catalogue;
 use rimaia_core::tasks::{
     self, NewTask, NewTaskLink, StrategyPhase, StrategyPlan, StrategyWorkflow,
 };
 use rimaia_core::testing::shared::SharedTeam;
 use rimaia_core::testing::{TempRepo, TestContext};
-use rimaia_core::{consent, AppPaths, ServiceContext};
+use rimaia_core::worktree::DiffStat;
+use rimaia_core::{consent, AppPaths, ErrorCode, ServiceContext};
 
 /// Class 1: consent-gated content. Each must reach a prompt.
 const CONSENTED: [&str; 10] = [
@@ -128,6 +139,128 @@ async fn a_shared_team_prompt_carries_no_ungated_team_text() {
         "{}",
         prompts[0].1
     );
+}
+
+/// What a runner reports and a later prompt renders: the branch, the base,
+/// the commits and the bundle's paths. A runner is one member's machine, so
+/// each is checked where it is written, and a bundle another runner recorded
+/// is rendered as counts only (D37).
+const REPORTED: [&str; 5] = ["branch", "base_ref", "base_sha", "head_sha", "bundle_path"];
+
+/// A full sha, the only commit the board stores.
+const COMMIT: &str = "0123456789abcdef0123456789abcdef01234567";
+
+#[tokio::test]
+async fn a_runners_reports_carry_no_text_into_another_runners_prompt() {
+    let team = SharedTeam::new().await;
+    let task = write_canaries(&team.alice.ctx, &team.repository.id).await;
+    tasks::assign_task(&team.alice.ctx, &task, Some(&team.alice.user_id))
+        .await
+        .expect("assign the task to Alice");
+    let alice = team.board(&team.alice);
+    let claimed = alice
+        .claim(run_now(&task))
+        .await
+        .expect("Alice's runner may take it")
+        .expect("nobody else holds it");
+    let lease = &claimed.lease;
+
+    // Each write that would carry text is refused, and nothing is stored.
+    let refused = alice
+        .record_branch(lease, &canary("branch"))
+        .await
+        .expect_err("a branch that is text");
+    assert_eq!(refused.code(), ErrorCode::Invalid, "{refused}");
+    for start in [
+        starting(Some(canary("base_ref")), Some(COMMIT.to_string())),
+        starting(Some(canary("default_branch")), Some(canary("base_sha"))),
+    ] {
+        let refused = alice
+            .start_run(lease, start)
+            .await
+            .expect_err("a base that is text");
+        assert_eq!(refused.code(), ErrorCode::Invalid, "{refused}");
+    }
+
+    // What `worktree::naming` builds, the default branch and full shas pass.
+    let branch = format!("rimaia/{task}-canary-title");
+    alice
+        .record_branch(lease, &branch)
+        .await
+        .expect("the branch naming built");
+    let start = starting(Some(canary("default_branch")), Some(COMMIT.to_string()));
+    let run_id = start.run_id.clone();
+    alice.start_run(lease, start).await.expect("open the run");
+    let refused = alice
+        .finish_run(lease, &run_id, finishing(&canary("head_sha")))
+        .await
+        .expect_err("a head that is text");
+    assert_eq!(refused.code(), ErrorCode::Invalid, "{refused}");
+    alice
+        .finish_run(lease, &run_id, finishing(&"f".repeat(40)))
+        .await
+        .expect("finish the run");
+
+    // Alice's own runner reads its own bundle's paths.
+    let own = every_prompt(
+        &alice
+            .preview(&task, PreviewOf::Run)
+            .await
+            .expect("Alice's preview"),
+    );
+    assert!(
+        own.iter()
+            .any(|(_, prompt)| prompt.contains(&canary("bundle_path"))),
+        "a runner's own bundle is rendered whole"
+    );
+
+    // Bob's runner, which Alice's runner's writes reached, renders none of it.
+    tasks::assign_task(&team.alice.ctx, &task, Some(&team.bob.user_id))
+        .await
+        .expect("assign the task to Bob");
+    consent::set_trust(&team.bob.ctx, &team.team_id, &team.alice.user_id, true)
+        .await
+        .expect("Bob trusts Alice");
+    let context = team
+        .board(&team.bob)
+        .preview(&task, PreviewOf::Run)
+        .await
+        .expect("Bob's preview");
+    let change = context
+        .review
+        .as_ref()
+        .and_then(|review| review.change.as_ref())
+        .expect("Alice's run recorded a bundle");
+    assert_eq!(change.files, None, "another runner's paths are withheld");
+    let prompts = every_prompt(&context);
+    let review = &prompts
+        .iter()
+        .find(|(kind, _)| *kind == "review")
+        .expect("a review prompt")
+        .1;
+    assert!(
+        review.contains("1 file changed, 1 insertion(+), 0 deletions(-).\n"),
+        "the counts are rendered:\n{review}"
+    );
+    // The branch is the task's id and a slug of the title Bob consented to.
+    assert!(
+        review.contains(&format!("- Branch: {branch}\n")),
+        "the branch is rendered:\n{review}"
+    );
+    for (kind, prompt) in prompts {
+        for field in REPORTED {
+            assert!(
+                !prompt.contains(&canary(field)),
+                "the {kind} prompt carries {field}:\n{prompt}"
+            );
+        }
+        for field in canaries_in(&prompt) {
+            assert!(
+                CONSENTED.contains(&field.as_str()) || CONSTRAINED.contains(&field.as_str()),
+                "the {kind} prompt carries {field}, which has no class in D37:\n{prompt}"
+            );
+        }
+    }
 }
 
 #[tokio::test]
@@ -424,7 +557,10 @@ fn every_prompt(context: &RunContext) -> Vec<(&'static str, String)> {
             compose_review_resume(task, RECORD_TOOL, true),
         ),
         ("fix resume", compose_fix_resume(task, RESOLVE_TOOL)),
-        ("system append", compose_system_append(task, repository)),
+        (
+            "system append",
+            compose_system_append(task, repository, team),
+        ),
         (
             "strategy system append",
             compose_strategy_system_append(&task.task.id, SET_STRATEGY_TOOL),
@@ -447,6 +583,58 @@ fn canaries_in(prompt: &str) -> Vec<String> {
                 .collect()
         })
         .collect()
+}
+
+fn starting(base_ref: Option<String>, base_sha: Option<String>) -> StartRun {
+    StartRun {
+        run_id: new_id(),
+        kind: RunKind::Implementation,
+        session_id: "session-1".to_string(),
+        prompt: "do the work".to_string(),
+        base_ref,
+        base_sha,
+    }
+}
+
+/// A successful finish at `head`, with a bundle of one file whose path is a
+/// canary.
+fn finishing(head: &str) -> FinishRun {
+    FinishRun {
+        outcome: RunOutcome {
+            exit_class: ExitClass::Success,
+            status: RunStatus::Succeeded,
+            error_message: None,
+            num_turns: Some(4),
+            cost_usd: Some(0.25),
+            duration_ms: Some(1_000),
+            pr_url: None,
+            usage_limit_resets_at: None,
+            resume_after: None,
+            spawned_as: SpawnedAs::default(),
+            usage: TokenUsage::default(),
+        },
+        head_sha: Some(head.to_string()),
+        bundle: Some(ReviewBundle {
+            diff: DiffStat {
+                files_changed: 1,
+                insertions: 1,
+                deletions: 0,
+            },
+            files: vec![BundleFile {
+                path: canary("bundle_path"),
+                insertions: Some(1),
+                deletions: Some(0),
+                patch: PatchInclusion::Included,
+            }],
+            commits: vec![],
+            patch: String::new(),
+            patch_bytes: 0,
+            patch_truncated: false,
+        }),
+        window_closes_at: None,
+        transcript: TranscriptEnd::Complete { length: 0 },
+        ceiling: Default::default(),
+    }
 }
 
 fn run_now(task: &str) -> ClaimTarget {
