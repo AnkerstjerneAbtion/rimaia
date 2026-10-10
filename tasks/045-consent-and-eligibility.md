@@ -92,6 +92,13 @@ edit: it bumps nothing, so it does not undo anyone's acceptance.
   one rule for every row is simpler than a list.
 - MCP's tools reach the same services, so content written over MCP is written by the
   context's actor (ADR-0032 point 3).
+- **The title, links and strategy prose are plan content** (ADR-0032's 2026-10-10 amendment,
+  "the title, links and strategy prose are plan content"). They go through the plan helper,
+  so a changed value bumps `plan_revision` and records `plan_updated_by` and the mark:
+  `update_task` when `title` changes; every link service that adds, edits, removes or
+  reorders a task's links; and `set_task_strategy` and the planner's write when any phase's
+  `name` or `summary` differs from what was stored. A strategy write that changes only
+  model, effort, workflow or agent count bumps nothing.
 - `grep -rn "plan\s*=\|extra_instructions\s*=\|review_instructions\s*=" crates/core/src`
   lists every SQL writer. Each one either goes through a helper or is a test fixture. The
   grep is a check on the list above, not a substitute for it: a writer it misses because
@@ -453,6 +460,10 @@ not allow unattended runs in this repository`.
   members:
   - `editing_a_teammates_plan_makes_it_unrunnable_for_them_until_they_accept`;
   - `saving_the_same_plan_again_is_not_a_new_revision`;
+  - `retitling_a_teammates_task_makes_it_unrunnable_for_them_until_they_accept`;
+  - `changing_a_tasks_links_is_a_new_plan_revision`, for add, edit, remove and reorder;
+  - `a_strategy_whose_phase_prose_changed_is_a_new_plan_revision_and_one_whose_model_changed_is_not`;
+  - `a_planner_on_another_owners_runner_that_writes_phase_prose_is_marked`;
   - `changing_a_tasks_review_instructions_is_a_new_revision`, through `set_task_review`;
   - `requesting_changes_is_a_new_plan_revision_by_the_reviewer`: a task whose plan the
     first member wrote, in `in_review`; the second member's `request_changes` leaves

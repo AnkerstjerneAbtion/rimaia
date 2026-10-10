@@ -216,3 +216,34 @@ ceiling refuses on a personal team.
 In a shared team point 4 reads as written: a run needs both, and the Consequences' "the
 stricter wins" holds. Seam-contract D36 point 1 records this beside the other personal-team
 rules, which follow from who the people are rather than from a team-kind switch.
+
+## Amendment, 2026-10-10 — the title, links and strategy prose are plan content (task 045)
+
+Task 045's security review found three channels into a run's prompt that point 3's table did
+not name, each written by any member and none consent-gated: the task's **title**, its
+**links** (label and URL), and the strategy plan's **phase names and summaries**. All three
+reach the composed prompt (`# Task context`, the `{{task.title}}` and `{{task.links}}`
+template variables, and the strategy guidance section). So a teammate could put instructions
+into another member's unattended run without an acceptance or a trust, which is exactly what
+the Consequences rule out ("nobody's machine runs content they have not written, accepted or
+chosen to trust").
+
+**They join the plan revision.** Point 3's first row reads as covering the task's `title`,
+`plan`, `extra_instructions` and links, and the free-text `name` and `summary` of each phase
+of its strategy plan. Every edit that changes any of them increments `tasks.plan_revision`
+and records `plan_updated_by` and the written-during-run mark, exactly as a plan edit does:
+retitling, adding, editing, removing or reordering a link, and a strategy write (by
+`set_task_strategy` or by the planner) whose phase prose differs from what was stored. One
+revision rather than a piece per field, because each of these describes what the task is,
+and a separate acceptance per field would multiply the decisions the trust list exists to
+keep to one per teammate.
+
+**Execution strategy's structured fields stay exempt**, as point 3 says: model, effort,
+workflow and agent count change what a run costs, not what it runs, and the runner's strategy
+ceiling governs them. A strategy write that changes only those fields bumps nothing. A planner
+run on someone else's runner that writes phase prose sets the written-during-run mark, so
+point 6 applies to it unchanged.
+
+Rejected: a separate piece per field (more acceptances for the same decision, and more UI in
+task 061), and recording the channels as an accepted residual (it would void the property
+this ADR exists for).
