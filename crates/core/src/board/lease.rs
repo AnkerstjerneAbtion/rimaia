@@ -977,3 +977,79 @@ pub async fn end_for_test(ctx: &ServiceContext, lease: &LeaseRef) -> Result<()> 
     delete(&mut tx, lease).await?;
     tx.commit().await
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::strategy::PlannerBudget;
+    use pretty_assertions::assert_eq;
+
+    fn named(model: Option<&str>, effort: Option<&str>) -> (Option<String>, Option<String>) {
+        (model.map(str::to_string), effort.map(str::to_string))
+    }
+
+    fn judged(models: &PhaseModels, purpose: LeasePurpose) -> (Option<String>, Option<String>) {
+        let catalogue = Catalogue {
+            planner: PlannerBudget {
+                model: Some("haiku".to_string()),
+                effort: Some("low".to_string()),
+                ..PlannerBudget::default()
+            },
+            ..Catalogue::default()
+        };
+        let strategy = models.strategy_for(purpose, &catalogue);
+        (strategy.model, strategy.effort)
+    }
+
+    #[test]
+    fn the_ceiling_judges_each_purpose_on_what_that_phase_spawns_with() {
+        let models = PhaseModels {
+            strategy: Some("opus".to_string()),
+            review: Some("sonnet".to_string()),
+            effort: Some("high".to_string()),
+            review_effort: Some("medium".to_string()),
+        };
+
+        assert_eq!(
+            judged(&models, LeasePurpose::Implementation),
+            named(Some("opus"), Some("high"))
+        );
+        assert_eq!(
+            judged(&models, LeasePurpose::Fix),
+            named(Some("opus"), Some("high"))
+        );
+        assert_eq!(
+            judged(&models, LeasePurpose::Review),
+            named(Some("sonnet"), Some("medium"))
+        );
+        assert_eq!(
+            judged(&models, LeasePurpose::Strategy),
+            named(Some("haiku"), Some("low")),
+            "the planner's budget, never the card's choice"
+        );
+    }
+
+    #[test]
+    fn a_review_that_names_nothing_is_judged_on_the_tasks_own_strategy() {
+        let models = PhaseModels {
+            strategy: Some("opus".to_string()),
+            review: None,
+            effort: Some("high".to_string()),
+            review_effort: None,
+        };
+        assert_eq!(
+            judged(&models, LeasePurpose::Review),
+            named(Some("opus"), Some("high"))
+        );
+
+        // Each half falls back on its own.
+        let models = PhaseModels {
+            review: Some("sonnet".to_string()),
+            ..models
+        };
+        assert_eq!(
+            judged(&models, LeasePurpose::Review),
+            named(Some("sonnet"), Some("high"))
+        );
+    }
+}
