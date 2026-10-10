@@ -3453,7 +3453,8 @@ digest it bounds).
 Task 039's acceptance criteria name the functions that share a transaction across modules,
 and the one writer of `team_settings`. Building it needed four decisions the criteria do
 not state. They are recorded here; the task file is unchanged. Each one binds the tasks
-that follow.
+that follow. A fifth, point 5, was added when review found the fourth's trade applied to a
+second caller.
 
 **1. `context::ScopedTx` is the transaction a helper takes when it shares a caller's
 transaction across modules.** `ServiceContext::begin` and `begin_immediate` return it. It
@@ -3503,7 +3504,7 @@ and 051's owner check reach every write. A delete is a write. A separate delete 
 would be a second writer that both checks miss. A removal is checked against the scope and
 the key's placement exactly as a write is, and it publishes `ChangeEvent::settings(team_id)`.
 `each_split_settings_table_has_one_writer` scans for every statement that writes either
-split table, and allows two writers of `team_settings`: `set_team`, and the
+split table, and allows two writers of `team_settings`: `set_team_in` (point 5), and the
 `base_instructions` seed row that `identity::create_personal_team` writes as the team comes
 into being. That seed is part 3's, and no `set_team` can run before its team exists. Read
 039's "`set_team` is the only function that writes `team_settings`" as saying this.
@@ -3526,10 +3527,23 @@ D17.1's test still holds (`removing_a_repository_removes_its_strategy_default_ro
 does `a_refused_repository_removal_keeps_its_strategy_default`, both in
 `strategy/settings.rs`.
 
+**5. The statement lives in `set_team_in`, and `set_team` is it run over the pool.**
+`set_team_in(ctx, conn, team_id, key, value)` holds the placement check, the scope check and
+both statements, on a connection the caller's transaction holds, and publishes nothing.
+`set_team` acquires a connection, calls it, and publishes. This is the shape
+`set_user`/`set_user_in` already had. It exists for `review_loop::config::set_review_settings`,
+which before 039 wrote `review_instructions` and `review_config` in one transaction and
+published one `Settings` event. Two `set_team` calls would have let a failure between them
+commit new instructions over the old configuration, and would have published twice: a solo
+behaviour change 039's Goal forbids. The save now runs both `set_team_in` calls in one
+`ctx.begin()` transaction, commits, and publishes once.
+`saving_the_global_settings_commits_both_keys_and_announces_once` in
+`tests/review_loop.rs` pins this. `set_team_in` has its own `STORE_HANDLE_EXCEPTIONS` entry.
+
 **Binds.** 040–046 (`ScopedTx` across modules; an exception appended with its reason in the
 same commit), 045 (decides what a removal records, since a deleted row has no revision to
-carry), 051 (its owner check covers both branches of `set_team`), 065 (drops the legacy
-`settings` table that 039 leaves unread).
+carry; its columns go in `set_team_in`), 051 (its owner check goes in `set_team_in` and covers
+both of its branches), 065 (drops the legacy `settings` table that 039 leaves unread).
 
 ---
 
