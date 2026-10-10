@@ -23,6 +23,8 @@
 //! cases, and the race, which is the lease form of 042's),
 //! the model rule and who may start a runner (067: the `…model…` cases,
 //! `run_now_is_not_bound_by_capacity` and the owner case),
+//! consent and eligibility (045: the cases on [`Harness::start_shared`], and
+//! `a_personal_team_ignores_the_ceiling_column`),
 //! expiry (053), `run_tool` (055), resends (056).
 
 use std::future::Future;
@@ -40,6 +42,7 @@ use crate::board::{
     LeaseRef, LeaseTerm, NextStep, StartRun, TranscriptChunk, TranscriptEnd, LEASE_LIFETIME,
 };
 use crate::clock::Clock;
+use crate::consent::{self, eligibility::RunnerEligibility};
 use crate::context::ServiceContext;
 use crate::db::{
     new_id, BoardColumn, ExitClass, RunKind, RunState, RunStatus, StrategyMode, StrategySource,
@@ -79,6 +82,20 @@ pub trait Harness: Sized {
     /// must be served over more than one database connection, so a race
     /// between the two runners is a real one.
     fn start_with(term: LeaseTerm) -> impl Future<Output = Self>;
+    /// A server-shaped board with one shared team of two members (task 045):
+    /// no solo identity, each member made as a sign-up makes one, so each also
+    /// has a personal team. The first member, login `alice`, owns the team and
+    /// runner `A`, labelled `Alice's laptop`; the second, login `bob`, is a
+    /// member and owns runner `B`, labelled `Mac mini`. Both adapters are
+    /// scoped to the shared team, and [`board`](Harness::board) acts as
+    /// `alice` in it. Solo's lease term. Task 052's harness mints `B`'s runner
+    /// token for the second member.
+    fn start_shared() -> impl Future<Output = Self>;
+    /// The user id of the person who owns runner `A` or `B`: the solo user for
+    /// both on [`start`](Harness::start).
+    fn owner(&self, which: Which) -> String;
+    /// Runner `A` or `B`'s id.
+    fn runner_id(&self, which: Which) -> String;
     /// Runner `A` or `B`'s port onto the one board.
     fn runner(&self, which: Which) -> Arc<dyn BoardPort>;
     /// Runner `A` or `B`'s port onto the one board, as a runner whose claims
@@ -142,6 +159,14 @@ macro_rules! board_contract {
             a_plan_claim_and_an_inline_planner_claim_are_not_subject_to_the_model_rule,
             run_now_is_not_bound_by_capacity,
             only_a_runners_owner_is_authorized_to_start_it,
+            run_now_on_an_unconsented_task_refuses_with_the_reason,
+            next_skips_an_unconsented_task_and_takes_the_one_below_it,
+            a_runner_takes_its_owners_tasks_before_the_pool,
+            a_reassigned_pinned_task_is_claimable_by_nobody,
+            a_consent_lost_before_composition_ends_the_lease_and_answers_conflict,
+            a_fix_phase_whose_findings_lost_consent_is_released_instead_of_continued,
+            a_team_that_forbids_unattended_runs_blocks_every_runner,
+            a_personal_team_ignores_the_ceiling_column,
         );
     };
     (@cases $harness:ty; $($case:ident),* $(,)?) => {
@@ -199,6 +224,24 @@ impl Arranged {
 
     async fn task(&self, board: &ServiceContext, title: &str) -> String {
         self.task_in(board, title, BoardColumn::Ready).await
+    }
+
+    /// A `ready` task `by` writes, assigned to `assignee` (task 045's cases).
+    async fn task_by(&self, by: &ServiceContext, title: &str, assignee: Option<&str>) -> String {
+        let task_id = self.task(by, title).await;
+        tasks::assign_task(by, &task_id, assignee)
+            .await
+            .expect("assign the task");
+        task_id
+    }
+
+    /// Sets the team ceiling of this repository, which a repository registered
+    /// in a shared team starts without (ADR-0032 point 4). `board` acts as the
+    /// team's owner.
+    async fn allow_in_team(&self, board: &ServiceContext, allowed: bool) {
+        repo::set_repository_unattended_ceiling(board, &self.repository_id, allowed)
+            .await
+            .expect("the team's owner sets the ceiling");
     }
 
     /// A task appended to `column`, so creation order is board order.
@@ -516,6 +559,24 @@ async fn rows_a_lease_method_could_write(board: &ServiceContext) -> Vec<String> 
         rows.extend(table_rows.into_iter().map(|row| format!("{table}: {row}")));
     }
     rows
+}
+
+/// The board's context acting as `which`'s owner: what a person does on the
+/// shared board, through the same core services.
+fn as_owner<H: Harness>(harness: &H, which: Which) -> ServiceContext {
+    ServiceContext {
+        actor: harness.owner(which),
+        ..harness.board().clone()
+    }
+}
+
+/// The sentence a runner whose owner has not accepted `who`'s plan revision
+/// is refused with (task 045's Scope 11).
+fn plan_refusal(who: &str) -> String {
+    format!(
+        "the plan was changed by @{who}, and you have not accepted that revision. Accept it, or \
+         trust @{who}'s changes."
+    )
 }
 
 /// `lease`, one generation behind.
@@ -2043,5 +2104,379 @@ pub mod cases {
             RunTrigger::Queued,
             "away from it",
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // Consent and eligibility (task 045), on the shared board
+    // -----------------------------------------------------------------------
+
+    pub async fn run_now_on_an_unconsented_task_refuses_with_the_reason<H: Harness>() {
+        let harness = H::start_shared().await;
+        let board = harness.board();
+        let arranged = Arranged::new(board).await;
+        arranged.allow_in_team(board, true).await;
+        let bob = harness.owner(Which::B);
+        // Alice writes it and gives it to Bob, who has not read it.
+        let task_id = arranged.task_by(board, "Alice's plan", Some(&bob)).await;
+        let before = rows_a_lease_method_could_write(board).await;
+
+        let error = harness
+            .runner(Which::B)
+            .claim(run_target(&task_id, false))
+            .await
+            .expect_err("Run now is refused, never `None`");
+
+        assert_same(error.code(), ErrorCode::Invalid, "the code");
+        assert_same(error.to_string(), plan_refusal("alice"), "the sentence");
+        assert_same(
+            rows_a_lease_method_could_write(board).await,
+            before,
+            "a refused claim writes nothing",
+        );
+    }
+
+    pub async fn next_skips_an_unconsented_task_and_takes_the_one_below_it<H: Harness>() {
+        let harness = H::start_shared().await;
+        let board = harness.board();
+        let arranged = Arranged::new(board).await;
+        arranged.allow_in_team(board, true).await;
+        let bob = harness.owner(Which::B);
+        let as_bob = as_owner(&harness, Which::B);
+        let unread = arranged.task_by(board, "Alice's plan", Some(&bob)).await;
+        let own = arranged.task_by(&as_bob, "Bob's plan", Some(&bob)).await;
+        let repository = arranged.repository_id.as_str();
+
+        let claim = claimed(
+            harness.runner(Which::B).as_ref(),
+            next_target(&[repository], 2, &[(repository, 2)]),
+        )
+        .await;
+
+        assert_same(claim.lease.task_id.clone(), own, "the task below it");
+        assert_same(
+            run_state(board, &unread).await,
+            RunState::Idle,
+            "the task above is untouched",
+        );
+    }
+
+    pub async fn a_runner_takes_its_owners_tasks_before_the_pool<H: Harness>() {
+        let harness = H::start_shared().await;
+        let board = harness.board();
+        let arranged = Arranged::new(board).await;
+        arranged.allow_in_team(board, true).await;
+        let bob = harness.owner(Which::B);
+        let as_bob = as_owner(&harness, Which::B);
+        let team_id = board.scope.sole().expect("one team").clone();
+        consent::set_runner_eligibility(
+            &as_bob,
+            &harness.runner_id(Which::B),
+            RunnerEligibility::AssignedThenPool,
+            std::slice::from_ref(&team_id),
+        )
+        .await
+        .expect("Bob's runner takes this team's pool");
+        let pool = arranged.task_by(&as_bob, "In the pool", None).await;
+        let assigned = arranged.task_by(&as_bob, "Bob's own", Some(&bob)).await;
+        let repository = arranged.repository_id.as_str();
+        let runner = harness.runner(Which::B);
+
+        let first = claimed(
+            runner.as_ref(),
+            next_target(&[repository], 2, &[(repository, 2)]),
+        )
+        .await;
+        let second = claimed(
+            runner.as_ref(),
+            next_target(&[repository], 1, &[(repository, 1)]),
+        )
+        .await;
+
+        assert_same(
+            first.lease.task_id.clone(),
+            assigned,
+            "the owner's task first, though the pool's is above it",
+        );
+        assert_same(second.lease.task_id.clone(), pool, "then the pool's");
+    }
+
+    pub async fn a_reassigned_pinned_task_is_claimable_by_nobody<H: Harness>() {
+        let harness = H::start_shared().await;
+        let board = harness.board();
+        let arranged = Arranged::new(board).await;
+        arranged.allow_in_team(board, true).await;
+        let alice = harness.owner(Which::A);
+        let bob = harness.owner(Which::B);
+        let task_id = arranged.task_by(board, "Hit a wall", Some(&alice)).await;
+        let a = harness.runner(Which::A);
+        let b = harness.runner(Which::B);
+
+        // A's run waits out a transient failure, which pins the task to A.
+        let claim = claimed(a.as_ref(), run_target(&task_id, false)).await;
+        let run_id = new_id();
+        a.start_run(&claim.lease, starting(&run_id, RunKind::Implementation))
+            .await
+            .expect("start the run");
+        a.finish_run(&claim.lease, &run_id, finishing(transient()))
+            .await
+            .expect("finish it as retryable");
+        assert_same(
+            run_state(board, &task_id).await,
+            RunState::WaitingRetry,
+            "arranged",
+        );
+        tasks::assign_task(board, &task_id, Some(&bob))
+            .await
+            .expect("reassign it to Bob");
+        harness.clock().advance(Duration::days(1));
+
+        let refused_here = a
+            .claim(run_target(&task_id, true))
+            .await
+            .expect_err("the pinned runner no longer runs it");
+        assert_same(
+            refused_here.to_string(),
+            "this task is pinned to Alice's laptop, but it is now assigned to @bob. No runner can \
+             take it until someone chooses to run it elsewhere."
+                .to_string(),
+            "the pinned runner's sentence",
+        );
+        let refused_there = b
+            .claim(run_target(&task_id, true))
+            .await
+            .expect_err("the assignee's runner has no worktree");
+        assert_same(
+            refused_there.to_string(),
+            "this task is pinned to Alice's laptop, which has its worktree and the agent's \
+             conversation. Only that runner can run it until someone chooses to run it elsewhere."
+                .to_string(),
+            "043's pin sentence for every other runner",
+        );
+        let repository = arranged.repository_id.as_str();
+        for runner in [&a, &b] {
+            let next = runner
+                .claim(next_target(&[repository], 1, &[(repository, 1)]))
+                .await
+                .expect("a Next claim");
+            assert!(next.is_none(), "a due retry nobody can take: {next:?}");
+        }
+    }
+
+    pub async fn a_consent_lost_before_composition_ends_the_lease_and_answers_conflict<
+        H: Harness,
+    >() {
+        let harness = H::start_shared().await;
+        let board = harness.board();
+        let arranged = Arranged::new(board).await;
+        arranged.allow_in_team(board, true).await;
+        let bob = harness.owner(Which::B);
+        let as_bob = as_owner(&harness, Which::B);
+        let task_id = arranged.task_by(&as_bob, "Bob's plan", Some(&bob)).await;
+        let runner = harness.runner(Which::B);
+        let claim = claimed(runner.as_ref(), run_target(&task_id, false)).await;
+
+        // Alice edits the plan between the claim and the composition.
+        tasks::update_task(
+            board,
+            &task_id,
+            TaskPatch {
+                plan: Patch::Set("1. Do it Alice's way".to_string()),
+                ..TaskPatch::default()
+            },
+        )
+        .await
+        .expect("Alice edits the plan");
+
+        let error = runner
+            .run_context(&claim.lease)
+            .await
+            .expect_err("a plan edited since the claim is never composed");
+
+        assert_same(error.code(), ErrorCode::Conflict, "the code");
+        assert_same(lease_of(board, &task_id).await, None, "no lease remains");
+        assert_same(
+            run_state(board, &task_id).await,
+            RunState::Failed,
+            "where `release` lands a running task",
+        );
+    }
+
+    pub async fn a_fix_phase_whose_findings_lost_consent_is_released_instead_of_continued<
+        H: Harness,
+    >() {
+        let harness = H::start_shared().await;
+        let board = harness.board();
+        let arranged = Arranged::new(board).await;
+        arranged.allow_in_team(board, true).await;
+        turn_the_loop_on(board).await;
+        let alice = harness.owner(Which::A);
+        let bob = harness.owner(Which::B);
+        let as_bob = as_owner(&harness, Which::B);
+        let team_id = board.scope.sole().expect("one team").clone();
+        let task_id = arranged
+            .task_by(board, "Reviewed twice", Some(&alice))
+            .await;
+        let a = harness.runner(Which::A);
+        let b = harness.runner(Which::B);
+
+        // On A, Alice's runner: the implementation, then a review that records
+        // a blocking finding and stops on a transient failure, pinned to A.
+        let claim = claimed(a.as_ref(), run_target(&task_id, false)).await;
+        let implementation = new_id();
+        a.start_run(
+            &claim.lease,
+            starting(&implementation, RunKind::Implementation),
+        )
+        .await
+        .expect("start the implementation");
+        let receipt = a
+            .finish_run(
+                &claim.lease,
+                &implementation,
+                finishing_at(succeeded(), "a1"),
+            )
+            .await
+            .expect("finish the implementation");
+        assert_same(
+            receipt.next,
+            NextStep::Continue {
+                kind: RunKind::Review,
+            },
+            "the loop continues on A",
+        );
+        let review = new_id();
+        a.start_run(&claim.lease, starting(&review, RunKind::Review))
+            .await
+            .expect("start the review");
+        a.record_review_findings(
+            &claim.lease,
+            &review,
+            vec![NewReviewFinding {
+                severity: FindingSeverity::High,
+                title: "The retry never stops".to_string(),
+                body: "The loop has no budget.".to_string(),
+                file: None,
+                line: None,
+            }],
+        )
+        .await
+        .expect("record a blocking finding");
+        a.finish_run(&claim.lease, &review, finishing_at(transient(), "a1"))
+            .await
+            .expect("the review stops, retryable");
+
+        // Task 057's "run elsewhere" releases the pin; until it exists, the
+        // one column it writes stands in for it, as `testing::shared`'s
+        // helper stands in for 051's invitation.
+        sqlx::query("UPDATE tasks SET pinned_runner_id = NULL WHERE id = ?1")
+            .bind(&task_id)
+            .execute(&board.pool)
+            .await
+            .expect("release the pin");
+        tasks::assign_task(board, &task_id, Some(&bob))
+            .await
+            .expect("hand it to Bob");
+        consent::accept(
+            &as_bob,
+            &team_id,
+            Some(&task_id),
+            crate::consent::pieces::ContentKind::Plan,
+            "1",
+        )
+        .await
+        .expect("Bob reads Alice's plan; he has not read her runner's findings");
+
+        // On B: the review resumes and ends clean, and the finding A recorded
+        // is still open, so the loop would continue into a fix acting on it.
+        let claim = claimed(b.as_ref(), run_target(&task_id, true)).await;
+        assert_same(claim.purpose, LeasePurpose::Review, "the review resumes");
+        let resumed = new_id();
+        b.start_run(&claim.lease, starting(&resumed, RunKind::Review))
+            .await
+            .expect("resume the review");
+        let receipt = b
+            .finish_run(&claim.lease, &resumed, finishing_at(succeeded(), "a1"))
+            .await
+            .expect("finish the review");
+
+        assert_same(
+            receipt.next,
+            NextStep::Released { resume_after: None },
+            "released instead of continued into a fix of findings Bob never accepted",
+        );
+        assert_same(lease_of(board, &task_id).await, None, "the lease is gone");
+        let kinds: Vec<RunKind> = runs::list_runs_for_task(board, &task_id)
+            .await
+            .expect("read the runs")
+            .iter()
+            .map(|run| run.kind)
+            .collect();
+        assert!(
+            !kinds.contains(&RunKind::Fix),
+            "no fix was started: {kinds:?}"
+        );
+        let detail = tasks::get_task(board, &task_id)
+            .await
+            .expect("read the task");
+        assert_same(detail.task.column, BoardColumn::InReview, "the column");
+        assert_same(detail.task.run_state, RunState::Idle, "the run state");
+    }
+
+    pub async fn a_team_that_forbids_unattended_runs_blocks_every_runner<H: Harness>() {
+        let harness = H::start_shared().await;
+        let board = harness.board();
+        let arranged = Arranged::new(board).await;
+        arranged.allow_in_team(board, false).await;
+        let repository = repo::get(board, &arranged.repository_id)
+            .await
+            .expect("read the repository");
+        let refusal = format!(
+            "the team does not allow unattended runs in {}. A team owner can allow them.",
+            repository.name
+        );
+
+        for which in [Which::A, Which::B] {
+            let owner = harness.owner(which);
+            let as_them = as_owner(&harness, which);
+            let task_id = arranged.task_by(&as_them, "Their own", Some(&owner)).await;
+            let runner = harness.runner(which);
+
+            let error = runner
+                .claim(run_target(&task_id, false))
+                .await
+                .expect_err("the team ceiling refuses Run now");
+            assert_same(error.to_string(), refusal.clone(), "the sentence");
+            let next = runner
+                .claim(next_target(
+                    &[&repository.id],
+                    1,
+                    &[(repository.id.as_str(), 1)],
+                ))
+                .await
+                .expect("a Next claim");
+            assert!(next.is_none(), "and Next passes over it: {next:?}");
+        }
+    }
+
+    pub async fn a_personal_team_ignores_the_ceiling_column<H: Harness>() {
+        let harness = H::start().await;
+        let board = harness.board();
+        let arranged = Arranged::new(board).await;
+        // Registered after 066, so the column is at its default of 0: in a
+        // personal team the runner's own consent is the whole decision.
+        let repository = repo::get(board, &arranged.repository_id)
+            .await
+            .expect("read the repository");
+        assert!(!repository.allow_unattended_runs, "the column says no");
+        let named = arranged.task(board, "Run now").await;
+        let queued = arranged.task(board, "From the queue").await;
+
+        claimed(harness.runner(Which::A).as_ref(), run_target(&named, false)).await;
+        let claim = claimed(
+            harness.runner(Which::B).as_ref(),
+            next_target(&[&repository.id], 1, &[(repository.id.as_str(), 1)]),
+        )
+        .await;
+        assert_same(claim.lease.task_id.clone(), queued, "Next takes it");
     }
 }

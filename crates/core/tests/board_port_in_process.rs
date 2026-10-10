@@ -27,76 +27,159 @@ use rimaia_core::tasks::{self, NewTask};
 use rimaia_core::testing::board_contract::{Harness, Which};
 use rimaia_core::testing::db::{insert_member, insert_runner};
 use rimaia_core::testing::provider::Ledger;
-use rimaia_core::testing::{TempRepo, TestClock, TestContext};
+use rimaia_core::testing::shared::SharedTeam;
+use rimaia_core::testing::{test_epoch, TempRepo, TestClock, TestContext};
 use rimaia_core::{AppPaths, Clock, ServiceContext};
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 use tempfile::TempDir;
 
 struct InProcess {
-    harness: TestContext,
-    /// Held for its `Drop`: the board's database file and the transcript
-    /// paths both point inside it.
-    _data: TempDir,
+    /// The context cases arrange and inspect through: the solo context, or on
+    /// the shared board the team's owner's.
+    board: ServiceContext,
+    clock: TestClock,
+    /// The team the second member and the cases' repositories join.
+    team_id: String,
+    /// Each runner's owner, id and adapter context, `A` first.
+    owners: [String; 2],
+    runners: [String; 2],
+    contexts: [ServiceContext; 2],
     paths: AppPaths,
     term: LeaseTerm,
-    second_runner: String,
     a: Arc<dyn BoardPort>,
     b: Arc<dyn BoardPort>,
+    /// Held for their `Drop`: the board's database file and the transcript
+    /// paths point inside the directory, and the shared team holds clones.
+    _shared: Option<SharedTeam>,
+    _data: TempDir,
 }
 
 impl InProcess {
-    /// An adapter for `runner_id` holding `provider`, over the one board.
-    fn adapter(&self, runner_id: &str, provider: Arc<dyn AgentProvider>) -> Arc<dyn BoardPort> {
+    /// An adapter for `which`'s runner holding `provider`, over the one board.
+    fn adapter(&self, which: Which, provider: Arc<dyn AgentProvider>) -> Arc<dyn BoardPort> {
+        let index = Self::index(which);
         Arc::new(InProcessBoard::new(
-            self.harness.context.clone(),
+            self.contexts[index].clone(),
             self.paths.clone(),
             provider,
-            runner_id.to_string(),
+            self.runners[index].clone(),
             self.term,
         ))
+    }
+
+    fn index(which: Which) -> usize {
+        match which {
+            Which::A => 0,
+            Which::B => 1,
+        }
+    }
+
+    /// A board in a database file in a `TempDir`, over `db::connect`'s
+    /// multi-connection pool, so two runners' claims race for real (task
+    /// 043): the in-memory pool's one connection would serialise them.
+    fn data_dir() -> TempDir {
+        tempfile::Builder::new()
+            .prefix("rimaia-board-contract-")
+            .tempdir()
+            .expect("a data directory")
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn assemble(
+        board: ServiceContext,
+        clock: TestClock,
+        team_id: String,
+        owners: [String; 2],
+        runners: [String; 2],
+        contexts: [ServiceContext; 2],
+        term: LeaseTerm,
+        shared: Option<SharedTeam>,
+        data: TempDir,
+    ) -> Self {
+        let paths = AppPaths::new(data.path());
+        let config = RunnerConfig::default();
+        let adapter = |index: usize| -> Arc<dyn BoardPort> {
+            Arc::new(InProcessBoard::new(
+                contexts[index].clone(),
+                paths.clone(),
+                config.provider.clone(),
+                runners[index].clone(),
+                term,
+            ))
+        };
+        let (a, b) = (adapter(0), adapter(1));
+        Self {
+            board,
+            clock,
+            team_id,
+            owners,
+            runners,
+            contexts,
+            paths,
+            term,
+            a,
+            b,
+            _shared: shared,
+            _data: data,
+        }
     }
 }
 
 impl Harness for InProcess {
-    /// A board in a database file in a `TempDir`, over `db::connect`'s
-    /// multi-connection pool, so two runners' claims race for real (task
-    /// 043): the in-memory pool's one connection would serialise them.
     async fn start_with(term: LeaseTerm) -> Self {
-        let data = tempfile::Builder::new()
-            .prefix("rimaia-board-contract-")
-            .tempdir()
-            .expect("a data directory");
+        let data = Self::data_dir();
         let harness = TestContext::over_file(&data.path().join("rimaia.db")).await;
-        let paths = AppPaths::new(data.path());
-        let config = RunnerConfig::default();
         // Runner A is the solo runner. Runner B is a second machine of the
         // same user, which `runs.runner_id` needs a row for (D31 point 13).
         let second_runner = {
             let mut conn = harness.context.pool.acquire().await.expect("a connection");
             insert_runner(&mut conn, &harness.clock, &harness.solo.user_id, "Runner B").await
         };
-        let board = |runner_id: String| -> Arc<dyn BoardPort> {
-            Arc::new(InProcessBoard::new(
-                harness.context.clone(),
-                paths.clone(),
-                config.provider.clone(),
-                runner_id,
-                term,
-            ))
-        };
-        let a = board(harness.solo.runner_id.clone());
-        let b = board(second_runner.clone());
-
-        Self {
-            harness,
-            _data: data,
-            paths,
+        let solo = harness.solo.user_id.clone();
+        Self::assemble(
+            harness.context.clone(),
+            harness.clock.clone(),
+            harness.solo.team_id.clone(),
+            [solo.clone(), solo],
+            [harness.solo.runner_id.clone(), second_runner],
+            [harness.context.clone(), harness.context.clone()],
             term,
-            second_runner,
-            a,
-            b,
-        }
+            None,
+            data,
+        )
+    }
+
+    /// `testing::shared`'s two people over a file-backed board, so this
+    /// harness and the service tests share one fixture.
+    async fn start_shared() -> Self {
+        let data = Self::data_dir();
+        let pool = rimaia_core::db::connect(&data.path().join("rimaia.db"))
+            .await
+            .expect("open a file-backed board");
+        rimaia_core::db::migrate(&pool)
+            .await
+            .expect("migrate a file-backed board");
+        let team = SharedTeam::over(pool, TestClock::new(test_epoch())).await;
+        Self::assemble(
+            team.alice.ctx.clone(),
+            team.clock.clone(),
+            team.team_id.clone(),
+            [team.alice.user_id.clone(), team.bob.user_id.clone()],
+            [team.alice.runner_id.clone(), team.bob.runner_id.clone()],
+            [team.alice.ctx.clone(), team.bob.ctx.clone()],
+            LeaseTerm::Never,
+            Some(team),
+            data,
+        )
+    }
+
+    fn owner(&self, which: Which) -> String {
+        self.owners[Self::index(which)].clone()
+    }
+
+    fn runner_id(&self, which: Which) -> String {
+        self.runners[Self::index(which)].clone()
     }
 
     fn runner(&self, which: Which) -> Arc<dyn BoardPort> {
@@ -111,37 +194,22 @@ impl Harness for InProcess {
             ProviderId::ClaudeCode => Arc::new(ClaudeProvider),
             ProviderId::Ledger => Arc::new(Ledger),
         };
-        match which {
-            Which::A => self.adapter(&self.harness.solo.runner_id, provider),
-            Which::B => self.adapter(&self.second_runner, provider),
-        }
+        self.adapter(which, provider)
     }
 
     async fn add_member_with_runner(&self) -> (String, String) {
-        let mut conn = self
-            .harness
-            .context
-            .pool
-            .acquire()
-            .await
-            .expect("a connection");
-        let member = insert_member(
-            &mut conn,
-            &self.harness.clock,
-            &self.harness.solo.team_id,
-            "a-teammate",
-        )
-        .await;
-        let runner = insert_runner(&mut conn, &self.harness.clock, &member, "Their laptop").await;
+        let mut conn = self.board.pool.acquire().await.expect("a connection");
+        let member = insert_member(&mut conn, &self.clock, &self.team_id, "a-teammate").await;
+        let runner = insert_runner(&mut conn, &self.clock, &member, "Their laptop").await;
         (member, runner)
     }
 
     fn board(&self) -> &ServiceContext {
-        &self.harness.context
+        &self.board
     }
 
     fn clock(&self) -> &TestClock {
-        &self.harness.clock
+        &self.clock
     }
 }
 
