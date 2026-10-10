@@ -5245,7 +5245,8 @@ changes point 2's trait.
   purpose, forget, list, with their cases in `machine_store_contract!`. The rules are
   `machine::leases`. Every starter records after its claim returns and before it spawns
   (`runner::start::record_claim`, from the manual starter, `claim_for_planning` and the loop's
-  `try_step`); `run_task` notes the run after `start_run`, notes no run and the next purpose
+  `try_step`). A claim the runner cannot record is released, not run, and the starter answers
+  the store's error; `run_task` notes the run after `start_run`, notes no run and the next purpose
   after a `Continue`, and forgets the lease on a `Released` finish or a release whose answer
   says the board holds no such lease.
 - **Per-runner reconcile** (`scheduler::reconcile`). `reconcile_held(board, machine)` settles
