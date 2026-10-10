@@ -36,7 +36,7 @@ use rimaia_core::tasks::{
 use rimaia_core::testing::db::insert_runner;
 use rimaia_core::testing::shared::{add_member, Member, SharedTeam};
 use rimaia_core::testing::TempRepo;
-use rimaia_core::{board, ErrorCode, ServiceContext};
+use rimaia_core::{board, Clock, ErrorCode, ServiceContext};
 use serde_json::json;
 
 // ---------------------------------------------------------------------------
@@ -1509,6 +1509,77 @@ async fn a_dependency_commit_from_another_owners_runner_needs_trust_or_acceptanc
     claim(&team, &team.bob, &task).await;
 }
 
+#[tokio::test]
+async fn a_dependency_commit_is_credited_to_every_implementing_runner_up_to_the_chosen_attempt() {
+    let team = SharedTeam::new().await;
+    let (carol, carols_runner) = teammate_with_runner(&team, "carol", "Carol's desktop").await;
+    let (_, daves_runner) = teammate_with_runner(&team, "dave", "Dave's desktop").await;
+    let (_, erins_runner) = teammate_with_runner(&team, "erin", "Erin's desktop").await;
+    let dependency = task_in(
+        &team,
+        &team.alice,
+        "Schema",
+        BoardColumn::InReview,
+        Some(&team.alice),
+    )
+    .await;
+    let head = "0123456789abcdef0123456789abcdef01234567";
+    // The dependency's history as its runs record it: failed attempts stay in
+    // the worktree the next one continues from, a review builds nothing, and
+    // an attempt after the chosen one is not in the commit.
+    for (attempt, kind, status, runner, head_sha) in [
+        (1, "implementation", "failed", &carols_runner, None),
+        (2, "review", "succeeded", &daves_runner, None),
+        (3, "fix", "failed", &carols_runner, None),
+        (4, "fix", "succeeded", &team.alice.runner_id, Some(head)),
+        (5, "implementation", "failed", &erins_runner, None),
+    ] {
+        insert_run(&team, &dependency, attempt, kind, status, runner, head_sha).await;
+    }
+
+    let mut conn = team.alice.ctx.pool.acquire().await.expect("a connection");
+    let authors = rimaia_core::runs::commit_authors(&mut conn, &dependency, 4)
+        .await
+        .expect("read the commit's authors");
+    drop(conn);
+    assert_eq!(
+        authors,
+        vec![Some(carol), Some(team.alice.user_id.clone())],
+        "Carol first, as she ran first, and once"
+    );
+
+    let task = team.task(&team.bob, "Endpoint", Some(&team.bob)).await;
+    tasks::set_task_dependencies(&team.bob.ctx, &task, std::slice::from_ref(&dependency))
+        .await
+        .expect("the endpoint builds on the schema");
+    let missing = consent::status(&team.bob.ctx, &task, &team.bob.runner_id)
+        .await
+        .expect("read the task's consent")
+        .missing;
+    assert_eq!(
+        missing
+            .iter()
+            .map(|piece| (
+                piece.kind,
+                piece.revision.as_str(),
+                piece.author_login.as_deref()
+            ))
+            .collect::<Vec<_>>(),
+        vec![
+            (ContentKind::BaseCommit, head, Some("carol")),
+            (ContentKind::BaseCommit, head, Some("alice")),
+        ],
+        "the claim asks consent of exactly those two owners"
+    );
+    assert_eq!(
+        refusal(&team, &team.bob, &task).await,
+        format!(
+            "commit {head} from \"Schema\" was changed by @carol, and you have not accepted that \
+             revision. Accept it, or trust @carol's changes."
+        )
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Assignment and the team ceiling
 // ---------------------------------------------------------------------------
@@ -1835,6 +1906,55 @@ async fn carol(team: &SharedTeam) -> ServiceContext {
         actor: carol,
         ..team.bob.ctx.clone()
     }
+}
+
+/// A further member of the shared team signed up as `login`, as [`carol`]
+/// adds her, with a runner labelled `label`: `(user_id, runner_id)`.
+async fn teammate_with_runner(team: &SharedTeam, login: &str, label: &str) -> (String, String) {
+    let mut conn = team.alice.ctx.pool.acquire().await.expect("a connection");
+    let user_id = create_personal_team(&mut conn, &team.clock, login)
+        .await
+        .unwrap_or_else(|error| panic!("{login} signs up: {error}"))
+        .user_id;
+    add_member(
+        &mut conn,
+        &team.clock,
+        &team.team_id,
+        &user_id,
+        Role::Member,
+    )
+    .await;
+    let runner_id = insert_runner(&mut conn, &team.clock, &user_id, label).await;
+    (user_id, runner_id)
+}
+
+/// One row of `task`'s run history, written as the board would have left it:
+/// attempt `attempt` of `kind` on `runner`, ended `status` at `head_sha`.
+async fn insert_run(
+    team: &SharedTeam,
+    task: &str,
+    attempt: i64,
+    kind: &str,
+    status: &str,
+    runner: &str,
+    head_sha: Option<&str>,
+) {
+    sqlx::query(
+        "INSERT INTO runs (id, task_id, attempt, status, session_id, prompt, started_at,
+                           ended_at, kind, head_sha, runner_id)
+         VALUES (?1, ?2, ?3, ?4, 'session-1', 'do the work', ?5, ?5, ?6, ?7, ?8)",
+    )
+    .bind(format!("run-{attempt}-{task}"))
+    .bind(task)
+    .bind(attempt)
+    .bind(status)
+    .bind(team.clock.now())
+    .bind(kind)
+    .bind(head_sha)
+    .bind(runner)
+    .execute(&team.alice.ctx.pool)
+    .await
+    .unwrap_or_else(|error| panic!("insert attempt {attempt}: {error}"));
 }
 
 /// Carol as [`carol`] makes her, with a runner of her own, and the board
