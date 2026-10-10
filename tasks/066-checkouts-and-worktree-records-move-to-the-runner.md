@@ -6,6 +6,7 @@ status: ready
 depends_on: ["041"]
 adrs: ["0028", "0033", "0032", "0013", "0025", "0005", "0021"]
 size: L
+landed: "#34"
 ---
 
 # Checkouts and worktree records move to the runner
