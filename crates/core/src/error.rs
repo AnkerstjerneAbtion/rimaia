@@ -27,6 +27,13 @@ pub enum Error {
     #[error("{message}")]
     Invalid { message: String },
 
+    /// The lease a report was made under is not the current one (ADR-0031
+    /// point 3, seam-contract D8's 043 amendment). It means that and nothing
+    /// else: a fenced report, never a lost race and never a refusal a person
+    /// reads.
+    #[error("{message}")]
+    Conflict { message: String },
+
     /// Escape hatch for context-rich failures from `anyhow`-using internals.
     /// Not for anything the UI is expected to distinguish.
     #[error("{0}")]
@@ -43,6 +50,7 @@ pub enum ErrorCode {
     Io,
     NotFound,
     Invalid,
+    Conflict,
     Internal,
 }
 
@@ -53,6 +61,7 @@ impl Error {
             Error::Io(_) => ErrorCode::Io,
             Error::NotFound { .. } => ErrorCode::NotFound,
             Error::Invalid { .. } => ErrorCode::Invalid,
+            Error::Conflict { .. } => ErrorCode::Conflict,
             Error::Internal(_) => ErrorCode::Internal,
         }
     }
@@ -65,6 +74,12 @@ impl Error {
 
     pub fn invalid(message: impl Into<String>) -> Self {
         Error::Invalid {
+            message: message.into(),
+        }
+    }
+
+    pub fn conflict(message: impl Into<String>) -> Self {
+        Error::Conflict {
             message: message.into(),
         }
     }
@@ -106,6 +121,14 @@ mod tests {
         assert_eq!(
             as_json(Error::not_found("no task with that id")),
             r#"{"code":"not_found","message":"no task with that id"}"#
+        );
+    }
+
+    #[test]
+    fn conflict_serializes_to_code_and_message() {
+        assert_eq!(
+            as_json(Error::conflict("this lease is not the current one")),
+            r#"{"code":"conflict","message":"this lease is not the current one"}"#
         );
     }
 

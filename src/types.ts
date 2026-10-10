@@ -5,6 +5,9 @@ export type ErrorCode =
   | "io"
   | "not_found"
   | "invalid"
+  /** A report made under a lease that is no longer current (ADR-0031). No solo
+   *  path produces it; it is here so the union mirrors the enum. */
+  | "conflict"
   | "internal";
 
 /** Mirrors the payload `rimaia_core::Error` serializes to. */

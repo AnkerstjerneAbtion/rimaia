@@ -59,13 +59,15 @@ async fn a_fresh_database_gets_every_table_the_schema_declares() {
     // the SQL back at itself. `review_bundles` is ADR-0033 point 7's, added by task 033
     // as seam-contract D28 part 6 declares it, and `review_findings` ADR-0017's, added
     // by task 035 the same way. The seven team-mode tables (`runners` through `users`)
-    // are ADR-0029, ADR-0030 and ADR-0031's, added by task 038 the same way.
+    // are ADR-0029, ADR-0030 and ADR-0031's, added by task 038 the same way, and
+    // `runner_leases` ADR-0031 point 1's, added by task 043.
     assert_eq!(
         tables,
         vec![
             "repositories",
             "review_bundles",
             "review_findings",
+            "runner_leases",
             "runners",
             "runs",
             "schedules",
