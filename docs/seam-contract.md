@@ -3502,30 +3502,35 @@ which no team scope governs (D28 part 4).
 `set_team` the one writer of `team_settings`, so that 045's revision and authorship columns
 and 051's owner check reach every write. A delete is a write. A separate delete function
 would be a second writer that both checks miss. A removal is checked against the scope and
-the key's placement exactly as a write is, and it publishes `ChangeEvent::settings(team_id)`.
+the key's placement exactly as a write is. Through `set_team` it publishes
+`ChangeEvent::settings(team_id)`; through `set_team_in` the caller announces, as for a write.
 `each_split_settings_table_has_one_writer` scans for every statement that writes either
 split table, and allows two writers of `team_settings`: `set_team_in` (point 5), and the
 `base_instructions` seed row that `identity::create_personal_team` writes as the team comes
 into being. That seed is part 3's, and no `set_team` can run before its team exists. Read
 039's "`set_team` is the only function that writes `team_settings`" as saying this.
 
-**4. A removed repository's strategy default is deleted after the removal commits.**
+**4. A removed repository's strategy default is deleted inside the removal's transaction.**
 D17.1 has `repo::remove` delete `strategy_default.<repository_id>` so that no row is left
-behind. Before 039 the delete ran inside the removal's transaction. It now goes through
-`set_team(.., None)`, which runs on its own statement, so it runs after `repo::remove`
-commits and publishes. Consequences:
+behind. Before 039 the delete ran inside the removal's transaction, and it still does: it is
+`set_team_in(ctx, &mut tx, team_id, &repository_default_key(id), None)`, on the transaction
+that deletes the repository, before that transaction commits. Consequences:
 
-- A removal refused partway through (tasks still reference the repository) keeps its
-  default, as before.
-- If the delete fails after the commit, the repository is gone, the row stays, and
-  `repo::remove` returns the delete's error. The row is keyed by an id nothing will read
-  again. This residual costs less than a second writer of `team_settings` would.
-- A removal publishes two events, `Repositories` and then `Settings`, both naming the
-  repository's team.
+- A removal refused partway through (tasks still reference the repository) rolls back and
+  keeps its default, as before.
+- The repository and its default leave together or not at all.
+- A removal publishes one event, `Repositories`, naming the repository's team, as before 039.
+  `set_team_in` publishes nothing, so there is no second `Settings` event.
+
+An earlier draft of this point ran the delete through `set_team(.., None)` after the commit,
+because `set_team` ran on its own statement. That predated point 5; once `set_team_in` took a
+caller's transaction the reason was gone, and the two events it published were a solo
+behaviour change 039's Goal forbids.
 
 D17.1's test still holds (`removing_a_repository_removes_its_strategy_default_row`), and so
-does `a_refused_repository_removal_keeps_its_strategy_default`, both in
-`strategy/settings.rs`.
+does `a_refused_repository_removal_keeps_its_strategy_default`, which also pins that a refusal
+publishes nothing. `removing_a_repository_announces_only_the_repository_change` pins the one
+event. All three are in `strategy/settings.rs`.
 
 **5. The statement lives in `set_team_in`, and `set_team` is it run over the pool.**
 `set_team_in(ctx, conn, team_id, key, value)` holds the placement check, the scope check and
@@ -3536,7 +3541,8 @@ which before 039 wrote `review_instructions` and `review_config` in one transact
 published one `Settings` event. Two `set_team` calls would have let a failure between them
 commit new instructions over the old configuration, and would have published twice: a solo
 behaviour change 039's Goal forbids. The save now runs both `set_team_in` calls in one
-`ctx.begin()` transaction, commits, and publishes once.
+`ctx.begin()` transaction, commits, and publishes once. `repo::remove` is its second caller
+(point 4).
 `saving_the_global_settings_commits_both_keys_and_announces_once` in
 `tests/review_loop.rs` pins this. `set_team_in` has its own `STORE_HANDLE_EXCEPTIONS` entry.
 
