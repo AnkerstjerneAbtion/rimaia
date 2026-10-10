@@ -5397,7 +5397,9 @@ Amendments, as 043 set the precedent; point 2's trait gains no method.
   consent always judges the text that is returned. After three stale reads the lease ends as
   a lost consent does, with `Conflict` naming "what it would run changed each time it was
   read." `service::run_context_with_edit_between` (`testing` feature) is how a test lands an
-  edit in that window.
+  edit in that window. A claim's `context` is read before the claim's own transaction judges
+  consent, so it is never composed: every phase, the planner Plan now spawns included, takes
+  its prompt from a `run_context` after the claim.
 - **`Harness::start_shared`**, beside `owner(which)` and `runner_id(which)`: a server-shaped
   board with one shared team, `alice` owning it and runner `A` (`Alice's laptop`), `bob` a
   member owning runner `B` (`Mac mini`), both adapters scoped to the team and `board()` acting

@@ -10,6 +10,9 @@
 //! claim the task anyway, and asserts that the fixture CLI is never started
 //! for the refused phase and that the lease is gone.
 //!
+//! The same file holds the Plan-now case of D31's 045 amendment: what the
+//! planner is composed from is a fenced read, never the claim's earlier one.
+//!
 //! Real git in a `TempDir`, the recorded `success` stream, and a real bound
 //! MCP server, because the planner and the review are composed against one.
 
@@ -20,17 +23,22 @@ use std::collections::BTreeMap;
 use std::time::Duration;
 
 use pretty_assertions::assert_eq;
-use rimaia_core::board::{BoardPort, Claim, ClaimTarget, FreeCapacity, OwnerPresence};
+use rimaia_core::board::{
+    BoardFuture, BoardPort, Claim, ClaimTarget, FinishReceipt, FinishRun, FreeCapacity, Heartbeat,
+    LeaseRef, OwnerPresence, RunContext, StartRun, TranscriptAck, TranscriptChunk,
+};
 use rimaia_core::db::{BoardColumn, ExitClass, RunKind, RunState, StrategyMode};
 use rimaia_core::mcp::{self, McpHandle, RunHandles};
 use rimaia_core::repo::{self, NewRepository};
+use rimaia_core::review::findings::NewReviewFinding;
 use rimaia_core::review_loop::{config as review_config, UnreviewedReason, Verdict};
 use rimaia_core::runner::events::RunTail;
 use rimaia_core::runner::provider::ClaudeProvider;
 use rimaia_core::runner::strategy::{claim_for_planning, plan_claimed, PlanOutcome};
 use rimaia_core::runner::{run_task, CancelSignal, RunRequest, RunTrigger, RunnerConfig};
 use rimaia_core::scheduler::{InFlight, SlotOwner};
-use rimaia_core::tasks::{self, NewTask, TaskPatch};
+use rimaia_core::tasks::strategy::StrategyPlan;
+use rimaia_core::tasks::{self, NewTask, Patch, TaskPatch};
 use rimaia_core::testing::{self, open_gate, FakeCli, TempRepo, TestContext};
 use rimaia_core::{AppPaths, ServiceContext};
 use serde_json::json;
@@ -238,6 +246,64 @@ async fn a_phase_started_by_continue_refuses() {
     );
 }
 
+/// D31's 045 amendment on the Plan-now path: a claim's context is read before
+/// the transaction that judges consent, so an edit can land in between. The
+/// planner must be composed from the text the database holds, never from the
+/// claim's earlier read.
+#[tokio::test]
+async fn plan_now_composes_the_planner_from_a_fenced_read_not_the_claims() {
+    let f = Fixture::new().await;
+    let task = f.task("Plan now").await;
+    tasks::update_task(
+        f.ctx(),
+        &task,
+        TaskPatch {
+            strategy_mode: Some(StrategyMode::Planned),
+            plan: Patch::Set("1. Read before the claim's transaction".to_string()),
+            ..TaskPatch::default()
+        },
+    )
+    .await
+    .expect("ADR-0016's planned mode");
+    f.consent(true).await;
+
+    let config = f.config();
+    let board = EditBetweenReadAndClaim {
+        inner: f.harness.board(&f.paths, &config),
+        ctx: f.ctx().clone(),
+        plan: "1. Saved after the read",
+    };
+    let in_flight = InFlight::new();
+    let claim = claim_for_planning(
+        f.harness.starter(OwnerPresence::AtRunner),
+        &board,
+        f.harness.machine(),
+        &in_flight,
+        &task,
+        SlotOwner::Manual,
+    )
+    .await
+    .expect("Plan now")
+    .unwrap_or_else(|skip| panic!("the planner is claimed: {}", skip.message()));
+    tokio::time::timeout(
+        TEST_TIMEOUT,
+        plan_claimed(&board, f.harness.machine(), &f.paths, &config, claim),
+    )
+    .await
+    .expect("the planner must finish inside the test timeout")
+    .expect("the planner ran");
+
+    let prompt = f.cli.stdin(&task, 1);
+    assert!(
+        prompt.contains("1. Saved after the read"),
+        "the planner reads what the database holds: {prompt}"
+    );
+    assert!(
+        !prompt.contains("1. Read before the claim's transaction"),
+        "and never the claim's earlier read: {prompt}"
+    );
+}
+
 async fn once_the_run_is_live(mut tail: Receiver<RunTail>) {
     tokio::time::timeout(TEST_TIMEOUT, tail.recv())
         .await
@@ -408,5 +474,101 @@ impl Fixture {
         let detail = self.detail(task).await;
         assert_eq!(detail.task.run_state, RunState::Failed);
         assert_eq!(detail.last_run, None, "no run row was opened");
+    }
+}
+
+/// A board port whose `claim` returns the context as it read before an edit
+/// that then lands ahead of the claim's transaction: the window between
+/// `read_context` and `BEGIN IMMEDIATE`, made deterministic. Every other call
+/// goes through.
+struct EditBetweenReadAndClaim {
+    inner: std::sync::Arc<dyn BoardPort>,
+    ctx: ServiceContext,
+    plan: &'static str,
+}
+
+impl BoardPort for EditBetweenReadAndClaim {
+    fn preview<'a>(&'a self, task_id: &'a str) -> BoardFuture<'a, RunContext> {
+        self.inner.preview(task_id)
+    }
+
+    fn claim<'a>(&'a self, target: ClaimTarget) -> BoardFuture<'a, Option<Claim>> {
+        Box::pin(async move {
+            let ClaimTarget::Plan { task_id, .. } = &target else {
+                return self.inner.claim(target).await;
+            };
+            let read = self.inner.preview(task_id).await?;
+            tasks::update_task(
+                &self.ctx,
+                task_id,
+                TaskPatch {
+                    plan: Patch::Set(self.plan.to_string()),
+                    ..TaskPatch::default()
+                },
+            )
+            .await?;
+            Ok(self.inner.claim(target).await?.map(|claim| Claim {
+                context: read,
+                ..claim
+            }))
+        })
+    }
+
+    fn heartbeat<'a>(&'a self, held: &'a [LeaseRef]) -> BoardFuture<'a, Heartbeat> {
+        self.inner.heartbeat(held)
+    }
+
+    fn run_context<'a>(&'a self, lease: &'a LeaseRef) -> BoardFuture<'a, RunContext> {
+        self.inner.run_context(lease)
+    }
+
+    fn record_branch<'a>(&'a self, lease: &'a LeaseRef, branch: &'a str) -> BoardFuture<'a, ()> {
+        self.inner.record_branch(lease, branch)
+    }
+
+    fn start_run<'a>(&'a self, lease: &'a LeaseRef, run: StartRun) -> BoardFuture<'a, ()> {
+        self.inner.start_run(lease, run)
+    }
+
+    fn append_transcript<'a>(
+        &'a self,
+        lease: &'a LeaseRef,
+        chunk: TranscriptChunk,
+    ) -> BoardFuture<'a, TranscriptAck> {
+        self.inner.append_transcript(lease, chunk)
+    }
+
+    fn publish_tail(&self, lease: &LeaseRef, tail: RunTail) {
+        self.inner.publish_tail(lease, tail);
+    }
+
+    fn finish_run<'a>(
+        &'a self,
+        lease: &'a LeaseRef,
+        run_id: &'a str,
+        finish: FinishRun,
+    ) -> BoardFuture<'a, FinishReceipt> {
+        self.inner.finish_run(lease, run_id, finish)
+    }
+
+    fn release<'a>(&'a self, lease: &'a LeaseRef) -> BoardFuture<'a, ()> {
+        self.inner.release(lease)
+    }
+
+    fn record_strategy<'a>(
+        &'a self,
+        lease: &'a LeaseRef,
+        plan: StrategyPlan,
+    ) -> BoardFuture<'a, ()> {
+        self.inner.record_strategy(lease, plan)
+    }
+
+    fn record_review_findings<'a>(
+        &'a self,
+        lease: &'a LeaseRef,
+        run_id: &'a str,
+        findings: Vec<NewReviewFinding>,
+    ) -> BoardFuture<'a, ()> {
+        self.inner.record_review_findings(lease, run_id, findings)
     }
 }

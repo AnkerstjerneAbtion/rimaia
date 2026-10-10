@@ -687,15 +687,17 @@ pub async fn claim_for_planning(
 /// **Never `Err` for a planner that failed** — the same contract [`resolve`]
 /// keeps: a failure is recorded on the card and reported as
 /// [`PlanOutcome::Failed`]. `Err` is for a database or filesystem failure, which
-/// is the caller's problem in the way it already was.
+/// is the caller's problem in the way it already was, and for a lease the board
+/// ended because what the planner would read lost consent after the claim.
 ///
 /// The `Plan` claim is released on every path, after the last strategy write
 /// and before the slot drops: that deletes the lease row, leaves `run_state`
 /// alone (a strategy claim took no edge), and forgets this runner's record.
 ///
 /// `machine` is this machine's own state and clock. The worktree is prepared
-/// from the claim's context, base included (task 044), so nothing here reads
-/// the board except through `board`.
+/// from the claim's context, base included (task 044), and the prompt is
+/// composed from a later `run_context`, as `Claim::context` requires; nothing
+/// here reads the board except through `board`.
 pub async fn plan_claimed(
     board: &dyn BoardPort,
     machine: &MachineContext,
@@ -735,13 +737,21 @@ async fn plan_under(
     // implementation run would have used.
     let worktree = crate::worktree::prepare(machine, board, lease, &claim.context).await?;
 
+    // Composed from a fenced read, never from the claim's: the claim's context
+    // was read before its transaction judged consent, so an edit landing in
+    // between would put text consent never judged into the prompt (D31's 045
+    // amendment). `run_context` checks the read against the revisions it
+    // judges, and a lease it ends for lost consent is an `Err`: there is no
+    // claim left to record a failure under.
+    let context = board.run_context(lease).await?;
+
     match plan(
         board,
         lease,
         machine,
         paths,
         config,
-        &claim.context,
+        &context,
         Path::new(&worktree.path),
         cancel,
     )
