@@ -230,10 +230,11 @@ Rules:
   deletes every child row. No migration file begins with `-- no-transaction`. The prepare
   recipe above still works, because the rebuild's guard passes on an empty `tasks`.
 - **Machine state lives in `runner.db`, behind `rimaia_core::machine`; its rules stay in
-  core.** The runner keys, schedules, checkouts and worktree records are reached through a
-  `MachineContext` (`AppState.machine`, `TestContext::machine()`), never the board's
-  context. `rimaia-runner` stores them and decides nothing (seam-contract D31's
-  2026-10-10 amendment).
+  core, and no board DTO carries an absolute path.** The runner keys, schedules, checkouts
+  and worktree records are reached through a `MachineContext` (`AppState.machine`,
+  `TestContext::machine()`), never the board's context. `rimaia-runner` stores them and
+  decides nothing (seam-contract D31's 2026-10-10 amendments). A run's transcript path is
+  derived from its ids, never read off `runs.log_path`.
 - Board `position` is a fractional float; ordering is the priority mechanism. There is no
   separate priority field (ADR-0007).
 - A dependency is satisfied when its run **succeeds**, not when a human marks it done

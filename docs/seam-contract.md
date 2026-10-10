@@ -760,6 +760,20 @@ argument was always against fifty reads per board read, not against a second sta
 
 The entry now binds 037 as well.
 
+### Amendment, 2026-10-10 — no worktree path on the summary or the detail (task 066)
+
+`TaskSummary = every column of tasks` above now means every column a board DTO may carry:
+`worktree_path` is not one of them. `Task`, `TaskSummary` and `TaskDetail` lose
+`worktreePath`, and the MCP `TaskView` loses `worktree_path`. `TASK_SUMMARY_SELECT` names
+its columns instead of `t.*`, so no board read carries the retired column even unread.
+
+Where a task's worktree is belongs to the machine that made it (ADR-0028 point 2), and the
+window reads it from the local `list_local_worktrees` command, one read shared by every
+card and joined by task id. The cost argument above is unchanged: a board read is still one
+query, and the worktree read is one more invoke per window, not one per card.
+
+The entry now binds 066 as well.
+
 ## D13 — Whether a task can change repository
 
 **Question.** Task 005's Scope lists "Title, repository selector" in the task detail panel, but
@@ -789,6 +803,25 @@ inverts cause and effect. Task 004 simply had no reason to add the field; that i
 anyone made.
 
 **Binds.** 004, 005, 007.
+
+### Amendment, 2026-10-10 — the guard reads the branch, not the worktree (task 066)
+
+A task's repository is reassignable **only while it has no recorded `branch` and no runs**.
+The refusal is, exactly:
+
+`cannot move "<title>" to another repository: it already has a branch, <branch>, in <repository name>`
+
+**Why.** A board rule cannot see a path: since task 066 the worktree is the runner's
+record, not a board column. The branch is the board-side fact ADR-0005 ties to one
+repository, and the same act that recorded it created the worktree, so it is what the
+guard reads. This is a real narrowing: a task whose worktree was removed with its branch
+kept, and which has no runs, used to be reassignable, and is not any more. That is
+intended: its branch is still in the old repository.
+
+`RepositorySelector.tsx` computes its disabled reason from `task.branch` in the same
+words. The run-count refusal is unchanged.
+
+The entry now binds 066 as well.
 
 ## D14 — The mechanism for the live run tail
 
@@ -4483,7 +4516,7 @@ which task, and where does the suite live?
    | `queue::try_step` → `selection::plan`, `next_batch` | reads the board | `claim(Next)` | 042 |
    | `start_task_run` → `scheduler::claim`; `retry_task_now` → `claim_retry`; `process::claim` | `set_run_state` ×0–2 | `claim(Run { trigger: Manual, … })` in the starter; `process::claim` retires | 036 |
    | `process::release` (five sites in `run_task`); `claim::release` in `try_step` and `supervise` | `set_run_state(Failed)` | `release` | 036 |
-   | `run_task` → `repo::get`, `ensure_unattended_runs_allowed` | read | `RunContext::repository`; the starter checks it on `preview`; 066 moves the runner's half to its store, and 045 adds the team ceiling to the claim | 036 |
+   | `run_task` → `repo::get`, `ensure_unattended_runs_allowed` | read | `RunContext::repository`; the starter checks it on `preview`; the runner's half reads the checkout's `unattended_consent` (done in 066), and 045 adds the team ceiling to the claim | 036 |
    | `run_task` → `tasks::get_task` ×3, `settings::base_instructions`, `max_turns`, the `DISALLOWED_TOOLS` read in `forbidden_operations` | reads | `Claim::context`, `run_context` | 036 |
    | `strategy::resolve`, `effective_for` → `global_default`, `repository_default`, `catalogue`, `get_task` ×2 | reads | `RunContext::{strategy, catalogue}`, `run_context` | 036 |
    | `strategy::plan` → `get_task` for `strategy_updated_at` | read | `run_context` | 036 |
@@ -4497,14 +4530,15 @@ which task, and where does the suite live?
    | `outcome::finish_run` → `apply_to_task` → `move_task_to_bottom`, `set_run_state` | `UPDATE runs`, column, run state, publishes | `finish_run` | 036 |
    | `execute` → `EventStream::create(ctx, …)` → `publish_tail` | tail channel | `publish_tail` | 036 |
    | the JSONL transcript | runner disk | `append_transcript`, `FinishRun::transcript` | 056 |
-   | `worktree::prepare` → `write_worktree_columns` (also reached from `plan_claimed`) | `UPDATE tasks SET branch, worktree_path` | `record_branch`; the path moves to `runner.db` | 066 |
+   | `worktree::prepare` → `write_worktree_columns` (also reached from `plan_claimed`) | `UPDATE tasks SET branch, worktree_path` | `record_branch`; the path is `MachineStore::record_worktree` in `runner.db` (done in 066; `write_worktree_columns` is gone, and the two leaseless branch clears share `worktree::clear_branch`) | 066 |
    | `worktree::prepare` → `base_ref::resolve` | reads dependencies | `RunContext::base` | 044 |
    | `reconcile::reconcile` after `startup::survey` | `finish_run`, `set_run_state` | per runner: `finish_run` with the interrupted outcome, then `release` | 043 |
    | `QueueHandle` verbs, `tick_schedules`, `capacity::resolve`, `pause::active_until`, `settings::run_environment` | runner-owned state | never (ADR-0031 point 6) | 041 |
 
    036 ships every method except `run_tool`. Its in-process body needs the run-tool
    dispatch that 055 extracts from `mcp::server`, so 055 adds it, with the signature
-   above. Some methods have no production caller yet: `record_branch` until 066,
+   above. Some methods have no production caller yet (`record_branch` got its first, in
+   `worktree::prepare`, in 066):
    `claim(Next)` until 042, `heartbeat` until 053, `append_transcript` until 056 and
    `record_review_findings` until 055. Each still has its in-process body and its contract
    cases from the day it lands.
@@ -4921,6 +4955,63 @@ one shape:
 its server passes `None` for `LocalTools`), 048 (replaces `changes` and `event_team`), 059
 (converts the board reads the local handlers make through named core functions), 065
 (deletes `read_board`), 066 (reads checkouts and worktree records through the port).
+
+### Amendment, 2026-10-10 — the checkout and worktree half (task 066)
+
+The amendment above moved the runner keys and the schedules; task 066 moved every reader of
+the per-repository and per-task half, so no board query reads a retired column and no board
+DTO carries an absolute path. What it settled, so 042, 043, 045, 046, 048, 054 and 056
+build on one shape:
+
+- **`machine::local`** holds the rules over checkouts and worktree records: `CheckoutView`
+  (the local DTO `list_checkouts` and the per-repository setters answer), `not_set_up` (the
+  one refusal every reader gives a board repository with no checkout here:
+  `"<name>" is not set up on this computer`), `checkout_of`, `consented_repositories` (the
+  set of repositories whose checkout has `unattended_consent`, which the queue reads once
+  per pass and 042 sends as `ClaimTarget::Next.repositories`), and the writers
+  `insert_checkout`, `patch_checkout`, `remove_checkout`, `record_worktree` and
+  `forget_worktree`. Each writer announces itself through `MachineContext::publish`: a
+  checkout as `Repositories([id])`, a worktree record as `Tasks([task_id])`, the wire names
+  048's `LocalChange::{Checkouts, Worktrees}` keep.
+- **The board's `Repository`** keeps `id`, `name`, `default_branch`, `created_at` and the
+  team ceiling `allow_unattended_runs`, which is `#[serde(skip)]` until 045 names it and
+  read by nothing. `RunContext::repository` is this pathless row.
+- **Every function that touches the clone takes the checkout from the machine**:
+  `repo::{remote_info, gh_status, path_problem, has_credential}` take a `Checkout`;
+  `worktree::{prepare, status, diff_summary, remove, reconcile, local_path}` and
+  `worktree::cleanup::{inventory, remove_worktree, remove_done_worktrees,
+  remove_merged_worktrees}` take `&MachineContext`; `capacity::resolve(machine)` reads each
+  cap off the checkouts and no longer takes a board context; `doctor::run` lists the board's
+  repositories by name and checks only those with a checkout here;
+  `repo::ensure_unattended_runs_allowed(machine, repository)` answers the checkout a run then
+  uses, or refuses before any run state is written; `archive::run_on_archive(ctx, machine,
+  task)` reads the policy and script off the checkout and the worktree off its record.
+- **`worktree::prepare(ctx, machine, board, lease)`** records the path with
+  `record_worktree` and the branch with `BoardPort::record_branch` under the lease, its
+  first production caller. The two branch writes with no lease, the clear in
+  `worktree::remove` when the branch is deleted and reconcile's clear when the branch is
+  gone, share `worktree::clear_branch`, named for 054's `report_runner` and 043's per-runner
+  reconcile.
+- **Log paths are derived**: every reader computes `runner::events::transcript_path(paths,
+  task_id, run_id)` (`runs::{list_runs, get_run, transcript_of, log_path,
+  log_path_to_reveal, prune_logs}` and `startup::survey`). `outcome::insert_run` still
+  writes the column, marked `-- runs.log_path written until 056`, and nothing reads it.
+- **`repo::remove(ctx, Option<&MachineContext>, id)`**: the board removal first, refused
+  before any write in either store; then, given a machine, every worktree record of the
+  repository is forgotten and the checkout removed.
+- **`review::digest(ctx, Option<&MachineContext>)`** reads consent the way the machine
+  reactions do: `Some` from the shell and the solo MCP server; with `None`, no task is
+  reported as skipped for consent, since a server cannot see a runner's consent before 045.
+- **`repo::checkouts(ctx, machine)`** is what `list_checkouts` answers through both doors:
+  this machine's checkouts of the repositories the caller's one team holds, so one machine
+  holding two teams' clones tells neither about the other (ADR-0029 point 5). Its board fact
+  comes from `repo::list`, a named read 059 converts.
+- **The test that keeps it true** is `no_board_query_reads_a_retired_column`
+  (`crates/core/tests/checkouts.rs`), which parses every entry of `crates/core/.sqlx/` and
+  exempts only `-- machine_state adoption` and, for `log_path` in its text alone, the
+  `start_run` insert.
+
+**Binds.** 042, 043, 045, 046, 048, 054, 056, 059, 065.
 
 ---
 
@@ -5507,7 +5598,7 @@ There are 45 board commands: 37 from 046, and 8 flipped later. There are 52 loca
 | `debug_provoke_error` | app | local | — | 046 | Debug builds only |
 | `list_repositories` | repositories | board | Read | 046 | The DTO loses `path`, `worktreeRoot` and the per-machine columns (ADR-0028 §2) |
 | `register_repository` | repositories | board | Write | 054, local until then | Split in two. The board half keeps the name and takes a remote (ADR-0033 §1). The local half maps a clone (ADR-0033 §2), and 054 names it |
-| `update_repository` | repositories | board | Write | 046 | Name and default branch. `worktreeRoot` is a runner setting and leaves the patch in 066 |
+| `update_repository` | repositories | board | Write | 046 | Name and default branch. `worktreeRoot` is a runner setting and left the patch in task 066 for the local `set_repository_worktree_root` (below). No MCP tool, as before |
 | `set_repository_unattended_runs` | repositories | local | — | 046 | The runner's consent (ADR-0032). 045 adds the team ceiling as a separate board command |
 | `set_repository_on_archive` | repositories | local | — | 046 | Runner configuration, per checkout (ADR-0033 §8) |
 | `set_repository_max_concurrency` | repositories | local | — | 046 | A per-runner cap (ADR-0031 §6) |
@@ -5610,7 +5701,7 @@ Six commands added before 046, as point 8 requires. The counts above describe `m
 | Command | Group | Kind | Effect | From | Note |
 | --- | --- | --- | --- | --- | --- |
 | `approve_task` | review | board | Write | 046 | As `move_task`: D20.3's auto-removal on `done` becomes the runner's reaction to the change event once `worktree_auto_cleanup` is a runner setting (ADR-0028 §2). ADR-0021 point 3, task 034 |
-| `reject_task` | review | board | Write | 046 | The board handler writes the note, `branch = NULL`, the move and the marker. The uncommitted-changes refusal and the worktree removal (`review::actions::set_aside_worktree`, with the `worktree_path` write inside it) run on the runner that holds the worktree, not in the handler (ADR-0033 §7). In connected mode the refusal is a runner-side check, and a synchronous refusal to the caller is not guaranteed (task 034). ADR-0021 point 3 |
+| `reject_task` | review | board | Write | 046 | The board handler writes the note, `branch = NULL`, the move and the marker. The uncommitted-changes refusal and the worktree removal (`review::actions::set_aside_worktree`, with the worktree record's `forget_worktree` inside it since task 066) run on the runner that holds the worktree, not in the handler (ADR-0033 §7). In connected mode the refusal is a runner-side check, and a synchronous refusal to the caller is not guaranteed (task 034). ADR-0021 point 3 |
 | `request_task_changes` | review | board | Write | 046 | Touches no disk. ADR-0021 point 3, task 034 |
 | `get_task_dependents` | review | board | Read | 046 | ADR-0021 point 3, task 034 |
 | `get_review_digest` | review | board | Read | 046 | Rows only, no git. ADR-0021 point 3, task 034 |
@@ -5622,6 +5713,19 @@ Six commands added before 046, as point 8 requires. The counts above describe `m
 | `set_task_review` | review | board | Write | 046 | As `set_review_settings`, per task. 045 makes `review_instructions` consent-gated content with a revision (ADR-0032 §3); the handler stays on the board. ADR-0021 points 3 and 4, task 021 |
 | `get_review_history` | review | board | Read | 046 | Rows only, no git: runs and findings, grouped by core. Refused to every grant, as `list_review_findings` is (D30 point 5's "everything else" row). ADR-0021 point 3, task 037 |
 | `get_review_level` | review | board | Read | 046 | One level of the loop's configuration beside what it inherits and what it resolves to, so the interface never resolves the precedence chain itself. Refused to every grant, with the rest of the configuration (ADR-0021 §4). ADR-0021 points 3 and 4, task 037 |
+
+#### Added by task 066
+
+Four local commands, each replacing a per-machine field a board DTO lost (ADR-0028 §2), as
+point 8 requires. Each is served by the shell and reads the machine store; none issues a
+board query of its own (the 2026-10-04 amendment above).
+
+| Command | Group | Kind | Effect | From | Note |
+| --- | --- | --- | --- | --- | --- |
+| `list_checkouts` | repositories | local | — | 046 | This machine's clone of each repository: path, worktree root, cap, consent, archive policy (ADR-0033 §2). Its board fact, which repositories the caller sees, comes through `repo::list`. The local MCP router's 23rd tool, `list_checkouts`, refused to runs (D16.1's snake case), keeps the capability `list_repositories` carried until 066 (ADR-0021 point 1). Task 066 |
+| `set_repository_worktree_root` | repositories | local | — | 046 | Where this machine creates the repository's worktrees; `update_repository`'s `worktreeRoot` until 066 (D32's Binds). Inherits `update_repository`'s missing tool: the root had no MCP surface before, so nothing is lost. Task 066 |
+| `list_local_worktrees` | worktree | local | — | 046 | `{ taskId, path }` from this machine's worktree records; what task DTOs carried as `worktreePath`. Paired with the existing `list_worktrees` tool, which already serves this machine's worktree paths. Task 066 |
+| `get_run_log_path` | runs | local | — | 046 | One run's transcript path on this machine, derived from its ids (ADR-0013); what `Run.logPath` carried. A new ADR-0021 point 1 gap, recorded as point 9 records the existing ones; 056 replaces the derivation with `transcript_uploads.path`, and 071 closes the gap. Task 066 |
 
 ---
 
