@@ -54,6 +54,7 @@
 //! (`Run` and [`Task`](crate::db::Task) already derive it for exactly this
 //! reason — see [`crate::tasks::service::TaskSummary`]'s own hand-rolled impl
 //! for the precedent of mixing a derived one with extra joined columns).
+//! [`latest_successful_head`] is the one exception, and says why.
 
 pub mod bundle;
 pub mod transcript;
@@ -225,6 +226,49 @@ pub async fn list_runs_for_task(ctx: &ServiceContext, task_id: &str) -> Result<V
     .fetch_all(&ctx.pool)
     .await?;
     Ok(runs)
+}
+
+/// The commit a task's work was last verified at, and the run that ended on
+/// it: what a dependent branches from (ADR-0033 point 5, task 044).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SuccessfulHead {
+    pub run_id: String,
+    pub head_sha: String,
+}
+
+/// `task_id`'s latest successful implementation or fix `head_sha`, or `None`
+/// when no such run recorded one. Seam-contract D29 point 5 as its 2026-10-04
+/// amendment states it, and the only place "successful head" is defined.
+///
+/// A blank `head_sha` is excluded in the `WHERE`, like a NULL: filtered after
+/// the fetch, a blank row would end the search where a NULL falls through to
+/// an older one.
+///
+/// The one fixed-shape `query!` in this module, against the module doc's
+/// rule: its text is D29's, and the compile-time check is what pins it there.
+pub async fn latest_successful_head(
+    ctx: &ServiceContext,
+    task_id: &str,
+) -> Result<Option<SuccessfulHead>> {
+    let scope = ctx.scope.json();
+    let head = sqlx::query!(
+        r#"SELECT r.id AS "id!", r.head_sha AS "head_sha!"
+             FROM runs r JOIN tasks t ON t.id = r.task_id
+            WHERE r.task_id = ?1 AND t.team_id IN (SELECT value FROM json_each(?2))
+              AND r.status = 'succeeded'
+              AND r.kind IN ('implementation', 'fix')
+              AND r.head_sha IS NOT NULL AND trim(r.head_sha) <> ''
+            ORDER BY r.attempt DESC LIMIT 1"#,
+        task_id,
+        scope,
+    )
+    .fetch_optional(&ctx.pool)
+    .await?;
+
+    Ok(head.map(|row| SuccessfulHead {
+        run_id: row.id,
+        head_sha: row.head_sha,
+    }))
 }
 
 // ---------------------------------------------------------------------------
@@ -1655,5 +1699,220 @@ mod tests {
         for log in &logs {
             assert!(!log.exists(), "{} is pruned", log.display());
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // The latest successful head (D29 point 5, task 044)
+    // -----------------------------------------------------------------------
+
+    async fn set_head(ctx: &ServiceContext, run_id: &str, head_sha: Option<&str>) {
+        sqlx::query("UPDATE runs SET head_sha = ?1 WHERE id = ?2")
+            .bind(head_sha)
+            .bind(run_id)
+            .execute(&ctx.pool)
+            .await
+            .expect("set a run's head_sha");
+    }
+
+    /// A finished row of `kind` and `status` at `attempt`, ending on `head`.
+    async fn seed_ended(
+        h: &TestContext,
+        task_id: &str,
+        attempt: i64,
+        kind: RunKind,
+        status: RunStatus,
+        head: Option<&str>,
+    ) -> String {
+        let exit_class = match status {
+            RunStatus::Succeeded => Some(ExitClass::Success),
+            RunStatus::Failed => Some(ExitClass::Transient),
+            RunStatus::Cancelled => Some(ExitClass::Cancelled),
+            RunStatus::Interrupted => Some(ExitClass::Interrupted),
+            RunStatus::Running => None,
+        };
+        let ended = status != RunStatus::Running;
+        let run_id = seed_run(
+            &h.context,
+            task_id,
+            attempt,
+            status,
+            exit_class,
+            h.context.clock.now(),
+            ended,
+        )
+        .await;
+        set_kind(&h.context, &run_id, kind).await;
+        set_head(&h.context, &run_id, head).await;
+        run_id
+    }
+
+    async fn a_task(h: &TestContext) -> String {
+        let repository_id = seed_repository(&h.context, "Repo").await;
+        seed_task(&h.context, &repository_id, "A").await
+    }
+
+    #[tokio::test]
+    async fn the_latest_successful_head_skips_running_failed_cancelled_and_interrupted_rows() {
+        let h = TestContext::new().await;
+        let task_id = a_task(&h).await;
+        assert_eq!(
+            latest_successful_head(&h.context, &task_id)
+                .await
+                .expect("read"),
+            None,
+            "a task that has never run has no head",
+        );
+
+        let succeeded = seed_ended(
+            &h,
+            &task_id,
+            1,
+            RunKind::Implementation,
+            RunStatus::Succeeded,
+            Some("1111111111111111111111111111111111111111"),
+        )
+        .await;
+        for (attempt, status) in [
+            (2, RunStatus::Failed),
+            (3, RunStatus::Cancelled),
+            (4, RunStatus::Interrupted),
+            (5, RunStatus::Running),
+        ] {
+            let head = format!("{attempt}").repeat(40);
+            seed_ended(
+                &h,
+                &task_id,
+                attempt,
+                RunKind::Implementation,
+                status,
+                Some(&head),
+            )
+            .await;
+        }
+
+        assert_eq!(
+            latest_successful_head(&h.context, &task_id)
+                .await
+                .expect("read"),
+            Some(SuccessfulHead {
+                run_id: succeeded,
+                head_sha: "1111111111111111111111111111111111111111".to_string(),
+            }),
+        );
+    }
+
+    #[tokio::test]
+    async fn the_latest_successful_head_is_the_highest_attempt_among_implementation_and_fix_rows() {
+        let h = TestContext::new().await;
+        let task_id = a_task(&h).await;
+        seed_ended(
+            &h,
+            &task_id,
+            1,
+            RunKind::Implementation,
+            RunStatus::Succeeded,
+            Some("1111111111111111111111111111111111111111"),
+        )
+        .await;
+        let fix = seed_ended(
+            &h,
+            &task_id,
+            2,
+            RunKind::Fix,
+            RunStatus::Succeeded,
+            Some("2222222222222222222222222222222222222222"),
+        )
+        .await;
+
+        assert_eq!(
+            latest_successful_head(&h.context, &task_id)
+                .await
+                .expect("read"),
+            Some(SuccessfulHead {
+                run_id: fix,
+                head_sha: "2222222222222222222222222222222222222222".to_string(),
+            }),
+        );
+    }
+
+    #[tokio::test]
+    async fn a_succeeded_review_that_moved_head_is_not_a_base() {
+        // Task 021 calls a review that moved `HEAD` failed while its `status`
+        // stays `succeeded`; its commits are ones nobody reviewed.
+        let h = TestContext::new().await;
+        let task_id = a_task(&h).await;
+        let implementation = seed_ended(
+            &h,
+            &task_id,
+            1,
+            RunKind::Implementation,
+            RunStatus::Succeeded,
+            Some("1111111111111111111111111111111111111111"),
+        )
+        .await;
+        seed_ended(
+            &h,
+            &task_id,
+            2,
+            RunKind::Review,
+            RunStatus::Succeeded,
+            Some("2222222222222222222222222222222222222222"),
+        )
+        .await;
+
+        assert_eq!(
+            latest_successful_head(&h.context, &task_id)
+                .await
+                .expect("read"),
+            Some(SuccessfulHead {
+                run_id: implementation,
+                head_sha: "1111111111111111111111111111111111111111".to_string(),
+            }),
+        );
+    }
+
+    #[tokio::test]
+    async fn a_blank_head_sha_is_no_head_and_an_older_row_still_counts() {
+        let h = TestContext::new().await;
+        let task_id = a_task(&h).await;
+        let older = seed_ended(
+            &h,
+            &task_id,
+            1,
+            RunKind::Implementation,
+            RunStatus::Succeeded,
+            Some("1111111111111111111111111111111111111111"),
+        )
+        .await;
+        let newest = seed_ended(
+            &h,
+            &task_id,
+            2,
+            RunKind::Fix,
+            RunStatus::Succeeded,
+            Some("   "),
+        )
+        .await;
+        let expected = Some(SuccessfulHead {
+            run_id: older,
+            head_sha: "1111111111111111111111111111111111111111".to_string(),
+        });
+
+        assert_eq!(
+            latest_successful_head(&h.context, &task_id)
+                .await
+                .expect("read"),
+            expected,
+            "a blank head falls through to the older row",
+        );
+
+        // Exactly as for a NULL.
+        set_head(&h.context, &newest, None).await;
+        assert_eq!(
+            latest_successful_head(&h.context, &task_id)
+                .await
+                .expect("read"),
+            expected,
+        );
     }
 }
