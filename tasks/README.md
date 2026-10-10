@@ -56,7 +56,7 @@ reviewable in the app afterwards.
 | 43 | [042](042-split-the-scheduler.md) | Split the scheduler into board selection and a runner loop | v0.5 | 041, 066 | #34 |
 | 44 | [043](043-runner-leases.md) | Runner leases, fencing and pinning | v0.5 | 042 | #34 |
 | 45 | [044](044-branch-from-the-dependencys-commit.md) | Branch from the dependency's commit | v0.5 | 043 | #34 |
-| 46 | [067](067-the-model-rule-and-who-may-start-a-run.md) | The model rule, and who may start a run | v0.5 | 043 | — |
+| 46 | [067](067-the-model-rule-and-who-may-start-a-run.md) | The model rule, and who may start a run | v0.5 | 043 | #34 |
 | 47 | [045](045-consent-and-eligibility.md) | Consent and eligibility | v0.5 | 021, 039, 043, 044, 067 | — |
 | 48 | [046](046-the-server-crate-and-one-command-registry.md) | The server crate and one command registry | v0.5 | 028, 037, 045 | — |
 | 49 | [047](047-identity.md) | Identity: sign-in, sessions and tokens | v0.5 | 046 | — |

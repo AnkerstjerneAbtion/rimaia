@@ -6,6 +6,7 @@ status: ready
 depends_on: ["043"]
 adrs: ["0031", "0016", "0026", "0012"]
 size: M
+landed: "#34"
 ---
 
 # The model rule, and who may start a run
