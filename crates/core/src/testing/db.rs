@@ -154,6 +154,10 @@ pub fn board_migrations(keep: impl Fn(&str) -> bool) -> TempDir {
     dir
 }
 
+/// The version of task 045's consent file: every board migration older than
+/// this is the schema an install had before assignment and consent.
+pub const CONSENT_VERSION: &str = "20261003120200";
+
 /// A file board at `file`, at the schema every install had before task 038's
 /// rebuild: every board migration older than [`TEAM_MODE_REBUILD_VERSION`],
 /// applied through sqlx's public API and never through hand-written DDL that
@@ -164,15 +168,26 @@ pub fn board_migrations(keep: impl Fn(&str) -> bool) -> TempDir {
 /// different old boards. Opened through [`crate::db::connect`], so a later
 /// `db::migrate` on the same pool is exactly the launch that upgrades it.
 pub async fn pre_team_mode_board(file: &Path) -> SqlitePool {
-    let older = board_migrations(|name| name < TEAM_MODE_REBUILD_VERSION);
+    board_before(file, TEAM_MODE_REBUILD_VERSION).await
+}
+
+/// The same builder with any cutoff: the board at `file` brought up to every
+/// board migration older than `version`, and no further (task 045's
+/// [`CONSENT_VERSION`]).
+///
+/// Applied through [`crate::db::apply_migrations`], the path every launch
+/// takes, so a file that already holds rows from an older cutoff upgrades the
+/// way an install does: task 038's rebuild adopts the solo identity over them
+/// rather than refusing to run with enforcement on.
+pub async fn board_before(file: &Path, version: &str) -> SqlitePool {
+    let older = board_migrations(|name| name < version);
     let migrator = Migrator::new(older.path())
         .await
-        .expect("read the pre-rebuild migrations");
+        .expect("read the older migrations");
     let pool = crate::db::connect(file).await.expect("open the board");
-    migrator
-        .run(&pool)
+    crate::db::apply_migrations(&migrator, &pool)
         .await
-        .expect("the pre-rebuild migrations apply");
+        .expect("the older migrations apply");
     pool
 }
 
