@@ -5358,6 +5358,50 @@ sentences; it sends the `ProviderId` the model rule reads; its HTTP harness impl
 new members), 058, 061 (renders a skip and the runner picker), and the ADR-0028 amendment that
 gives each provider its own catalogue.
 
+### Amendment, 2026-10-10 — what task 045 decided
+
+ADR-0032 inside the claim. In solo nothing a user can see changes: every piece of content is
+the solo user's, every task is in their personal team, and no runner has a strategy ceiling.
+Amendments, as 043 set the precedent; point 2's trait gains no method.
+
+- **`ceiling` on the claim.** `ClaimTarget::Next`, `Run` and `Plan` each gain `ceiling:
+  StrategyCeiling` (`consent::ceiling`), and so does `FinishRun`, for the phase a `Continue`
+  would start. All are `#[serde(default, skip_serializing_if = "StrategyCeiling::is_none")]`,
+  so a runner without a ceiling sends what it sent before. The runner reads it from
+  `runner.db`'s `runner_settings` key `strategy_ceiling` when each claim is made, by the route
+  `run_environment` takes. The board only refuses with it; filling an absent choice at spawn
+  is 072's.
+- **`RunContext::authorship: Option<RunAuthorship>`** (`plan_revision`, `plan_author` login or
+  `None` for a deleted account, `runner_owner` login, `runner_label`), filled board-side from
+  the lease's runner in `read_context`. `None` in a personal team, where the facts say nothing.
+  `#[serde(default)]`. Rendering it into the prompt is 072's.
+- **`eligible`'s new parameter and order.** `Candidate` gains `ceiling: &StrategyCeiling` and
+  `composition: &consent::Composition` (which findings and which base commit the composers
+  would include, read with the context before the transaction). The answer is a `Verdict {
+  Eligible(Route), Ineligible(consent::Ineligible) }`, and the rules run in this order, the
+  first refusal winning: 043's pin; `eligibility::decide` (a task pinned here and then
+  reassigned is `PinnedThenReassigned`); the team ceiling, not consulted in a personal team;
+  067's model rule; `ceiling::judge`, using only its refusal; and consent over
+  `pieces_for(purpose)`. `Route::{Assigned, Pool}` orders `Next`: the owner's tasks in board
+  order, then the pool's. `preview` asks it with `StrategyCeiling::default()` and refuses as
+  `Invalid` with the same sentence, so a starter's preview and its claim agree.
+- **`run_context` ends a lease whose consent was lost.** It reads the context first, then,
+  inside the fence's transaction, re-checks consent for the lease's purpose. A refusal deletes
+  the lease and lands the task as `release` lands it (`lease::end_within`), commits, and
+  answers `Conflict` naming the refusal. The lease really is gone, so point 11's reaction is
+  correct, and a solo lease (`LeaseTerm::Never`) is never left `running` with no holder.
+- **`Harness::start_shared`**, beside `owner(which)` and `runner_id(which)`: a server-shaped
+  board with one shared team, `alice` owning it and runner `A` (`Alice's laptop`), `bob` a
+  member owning runner `B` (`Mac mini`), both adapters scoped to the team and `board()` acting
+  as `alice`. The in-process harness builds it with `testing::shared::SharedTeam` over a file
+  pool; 052's mints `B`'s runner token for the second member. 045's cases are the eight on
+  `start_shared` and `a_personal_team_ignores_the_ceiling_column` on `start`.
+
+**Binds.** 052 (implements `start_shared`, `owner` and `runner_id`, sends the ceiling, and its
+relay's read-only `eligible` refuses with the same `Ineligible` sentences), 057 (releases a
+reassigned pin), 061 (renders `get_task_consent`), 072 (judges again at spawn and renders
+`authorship`).
+
 ---
 
 ## D32 — One command registry: board and local commands, one dispatcher, one caller
@@ -6632,6 +6676,107 @@ D31 point 4, and D32 point 8 with its 2026-10-04 amendment.
 - **Any later local handler** reads the board through point 8's seams. A new reader of
   `BoardPort::preview` amends point 8.
 - **064** checks CLAUDE.md's connected-mode lines against points 2, 4 and 6.
+
+---
+
+## D36 — Task 045's cross-cutting choices
+
+**Question.** Task 045 puts ADR-0032 inside the claim. The ADR says who may run what on whose
+machine; it does not say how a personal team fits, what counts as a revision, which pieces a
+run executes, what "current" means for each kind of content, how the strategy ceiling treats
+a choice nobody made, or which refusals the queue explains. 051, 052, 057, 060, 061 and 072
+each meet these again, and left to each implementer they would be decided in five diffs.
+
+**Decision.**
+
+1. **The personal team.** A personal team's owner and its runners' owner are one person, so:
+   the team ceiling (`repositories.allow_unattended_runs`) is not consulted there, and
+   `set_repository_unattended_ceiling` refuses there as `Invalid`; `RunContext::authorship` is
+   `None`; and an unassigned task in the runner owner's personal team is `Assigned`, which is
+   why the migration does not backfill `assignee_id`. These are consequences of who the
+   people are, not a team-kind switch: point 6's mark has no personal-team short-circuit.
+2. **A revision only for a changed value.** One helper per kind of content
+   (`tasks::service::write_plan`, `review_loop::config`'s review-instructions writer,
+   `db::settings::set_team_in`), and each writes only when the value changes. Saving the same
+   text again bumps nothing, so it undoes nobody's acceptance. The plan's revision covers
+   `plan` and `extra_instructions` together, so 034's review note is a plan revision by the
+   reviewer, inside the verdict's transaction.
+3. **The pieces.** `pieces_for(purpose, inputs)` lists what the composer for that purpose
+   reads: implementation, plan · base instructions · base commit; strategy, plan · base
+   commit; review, plan · the effective review instructions · findings from another runner ·
+   base commit; fix, plan · base instructions · findings from another runner · base commit.
+   Findings are one piece per run on a runner other than the claiming one: for a fix, the
+   review runs whose open blocking findings it acts on; for a review, the fix runs whose
+   rejection reasons it is told. Their revision is the run id and their author the owner of
+   the run's runner. The base commit is one piece per distinct owner of the runners of the
+   dependency's implementation and fix runs up to the chosen run's attempt, failed ones
+   included (`runs::commit_authors`); its task is the dependency, its revision the commit.
+   The strategy planner's guidance in the implementation prompt is not a piece (ADR-0032
+   point 3 exempts execution strategy), and empty content is not a piece.
+4. **The current revision, per kind.** The decimal `plan_revision` or
+   `review_instructions_revision`; `team_settings.revision` of the key's row in the team; for
+   findings, a run the task lists now; for a base commit, the dependency's latest successful
+   head (D29 point 5). `accept` takes only the current one, and a stale one is `Invalid`
+   naming the current revision and who wrote it, never `Conflict`.
+5. **The ceiling refuses a named choice and fills an absent one.** A model the card, the
+   repository or the team names that is not in `models`, or an effort ranked above
+   `max_effort` by the catalogue's cheapest-first order, is refused and never lowered; an
+   effort the catalogue does not list exceeds every ceiling. No model means the first of
+   `models`, no effort means `max_effort`, as `StrategyOrigin::RunnerCeiling`. The board
+   refuses; the runner fills (072).
+6. **Three `SkipReason`s, each with `WaitingForRetry`'s justification (D23 point 4):** each
+   persists until a person acts, and each names a different act. `NotEligible`: reassign the
+   card or join the pool. `ConsentMissing`: accept, or trust. `ForbiddenByTeam`: ask a team
+   owner. A pin, the model rule and the strategy ceiling fail that test (D21 point 3), because
+   another runner resolves them with nobody acting, so `Next` passes over those silently.
+   `ForbiddenByTeam` is not `UnattendedRunsNotAllowed`, which since 042 means only that this
+   runner did not list the repository. The reasons are the local runner's.
+7. **The refusal sentences**, exact, in `consent::Ineligible::refusal` and beside it.
+   `{what}` is `the plan`, `this task's review instructions`, `the team's base
+   instructions`, `the team's review instructions`, `the findings recorded in run {run_id}` or
+   `commit {sha} from "{title}"`. `{who}` is `@{login}`, or `a former member`.
+
+   | Refusal | Sentence |
+   | --- | --- |
+   | assigned to someone else | `this task is assigned to @{login}. Only their runners run it: reassign it to run it here.` |
+   | unassigned, outside the pool | `this task is unassigned, and {label} does not take pool work from this team. Assign it to yourself, or add the team to the runner's pool.` |
+   | pinned here, then reassigned | `this task is pinned to {label}, but it is now assigned to @{login}. No runner can take it until someone chooses to run it elsewhere.` |
+   | consent missing | `{what} was changed by @{login}, and you have not accepted that revision. Accept it, or trust @{login}'s changes.` |
+   | consent missing, former member | `{what} was changed by a former member. Accept that revision to run it.` |
+   | consent missing, written during a run | `{what} was written with @{login}'s credentials during a run on someone else's task. Only accepting that revision lets it run.` |
+   | team ceiling | `the team does not allow unattended runs in {repository}. A team owner can allow them.` |
+   | strategy ceiling, model | `this task asks for the model "{model}", which {label}'s strategy ceiling does not allow. Change the task's model, or run it on another runner.` |
+   | strategy ceiling, effort | `this task asks for the effort "{effort}", above {label}'s ceiling of "{max_effort}". Nothing is lowered for it: change the task's effort, or raise the ceiling.` |
+   | stale acceptance | `revision {given} is not current: {what} is at revision {current}, changed by {who}. Read it before accepting it.` |
+   | trusting oneself | `you cannot trust yourself: your own changes already count.` |
+   | ceiling command, member | `only an owner of this team can change whether it allows unattended runs.` |
+   | ceiling command, personal team | `a personal team has no ceiling: this machine's own consent decides.` |
+
+   A task pinned to another runner keeps 043's pin sentence.
+
+**Why.** (1) keeps solo's single toggle, and repositories registered after 066 (column
+default `0`) still run in solo; a repository never leaves its team, so a personal team's column
+never becomes a team's ceiling. (2) is what makes an acceptance durable: a save that rewrote
+the same text would otherwise force every teammate to accept again. (3) reuses one function
+for the claim, the mark and the card, so "content authored by someone else" means one thing
+everywhere. (4) is "nobody accepts text they did not see" made checkable. (5) keeps the
+person who named a model in charge of its cost. (6) keeps D23's set closed against reasons a
+person cannot act on. (7) is quoted by 057 and 061, and one table is what keeps the three
+copies from drifting.
+
+See also [ADR-0032](adr/0032-assignment-and-consent-to-run-on-a-machine.md) and its
+2026-10-10 amendment, D21 point 3, D23 point 4, D28 part 6, D29 point 5, D31's 045 amendment.
+
+**Binds.**
+
+- **045** carries all seven points.
+- **051** generalises the owner check and replaces `testing::shared`'s membership helper; its
+  copy-to-team goes through `create_task`, so the copier is the author at revision 1.
+- **052** renders the same sentences from its relay.
+- **057** quotes point 7 and releases a reassigned pin.
+- **061** renders point 6's labels and point 7's sentences, and puts doors on trust and
+  eligibility.
+- **072** fills from the ceiling at spawn, by point 5.
 
 ---
 

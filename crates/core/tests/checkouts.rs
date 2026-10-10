@@ -564,9 +564,9 @@ async fn an_unattended_run_needs_this_runners_consent() {
         "the queue never claims it"
     );
 
-    // The ceiling at 0 and the consent at 1: this task does not read the
-    // ceiling, which is task 045's, so the run proceeds and the queue offers
-    // the task.
+    // The ceiling at 0 and the consent at 1: a personal team does not consult
+    // the ceiling (task 045, ADR-0032's amendment), so the run proceeds and
+    // the queue offers the task.
     f.set_ceiling(false).await;
     repo::set_allow_unattended_runs(f.ctx(), f.harness.machine(), &f.repository_id, true)
         .await
@@ -895,7 +895,8 @@ impl Fixture {
         id
     }
 
-    /// Sets the board's team ceiling, which nothing reads before task 045.
+    /// Sets the board's team ceiling, which a personal team does not consult
+    /// (task 045).
     async fn set_ceiling(&self, allow: bool) {
         sqlx::query("UPDATE repositories SET allow_unattended_runs = ?1 WHERE id = ?2")
             .bind(allow)

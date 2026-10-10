@@ -201,3 +201,18 @@ they give a prompt-injected plan one fewer ambiguity to exploit.
 - **Unattended consent held on the server.** Easier to show on the board. Rejected because it
   lets a remote write grant execution on a local machine. The board shows whether each runner
   has consented. The runner decides.
+
+## Amendment, 2026-10-10 — a personal team does not consult the team ceiling (task 045)
+
+Point 4's team ceiling is not consulted for a task in a personal team. There, the team's owner
+and the machine's owner are one person, so the runner's consent is the whole decision. Asking
+the same person a second time, in a second place, would only make solo's single toggle into
+two, and every repository registered after task 066 starts with the column at `0`, so solo
+would stop running anything until a setting nobody knows about was found. A repository never
+leaves its team (task 039 refuses the move, and task 051 copies tasks, not repositories), so a
+personal team's column never becomes a shared team's ceiling. The board command that sets the
+ceiling refuses on a personal team.
+
+In a shared team point 4 reads as written: a run needs both, and the Consequences' "the
+stricter wins" holds. Seam-contract D36 point 1 records this beside the other personal-team
+rules, which follow from who the people are rather than from a team-kind switch.

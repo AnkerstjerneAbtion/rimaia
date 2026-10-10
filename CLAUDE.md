@@ -167,7 +167,8 @@ Logic-first. Vitest for the frontend, `cargo test` for Rust. **No E2E.**
 incomplete:** prompt composition · outcome classification · event-stream parsing · retry
 and backoff policy · position/rebalance math · run-state transitions · dependency cycles
 and base-ref resolution · worktree operations · MCP handlers · tenant isolation · the lease
-protocol (claim, fencing, pinning, per-runner reconcile).
+protocol (claim, fencing, pinning, per-runner reconcile) · consent, eligibility and the
+strategy ceiling.
 
 Rules:
 
