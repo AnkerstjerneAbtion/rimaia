@@ -12,14 +12,14 @@ use std::sync::Arc;
 use chrono::{DateTime, Utc};
 use tokio::sync::broadcast::Receiver;
 
-use crate::board::{lease, BoardPort, InProcessBoard, LeaseTerm, RunContext};
+use crate::board::{lease, BoardPort, InProcessBoard, LeaseTerm, OwnerPresence, RunContext};
 use crate::context::{ServiceContext, TeamScope};
 use crate::db::MutationSource;
 use crate::events::ChangeEvent;
 use crate::identity::{ensure_solo, SoloIdentity};
 use crate::machine::MachineContext;
 use crate::paths::AppPaths;
-use crate::runner::RunnerConfig;
+use crate::runner::{RunnerConfig, Starter};
 use crate::testing::machine::MemoryMachine;
 use crate::testing::{test_pool, TestClock};
 
@@ -127,6 +127,19 @@ impl TestContext {
     /// and says "the machine store".
     pub fn machine(&self) -> &MachineContext {
         &self.machine
+    }
+
+    /// The solo user asking the solo runner to start, at the machine or not
+    /// (ADR-0031 point 7): what a test hands a start door. Every production
+    /// door in solo is [`OwnerPresence::AtRunner`]; a test that wants the
+    /// unattended posture a recording was captured under asks for
+    /// [`OwnerPresence::Remote`].
+    pub fn starter(&self, presence: OwnerPresence) -> Starter<'_> {
+        Starter {
+            ctx: &self.context,
+            runner_id: &self.solo.runner_id,
+            presence,
+        }
     }
 
     /// Where this machine's store records `task_id`'s worktree, if anywhere:

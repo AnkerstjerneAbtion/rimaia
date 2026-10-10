@@ -62,6 +62,89 @@ pub async fn preview(
     read_context(ctx, provider, task_id).await
 }
 
+/// Whether a runner's owner is at the machine when they ask it to start a run
+/// (ADR-0031 point 7).
+///
+/// Decided by the door, never by a request field. Every desktop command and
+/// the loopback operator MCP server run on the runner's own machine and pass
+/// [`AtRunner`](Self::AtRunner); task 052's browser route passes
+/// [`Remote`](Self::Remote). Not `Presence`: task 058's
+/// `rimaia_runner::host::Presence` is the runner's own view of its machine
+/// and never crosses to the board.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OwnerPresence {
+    /// At the runner, with the app in front of them: ADR-0012 point 6's
+    /// interactive run.
+    AtRunner,
+    /// Somewhere else: nobody is there to answer a prompt, so the run is an
+    /// unattended one.
+    Remote,
+}
+
+/// Whether the caller may ask `runner_id` to start a run, and the permission
+/// posture the run takes if so (ADR-0031 point 7).
+///
+/// Every start door calls this before it claims: Run now and Retry now
+/// (`runner::start::claim_manual_start`), and Plan now and a planning pass
+/// (`runner::strategy::claim_for_planning`). None restates a check here
+/// (ADR-0006). In order:
+///
+/// 1. **The runner** must exist, and its owner must be a member of a team
+///    `ctx` reaches. Otherwise `NotFound`, in the sentence a never-issued id
+///    gets (ADR-0029 point 5).
+/// 2. A runner that has been **unpaired** starts nothing: `Invalid`.
+/// 3. **Only its owner** may ask: `Invalid` for anyone else. A teammate makes
+///    a task claimable by assigning it; starting a process on someone else's
+///    machine is not a board action.
+/// 4. **Presence decides the posture.** [`OwnerPresence::AtRunner`] is
+///    [`RunTrigger::Manual`] (`acceptEdits`); [`OwnerPresence::Remote`] is
+///    [`RunTrigger::Queued`], an unattended run, held to ADR-0012's
+///    per-repository opt-in (and from task 045 to consent) exactly as a queued
+///    run is.
+///
+/// Capacity is not asked about (D19 point 5): a named start takes no
+/// `FreeCapacity`, and the board applies none.
+///
+/// `ctx` is the caller's own context, whose `actor` is the person asking,
+/// never the in-process adapter's `System` one. Writes nothing.
+pub async fn authorize_start(
+    ctx: &ServiceContext,
+    runner_id: &str,
+    presence: OwnerPresence,
+) -> Result<RunTrigger> {
+    let scope = ctx.scope.json();
+    let runner = sqlx::query!(
+        r#"SELECT r.user_id, r.unpaired_at AS "unpaired_at: DateTime<Utc>"
+             FROM runners r
+            WHERE r.id = ?1
+              AND EXISTS (SELECT 1 FROM team_memberships m
+                           WHERE m.user_id = r.user_id
+                             AND m.team_id IN (SELECT value FROM json_each(?2)))"#,
+        runner_id,
+        scope,
+    )
+    .fetch_optional(&ctx.pool)
+    .await?
+    .ok_or_else(|| Error::not_found(format!("no runner with id {runner_id}")))?;
+
+    if runner.unpaired_at.is_some() {
+        return Err(Error::invalid(
+            "this runner has been unpaired and can no longer start runs",
+        ));
+    }
+    if runner.user_id != ctx.actor {
+        return Err(Error::invalid(
+            "only the owner of this runner can start a run on it; assign the task to them, \
+             or leave it ready for their queue",
+        ));
+    }
+
+    Ok(match presence {
+        OwnerPresence::AtRunner => RunTrigger::Manual,
+        OwnerPresence::Remote => RunTrigger::Queued,
+    })
+}
+
 /// The runner an adapter serves: who the board's leases name, and what it
 /// leases for.
 #[derive(Debug, Clone, Copy)]

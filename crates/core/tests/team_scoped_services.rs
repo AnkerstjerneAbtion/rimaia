@@ -28,6 +28,7 @@ use rimaia_core::runner::outcome::observed_run_cost;
 use rimaia_core::runner::prompt::{compose_prompt, StrategyGuidance};
 use rimaia_core::runner::provider::{AgentProvider, ClaudeProvider};
 use rimaia_core::runner::strategy::claim_for_planning;
+use rimaia_core::runner::Starter;
 use rimaia_core::runs::{self, transcript};
 use rimaia_core::scheduler::SlotOwner;
 use rimaia_core::strategy::catalogue::{self, STRATEGY_CATALOGUE};
@@ -120,6 +121,7 @@ async fn a_foreign_id_is_answered_exactly_as_a_missing_one() {
     });
     probe!("plan_task_strategy", b.ready, |id| {
         claim_for_planning(
+            Starter::at_runner(a, &own.runner_id),
             board.as_ref(),
             &t.machine,
             &t.in_flight,

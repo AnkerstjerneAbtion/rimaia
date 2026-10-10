@@ -18,6 +18,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use pretty_assertions::assert_eq;
+use rimaia_core::board::OwnerPresence;
 use rimaia_core::board::lease::{self, Lease, LeaseState};
 use rimaia_core::board::{
     BoardFuture, BoardPort, Claim, ClaimTarget, FinishReceipt, FinishRun, Heartbeat,
@@ -811,6 +812,9 @@ async fn every_starter_records_its_claim_before_it_spawns() {
     let in_flight = InFlight::new();
     for continue_session in [false, true] {
         let started = claim_manual_start(
+            // Asked from away, for the trigger every recording was captured
+            // under.
+            f.harness.starter(OwnerPresence::Remote),
             &spy,
             f.machine(),
             &f.paths,
@@ -818,8 +822,6 @@ async fn every_starter_records_its_claim_before_it_spawns() {
             &in_flight,
             ManualStart {
                 task_id: task.clone(),
-                // The trigger every recording was captured under.
-                trigger: RunTrigger::Queued,
                 continue_session,
             },
         )
@@ -875,8 +877,15 @@ async fn every_starter_records_its_claim_before_it_spawns() {
     // Plan now, the command's path.
     let planned = f.task("Planned by hand").await;
     f.plan_mode(&planned).await;
-    let claim = claim_for_planning(&spy, f.machine(), &in_flight, &planned, SlotOwner::Manual)
-        .await
+    let claim = claim_for_planning(
+        f.harness.starter(OwnerPresence::AtRunner),
+        &spy,
+        f.machine(),
+        &in_flight,
+        &planned,
+        SlotOwner::Manual,
+    )
+    .await
         .expect("the claim")
         .expect("nothing refused it");
     let generation = claim.lease().generation;
@@ -960,6 +969,7 @@ async fn a_claim_the_runner_cannot_record_is_released_and_not_run() {
 
     let task = f.task("Started by hand").await;
     let error = claim_manual_start(
+        f.harness.starter(OwnerPresence::AtRunner),
         board.as_ref(),
         &machine,
         &f.paths,
@@ -967,7 +977,6 @@ async fn a_claim_the_runner_cannot_record_is_released_and_not_run() {
         &in_flight,
         ManualStart {
             task_id: task.clone(),
-            trigger: RunTrigger::Manual,
             continue_session: false,
         },
     )
@@ -994,6 +1003,7 @@ async fn a_claim_the_runner_cannot_record_is_released_and_not_run() {
     let planned = f.task("Planned by hand").await;
     f.plan_mode(&planned).await;
     let error = claim_for_planning(
+        f.harness.starter(OwnerPresence::AtRunner),
         board.as_ref(),
         &machine,
         &in_flight,

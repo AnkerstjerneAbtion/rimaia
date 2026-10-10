@@ -22,7 +22,7 @@ use chrono::{DateTime, Utc};
 use rimaia_core::db::{Run, RunKind, RunStatus};
 use rimaia_core::runner::events::RunTail;
 use rimaia_core::runner::{
-    claim_manual_start, run_task, ManualStart, RunRequest, RunTrigger, Started,
+    claim_manual_start, run_task, ManualStart, RunRequest, Started, Starter,
 };
 use rimaia_core::runs::transcript::{self, SearchHit, TranscriptPage};
 use rimaia_core::runs::{self, PruneCriterion, PruneResult, RunDetail, RunFilter, RunListEntry};
@@ -53,16 +53,17 @@ use crate::state::AppState;
 /// `tracing::error!` inside a detached task nobody is still watching. That
 /// preflight is a rule, and it lives in `rimaia-core` (ADR-0006).
 ///
-/// `RunTrigger::Manual` is ADR-0012's conservative `acceptEdits` posture: this
-/// command is the foreground "Run now" button. The unattended,
-/// `bypassPermissions` path is task 009's queue, not this one.
+/// The posture is the board's answer, not this command's: the button is on the
+/// runner's own machine, so it asks as an owner at the runner
+/// ([`Starter::at_runner`]), which `authorize_start` answers with ADR-0012's
+/// conservative `acceptEdits` posture (ADR-0031 point 7). The unattended,
+/// `bypassPermissions` path is the queue's, or a remote Run now's (task 052).
 #[tauri::command]
 pub async fn start_task_run(state: State<'_, AppState>, task_id: String) -> Result<()> {
     start_by_hand(
         &state,
         ManualStart {
             task_id,
-            trigger: RunTrigger::Manual,
             // "Run now" starts, it does not continue. Resuming a session is
             // `retry_task_now`'s job, and the two are separate buttons because
             // they mean different things to a human looking at a card: one
@@ -97,7 +98,6 @@ pub async fn retry_task_now(state: State<'_, AppState>, task_id: String) -> Resu
         &state,
         ManualStart {
             task_id,
-            trigger: RunTrigger::Manual,
             continue_session: true,
         },
     )
@@ -116,7 +116,9 @@ async fn start_by_hand(state: &AppState, start: ManualStart) -> Result<()> {
     let paths = state.paths.clone();
     let task_id = start.task_id.clone();
 
+    // This machine's own runner, asked by the person at it (ADR-0031 point 7).
     let Started { slot, claim } = claim_manual_start(
+        Starter::at_runner(&state.context, &state.solo.runner_id),
         board.as_ref(),
         &machine,
         &paths,

@@ -22,6 +22,7 @@ pub mod types;
 pub use in_process::InProcessBoard;
 pub use lease::{LeaseTerm, LEASE_LIFETIME};
 pub use port::{BoardFuture, BoardPort};
+pub use service::{authorize_start, OwnerPresence};
 pub use types::{
     BaseDependency, BoardMethod, ChangeSummary, Claim, ClaimTarget, FinishReceipt, FinishRun,
     FreeCapacity, Heartbeat, ImplementationBase, LeasePurpose, LeaseRef, NextStep, ReviewContext,

@@ -19,6 +19,7 @@ use std::time::Duration;
 
 use chrono::TimeDelta;
 use pretty_assertions::assert_eq;
+use rimaia_core::board::OwnerPresence;
 use rimaia_core::board::{
     BoardFuture, BoardPort, Claim, ClaimTarget, FinishReceipt, FinishRun, Heartbeat, LeaseRef,
     RunContext, StartRun, TranscriptAck, TranscriptChunk,
@@ -1078,6 +1079,9 @@ async fn a_review_waiting_on_a_usage_limit_is_resumed_by_the_queue_as_a_review()
     let board = fixture.board(&config);
     let in_flight = InFlight::new();
     let started = claim_manual_start(
+        // Asked from away, for the trigger every recording echoes; the route
+        // is Retry now's.
+        fixture.harness.starter(OwnerPresence::Remote),
         board.as_ref(),
         fixture.machine(),
         &fixture.paths,
@@ -1085,8 +1089,6 @@ async fn a_review_waiting_on_a_usage_limit_is_resumed_by_the_queue_as_a_review()
         &in_flight,
         ManualStart {
             task_id: fixture.task_id.clone(),
-            // The trigger every recording echoes; the route is Retry now's.
-            trigger: RunTrigger::Queued,
             continue_session: true,
         },
     )

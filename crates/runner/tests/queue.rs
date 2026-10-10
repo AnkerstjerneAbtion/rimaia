@@ -66,6 +66,7 @@ use std::time::Duration;
 
 use chrono::{DateTime, TimeDelta, Utc};
 use pretty_assertions::assert_eq;
+use rimaia_core::board::OwnerPresence;
 use rimaia_core::board::{
     BoardFuture, BoardPort, Claim, ClaimTarget, FinishReceipt, FinishRun, Heartbeat,
     InProcessBoard, LeasePurpose, LeaseRef, LeaseTerm, RunContext, StartRun, TranscriptAck,
@@ -3675,9 +3676,10 @@ async fn a_manual_run_gets_the_same_limits_as_a_queued_one() {
     let board = fixture.harness.board(&fixture.paths, &config);
     let in_flight = InFlight::new();
 
-    // Through 036's starter, the function both buttons call. The trigger every
-    // recording echoes; the limits do not depend on it.
+    // Through 036's starter, the function both buttons call. Asked from away,
+    // for the trigger every recording echoes; the limits do not depend on it.
     let started = claim_manual_start(
+        fixture.harness.starter(OwnerPresence::Remote),
         board.as_ref(),
         fixture.machine(),
         &fixture.paths,
@@ -3685,7 +3687,6 @@ async fn a_manual_run_gets_the_same_limits_as_a_queued_one() {
         &in_flight,
         ManualStart {
             task_id: task_id.clone(),
-            trigger: RunTrigger::Queued,
             continue_session: false,
         },
     )

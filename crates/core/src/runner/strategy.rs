@@ -73,6 +73,7 @@ use crate::tasks::{self, TaskDetail, TaskFilter, TaskSummary};
 
 use super::limits::{self, RunnerLimits};
 use super::process::{Attempt, CancelSignal, PermissionMode, RunnerConfig};
+use super::start::Starter;
 use super::prompt::{compose_strategy_prompt, compose_strategy_system_append, StrategyGuidance};
 use super::provider::{self, ForbiddenOperation, RimaiaHandle, RunIntent, SessionIntent};
 
@@ -592,9 +593,14 @@ impl PlannerClaim {
 
 /// Takes the slot for planning one task, or says why not.
 ///
-/// A preview, the slot, then the board's `Plan` claim. Everything before the
-/// claim is read-only apart from the slot, and every refusal is one a caller
-/// can render:
+/// The starter authorized, a preview, the slot, then the board's `Plan`
+/// claim. Everything before the claim is read-only apart from the slot, and
+/// every refusal is one a caller can render:
+///
+/// - **Not this caller's runner to start** — [`Starter::authorize`], the
+///   owner rule every start door applies (ADR-0031 point 7), answered as an
+///   `Err` because it is about who asked, not about the card. The posture it
+///   answers is not used: the planner's own posture is unchanged.
 ///
 /// - **Already in flight** — the same registry the queue and "Run now" take
 ///   from ([`InFlight`], seam-contract D19). This is what closes the hazard task
@@ -615,12 +621,14 @@ impl PlannerClaim {
 /// that quietly overwrote proposals the user had accepted would be the opposite
 /// of a review aid (task 023's Out of scope).
 pub async fn claim_for_planning(
+    starter: Starter<'_>,
     board: &dyn BoardPort,
     machine: &MachineContext,
     in_flight: &InFlight,
     task_id: &str,
     owner: SlotOwner,
 ) -> Result<std::result::Result<PlannerClaim, PlanSkip>> {
+    starter.authorize().await?;
     let preview = board.preview(task_id).await?;
     let repository = &preview.repository;
 
@@ -998,11 +1006,17 @@ pub async fn selected_tasks(
 /// signal, so a pass stopped mid-way leaves every proposal already written in
 /// place. There is nothing to roll back: each proposal is a committed write to
 /// its own card.
+///
+/// # Who asked
+///
+/// `starter` is the caller: its context reads the selection, and each card's
+/// claim goes through [`claim_for_planning`], so a pass on a runner the caller
+/// may not start is refused at its first card that would plan.
 #[allow(clippy::too_many_arguments)]
 pub async fn plan_all(
+    starter: Starter<'_>,
     board: &dyn BoardPort,
     machine: &MachineContext,
-    ctx: &ServiceContext,
     paths: &AppPaths,
     config: &RunnerConfig,
     in_flight: &InFlight,
@@ -1010,7 +1024,7 @@ pub async fn plan_all(
     cancel: &CancelSignal,
     on_progress: &(dyn Fn(PlanProgress<'_>) + Send + Sync),
 ) -> Result<PlanPass> {
-    let selected = selected_tasks(ctx, selection).await?;
+    let selected = selected_tasks(starter.ctx, selection).await?;
     let total = selected.len();
     let mut pass = PlanPass::default();
 
@@ -1033,7 +1047,15 @@ pub async fn plan_all(
             // `Manual`, because a pass is a person at the machine: a Stop
             // pressed on the queue must not kill a preflight they started
             // deliberately.
-            match claim_for_planning(board, machine, in_flight, &task_id, SlotOwner::Manual).await?
+            match claim_for_planning(
+                starter,
+                board,
+                machine,
+                in_flight,
+                &task_id,
+                SlotOwner::Manual,
+            )
+            .await?
             {
                 Ok(claim) => plan_claimed(board, machine, paths, config, claim).await?,
                 Err(skip) => PlanOutcome::Skipped(skip),

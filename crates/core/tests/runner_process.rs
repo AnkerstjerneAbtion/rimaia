@@ -55,6 +55,7 @@ use std::process::Command;
 use std::time::Duration;
 
 use pretty_assertions::assert_eq;
+use rimaia_core::board::OwnerPresence;
 use rimaia_core::board::service::team_disallowed_tools;
 use rimaia_core::db::settings::{self, RunEnvironment};
 use rimaia_core::db::{BoardColumn, ExitClass, Run, RunState, RunStatus, Task};
@@ -1850,7 +1851,14 @@ impl RunnerFixture {
         config: &RunnerConfig,
         trigger: RunTrigger,
     ) -> rimaia_core::Result<Started> {
+        // The posture a trigger names is the one presence decides (ADR-0031
+        // point 7): an owner at the runner is a manual run.
+        let presence = match trigger {
+            RunTrigger::Manual => OwnerPresence::AtRunner,
+            RunTrigger::Queued => OwnerPresence::Remote,
+        };
         claim_manual_start(
+            self.harness.starter(presence),
             self.harness.board(&self.paths, config).as_ref(),
             self.harness.machine(),
             &self.paths,
@@ -1858,7 +1866,6 @@ impl RunnerFixture {
             &InFlight::new(),
             ManualStart {
                 task_id: self.task_id.clone(),
-                trigger,
                 continue_session: false,
             },
         )

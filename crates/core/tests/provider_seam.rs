@@ -30,6 +30,7 @@ use std::sync::Arc;
 
 use chrono::Duration;
 use pretty_assertions::assert_eq;
+use rimaia_core::board::OwnerPresence;
 use rimaia_core::db::settings::RunEnvironment;
 use rimaia_core::db::{BoardColumn, ExitClass, RunState};
 use rimaia_core::mcp::{MCP_SERVER_NAME, RUN_MCP_SERVER_NAME};
@@ -41,7 +42,7 @@ use rimaia_core::runner::provider::{
     negotiate, AgentProvider, ClaudeProvider, ForbiddenOperation, PermissionMode, PromptStyle,
     ProviderId, RefusalAxis, RimaiaHandle, RunIntent, SessionIntent, SpawnPlan,
 };
-use rimaia_core::runner::{claim_manual_start, ManualStart, RunTrigger, RunnerConfig};
+use rimaia_core::runner::{claim_manual_start, ManualStart, RunnerConfig};
 use rimaia_core::scheduler::retry::{self, RetryDecision, RetryKind, USAGE_LIMIT_FALLBACK_POLL};
 use rimaia_core::scheduler::{AttemptHistory, InFlight};
 use rimaia_core::tasks::{self, NewTask};
@@ -229,14 +230,16 @@ async fn a_provider_that_cannot_deny_a_tool_refuses_an_unattended_run() {
     // express them does not get an unattended run — and the refusal lands before
     // anything is written, so there is nothing to clean up afterwards.
     //
-    // Through the manual starter with `RunTrigger::Queued`, which no production
-    // caller does: this pins the starter's order only. The queue's half — a
+    // Through the manual starter asked from away from the machine, which no
+    // production caller does before task 052: this pins the starter's order
+    // only. The queue's half — a
     // claim whose context no longer negotiates — is
     // `run_task_releases_a_claim_whose_context_no_longer_negotiates`.
     let fixture = Fixture::new().await;
     let config = fixture.ledger_config();
 
     let error = claim_manual_start(
+        fixture.harness.starter(OwnerPresence::Remote),
         fixture.harness.board(&fixture.paths, &config).as_ref(),
         fixture.harness.machine(),
         &fixture.paths,
@@ -244,7 +247,6 @@ async fn a_provider_that_cannot_deny_a_tool_refuses_an_unattended_run() {
         &InFlight::new(),
         ManualStart {
             task_id: fixture.task_id.clone(),
-            trigger: RunTrigger::Queued,
             continue_session: false,
         },
     )

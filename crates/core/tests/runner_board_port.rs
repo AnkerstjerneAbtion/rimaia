@@ -19,6 +19,7 @@ use std::time::Duration;
 
 use chrono::{DateTime, TimeDelta, Utc};
 use pretty_assertions::assert_eq;
+use rimaia_core::board::OwnerPresence;
 use rimaia_core::board::{
     BaseDependency, BoardFuture, BoardPort, Claim, ClaimTarget, FinishReceipt, FinishRun,
     Heartbeat, LeasePurpose, LeaseRef, RunBase, RunContext, StartRun, TranscriptAck,
@@ -587,6 +588,7 @@ impl Fixture {
         continue_session: bool,
     ) -> rimaia_core::Result<rimaia_core::runner::Started> {
         claim_manual_start(
+            self.harness.starter(OwnerPresence::AtRunner),
             self.board(config).as_ref(),
             self.machine(),
             &self.paths,
@@ -594,7 +596,6 @@ impl Fixture {
             &InFlight::new(),
             ManualStart {
                 task_id: self.task_id.clone(),
-                trigger: RunTrigger::Manual,
                 continue_session,
             },
         )

@@ -65,6 +65,7 @@ use crate::review;
 use crate::review_loop::{self, ReviewConfig, ReviewLevel, ReviewSettings, TaskReview};
 use crate::runner::prompt::TEMPLATE_VARIABLES;
 use crate::runner::provider::AgentProvider;
+use crate::runner::start::Starter;
 use crate::runner::strategy::{self as runner_strategy, PlanOutcome, PlanSelection, PlannerAccess};
 use crate::schedule;
 use crate::scheduler::{self, capacity};
@@ -1141,7 +1142,10 @@ a task that already carries a proposal is re-planned, which is what this tool me
             .authorize(Tool::PlanTaskStrategy, Some(&request.task_id))?;
         let local = self.local()?;
 
+        // The loopback operator server runs on this runner's own machine, so
+        // its caller is at the runner (ADR-0031 point 7).
         let claim = runner_strategy::claim_for_planning(
+            Starter::at_runner(&self.ctx, &local.planner.runner_id),
             local.planner.board.as_ref(),
             &local.machine,
             &local.planner.in_flight,
@@ -1202,9 +1206,9 @@ deliberately."
         // button hands in a real one.
         let cancel = crate::runner::CancelSignal::new();
         let pass = runner_strategy::plan_all(
+            Starter::at_runner(&self.ctx, &local.planner.runner_id),
             local.planner.board.as_ref(),
             &local.machine,
-            &self.ctx,
             &local.planner.paths,
             &local.planner.runner,
             &local.planner.in_flight,

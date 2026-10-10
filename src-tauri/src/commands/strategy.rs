@@ -18,7 +18,7 @@ use rimaia_core::db::{BoardColumn, Task};
 use rimaia_core::runner::strategy::{
     PlanOutcome, PlanPass, PlanProgress, PlanResult, PlanSelection,
 };
-use rimaia_core::runner::{probe_cli, strategy as runner_strategy, CancelSignal};
+use rimaia_core::runner::{probe_cli, strategy as runner_strategy, CancelSignal, Starter};
 use rimaia_core::scheduler::SlotOwner;
 use rimaia_core::strategy::{
     catalogue, settings as strategy_settings, Catalogue, StrategyApproval, StrategyDefaults,
@@ -244,7 +244,9 @@ pub async fn plan_task_strategy(state: State<'_, AppState>, task_id: String) -> 
     // the button can render, rather than one that only reaches `tracing::error!`
     // inside a detached task nobody is watching.
     let board = state.board_port.clone();
+    // This machine's own runner, asked by the person at it (ADR-0031 point 7).
     let claim = runner_strategy::claim_for_planning(
+        Starter::at_runner(&state.context, &state.solo.runner_id),
         board.as_ref(),
         &state.machine,
         &state.in_flight,
@@ -308,9 +310,9 @@ pub async fn plan_tasks_strategy(
     probe_cli(state.runner.provider.as_ref(), &state.runner.program).await?;
 
     let pass = runner_strategy::plan_all(
+        Starter::at_runner(&state.context, &state.solo.runner_id),
         state.board_port.as_ref(),
         &state.machine,
-        &state.context,
         &state.paths,
         &state.runner,
         &state.in_flight,

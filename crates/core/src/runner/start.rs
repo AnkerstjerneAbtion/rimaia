@@ -4,8 +4,15 @@
 //! It is a rule, so it lives here and not in the shell (ADR-0006). The two
 //! commands call [`claim_manual_start`] and spawn [`run_task`](super::run_task)
 //! with what it returns; nothing about the order below is theirs to get wrong.
+//!
+//! Run now, Retry now and Plan now each name a runner, and only its owner may
+//! ask (ADR-0031 point 7): a [`Starter`] says who is asking, of which runner,
+//! and from where, and both this preflight and
+//! [`claim_for_planning`](super::strategy::claim_for_planning) hand it to
+//! [`authorize_start`] before anything else.
 
-use crate::board::{BoardPort, Claim, ClaimTarget};
+use crate::board::{authorize_start, BoardPort, Claim, ClaimTarget, OwnerPresence};
+use crate::context::ServiceContext;
 use crate::db::settings;
 use crate::error::{Error, Result};
 use crate::machine::{leases, MachineContext};
@@ -21,14 +28,43 @@ use super::provider;
 /// whether a session is opened or continued, never which session it is.
 const NOT_YET_CLAIMED: &str = "not-yet-claimed";
 
+/// Who asks a runner to start a process, which runner, and whether they are
+/// at it (ADR-0031 point 7): what every start door hands
+/// [`authorize_start`].
+#[derive(Debug, Clone, Copy)]
+pub struct Starter<'a> {
+    /// The caller's own context, whose `actor` is the person asking. Never the
+    /// board adapter's `System` one.
+    pub ctx: &'a ServiceContext,
+    /// The runner the start is for: the one the door's board port serves.
+    pub runner_id: &'a str,
+    /// Decided by the door, never by a request field.
+    pub presence: OwnerPresence,
+}
+
+impl<'a> Starter<'a> {
+    /// A door on the runner's own machine: each desktop command and each tool
+    /// of the loopback operator MCP server. All of them are
+    /// [`OwnerPresence::AtRunner`].
+    pub fn at_runner(ctx: &'a ServiceContext, runner_id: &'a str) -> Self {
+        Self {
+            ctx,
+            runner_id,
+            presence: OwnerPresence::AtRunner,
+        }
+    }
+
+    /// [`authorize_start`] for this caller: the permission posture the start
+    /// takes, or why it may not happen. Writes nothing.
+    pub async fn authorize(&self) -> Result<RunTrigger> {
+        authorize_start(self.ctx, self.runner_id, self.presence).await
+    }
+}
+
 /// What a manual start asks for.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ManualStart {
     pub task_id: String,
-    /// Always [`RunTrigger::Manual`] from a button. A parameter so ADR-0026's
-    /// "an unattended refusal writes nothing" keeps a caller that can assert
-    /// it, although no production caller starts a queued run through here.
-    pub trigger: RunTrigger,
     /// `false` for Run now, `true` for Retry now.
     pub continue_session: bool,
 }
@@ -42,9 +78,15 @@ pub struct Started {
     pub claim: Claim,
 }
 
-/// Previews, takes the slot, checks the opt-in, negotiates, probes the CLI,
-/// then claims — and only the claim writes anything — and records the lease
-/// in this runner's own store before it hands the claim back.
+/// Authorizes the starter, previews, takes the slot, checks the opt-in,
+/// negotiates, probes the CLI, then claims — and only the claim writes
+/// anything — and records the lease in this runner's own store before it
+/// hands the claim back.
+///
+/// [`Starter::authorize`] decides the permission posture: `acceptEdits` for an
+/// owner at the runner, an unattended run for one who is not, negotiated and
+/// claimed as such. Capacity is not consulted (D19 point 5): the slot is
+/// unbounded and the claim carries no `FreeCapacity`.
 ///
 /// So every refusal before it leaves the task exactly as it was (task 008's
 /// "refused before any run state is written", ADR-0026's for a provider that
@@ -55,6 +97,7 @@ pub struct Started {
 ///
 /// The run environment it negotiates with is this machine's, from `machine`.
 pub async fn claim_manual_start(
+    starter: Starter<'_>,
     board: &dyn BoardPort,
     machine: &MachineContext,
     paths: &AppPaths,
@@ -62,12 +105,14 @@ pub async fn claim_manual_start(
     in_flight: &InFlight,
     start: ManualStart,
 ) -> Result<Started> {
+    let trigger = starter.authorize().await?;
     let preview = board.preview(&start.task_id).await?;
 
     // `acquire_unbounded`, not `acquire`: the concurrency caps bound what the
-    // *scheduler* starts, and a person clicking Run now with the app in front
-    // of them is not the mis-set-configuration failure those settings exist
-    // for. The per-task exclusion and the absolute ceiling still apply.
+    // *scheduler* starts, and a start its owner named is not the
+    // mis-set-configuration failure those settings exist for, at the machine
+    // or not (D19 point 5, ADR-0031 point 7). The per-task exclusion and the
+    // absolute ceiling still apply.
     let slot = in_flight
         .acquire_unbounded(&start.task_id, &preview.repository.id, SlotOwner::Manual)
         .map_err(|refused| Error::invalid(refused.message()))?;
@@ -86,7 +131,7 @@ pub async fn claim_manual_start(
         &preview,
         &runner_limits,
         config,
-        start.trigger,
+        trigger,
         run_environment,
         session_intent(start.continue_session, NOT_YET_CLAIMED, &home),
     );
@@ -97,7 +142,7 @@ pub async fn claim_manual_start(
     let claim = board
         .claim(ClaimTarget::Run {
             task_id: start.task_id.clone(),
-            trigger: start.trigger,
+            trigger,
             continue_session: start.continue_session,
         })
         .await?

@@ -10,6 +10,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use pretty_assertions::assert_eq;
+use rimaia_core::board::OwnerPresence;
 use rimaia_core::board::LeaseRef;
 use rimaia_core::db::{BoardColumn, MutationSource, RunState};
 use rimaia_core::mcp::requests::{GetTaskRequest, ListTasksRequest};
@@ -458,6 +459,7 @@ async fn a_repository_not_set_up_on_this_computer_refuses_to_run() {
     let config = f.config(&cli);
     let board = f.harness.board(&f.paths, &config);
     let error = claim_manual_start(
+        f.harness.starter(OwnerPresence::AtRunner),
         board.as_ref(),
         f.harness.machine(),
         &f.paths,
@@ -465,7 +467,6 @@ async fn a_repository_not_set_up_on_this_computer_refuses_to_run() {
         &InFlight::new(),
         ManualStart {
             task_id: task.clone(),
-            trigger: RunTrigger::Manual,
             continue_session: false,
         },
     )
@@ -510,16 +511,17 @@ async fn an_unattended_run_needs_this_runners_consent() {
     cli.replays(&task, "success", 0);
     let config = f.config(&cli);
     let board = f.harness.board(&f.paths, &config);
-    // The trigger every recording echoes: the fixture reports the permission
-    // mode a queued run asks for, and a manual one would stop it as a posture
-    // nobody chose. The consent check is the same for both.
+    // Asked from away from the machine, for the trigger every recording
+    // echoes: the fixture reports the permission mode a queued run asks for,
+    // and a manual one would stop it as a posture nobody chose. The consent
+    // check is the same for both.
     let start = || ManualStart {
         task_id: task.clone(),
-        trigger: RunTrigger::Queued,
         continue_session: false,
     };
     let in_flight = InFlight::new();
     let error = claim_manual_start(
+        f.harness.starter(OwnerPresence::Remote),
         board.as_ref(),
         f.harness.machine(),
         &f.paths,
@@ -572,6 +574,7 @@ async fn an_unattended_run_needs_this_runners_consent() {
     assert_eq!(entry.queue_position, Some(1));
 
     let started = claim_manual_start(
+        f.harness.starter(OwnerPresence::Remote),
         board.as_ref(),
         f.harness.machine(),
         &f.paths,

@@ -46,5 +46,5 @@ pub use process::{
     RunnerConfig,
 };
 pub use provider::{AgentProvider, ProviderId, RunIntent, SpawnPlan};
-pub use start::{claim_manual_start, ManualStart, Started};
+pub use start::{claim_manual_start, ManualStart, Started, Starter};
 pub use strategy::{Resolution, STRATEGY_TRANSCRIPT_PREFIX};

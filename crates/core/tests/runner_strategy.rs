@@ -56,7 +56,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use pretty_assertions::assert_eq;
-use rimaia_core::board::{BoardPort, Claim};
+use rimaia_core::board::{BoardPort, Claim, OwnerPresence};
 use rimaia_core::db::settings;
 use rimaia_core::db::{
     BoardColumn, Repository, Run, RunState, RunStatus, StrategyMode, StrategySource, Task,
@@ -976,12 +976,12 @@ async fn a_pass_and_the_queue_cannot_start_two_processes_for_one_task() {
         .expect("the queue takes the task first");
 
     let pass = runner_strategy::plan_all(
+        fixture.harness.starter(OwnerPresence::AtRunner),
         fixture
             .harness
             .board(&fixture.paths, &fixture.config(&FakeCli::silent()))
             .as_ref(),
         fixture.harness.machine(),
-        &fixture.harness.context,
         &fixture.paths,
         &fixture.config(&FakeCli::silent()),
         &in_flight,
@@ -1044,12 +1044,12 @@ async fn a_pass_cancelled_before_it_starts_spawns_nothing_and_says_it_was_cancel
     cancel.cancel();
 
     let pass = runner_strategy::plan_all(
+        fixture.harness.starter(OwnerPresence::AtRunner),
         fixture
             .harness
             .board(&fixture.paths, &fixture.config(&cli))
             .as_ref(),
         fixture.harness.machine(),
-        &fixture.harness.context,
         &fixture.paths,
         &fixture.config(&cli),
         &InFlight::new(),
@@ -1080,12 +1080,12 @@ async fn a_pass_plans_an_eligible_card_and_reports_its_model_effort_and_rational
     // rendering progress, so it may not need exclusive access to anything.
     let seen: std::sync::Mutex<Vec<(usize, usize)>> = std::sync::Mutex::new(Vec::new());
     let pass = runner_strategy::plan_all(
+        fixture.harness.starter(OwnerPresence::AtRunner),
         fixture
             .harness
             .board(&fixture.paths, &fixture.config(&cli))
             .as_ref(),
         fixture.harness.machine(),
-        &fixture.harness.context,
         &fixture.paths,
         &fixture.config(&cli),
         &InFlight::new(),
@@ -1134,12 +1134,12 @@ async fn a_pass_plans_an_eligible_card_and_reports_its_model_effort_and_rational
 /// a skip is decided before anything is spawned.
 async fn plan_selection(fixture: &StrategyFixture, selection: PlanSelection) -> PlanPass {
     runner_strategy::plan_all(
+        fixture.harness.starter(OwnerPresence::AtRunner),
         fixture
             .harness
             .board(&fixture.paths, &fixture.config(&FakeCli::silent()))
             .as_ref(),
         fixture.harness.machine(),
-        &fixture.harness.context,
         &fixture.paths,
         &fixture.config(&FakeCli::silent()),
         &InFlight::new(),
