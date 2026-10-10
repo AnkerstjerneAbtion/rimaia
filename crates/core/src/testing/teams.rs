@@ -20,7 +20,7 @@
 //!
 //! [`TwoTeams::runner`] spawns [`FakeCli`], which replays recorded streams,
 //! and its credential store is a [`MemoryStore`]. [`TwoTeams::doctor`] is
-//! rooted in the fixture's own data directory and probes the same stand-in.
+//! `testing::doctor::temp_environment()`, probing the same stand-in.
 //!
 //! Lives here rather than in a test binary so task 046's
 //! `crates/server/tests/commands.rs` can reuse it (D32 point 5).
@@ -150,6 +150,8 @@ pub struct TwoTeams {
     pub in_flight: InFlight,
     pub paths: AppPaths,
     _data: TempDir,
+    doctor: doctor::Environment,
+    _doctor_root: TempDir,
 }
 
 impl TwoTeams {
@@ -205,6 +207,11 @@ impl TwoTeams {
             credentials: CredentialAccess::new(MemoryStore::new()),
             ..RunnerConfig::default()
         };
+        // A real, writable directory for the doctor to report on, probing the
+        // stand-in rather than whatever `claude` is on this machine's PATH.
+        let (doctor_root, mut doctor) = crate::testing::doctor::temp_environment();
+        doctor.programs.agent = runner.program.clone();
+        doctor.run_handles = handles.clone();
 
         Self {
             a,
@@ -220,6 +227,8 @@ impl TwoTeams {
             in_flight: InFlight::new(),
             paths,
             _data: data,
+            doctor,
+            _doctor_root: doctor_root,
         }
     }
 
@@ -249,12 +258,12 @@ impl TwoTeams {
         }
     }
 
-    /// A doctor that reports on the fixture's own data directory and probes
-    /// the stand-in.
+    /// What `run_doctor` reports on: [`temp_environment`]'s real directory,
+    /// probing the stand-in and the shared handle table.
+    ///
+    /// [`temp_environment`]: crate::testing::doctor::temp_environment
     pub fn doctor(&self) -> doctor::Environment {
-        let mut environment = doctor::Environment::for_runner(self.paths.clone(), &self.runner);
-        environment.run_handles = self.handles.clone();
-        environment
+        self.doctor.clone()
     }
 
     /// Every row of team B's, in every table a board service reads or writes,
