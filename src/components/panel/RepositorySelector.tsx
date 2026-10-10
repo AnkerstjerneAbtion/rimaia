@@ -19,7 +19,9 @@ interface RepositorySelectorProps {
   /** What to show for `repositoryId` when the list above does not hold it —
    *  the board already resolved this name for the card. */
   readonly repositoryName: string;
-  readonly worktreePath: string | null;
+  /** The task's recorded branch: the board-side fact D13 reads since its
+   *  2026-10-10 amendment, because a board rule cannot see a path. */
+  readonly branch: string | null;
   readonly hasRuns: boolean;
   /** True while `get_task` is still in flight: whether the task has runs is
    *  not yet known, and guessing "no" would offer a control this task may
@@ -29,7 +31,8 @@ interface RepositorySelectorProps {
 
 /**
  * Task 005's "repository selector", decided by seam-contract D13: a task's
- * repository is reassignable **only while it has no worktree and no runs**.
+ * repository is reassignable **only while it has no recorded branch and no
+ * runs**.
  *
  * The rule itself is `tasks::update_task`'s, not this component's — it
  * refuses either way, and task 010 will call the same service over MCP where
@@ -44,7 +47,7 @@ export function RepositorySelector({
   repositoryId,
   repositories,
   repositoryName,
-  worktreePath,
+  branch,
   hasRuns,
   detailLoading,
 }: RepositorySelectorProps) {
@@ -52,7 +55,7 @@ export function RepositorySelector({
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<RimaiaError | null>(null);
 
-  const blockedReason = reassignmentBlockedReason(worktreePath, hasRuns);
+  const blockedReason = reassignmentBlockedReason(branch, repositoryName, hasRuns);
 
   function handleChange(event: ChangeEvent<HTMLSelectElement>) {
     const next = event.target.value;
@@ -111,8 +114,8 @@ export function RepositorySelector({
 
 /**
  * Why the selector is disabled, or `null` when it is not — the same two
- * conditions, checked in the same order (worktree first, because it names a
- * place on disk the user can go and look at), that
+ * conditions, checked in the same order (the branch first, because it names
+ * something the user can go and look at), that
  * `tasks::ensure_repository_is_reassignable` refuses on.
  *
  * The wording is the service's own sentence with two elisions, both forced.
@@ -123,9 +126,13 @@ export function RepositorySelector({
  * omitting it. The counted sentence is still what the user sees if the
  * service ever refuses for real — that message is rendered verbatim.
  */
-function reassignmentBlockedReason(worktreePath: string | null, hasRuns: boolean): string | null {
-  if (worktreePath) {
-    return `Cannot move to another repository: it already has a worktree at ${worktreePath}.`;
+function reassignmentBlockedReason(
+  branch: string | null,
+  repositoryName: string,
+  hasRuns: boolean,
+): string | null {
+  if (branch) {
+    return `Cannot move to another repository: it already has a branch, ${branch}, in ${repositoryName}.`;
   }
   if (hasRuns) {
     return "Cannot move to another repository: a run has already been recorded against it.";

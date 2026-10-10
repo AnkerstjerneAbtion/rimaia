@@ -1,7 +1,9 @@
 import { useState } from "react";
 
 import { runLabel } from "../../lib/board";
-import type { ExitClass, Run } from "../../types";
+import { getRunLogPath, toRimaiaError } from "../../lib/commands";
+import type { ExitClass, RimaiaError, Run } from "../../types";
+import { ErrorBanner } from "../ErrorBanner";
 
 /**
  * ADR-0011's six exit classes, in the words a reviewer reads rather than the
@@ -66,15 +68,28 @@ export function RunOutcomeSection({ lastRun, loading }: RunOutcomeSectionProps) 
 
 function RunOutcomeDetails({ run }: { readonly run: Run }) {
   const [copied, setCopied] = useState(false);
+  // Fetched on the action, because `Run` carries no path since task 066: the
+  // transcript is this computer's file, derived from the run's ids.
+  const [logPath, setLogPath] = useState<string | null>(null);
+  const [pathError, setPathError] = useState<RimaiaError | null>(null);
 
   async function handleCopyLogPath() {
+    let path: string;
     try {
-      await navigator.clipboard.writeText(run.logPath);
+      path = await getRunLogPath(run.taskId, run.id);
+      setLogPath(path);
+      setPathError(null);
+    } catch (thrown) {
+      setPathError(toRimaiaError(thrown));
+      setCopied(false);
+      return;
+    }
+    try {
+      await navigator.clipboard.writeText(path);
       setCopied(true);
     } catch {
-      // The path is still shown as text below — copying is a convenience on
-      // top of that, never the only way to reach it (no backend command
-      // exists to open it; task 015 owns the transcript viewer).
+      // The path is shown as text below once fetched — copying is a
+      // convenience on top of that, never the only way to reach it.
       setCopied(false);
     }
   }
@@ -118,16 +133,21 @@ function RunOutcomeDetails({ run }: { readonly run: Run }) {
             </dd>
           </>
         )}
-        <dt>Log</dt>
-        <dd>
-          <code>{run.logPath}</code>
-        </dd>
+        {logPath && (
+          <>
+            <dt>Log</dt>
+            <dd>
+              <code>{logPath}</code>
+            </dd>
+          </>
+        )}
       </dl>
       <div className="run-outcome-actions">
         <button type="button" onClick={handleCopyLogPath}>
           {copied ? "Copied" : "Copy log path"}
         </button>
       </div>
+      {pathError && <ErrorBanner error={pathError} onDismiss={() => setPathError(null)} />}
     </>
   );
 }

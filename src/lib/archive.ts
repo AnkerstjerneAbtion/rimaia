@@ -1,5 +1,5 @@
 import { formatBytes } from "./format";
-import type { ArchiveReport, OnArchive, OnArchiveOutcome, Repository } from "../types";
+import type { ArchiveReport, CheckoutView, OnArchive, OnArchiveOutcome } from "../types";
 
 /**
  * Sentences about ADR-0025's archiving, kept out of the components that render
@@ -33,18 +33,22 @@ export function describeCleanup(outcome: OnArchiveOutcome): string | null {
  * What the archive confirmation has to say *before* the click.
  *
  * "Archive" and "Archive, and delete a 900 MB checkout" must not be the same
- * sentence — that is the whole reason this is computed from the repository
- * rather than written once into a button label.
+ * sentence — that is the whole reason this is computed from the policy rather
+ * than written once into a button label.
+ *
+ * The policy is this computer's checkout's (task 066). A repository with no
+ * checkout here has nothing on this computer to clean up, so it says nothing,
+ * as `"none"` does.
  */
-export function describeCleanupIntent(repository: Repository | undefined): string | null {
-  switch (repository?.onArchive) {
+export function describeCleanupIntent(checkout: CheckoutView | undefined): string | null {
+  switch (checkout?.onArchive) {
     case undefined:
     case "none":
       return null;
     case "remove_worktree":
       return "Its git worktree will be deleted. The branch is kept, and a dirty or unpushed worktree is left alone.";
     case "script":
-      return `Your cleanup script will run: ${repository.onArchiveScript ?? "(none configured)"}. Rimaia applies none of its own guards to it.`;
+      return `Your cleanup script will run: ${checkout.onArchiveScript ?? "(none configured)"}. Rimaia applies none of its own guards to it.`;
   }
 }
 

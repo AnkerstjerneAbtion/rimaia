@@ -1,4 +1,4 @@
-import { render, screen, within } from "@testing-library/react";
+import { fireEvent, render, screen, within } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { invoke } from "@tauri-apps/api/core";
@@ -73,7 +73,6 @@ function runDetail(overrides: Partial<RunDetail> = {}): RunDetail {
     errorMessage: null,
     numTurns: 4,
     costUsd: 0.1234,
-    logPath: "/data/runs/task-1/run-1.jsonl",
     prUrl: "https://github.com/abtion/rimaia/pull/42",
     resumeAfter: null,
     baseRef: null,
@@ -307,6 +306,59 @@ describe("RunDetailOverlay", () => {
     expect(screen.getByText("Implement the parser.")).toBeInTheDocument();
     expect(screen.getByRole("heading", { name: "Transcript" })).toBeInTheDocument();
     expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  });
+
+  it("renders the one line when get_diff_summary refuses a repository not set up on this computer", async () => {
+    // Task 066: the live diff is found through this computer's worktree
+    // record, so a repository with no checkout here is refused, and the
+    // overlay's existing fallback line is what shows it.
+    answering(runDetail({ review: { source: "not_recorded" }, headSha: null }), async () => {
+      throw { code: "invalid", message: '"rimaia" is not set up on this computer' };
+    });
+
+    render(<RunDetailOverlay runId="run-1" onClose={() => {}} />);
+
+    expect(
+      await screen.findByText(
+        "No diff was recorded for this run, and its branch can no longer be read.",
+      ),
+    ).toBeInTheDocument();
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  });
+
+  it("fetches the log path on the copy action, from the run's ids", async () => {
+    // A run carries no path since task 066.
+    mockInvoke.mockImplementation(async (command, args) => {
+      if (command === "get_run") return runDetail({ logAvailable: false });
+      if (command === "get_run_log_path") {
+        expect(args).toEqual({ taskId: "task-1", runId: "run-1" });
+        return "/data/runs/task-1/run-1.jsonl";
+      }
+      throw new Error(`unexpected command: ${command}`);
+    });
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.assign(navigator, { clipboard: { writeText } });
+
+    render(<RunDetailOverlay runId="run-1" onClose={() => {}} />);
+    fireEvent.click(await screen.findByRole("button", { name: "Copy log path" }));
+
+    expect(await screen.findByRole("button", { name: "Copied" })).toBeInTheDocument();
+    expect(writeText).toHaveBeenCalledWith("/data/runs/task-1/run-1.jsonl");
+  });
+
+  it("shows the refusal when the log path cannot be had", async () => {
+    mockInvoke.mockImplementation(async (command) => {
+      if (command === "get_run") return runDetail({ logAvailable: false });
+      if (command === "get_run_log_path") {
+        throw { code: "not_found", message: "no run with id run-1" };
+      }
+      throw new Error(`unexpected command: ${command}`);
+    });
+
+    render(<RunDetailOverlay runId="run-1" onClose={() => {}} />);
+    fireEvent.click(await screen.findByRole("button", { name: "Copy log path" }));
+
+    expect(await screen.findByText("no run with id run-1")).toBeInTheDocument();
   });
 
   // Both callers mount it inside their own layout — `RunHistorySection`

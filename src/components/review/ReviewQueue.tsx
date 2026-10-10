@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
 
+import { useLocalWorktrees } from "../../hooks/useLocalWorktrees";
 import { useRepositories } from "../../hooks/useTasks";
 import { useReviewTarget } from "../../hooks/useReviewTarget";
 import { approveTask, rejectTask, requestTaskChanges, toRimaiaError } from "../../lib/commands";
@@ -81,6 +82,9 @@ export function ReviewQueue({
   const current =
     queue.find((task) => task.id === currentId) ?? (currentId === null ? (queue[0] ?? null) : null);
   const { target, error: targetError } = useReviewTarget(current?.id ?? null);
+  // Whether the card on screen has a worktree on this computer (task 066).
+  const { worktrees } = useLocalWorktrees();
+  const hasWorktree = current !== null && worktrees.has(current.id);
 
   const select = useCallback((id: string | null) => {
     currentIdRef.current = id;
@@ -238,13 +242,13 @@ export function ReviewQueue({
         case "open_pull_request":
           return openPullRequest();
         case "open_worktree":
-          if (current?.worktreePath) setMenuOpen(true);
+          if (hasWorktree) setMenuOpen(true);
           return;
         case "start_review":
           return;
       }
     },
-    [current, decide, onShowDigest, openPullRequest, step],
+    [current, decide, hasWorktree, onShowDigest, openPullRequest, step],
   );
 
   const handleKey = useRef<(event: KeyboardEvent) => void>(() => {});
@@ -344,7 +348,7 @@ export function ReviewQueue({
                   <button type="button" disabled={!target} onClick={openPullRequest}>
                     Open PR <kbd>o</kbd>
                   </button>
-                  {current.worktreePath && (
+                  {hasWorktree && (
                     <OpenInMenu
                       taskId={current.id}
                       onError={setError}

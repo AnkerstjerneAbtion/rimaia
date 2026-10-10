@@ -11,7 +11,11 @@ const RUN_STATUS_LABELS: Record<Run["status"], string> = {
 
 interface RunInfoSectionProps {
   readonly branch: string | null;
+  /** Where the worktree is on this computer, from its own record (task 066). */
   readonly worktreePath: string | null;
+  /** The task's repository has no checkout on this computer, so no worktree of
+   *  it can be here. */
+  readonly notSetUp: boolean;
   readonly lastRun: Run | null;
   readonly loading: boolean;
 }
@@ -23,7 +27,13 @@ interface RunInfoSectionProps {
  * case on purpose — so each `dd` below says *why* it is empty, not just a
  * blank dash.
  */
-export function RunInfoSection({ branch, worktreePath, lastRun, loading }: RunInfoSectionProps) {
+export function RunInfoSection({
+  branch,
+  worktreePath,
+  notSetUp,
+  lastRun,
+  loading,
+}: RunInfoSectionProps) {
   return (
     <section className="task-detail-section">
       <h4>Run info</h4>
@@ -40,6 +50,8 @@ export function RunInfoSection({ branch, worktreePath, lastRun, loading }: RunIn
         <dd>
           {worktreePath ? (
             <code>{worktreePath}</code>
+          ) : notSetUp ? (
+            <span className="muted">Not set up on this computer.</span>
           ) : (
             <span className="muted">Not created yet.</span>
           )}

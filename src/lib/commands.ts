@@ -7,6 +7,7 @@ import type {
   ArchiveReport,
   AutoCleanup,
   BoardColumn,
+  CheckoutView,
   CleanupReport,
   CredentialStatus,
   DetectedOpenInTarget,
@@ -14,6 +15,7 @@ import type {
   DoctorDismissal,
   DoctorReport,
   FindingStatus,
+  LocalWorktree,
   McpProbe,
   McpStatus,
   NewTaskInput,
@@ -174,10 +176,27 @@ export function updateRepository(
   return call<Repository>("update_repository", { id, patch });
 }
 
+/** This computer's clone of every repository it has one of (task 066): the
+ *  per-machine fields {@link Repository} no longer carries. A repository with
+ *  no entry is not set up on this computer. */
+export function listCheckouts(): Promise<CheckoutView[]> {
+  return call<CheckoutView[]>("list_checkouts");
+}
+
+/** Moves where this computer creates a repository's worktrees — what
+ *  `updateRepository`'s `worktreeRoot` did until task 066. */
+export function setRepositoryWorktreeRoot(
+  repositoryId: string,
+  worktreeRoot: string,
+): Promise<CheckoutView> {
+  return call<CheckoutView>("set_repository_worktree_root", { repositoryId, worktreeRoot });
+}
+
 /** The caller is responsible for the ADR-0012 confirmation dialog before
- *  passing `allow: true` — this only performs the already-agreed act. */
-export function setRepositoryUnattendedRuns(id: string, allow: boolean): Promise<Repository> {
-  return call<Repository>("set_repository_unattended_runs", { id, allow });
+ *  passing `allow: true` — this only performs the already-agreed act. Writes
+ *  this computer's consent (task 066). */
+export function setRepositoryUnattendedRuns(id: string, allow: boolean): Promise<CheckoutView> {
+  return call<CheckoutView>("set_repository_unattended_runs", { id, allow });
 }
 
 /**
@@ -194,8 +213,8 @@ export function setRepositoryOnArchive(
   id: string,
   onArchive: OnArchive,
   script: string | null,
-): Promise<Repository> {
-  return call<Repository>("set_repository_on_archive", { id, onArchive, script });
+): Promise<CheckoutView> {
+  return call<CheckoutView>("set_repository_on_archive", { id, onArchive, script });
 }
 
 /**
@@ -210,8 +229,8 @@ export function setRepositoryOnArchive(
 export function setRepositoryMaxConcurrency(
   id: string,
   maxConcurrency: number,
-): Promise<Repository> {
-  return call<Repository>("set_repository_max_concurrency", { id, maxConcurrency });
+): Promise<CheckoutView> {
+  return call<CheckoutView>("set_repository_max_concurrency", { id, maxConcurrency });
 }
 
 export function removeRepository(id: string): Promise<void> {
@@ -682,11 +701,17 @@ export function getDiffSummary(taskId: string): Promise<DiffSummary> {
 /**
  * Opens the task's worktree directory in the OS file manager. "Copy path"
  * needs no command — a component already has the path from
- * {@link getWorktreeStatus} or from `TaskDetail.worktreePath`, and the
+ * {@link getWorktreeStatus} or from {@link listLocalWorktrees}, and the
  * system clipboard is a browser API away.
  */
 export function revealTaskWorktree(taskId: string): Promise<void> {
   return call<void>("reveal_task_worktree", { taskId });
+}
+
+/** Every worktree this computer records (task 066): what task DTOs carried
+ *  as `worktreePath` until no board DTO held a path. Join by `taskId`. */
+export function listLocalWorktrees(): Promise<LocalWorktree[]> {
+  return call<LocalWorktree[]>("list_local_worktrees");
 }
 
 /**
@@ -894,12 +919,16 @@ export function summarizeRunTranscript(runId: string): Promise<TranscriptSummary
   return call<TranscriptSummary>("summarize_run_transcript", { runId });
 }
 
-/** Reveals `runId`'s raw JSONL transcript in the OS file manager. "Copy log
- *  path" needs no command — every caller already has `Run.logPath` from
- *  {@link getRun} or {@link listRunsForTask}, and the system clipboard is a
- *  browser API away. */
+/** Reveals `runId`'s raw JSONL transcript in the OS file manager. */
 export function revealRunLog(runId: string): Promise<void> {
   return call<void>("reveal_run_log", { runId });
+}
+
+/** Where a run's transcript is on this computer, derived from its ids
+ *  (ADR-0013): what "copy log path" copies, fetched on the action because
+ *  `Run` carries no `logPath` since task 066. */
+export function getRunLogPath(taskId: string, runId: string): Promise<string> {
+  return call<string>("get_run_log_path", { taskId, runId });
 }
 
 /** Total bytes on disk across every run's transcript, for Settings' storage

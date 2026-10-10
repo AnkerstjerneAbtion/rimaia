@@ -293,22 +293,34 @@ export interface DetectedOpenInTarget {
 // `rimaia_core::repo::RemoteInfo`.
 // ---------------------------------------------------------------------------
 
-/** Mirrors `rimaia_core::db::Repository`. */
+/** Mirrors `rimaia_core::db::Repository`: the board's half only. Everything
+ *  true of one machine's clone is its {@link CheckoutView} (task 066), so no
+ *  board DTO carries an absolute path. */
 export interface Repository {
   id: string;
   name: string;
-  path: string;
   defaultBranch: string;
+  /** RFC 3339 UTC, as sqlx writes it — see the module note above `RimaiaError`. */
+  createdAt: string;
+}
+
+/**
+ * Mirrors `rimaia_core::machine::CheckoutView`: this computer's clone of one
+ * repository, from `list_checkouts` (task 066). A repository with no checkout
+ * is not set up on this computer, which is a legitimate state, not an error.
+ */
+export interface CheckoutView {
+  repositoryId: string;
+  /** Where the clone is on this computer. */
+  path: string;
   worktreeRoot: string;
-  /** ADR-0012's per-repository opt-in to unattended runs. */
-  allowUnattendedRuns: boolean;
   /** ADR-0010's per-repository cap: how many runs this repository will hold at
    *  once. `1` unless the user opted out, and the opt-out is deliberate —
    *  worktree isolation makes two agents in one repository safe for git and
    *  does nothing about ports, test databases and lockfiles. */
   maxConcurrency: number;
-  /** RFC 3339 UTC, as sqlx writes it — see the module note above `RimaiaError`. */
-  createdAt: string;
+  /** This computer's consent to unattended runs (ADR-0012, ADR-0032 point 4). */
+  unattendedConsent: boolean;
   /** What archiving a task in this repository cleans up (ADR-0025 point 4).
    *  One slot, three states — a script and the built-in worktree removal are
    *  mutually exclusive by construction, not by a rule the form enforces. */
@@ -316,6 +328,12 @@ export interface Repository {
   /** The executable `"script"` names, canonicalized. `null` for every other
    *  mode. */
   onArchiveScript: string | null;
+}
+
+/** One task's worktree on this computer, from `list_local_worktrees`. */
+export interface LocalWorktree {
+  taskId: string;
+  path: string;
 }
 
 /** ADR-0025's cleanup slot. `"script"` means Rimaia does no cleanup of its own
@@ -348,12 +366,12 @@ export interface RegisterRepositoryInput {
 /**
  * What [`updateRepository`](./commands) sends. Mirrors `RepositoryPatch` — a
  * field left out leaves that column unchanged; there is no "clear" for any
- * of these, they are all `NOT NULL`.
+ * of these, they are all `NOT NULL`. The worktree root is this computer's,
+ * and has its own command, `setRepositoryWorktreeRoot` (task 066).
  */
 export interface UpdateRepositoryInput {
   name?: string;
   defaultBranch?: string;
-  worktreeRoot?: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -427,8 +445,9 @@ export interface Task {
    *  `beforeId`/`afterId` to `moveTask` and read back from the result. */
   position: number;
   runState: RunState;
+  /** Where its worktree is on this computer is not here: it is
+   *  {@link LocalWorktree}, from `list_local_worktrees` (task 066). */
   branch: string | null;
-  worktreePath: string | null;
   strategyMode: StrategyMode;
   /** What the *card* asks for. Read {@link TaskSummary.effectiveModel} to
    *  render what a run would actually spawn with: a task in resolved
@@ -481,7 +500,6 @@ export interface Run {
   errorMessage: string | null;
   numTurns: number | null;
   costUsd: number | null;
-  logPath: string;
   prUrl: string | null;
   resumeAfter: string | null;
   /** The branch this attempt was created from (ADR-0008) — the repository's

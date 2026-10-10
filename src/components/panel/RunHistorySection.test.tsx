@@ -34,7 +34,6 @@ function run(overrides: Partial<Run> = {}): Run {
     errorMessage: null,
     numTurns: 4,
     costUsd: 0.05,
-    logPath: "/data/runs/task-1/run-1.jsonl",
     prUrl: null,
     resumeAfter: null,
     baseRef: null,

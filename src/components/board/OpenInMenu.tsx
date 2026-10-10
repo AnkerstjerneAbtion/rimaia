@@ -9,7 +9,8 @@ import type { DetectedOpenInTarget, RimaiaError } from "../../types";
  * actually open a worktree in.
  *
  * Rendered only for a card whose task has a worktree — the caller decides that
- * off `task.worktreePath`, and never by asking the disk. "No worktree yet" is
+ * off this computer's worktree records (`useLocalWorktrees`, task 066), and
+ * never by asking the disk. "No worktree yet" is
  * the normal state of most of the board (task 007), not a failure to report, so
  * a card without one shows no control at all rather than a disabled one.
  *

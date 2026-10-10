@@ -1,4 +1,5 @@
 import type {
+  CheckoutView,
   DigestEntry,
   HistoryFinding,
   PhaseSummary,
@@ -25,7 +26,6 @@ export function taskSummary(overrides: Partial<TaskSummary> = {}): TaskSummary {
     position: 1,
     runState: "idle",
     branch: "rimaia/task-1",
-    worktreePath: "/data/worktrees/a/task-1",
     strategyMode: "default",
     model: null,
     effort: null,
@@ -53,12 +53,20 @@ export function repository(overrides: Partial<Repository> = {}): Repository {
   return {
     id: "repo-a",
     name: "rimaia-app",
-    path: "/code/rimaia-app",
     defaultBranch: "main",
-    worktreeRoot: "/data/worktrees/a",
-    allowUnattendedRuns: true,
-    maxConcurrency: 1,
     createdAt: "2026-08-20T09:00:00Z",
+    ...overrides,
+  };
+}
+
+/** This computer's checkout of {@link repository} (task 066). */
+export function checkout(overrides: Partial<CheckoutView> = {}): CheckoutView {
+  return {
+    repositoryId: "repo-a",
+    path: "/code/rimaia-app",
+    worktreeRoot: "/data/worktrees/a",
+    maxConcurrency: 1,
+    unattendedConsent: true,
     onArchive: "none",
     onArchiveScript: null,
     ...overrides,
@@ -130,7 +138,6 @@ export function runDetail(taskId: string, overrides: Partial<RunDetail> = {}): R
     errorMessage: null,
     numTurns: 12,
     costUsd: 1.5,
-    logPath: `/data/runs/${taskId}.jsonl`,
     prUrl: `https://github.com/example/app/pull/${taskId}`,
     resumeAfter: null,
     baseRef: "main",

@@ -1,5 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 
+import { useCheckouts } from "../../hooks/useCheckouts";
+import { useLocalWorktrees } from "../../hooks/useLocalWorktrees";
 import { getTask, toRimaiaError } from "../../lib/commands";
 import { subscribeToTasksChanged } from "../../lib/events";
 import type { Repository, RimaiaError, Task, TaskDetail } from "../../types";
@@ -81,6 +83,12 @@ function TaskDetailPanelBody({
   const [detail, setDetail] = useState<TaskDetail | null>(null);
   const [detailError, setDetailError] = useState<RimaiaError | null>(null);
   const panelRef = useRef<HTMLElement>(null);
+  // This computer's half of the task (task 066): its repository's checkout
+  // and where its worktree is, joined by id.
+  const { checkouts, loading: checkoutsLoading, error: checkoutsError } = useCheckouts();
+  const { worktrees } = useLocalWorktrees();
+  const checkout = checkouts.get(task.repositoryId);
+  const worktreePath = worktrees.get(task.id) ?? null;
 
   // Focus follows the drawer in. Without this the panel opens *over* the
   // board while focus stays on the card behind it, so a keyboard user's next
@@ -188,7 +196,7 @@ function TaskDetailPanelBody({
                 repositoryId={task.repositoryId}
                 repositories={repositories}
                 repositoryName={repositoryName}
-                worktreePath={task.worktreePath}
+                branch={task.branch}
                 hasRuns={detail?.lastRun != null}
                 detailLoading={detailLoading}
               />
@@ -282,7 +290,8 @@ function TaskDetailPanelBody({
 
           <RunInfoSection
             branch={task.branch}
-            worktreePath={task.worktreePath}
+            worktreePath={worktreePath}
+            notSetUp={!checkoutsLoading && checkoutsError === null && checkout === undefined}
             lastRun={detail?.lastRun ?? null}
             loading={detailLoading}
           />
@@ -327,7 +336,7 @@ function TaskDetailPanelBody({
               still one click further away and still the harder-to-reach one. */}
           <ArchiveTaskSection
             task={task}
-            repository={repositories?.find((candidate) => candidate.id === task.repositoryId)}
+            checkout={checkout}
             onArchived={onClose}
           />
 

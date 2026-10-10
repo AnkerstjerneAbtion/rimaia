@@ -8,6 +8,8 @@ import type {
   DoctorReport,
   QueueEntry,
   QueueStatus,
+  CheckoutView,
+  LocalWorktree,
   Repository,
   ReviewDigest,
   ReviewFinding,
@@ -73,6 +75,12 @@ export interface Scenario {
   readonly name: ScenarioName;
   readonly appInfo: AppInfo;
   readonly repositories: Repository[];
+  /** What `list_checkouts` answers: this computer's clone of each repository
+   *  it has one of (task 066). A repository with none is not set up here. */
+  readonly checkouts: CheckoutView[];
+  /** What `list_local_worktrees` answers: where each task with a worktree on
+   *  this computer has it (task 066). */
+  readonly worktrees: LocalWorktree[];
   readonly tasks: TaskSummary[];
   /** Every run, newest first — the Runs view's history and each task's own. */
   readonly runs: RunListEntry[];
@@ -143,28 +151,45 @@ function repositories(): Repository[] {
     {
       id: REPO_APP,
       name: "rimaia-app",
-      path: "/Users/dev/code/rimaia-app",
       defaultBranch: "main",
-      worktreeRoot: "/Users/dev/Library/Application Support/Rimaia/worktrees/rimaia-app",
-      allowUnattendedRuns: true,
-      maxConcurrency: 3,
       createdAt: ago(40 * DAY),
-      onArchive: "remove_worktree",
-      onArchiveScript: null,
     },
     {
       id: REPO_SITE,
       name: "marketing-site",
-      path: "/Users/dev/code/marketing-site",
       defaultBranch: "main",
-      worktreeRoot: "/Users/dev/Library/Application Support/Rimaia/worktrees/marketing-site",
-      allowUnattendedRuns: true,
-      maxConcurrency: 2,
       createdAt: ago(21 * DAY),
+    },
+  ];
+}
+
+/** This computer's clone of each of {@link repositories}, in the same order. */
+function checkouts(): CheckoutView[] {
+  return [
+    {
+      repositoryId: REPO_APP,
+      path: "/Users/dev/code/rimaia-app",
+      worktreeRoot: "/Users/dev/Library/Application Support/Rimaia/worktrees/rimaia-app",
+      maxConcurrency: 3,
+      unattendedConsent: true,
+      onArchive: "remove_worktree",
+      onArchiveScript: null,
+    },
+    {
+      repositoryId: REPO_SITE,
+      path: "/Users/dev/code/marketing-site",
+      worktreeRoot: "/Users/dev/Library/Application Support/Rimaia/worktrees/marketing-site",
+      maxConcurrency: 2,
+      unattendedConsent: true,
       onArchive: "none",
       onArchiveScript: null,
     },
   ];
+}
+
+/** Where a seeded task's worktree is on this computer. */
+function worktreeOf(taskId: string): LocalWorktree {
+  return { taskId, path: `/worktrees/rimaia-app/${taskId}` };
 }
 
 interface TaskInit {
@@ -194,7 +219,6 @@ function task(init: TaskInit): TaskSummary {
     position: positionCounter * 1024,
     runState: init.runState ?? "idle",
     branch: init.runState && init.runState !== "idle" ? `rimaia/${init.id}` : null,
-    worktreePath: null,
     strategyMode: planned ? "planned" : "default",
     model: planned ? "opus" : null,
     effort: planned ? "high" : null,
@@ -261,7 +285,6 @@ function runFor(
     errorMessage: status === "failed" ? "The agent stopped after repeated tool failures." : null,
     numTurns: running ? null : 38,
     costUsd: running ? null : 2.48,
-    logPath: `/Users/dev/Library/Application Support/Rimaia/logs/run-${runCounter}.jsonl`,
     prUrl: status === "succeeded" ? `https://github.com/example/${repositoryName}/pull/${100 + runCounter}` : null,
     resumeAfter: summary?.resumeAfter ?? null,
     baseRef: "main",
@@ -669,6 +692,8 @@ function populated(name: ScenarioName, runningCount: number, full: boolean): Sce
     name,
     appInfo: appInfo(true),
     repositories: repositories(),
+    checkouts: checkouts(),
+    worktrees: [],
     tasks,
     runs,
     tails,
@@ -941,7 +966,7 @@ function reviewTask(spec: ReviewSpec, index: number): TaskSummary {
     column: "in_review",
     lastRun: spec.review === "none" ? null : lastRun("succeeded", "success", (3 + index) * HOUR),
   });
-  return { ...base, branch: `rimaia/${spec.id}`, worktreePath: `/worktrees/rimaia-app/${spec.id}` };
+  return { ...base, branch: `rimaia/${spec.id}` };
 }
 
 /** The tasks around the reviewed ones, so the board is not only the queue. */
@@ -1000,6 +1025,8 @@ function reviewBoard(
     name,
     appInfo: appInfo(true),
     repositories: repositories(),
+    checkouts: checkouts(),
+    worktrees: reviewed.map((summary) => worktreeOf(summary.id)),
     tasks,
     runs,
     tails: [],
@@ -1502,7 +1529,6 @@ function reviewLoopScenario(name: ScenarioName): Scenario {
     return {
       ...base,
       branch: `rimaia/${card.id}`,
-      worktreePath: `/worktrees/rimaia-app/${card.id}`,
       reviewLoop: card.loop,
       updatedAt: ago(2 * HOUR),
     };
@@ -1593,6 +1619,8 @@ function reviewLoopScenario(name: ScenarioName): Scenario {
     name,
     appInfo: appInfo(true),
     repositories: repositories(),
+    checkouts: checkouts(),
+    worktrees: cards.map((card) => worktreeOf(card.id)),
     tasks,
     runs,
     tails,
@@ -1640,6 +1668,8 @@ function empty(name: ScenarioName, onboardingDismissed: boolean, withRepository:
     name,
     appInfo: appInfo(onboardingDismissed),
     repositories: withRepository ? repositories().slice(0, 1) : [],
+    checkouts: withRepository ? checkouts().slice(0, 1) : [],
+    worktrees: [],
     tasks: [],
     runs: [],
     tails: [],

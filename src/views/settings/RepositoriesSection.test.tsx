@@ -7,6 +7,7 @@ import { open } from "@tauri-apps/plugin-dialog";
 
 import { RepositoriesSection } from "./RepositoriesSection";
 import type {
+  CheckoutView,
   Repository,
   ReviewConfig,
   ReviewLevel,
@@ -47,17 +48,29 @@ function repository(overrides: Partial<Repository> = {}): Repository {
   return {
     id: "repo-1",
     name: "rimaia",
-    path: "/Users/dev/code/rimaia",
     defaultBranch: "main",
-    worktreeRoot: "/Users/dev/.local/share/rimaia/worktrees/rimaia",
-    allowUnattendedRuns: false,
-    maxConcurrency: 1,
     createdAt: "2026-08-20T12:00:00+00:00",
+    ...overrides,
+  };
+}
+
+/** This computer's checkout of {@link repository} (task 066): the path, the
+ *  consent, the cap and the archive policy the board's row no longer has. */
+function checkout(overrides: Partial<CheckoutView> = {}): CheckoutView {
+  return {
+    repositoryId: "repo-1",
+    path: "/Users/dev/code/rimaia",
+    worktreeRoot: "/Users/dev/worktrees/rimaia",
+    maxConcurrency: 1,
+    unattendedConsent: false,
     onArchive: "none",
     onArchiveScript: null,
     ...overrides,
   };
 }
+
+/** What `list_checkouts` answers; a test that writes a checkout replaces it. */
+let checkouts: CheckoutView[] = [];
 
 const CATALOGUE_JSON = `{
   "models": [{ "id": "opus", "label": "Opus" }, { "id": "sonnet", "label": "Sonnet" }],
@@ -105,6 +118,8 @@ function inheritingEverything(): ReviewLevel {
  */
 function mockBackend(handler: (command: string, args?: unknown) => unknown) {
   mockInvoke.mockImplementation(async (command, args) => {
+    // This computer's checkouts (task 066), which every row joins to.
+    if (command === "list_checkouts") return checkouts;
     if (command === "get_strategy_catalogue") return catalogueView();
     if (command === "get_strategy_defaults") {
       return { mode: "default" } satisfies StrategyDefaults;
@@ -130,6 +145,7 @@ function mockBackend(handler: (command: string, args?: unknown) => unknown) {
 }
 
 beforeEach(() => {
+  checkouts = [checkout()];
   mockInvoke.mockReset();
   mockOpen.mockReset();
   mockListen.mockReset();
@@ -199,7 +215,7 @@ describe("RepositoriesSection", () => {
   });
 
   it("defaults the unattended opt-in to off and requires confirming the honest warning before enabling it", async () => {
-    const repo = repository({ allowUnattendedRuns: false });
+    const repo = repository();
     mockBackend((command) => {
       if (command === "list_repositories") return [repo];
       if (command === "get_repository_remote_info") return { remoteUrl: null, ghReady: null };
@@ -231,14 +247,13 @@ describe("RepositoriesSection", () => {
   });
 
   it("enables unattended runs only once the confirmation is accepted", async () => {
-    const repo = repository({ allowUnattendedRuns: false });
-    let allow = false;
+    const repo = repository();
     mockBackend((command, args) => {
-      if (command === "list_repositories") return [{ ...repo, allowUnattendedRuns: allow }];
+      if (command === "list_repositories") return [repo];
       if (command === "get_repository_remote_info") return { remoteUrl: null, ghReady: null };
       if (command === "set_repository_unattended_runs") {
-        allow = (args as { allow: boolean }).allow;
-        return { ...repo, allowUnattendedRuns: allow };
+        checkouts = [checkout({ unattendedConsent: (args as { allow: boolean }).allow })];
+        return checkouts[0];
       }
       throw new Error(`unexpected command: ${command}`);
     });
@@ -258,6 +273,60 @@ describe("RepositoriesSection", () => {
     await waitFor(() => {
       expect(screen.getByRole("checkbox", { name: "Allow unattended agent runs" })).toBeChecked();
     });
+  });
+
+  it("says a repository with no checkout is not set up on this computer, and offers none of its controls", async () => {
+    checkouts = [];
+    mockBackend((command) => {
+      if (command === "list_repositories") return [repository()];
+      throw new Error(`unexpected command: ${command}`);
+    });
+
+    render(<RepositoriesSection />);
+
+    expect(await screen.findByText("Not set up on this computer")).toBeInTheDocument();
+    expect(screen.getByText("main")).toBeInTheDocument();
+    // Every control below is this computer's checkout, and there is none.
+    expect(screen.queryByRole("checkbox", { name: "Allow unattended agent runs" })).toBeNull();
+    expect(screen.queryByLabelText("Runs at once")).toBeNull();
+    expect(screen.queryByText("/Users/dev/code/rimaia")).toBeNull();
+    // Nor is the remote asked for: it is read from a clone this computer lacks.
+    expect(mockInvoke).not.toHaveBeenCalledWith("get_repository_remote_info", expect.anything());
+  });
+
+  it("saves the worktree root to the checkout, and the name and branch to the board", async () => {
+    mockBackend((command, args) => {
+      if (command === "list_repositories") return [repository()];
+      if (command === "get_repository_remote_info") return { remoteUrl: null, ghReady: null };
+      if (command === "update_repository") return repository();
+      if (command === "set_repository_worktree_root") {
+        checkouts = [checkout({ worktreeRoot: (args as { worktreeRoot: string }).worktreeRoot })];
+        return checkouts[0];
+      }
+      throw new Error(`unexpected command: ${command}`);
+    });
+
+    render(<RepositoriesSection />);
+    expect(await screen.findByText("/Users/dev/worktrees/rimaia")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Edit" }));
+    fireEvent.change(screen.getByLabelText("Worktree root"), {
+      target: { value: "/Volumes/Fast/worktrees" },
+    });
+    // The edit form's own Save; the credential pane below has one too.
+    const form = screen.getByLabelText("Worktree root").closest("form") as HTMLFormElement;
+    fireEvent.click(within(form).getByRole("button", { name: "Save" }));
+
+    await waitFor(() =>
+      expect(mockInvoke).toHaveBeenCalledWith("set_repository_worktree_root", {
+        repositoryId: "repo-1",
+        worktreeRoot: "/Volumes/Fast/worktrees",
+      }),
+    );
+    expect(mockInvoke).toHaveBeenCalledWith("update_repository", {
+      id: "repo-1",
+      patch: { name: "rimaia", defaultBranch: "main" },
+    });
+    expect(await screen.findByText("/Volumes/Fast/worktrees")).toBeInTheDocument();
   });
 
   it("shows the backend's refusal, including the task count, when removing a repository with tasks", async () => {
@@ -319,6 +388,7 @@ describe("RepositoriesSection", () => {
       const repo = repository();
       let stored: ReviewConfig = {};
       mockInvoke.mockImplementation(async (command, args) => {
+        if (command === "list_checkouts") return checkouts;
         if (command === "list_repositories") return [repo];
         if (command === "get_repository_remote_info") return { remoteUrl: null, ghReady: null };
         if (command === "get_strategy_catalogue") return catalogueView();
@@ -405,6 +475,7 @@ describe("RepositoriesSection", () => {
     const repo = repository();
     const stored: Record<string, StrategyDefaults> = {};
     mockInvoke.mockImplementation(async (command, args) => {
+      if (command === "list_checkouts") return checkouts;
       if (command === "list_repositories") return [repo];
       if (command === "get_repository_remote_info") return { remoteUrl: null, ghReady: null };
       if (command === "get_strategy_catalogue") return catalogueView();
@@ -469,13 +540,12 @@ describe("RepositoriesSection", () => {
   });
 
   it("writes the per-repository cap and warns about what two agents in one repository share", async () => {
-    let stored = 1;
     mockBackend((command, args) => {
-      if (command === "list_repositories") return [repository({ maxConcurrency: stored })];
+      if (command === "list_repositories") return [repository()];
       if (command === "get_repository_remote_info") return { remoteUrl: null, ghReady: null };
       if (command === "set_repository_max_concurrency") {
-        stored = (args as { maxConcurrency: number }).maxConcurrency;
-        return repository({ maxConcurrency: stored });
+        checkouts = [checkout({ maxConcurrency: (args as { maxConcurrency: number }).maxConcurrency })];
+        return checkouts[0];
       }
       throw new Error(`unexpected command: ${command}`);
     });
@@ -518,6 +588,7 @@ describe("RepositoriesSection", () => {
   it("reverts the row's strategy dropdown and shows the backend's refusal when the write fails", async () => {
     const repo = repository();
     mockInvoke.mockImplementation(async (command) => {
+      if (command === "list_checkouts") return checkouts;
       if (command === "list_repositories") return [repo];
       if (command === "get_repository_remote_info") return { remoteUrl: null, ghReady: null };
       if (command === "get_strategy_catalogue") return catalogueView();

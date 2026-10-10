@@ -392,9 +392,9 @@ describe("fixture seed", () => {
       );
 
       // D21: every repository's own cap admits what is running in it.
-      for (const repository of scenario.repositories) {
-        const inRepository = running.filter((run) => run.repositoryId === repository.id);
-        expect(repository.maxConcurrency).toBeGreaterThanOrEqual(inRepository.length);
+      for (const checkout of scenario.checkouts) {
+        const inRepository = running.filter((run) => run.repositoryId === checkout.repositoryId);
+        expect(checkout.maxConcurrency).toBeGreaterThanOrEqual(inRepository.length);
       }
     }
     expect(busy.capacity.mode).toBe("parallel");

@@ -6,18 +6,16 @@ import {
   describeCleanupIntent,
   needsAttention,
 } from "./archive";
-import type { ArchiveReport, OnArchiveOutcome, Repository } from "../types";
+import type { ArchiveReport, CheckoutView, OnArchiveOutcome } from "../types";
 
-function repository(overrides: Partial<Repository> = {}): Repository {
+/** This computer's checkout, which holds the archive policy (task 066). */
+function checkout(overrides: Partial<CheckoutView> = {}): CheckoutView {
   return {
-    id: "repo-1",
-    name: "rimaia",
+    repositoryId: "repo-1",
     path: "/code/rimaia",
-    defaultBranch: "main",
     worktreeRoot: "/data/worktrees/rimaia",
-    allowUnattendedRuns: true,
     maxConcurrency: 1,
-    createdAt: "2026-08-20T09:00:00Z",
+    unattendedConsent: true,
     onArchive: "none",
     onArchiveScript: null,
     ...overrides,
@@ -61,12 +59,16 @@ describe("describeCleanup", () => {
 
 describe("describeCleanupIntent", () => {
   it("says nothing when archiving deletes nothing", () => {
-    expect(describeCleanupIntent(repository())).toBeNull();
+    expect(describeCleanupIntent(checkout())).toBeNull();
+  });
+
+  it("says nothing for a repository not set up on this computer", () => {
+    // No checkout here is nothing here to clean up.
     expect(describeCleanupIntent(undefined)).toBeNull();
   });
 
   it("warns that the worktree goes, and that the branch does not", () => {
-    const sentence = describeCleanupIntent(repository({ onArchive: "remove_worktree" }));
+    const sentence = describeCleanupIntent(checkout({ onArchive: "remove_worktree" }));
     expect(sentence).toContain("worktree will be deleted");
     expect(sentence).toContain("branch is kept");
   });
@@ -75,7 +77,7 @@ describe("describeCleanupIntent", () => {
     // ADR-0025 point 4 puts this obligation on the copy rather than the code:
     // a script gives up every guard task 016 built.
     const sentence = describeCleanupIntent(
-      repository({ onArchive: "script", onArchiveScript: "/opt/teardown.sh" }),
+      checkout({ onArchive: "script", onArchiveScript: "/opt/teardown.sh" }),
     );
     expect(sentence).toContain("/opt/teardown.sh");
     expect(sentence).toContain("none of its own guards");

@@ -5,6 +5,7 @@ import { useReviewHistory } from "../../hooks/useReviewHistory";
 import { runLabel } from "../../lib/board";
 import {
   getRun,
+  getRunLogPath,
   revealRunLog,
   summarizeRunTranscript,
   toRimaiaError,
@@ -115,10 +116,20 @@ export function RunDetailOverlay({ runId, onClose }: RunDetailOverlayProps) {
     }
   }
 
+  // The path is fetched on the action, because a run carries none since task
+  // 066: the transcript is this computer's file, derived from the run's ids.
   async function handleCopyPath() {
     if (!detail) return;
+    let path: string;
     try {
-      await navigator.clipboard.writeText(detail.logPath);
+      path = await getRunLogPath(detail.taskId, detail.id);
+    } catch (thrown) {
+      setRevealError(toRimaiaError(thrown));
+      setCopied(false);
+      return;
+    }
+    try {
+      await navigator.clipboard.writeText(path);
       setCopied(true);
     } catch {
       setCopied(false);

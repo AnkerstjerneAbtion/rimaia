@@ -77,7 +77,6 @@ function task(overrides: Partial<Task> = {}): Task {
     position: 0,
     runState: "idle",
     branch: null,
-    worktreePath: null,
     strategyMode: "default",
     model: null,
     effort: null,
@@ -96,14 +95,8 @@ function repository(overrides: Partial<Repository> = {}): Repository {
   return {
     id: "repo-1",
     name: "rimaia",
-    path: "/code/rimaia",
     defaultBranch: "main",
-    worktreeRoot: "/data/worktrees/rimaia",
-    allowUnattendedRuns: false,
-    maxConcurrency: 1,
     createdAt: "2026-08-20T09:00:00Z",
-    onArchive: "none",
-    onArchiveScript: null,
     ...overrides,
   };
 }

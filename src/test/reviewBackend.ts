@@ -13,6 +13,7 @@ import type {
   TaskSummary,
 } from "../types";
 import {
+  checkout,
   emptyDigest,
   repository,
   runDetail,
@@ -42,6 +43,9 @@ export interface ReviewBackend {
   /** What `reject_task` answers as the set-aside branch. */
   setAsideBranch: string | null;
   openTargets: DetectedOpenInTarget[];
+  /** Tasks this computer has no worktree record of; every other task has one
+   *  (`list_local_worktrees`, task 066). */
+  withoutWorktree: string[];
   /** Every command the view sent, with its arguments, in order. */
   calls: Array<[string, unknown]>;
   fire: (event: string, payload?: unknown) => void;
@@ -66,6 +70,7 @@ export function installBackend(tasks: TaskSummary[]): ReviewBackend {
     refusals: {},
     setAsideBranch: "rimaia/task-1-2",
     openTargets: [{ target: "vs_code", label: "VS Code" }],
+    withoutWorktree: [],
     calls: [],
     fire(event, payload = []) {
       for (const handler of handlers[event] ?? []) handler({ payload });
@@ -82,6 +87,12 @@ export function installBackend(tasks: TaskSummary[]): ReviewBackend {
         return backend.tasks.filter((task) => task.archivedAt === null);
       case "list_repositories":
         return [repository()];
+      case "list_checkouts":
+        return [checkout()];
+      case "list_local_worktrees":
+        return backend.tasks
+          .filter((task) => !backend.withoutWorktree.includes(task.id))
+          .map((task) => ({ taskId: task.id, path: `/data/worktrees/a/${task.id}` }));
       case "get_review_digest":
         return backend.digest;
       case "get_task":

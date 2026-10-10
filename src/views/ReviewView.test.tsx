@@ -615,7 +615,8 @@ describe("open PR and open worktree", () => {
   });
 
   it("does nothing on w for a task without a worktree", async () => {
-    backend.tasks[0] = taskSummary({ id: "task-a", title: "Task A", worktreePath: null });
+    backend.tasks[0] = taskSummary({ id: "task-a", title: "Task A" });
+    backend.withoutWorktree = ["task-a"];
     render(<ReviewView now={NOW} />);
     await openQueue(user);
     await screen.findByText(PATCH_LINE);

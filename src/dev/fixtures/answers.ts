@@ -107,7 +107,7 @@ function sentBack(
       ...seeded,
       column: "ready",
       extraInstructions,
-      ...(rejected ? { branch: null, worktreePath: null } : {}),
+      ...(rejected ? { branch: null } : {}),
     },
     dependents: dependentsOf(scenario, id),
     setAsideBranch: rejected ? seeded.branch : null,
@@ -258,6 +258,12 @@ const SCHEDULE_VIEW: ScheduleView = {
 
 const done: Answer = () => undefined;
 
+/** The seeded checkout a per-repository setter answers with: writes change
+ *  nothing in fixture mode, so the answer is what was seeded. */
+function checkoutOf(scenario: Scenario, id: unknown) {
+  return scenario.checkouts.find((c) => c.repositoryId === id) ?? scenario.checkouts[0];
+}
+
 export const ANSWERS: Record<string, Answer> = {
   // --- app --------------------------------------------------------------
   get_app_info: (_args, s) => s.appInfo,
@@ -268,12 +274,11 @@ export const ANSWERS: Record<string, Answer> = {
   list_repositories: (_args, s) => s.repositories,
   register_repository: unsupported("registering a repository needs a real filesystem"),
   update_repository: (args, s) => s.repositories.find((r) => r.id === args.id) ?? s.repositories[0],
-  set_repository_unattended_runs: (args, s) =>
-    s.repositories.find((r) => r.id === args.id) ?? s.repositories[0],
-  set_repository_on_archive: (args, s) =>
-    s.repositories.find((r) => r.id === args.id) ?? s.repositories[0],
-  set_repository_max_concurrency: (args, s) =>
-    s.repositories.find((r) => r.id === args.id) ?? s.repositories[0],
+  list_checkouts: (_args, s) => s.checkouts,
+  set_repository_worktree_root: (args, s) => checkoutOf(s, args.repositoryId),
+  set_repository_unattended_runs: (args, s) => checkoutOf(s, args.id),
+  set_repository_on_archive: (args, s) => checkoutOf(s, args.id),
+  set_repository_max_concurrency: (args, s) => checkoutOf(s, args.id),
   remove_repository: done,
   get_repository_remote_info: () => ({
     remoteUrl: "git@github.com:example/rimaia-app.git",
@@ -383,6 +388,7 @@ export const ANSWERS: Record<string, Answer> = {
       commits: [],
     },
   reveal_task_worktree: done,
+  list_local_worktrees: (_args, s) => s.worktrees,
   list_open_in_targets: () => [
     { target: "vs_code", label: "VS Code" },
     { target: "terminal", label: "Terminal" },
@@ -419,6 +425,8 @@ export const ANSWERS: Record<string, Answer> = {
   search_run_transcript: () => [],
   summarize_run_transcript: () => TRANSCRIPT_SUMMARY,
   reveal_run_log: done,
+  get_run_log_path: (args) =>
+    `/Users/dev/Library/Application Support/Rimaia/runs/${String(args.taskId)}/${String(args.runId)}.jsonl`,
   get_run_log_size: (_args, s) => s.runs.length * 412_000,
   prune_run_logs: () => EMPTY_PRUNE,
 
