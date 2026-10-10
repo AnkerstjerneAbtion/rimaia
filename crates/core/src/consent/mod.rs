@@ -135,7 +135,8 @@ pub async fn composition(
     }
 
     let resolved = crate::review_loop::config::resolve(ctx, task_id, &repository.id).await?;
-    let review = crate::review_loop::context(ctx, task_id, resolved).await?;
+    // Only the findings are read here, so the paths need no withholding.
+    let review = crate::review_loop::context(ctx, task_id, resolved, None).await?;
     let open = review
         .open_blocking
         .iter()

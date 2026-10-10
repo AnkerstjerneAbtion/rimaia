@@ -230,10 +230,16 @@ pub fn open_advisory<'f>(
 
 /// What a review or fix phase is composed from, read for `task_id` as it
 /// stands (seam-contract D31 point 6).
+///
+/// `shared_runner` is the runner the context is read for when the task's team
+/// is shared. The change's file paths are then kept only when the newest row
+/// ran on it: another runner's bundle names paths its owner wrote, which this
+/// runner's owner never consented to (D37).
 pub async fn context(
     ctx: &ServiceContext,
     task_id: &str,
     resolved: config::Resolved,
+    shared_runner: Option<&str>,
 ) -> Result<ReviewContext> {
     let rows = findings::loop_rows(ctx, task_id).await?;
     let all = findings::list(ctx, task_id, None).await?;
@@ -283,10 +289,16 @@ pub async fn context(
         Some(row) => match runs::review(ctx, &row.id).await? {
             RunReview::Recorded {
                 bundle: Some(bundle),
-            } => Some(ChangeSummary {
-                diff: bundle.diff,
-                files: bundle.files,
-            }),
+            } => {
+                let visible = match shared_runner {
+                    None => true,
+                    Some(runner) => runs::runner_of(ctx, &row.id).await?.as_deref() == Some(runner),
+                };
+                Some(ChangeSummary {
+                    diff: bundle.diff,
+                    files: visible.then_some(bundle.files),
+                })
+            }
             _ => None,
         },
         None => None,

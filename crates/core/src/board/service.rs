@@ -29,6 +29,7 @@ use tokio::sync::broadcast::error::{RecvError, TryRecvError};
 use crate::context::{ScopedTx, ServiceContext, TeamScope};
 use crate::db::{settings, StrategySource};
 use crate::error::{Error, ErrorCode, Result};
+use crate::identity::TeamKind;
 use crate::paths::AppPaths;
 use crate::review::findings::{self, NewReviewFinding};
 use crate::review_loop;
@@ -925,14 +926,15 @@ async fn read_context(
     let catalogue = catalogue::catalogue_for(ctx, &team_id, provider).await?;
     let limits = team_limits(ctx, &team_id).await?;
 
+    let team_kind = tasks::team_kind_of_task(ctx, task_id).await?;
     let resolved = review_loop::config::resolve(ctx, task_id, &repository.id).await?;
-    let review = review_loop::context(ctx, task_id, resolved).await?;
+    let shared_runner = (team_kind == TeamKind::Shared).then_some(runner.id);
+    let review = review_loop::context(ctx, task_id, resolved, shared_runner).await?;
 
     // Decided here, under the context's scope, so the runner creates the
     // worktree from it without reading the dependency graph (D31 point 6).
     let base = base_ref::resolve(ctx, &task.task, &repository).await?;
     let authorship = authorship(ctx, &task.task, runner.id).await?;
-    let team_kind = tasks::team_kind_of_task(ctx, task_id).await?;
 
     Ok(RunContext {
         task,

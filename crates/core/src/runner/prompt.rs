@@ -69,6 +69,7 @@ use crate::identity::TeamKind;
 use crate::review::findings::{FindingSeverity, ReviewFinding};
 use crate::strategy::{Catalogue, CatalogueEntry};
 use crate::tasks::TaskDetail;
+use crate::worktree::naming;
 
 /// Section headings, in ADR-0009's fixed order.
 ///
@@ -138,6 +139,24 @@ impl<'a> PromptTeam<'a> {
             PromptTeam::Shared(authorship) => authorship,
         }
     }
+
+    /// The task's branch as this team's prompt may render it.
+    ///
+    /// A runner records the branch, and in a shared team a later run on
+    /// another member's machine renders it. The board holds it to
+    /// `worktree::naming`'s shape on write, but a slug of an earlier title is
+    /// text nobody running the task now consented to, so a shared team's
+    /// prompt renders the branch only when every byte of it is the task's id,
+    /// a slug of the title rendered beside it, or a collision number (D37).
+    fn branch(self, task: &TaskDetail) -> Option<&str> {
+        let branch = task.task.branch.as_deref()?;
+        match self {
+            PromptTeam::Personal => Some(branch),
+            PromptTeam::Shared(_) => {
+                naming::derives_from(&task.task.id, &task.task.title, branch).then_some(branch)
+            }
+        }
+    }
 }
 
 /// The whole prompt for one run, in ADR-0009's order: base instructions, task
@@ -184,7 +203,7 @@ pub fn compose_prompt(
     push_section(
         &mut sections,
         TASK_CONTEXT_HEADING,
-        &task_context(task, repo, &repo.default_branch, team),
+        &task_context(task, repo, Some(&repo.default_branch), team),
     );
     push_section(
         &mut sections,
@@ -244,7 +263,7 @@ pub fn compose_strategy_prompt(
     push_section(
         &mut sections,
         TASK_CONTEXT_HEADING,
-        &task_context(task, repo, &repo.default_branch, team),
+        &task_context(task, repo, Some(&repo.default_branch), team),
     );
     push_section(
         &mut sections,
@@ -307,11 +326,15 @@ pub fn compose_strategy_system_append(task_id: &str, tool: &str) -> String {
 /// branch, stop rather than guess. Nothing task-specific beyond the branch —
 /// what the task *is* belongs in the prompt, where the agent may reason about
 /// it.
-pub fn compose_system_append(task: &TaskDetail, repo: &Repository) -> String {
+///
+/// `team` decides only whether the branch is named: a shared team's prompt
+/// names it under [`PromptTeam`]'s branch rule, and otherwise says the
+/// worktree is on the branch Rimaia created, which it is.
+pub fn compose_system_append(task: &TaskDetail, repo: &Repository, team: PromptTeam<'_>) -> String {
     // A run always has a branch by the time task 008 spawns it, because task
     // 007 prepared the worktree first. The other spelling exists for the
     // Settings preview, which composes against whatever task the user picked.
-    let where_to_work = match task.task.branch.as_deref() {
+    let where_to_work = match team.branch(task) {
         Some(branch) => format!("on the branch `{branch}`"),
         None => "on the branch Rimaia created for this task".to_string(),
     };
@@ -366,7 +389,7 @@ pub fn compose_review_prompt(
     review: &ReviewContext,
     tool: &str,
 ) -> String {
-    let base_ref = loop_base_ref(review, repo);
+    let base_ref = loop_base_ref(review, repo, team);
     let mut sections = Vec::with_capacity(8);
     push_section(&mut sections, YOUR_JOB_HEADING, REVIEW_JOB);
     push_section(
@@ -437,7 +460,7 @@ pub fn compose_fix_prompt(
     review: &ReviewContext,
     tool: &str,
 ) -> String {
-    let base_ref = loop_base_ref(review, repo);
+    let base_ref = loop_base_ref(review, repo, team);
     let mut sections = Vec::with_capacity(6);
     push_section(
         &mut sections,
@@ -510,64 +533,97 @@ Judge the change as it is committed on this branch: whether it does what the pla
 /// The base the loop's rows record, which since task 011 can be a
 /// dependency's branch rather than the default one (seam-contract D29
 /// point 4).
-fn loop_base_ref<'a>(review: &'a ReviewContext, repo: &'a Repository) -> &'a str {
-    review
-        .implementation
-        .as_ref()
+///
+/// A dependency's branch is a slug of the dependency's title, which nobody
+/// consented to by running this task, so a shared team's prompt names the
+/// base only as the default branch (class 3) or a commit (class 2), and
+/// stands the base commit in for any other label. `None` when there is no
+/// such commit either, which takes a fork point git could not compute (D37).
+fn loop_base_ref<'a>(
+    review: &'a ReviewContext,
+    repo: &'a Repository,
+    team: PromptTeam<'_>,
+) -> Option<&'a str> {
+    let implementation = review.implementation.as_ref();
+    let label = implementation
         .and_then(|base| base.base_ref.as_deref())
-        .unwrap_or(&repo.default_branch)
+        .unwrap_or(&repo.default_branch);
+    match team {
+        PromptTeam::Personal => Some(label),
+        PromptTeam::Shared(_) if label == repo.default_branch || naming::is_commit_sha(label) => {
+            Some(label)
+        }
+        PromptTeam::Shared(_) => implementation.and_then(|base| base.base_sha.as_deref()),
+    }
 }
 
 /// `# The change`: the three commits, the bundle's size and files when one was
 /// recorded, and the two commands that read the whole branch.
-fn the_change(review: &ReviewContext, base_ref: &str) -> String {
+///
+/// The files are absent when the board withheld them: in a shared team, a
+/// bundle another runner recorded names paths this runner's owner never saw
+/// (D37), so only its counts are rendered.
+fn the_change(review: &ReviewContext, base_ref: Option<&str>) -> String {
     let base_sha = review
         .implementation
         .as_ref()
         .and_then(|base| base.base_sha.as_deref());
-    let mut lines = vec![format!("- Base ref: `{base_ref}`")];
+    let mut lines = Vec::new();
+    if let Some(base_ref) = base_ref {
+        lines.push(format!("- Base ref: `{base_ref}`"));
+    }
     if let Some(sha) = base_sha {
         lines.push(format!("- Base commit: `{sha}`"));
     }
     if let Some(sha) = review.head_sha.as_deref() {
         lines.push(format!("- Head commit: `{sha}`"));
     }
-    let mut parts = vec![lines.join("\n")];
+    let mut parts = Vec::new();
+    if !lines.is_empty() {
+        parts.push(lines.join("\n"));
+    }
 
     if let Some(change) = &review.change {
         let diff = &change.diff;
-        parts.push(format!(
-            "{} {} changed, {} {}(+), {} {}(-):",
+        let counts = format!(
+            "{} {} changed, {} {}(+), {} {}(-)",
             diff.files_changed,
             plural(diff.files_changed, "file", "files"),
             diff.insertions,
             plural(diff.insertions, "insertion", "insertions"),
             diff.deletions,
             plural(diff.deletions, "deletion", "deletions"),
-        ));
-        parts.push(
-            change
-                .files
-                .iter()
-                .map(|file| match (file.insertions, file.deletions) {
-                    (Some(added), Some(removed)) => {
-                        format!("- `{}` (+{added} -{removed})", file.path)
-                    }
-                    _ => format!("- `{}` (binary)", file.path),
-                })
-                .collect::<Vec<_>>()
-                .join("\n"),
         );
+        match &change.files {
+            None => parts.push(format!("{counts}.")),
+            Some(files) => {
+                parts.push(format!("{counts}:"));
+                parts.push(
+                    files
+                        .iter()
+                        .map(|file| match (file.insertions, file.deletions) {
+                            (Some(added), Some(removed)) => {
+                                format!("- `{}` (+{added} -{removed})", file.path)
+                            }
+                            _ => format!("- `{}` (binary)", file.path),
+                        })
+                        .collect::<Vec<_>>()
+                        .join("\n"),
+                );
+            }
+        }
     }
 
-    let from = base_sha.unwrap_or(base_ref);
-    let to = review.head_sha.as_deref().unwrap_or("HEAD");
-    parts.push(format!(
-        "Read the whole change against its base in this worktree:\n\
-         \n\
-         - `git log --oneline {from}..{to}`\n\
-         - `git diff {from}...{to}`"
-    ));
+    // Without a base to name there is no range to read, so neither command.
+    if let Some(from) = base_sha.or(base_ref) {
+        let to = review.head_sha.as_deref().unwrap_or("HEAD");
+        parts.push(format!(
+            "Read the whole change against its base in this worktree:\n\
+             \n\
+             - `git log --oneline {from}..{to}`\n\
+             - `git diff {from}...{to}`"
+        ));
+    }
     parts.join(SECTION_SEPARATOR)
 }
 
@@ -732,17 +788,19 @@ fn push_section(sections: &mut Vec<String>, heading: &str, body: &str) {
 fn task_context(
     task: &TaskDetail,
     repo: &Repository,
-    base_ref: &str,
+    base_ref: Option<&str>,
     team: PromptTeam<'_>,
 ) -> String {
     let mut lines = vec![format!("- Title: {}", task.task.title)];
     if team == PromptTeam::Personal {
         lines.push(format!("- Repository: {}", repo.name));
     }
-    if let Some(branch) = task.task.branch.as_deref() {
+    if let Some(branch) = team.branch(task) {
         lines.push(format!("- Branch: {branch}"));
     }
-    lines.push(format!("- Base ref: {base_ref}"));
+    if let Some(base_ref) = base_ref {
+        lines.push(format!("- Base ref: {base_ref}"));
+    }
     if let Some(authorship) = team.authorship() {
         let author = match authorship.plan_author.as_deref() {
             Some(login) => format!("@{login}"),
@@ -1049,6 +1107,10 @@ fn link_list(links: &[TaskLink]) -> String {
 // ---------------------------------------------------------------------------
 
 const OPEN: &str = "{{";
+
+/// What `{{task.branch}}` stands in for a branch a shared team's prompt does
+/// not name: in the run's worktree, `HEAD` is that branch.
+const WITHHELD_BRANCH: &str = "HEAD";
 const CLOSE: &str = "}}";
 
 /// ADR-0009's five variable names, as a list something outside this module can
@@ -1085,15 +1147,22 @@ struct Variables {
 impl Variables {
     /// `{{repo.name}}` is the repository's id in a shared team: the name is
     /// free text no write constrains, and a variable that expanded to nothing
-    /// would leave a sentence written around it with a hole (D37).
+    /// would leave a sentence written around it with a hole (D37). For the
+    /// same reason a branch a shared team's prompt does not name expands to
+    /// `HEAD`, which in the run's worktree is that branch.
     fn of(task: &TaskDetail, repo: &Repository, team: PromptTeam<'_>) -> Self {
-        Self {
-            task_title: task.task.title.clone(),
+        let task_branch = match (team.branch(task), task.task.branch.as_deref()) {
+            (Some(branch), _) => branch.to_string(),
+            (None, Some(_)) => WITHHELD_BRANCH.to_string(),
             // A known variable with no value expands to nothing rather than
             // staying verbatim. Leaving `{{task.branch}}` in the prompt would
             // show the agent Rimaia's own template syntax, which is worse than
             // a short sentence.
-            task_branch: task.task.branch.clone().unwrap_or_default(),
+            (None, None) => String::new(),
+        };
+        Self {
+            task_title: task.task.title.clone(),
+            task_branch,
             task_links: link_list(&task.links),
             repo_name: match team {
                 PromptTeam::Personal => repo.name.clone(),

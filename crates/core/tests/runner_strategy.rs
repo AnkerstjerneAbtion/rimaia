@@ -364,7 +364,7 @@ async fn the_implementation_run_spawns_with_exactly_the_model_and_effort_the_pla
         "--permission-mode".to_string(),
         "bypassPermissions".to_string(),
         "--append-system-prompt".to_string(),
-        compose_system_append(&detail, &fixture.repository().await),
+        compose_system_append(&detail, &fixture.repository().await, PromptTeam::Personal),
         "--model".to_string(),
         PROPOSED_MODEL.to_string(),
         "--effort".to_string(),

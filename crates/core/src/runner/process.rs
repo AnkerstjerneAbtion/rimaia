@@ -848,7 +848,7 @@ async fn run_implementation(
         ),
     };
 
-    intent.system_append = compose_system_append(detail, repository);
+    intent.system_append = compose_system_append(detail, repository, PromptTeam::of(&context));
     intent.prompt = &prompt;
     intent.workspace = Path::new(&worktree.path);
 
@@ -1258,7 +1258,7 @@ impl Phases<'_> {
             ),
             _ => (
                 limits::effective(&context.limits, &runner_limits, provider_id, []),
-                compose_system_append(&context.task, &context.repository),
+                compose_system_append(&context.task, &context.repository, PromptTeam::of(&context)),
             ),
         };
 

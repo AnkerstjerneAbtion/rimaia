@@ -632,7 +632,11 @@ async fn a_fix_phase_argv_allows_only_resolve_review_finding() {
     .map(|arg| (*arg).to_string())
     .collect();
     expected.extend(lines_of(
-        &rimaia_core::runner::prompt::compose_system_append(&detail, &repository),
+        &rimaia_core::runner::prompt::compose_system_append(
+            &detail,
+            &repository,
+            rimaia_core::runner::prompt::PromptTeam::Personal,
+        ),
     ));
     expected.extend(["--allowedTools", RESOLVE_TOOL, "--disallowedTools"].map(str::to_string));
     expected.extend(

@@ -372,6 +372,21 @@ pub async fn get_run_row(ctx: &ServiceContext, run_id: &str) -> Result<Run> {
     fetch_run(ctx, run_id).await
 }
 
+/// The runner that ran `run_id`, under the context's scope: `None` for a row
+/// written before runners were recorded, or one the context cannot reach.
+pub async fn runner_of(ctx: &ServiceContext, run_id: &str) -> Result<Option<String>> {
+    let scope = ctx.scope.json();
+    let runner = sqlx::query_scalar!(
+        "SELECT r.runner_id FROM runs r JOIN tasks t ON t.id = r.task_id
+          WHERE r.id = ?1 AND t.team_id IN (SELECT value FROM json_each(?2))",
+        run_id,
+        scope,
+    )
+    .fetch_optional(&ctx.pool)
+    .await?;
+    Ok(runner.flatten())
+}
+
 /// Which [`RunReview`] a row and its bundle row add up to:
 ///
 /// - a `review_bundles` row exists: `Recorded` with that bundle;

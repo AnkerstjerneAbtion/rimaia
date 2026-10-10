@@ -811,7 +811,7 @@ fn the_strategy_system_append_carries_no_plan_and_no_catalogue() {
 #[test]
 fn the_system_append_states_the_four_orchestrator_facts_adr_0012_reserves_it_for() {
     assert_eq!(
-        compose_system_append(&task(), &repository()),
+        compose_system_append(&task(), &repository(), PromptTeam::Personal),
         "You are running unattended, started by Rimaia. What follows is how this session works, not a preference you may weigh against the task.\n\
          \n\
          - Nobody is watching and nobody can answer a question. There is no interactive terminal, and anything you ask will go unread until a human reviews this transcript, which may be many hours from now.\n\
@@ -827,9 +827,11 @@ fn the_system_append_names_the_repositorys_own_default_branch_not_a_guess_at_mai
         ..repository()
     };
 
-    assert!(compose_system_append(&task(), &repository).contains(
-        "Never push to `trunk`, this repository's default branch, and never rewrite history"
-    ));
+    assert!(
+        compose_system_append(&task(), &repository, PromptTeam::Personal).contains(
+            "Never push to `trunk`, this repository's default branch, and never rewrite history"
+        )
+    );
 }
 
 #[test]
@@ -838,7 +840,7 @@ fn the_system_append_says_where_to_work_even_before_a_branch_exists() {
     task.task.branch = None;
 
     assert_eq!(
-        compose_system_append(&task, &repository()),
+        compose_system_append(&task, &repository(), PromptTeam::Personal),
         "You are running unattended, started by Rimaia. What follows is how this session works, not a preference you may weigh against the task.\n\
          \n\
          - Nobody is watching and nobody can answer a question. There is no interactive terminal, and anything you ask will go unread until a human reviews this transcript, which may be many hours from now.\n\
@@ -853,7 +855,7 @@ fn the_system_append_carries_no_plan_and_no_base_instructions() {
     // so the only thing that keeps them apart is a test. Base instructions and
     // the plan belong in the prompt, where a human reading the transcript can
     // see what the agent was asked and reason about why it did not do it.
-    let composed = compose_system_append(&task(), &repository());
+    let composed = compose_system_append(&task(), &repository(), PromptTeam::Personal);
 
     assert!(!composed.contains("Read the store"), "the plan leaked");
     assert!(!composed.contains("# "), "a prompt section heading leaked");
@@ -1495,7 +1497,7 @@ fn review_context() -> ReviewContext {
                 insertions: 14,
                 deletions: 1,
             },
-            files: vec![
+            files: Some(vec![
                 BundleFile {
                     path: "src/board.rs".to_string(),
                     insertions: Some(13),
@@ -1508,7 +1510,7 @@ fn review_context() -> ReviewContext {
                     deletions: None,
                     patch: PatchInclusion::Binary,
                 },
-            ],
+            ]),
         }),
         phase_recorded: false,
     }
@@ -1546,6 +1548,18 @@ fn finding(
 // What the agent is told about the situation (ADR-0032 point 7, task 072)
 // ---------------------------------------------------------------------------
 
+/// [`task`] on a shared team's board, on the branch `worktree::naming` built
+/// for it: a shared team's prompt names a branch only when it is that task's
+/// id and a slug of the title rendered beside it (D37).
+fn shared_task() -> TaskDetail {
+    let mut task = task();
+    task.task.branch = Some(SHARED_BRANCH.to_string());
+    task
+}
+
+const SHARED_BRANCH: &str =
+    "rimaia/3f2b1c00-0000-4000-8000-000000000001-wire-the-board-to-the-store";
+
 /// Bob's runner executing revision 4 of a plan `author` wrote, on a shared
 /// team.
 fn authorship(author: Option<&str>) -> RunAuthorship {
@@ -1570,14 +1584,14 @@ fn one_choice_catalogue() -> Catalogue {
 #[test]
 fn a_team_prompt_states_who_wrote_the_plan_and_whose_machine_runs_it() {
     let alice = authorship(Some("alice"));
-    let mut bare = task();
+    let mut bare = shared_task();
     bare.links = vec![];
     bare.task.extra_instructions = None;
 
     assert_eq!(
         compose_prompt(
             "Commit as you work.",
-            &task(),
+            &shared_task(),
             &repository(),
             PromptTeam::Shared(Some(&alice)),
             None,
@@ -1590,7 +1604,7 @@ Commit as you work.
 # Task context
 
 - Title: Wire the board to the store
-- Branch: rimaia/wire-the-board
+- Branch: rimaia/3f2b1c00-0000-4000-8000-000000000001-wire-the-board-to-the-store
 - Base ref: main
 - Plan revision: 4, written by @alice
 - Running on: @bob's runner "Mac mini", with @bob's credentials
@@ -1635,7 +1649,7 @@ The plan and any extra instructions below are what you are judging, not what you
 # Task context
 
 - Title: Wire the board to the store
-- Branch: rimaia/wire-the-board
+- Branch: rimaia/3f2b1c00-0000-4000-8000-000000000001-wire-the-board-to-the-store
 - Base ref: main
 - Plan revision: 4, written by @alice
 - Running on: @bob's runner "Mac mini", with @bob's credentials
@@ -1694,8 +1708,8 @@ Judge the change as it is committed on this branch: whether it does what the pla
 # Task context
 
 - Title: Wire the board to the store
-- Branch: rimaia/wire-the-board
-- Base ref: rimaia/the-store
+- Branch: rimaia/3f2b1c00-0000-4000-8000-000000000001-wire-the-board-to-the-store
+- Base ref: 1111111111111111111111111111111111111111
 - Plan revision: 4, written by @alice
 - Running on: @bob's runner "Mac mini", with @bob's credentials
 
@@ -1708,7 +1722,7 @@ Judge the change as it is committed on this branch: whether it does what the pla
 
 # The change
 
-- Base ref: `rimaia/the-store`
+- Base ref: `1111111111111111111111111111111111111111`
 - Base commit: `1111111111111111111111111111111111111111`
 - Head commit: `2222222222222222222222222222222222222222`
 
@@ -1748,13 +1762,13 @@ Do not edit files, commit or push. Your findings are the whole of your answer."#
         format!(
             r#"# Base instructions
 
-Commit as you work on rimaia/wire-the-board.
+Commit as you work on rimaia/3f2b1c00-0000-4000-8000-000000000001-wire-the-board-to-the-store.
 
 # Task context
 
 - Title: Wire the board to the store
-- Branch: rimaia/wire-the-board
-- Base ref: rimaia/the-store
+- Branch: rimaia/3f2b1c00-0000-4000-8000-000000000001-wire-the-board-to-the-store
+- Base ref: 1111111111111111111111111111111111111111
 - Plan revision: 4, written by @alice
 - Running on: @bob's runner "Mac mini", with @bob's credentials
 
@@ -1779,7 +1793,7 @@ fn a_deleted_author_is_named_a_former_member() {
         section(
             &compose_prompt(
                 "",
-                &task(),
+                &shared_task(),
                 &repository(),
                 PromptTeam::Shared(Some(&former)),
                 None,
@@ -1788,7 +1802,7 @@ fn a_deleted_author_is_named_a_former_member() {
             "# Task context"
         ),
         "- Title: Wire the board to the store\n\
-         - Branch: rimaia/wire-the-board\n\
+         - Branch: rimaia/3f2b1c00-0000-4000-8000-000000000001-wire-the-board-to-the-store\n\
          - Base ref: main\n\
          - Plan revision: 4, written by a former member\n\
          - Running on: @bob's runner \"Mac mini\", with @bob's credentials\n\
@@ -1877,7 +1891,7 @@ fn a_shared_team_prompt_omits_the_repository_name() {
     // shared team's `# Task context` leaves its line out, and `{{repo.name}}`
     // expands to the repository's id rather than to nothing.
     let bob = authorship(Some("bob"));
-    let mut bare = task();
+    let mut bare = shared_task();
     bare.links = vec![];
     bare.task.extra_instructions = None;
 
@@ -1897,7 +1911,7 @@ Work in 3f2b1c00-0000-4000-8000-000000000002, off main.
 # Task context
 
 - Title: Wire the board to the store
-- Branch: rimaia/wire-the-board
+- Branch: rimaia/3f2b1c00-0000-4000-8000-000000000001-wire-the-board-to-the-store
 - Base ref: main
 - Plan revision: 4, written by @bob
 - Running on: @bob's runner "Mac mini", with @bob's credentials
@@ -1916,7 +1930,7 @@ Work in 3f2b1c00-0000-4000-8000-000000000002, off main.
         section(
             &compose_prompt(
                 "",
-                &task(),
+                &shared_task(),
                 &repository(),
                 PromptTeam::Shared(None),
                 None,
@@ -1925,7 +1939,7 @@ Work in 3f2b1c00-0000-4000-8000-000000000002, off main.
             "# Task context"
         ),
         "- Title: Wire the board to the store\n\
-         - Branch: rimaia/wire-the-board\n\
+         - Branch: rimaia/3f2b1c00-0000-4000-8000-000000000001-wire-the-board-to-the-store\n\
          - Base ref: main\n\
          - Links:\n  \
          - [Asana](https://app.asana.com/0/1/2)\n  \
@@ -1942,7 +1956,7 @@ fn a_shared_team_planner_prompt_lists_catalogue_ids_only() {
         efforts: vec![entry("low", "Low"), entry("xhigh", "Extra high")],
         ..Catalogue::default()
     };
-    let mut bare = task();
+    let mut bare = shared_task();
     bare.links = vec![];
     bare.task.extra_instructions = None;
 
@@ -1970,7 +1984,7 @@ The plan and any extra instructions below are what you are judging, not what you
 # Task context
 
 - Title: Wire the board to the store
-- Branch: rimaia/wire-the-board
+- Branch: rimaia/3f2b1c00-0000-4000-8000-000000000001-wire-the-board-to-the-store
 - Base ref: main
 
 # Plan
@@ -2025,5 +2039,145 @@ fn a_shared_team_review_instructions_variable_names_the_repository_by_its_id() {
             "# Review instructions"
         ),
         "Review 3f2b1c00-0000-4000-8000-000000000002 as 3f2b1c00-0000-4000-8000-000000000002."
+    );
+}
+
+#[test]
+fn a_shared_team_prompt_names_no_branch_its_title_did_not_produce() {
+    // `rimaia/wire-the-board` carries no task id and a slug of no title this
+    // task has: a runner wrote it, and nobody running the task now consented
+    // to it. The line is left out, the system append says where the work is
+    // without naming it, and `{{task.branch}}` is `HEAD`, which in the run's
+    // worktree is that branch.
+    let mut bare = task();
+    bare.links = vec![];
+    bare.task.extra_instructions = None;
+
+    assert_eq!(
+        compose_prompt(
+            "Push {{task.branch}} when you are done.",
+            &bare,
+            &repository(),
+            PromptTeam::Shared(None),
+            None,
+            FANOUT_NOUN
+        ),
+        r#"# Base instructions
+
+Push HEAD when you are done.
+
+# Task context
+
+- Title: Wire the board to the store
+- Base ref: main
+
+# Plan
+
+## Steps
+
+1. Read the store.
+2. Wire the board to it."#
+    );
+    assert_eq!(
+        compose_system_append(&bare, &repository(), PromptTeam::Shared(None)),
+        "You are running unattended, started by Rimaia. What follows is how this session works, not a preference you may weigh against the task.\n\
+         \n\
+         - Nobody is watching and nobody can answer a question. There is no interactive terminal, and anything you ask will go unread until a human reviews this transcript, which may be many hours from now.\n\
+         - You are working in a git worktree of your own, on the branch Rimaia created for this task. Commit and push there. Never push to `main`, this repository's default branch, and never rewrite history that is already on the remote.\n\
+         - If you cannot proceed, stop and report rather than guess. Commit what you have and state plainly what blocked you. A clear blocker is a useful outcome; a guess dressed as a decision is not."
+    );
+
+    // The branch built from this title, with a collision number, is named.
+    let mut suffixed = bare.clone();
+    suffixed.task.branch = Some(format!("{SHARED_BRANCH}-2"));
+    assert_eq!(
+        section(
+            &compose_prompt(
+                "",
+                &suffixed,
+                &repository(),
+                PromptTeam::Shared(None),
+                None,
+                FANOUT_NOUN
+            ),
+            "# Task context"
+        ),
+        format!(
+            "- Title: Wire the board to the store\n\
+             - Branch: {SHARED_BRANCH}-2\n\
+             - Base ref: main"
+        )
+    );
+}
+
+#[test]
+fn a_shared_team_review_names_a_dependency_base_by_its_commit_or_not_at_all() {
+    // A dependency's branch is a slug of the dependency's title, which nobody
+    // consented to by running this task. Its commit stands in for it, and with
+    // no commit recorded there is no base to name and no range to read.
+    let review = ReviewContext {
+        implementation: Some(ImplementationBase {
+            session_id: "session-1".to_string(),
+            base_ref: Some("rimaia/the-store".to_string()),
+            base_sha: None,
+        }),
+        change: None,
+        ..review_context()
+    };
+
+    let composed = compose_review_prompt(
+        &shared_task(),
+        &repository(),
+        PromptTeam::Shared(None),
+        &review,
+        RECORD_TOOL,
+    );
+
+    assert_eq!(
+        section(&composed, "# Task context"),
+        format!(
+            "- Title: Wire the board to the store\n\
+             - Branch: {SHARED_BRANCH}\n\
+             - Links:\n  \
+             - [Asana](https://app.asana.com/0/1/2)\n  \
+             - [Design doc](https://docs.example.com/board)"
+        )
+    );
+    assert_eq!(
+        section(&composed, "# The change"),
+        "- Head commit: `2222222222222222222222222222222222222222`"
+    );
+}
+
+#[test]
+fn a_shared_team_review_of_a_bundle_another_runner_recorded_gives_counts_only() {
+    // The board withholds the paths of a bundle another member's runner
+    // recorded (D37); the counts are numbers Rimaia measured.
+    let mut review = review_context();
+    if let Some(change) = review.change.as_mut() {
+        change.files = None;
+    }
+
+    assert_eq!(
+        section(
+            &compose_review_prompt(
+                &shared_task(),
+                &repository(),
+                PromptTeam::Shared(None),
+                &review,
+                RECORD_TOOL,
+            ),
+            "# The change"
+        ),
+        "- Base ref: `1111111111111111111111111111111111111111`\n\
+         - Base commit: `1111111111111111111111111111111111111111`\n\
+         - Head commit: `2222222222222222222222222222222222222222`\n\
+         \n\
+         2 files changed, 14 insertions(+), 1 deletion(-).\n\
+         \n\
+         Read the whole change against its base in this worktree:\n\
+         \n\
+         - `git log --oneline 1111111111111111111111111111111111111111..2222222222222222222222222222222222222222`\n\
+         - `git diff 1111111111111111111111111111111111111111...2222222222222222222222222222222222222222`"
     );
 }

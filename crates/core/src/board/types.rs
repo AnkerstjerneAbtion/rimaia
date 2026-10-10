@@ -340,7 +340,10 @@ pub struct ImplementationBase {
 #[serde(rename_all = "camelCase")]
 pub struct ChangeSummary {
     pub diff: DiffStat,
-    pub files: Vec<BundleFile>,
+    /// `None` when withheld: in a shared team, unless the newest row ran on
+    /// the runner the context is read for, since a path is text another
+    /// member's runner wrote (seam-contract D37).
+    pub files: Option<Vec<BundleFile>>,
 }
 
 /// The board's half of what bounds a run. The runner applies it.
