@@ -19,12 +19,14 @@ use rimaia_core::db::{BoardColumn, ExitClass, RunKind, RunStatus};
 use rimaia_core::repo::{self, NewRepository};
 use rimaia_core::runner::events::TokenUsage;
 use rimaia_core::runner::outcome::{RunOutcome, SpawnedAs};
+use rimaia_core::runner::provider::{AgentProvider, ClaudeProvider, ProviderId};
 use rimaia_core::runner::{RunTrigger, RunnerConfig};
 use rimaia_core::runs::bundle::ReviewBundle;
 use rimaia_core::scheduler::ResumePoint;
 use rimaia_core::tasks::{self, NewTask};
 use rimaia_core::testing::board_contract::{Harness, Which};
-use rimaia_core::testing::db::insert_runner;
+use rimaia_core::testing::db::{insert_member, insert_runner};
+use rimaia_core::testing::provider::Ledger;
 use rimaia_core::testing::{TempRepo, TestClock, TestContext};
 use rimaia_core::{AppPaths, Clock, ServiceContext};
 use serde::de::DeserializeOwned;
@@ -36,8 +38,24 @@ struct InProcess {
     /// Held for its `Drop`: the board's database file and the transcript
     /// paths both point inside it.
     _data: TempDir,
+    paths: AppPaths,
+    term: LeaseTerm,
+    second_runner: String,
     a: Arc<dyn BoardPort>,
     b: Arc<dyn BoardPort>,
+}
+
+impl InProcess {
+    /// An adapter for `runner_id` holding `provider`, over the one board.
+    fn adapter(&self, runner_id: &str, provider: Arc<dyn AgentProvider>) -> Arc<dyn BoardPort> {
+        Arc::new(InProcessBoard::new(
+            self.harness.context.clone(),
+            self.paths.clone(),
+            provider,
+            runner_id.to_string(),
+            self.term,
+        ))
+    }
 }
 
 impl Harness for InProcess {
@@ -68,11 +86,14 @@ impl Harness for InProcess {
             ))
         };
         let a = board(harness.solo.runner_id.clone());
-        let b = board(second_runner);
+        let b = board(second_runner.clone());
 
         Self {
             harness,
             _data: data,
+            paths,
+            term,
+            second_runner,
             a,
             b,
         }
@@ -83,6 +104,36 @@ impl Harness for InProcess {
             Which::A => Arc::clone(&self.a),
             Which::B => Arc::clone(&self.b),
         }
+    }
+
+    fn runner_on(&self, which: Which, provider: ProviderId) -> Arc<dyn BoardPort> {
+        let provider: Arc<dyn AgentProvider> = match provider {
+            ProviderId::ClaudeCode => Arc::new(ClaudeProvider),
+            ProviderId::Ledger => Arc::new(Ledger),
+        };
+        match which {
+            Which::A => self.adapter(&self.harness.solo.runner_id, provider),
+            Which::B => self.adapter(&self.second_runner, provider),
+        }
+    }
+
+    async fn add_member_with_runner(&self) -> (String, String) {
+        let mut conn = self
+            .harness
+            .context
+            .pool
+            .acquire()
+            .await
+            .expect("a connection");
+        let member = insert_member(
+            &mut conn,
+            &self.harness.clock,
+            &self.harness.solo.team_id,
+            "a-teammate",
+        )
+        .await;
+        let runner = insert_runner(&mut conn, &self.harness.clock, &member, "Their laptop").await;
+        (member, runner)
     }
 
     fn board(&self) -> &ServiceContext {

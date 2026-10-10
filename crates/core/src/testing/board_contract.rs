@@ -21,6 +21,8 @@
 //! `ClaimTarget::Next` (042: the `a_next_claim_…` cases and its race),
 //! fencing and generations (043: the `…generation…`, heartbeat and week-long
 //! cases, and the race, which is the lease form of 042's),
+//! the model rule and who may start a runner (067: the `…model…` cases,
+//! `run_now_is_not_bound_by_capacity` and the owner case),
 //! expiry (053), `run_tool` (055), resends (056).
 
 use std::future::Future;
@@ -32,6 +34,7 @@ use chrono::Duration;
 use tempfile::TempDir;
 
 use crate::board::lease;
+use crate::board::service::{authorize_start, OwnerPresence};
 use crate::board::{
     BoardMethod, BoardPort, Claim, ClaimTarget, FinishRun, FreeCapacity, Heartbeat, LeasePurpose,
     LeaseRef, LeaseTerm, NextStep, StartRun, TranscriptChunk, TranscriptEnd, LEASE_LIFETIME,
@@ -48,11 +51,13 @@ use crate::review::findings::{self, FindingSeverity, NewReviewFinding};
 use crate::review_loop::{config as review_config, Verdict};
 use crate::runner::events::{RunTail, TokenUsage};
 use crate::runner::outcome::{self, NewRun, RunOutcome, SpawnedAs};
-use crate::runner::provider::ClaudeProvider;
+use crate::runner::provider::{ClaudeProvider, ProviderId};
 use crate::runner::RunTrigger;
 use crate::runs::{self, bundle::RunCapture};
+use crate::scheduler::selection::{self, RunnerView};
 use crate::scheduler::ResumePoint;
 use crate::tasks::strategy::StrategyPlan;
+use crate::tasks::Patch;
 use crate::tasks::{self, NewTask, TaskPatch};
 use crate::testing::{TempRepo, TestClock};
 
@@ -76,6 +81,14 @@ pub trait Harness: Sized {
     fn start_with(term: LeaseTerm) -> impl Future<Output = Self>;
     /// Runner `A` or `B`'s port onto the one board.
     fn runner(&self, which: Which) -> Arc<dyn BoardPort>;
+    /// Runner `A` or `B`'s port onto the one board, as a runner whose claims
+    /// carry `provider` (task 067's model rule). The in-process harness builds
+    /// the adapter with that provider; task 052's builds its `HttpBoard` with
+    /// that `ProviderId`.
+    fn runner_on(&self, which: Which, provider: ProviderId) -> Arc<dyn BoardPort>;
+    /// Adds a second user as a member of the board's team, with a runner of
+    /// their own, and returns both ids: `(user_id, runner_id)`.
+    fn add_member_with_runner(&self) -> impl Future<Output = (String, String)>;
     /// The board's own context, to arrange and inspect it through core
     /// services.
     fn board(&self) -> &ServiceContext;
@@ -124,6 +137,11 @@ macro_rules! board_contract {
             generation_increases_across_a_release_and_a_reclaim,
             the_heartbeat_renews_current_leases_and_fences_stale_ones_per_lease,
             a_solo_lease_survives_a_week_of_clock_time,
+            a_runner_is_not_offered_a_task_whose_model_belongs_to_another_provider,
+            a_continue_into_a_review_whose_model_this_provider_cannot_run_is_released,
+            a_plan_claim_and_an_inline_planner_claim_are_not_subject_to_the_model_rule,
+            run_now_is_not_bound_by_capacity,
+            only_a_runners_owner_is_authorized_to_start_it,
         );
     };
     (@cases $harness:ty; $($case:ident),* $(,)?) => {
@@ -274,6 +292,37 @@ async fn turn_the_loop_on(board: &ServiceContext) {
     )
     .await
     .expect("turn the loop on");
+}
+
+/// Sets `task_id`'s model through the board's own service, which makes the
+/// task `manual` (D17.6) unless `mode` says otherwise.
+async fn ask_for_model(
+    board: &ServiceContext,
+    task_id: &str,
+    model: &str,
+    mode: Option<StrategyMode>,
+) {
+    tasks::update_task(
+        board,
+        task_id,
+        TaskPatch {
+            strategy_mode: mode,
+            model: Patch::Set(model.to_string()),
+            ..TaskPatch::default()
+        },
+    )
+    .await
+    .expect("set the task's model");
+}
+
+/// The sentence a named claim of a task set to `model` gets from a runner
+/// whose provider is `provider` and does not offer it.
+fn model_refusal(model: &str, provider: ProviderId) -> String {
+    format!(
+        "this task asks for the model \"{model}\", which {} cannot run. Change the task's \
+         model, or run it on a runner whose provider offers it.",
+        provider.display_name()
+    )
 }
 
 async fn claimed(runner: &dyn BoardPort, target: ClaimTarget) -> Claim {
@@ -1743,6 +1792,248 @@ pub mod cases {
             receipt.next,
             NextStep::Released { resume_after: None },
             "the finish landed",
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Task 067: the model rule, and who may start a runner
+    // -----------------------------------------------------------------------
+
+    pub async fn a_runner_is_not_offered_a_task_whose_model_belongs_to_another_provider<
+        H: Harness,
+    >() {
+        let harness = H::start().await;
+        let board = harness.board();
+        let arranged = Arranged::new(board).await;
+        let repository = arranged.repository_id.as_str();
+        let task_id = arranged.task(board, "Asks for opus").await;
+        ask_for_model(board, &task_id, "opus", None).await;
+        harness.clock().advance(Duration::seconds(1));
+        let before = rows_a_lease_method_could_write(board).await;
+        let ledger = harness.runner_on(Which::B, ProviderId::Ledger);
+
+        let passed_over = ledger
+            .claim(next_target(&[repository], 1, &[(repository, 1)]))
+            .await
+            .expect("passing a task over is not an error");
+        assert!(
+            passed_over.is_none(),
+            "a Ledger runner was offered a task set to opus: {passed_over:?}"
+        );
+
+        // The plan a card shows agrees with the claim: Ledger's leaves the task
+        // out, Claude's has it next. Neither is pinned, so the runner a view
+        // names does not matter here.
+        let plan_for = |provider| {
+            let view = RunnerView::new("a-plan-view", provider, [repository.to_string()]);
+            async move { selection::plan(board, &view).await.expect("draw a plan") }
+        };
+        assert!(
+            !plan_for(ProviderId::Ledger)
+                .await
+                .iter()
+                .any(|entry| entry.task_id == task_id),
+            "Ledger's plan lists a task it cannot run",
+        );
+        let claude_plan = plan_for(ProviderId::ClaudeCode).await;
+        let next = claude_plan
+            .iter()
+            .find(|entry| entry.task_id == task_id)
+            .expect("Claude's plan lists the task");
+        assert_same(next.queue_position, Some(1), "next for Claude");
+
+        let refused = ledger
+            .claim(run_target(&task_id, false))
+            .await
+            .expect_err("a named claim is refused, in a sentence");
+        assert_same(refused.code(), ErrorCode::Invalid, "the code");
+        assert_same(
+            refused.to_string(),
+            model_refusal("opus", ProviderId::Ledger),
+            "the sentence",
+        );
+        assert_same(
+            rows_a_lease_method_could_write(board).await,
+            before,
+            "nothing was written",
+        );
+
+        let claim = harness
+            .runner(Which::A)
+            .claim(next_target(&[repository], 1, &[(repository, 1)]))
+            .await
+            .expect("claim")
+            .expect("a Claude runner takes the task");
+        assert_same(claim.lease.task_id, task_id, "A's claim");
+    }
+
+    pub async fn a_continue_into_a_review_whose_model_this_provider_cannot_run_is_released<
+        H: Harness,
+    >() {
+        let harness = H::start().await;
+        let board = harness.board();
+        let arranged = Arranged::new(board).await;
+        // No model of its own, so Ledger can implement it; the review loop
+        // names Claude's.
+        let task_id = arranged.task(board, "Reviewed by opus").await;
+        review_config::set_review_settings(
+            board,
+            &ClaudeProvider,
+            "",
+            serde_json::json!({ "enabled": "on_cost_acknowledged", "review_model": "opus" }),
+        )
+        .await
+        .expect("turn the loop on with a review model");
+        let ledger = harness.runner_on(Which::B, ProviderId::Ledger);
+        let claim = claimed(ledger.as_ref(), run_target(&task_id, false)).await;
+        let run_id = new_id();
+        ledger
+            .start_run(&claim.lease, starting(&run_id, RunKind::Implementation))
+            .await
+            .expect("start the implementation");
+
+        let receipt = ledger
+            .finish_run(&claim.lease, &run_id, finishing_at(succeeded(), "a1"))
+            .await
+            .expect("finish it");
+
+        assert_same(
+            receipt.next,
+            NextStep::Released { resume_after: None },
+            "the loop ends here rather than continuing into a review Ledger cannot run",
+        );
+        assert_same(lease_of(board, &task_id).await, None, "the lease is gone");
+        let runs = runs::list_runs_for_task(board, &task_id)
+            .await
+            .expect("read the runs");
+        assert_same(
+            runs.iter().map(|run| run.kind).collect::<Vec<_>>(),
+            vec![RunKind::Implementation],
+            "no review run was started",
+        );
+        let detail = tasks::get_task(board, &task_id)
+            .await
+            .expect("read the task");
+        assert_same(detail.task.column, BoardColumn::InReview, "the column");
+        assert_same(detail.task.run_state, RunState::Idle, "the run state");
+    }
+
+    pub async fn a_plan_claim_and_an_inline_planner_claim_are_not_subject_to_the_model_rule<
+        H: Harness,
+    >() {
+        let harness = H::start().await;
+        let board = harness.board();
+        let arranged = Arranged::new(board).await;
+        let ledger = harness.runner_on(Which::B, ProviderId::Ledger);
+
+        // Plan now on a card set to opus: the planner chooses from Ledger's
+        // own catalogue, so the card's model is not the planner's.
+        let by_hand = arranged.task(board, "Planned by hand").await;
+        ask_for_model(board, &by_hand, "opus", None).await;
+        let plan = claimed(
+            ledger.as_ref(),
+            ClaimTarget::Plan {
+                task_id: by_hand.clone(),
+            },
+        )
+        .await;
+        assert_same(plan.purpose, LeasePurpose::Strategy, "Plan now's purpose");
+        assert_same(
+            plan.context.strategy.model.as_deref(),
+            Some("opus"),
+            "the model the rule would have refused",
+        );
+
+        // A fresh start that needs planning is leased as `strategy`, ADR-0016's
+        // inline planner, and is exempt for the same reason.
+        let inline = arranged.task(board, "Planned inline").await;
+        ask_for_model(board, &inline, "opus", Some(StrategyMode::Planned)).await;
+        let started = claimed(ledger.as_ref(), run_target(&inline, false)).await;
+        assert_same(
+            started.purpose,
+            LeasePurpose::Strategy,
+            "the inline planner's purpose",
+        );
+        assert_same(
+            started.context.strategy.model.as_deref(),
+            Some("opus"),
+            "the model the rule would have refused",
+        );
+    }
+
+    pub async fn run_now_is_not_bound_by_capacity<H: Harness>() {
+        let harness = H::start().await;
+        let board = harness.board();
+        let arranged = Arranged::new(board).await;
+        let repository = arranged.repository_id.as_str();
+        let task_id = arranged
+            .task(board, "Started by hand on a full runner")
+            .await;
+        let runner = harness.runner(Which::A);
+
+        let queued = runner
+            .claim(next_target(&[repository], 0, &[(repository, 0)]))
+            .await
+            .expect("no capacity is not an error");
+        assert!(
+            queued.is_none(),
+            "a full runner's queue claimed: {queued:?}"
+        );
+
+        // D19 point 5: a named start carries no capacity, and the board applies
+        // none.
+        let claim = claimed(
+            runner.as_ref(),
+            ClaimTarget::Run {
+                task_id: task_id.clone(),
+                trigger: RunTrigger::Manual,
+                continue_session: false,
+            },
+        )
+        .await;
+        assert_same(&claim.lease.task_id, &task_id, "Run now claims");
+        assert_same(claim.trigger, RunTrigger::Manual, "as a manual run");
+        assert_same(
+            run_state(board, &task_id).await,
+            RunState::Running,
+            "running",
+        );
+    }
+
+    pub async fn only_a_runners_owner_is_authorized_to_start_it<H: Harness>() {
+        let harness = H::start().await;
+        let board = harness.board();
+        let (member, theirs) = harness.add_member_with_runner().await;
+
+        let refused = authorize_start(board, &theirs, OwnerPresence::AtRunner)
+            .await
+            .expect_err("a teammate's runner is not the caller's to start");
+        assert_same(refused.code(), ErrorCode::Invalid, "the code");
+        assert_same(
+            refused.to_string(),
+            "only the owner of this runner can start a run on it; assign the task to them, or \
+             leave it ready for their queue"
+                .to_string(),
+            "the sentence",
+        );
+
+        let as_them = ServiceContext {
+            actor: member,
+            ..board.clone()
+        };
+        assert_same(
+            authorize_start(&as_them, &theirs, OwnerPresence::AtRunner)
+                .await
+                .expect("its owner may start it"),
+            RunTrigger::Manual,
+            "at the runner",
+        );
+        assert_same(
+            authorize_start(&as_them, &theirs, OwnerPresence::Remote)
+                .await
+                .expect("its owner may start it from elsewhere"),
+            RunTrigger::Queued,
+            "away from it",
         );
     }
 }

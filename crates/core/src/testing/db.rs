@@ -81,6 +81,49 @@ pub async fn insert_runner(
     runner_id
 }
 
+/// A second user, a `member` of `team_id`, for a test about who may act on
+/// another person's runner (task 067). Returns the user's id.
+///
+/// A fixture, not a membership service: invitations are task 051's.
+pub async fn insert_member(
+    conn: &mut SqliteConnection,
+    clock: &dyn Clock,
+    team_id: &str,
+    login: &str,
+) -> crate::events::UserId {
+    let user_id = crate::db::new_id();
+    let now = clock.now();
+    sqlx::query("INSERT INTO users (id, login, created_at) VALUES (?1, ?2, ?3)")
+        .bind(&user_id)
+        .bind(login)
+        .bind(now)
+        .execute(&mut *conn)
+        .await
+        .expect("a new user must insert");
+    sqlx::query(
+        "INSERT INTO team_memberships (team_id, user_id, role, created_at)
+         VALUES (?1, ?2, 'member', ?3)",
+    )
+    .bind(team_id)
+    .bind(&user_id)
+    .bind(now)
+    .execute(&mut *conn)
+    .await
+    .expect("a membership of an existing team must insert");
+    user_id
+}
+
+/// Marks `runner_id` unpaired now, as unpairing a machine does: the row
+/// stays, because runs keep naming it.
+pub async fn unpair_runner(conn: &mut SqliteConnection, clock: &dyn Clock, runner_id: &str) {
+    sqlx::query("UPDATE runners SET unpaired_at = ?1 WHERE id = ?2")
+        .bind(clock.now())
+        .bind(runner_id)
+        .execute(&mut *conn)
+        .await
+        .expect("an existing runner must unpair");
+}
+
 /// The version of task 038's team-mode rebuild: every board migration older
 /// than this is the schema an install had before team mode.
 pub const TEAM_MODE_REBUILD_VERSION: &str = "20261003120000";
