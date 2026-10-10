@@ -379,7 +379,7 @@ async fn start_run_moves_the_lease_to_the_runs_kind_under_one_generation() {
         .finish_run(
             &claim.lease,
             &implementation,
-            finishing_at(succeeded(), "a1"),
+            finishing_at(succeeded(), HEAD),
         )
         .await
         .expect("finish the implementation")
@@ -403,7 +403,7 @@ async fn start_run_moves_the_lease_to_the_runs_kind_under_one_generation() {
         .await
         .expect("record a blocking finding");
     let next = board
-        .finish_run(&claim.lease, &review, finishing_at(succeeded(), "a1"))
+        .finish_run(&claim.lease, &review, finishing_at(succeeded(), HEAD))
         .await
         .expect("finish the review")
         .next;
@@ -438,7 +438,7 @@ async fn a_waiting_review_is_claimed_back_as_a_review() {
         .finish_run(
             &claim.lease,
             &implementation,
-            finishing_at(succeeded(), "a1"),
+            finishing_at(succeeded(), HEAD),
         )
         .await
         .expect("finish the implementation");
@@ -541,7 +541,7 @@ async fn continue_keeps_the_lease() {
         .expect("start");
 
     let receipt = board
-        .finish_run(&claim.lease, &run_id, finishing_at(succeeded(), "a1"))
+        .finish_run(&claim.lease, &run_id, finishing_at(succeeded(), HEAD))
         .await
         .expect("finish");
 
@@ -577,7 +577,7 @@ async fn a_continue_that_eligibility_refuses_is_released() {
         .expect("pin the task to B");
 
     let receipt = board
-        .finish_run(&claim.lease, &run_id, finishing_at(succeeded(), "a1"))
+        .finish_run(&claim.lease, &run_id, finishing_at(succeeded(), HEAD))
         .await
         .expect("finish");
 
@@ -764,7 +764,7 @@ async fn continue_leaves_the_pin() {
         .expect("start");
 
     let receipt = board
-        .finish_run(&claim.lease, &run_id, finishing_at(succeeded(), "a1"))
+        .finish_run(&claim.lease, &run_id, finishing_at(succeeded(), HEAD))
         .await
         .expect("finish");
 
@@ -1234,7 +1234,7 @@ async fn a_held_lease_whose_run_the_board_already_closed_is_released() {
         .finish_run(
             &claim.lease,
             &implementation,
-            finishing_at(succeeded(), "a1"),
+            finishing_at(succeeded(), HEAD),
         )
         .await
         .expect("finish the implementation")
@@ -1503,6 +1503,9 @@ fn finishing(outcome: RunOutcome) -> FinishRun {
         ceiling: Default::default(),
     }
 }
+
+/// A commit a run ended on: the board refuses anything but a full sha (D37).
+const HEAD: &str = "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1";
 
 fn finishing_at(outcome: RunOutcome, head: &str) -> FinishRun {
     FinishRun {

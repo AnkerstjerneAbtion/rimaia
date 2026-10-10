@@ -56,7 +56,7 @@ pub(crate) mod base_ref;
 pub mod bundle;
 pub mod cleanup;
 mod git;
-mod naming;
+pub(crate) mod naming;
 // `pub(crate)` rather than private since task 030: `archive::validate_script_path`
 // needs the same "absolute, no `..`, canonicalized" rule, and a second copy of
 // that check is exactly what this module's own header argues against.

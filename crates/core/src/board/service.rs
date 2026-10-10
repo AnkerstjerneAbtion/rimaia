@@ -46,6 +46,7 @@ use crate::strategy::{self, catalogue};
 use crate::tasks;
 use crate::tasks::strategy::{prepare_strategy, write_strategy, StrategyPlan};
 use crate::worktree::base_ref;
+use crate::worktree::naming::{self, COMMIT_RULE, TASK_BRANCH_RULE};
 
 use super::lease::{self, Candidate, ClaimRequest, Door, Edges, LeaseTerm, PhaseModels};
 use super::types::{
@@ -590,6 +591,8 @@ async fn end_before_composition(
 
 /// Writes `tasks.branch` and nothing else: the worktree path is the runner's
 /// (ADR-0028 point 2). Its production caller is `worktree::prepare` (task 066).
+/// A branch `worktree::naming` could not have built for this task is refused,
+/// since a later run on another member's machine renders it (D37).
 pub async fn record_branch(
     ctx: &ServiceContext,
     runner_id: &str,
@@ -599,6 +602,7 @@ pub async fn record_branch(
     let ctx = &lease_context(ctx, lease)?;
     let mut tx = ctx.begin_immediate().await?;
     lease::current(&mut tx, lease, runner_id).await?;
+    check_branch(&mut tx, &lease.task_id, branch).await?;
 
     let now = ctx.clock.now();
     let team_id = sqlx::query_scalar!(
@@ -619,7 +623,8 @@ pub async fn record_branch(
 /// the runner the adapter serves, and moves the lease onto it: its `run_id`
 /// and, as its purpose, the run's kind, under the same generation (task 043).
 /// In process the transcript path comes from this board's own `paths` (D31
-/// point 4).
+/// point 4). The base is held to [`check_start`], for `record_branch`'s
+/// reason.
 pub async fn start_run(
     ctx: &ServiceContext,
     paths: &AppPaths,
@@ -630,6 +635,13 @@ pub async fn start_run(
     let ctx = &lease_context(ctx, lease)?;
     let mut tx = ctx.begin_immediate().await?;
     lease::current(&mut tx, lease, runner_id).await?;
+    check_start(
+        &mut tx,
+        &lease.task_id,
+        run.base_ref.as_deref(),
+        run.base_sha.as_deref(),
+    )
+    .await?;
 
     let team_id = outcome::insert_run_within(
         &mut tx,
@@ -738,6 +750,7 @@ pub async fn finish_run(
     let mut tx = ctx.begin_immediate().await?;
     lease::current(&mut tx, lease, runner_id).await?;
     ensure_run_of_task(&mut tx, &lease.task_id, run_id).await?;
+    check_head(head_sha.as_deref())?;
     let run = outcome::close_within(
         &mut tx,
         ctx.clock.as_ref(),
@@ -1100,4 +1113,124 @@ async fn ensure_run_of_task(tx: &mut ScopedTx, task_id: &str, run_id: &str) -> R
         ))),
         None => Err(Error::not_found(format!("no run with id {run_id}"))),
     }
+}
+
+// ---------------------------------------------------------------------------
+// What a runner reports back that a later prompt renders (D37)
+// ---------------------------------------------------------------------------
+//
+// A runner writes the task's branch, a run's base and the commit it ended on.
+// In a shared team the runner is one member's machine, and the prompt that
+// renders the value may run on another's (ADR-0032's amendment "every prompt
+// input has a class"), so none of them may carry text. Each is checked on the
+// `BoardPort` write that stores it, the one door every runner takes
+// (ADR-0006), so task 052's HTTP adapter keeps the checks by calling these
+// same services. A value already stored is never re-checked or rewritten
+// (D37 point 4), and one written back unchanged is accepted, since it adds
+// nothing.
+
+/// What [`check_start`] admits for a run's base label, as the sentence a
+/// refusal renders.
+pub const BASE_REF_RULE: &str = "a run's base ref is the repository's default branch, a task's \
+     branch, a full commit sha, or a base a run of this task already recorded";
+
+/// Refuses a branch for `task_id` that is neither the one already recorded nor
+/// one `worktree::naming` could have built for it.
+async fn check_branch(tx: &mut ScopedTx, task_id: &str, branch: &str) -> Result<()> {
+    if naming::is_branch_of(task_id, branch) {
+        return Ok(());
+    }
+    let scope = tx.scope().json();
+    let recorded: Option<String> = sqlx::query_scalar!(
+        "SELECT branch FROM tasks WHERE id = ?1 AND team_id IN (SELECT value FROM json_each(?2))",
+        task_id,
+        scope,
+    )
+    .fetch_optional(&mut **tx)
+    .await?
+    .flatten();
+    if recorded.as_deref() == Some(branch) {
+        return Ok(());
+    }
+    Err(Error::invalid(format!(
+        "the branch {branch:?} is refused: {TASK_BRANCH_RULE}"
+    )))
+}
+
+/// Refuses a run's base that is not one the board could have resolved for
+/// `task_id`, or that its implementation recorded (D29 point 4: a review and a
+/// fix record the implementation's base, which may predate a rename of the
+/// default branch).
+async fn check_start(
+    tx: &mut ScopedTx,
+    task_id: &str,
+    base_ref: Option<&str>,
+    base_sha: Option<&str>,
+) -> Result<()> {
+    if let Some(sha) = base_sha {
+        if !naming::is_commit_sha(sha) && !recorded_base(tx, task_id, None, Some(sha)).await? {
+            return Err(Error::invalid(commit_refusal("base", sha)));
+        }
+    }
+    let Some(label) = base_ref else {
+        return Ok(());
+    };
+    if naming::is_commit_sha(label) || naming::is_task_branch(label) {
+        return Ok(());
+    }
+    let scope = tx.scope().json();
+    let default_branch: Option<String> = sqlx::query_scalar!(
+        "SELECT r.default_branch FROM tasks t JOIN repositories r ON r.id = t.repository_id
+          WHERE t.id = ?1 AND t.team_id IN (SELECT value FROM json_each(?2))",
+        task_id,
+        scope,
+    )
+    .fetch_optional(&mut **tx)
+    .await?;
+    if default_branch.as_deref() == Some(label)
+        || recorded_base(tx, task_id, Some(label), None).await?
+    {
+        return Ok(());
+    }
+    Err(Error::invalid(format!(
+        "the base ref {label:?} is refused: {BASE_REF_RULE}"
+    )))
+}
+
+/// Refuses a head commit that is not a full sha.
+fn check_head(head_sha: Option<&str>) -> Result<()> {
+    match head_sha {
+        Some(sha) if !naming::is_commit_sha(sha) => {
+            Err(Error::invalid(commit_refusal("head", sha)))
+        }
+        _ => Ok(()),
+    }
+}
+
+fn commit_refusal(which: &str, sha: &str) -> String {
+    format!("the {which} commit {sha:?} is refused: {COMMIT_RULE}")
+}
+
+/// Whether a run of `task_id` already recorded this base label or commit.
+async fn recorded_base(
+    tx: &mut ScopedTx,
+    task_id: &str,
+    label: Option<&str>,
+    sha: Option<&str>,
+) -> Result<bool> {
+    let scope = tx.scope().json();
+    let found = sqlx::query_scalar!(
+        r#"SELECT EXISTS (
+             SELECT 1 FROM runs r JOIN tasks t ON t.id = r.task_id
+              WHERE r.task_id = ?1 AND t.team_id IN (SELECT value FROM json_each(?2))
+                AND (r.base_ref = ?3 OR r.base_sha = ?4)
+           ) AS "found!: bool""#,
+        task_id,
+        scope,
+        label,
+        sha,
+    )
+    .fetch_one(&mut **tx)
+    .await?;
+    Ok(found)
 }

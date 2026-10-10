@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT EXISTS (\n             SELECT 1 FROM runs r JOIN tasks t ON t.id = r.task_id\n              WHERE r.task_id = ?1 AND t.team_id IN (SELECT value FROM json_each(?2))\n                AND (r.base_ref = ?3 OR r.base_sha = ?4)\n           ) AS \"found!: bool\"",
+  "describe": {
+    "columns": [
+      {
+        "name": "found!: bool",
+        "ordinal": 0,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 4
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "740978ecb8de20faee1a3c3dbf1aaa79aa8182448ff30a7f52515355f0fbf862"
+}
