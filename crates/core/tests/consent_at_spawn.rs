@@ -133,7 +133,13 @@ async fn plan_now_refuses() {
 
     let outcome = tokio::time::timeout(
         TEST_TIMEOUT,
-        plan_claimed(board.as_ref(), f.harness.machine(), &f.paths, &config, claim),
+        plan_claimed(
+            board.as_ref(),
+            f.harness.machine(),
+            &f.paths,
+            &config,
+            claim,
+        ),
     )
     .await
     .expect("the planner must finish inside the test timeout")
