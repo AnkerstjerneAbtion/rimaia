@@ -201,9 +201,12 @@ pub fn run() {
                         return Err(err.into());
                     }
                 };
-            if let Err(err) =
-                tauri::async_runtime::block_on(adopt::adopt_board(&context, &runner_store, &solo))
-            {
+            if let Err(err) = tauri::async_runtime::block_on(adopt::adopt_board(
+                &context,
+                &runner_store,
+                &solo,
+                &paths,
+            )) {
                 const STEP: &str = "adopt this machine's state into the runner store";
                 log_startup_failure(STEP, &runner_db_file, &err);
                 report_startup_failure(app.handle(), STEP, Some(&logs_dir), &err);

@@ -226,7 +226,7 @@ pub async fn register(
     };
     let worktree_root = match new.worktree_root {
         Some(root) => require_non_empty(root, "worktree root")?,
-        None => path_to_string(&worktrees_dir.join(naming::slugify(&name)))?,
+        None => default_worktree_root(worktrees_dir, &name)?,
     };
 
     let id = crate::db::new_id();
@@ -650,6 +650,16 @@ async fn resolve_default_branch(path: &Path) -> Result<String> {
             path.display()
         ))
     })
+}
+
+/// Where a repository named `name` keeps its worktrees when nobody chose:
+/// `<worktrees_dir>/<slug>` (ADR-0005).
+///
+/// [`register`]'s default, and the one task 041's adoption gives a checkout
+/// whose board row has no root, so the two cannot derive different
+/// directories for one repository.
+pub fn default_worktree_root(worktrees_dir: &Path, name: &str) -> Result<String> {
+    path_to_string(&worktrees_dir.join(naming::slugify(name)))
 }
 
 fn path_to_string(path: &Path) -> Result<String> {

@@ -16,6 +16,7 @@
 //! to its in-memory twin by a contract suite
 //! (`testing::machine_contract`).
 
+pub mod adoption;
 pub mod context;
 pub mod port;
 pub mod types;

@@ -1,6 +1,7 @@
 //! The one-time copies of this machine's state out of `rimaia.db` (ADR-0028
 //! point 5, seam-contract D28 "The runner set").
 //!
+//! Two steps so far: `settings` (task 040) and `machine_state` (task 041).
 //! Each copy is a step with a name. A step runs only while its `adoptions` row
 //! is absent, and writes `runner.db` in one transaction that also inserts that
 //! row, so a step that fails partway leaves nothing behind and the next launch
@@ -14,22 +15,27 @@
 //! (seam-contract D33 point 2).
 
 use std::future::Future;
+use std::path::Path;
 use std::pin::Pin;
 
 use chrono::{DateTime, Utc};
 use rimaia_core::db::settings;
 use rimaia_core::identity::SoloIdentity;
-use rimaia_core::{Error, Result, ServiceContext};
+use rimaia_core::machine::adoption;
+use rimaia_core::{AppPaths, Error, Result, ServiceContext};
 use sqlx::SqliteConnection;
 
+use crate::machine;
 use crate::store::RunnerStore;
 
 /// What every step is handed: the board to read, the identity the shell
-/// already established, and the instant this step stamps.
+/// already established, where this machine keeps worktrees, and the instant
+/// this step stamps.
 #[derive(Clone, Copy)]
 struct StepInput<'a> {
     board: &'a ServiceContext,
     solo: &'a SoloIdentity,
+    worktrees_dir: &'a Path,
     now: DateTime<Utc>,
 }
 
@@ -46,14 +52,18 @@ type Step = for<'a> fn(StepInput<'a>, &'a mut SqliteConnection) -> StepFuture<'a
 /// Data, not branches: task 041 appends `machine_state` and task 054
 /// `credential_keys`, each as one more entry. An install that already ran the
 /// earlier steps runs only the new one, with no code of its own.
-const STEPS: &[(&str, Step)] = &[("settings", settings_step)];
+const STEPS: &[(&str, Step)] = &[
+    ("settings", settings_step),
+    ("machine_state", machine_state_step),
+];
 
 /// Adopts whatever this machine has not yet copied out of the board.
 ///
 /// Solo only, once per launch, after the shell has established `solo` with
 /// `identity::ensure_solo`. Adoption never calls that itself: it creates rows
 /// on a board that has none, and adoption never writes the board. `board`'s
-/// clock stamps every row written here.
+/// clock stamps every row written here, and `paths` says where a checkout
+/// whose board row names no worktree root keeps its worktrees.
 ///
 /// Before any step, a store that names another runner is refused, and
 /// neither file is written (D28, "A runner store from another board is
@@ -62,7 +72,9 @@ pub async fn adopt_board(
     board: &ServiceContext,
     store: &RunnerStore,
     solo: &SoloIdentity,
+    paths: &AppPaths,
 ) -> Result<()> {
+    let worktrees_dir = paths.worktrees_dir();
     refuse_another_boards_store(store, solo).await?;
 
     for (name, step) in STEPS {
@@ -75,7 +87,13 @@ pub async fn adopt_board(
         }
 
         let now = board.clock.now();
-        step(StepInput { board, solo, now }, &mut tx).await?;
+        let input = StepInput {
+            board,
+            solo,
+            worktrees_dir: &worktrees_dir,
+            now,
+        };
+        step(input, &mut tx).await?;
         sqlx::query!(
             "INSERT INTO adoptions (step, adopted_at) VALUES (?1, ?2)",
             name,
@@ -136,6 +154,32 @@ fn settings_step<'a>(input: StepInput<'a>, tx: &'a mut SqliteConnection) -> Step
         )
         .execute(&mut *tx)
         .await?;
+        Ok(())
+    })
+}
+
+/// Each repository's clone as a checkout, every recorded worktree path, and
+/// every schedule (D28 "The runner set").
+///
+/// What maps to what, and the two cases skipped rather than guessed at, are
+/// `rimaia-core`'s (`machine::adoption::machine_state`); this writes the
+/// result. The rows go through the same statements the store's own writes
+/// use, so a value adoption copies is a value the store would have accepted.
+fn machine_state_step<'a>(input: StepInput<'a>, tx: &'a mut SqliteConnection) -> StepFuture<'a> {
+    Box::pin(async move {
+        let state = adoption::machine_state(
+            adoption::read_board(input.board).await?,
+            input.worktrees_dir,
+        )?;
+        for checkout in &state.checkouts {
+            machine::insert_checkout(&mut *tx, checkout).await?;
+        }
+        for worktree in &state.worktrees {
+            machine::record_worktree(&mut *tx, worktree).await?;
+        }
+        for schedule in &state.schedules {
+            machine::insert_schedule(&mut *tx, schedule).await?;
+        }
         Ok(())
     })
 }

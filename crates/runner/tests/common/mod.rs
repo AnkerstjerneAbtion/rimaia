@@ -22,16 +22,27 @@ use rimaia_core::{ServiceContext, TeamScope};
 use sqlx::SqlitePool;
 
 /// The board tables adoption must never write.
-pub const BOARD_TABLES: [&str; 5] = [
+pub const BOARD_TABLES: [&str; 8] = [
     "settings",
     "team_settings",
     "user_settings",
     "solo_identity",
     "runners",
+    "repositories",
+    "tasks",
+    "schedules",
 ];
 
 /// The runner set's tables.
-pub const RUNNER_TABLES: [&str; 3] = ["runner_identity", "runner_settings", "adoptions"];
+pub const RUNNER_TABLES: [&str; 7] = [
+    "runner_identity",
+    "runner_settings",
+    "adoptions",
+    "checkouts",
+    "worktrees",
+    "held_leases",
+    "schedules",
+];
 
 /// The board at `file`, opened as a launch opens it.
 pub async fn open_board(file: &Path, clock: &TestClock) -> (ServiceContext, SoloIdentity) {
@@ -79,7 +90,8 @@ pub async fn dump(pool: &SqlitePool, tables: &[&str]) -> Vec<(String, Vec<String
 }
 
 /// Writes `key` into the board's legacy `settings` table, as every runner key
-/// is written until task 041 moves its readers.
+/// was written before task 041 moved its readers, and as an upgraded install
+/// still holds it.
 pub async fn store_legacy_setting(pool: &SqlitePool, key: &str, value: &str) {
     sqlx::query("INSERT OR REPLACE INTO settings (key, value) VALUES (?1, ?2)")
         .bind(key)
