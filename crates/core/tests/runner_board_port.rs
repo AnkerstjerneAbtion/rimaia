@@ -20,14 +20,15 @@ use std::time::Duration;
 use chrono::{DateTime, TimeDelta, Utc};
 use pretty_assertions::assert_eq;
 use rimaia_core::board::{
-    BoardFuture, BoardPort, Claim, ClaimTarget, FinishReceipt, FinishRun, Heartbeat, LeasePurpose,
-    LeaseRef, RunContext, StartRun, TranscriptAck, TranscriptChunk,
+    BaseDependency, BoardFuture, BoardPort, Claim, ClaimTarget, FinishReceipt, FinishRun,
+    Heartbeat, LeasePurpose, LeaseRef, RunBase, RunContext, StartRun, TranscriptAck,
+    TranscriptChunk,
 };
 use rimaia_core::db::{BoardColumn, ExitClass, Run, RunKind, RunState, RunStatus, ScheduleMode};
 use rimaia_core::repo::{self, NewRepository};
 use rimaia_core::review::findings::NewReviewFinding;
-use rimaia_core::runner::events::RunTail;
-use rimaia_core::runner::outcome::{start_run, NewRun};
+use rimaia_core::runner::events::{RunTail, TokenUsage};
+use rimaia_core::runner::outcome::{start_run, NewRun, RunOutcome, SpawnedAs};
 use rimaia_core::runner::provider::ProviderId;
 use rimaia_core::runner::{
     claim_manual_start, run_task, ManualStart, RunRequest, RunTrigger, RunnerConfig,
@@ -37,7 +38,7 @@ use rimaia_core::scheduler::retry::{self, USAGE_LIMIT_MAX_JITTER};
 use rimaia_core::scheduler::{pause, InFlight, ResumePoint};
 use rimaia_core::tasks::strategy::StrategyPlan;
 use rimaia_core::tasks::{self, NewTask};
-use rimaia_core::testing::board::claim_run;
+use rimaia_core::testing::board::{claim_run, run_without_a_child, FinishedRun};
 use rimaia_core::testing::provider::Ledger;
 use rimaia_core::testing::{self, FakeCli, TempRepo, TestContext};
 use rimaia_core::{AppPaths, Clock, ErrorCode, ServiceContext};
@@ -213,6 +214,115 @@ async fn run_task_releases_a_claim_whose_context_no_longer_negotiates() {
         Vec::<String>::new(),
         "nothing was spawned"
     );
+}
+
+// ---------------------------------------------------------------------------
+// The base a claim carries (task 044)
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn the_run_context_carries_the_base_the_board_resolved() {
+    let mut fixture = Fixture::new().await;
+    let config = fixture.config();
+    let board = fixture.board(&config);
+    let (base_id, base_run) = fixture.dependency_that_succeeded(board.as_ref()).await;
+    // A second dependency, unsatisfied, so the base carries ADR-0008's
+    // warning about what is not in it.
+    let other = fixture.task("Other", BoardColumn::NotReady).await;
+    tasks::set_task_dependencies(fixture.ctx(), &fixture.task_id, &[base_id.clone(), other])
+        .await
+        .expect("Alpha depends on both");
+    let expected = RunBase {
+        base_ref: base_run.worktree.branch.clone(),
+        dependency: Some(BaseDependency {
+            task_id: base_id,
+            title: "Base".to_string(),
+            run_id: base_run.run_id.clone(),
+            commit: base_run.head_sha.clone(),
+        }),
+        warning: Some(format!(
+            "This task branches from \"Base\" ({}). \"Other\" is also a dependency and is \
+             not in that base — merge into it what you need, or run this task again once the \
+             rest have landed.",
+            base_run.worktree.branch,
+        )),
+    };
+    let before = fixture.detail().await;
+    while fixture.harness.changes.try_recv().is_ok() {}
+
+    let preview = board.preview(&fixture.task_id).await.expect("preview");
+
+    assert_eq!(preview.base, expected);
+    assert_eq!(fixture.detail().await, before, "preview writes nothing");
+    assert!(
+        fixture.harness.changes.try_recv().is_err(),
+        "and announces nothing"
+    );
+
+    let claim = claim_run(board.as_ref(), &fixture.task_id, RunTrigger::Queued, false)
+        .await
+        .expect("claim Alpha");
+    assert_eq!(claim.context.base, expected);
+}
+
+#[tokio::test]
+async fn the_base_a_run_records_is_the_claims_even_when_a_later_read_disagrees() {
+    // `run_task` composes its prompt from `run_context` reads taken after the
+    // worktree exists, and each resolves the base again. Between the claim and
+    // those reads the dependency is dragged back to `ready`, so they say the
+    // default branch; the worktree and the row still use the claim's base.
+    let fixture = Fixture::new().await;
+    fixture.cli.replays(&fixture.task_id, "success", 0);
+    let config = fixture.config();
+    let board = fixture.board(&config);
+    let (base_id, base_run) = fixture.dependency_that_succeeded(board.as_ref()).await;
+    tasks::set_task_dependencies(
+        fixture.ctx(),
+        &fixture.task_id,
+        std::slice::from_ref(&base_id),
+    )
+    .await
+    .expect("Alpha depends on Base");
+    let claim = claim_run(board.as_ref(), &fixture.task_id, RunTrigger::Queued, false)
+        .await
+        .expect("claim Alpha");
+    assert_eq!(
+        claim
+            .context
+            .base
+            .dependency
+            .as_ref()
+            .map(|base| &base.commit),
+        Some(&base_run.head_sha),
+    );
+
+    tasks::move_task_to_bottom(fixture.ctx(), &base_id, BoardColumn::Ready)
+        .await
+        .expect("drag Base back to ready");
+    let reread = board.run_context(&claim.lease).await.expect("re-read");
+    assert_eq!(reread.base.base_ref, "main");
+    assert_eq!(reread.base.dependency, None);
+
+    let run = tokio::time::timeout(
+        TEST_TIMEOUT,
+        run_task(
+            board.as_ref(),
+            fixture.machine(),
+            &fixture.paths,
+            &config,
+            claim,
+            RunRequest::default(),
+        ),
+    )
+    .await
+    .expect("a run must finish inside the test timeout")
+    .expect("the run completes");
+
+    assert_eq!(
+        run.base_ref.as_deref(),
+        Some(base_run.worktree.branch.as_str())
+    );
+    assert_eq!(run.base_sha.as_deref(), Some(base_run.head_sha.as_str()));
 }
 
 // ---------------------------------------------------------------------------
@@ -510,6 +620,40 @@ impl Fixture {
         .expect("a run must finish inside the test timeout")
     }
 
+    async fn task(&self, title: &str, column: BoardColumn) -> String {
+        tasks::create_task(
+            self.ctx(),
+            NewTask {
+                repository_id: self.detail().await.task.repository_id,
+                title: title.to_string(),
+                plan: Some(format!("1. Implement {title}")),
+                extra_instructions: None,
+                column: Some(column),
+                links: vec![],
+            },
+        )
+        .await
+        .expect("create a task")
+        .id
+    }
+
+    /// "Base", a task in the same repository whose implementation run
+    /// committed and succeeded, which files it for review.
+    async fn dependency_that_succeeded(&self, board: &dyn BoardPort) -> (String, FinishedRun) {
+        let base_id = self.task("Base", BoardColumn::Ready).await;
+        let run = run_without_a_child(
+            &self.harness,
+            board,
+            &base_id,
+            RunKind::Implementation,
+            false,
+            &["base.rs"],
+            succeeded(),
+        )
+        .await;
+        (base_id, run)
+    }
+
     async fn detail(&self) -> tasks::TaskDetail {
         tasks::get_task(self.ctx(), &self.task_id)
             .await
@@ -520,5 +664,21 @@ impl Fixture {
         pause::active_until(self.machine(), self.harness.clock.now())
             .await
             .expect("read the usage-limit pause")
+    }
+}
+
+fn succeeded() -> RunOutcome {
+    RunOutcome {
+        exit_class: ExitClass::Success,
+        status: RunStatus::Succeeded,
+        error_message: None,
+        num_turns: Some(4),
+        cost_usd: Some(0.25),
+        duration_ms: Some(1_000),
+        pr_url: None,
+        usage_limit_resets_at: None,
+        resume_after: None,
+        spawned_as: SpawnedAs::default(),
+        usage: TokenUsage::default(),
     }
 }
