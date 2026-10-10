@@ -62,6 +62,7 @@ use serde::Serialize;
 use crate::board::lease::{self, Candidate, PhaseModels, Route, Verdict};
 use crate::board::{FreeCapacity, LeasePurpose};
 use crate::consent::ceiling::StrategyCeiling;
+use crate::consent::pieces::Composes;
 use crate::consent::{self, Composition};
 use crate::context::ServiceContext;
 use crate::db::{BoardColumn, RunState};
@@ -280,7 +281,7 @@ pub async fn plan(ctx: &ServiceContext, runner: &RunnerView) -> Result<Vec<Queue
     // connection.
     let mut conn = ctx.pool.acquire().await?;
     let mut entries = Vec::with_capacity(ready.len());
-    for (summary, (purpose, defaults, models, composition)) in ready.iter().zip(&candidates) {
+    for (summary, (composes, defaults, models, composition)) in ready.iter().zip(&candidates) {
         let candidate = Candidate {
             runner_id: &runner.runner_id,
             provider: runner.provider,
@@ -289,7 +290,7 @@ pub async fn plan(ctx: &ServiceContext, runner: &RunnerView) -> Result<Vec<Queue
             ceiling: &runner.ceiling,
             composition,
         };
-        let verdict = lease::eligible(&mut conn, &summary.task.id, &candidate, *purpose).await?;
+        let verdict = lease::eligible(&mut conn, &summary.task.id, &candidate, *composes).await?;
         // 042's listed-repository check is the runner's half and speaks
         // first; eligibility's reason fills an entry it leaves unskipped.
         let listed = skip_reason(
@@ -360,14 +361,7 @@ async fn candidates(
     ctx: &ServiceContext,
     runner: &RunnerView,
     ready: &[TaskSummary],
-) -> Result<
-    Vec<(
-        LeasePurpose,
-        Arc<RepositoryDefaults>,
-        PhaseModels,
-        Composition,
-    )>,
-> {
+) -> Result<Vec<(Composes, Arc<RepositoryDefaults>, PhaseModels, Composition)>> {
     let mut by_repository: HashMap<String, Arc<RepositoryDefaults>> = HashMap::new();
     let mut candidates = Vec::with_capacity(ready.len());
 
@@ -387,19 +381,20 @@ async fn candidates(
             }
         };
 
-        let purpose = match (scheduled_resume(summary), &summary.last_run) {
-            (Some(_), Some(run)) => run.kind.into(),
+        // What the claim would compose: `lease::claim` decides the same way.
+        let composes = match (scheduled_resume(summary), &summary.last_run) {
+            (Some(_), Some(run)) => Composes::Phase(run.kind.into()),
             _ => {
                 let mode =
                     effective_strategy(&summary.task, &defaults.repository, &defaults.global).mode;
                 if needs_planning(&summary.task, mode) {
-                    LeasePurpose::Strategy
+                    Composes::PlannerThenImplementation
                 } else {
-                    LeasePurpose::Implementation
+                    Composes::Phase(LeasePurpose::Implementation)
                 }
             }
         };
-        let (review, review_effort) = match purpose {
+        let (review, review_effort) = match composes.purpose() {
             LeasePurpose::Review => {
                 let config = review_config::resolve(ctx, &summary.task.id, repository_id)
                     .await?
@@ -412,7 +407,7 @@ async fn candidates(
         // commit only for a task with dependencies, and findings only for a
         // review or fix waiting to resume, so a board of plain tasks reads
         // nothing more here.
-        let findings = matches!(purpose, LeasePurpose::Review | LeasePurpose::Fix);
+        let findings = composes.reads_findings();
         let composition = if findings || summary.dependency_count > 0 {
             consent::composition(ctx, &summary.task.id, findings).await?
         } else {
@@ -420,7 +415,7 @@ async fn candidates(
         };
 
         candidates.push((
-            purpose,
+            composes,
             defaults,
             PhaseModels {
                 strategy: summary.effective_model.clone(),

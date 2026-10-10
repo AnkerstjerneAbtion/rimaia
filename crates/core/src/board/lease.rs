@@ -92,7 +92,7 @@ use crate::tasks::service::{fetch_task_row, team_of_task};
 use crate::tasks::strategy::needs_planning;
 
 use crate::consent::ceiling::{self, PhaseStrategy, StrategyCeiling};
-use crate::consent::pieces::pieces_for;
+use crate::consent::pieces::{pieces_composed, Composes};
 pub use crate::consent::Route;
 use crate::consent::{self, Composition, Ineligible, TeamCeiling};
 use crate::runner::provider::ProviderId;
@@ -353,8 +353,9 @@ pub struct Candidate<'a> {
     pub composition: &'a Composition,
 }
 
-/// Whether `candidate` may take `task_id` for `purpose`: the one place the
-/// board decides that *this* runner may take *this* task.
+/// Whether `candidate` may take `task_id` to compose what `composes` names:
+/// the one place the board decides that *this* runner may take *this* task.
+/// The purpose the lease is held as is `composes.purpose()`.
 ///
 /// Six rules, in this order, and the first that refuses is the answer:
 ///
@@ -369,7 +370,8 @@ pub struct Candidate<'a> {
 ///    ([`PhaseModels::for_purpose`]).
 /// 5. **The strategy ceiling** ([`ceiling::judge`]), using only its refusal.
 /// 6. **Consent** (ADR-0032 points 3 and 6) to every piece
-///    [`pieces_for`](crate::consent::pieces::pieces_for) lists for `purpose`.
+///    [`pieces_composed`] lists for `composes`: for ADR-0016's inline
+///    planner, the implementation's pieces as well as the planner's.
 ///
 /// Nothing adds a second call: selection's plan, the claim transaction, a
 /// `Continue` and `run_context` all ask this. Selection's own rules
@@ -383,9 +385,10 @@ pub async fn eligible(
     conn: &mut SqliteConnection,
     task_id: &str,
     candidate: &Candidate<'_>,
-    purpose: LeasePurpose,
+    composes: Composes,
 ) -> Result<Verdict> {
     let refuse = |ineligible| Ok(Verdict::Ineligible(ineligible));
+    let purpose = composes.purpose();
     let Some(task) = consent::task_row(conn, task_id).await? else {
         return Ok(Verdict::Eligible(Route::Assigned));
     };
@@ -443,7 +446,7 @@ pub async fn eligible(
             candidate.runner_id,
             &runner.owner,
             &task.team_id,
-            purpose,
+            composes,
             candidate.composition,
         )
         .await?
@@ -456,13 +459,13 @@ pub async fn eligible(
 }
 
 /// [`eligible`]'s sixth rule alone: whether `runner_id`'s owner still
-/// consents to everything a `purpose` run of `task_id` would execute. What
+/// consents to everything `composes` would execute of `task_id`. What
 /// `run_context` re-checks before a composition (D31 point 6).
 pub(crate) async fn consent_refusal(
     conn: &mut SqliteConnection,
     task_id: &str,
     runner_id: &str,
-    purpose: LeasePurpose,
+    composes: Composes,
     composition: &Composition,
 ) -> Result<Option<Ineligible>> {
     let Some(task) = consent::task_row(conn, task_id).await? else {
@@ -478,10 +481,26 @@ pub(crate) async fn consent_refusal(
         runner_id,
         &owner,
         &task.team_id,
-        purpose,
+        composes,
         composition,
     )
     .await
+}
+
+/// What a held lease composes from here on: its purpose's composer, or for a
+/// `strategy` lease on a `running` task, ADR-0016's inline planner and the
+/// implementation after it.
+///
+/// Only a fresh start takes a task to `running` with a `strategy` lease; a
+/// `Plan` claim takes no edge (D31's purposes), which is the distinction
+/// [`release`] keys on too. A `Continue` has already moved the lease to the
+/// next phase's purpose ([`land`]), so every other lease names its own
+/// composer.
+pub(crate) fn composes(purpose: LeasePurpose, run_state: RunState) -> Composes {
+    match (purpose, run_state) {
+        (LeasePurpose::Strategy, RunState::Running) => Composes::PlannerThenImplementation,
+        (purpose, _) => Composes::Phase(purpose),
+    }
 }
 
 async fn refuse_consent(
@@ -490,13 +509,13 @@ async fn refuse_consent(
     runner_id: &str,
     owner: &str,
     team_id: &str,
-    purpose: LeasePurpose,
+    composes: Composes,
     composition: &Composition,
 ) -> Result<Option<Ineligible>> {
     let Some(inputs) = consent::inputs(conn, task_id, runner_id, composition).await? else {
         return Ok(None);
     };
-    let pieces = pieces_for(purpose, &inputs);
+    let pieces = pieces_composed(composes, &inputs);
     let missing = consent::missing(conn, owner, team_id, &pieces).await?;
     match missing.into_iter().next() {
         Some((piece, reason)) => Ok(Some(consent::refusal_for(conn, &piece, reason).await?)),
@@ -579,17 +598,21 @@ pub(crate) async fn claim(
         Err(error) => return Err(error),
     };
 
-    let purpose = match edges {
-        Edges::Plan => LeasePurpose::Strategy,
-        Edges::Resume { kind } => kind.map_or(LeasePurpose::Implementation, Into::into),
+    let composes = match edges {
+        Edges::Plan => Composes::Phase(LeasePurpose::Strategy),
+        Edges::Resume { kind } => {
+            Composes::Phase(kind.map_or(LeasePurpose::Implementation, Into::into))
+        }
         // ADR-0016's inline planner, which ADR-0031 point 1 leases as
-        // `strategy`; `start_run` moves it to the implementation's kind.
-        Edges::Fresh if needs_planning(&task, mode) => LeasePurpose::Strategy,
-        Edges::Fresh => LeasePurpose::Implementation,
+        // `strategy`; `start_run` moves it to the implementation's kind, after
+        // the implementation was composed under this claim.
+        Edges::Fresh if needs_planning(&task, mode) => Composes::PlannerThenImplementation,
+        Edges::Fresh => Composes::Phase(LeasePurpose::Implementation),
     };
+    let purpose = composes.purpose();
 
     let runner_id = candidate.runner_id;
-    if let Some(refusal) = eligible(&mut tx, task_id, &candidate, purpose)
+    if let Some(refusal) = eligible(&mut tx, task_id, &candidate, composes)
         .await?
         .refusal()
     {
@@ -837,7 +860,11 @@ pub(crate) async fn end_within(
 /// - **`Continue`** keeps the lease, after [`eligible`] for the next phase's
 ///   purpose, which applies the model rule to the next phase's model. A
 ///   refusal turns it into `Released`, and the task lands as a finish that
-///   does not continue lands it, in `in_review` (D31 point 4).
+///   does not continue lands it, in `in_review` (D31 point 4). A kept lease
+///   is moved to the next phase's purpose with no run, as a claim leaves it,
+///   so `run_context` judges consent on the composer the runner calls next
+///   and not on the one that just finished (D29 point 1's invariant holds:
+///   with `run_id` unset, the purpose names no run's kind).
 /// - **`Released`** deletes the lease. The task is pinned to the holder when
 ///   the run was interrupted or the task lands `waiting_retry`, and a pin the
 ///   holder had is cleared otherwise.
@@ -858,7 +885,7 @@ pub(crate) async fn land(
 
     let mut decision = decision;
     if let NextStep::Continue { kind } = decision.next {
-        let next = eligible(tx, task_id, candidate, kind.into()).await?;
+        let next = eligible(tx, task_id, candidate, Composes::Phase(kind.into())).await?;
         if let Some(refusal) = next.refusal() {
             tracing::info!(
                 %task_id,
@@ -874,6 +901,19 @@ pub(crate) async fn land(
     }
 
     let rebalanced = outcome::land_within(ctx, tx, task_id, decision.landing).await?;
+
+    if let NextStep::Continue { kind } = decision.next {
+        let next = LeasePurpose::from(kind);
+        sqlx::query!(
+            "UPDATE runner_leases SET run_id = NULL, purpose = ?1
+              WHERE task_id = ?2 AND generation = ?3",
+            next,
+            lease.task_id,
+            lease.generation,
+        )
+        .execute(&mut **tx)
+        .await?;
+    }
 
     if let NextStep::Released { .. } = decision.next {
         delete(tx, lease).await?;

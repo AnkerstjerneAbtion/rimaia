@@ -51,8 +51,8 @@ use crate::scheduler::SkipReason;
 use ceiling::CeilingExceeded;
 use eligibility::{Eligibility, Reason, RunnerEligibility, RunnerFacts, TaskFacts};
 use pieces::{
-    consents, pieces_for, Accepted, BaseCommitInput, Consent, ContentKind, MissingReason, Piece,
-    PieceInputs, Revision, RunOnRunner,
+    consents, pieces_composed, pieces_for, Accepted, BaseCommitInput, Composes, Consent,
+    ContentKind, MissingReason, Piece, PieceInputs, Revision, RunOnRunner,
 };
 
 // ---------------------------------------------------------------------------
@@ -728,8 +728,8 @@ pub(crate) fn decide(
 /// held by a runner of `actor`'s, and the content that lease's run would
 /// execute names an author other than `actor` (ADR-0032 point 6).
 ///
-/// Reusing [`pieces_for`] makes "content authored by someone else" mean the
-/// same thing here and in the check. **It reads across all of the actor's
+/// Reusing [`pieces_composed`] makes "content authored by someone else" mean
+/// the same thing here and in the check. **It reads across all of the actor's
 /// runners and teams, ignoring `ctx.scope`**: Bob's runner can hold a lease in
 /// a shared team while Bob writes into his personal team, and that is exactly
 /// the path point 6 closes. It is safe because it returns one bool about the
@@ -742,7 +742,8 @@ pub(crate) fn decide(
 pub async fn written_during_run(ctx: &ServiceContext, actor: &str) -> Result<bool> {
     let now = ctx.clock.now();
     let leases = sqlx::query!(
-        r#"SELECT l.task_id, l.purpose AS "purpose: LeasePurpose", l.runner_id, t.team_id
+        r#"SELECT l.task_id, l.purpose AS "purpose: LeasePurpose", l.runner_id, t.team_id,
+                  t.run_state AS "run_state: crate::db::RunState"
              FROM runner_leases l
              JOIN runners r ON r.id = l.runner_id
              JOIN tasks t ON t.id = l.task_id
@@ -757,15 +758,15 @@ pub async fn written_during_run(ctx: &ServiceContext, actor: &str) -> Result<boo
 
     for lease in leases {
         let scoped = ctx.with_scope(crate::context::TeamScope::one(lease.team_id.clone()));
-        let findings = matches!(lease.purpose, LeasePurpose::Review | LeasePurpose::Fix);
-        let composition = composition(&scoped, &lease.task_id, findings).await?;
+        let composes = crate::board::lease::composes(lease.purpose, lease.run_state);
+        let composition = composition(&scoped, &lease.task_id, composes.reads_findings()).await?;
         let mut conn = ctx.pool.acquire().await?;
         let Some(inputs) =
             inputs(&mut conn, &lease.task_id, &lease.runner_id, &composition).await?
         else {
             continue;
         };
-        if pieces_for(lease.purpose, &inputs)
+        if pieces_composed(composes, &inputs)
             .iter()
             .any(|piece| piece.author.as_deref() != Some(actor))
         {
@@ -1085,9 +1086,8 @@ pub struct TaskConsent {
 /// what a person has accepted is theirs to read.
 pub async fn status(ctx: &ServiceContext, task_id: &str, runner_id: &str) -> Result<TaskConsent> {
     let task = crate::tasks::get_task(ctx, task_id).await?;
-    let purpose = purpose_now(ctx, &task.task).await?;
-    let findings = matches!(purpose, LeasePurpose::Review | LeasePurpose::Fix);
-    let composition = composition(ctx, task_id, findings).await?;
+    let composes = composes_now(ctx, &task.task).await?;
+    let composition = composition(ctx, task_id, composes.reads_findings()).await?;
 
     let mut conn = ctx.pool.acquire().await?;
     let runner = runner_row(&mut conn, runner_id)
@@ -1109,7 +1109,7 @@ pub async fn status(ctx: &ServiceContext, task_id: &str, runner_id: &str) -> Res
 
     let mut pieces_missing = Vec::new();
     if let Some(inputs) = inputs(&mut conn, task_id, runner_id, &composition).await? {
-        let pieces = pieces_for(purpose, &inputs);
+        let pieces = pieces_composed(composes, &inputs);
         for (piece, reason) in missing(&mut conn, &runner.owner, &row.team_id, &pieces).await? {
             pieces_missing.push(MissingPiece {
                 author_login: login_of(&mut conn, piece.author.as_deref()).await?,
@@ -1129,16 +1129,13 @@ pub async fn status(ctx: &ServiceContext, task_id: &str, runner_id: &str) -> Res
     })
 }
 
-/// The purpose a claim of `task` would lease now: the kind a due retry
-/// resumes as, the planner for a fresh start that needs one, the
-/// implementation otherwise.
-pub(crate) async fn purpose_now(
-    ctx: &ServiceContext,
-    task: &crate::db::Task,
-) -> Result<LeasePurpose> {
+/// What a claim of `task` would compose now: the kind a due retry resumes
+/// as, ADR-0016's inline planner and the implementation after it for a fresh
+/// start that needs planning, the implementation otherwise.
+pub(crate) async fn composes_now(ctx: &ServiceContext, task: &crate::db::Task) -> Result<Composes> {
     if task.run_state == crate::db::RunState::WaitingRetry {
         if let Some(point) = crate::scheduler::attempts::resume_point(ctx, &task.id).await? {
-            return Ok(point.kind.into());
+            return Ok(Composes::Phase(point.kind.into()));
         }
     }
     let team_id = crate::tasks::service::team_of(ctx, &task.id).await?;
@@ -1147,9 +1144,9 @@ pub(crate) async fn purpose_now(
         crate::strategy::settings::repository_default(ctx, &task.repository_id).await?;
     let mode = crate::strategy::effective_strategy(task, &repository, &global).mode;
     Ok(if crate::tasks::strategy::needs_planning(task, mode) {
-        LeasePurpose::Strategy
+        Composes::PlannerThenImplementation
     } else {
-        LeasePurpose::Implementation
+        Composes::Phase(LeasePurpose::Implementation)
     })
 }
 

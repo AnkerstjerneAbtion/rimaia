@@ -59,17 +59,17 @@ use crate::db::RunKind;
 /// The context a claim of `task_id` would carry. Writes nothing.
 ///
 /// Refuses, with the claim's own sentence, a task `lease::eligible` would
-/// refuse this runner for the purpose a claim would lease it as now (task
-/// 045). It takes no ceiling: it passes `StrategyCeiling::default()`, so it
-/// reports eligibility and consent refusals only, and a ceiling refusal comes
-/// from the claim.
+/// refuse this runner for what a claim would compose now (task 045): the
+/// inline planner's claim includes the implementation after it. It takes no
+/// ceiling: it passes `StrategyCeiling::default()`, so it reports eligibility
+/// and consent refusals only, and a ceiling refusal comes from the claim.
 pub async fn preview(
     ctx: &ServiceContext,
     runner: Runner<'_>,
     task_id: &str,
 ) -> Result<RunContext> {
     let context = read_context(ctx, runner, task_id).await?;
-    let purpose = consent::purpose_now(ctx, &context.task.task).await?;
+    let composes = consent::composes_now(ctx, &context.task.task).await?;
     let composition = Composition::of(&context);
     let models = PhaseModels::of(&context);
     let ceiling = StrategyCeiling::default();
@@ -82,7 +82,7 @@ pub async fn preview(
         composition: &composition,
     };
     let mut conn = ctx.pool.acquire().await?;
-    let verdict = lease::eligible(&mut conn, task_id, &candidate, purpose).await?;
+    let verdict = lease::eligible(&mut conn, task_id, &candidate, composes).await?;
     drop(conn);
     match verdict.refusal() {
         Some(refusal) => Err(Error::invalid(refusal)),
@@ -520,6 +520,9 @@ where
 
         let mut tx = ctx.begin_immediate().await?;
         let held = lease::current(&mut tx, lease, runner.id).await?;
+        let run_state = tasks::service::fetch_task_row(&mut tx, &lease.task_id)
+            .await?
+            .run_state;
         // Consent is judged on the revisions the transaction reads, so it
         // must be the text this read returns. An edit that landed in between
         // makes this read stale: drop it, writing nothing, and read again.
@@ -534,7 +537,7 @@ where
             &mut tx,
             &lease.task_id,
             runner.id,
-            held.purpose,
+            lease::composes(held.purpose, run_state),
             &composition,
         )
         .await?

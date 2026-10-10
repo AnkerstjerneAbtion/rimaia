@@ -232,6 +232,62 @@ pub fn pieces_for(purpose: LeasePurpose, inputs: &PieceInputs) -> Vec<Piece> {
     pieces
 }
 
+/// What one lease composes before `start_run` moves its purpose: what
+/// consent is judged on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Composes {
+    /// One phase, composed by its purpose's own composer.
+    Phase(LeasePurpose),
+    /// ADR-0016's inline planner. It is leased as `strategy`, and the same
+    /// lease then composes the implementation the planner was run for, before
+    /// `start_run` moves the purpose. ADR-0032 point 3 asks consent to every
+    /// piece the run executes, so it is judged on both composers' pieces, not
+    /// on the planner's alone, which would leave the base instructions out.
+    PlannerThenImplementation,
+}
+
+impl Composes {
+    /// The purpose the lease is held as: what the model rule and the strategy
+    /// ceiling judge.
+    pub const fn purpose(self) -> LeasePurpose {
+        match self {
+            Composes::Phase(purpose) => purpose,
+            Composes::PlannerThenImplementation => LeasePurpose::Strategy,
+        }
+    }
+
+    /// Whether a composer it feeds is told recorded findings.
+    pub const fn reads_findings(self) -> bool {
+        matches!(
+            self,
+            Composes::Phase(LeasePurpose::Review | LeasePurpose::Fix)
+        )
+    }
+}
+
+impl From<LeasePurpose> for Composes {
+    fn from(purpose: LeasePurpose) -> Self {
+        Composes::Phase(purpose)
+    }
+}
+
+/// [`pieces_for`] over every composer `composes` feeds, each piece once, in
+/// the order the first composer to read it reads it.
+pub fn pieces_composed(composes: Composes, inputs: &PieceInputs) -> Vec<Piece> {
+    match composes {
+        Composes::Phase(purpose) => pieces_for(purpose, inputs),
+        Composes::PlannerThenImplementation => {
+            let mut pieces = pieces_for(LeasePurpose::Strategy, inputs);
+            for piece in pieces_for(LeasePurpose::Implementation, inputs) {
+                if !pieces.contains(&piece) {
+                    pieces.push(piece);
+                }
+            }
+            pieces
+        }
+    }
+}
+
 fn revisioned(kind: ContentKind, task: Option<&TaskId>, revision: &Revision) -> Piece {
     Piece {
         kind,
@@ -425,6 +481,28 @@ mod tests {
         assert_eq!(
             pieces_for(LeasePurpose::Strategy, &nothing_optional()),
             Vec::new()
+        );
+    }
+
+    #[test]
+    fn an_inline_planner_needs_what_the_implementation_after_it_needs() {
+        assert_eq!(
+            pieces_composed(Composes::PlannerThenImplementation, &everything()),
+            vec![
+                plan(),
+                base_commit(),
+                piece(ContentKind::BaseInstructions, None, "2", "olga"),
+            ]
+        );
+        assert_eq!(
+            Composes::PlannerThenImplementation.purpose(),
+            LeasePurpose::Strategy,
+            "held as the planner, so the model rule and the ceiling judge the planner"
+        );
+        // Plan now composes the planner alone.
+        assert_eq!(
+            pieces_composed(Composes::Phase(LeasePurpose::Strategy), &everything()),
+            vec![plan(), base_commit()]
         );
     }
 

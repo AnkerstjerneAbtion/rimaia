@@ -5382,14 +5382,28 @@ Amendments, as 043 set the precedent; point 2's trait gains no method.
   first refusal winning: 043's pin; `eligibility::decide` (a task pinned here and then
   reassigned is `PinnedThenReassigned`); the team ceiling, not consulted in a personal team;
   067's model rule; `ceiling::judge`, using only its refusal; and consent over
-  `pieces_for(purpose)`. `Route::{Assigned, Pool}` orders `Next`: the owner's tasks in board
+  `pieces_composed(composes)`. `eligible` takes a `consent::pieces::Composes` rather than a bare
+  purpose: `Phase(purpose)` for one phase, or `PlannerThenImplementation` for ADR-0016's inline
+  planner, whose lease is held as `strategy` (`Composes::purpose`, which the model rule and the
+  ceiling judge) but which composes the implementation under the same lease before `start_run`
+  moves the purpose, so consent is judged on both composers' pieces and the base instructions
+  are one of them. The claim, selection, `preview` and `consent::status` all treat a fresh
+  start that needs planning as `PlannerThenImplementation`; only a `Plan` claim is
+  `Phase(strategy)`. `Route::{Assigned, Pool}` orders `Next`: the owner's tasks in board
   order, then the pool's. `preview` asks it with `StrategyCeiling::default()` and refuses as
   `Invalid` with the same sentence, so a starter's preview and its claim agree.
 - **`run_context` ends a lease whose consent was lost.** It reads the context first, then,
-  inside the fence's transaction, re-checks consent for the lease's purpose. A refusal deletes
-  the lease and lands the task as `release` lands it (`lease::end_within`), commits, and
-  answers `Conflict` naming the refusal. The lease really is gone, so point 11's reaction is
-  correct, and a solo lease (`LeaseTerm::Never`) is never left `running` with no holder.
+  inside the fence's transaction, re-checks consent for what the lease composes next:
+  `lease::composes(purpose, run_state)`, which is `PlannerThenImplementation` for a `strategy`
+  lease on a `running` task (only a fresh start takes that edge; a `Plan` claim takes none, the
+  distinction `release` keys on) and the lease's own purpose otherwise. **A `Continue` moves the
+  kept lease to the next phase's purpose with `run_id` NULL** (`lease::land`), as a claim leaves
+  one, so the re-check before a review or a fix is composed judges that phase's pieces and not
+  the finished one's. D29 point 1's invariant still holds: with `run_id` unset the purpose names
+  no run's kind, and `start_run` sets both again. A refusal deletes the lease and lands the
+  task as `release` lands it (`lease::end_within`), commits, and answers `Conflict` naming the
+  refusal. The lease really is gone, so point 11's reaction is correct, and a solo lease
+  (`LeaseTerm::Never`) is never left `running` with no holder.
   Consent reads revisions inside the transaction and the context was read before it, so the
   re-check first asks `consent::context_is_current`: the plan's revision, the base
   instructions and the effective review instructions the context holds against the
@@ -6726,8 +6740,11 @@ each meet these again, and left to each implementer they would be decided in fiv
    Findings are one piece per run on a runner other than the claiming one: for a fix, the
    review runs whose open blocking findings it acts on; for a review, the fix runs whose
    rejection reasons it is told. Their revision is the run id and their author the owner of
-   the run's runner. The base commit is one piece per distinct owner of the runners of the
-   dependency's implementation and fix runs up to the chosen run's attempt, failed ones
+   the run's runner. ADR-0016's inline planner is leased as `strategy` and composes the
+   implementation under the same lease, so its claim and `run_context` judge the strategy and
+   the implementation pieces together (`Composes::PlannerThenImplementation`); Plan now judges
+   the strategy pieces alone. The base commit is one piece per distinct owner of the runners
+   of the dependency's implementation and fix runs up to the chosen run's attempt, failed ones
    included (`runs::commit_authors`); its task is the dependency, its revision the commit.
    The strategy planner's guidance in the implementation prompt is not a piece (ADR-0032
    point 3 exempts execution strategy), and empty content is not a piece. The plan is always
