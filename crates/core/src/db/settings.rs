@@ -27,6 +27,7 @@ use serde::{Deserialize, Serialize};
 use sqlx::SqliteConnection;
 
 use crate::context::ServiceContext;
+use crate::db::Setting;
 use crate::doctor::Check;
 use crate::error::{Error, Result};
 use crate::events::ChangeEvent;
@@ -403,6 +404,28 @@ pub(crate) async fn get_runner(ctx: &ServiceContext, key: &str) -> Result<Option
         .fetch_optional(&ctx.pool)
         .await?;
     Ok(value)
+}
+
+/// Every runner-placed row of the legacy `settings` table: what task 040's
+/// adoption copies into `runner.db`.
+///
+/// Filtered through [`placement`] rather than a key list of its own, so the
+/// copy cannot drift from what 038's migration left out of `team_settings`.
+/// A key the board does not hold is not returned: absent already means "the
+/// default" to every accessor, and the copy keeps it absent.
+///
+/// It takes the context and ignores its scope, as [`get_runner`] does:
+/// machine state belongs to no team. One query of its own rather than a loop
+/// over [`get_runner`], because task 041 deletes that accessor and this
+/// outlives it. Task 065 deletes this with the table.
+pub async fn runner_placed(ctx: &ServiceContext) -> Result<Vec<Setting>> {
+    let rows = sqlx::query_as!(Setting, "SELECT key, value FROM settings ORDER BY key")
+        .fetch_all(&ctx.pool)
+        .await?;
+    Ok(rows
+        .into_iter()
+        .filter(|row| placement(&row.key) == Placement::Runner)
+        .collect())
 }
 
 /// Writes a runner key into the legacy `settings` table, and announces it.
@@ -893,6 +916,41 @@ mod tests {
         assert_eq!(
             h.changes.try_recv().expect("the removal's publication"),
             ChangeEvent::settings(h.solo.team_id.clone())
+        );
+    }
+
+    #[tokio::test]
+    async fn runner_placed_returns_exactly_the_runner_rows_the_board_holds() {
+        let h = TestContext::new().await;
+        // Every runner key but one, plus a team and a user key planted in the
+        // legacy table, so the filter has something on each side of it.
+        let (absent, held) = RUNNER_KEYS.split_last().expect("ten runner keys");
+        for key in held
+            .iter()
+            .chain([&BASE_INSTRUCTIONS, &SUBSCRIPTION_MONTHLY_USD])
+        {
+            sqlx::query("INSERT OR REPLACE INTO settings (key, value) VALUES (?1, ?2)")
+                .bind(key)
+                .bind(format!("what {key} held"))
+                .execute(&h.context.pool)
+                .await
+                .expect("plant a legacy row");
+        }
+
+        let rows = runner_placed(&h.context).await.expect("read the rows");
+
+        let mut expected: Vec<Setting> = held
+            .iter()
+            .map(|key| Setting {
+                key: (*key).to_string(),
+                value: format!("what {key} held"),
+            })
+            .collect();
+        expected.sort_by(|a, b| a.key.cmp(&b.key));
+        assert_eq!(rows, expected);
+        assert!(
+            rows.iter().all(|row| row.key != *absent),
+            "a key the board does not hold is not returned"
         );
     }
 
