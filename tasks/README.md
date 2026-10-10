@@ -53,7 +53,7 @@ reviewable in the app afterwards.
 | 40 | [040](040-the-runner-store.md) | The runner store | v0.5 | 039 | #34 |
 | 41 | [041](041-machine-state-moves-to-the-runner.md) | Machine state moves to the runner | v0.5 | 040 | #34 |
 | 42 | [066](066-checkouts-and-worktree-records-move-to-the-runner.md) | Checkouts and worktree records move to the runner | v0.5 | 041 | #34 |
-| 43 | [042](042-split-the-scheduler.md) | Split the scheduler into board selection and a runner loop | v0.5 | 041, 066 | — |
+| 43 | [042](042-split-the-scheduler.md) | Split the scheduler into board selection and a runner loop | v0.5 | 041, 066 | #34 |
 | 44 | [043](043-runner-leases.md) | Runner leases, fencing and pinning | v0.5 | 042 | — |
 | 45 | [044](044-branch-from-the-dependencys-commit.md) | Branch from the dependency's commit | v0.5 | 043 | — |
 | 46 | [067](067-the-model-rule-and-who-may-start-a-run.md) | The model rule, and who may start a run | v0.5 | 043 | — |

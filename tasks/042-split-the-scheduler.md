@@ -6,6 +6,7 @@ status: ready
 depends_on: ["041", "066"]
 adrs: ["0010", "0031", "0028"]
 size: L
+landed: "#34"
 ---
 
 # Split the scheduler into board selection and a runner loop
