@@ -354,6 +354,31 @@ fn cases() -> Vec<Case> {
             Reads,
             |b| json!({ "level": "task", "id": b.teams.team_b.in_review }),
         ),
+        // Task 045. Team A's own task, so the membership check is what has
+        // to refuse team B's owner as an assignee.
+        case(
+            "assign_task",
+            Writes,
+            |b| json!({ "task_id": b.teams.team_a.ready, "assignee_id": b.teams.team_b.owner_id }),
+        ),
+        case("accept_content", Writes, |b| {
+            json!({
+                "team_id": b.teams.team_b.team_id,
+                "task_id": b.teams.team_b.ready,
+                "kind": "plan",
+                "revision": "1",
+            })
+        }),
+        case(
+            "set_repository_unattended_ceiling",
+            Writes,
+            |b| json!({ "repository_id": b.teams.team_b.repository.id, "allowed": true }),
+        ),
+        case(
+            "get_task_consent",
+            Reads,
+            |b| json!({ "task_id": b.teams.team_b.ready, "runner_id": b.teams.team_a.runner_id }),
+        ),
     ]
 }
 

@@ -37,28 +37,31 @@ use crate::doctor;
 use crate::machine::{self, MachineContext};
 use crate::mcp::error::ToolError;
 use crate::mcp::requests::{
-    AddTaskLinkRequest, AnalyticsRequest, ArchiveTaskRequest, ArchiveTasksRequest, ClearableField,
-    CreateTaskRequest, DoctorDismissalRequest, GetReviewHistoryRequest, GetReviewLevelRequest,
-    GetStrategyDefaultsRequest, GetTaskRequest, ListReviewFindingsRequest, ListTasksRequest,
-    MarkReviewDigestSeenRequest, MoveTaskRequest, PlanSelectionRequest,
+    AcceptContentRequest, AddTaskLinkRequest, AnalyticsRequest, ArchiveTaskRequest,
+    ArchiveTasksRequest, AssignTaskRequest, ClearableField, CreateTaskRequest,
+    DoctorDismissalRequest, GetReviewHistoryRequest, GetReviewLevelRequest,
+    GetStrategyDefaultsRequest, GetTaskConsentRequest, GetTaskRequest, ListReviewFindingsRequest,
+    ListTasksRequest, MarkReviewDigestSeenRequest, MoveTaskRequest, PlanSelectionRequest,
     RecordReviewFindingsRequest, RemoveTaskLinkRequest, RepositoryRequest,
     ResolveReviewFindingRequest, ReviewNoteRequest, ScheduleConfigRequest, ScheduleRequest,
     SetMaxConcurrencyRequest, SetRepositoryMaxConcurrencyRequest, SetRepositoryOnArchiveRequest,
-    SetRepositoryReviewConfigRequest, SetReviewSettingsRequest, SetScheduleEnabledRequest,
-    SetScheduleModeRequest, SetStrategyApprovalRequest, SetStrategyCatalogueRequest,
-    SetStrategyDefaultsRequest, SetTaskDependenciesRequest, SetTaskReviewRequest,
-    SetTaskStrategyRequest, SetWorktreeAutoCleanupRequest, SubscriptionCostRequest,
-    TaskStrategyRequest, UpdateScheduleRequest, UpdateTaskRequest,
+    SetRepositoryReviewConfigRequest, SetRepositoryUnattendedCeilingRequest,
+    SetReviewSettingsRequest, SetScheduleEnabledRequest, SetScheduleModeRequest,
+    SetStrategyApprovalRequest, SetStrategyCatalogueRequest, SetStrategyDefaultsRequest,
+    SetTaskDependenciesRequest, SetTaskReviewRequest, SetTaskStrategyRequest,
+    SetWorktreeAutoCleanupRequest, SubscriptionCostRequest, TaskStrategyRequest,
+    UpdateScheduleRequest, UpdateTaskRequest,
 };
 use crate::mcp::responses::{
-    AnalyticsView, ArchiveReportView, ArchivedTaskView, BaseInstructionsView, CheckoutListView,
-    CheckoutView, CredentialStatusView, DigestMarkerView, DismissalView, DoctorDismissalsView,
-    DoctorReportView, OnboardingView, PlanPassView, PlanResultView, PreflightView,
-    RepositoryListView, RepositoryOnArchiveView, RepositoryView, ReviewDigestView,
+    AcceptedView, AnalyticsView, ArchiveReportView, ArchivedTaskView, BaseInstructionsView,
+    CheckoutListView, CheckoutView, CredentialStatusView, DigestMarkerView, DismissalView,
+    DoctorDismissalsView, DoctorReportView, OnboardingView, PlanPassView, PlanResultView,
+    PreflightView, RepositoryListView, RepositoryOnArchiveView, RepositoryView, ReviewDigestView,
     ReviewFindingView, ReviewFindingsView, ReviewHistoryView, ReviewOutcomeView, ReviewedTaskView,
     RunCapacityView, ScheduleDeletedView, ScheduleListView, ScheduleView, StrategyApprovalView,
-    SubscriptionCostView, TaskDependentsView, TaskListItem, TaskListView, TaskView,
-    TimezoneListView, WorktreeAutoCleanupView, WorktreeListView, WorktreeView,
+    SubscriptionCostView, TaskConsentView, TaskDependentsView, TaskListItem, TaskListView,
+    TaskView, TimezoneListView, UnattendedCeilingView, WorktreeAutoCleanupView, WorktreeListView,
+    WorktreeView,
 };
 use crate::mcp::scope::{RunScope, Tool};
 use crate::review;
@@ -1050,6 +1053,92 @@ field (see `get_review_settings`). Turning the loop on is spelled \
     }
 
     #[tool(
+        description = "Assign a task to one member of its team, whose runners alone will then \
+run it, or send `assignee_id: null` to return it to the team's pool. Call this when the user says \
+who should do a piece of work. The assignee must be a member of the task's team. Assigning speaks \
+for a person, so a run cannot call it."
+    )]
+    pub async fn assign_task(
+        &self,
+        Parameters(request): Parameters<AssignTaskRequest>,
+    ) -> Result<Json<TaskView>, ToolError> {
+        self.scope.authorize(Tool::AssignTask, None)?;
+        let task =
+            tasks::assign_task(&self.ctx, &request.task_id, request.assignee_id.as_deref()).await?;
+        self.task_view(&task.id).await
+    }
+
+    #[tool(
+        description = "Record that the user has read one revision of content a teammate \
+changed (a plan, review instructions, the team's base or review instructions, another runner's \
+findings, or a dependency's commit) and accepts running it on their machine. Call this only after \
+the user has read that exact revision and said yes; `get_task_consent` lists what is missing. Only \
+the current revision is accepted. A run can never call this: it would be accepting on a person's \
+behalf."
+    )]
+    pub async fn accept_content(
+        &self,
+        Parameters(request): Parameters<AcceptContentRequest>,
+    ) -> Result<Json<AcceptedView>, ToolError> {
+        self.scope.authorize(Tool::AcceptContent, None)?;
+        crate::consent::accept(
+            &self.ctx,
+            &request.team_id,
+            request.task_id.as_deref(),
+            request.kind,
+            &request.revision,
+        )
+        .await?;
+        Ok(Json(AcceptedView {
+            team_id: request.team_id,
+            task_id: request.task_id,
+            kind: request.kind,
+            revision: request.revision,
+        }))
+    }
+
+    #[tool(
+        description = "Set whether a shared team allows unattended runs in one repository at \
+all: the team ceiling, which every runner's own consent sits under. Call this when a team owner \
+wants to allow or forbid unattended runs in a repository for everyone. Only an owner of the team \
+may, and a personal team has no ceiling. This machine's own consent is a separate setting."
+    )]
+    pub async fn set_repository_unattended_ceiling(
+        &self,
+        Parameters(request): Parameters<SetRepositoryUnattendedCeilingRequest>,
+    ) -> Result<Json<UnattendedCeilingView>, ToolError> {
+        self.scope
+            .authorize(Tool::SetRepositoryUnattendedCeiling, None)?;
+        let repository = repo::set_repository_unattended_ceiling(
+            &self.ctx,
+            &request.repository_id,
+            request.allowed,
+        )
+        .await?;
+        Ok(Json(UnattendedCeilingView {
+            repository_id: repository.id,
+            allowed: repository.allow_unattended_runs,
+        }))
+    }
+
+    #[tool(
+        description = "Explain why one of the user's runners would or would not take a task: \
+whether it is eligible (assigned to them, or in a pool the runner takes), the pin, the team's \
+ceiling, and every piece of content a teammate changed that the user has not accepted, with its \
+revision and author. Call this when the user asks why a task is not running, or before \
+`accept_content`."
+    )]
+    pub async fn get_task_consent(
+        &self,
+        Parameters(request): Parameters<GetTaskConsentRequest>,
+    ) -> Result<Json<TaskConsentView>, ToolError> {
+        self.scope.authorize(Tool::GetTaskConsent, None)?;
+        let consent =
+            crate::consent::status(&self.ctx, &request.task_id, &request.runner_id).await?;
+        Ok(Json(TaskConsentView::from(consent)))
+    }
+
+    #[tool(
         description = "Accept a planner's proposal on behalf of the user, marking the strategy as \
 theirs rather than the planner's. A later planner run will then leave it alone. Call this when a human has \
 reviewed a proposal and is happy with it; it speaks for that human, so a run cannot call it — \
@@ -1768,12 +1857,14 @@ mod tests {
     /// capability parity a rule. What replaces a count is the property that
     /// actually matters — a registered tool with no run-scope decision cannot
     /// reach the wire.
-    const REGISTERED_TOOLS: [&str; 64] = [
+    const REGISTERED_TOOLS: [&str; 68] = [
+        "accept_content",
         "accept_task_strategy",
         "add_task_link",
         "approve_task",
         "archive_task",
         "archive_tasks",
+        "assign_task",
         "clear_task_strategy",
         "create_schedule",
         "create_task",
@@ -1793,6 +1884,7 @@ mod tests {
         "get_strategy_defaults",
         "get_subscription_cost",
         "get_task",
+        "get_task_consent",
         "get_task_dependents",
         "get_worktree_auto_cleanup",
         "give_up_on_task",
@@ -1819,6 +1911,7 @@ mod tests {
         "set_repository_max_concurrency",
         "set_repository_on_archive",
         "set_repository_review_config",
+        "set_repository_unattended_ceiling",
         "set_review_settings",
         "set_schedule_enabled",
         "set_schedule_mode",

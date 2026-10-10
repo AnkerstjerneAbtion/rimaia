@@ -14,16 +14,17 @@
 
 use rimaia_core::db::{BoardColumn, MutationSource, RunKind, ScheduleMode};
 use rimaia_core::mcp::requests::{
-    ArchiveTaskRequest, CreateTaskRequest, DoctorDismissalRequest, GetReviewHistoryRequest,
-    GetReviewLevelRequest, GetStrategyDefaultsRequest, GetTaskRequest, ListReviewFindingsRequest,
+    AcceptContentRequest, ArchiveTaskRequest, AssignTaskRequest, CreateTaskRequest,
+    DoctorDismissalRequest, GetReviewHistoryRequest, GetReviewLevelRequest,
+    GetStrategyDefaultsRequest, GetTaskConsentRequest, GetTaskRequest, ListReviewFindingsRequest,
     ListTasksRequest, MarkReviewDigestSeenRequest, MoveTaskRequest, PlanSelectionRequest,
     RecordReviewFindingsRequest, ResolveReviewFindingRequest, ReviewNoteRequest,
     ScheduleConfigRequest, ScheduleRequest, SetMaxConcurrencyRequest,
-    SetRepositoryMaxConcurrencyRequest, SetRepositoryReviewConfigRequest, SetReviewSettingsRequest,
-    SetScheduleEnabledRequest, SetScheduleModeRequest, SetStrategyApprovalRequest,
-    SetStrategyCatalogueRequest, SetStrategyDefaultsRequest, SetTaskDependenciesRequest,
-    SetTaskReviewRequest, SetTaskStrategyRequest, TaskStrategyRequest, UpdateScheduleRequest,
-    UpdateTaskRequest,
+    SetRepositoryMaxConcurrencyRequest, SetRepositoryReviewConfigRequest,
+    SetRepositoryUnattendedCeilingRequest, SetReviewSettingsRequest, SetScheduleEnabledRequest,
+    SetScheduleModeRequest, SetStrategyApprovalRequest, SetStrategyCatalogueRequest,
+    SetStrategyDefaultsRequest, SetTaskDependenciesRequest, SetTaskReviewRequest,
+    SetTaskStrategyRequest, TaskStrategyRequest, UpdateScheduleRequest, UpdateTaskRequest,
 };
 use rimaia_core::mcp::responses::{
     DoctorDismissalsView, DoctorReportView, PreflightView, ScheduleDeletedView, ScheduleListView,
@@ -259,6 +260,12 @@ fn expected_access(tool: Tool, kind: GrantKind) -> RunAccess {
             | Tool::SetReviewSettings
             | Tool::SetRepositoryReviewConfig
             | Tool::SetTaskReview => RunAccess::Refused,
+            // Task 045. Each speaks for a person; see
+            // `a_run_cannot_accept_through_its_handle`.
+            Tool::AssignTask
+            | Tool::AcceptContent
+            | Tool::SetRepositoryUnattendedCeiling
+            | Tool::GetTaskConsent => RunAccess::Refused,
     }
 }
 
@@ -2395,4 +2402,82 @@ async fn solo_team(pool: &SqlitePool) -> String {
     .await
     .expect("the board's solo identity")
     .team_id
+}
+
+#[tokio::test]
+async fn a_run_cannot_accept_through_its_handle() {
+    // ADR-0032 point 6, and task 045's reason for refusing all four: a run that
+    // could accept would launder consent through its own handle, its owner
+    // accepting content the run itself wrote. Refused for every grant, on its
+    // own task, before anything is read or written; the operator's door is the
+    // control.
+    let h = TestContext::new().await;
+    let repository_id = seed_repository(&h.context.pool, "rimaia", "/tmp/rimaia").await;
+    let task = create_task(&h, &repository_id, "Mine").await;
+    let accept = || {
+        request::<AcceptContentRequest>(json!({
+            "team_id": h.solo.team_id,
+            "task_id": task.id,
+            "kind": "plan",
+            "revision": "1",
+        }))
+    };
+
+    for grant in every_grant() {
+        let server = scoped_as(&h, &task.id, grant);
+
+        assert_refusal(
+            &as_result(server.accept_content(Parameters(accept())).await),
+            &not_available("accept_content", &task.id),
+        );
+        assert_refusal(
+            &as_result(
+                server
+                    .assign_task(Parameters(request::<AssignTaskRequest>(
+                        json!({ "task_id": task.id, "assignee_id": null }),
+                    )))
+                    .await,
+            ),
+            &not_available("assign_task", &task.id),
+        );
+        assert_refusal(
+            &as_result(
+                server
+                    .set_repository_unattended_ceiling(Parameters(request::<
+                        SetRepositoryUnattendedCeilingRequest,
+                    >(
+                        json!({ "repository_id": repository_id, "allowed": true }),
+                    )))
+                    .await,
+            ),
+            &not_available("set_repository_unattended_ceiling", &task.id),
+        );
+        assert_refusal(
+            &as_result(
+                server
+                    .get_task_consent(Parameters(request::<GetTaskConsentRequest>(
+                        json!({ "task_id": task.id, "runner_id": h.solo.runner_id }),
+                    )))
+                    .await,
+            ),
+            &not_available("get_task_consent", &task.id),
+        );
+    }
+    let recorded: i64 = sqlx::query_scalar("SELECT count(*) FROM acceptances")
+        .fetch_one(&h.context.pool)
+        .await
+        .expect("count the acceptances");
+    assert_eq!(recorded, 0, "no run recorded an acceptance");
+
+    let operator = RimaiaServer::new(
+        h.context.with_source(MutationSource::Mcp),
+        testing::doctor::provider(),
+        Some(testing::doctor::local_tools(h.machine())),
+    );
+    json_of(operator.accept_content(Parameters(accept())).await);
+    let recorded: i64 = sqlx::query_scalar("SELECT count(*) FROM acceptances")
+        .fetch_one(&h.context.pool)
+        .await
+        .expect("count the acceptances");
+    assert_eq!(recorded, 1, "the operator's own door accepts");
 }

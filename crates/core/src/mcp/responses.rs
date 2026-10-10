@@ -1608,6 +1608,77 @@ pub struct DigestMarkerView {
     pub seen_through: DateTime<Utc>,
 }
 
+// ---------------------------------------------------------------------------
+// Assignment and consent (ADR-0032, task 045)
+// ---------------------------------------------------------------------------
+
+/// `accept_content`: the revision now on the caller's record.
+#[derive(Debug, Clone, PartialEq, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub struct AcceptedView {
+    pub team_id: String,
+    pub task_id: Option<String>,
+    #[schemars(with = "String")]
+    pub kind: crate::consent::pieces::ContentKind,
+    pub revision: String,
+}
+
+/// `set_repository_unattended_ceiling`: the team ceiling as it now stands.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub struct UnattendedCeilingView {
+    pub repository_id: String,
+    pub allowed: bool,
+}
+
+/// `get_task_consent`: [`TaskConsent`](crate::consent::TaskConsent) in
+/// D16.1's snake case.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub struct TaskConsentView {
+    pub eligibility: crate::consent::EligibilityStatus,
+    pub pinned_runner_id: Option<String>,
+    pub team_ceiling: crate::consent::TeamCeiling,
+    /// Every piece the runner's owner has neither written, accepted nor
+    /// trusted, each with what accepting it takes.
+    pub missing: Vec<MissingPieceView>,
+}
+
+/// One piece of [`TaskConsentView::missing`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub struct MissingPieceView {
+    #[schemars(with = "String")]
+    pub kind: crate::consent::pieces::ContentKind,
+    pub task_id: Option<String>,
+    pub revision: String,
+    /// `None` for a former member.
+    pub author_login: Option<String>,
+    #[schemars(with = "String")]
+    pub reason: crate::consent::pieces::MissingReason,
+}
+
+impl From<crate::consent::TaskConsent> for TaskConsentView {
+    fn from(consent: crate::consent::TaskConsent) -> Self {
+        Self {
+            eligibility: consent.eligibility,
+            pinned_runner_id: consent.pinned_runner_id,
+            team_ceiling: consent.team_ceiling,
+            missing: consent
+                .missing
+                .into_iter()
+                .map(|piece| MissingPieceView {
+                    kind: piece.kind,
+                    task_id: piece.task_id,
+                    revision: piece.revision,
+                    author_login: piece.author_login,
+                    reason: piece.reason,
+                })
+                .collect(),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

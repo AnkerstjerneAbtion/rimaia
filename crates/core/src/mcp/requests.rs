@@ -930,3 +930,55 @@ mod tests {
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// Assignment and consent (ADR-0032, task 045)
+// ---------------------------------------------------------------------------
+
+/// `assign_task`.
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct AssignTaskRequest {
+    pub task_id: String,
+    /// A member of the task's team, whose runners alone will run it. Null or
+    /// absent returns the task to the team's pool.
+    #[serde(default)]
+    pub assignee_id: Option<String>,
+}
+
+/// `accept_content`: one revision of one piece of content, accepted as read.
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct AcceptContentRequest {
+    pub team_id: String,
+    /// The task the content belongs to; for `base_commit`, the dependency
+    /// that made the commit. Absent exactly for `base_instructions` and
+    /// `review_instructions`, which belong to the team.
+    #[serde(default)]
+    pub task_id: Option<String>,
+    #[schemars(with = "String")]
+    pub kind: crate::consent::pieces::ContentKind,
+    /// The revision read: the decimal revision for a plan or instructions,
+    /// the run's id for findings, the commit for a base commit. Only the
+    /// current one is accepted.
+    pub revision: String,
+}
+
+/// `set_repository_unattended_ceiling`.
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct SetRepositoryUnattendedCeilingRequest {
+    pub repository_id: String,
+    /// Whether the team allows unattended runs in this repository at all.
+    pub allowed: bool,
+}
+
+/// `get_task_consent`.
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct GetTaskConsentRequest {
+    pub task_id: String,
+    /// One of the caller's own runners: what a person has accepted is
+    /// theirs to read.
+    pub runner_id: String,
+}

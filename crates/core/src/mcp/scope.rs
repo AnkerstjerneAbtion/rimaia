@@ -268,6 +268,13 @@ pub enum Tool {
     GetReviewHistory,
     // Read with the other review configuration: refused to every run.
     GetReviewLevel,
+
+    // Task 045. Assignment, acceptance, the team ceiling and the consent read
+    // (ADR-0032). All four are refused to a run — see `run_access`.
+    AssignTask,
+    AcceptContent,
+    SetRepositoryUnattendedCeiling,
+    GetTaskConsent,
 }
 
 /// What a [`RunScope::Run`] may do with one tool — ADR-0006's amendment table,
@@ -284,7 +291,7 @@ pub enum RunAccess {
 
 impl Tool {
     /// Every tool with a recorded decision, so a test can walk the table.
-    pub const ALL: [Tool; 64] = [
+    pub const ALL: [Tool; 68] = [
         Tool::AddTaskLink,
         Tool::CreateTask,
         Tool::GetBaseInstructions,
@@ -349,6 +356,10 @@ impl Tool {
         Tool::SetTaskReview,
         Tool::GetReviewHistory,
         Tool::GetReviewLevel,
+        Tool::AssignTask,
+        Tool::AcceptContent,
+        Tool::SetRepositoryUnattendedCeiling,
+        Tool::GetTaskConsent,
     ];
 
     /// The wired name — what `tools/list` advertises and what the ADR table
@@ -419,6 +430,10 @@ impl Tool {
             Tool::SetTaskReview => "set_task_review",
             Tool::GetReviewHistory => "get_review_history",
             Tool::GetReviewLevel => "get_review_level",
+            Tool::AssignTask => "assign_task",
+            Tool::AcceptContent => "accept_content",
+            Tool::SetRepositoryUnattendedCeiling => "set_repository_unattended_ceiling",
+            Tool::GetTaskConsent => "get_task_consent",
         }
     }
 
@@ -666,6 +681,18 @@ impl Tool {
             | Tool::SetReviewSettings
             | Tool::SetRepositoryReviewConfig
             | Tool::SetTaskReview => RunAccess::Refused,
+
+            // Task 045 (ADR-0032), and each speaks for a person. `accept_content`
+            // is the one that matters: a run that could accept would launder
+            // consent through its own handle, its owner's acceptance of content
+            // the run itself just wrote. Assigning chooses whose machine runs a
+            // card, the ceiling is a team owner's decision about every runner,
+            // and the consent read is a person's own record, which a run has no
+            // use for but deciding what to accept.
+            Tool::AssignTask
+            | Tool::AcceptContent
+            | Tool::SetRepositoryUnattendedCeiling
+            | Tool::GetTaskConsent => RunAccess::Refused,
         }
     }
 }
