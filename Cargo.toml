@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/core", "src-tauri"]
+members = ["crates/core", "crates/runner", "src-tauri"]
 
 # Versions live here so the core crate and the Tauri shell can never drift onto
 # two different serde or sqlx. ADR-0015 splits the crates; it does not split the

@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT runner_id FROM runner_identity",
+  "describe": {
+    "columns": [
+      {
+        "name": "runner_id",
+        "ordinal": 0,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "adce5255b02775a90dea6add8ddf7ff538039dbc80758d79c63478e690340709"
+}

@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO adoptions (step, adopted_at) VALUES (?1, ?2)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "113272900ff65de5b50333f5ef97851b3ba09fc4c81d385f02809d72b21b9c08"
+}

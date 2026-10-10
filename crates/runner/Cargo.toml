@@ -1,0 +1,25 @@
+[package]
+name = "rimaia-runner"
+version = "0.1.0"
+edition = "2021"
+description = "The Rimaia runner: runner.db and what one machine keeps for itself (ADR-0027, ADR-0028)."
+
+# A library only; the headless binary is task 058's. Like `rimaia-core`, nothing
+# here may require a display server, WebKit or GTK: the headless runner links
+# this crate on a machine that has none, so no desktop-framework crate belongs in
+# either table below.
+[dependencies]
+rimaia-core = { path = "../core" }
+chrono = { workspace = true }
+sqlx = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+
+# `rimaia-core` again, with `testing` on, for the clock and the pre-038 board
+# builder. `pretty_assertions` is pinned directly because `crates/core` pins it
+# directly; the same requirement resolves to the version Cargo.lock already
+# holds, so no crate enters the lock (seam-contract D6, D34).
+[dev-dependencies]
+rimaia-core = { path = "../core", features = ["testing"] }
+pretty_assertions = "1"
+tempfile = { workspace = true }
