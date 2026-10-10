@@ -920,12 +920,38 @@ fn current_piece(
 
 /// Every piece of `kind` that `task_id` lists now, for any purpose and
 /// whichever runner would run it.
+///
+/// A [`ContentKind::BaseCommit`] piece names the *dependency* as its task, so
+/// its current revision is the commit that dependency offers its dependents
+/// now: its latest successful head (D29 point 5), credited to every owner
+/// whose runners' work that commit holds.
 async fn current_listed(
     ctx: &ServiceContext,
     task_id: &str,
     kind: ContentKind,
 ) -> Result<Vec<Piece>> {
-    let composition = composition(ctx, task_id, kind == ContentKind::ReviewFindings).await?;
+    if kind == ContentKind::BaseCommit {
+        let Some(head) = crate::runs::latest_successful_head(ctx, task_id).await? else {
+            return Ok(Vec::new());
+        };
+        let mut conn = ctx.pool.acquire().await?;
+        let attempt = sqlx::query_scalar!("SELECT attempt FROM runs WHERE id = ?1", head.run_id)
+            .fetch_one(&mut *conn)
+            .await?;
+        let owners = crate::runs::commit_authors(&mut conn, task_id, attempt).await?;
+        return Ok(owners
+            .into_iter()
+            .map(|author| Piece {
+                kind,
+                task_id: Some(task_id.to_string()),
+                revision: head.head_sha.clone(),
+                author,
+                written_during_run: false,
+            })
+            .collect());
+    }
+
+    let composition = composition(ctx, task_id, true).await?;
     let mut conn = ctx.pool.acquire().await?;
     // No runner's id: every recorded run is "another runner's" here.
     let Some(inputs) = inputs(&mut conn, task_id, "", &composition).await? else {
