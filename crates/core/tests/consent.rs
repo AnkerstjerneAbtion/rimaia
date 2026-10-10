@@ -8,7 +8,9 @@
 
 use pretty_assertions::assert_eq;
 use rimaia_core::board::{Claim, ClaimTarget, LeaseRef};
-use rimaia_core::consent::{self, pieces::ContentKind};
+use rimaia_core::consent::eligibility::RunnerEligibility;
+use rimaia_core::consent::pieces::{ContentKind, MissingReason};
+use rimaia_core::consent::{self, EligibilityStatus, MissingPiece, TaskConsent, TeamCeiling};
 use rimaia_core::db::settings;
 use rimaia_core::db::{BoardColumn, ExitClass, RunKind, RunStatus};
 use rimaia_core::events::TaskId;
@@ -506,6 +508,147 @@ async fn a_member_cannot_set_the_team_ceiling() {
     assert_eq!(
         error.to_string(),
         "a personal team has no ceiling: this machine's own consent decides."
+    );
+}
+
+// ---------------------------------------------------------------------------
+// What a card shows
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn task_consent_says_why_a_runner_would_or_would_not_take_a_task() {
+    let team = SharedTeam::new().await;
+    let status = |member: &Member, task: &TaskId| {
+        let ctx = member.ctx.clone();
+        let (task, runner) = (task.clone(), member.runner_id.clone());
+        async move {
+            consent::status(&ctx, &task, &runner)
+                .await
+                .expect("read the task's consent")
+        }
+    };
+
+    // Bob's own task, nobody else's content: nothing stands in the way.
+    let bobs = team.task(&team.bob, "Bob's", Some(&team.bob)).await;
+    assert_eq!(
+        status(&team.bob, &bobs).await,
+        TaskConsent {
+            eligibility: EligibilityStatus::Assigned,
+            pinned_runner_id: None,
+            team_ceiling: TeamCeiling::Allowed,
+            missing: vec![],
+        }
+    );
+
+    // Alice edits his plan, and the base instructions are a former member's:
+    // both are listed, in the order the implementation prompt reads them.
+    edit_plan(&team.alice, &bobs, "1. Bob's, Alice's way").await;
+    settings::set_base_instructions(&team.alice.ctx, "Use tabs.")
+        .await
+        .expect("Alice edits the base instructions");
+    sqlx::query("UPDATE team_settings SET updated_by = NULL WHERE team_id = ?1 AND key = ?2")
+        .bind(&team.team_id)
+        .bind(settings::BASE_INSTRUCTIONS)
+        .execute(&team.alice.ctx.pool)
+        .await
+        .expect("the editor's account is gone");
+    assert_eq!(
+        status(&team.bob, &bobs).await,
+        TaskConsent {
+            eligibility: EligibilityStatus::Assigned,
+            pinned_runner_id: None,
+            team_ceiling: TeamCeiling::Allowed,
+            missing: vec![
+                MissingPiece {
+                    kind: ContentKind::Plan,
+                    task_id: Some(bobs.clone()),
+                    revision: "2".to_string(),
+                    author_login: Some("alice".to_string()),
+                    reason: MissingReason::NotAccepted,
+                },
+                MissingPiece {
+                    kind: ContentKind::BaseInstructions,
+                    task_id: None,
+                    revision: "1".to_string(),
+                    author_login: None,
+                    reason: MissingReason::FormerMember,
+                },
+            ],
+        }
+    );
+
+    // The same task from Alice's runner: someone else's, whatever she wrote.
+    // The plan is hers, so only the former member's revision is missing.
+    let alices_view = status(&team.alice, &bobs).await;
+    assert_eq!(
+        alices_view.eligibility,
+        EligibilityStatus::AssignedToSomeoneElse
+    );
+    assert_eq!(
+        alices_view
+            .missing
+            .iter()
+            .map(|piece| piece.kind)
+            .collect::<Vec<_>>(),
+        vec![ContentKind::BaseInstructions]
+    );
+
+    // An unassigned task is outside the pool until the runner takes it.
+    let pooled = team.task(&team.bob, "Pooled", None).await;
+    assert_eq!(
+        status(&team.bob, &pooled).await.eligibility,
+        EligibilityStatus::Unassigned
+    );
+    consent::set_runner_eligibility(
+        &team.bob.ctx,
+        &team.bob.runner_id,
+        RunnerEligibility::AssignedThenPool,
+        std::slice::from_ref(&team.team_id),
+    )
+    .await
+    .expect("Bob's runner takes this team's pool");
+    assert_eq!(
+        status(&team.bob, &pooled).await.eligibility,
+        EligibilityStatus::Pool
+    );
+
+    // The team ceiling, as the owner sets it, and not consulted at all in a
+    // personal team.
+    repo::set_repository_unattended_ceiling(&team.alice.ctx, &team.repository.id, false)
+        .await
+        .expect("Alice forbids unattended runs");
+    assert_eq!(
+        status(&team.bob, &bobs).await.team_ceiling,
+        TeamCeiling::Forbidden
+    );
+    let (personal, _) = personal_task(&team, &team.bob).await;
+    let own = consent::status(&team.bob.personal, &personal, &team.bob.runner_id)
+        .await
+        .expect("read a personal task's consent");
+    assert_eq!(
+        own,
+        TaskConsent {
+            eligibility: EligibilityStatus::Assigned,
+            pinned_runner_id: None,
+            team_ceiling: TeamCeiling::NotConsulted,
+            missing: vec![],
+        }
+    );
+
+    // What Alice has accepted is hers to read: her runner, asked about by
+    // Bob, reads exactly as a runner that was never issued.
+    let someone_elses = consent::status(&team.bob.ctx, &bobs, &team.alice.runner_id)
+        .await
+        .expect_err("not Bob's runner");
+    let never_issued = consent::status(&team.bob.ctx, &bobs, "never-issued")
+        .await
+        .expect_err("nobody's runner");
+    assert_eq!(someone_elses.code(), ErrorCode::NotFound);
+    assert_eq!(
+        someone_elses
+            .to_string()
+            .replace(&team.alice.runner_id, "never-issued"),
+        never_issued.to_string()
     );
 }
 

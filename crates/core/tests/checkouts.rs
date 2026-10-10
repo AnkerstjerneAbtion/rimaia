@@ -17,8 +17,9 @@ use std::time::Duration;
 use pretty_assertions::assert_eq;
 use rimaia_core::board::LeaseRef;
 use rimaia_core::board::OwnerPresence;
+use rimaia_core::consent;
 use rimaia_core::db::{BoardColumn, MutationSource, RunState};
-use rimaia_core::mcp::requests::{GetTaskRequest, ListTasksRequest};
+use rimaia_core::mcp::requests::{GetTaskConsentRequest, GetTaskRequest, ListTasksRequest};
 use rimaia_core::mcp::RimaiaServer;
 use rimaia_core::repo::{self, NewRepository, RepositoryPatch};
 use rimaia_core::runner::events::transcript_path;
@@ -298,6 +299,16 @@ async fn no_board_dto_carries_an_absolute_path() {
         ),
     );
 
+    let runner_id = f.harness.solo.runner_id.clone();
+    record(
+        "get_task_consent",
+        to_json(
+            &consent::status(f.ctx(), &task, &runner_id)
+                .await
+                .expect("consent"),
+        ),
+    );
+
     let server = RimaiaServer::new(
         f.ctx().with_source(MutationSource::Mcp),
         testing::doctor::provider(),
@@ -320,6 +331,13 @@ async fn no_board_dto_carries_an_absolute_path() {
         .await
         .unwrap_or_else(|error| panic!("{:?}", error.0));
     record("mcp list_tasks", to_json(&view));
+    let Json(view) = server
+        .get_task_consent(Parameters(request::<GetTaskConsentRequest>(
+            json!({ "task_id": task, "runner_id": runner_id }),
+        )))
+        .await
+        .unwrap_or_else(|error| panic!("{:?}", error.0));
+    record("mcp get_task_consent", to_json(&view));
 
     // Last, because it takes the card off the board.
     record(
