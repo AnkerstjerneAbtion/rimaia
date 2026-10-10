@@ -21,6 +21,7 @@ pub mod doctor;
 pub mod error;
 pub mod events;
 pub mod identity;
+pub mod machine;
 pub mod mcp;
 pub mod openers;
 pub mod paths;

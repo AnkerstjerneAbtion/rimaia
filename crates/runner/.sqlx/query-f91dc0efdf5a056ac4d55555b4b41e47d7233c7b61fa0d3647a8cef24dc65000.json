@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE schedules SET enabled = ?2, armed_at = ?3 WHERE id = ?1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": []
+  },
+  "hash": "f91dc0efdf5a056ac4d55555b4b41e47d7233c7b61fa0d3647a8cef24dc65000"
+}

@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "DELETE FROM runner_settings WHERE key = ?1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": []
+  },
+  "hash": "9aeac5317f5e9e5e452edcd4c8f34271536a38274b5d0644e2ce1a32989fe6ed"
+}

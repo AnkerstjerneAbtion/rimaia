@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "\n        INSERT INTO checkouts\n            (repository_id, path, worktree_root, max_concurrency, unattended_consent,\n             on_archive, on_archive_script, credential_login, credential_label,\n             credential_added_at, created_at)\n        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 11
+    },
+    "nullable": []
+  },
+  "hash": "3531136587e386a6da7298e5d8d2c98dc19096fbb704817977b039e9bcbd74b0"
+}

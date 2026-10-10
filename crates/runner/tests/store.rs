@@ -47,7 +47,7 @@ async fn a_second_launch_applies_no_further_runner_migrations() {
     assert_eq!(after_first, after_second);
     assert_eq!(
         versions,
-        vec![20261003130000],
+        vec![20261003130000, 20261003130100],
         "the runner set and no board version"
     );
 }
