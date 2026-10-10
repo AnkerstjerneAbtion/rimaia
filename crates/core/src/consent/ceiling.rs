@@ -9,7 +9,6 @@
 use serde::{Deserialize, Serialize};
 
 use crate::error::Result;
-use crate::events::ChangeEvent;
 use crate::machine::MachineContext;
 use crate::strategy::{Catalogue, StrategyOrigin};
 
@@ -38,10 +37,11 @@ impl StrategyCeiling {
 /// The `runner_settings` key holding the ceiling, as [`StrategyCeiling`]'s
 /// JSON.
 ///
-/// Read and written straight through the machine store, like
-/// `runner::limits`' two override keys, and for their reason: it is not in
+/// Read straight through the machine store, like `runner::limits`' two
+/// override keys, and for their reason: it is not in
 /// `db::settings::RUNNER_KEYS`, because the board's `settings` never held it
-/// and task 040's adoption has nothing to copy.
+/// and task 040's adoption has nothing to copy. The local commands that write
+/// it are task 072's.
 pub const STRATEGY_CEILING: &str = "strategy_ceiling";
 
 /// This runner's ceiling, read when each run starts by the route
@@ -56,22 +56,6 @@ pub async fn strategy_ceiling(machine: &MachineContext) -> Result<StrategyCeilin
         tracing::warn!(value = stored, %error, "unusable strategy_ceiling; no ceiling applies");
         StrategyCeiling::default()
     }))
-}
-
-/// Replaces this runner's ceiling. One that constrains nothing removes the
-/// row, so "no ceiling" has one spelling.
-pub async fn set_strategy_ceiling(
-    machine: &MachineContext,
-    ceiling: &StrategyCeiling,
-) -> Result<StrategyCeiling> {
-    if ceiling.is_none() {
-        machine.store.clear_setting(STRATEGY_CEILING).await?;
-    } else {
-        let stored = serde_json::to_string(ceiling).map_err(anyhow::Error::from)?;
-        machine.store.set_setting(STRATEGY_CEILING, &stored).await?;
-    }
-    machine.publish(ChangeEvent::settings);
-    strategy_ceiling(machine).await
 }
 
 /// What one phase would spawn with, and where each half came from.

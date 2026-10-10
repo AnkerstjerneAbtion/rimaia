@@ -1510,8 +1510,9 @@ impl Phases<'_> {
 
 /// This runner's strategy ceiling, sent with a finish for the phase a
 /// `Continue` would start (task 045). A ceiling that cannot be read is sent as
-/// none: the board's refusal is only the early half, and the spawn gate reads
-/// it again before the next phase spawns, where a read failure refuses.
+/// none rather than failing a finish that has already happened: the board's
+/// refusal is a cost control, not consent, and judging the ceiling again
+/// before the next phase spawns is task 072's.
 async fn next_phase_ceiling(machine: &MachineContext) -> StrategyCeiling {
     ceiling::strategy_ceiling(machine)
         .await

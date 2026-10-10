@@ -72,6 +72,7 @@ use rimaia_core::board::{
     InProcessBoard, LeasePurpose, LeaseRef, LeaseTerm, RunContext, StartRun, TranscriptAck,
     TranscriptChunk,
 };
+use rimaia_core::consent::ceiling::STRATEGY_CEILING;
 use rimaia_core::db::{
     BoardColumn, ExitClass, OnArchive, RunKind, RunState, RunStatus, ScheduleMode, Task,
 };
@@ -592,6 +593,117 @@ async fn a_repository_without_the_opt_in_is_skipped_with_the_reason_rather_than_
     );
 
     queue.shutdown();
+}
+
+// ---------------------------------------------------------------------------
+// The strategy ceiling (task 045)
+//
+// The ceiling is this runner's, stored in its own `runner_settings`, and
+// travels with every claim; the board only refuses with it. Core's
+// `strategy_ceiling.rs` asks the claim with a ceiling it builds. These store
+// the key and let the loop and the starter read it, so what is asserted is
+// that the stored value reaches the claim.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn the_queue_passes_over_a_task_above_the_stored_ceiling() {
+    let fixture = Fixture::new().await;
+    let above = fixture.add_task("Asks for opus").await;
+    choose_model(&fixture, &above, "opus").await;
+    let below = fixture.add_task("Names nothing").await;
+    store_ceiling(&fixture, r#"{"models":["sonnet"]}"#).await;
+
+    let mut changes = fixture.ctx().subscribe();
+    let queue = fixture.spawn_queue();
+    queue.start().await.expect("start the queue");
+    wait_until_in_review(&fixture, &mut changes, &below).await;
+    let status = queue::status_with_plan(&queue)
+        .await
+        .expect("read the queue's status");
+    queue.shutdown();
+
+    assert_eq!(fixture.cli.started(), vec![below], "only the task below it");
+    assert_eq!(fixture.task(&above).await.run_state, RunState::Idle);
+    assert!(
+        status.plan.iter().all(|entry| entry.task_id != above),
+        "passed over without a reason, since another runner can take it with nobody acting: \
+         {:?}",
+        status.plan
+    );
+}
+
+#[tokio::test]
+async fn run_now_above_the_stored_ceiling_is_refused_in_a_sentence() {
+    let fixture = Fixture::new().await;
+    let task = fixture.add_task("Asks for opus").await;
+    choose_model(&fixture, &task, "opus").await;
+    store_ceiling(&fixture, r#"{"models":["sonnet","haiku"]}"#).await;
+    let config = fixture.runner();
+    let board = fixture.harness.board(&fixture.paths, &config);
+
+    let error = claim_manual_start(
+        fixture.harness.starter(OwnerPresence::Remote),
+        board.as_ref(),
+        fixture.machine(),
+        &fixture.paths,
+        &config,
+        &InFlight::new(),
+        ManualStart {
+            task_id: task.clone(),
+            continue_session: false,
+        },
+    )
+    .await
+    .err()
+    .expect("Run now is refused");
+
+    let label: String = sqlx::query_scalar("SELECT label FROM runners WHERE id = ?1")
+        .bind(&fixture.harness.solo.runner_id)
+        .fetch_one(&fixture.ctx().pool)
+        .await
+        .expect("read this runner's label");
+    assert_eq!(
+        error.to_string(),
+        format!(
+            "this task asks for the model \"opus\", which {label}'s strategy ceiling does not \
+             allow. Change the task's model, or run it on another runner."
+        )
+    );
+    assert_eq!(
+        fixture.cli.started(),
+        Vec::<String>::new(),
+        "nothing spawned"
+    );
+    assert_eq!(
+        fixture.task(&task).await.run_state,
+        RunState::Idle,
+        "a refused claim moves nothing"
+    );
+}
+
+/// Names `model` on the card, through the board's own service.
+async fn choose_model(fixture: &Fixture, task_id: &str, model: &str) {
+    tasks::update_task(
+        fixture.ctx(),
+        task_id,
+        tasks::TaskPatch {
+            model: tasks::Patch::Set(model.to_string()),
+            ..tasks::TaskPatch::default()
+        },
+    )
+    .await
+    .expect("name a model on the card");
+}
+
+/// Stores `json` as this runner's `strategy_ceiling`, as task 072's local
+/// command will.
+async fn store_ceiling(fixture: &Fixture, json: &str) {
+    fixture
+        .machine()
+        .store
+        .set_setting(STRATEGY_CEILING, json)
+        .await
+        .expect("store the ceiling");
 }
 
 // ---------------------------------------------------------------------------

@@ -6,7 +6,9 @@
 //! does with the ceiling a claim carries: a named start refused in Scope 11's
 //! sentence, `Next` passing the task over with no reason, and each purpose
 //! judged on what that phase would spawn with. Judging again at spawn, and
-//! filling an absent choice, are task 072's.
+//! filling an absent choice, are task 072's. How the runner reads the stored
+//! key is here too; that the loop and the starter send what it reads is
+//! asserted in `crates/runner/tests/queue.rs`.
 //!
 //! Bob's runner, "Mac mini", on the shared team (`testing::shared`), running
 //! Bob's own tasks, so neither eligibility nor consent is what refuses.
@@ -17,7 +19,7 @@ use pretty_assertions::assert_eq;
 use rimaia_core::board::{
     ClaimTarget, FinishRun, FreeCapacity, LeasePurpose, NextStep, StartRun, TranscriptEnd,
 };
-use rimaia_core::consent::ceiling::StrategyCeiling;
+use rimaia_core::consent::ceiling::{strategy_ceiling, StrategyCeiling, STRATEGY_CEILING};
 use rimaia_core::db::{BoardColumn, ExitClass, RunKind, RunState, RunStatus};
 use rimaia_core::events::TaskId;
 use rimaia_core::review_loop::config as review_config;
@@ -28,6 +30,7 @@ use rimaia_core::runner::RunTrigger;
 use rimaia_core::scheduler::selection::{self, RunnerView};
 use rimaia_core::tasks::{self, Patch, TaskPatch};
 use rimaia_core::testing::shared::{Member, SharedTeam};
+use rimaia_core::testing::TestContext;
 use rimaia_core::ErrorCode;
 use serde_json::json;
 
@@ -183,6 +186,40 @@ async fn a_continue_into_a_review_is_judged_on_the_review_model_then_the_tasks()
             assert_eq!(detail.task.run_state, RunState::Idle, "{case}");
         }
     }
+}
+
+#[tokio::test]
+async fn a_stored_ceiling_that_does_not_parse_reads_as_no_ceiling() {
+    let harness = TestContext::new().await;
+    let machine = harness.machine();
+    let read = || async { strategy_ceiling(machine).await.expect("read the ceiling") };
+
+    assert_eq!(read().await, StrategyCeiling::default(), "absent is none");
+
+    machine
+        .store
+        .set_setting(
+            STRATEGY_CEILING,
+            r#"{"models":["sonnet"],"maxEffort":"medium"}"#,
+        )
+        .await
+        .expect("store a ceiling");
+    assert_eq!(
+        read().await,
+        StrategyCeiling {
+            models: Some(vec!["sonnet".to_string()]),
+            max_effort: Some("medium".to_string()),
+        }
+    );
+
+    // A hand-edited `runner.db`, or one a later build wrote: tolerated, and
+    // read as no ceiling rather than stopping every claim (ADR-0003).
+    machine
+        .store
+        .set_setting(STRATEGY_CEILING, "sonnet, please")
+        .await
+        .expect("store a value that is not JSON");
+    assert_eq!(read().await, StrategyCeiling::default());
 }
 
 // ---------------------------------------------------------------------------
