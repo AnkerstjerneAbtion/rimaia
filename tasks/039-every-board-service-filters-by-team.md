@@ -6,6 +6,7 @@ status: ready
 depends_on: ["038"]
 adrs: ["0029", "0021", "0028", "0030", "0035"]
 size: L
+landed: "#34"
 ---
 
 # Every board service filters by team
