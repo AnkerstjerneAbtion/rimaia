@@ -35,7 +35,7 @@ use rimaia_core::tasks::{
 };
 use rimaia_core::testing::db::insert_runner;
 use rimaia_core::testing::shared::{add_member, Member, SharedTeam};
-use rimaia_core::testing::TempRepo;
+use rimaia_core::testing::{TempRepo, TestContext};
 use rimaia_core::{board, Clock, ErrorCode, ServiceContext};
 use serde_json::json;
 
@@ -1581,6 +1581,132 @@ async fn a_dependency_commit_is_credited_to_every_implementing_runner_up_to_the_
 }
 
 // ---------------------------------------------------------------------------
+// Authorship facts (ADR-0032 point 7)
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn a_shared_team_run_context_names_the_plan_author_and_the_runner() {
+    let team = SharedTeam::new().await;
+    let task = team.task(&team.alice, "Alpha", Some(&team.bob)).await;
+    consent::accept(
+        &team.bob.ctx,
+        &team.team_id,
+        Some(&task),
+        ContentKind::Plan,
+        "1",
+    )
+    .await
+    .expect("Bob reads Alice's plan");
+    let bobs = team.board(&team.bob);
+
+    let claimed = claim(&team, &team.bob, &task).await;
+    let context = bobs
+        .run_context(&claimed.lease)
+        .await
+        .expect("the context under the lease");
+
+    let expected = Some(board::RunAuthorship {
+        plan_revision: 1,
+        plan_author: Some("alice".to_string()),
+        runner_owner: "bob".to_string(),
+        runner_label: "Mac mini".to_string(),
+    });
+    assert_eq!(context.authorship, expected);
+    assert_eq!(claimed.context.authorship, expected, "the claim's too");
+}
+
+#[tokio::test]
+async fn a_personal_team_run_context_carries_no_authorship() {
+    let harness = TestContext::new().await;
+    let data = tempfile::TempDir::new().expect("a data directory");
+    let paths = rimaia_core::AppPaths::new(data.path());
+    let source = TempRepo::init();
+    let repository = repo::register(
+        &harness.context,
+        harness.machine(),
+        &paths.worktrees_dir(),
+        NewRepository {
+            path: source.path().to_string_lossy().into_owned(),
+            name: None,
+            worktree_root: None,
+        },
+    )
+    .await
+    .expect("register a repository");
+    let task = tasks::create_task(
+        &harness.context,
+        NewTask {
+            repository_id: repository.id,
+            title: "Solo".to_string(),
+            plan: Some("1. Mine".to_string()),
+            extra_instructions: None,
+            column: Some(BoardColumn::Ready),
+            links: vec![],
+        },
+    )
+    .await
+    .expect("create a task");
+    let solo = harness.board(&paths, &RunnerConfig::default());
+
+    let claimed = solo
+        .claim(run_now(&task.id))
+        .await
+        .expect("claim")
+        .expect("nobody else holds it");
+    let context = solo
+        .run_context(&claimed.lease)
+        .await
+        .expect("the context under the lease");
+
+    assert_eq!(context.authorship, None);
+    assert_eq!(claimed.context.authorship, None, "the claim's neither");
+}
+
+#[tokio::test]
+async fn a_plan_author_whose_account_was_deleted_is_named_as_nobody() {
+    let team = SharedTeam::new().await;
+    let (carol, _) = teammate_with_runner(&team, "carol", "Carol's desktop").await;
+    let carol_ctx = ServiceContext {
+        actor: carol.clone(),
+        ..team.bob.ctx.clone()
+    };
+    let task = team.task(&team.bob, "Alpha", Some(&team.bob)).await;
+    edit_plan_as(&carol_ctx, &task, "1. Carol's way").await;
+    consent::accept(
+        &team.bob.ctx,
+        &team.team_id,
+        Some(&task),
+        ContentKind::Plan,
+        "2",
+    )
+    .await
+    .expect("Bob reads Carol's plan");
+    delete_account(&team, &carol).await;
+    assert_eq!(
+        row(&team, &task).await.plan_updated_by,
+        None,
+        "the revision outlives its author"
+    );
+
+    let claimed = claim(&team, &team.bob, &task).await;
+    let context = team
+        .board(&team.bob)
+        .run_context(&claimed.lease)
+        .await
+        .expect("the context under the lease");
+
+    assert_eq!(
+        context.authorship,
+        Some(board::RunAuthorship {
+            plan_revision: 2,
+            plan_author: None,
+            runner_owner: "bob".to_string(),
+            runner_label: "Mac mini".to_string(),
+        })
+    );
+}
+
+// ---------------------------------------------------------------------------
 // Assignment and the team ceiling
 // ---------------------------------------------------------------------------
 
@@ -1926,6 +2052,25 @@ async fn teammate_with_runner(team: &SharedTeam, login: &str, label: &str) -> (S
     .await;
     let runner_id = insert_runner(&mut conn, &team.clock, &user_id, label).await;
     (user_id, runner_id)
+}
+
+/// Deletes `user_id`'s account: their personal team, which holds nothing
+/// here and would otherwise refuse the delete, then the user, whose
+/// memberships and runners go with it and whose authorship columns are set
+/// NULL by their foreign keys. No service deletes an account yet.
+async fn delete_account(team: &SharedTeam, user_id: &str) {
+    let mut tx = team.alice.ctx.pool.begin().await.expect("a transaction");
+    sqlx::query("DELETE FROM teams WHERE personal_user_id = ?1")
+        .bind(user_id)
+        .execute(&mut *tx)
+        .await
+        .expect("delete the personal team");
+    sqlx::query("DELETE FROM users WHERE id = ?1")
+        .bind(user_id)
+        .execute(&mut *tx)
+        .await
+        .expect("delete the account");
+    tx.commit().await.expect("commit the deletion");
 }
 
 /// One row of `task`'s run history, written as the board would have left it:
