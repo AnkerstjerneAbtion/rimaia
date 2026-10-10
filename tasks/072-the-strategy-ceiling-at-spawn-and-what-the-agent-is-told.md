@@ -3,6 +3,7 @@ id: "072"
 title: The strategy ceiling at spawn, and what the agent is told
 milestone: v0.5
 status: ready
+landed: "#34"
 depends_on: ["045"]
 adrs: ["0032", "0009", "0028", "0031"]
 size: M
