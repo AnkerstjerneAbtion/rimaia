@@ -136,7 +136,7 @@ impl BoardPort for InProcessBoard {
     ) -> BoardFuture<'a, FinishReceipt> {
         Box::pin(service::finish_run(
             &self.ctx,
-            &self.runner_id,
+            self.runner(),
             lease,
             run_id,
             finish,

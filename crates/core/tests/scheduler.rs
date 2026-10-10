@@ -17,6 +17,7 @@
 use chrono::{DateTime, TimeDelta, Utc};
 use pretty_assertions::assert_eq;
 use rimaia_core::board::StartRun;
+use rimaia_core::runner::provider::ClaudeProvider;
 use rimaia_core::db::{new_id, BoardColumn, ExitClass, RunKind, RunState, RunStatus, Task};
 use rimaia_core::repo::{self, NewRepository};
 use rimaia_core::runner::events::TokenUsage;
@@ -685,7 +686,12 @@ impl Fixture {
 
     /// Solo's arm of the reconcile, with nothing recorded on the runner.
     async fn reconcile_unrecorded(&self) -> Vec<String> {
-        scheduler::reconcile_unrecorded(self.ctx(), &self.harness.solo.runner_id, &[])
+        scheduler::reconcile_unrecorded(
+            self.ctx(),
+            &self.harness.solo.runner_id,
+            &ClaudeProvider,
+            &[],
+        )
             .await
             .expect("reconcile")
     }

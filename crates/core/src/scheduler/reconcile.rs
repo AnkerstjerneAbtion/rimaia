@@ -42,7 +42,7 @@
 use chrono::{DateTime, Utc};
 
 use crate::board::lease::{self as board_lease, Lease};
-use crate::board::{service, BoardPort, FinishRun, LeaseRef, TranscriptEnd};
+use crate::board::{service, BoardPort, FinishRun, LeaseRef, LeaseTerm, TranscriptEnd};
 use crate::context::ServiceContext;
 use crate::db::{ExitClass, RunState, RunStatus};
 use crate::error::{ErrorCode, Result};
@@ -50,6 +50,7 @@ use crate::events::TeamId;
 use crate::machine::{leases, MachineContext};
 use crate::runner::events::TokenUsage;
 use crate::runner::outcome::{finish_run, RunOutcome, SpawnedAs};
+use crate::runner::provider::AgentProvider;
 use crate::runs::bundle::RunCapture;
 use crate::scheduler::attempts::{self, Ending};
 use crate::scheduler::retry;
@@ -221,9 +222,14 @@ pub async fn reconcile_held(
 /// **In team mode neither set can exist.** The first expires on the server
 /// (task 053). The second cannot be written once the claim writes the edges
 /// and the lease together, so its query is the one task 065 can delete.
+///
+/// `provider` is the runner's, as the board port holds it: a finish is
+/// answered for the runner that reports it (task 067), although an
+/// interrupted run never continues into a next phase for it to be asked about.
 pub async fn reconcile_unrecorded(
     ctx: &ServiceContext,
     runner_id: &str,
+    provider: &dyn AgentProvider,
     held: &[String],
 ) -> Result<Vec<String>> {
     let mut reconciled = Vec::new();
@@ -233,7 +239,12 @@ pub async fn reconcile_unrecorded(
             continue;
         }
         let task_id = lease.task_id.clone();
-        match settle_unrecorded(ctx, runner_id, &lease, team_id).await {
+        let runner = service::Runner {
+            id: runner_id,
+            provider,
+            term: LeaseTerm::Never,
+        };
+        match settle_unrecorded(ctx, runner, &lease, team_id).await {
             Ok(()) => reconciled.push(task_id),
             Err(error) => tracing::error!(
                 %task_id, %error,
@@ -264,7 +275,7 @@ pub async fn reconcile_unrecorded(
 /// One lease the board holds for this runner that the runner never recorded.
 async fn settle_unrecorded(
     ctx: &ServiceContext,
-    runner_id: &str,
+    runner: service::Runner<'_>,
     lease: &Lease,
     team_id: TeamId,
 ) -> Result<()> {
@@ -272,9 +283,9 @@ async fn settle_unrecorded(
     let open = open_runs(ctx, &lease.task_id).await?;
     match lease.run_id.as_ref().filter(|run_id| open.contains(run_id)) {
         Some(run_id) => {
-            service::finish_run(ctx, runner_id, &reference, run_id, interrupted_finish()).await?;
+            service::finish_run(ctx, runner, &reference, run_id, interrupted_finish()).await?;
         }
-        None => service::release(ctx, runner_id, &reference).await?,
+        None => service::release(ctx, runner.id, &reference).await?,
     }
     Ok(())
 }

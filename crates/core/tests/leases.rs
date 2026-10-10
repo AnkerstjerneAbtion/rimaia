@@ -1794,7 +1794,12 @@ impl Fixture {
             .into_iter()
             .map(|lease| lease.task_id)
             .collect();
-        scheduler::reconcile_unrecorded(self.ctx(), &self.harness.solo.runner_id, &held)
+        scheduler::reconcile_unrecorded(
+            self.ctx(),
+            &self.harness.solo.runner_id,
+            &ClaudeProvider,
+            &held,
+        )
             .await
             .expect("reconcile")
     }

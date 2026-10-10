@@ -1354,7 +1354,12 @@ async fn a_review_left_open_by_a_crash_is_reconciled_into_in_review_or_a_review_
     let fixture = Fixture::new().await;
     fixture.open_review_left_by_a_crash(0).await;
     // Lease-less rows, as a build older than task 043 left them: solo's arm.
-    scheduler::reconcile_unrecorded(fixture.ctx(), &fixture.harness.solo.runner_id, &[])
+    scheduler::reconcile_unrecorded(
+        fixture.ctx(),
+        &fixture.harness.solo.runner_id,
+        &ClaudeProvider,
+        &[],
+    )
         .await
         .expect("reconcile");
     let detail = fixture.detail().await;
@@ -1377,7 +1382,12 @@ async fn a_review_left_open_by_a_crash_is_reconciled_into_in_review_or_a_review_
         .open_review_left_by_a_crash(scheduler::MAX_TRANSIENT_ATTEMPTS as usize)
         .await;
     // Lease-less rows, as a build older than task 043 left them: solo's arm.
-    scheduler::reconcile_unrecorded(fixture.ctx(), &fixture.harness.solo.runner_id, &[])
+    scheduler::reconcile_unrecorded(
+        fixture.ctx(),
+        &fixture.harness.solo.runner_id,
+        &ClaudeProvider,
+        &[],
+    )
         .await
         .expect("reconcile");
     let detail = fixture.detail().await;

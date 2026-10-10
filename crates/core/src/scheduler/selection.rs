@@ -48,24 +48,30 @@
 //!
 //! The one exception is a task this runner is not eligible for
 //! ([`board::lease::eligible`](crate::board::lease::eligible)): pinned to
-//! another runner, from task 043. It is left out of *this runner's* plan
-//! before positions are numbered, and carries no `SkipReason`, because it is
-//! not a problem with the card: another runner can claim it. Saying which
-//! runner holds it is the card's (task 061).
+//! another runner, from task 043, or set to a model another provider claims,
+//! from task 067. It is left out of *this runner's* plan before positions are
+//! numbered, and carries no `SkipReason`, because it is not a problem with the
+//! card: another runner can claim it. Saying why is the card's (task 061).
 
 use std::collections::{BTreeSet, HashMap};
+use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
 use serde::Serialize;
 
-use crate::board::lease::{self, Eligibility};
+use crate::board::lease::{self, Candidate, Eligibility, PhaseModels};
 use crate::board::{FreeCapacity, LeasePurpose};
 use crate::context::ServiceContext;
 use crate::db::{BoardColumn, RunState};
 use crate::error::Result;
 use crate::events::RunnerId;
 use crate::runner::provider::ProviderId;
+use crate::review_loop::config as review_config;
 use crate::scheduler::inflight::Counts;
+use crate::strategy::catalogue::{catalogue_for_provider, Catalogue};
+use crate::strategy::settings::{self as strategy_settings, StrategyDefaults};
+use crate::strategy::effective_strategy;
+use crate::tasks::strategy::needs_planning;
 use crate::tasks::{self, TaskFilter, TaskSummary};
 
 /// Why the queue will not start a `ready` task it can otherwise see.
@@ -180,8 +186,9 @@ pub struct QueueEntry {
 /// it would skip every repository registered from task 066 on, and keep
 /// offering one whose consent was withdrawn.
 ///
-/// `provider` is carried for task 067's model rule, which `lease::eligible`
-/// reads; nothing reads it before then.
+/// `provider` is what task 067's model rule reads in `lease::eligible`: a
+/// task whose model belongs to another provider is left out of this runner's
+/// plan.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RunnerView {
     pub runner_id: RunnerId,
@@ -210,8 +217,8 @@ impl RunnerView {
 /// taken when the queue was started. That is what makes "a task dragged to the
 /// top mid-queue is picked up next" true rather than aspirational.
 ///
-/// A task [`lease::eligible`] refuses `runner` (pinned to another runner) is
-/// left out before positions are numbered, so the plan a card shows and the
+/// A task [`lease::eligible`] refuses `runner` (pinned to another runner, or
+/// set to another provider's model) is left out before positions are numbered, so the plan a card shows and the
 /// task `claim(Next)` takes agree. The claim transaction asks again.
 pub async fn plan(ctx: &ServiceContext, runner: &RunnerView) -> Result<Vec<QueueEntry>> {
     let ready = tasks::list_tasks(
@@ -229,18 +236,23 @@ pub async fn plan(ctx: &ServiceContext, runner: &RunnerView) -> Result<Vec<Queue
     // would not be the plan the batch was taken from.
     let now = ctx.clock.now();
 
+    // What eligibility's model rule reads, over the pool and before the
+    // connection below is held: the test pool has one connection.
+    let candidates = candidates(ctx, runner, &ready).await?;
+
     // Acquired after the list, never across it: the test pool has one
     // connection.
     let mut conn = ctx.pool.acquire().await?;
     let mut plan = Vec::with_capacity(ready.len());
     let mut claimable = 0;
-    for summary in &ready {
-        // A due retry resumes as the kind that was waiting (D29 point 3).
-        let purpose = match (scheduled_resume(summary), &summary.last_run) {
-            (Some(_), Some(run)) => run.kind.into(),
-            _ => LeasePurpose::Implementation,
+    for (summary, (purpose, defaults, models)) in ready.iter().zip(&candidates) {
+        let candidate = Candidate {
+            runner_id: &runner.runner_id,
+            provider: runner.provider,
+            catalogue: &defaults.catalogue,
+            models,
         };
-        if lease::eligible(&mut conn, &summary.task.id, &runner.runner_id, purpose).await?
+        if lease::eligible(&mut conn, &summary.task.id, &candidate, *purpose).await?
             != Eligibility::Eligible
         {
             continue;
@@ -267,6 +279,86 @@ pub async fn plan(ctx: &ServiceContext, runner: &RunnerView) -> Result<Vec<Queue
     }
 
     Ok(plan)
+}
+
+/// One repository's share of what eligibility reads: the catalogue the board
+/// resolves for the runner's provider in the repository's team, and the
+/// strategy defaults that decide a task's mode.
+struct RepositoryDefaults {
+    catalogue: Catalogue,
+    repository: StrategyDefaults,
+    global: StrategyDefaults,
+}
+
+/// For each task in `ready`, the purpose a claim would lease it as and what
+/// its phases would spawn with, so the plan asks [`lease::eligible`] the
+/// question the claim transaction will ask (task 067).
+///
+/// - A due retry resumes as the kind that was waiting (D29 point 3).
+/// - A fresh start is `strategy` when it needs planning, ADR-0016's inline
+///   planner, which the model rule exempts, and `implementation` otherwise.
+///
+/// The repository reads are made once per repository, as
+/// `tasks::service`'s own effective-strategy pass makes them, and a review's
+/// `review_model` is read only for a review waiting to resume.
+async fn candidates(
+    ctx: &ServiceContext,
+    runner: &RunnerView,
+    ready: &[TaskSummary],
+) -> Result<Vec<(LeasePurpose, Arc<RepositoryDefaults>, PhaseModels)>> {
+    let mut by_repository: HashMap<String, Arc<RepositoryDefaults>> = HashMap::new();
+    let mut candidates = Vec::with_capacity(ready.len());
+
+    for summary in ready {
+        let repository_id = &summary.task.repository_id;
+        let defaults = match by_repository.get(repository_id) {
+            Some(defaults) => Arc::clone(defaults),
+            None => {
+                let team_id = crate::repo::team_of(ctx, repository_id).await?;
+                let defaults = Arc::new(RepositoryDefaults {
+                    catalogue: catalogue_for_provider(ctx, &team_id, runner.provider).await?,
+                    repository: strategy_settings::repository_default(ctx, repository_id)
+                        .await?,
+                    global: strategy_settings::global_default_for(ctx, &team_id).await?,
+                });
+                by_repository.insert(repository_id.clone(), Arc::clone(&defaults));
+                defaults
+            }
+        };
+
+        let purpose = match (scheduled_resume(summary), &summary.last_run) {
+            (Some(_), Some(run)) => run.kind.into(),
+            _ => {
+                let mode =
+                    effective_strategy(&summary.task, &defaults.repository, &defaults.global).mode;
+                if needs_planning(&summary.task, mode) {
+                    LeasePurpose::Strategy
+                } else {
+                    LeasePurpose::Implementation
+                }
+            }
+        };
+        let review = match purpose {
+            LeasePurpose::Review => {
+                review_config::resolve(ctx, &summary.task.id, repository_id)
+                    .await?
+                    .config
+                    .review_model
+            }
+            _ => None,
+        };
+
+        candidates.push((
+            purpose,
+            defaults,
+            PhaseModels {
+                strategy: summary.effective_model.clone(),
+                review,
+            },
+        ));
+    }
+
+    Ok(candidates)
 }
 
 /// The deadline ADR-0011's policy wrote for this task's next attempt, or `None`

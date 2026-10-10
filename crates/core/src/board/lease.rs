@@ -91,7 +91,10 @@ use crate::tasks::run_state::transition;
 use crate::tasks::service::{fetch_task_row, team_of_task};
 use crate::tasks::strategy::needs_planning;
 
-use super::types::{Heartbeat, LeasePurpose, LeaseRef, NextStep};
+use crate::runner::provider::ProviderId;
+use crate::strategy::catalogue::{runs_on, Catalogue};
+
+use super::types::{Heartbeat, LeasePurpose, LeaseRef, NextStep, RunContext};
 
 /// How long a renewable lease lives without a heartbeat (ADR-0031 point 3).
 ///
@@ -238,6 +241,12 @@ pub enum Eligibility {
     PinnedElsewhere {
         label: String,
     },
+    /// ADR-0031 point 1: the phase would spawn with a model that belongs to
+    /// another provider ([`runs_on`]).
+    ModelNotOffered {
+        model: String,
+        provider: ProviderId,
+    },
 }
 
 impl Eligibility {
@@ -251,29 +260,94 @@ impl Eligibility {
                  conversation. Only that runner can run it until someone chooses to run it \
                  elsewhere."
             )),
+            Eligibility::ModelNotOffered { model, provider } => Some(format!(
+                "this task asks for the model \"{model}\", which {} cannot run. Change the \
+                 task's model, or run it on a runner whose provider offers it.",
+                provider.display_name()
+            )),
         }
     }
 }
 
-/// Whether `runner_id` may take `task_id` for `purpose`: the one place the
+/// The models a task's phases would spawn with, read with the claim's
+/// context before any transaction opens (task 067).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PhaseModels {
+    /// The effective strategy's model (ADR-0016): what an implementation and
+    /// a fix spawn with.
+    pub strategy: Option<String>,
+    /// The review loop's `review_model`, when one names it (task 021).
+    pub review: Option<String>,
+}
+
+impl PhaseModels {
+    /// What `context`'s phases would spawn with, as `run_task` resolves it.
+    pub fn of(context: &RunContext) -> Self {
+        Self {
+            strategy: context.strategy.model.clone(),
+            review: context
+                .review
+                .as_ref()
+                .and_then(|review| review.config.review_model.clone()),
+        }
+    }
+
+    /// The model a phase of `purpose` would spawn with, or `None` when it
+    /// names none or is exempt from the model rule.
+    ///
+    /// - `implementation` and `fix`: the effective strategy's model;
+    /// - `review`: `review_model` when it names one, otherwise the effective
+    ///   strategy's model, as task 021 resolves it;
+    /// - `strategy`: exempt, for a `Plan` claim and for the inline planner
+    ///   alike, because a planner chooses from the runner's own catalogue
+    ///   (D17).
+    pub fn for_purpose(&self, purpose: LeasePurpose) -> Option<&str> {
+        match purpose {
+            LeasePurpose::Implementation | LeasePurpose::Fix => self.strategy.as_deref(),
+            LeasePurpose::Review => self.review.as_deref().or(self.strategy.as_deref()),
+            LeasePurpose::Strategy => None,
+        }
+    }
+}
+
+/// A runner as a candidate for one task: who it is, what its provider runs,
+/// and what the task's phases would spawn with. Everything [`eligible`] needs
+/// that is not read inside the asking transaction.
+#[derive(Debug, Clone, Copy)]
+pub struct Candidate<'a> {
+    pub runner_id: &'a str,
+    /// The claiming runner's provider: the in-process adapter's (D31 point 9),
+    /// or the one a runner sends over HTTP (D31 point 10).
+    pub provider: ProviderId,
+    /// The catalogue the board resolves for `provider` in the task's team.
+    pub catalogue: &'a Catalogue,
+    pub models: &'a PhaseModels,
+}
+
+/// Whether `candidate` may take `task_id` for `purpose`: the one place the
 /// board decides that *this* runner may take *this* task.
 ///
-/// One rule from task 043, **pinning**: a task pinned to another runner is
-/// not this runner's, for every purpose, `strategy` included. Task 067 adds
-/// the model rule here and task 045 consent, and neither adds a second call:
-/// selection's plan, the claim transaction and a `Continue` all ask this.
-/// Selection's own rules (ADR-0010's order, dependencies, D21's cap) are not
-/// restated here.
+/// Two rules, in this order:
 ///
-/// Takes the connection of whichever transaction asks, so the answer is read
-/// in the transaction that acts on it. A task that does not exist is
+/// 1. **Pinning** (task 043): a task pinned to another runner is not this
+///    runner's, for every purpose, `strategy` included.
+/// 2. **The model rule** (task 067, ADR-0031 point 1): a phase whose model
+///    belongs to another provider ([`runs_on`]) is not this runner's.
+///    `strategy` is exempt ([`PhaseModels::for_purpose`]).
+///
+/// Task 045 adds consent here, and nothing adds a second call: selection's
+/// plan, the claim transaction and a `Continue` all ask this. Selection's own
+/// rules (ADR-0010's order, dependencies, D21's cap) are not restated here.
+///
+/// Takes the connection of whichever transaction asks, so the pin is read in
+/// the transaction that acts on it. A task that does not exist is
 /// `Eligible`: whether it exists is the caller's question, answered in its
 /// own words.
 pub async fn eligible(
     conn: &mut SqliteConnection,
     task_id: &str,
-    runner_id: &str,
-    _purpose: LeasePurpose,
+    candidate: &Candidate<'_>,
+    purpose: LeasePurpose,
 ) -> Result<Eligibility> {
     let pinned = sqlx::query!(
         r#"SELECT t.pinned_runner_id AS "pinned_runner_id?", r.label AS "label?"
@@ -284,15 +358,27 @@ pub async fn eligible(
     .fetch_optional(&mut *conn)
     .await?;
 
-    Ok(match pinned {
-        Some(row) => match row.pinned_runner_id {
-            Some(pinned) if pinned != runner_id => Eligibility::PinnedElsewhere {
+    let Some(row) = pinned else {
+        return Ok(Eligibility::Eligible);
+    };
+    if let Some(pinned) = row.pinned_runner_id {
+        if pinned != candidate.runner_id {
+            return Ok(Eligibility::PinnedElsewhere {
                 label: row.label.unwrap_or(pinned),
-            },
-            _ => Eligibility::Eligible,
-        },
-        None => Eligibility::Eligible,
-    })
+            });
+        }
+    }
+
+    if let Some(model) = candidate.models.for_purpose(purpose) {
+        if !runs_on(model, candidate.provider, candidate.catalogue) {
+            return Ok(Eligibility::ModelNotOffered {
+                model: model.to_string(),
+                provider: candidate.provider,
+            });
+        }
+    }
+
+    Ok(Eligibility::Eligible)
 }
 
 // ---------------------------------------------------------------------------
@@ -328,7 +414,8 @@ pub(crate) enum Door {
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct ClaimRequest<'a> {
     pub task_id: &'a str,
-    pub runner_id: &'a str,
+    /// The claiming runner, and what the task's phases would spawn with.
+    pub candidate: Candidate<'a>,
     pub term: LeaseTerm,
     pub edges: Edges,
     pub door: Door,
@@ -354,7 +441,7 @@ pub(crate) async fn claim(
 ) -> Result<Option<Granted>> {
     let ClaimRequest {
         task_id,
-        runner_id,
+        candidate,
         term,
         edges,
         door,
@@ -378,7 +465,8 @@ pub(crate) async fn claim(
         Edges::Fresh => LeasePurpose::Implementation,
     };
 
-    if let Some(refusal) = eligible(&mut tx, task_id, runner_id, purpose)
+    let runner_id = candidate.runner_id;
+    if let Some(refusal) = eligible(&mut tx, task_id, &candidate, purpose)
         .await?
         .refusal()
     {
@@ -614,8 +702,9 @@ pub(crate) async fn release(ctx: &ServiceContext, runner_id: &str, lease: &Lease
 /// deleted or kept, with the pin set or cleared beside it.
 ///
 /// - **`Continue`** keeps the lease, after [`eligible`] for the next phase's
-///   purpose. A refusal turns it into `Released`, and the task lands as a
-///   finish that does not continue lands it, in `in_review` (D31 point 4).
+///   purpose, which applies the model rule to the next phase's model. A
+///   refusal turns it into `Released`, and the task lands as a finish that
+///   does not continue lands it, in `in_review` (D31 point 4).
 /// - **`Released`** deletes the lease. The task is pinned to the holder when
 ///   the run was interrupted or the task lands `waiting_retry`, and a pin the
 ///   holder had is cleared otherwise.
@@ -624,18 +713,19 @@ pub(crate) async fn release(ctx: &ServiceContext, runner_id: &str, lease: &Lease
 pub(crate) async fn land(
     ctx: &ServiceContext,
     tx: &mut ScopedTx,
-    runner_id: &str,
+    candidate: &Candidate<'_>,
     lease: &LeaseRef,
     run: &Run,
     outcome: &RunOutcome,
     decision: Decision,
 ) -> Result<(NextStep, Vec<String>)> {
+    let runner_id = candidate.runner_id;
     current(tx, lease, runner_id).await?;
     let task_id = lease.task_id.as_str();
 
     let mut decision = decision;
     if let NextStep::Continue { kind } = decision.next {
-        let next = eligible(tx, task_id, runner_id, kind.into()).await?;
+        let next = eligible(tx, task_id, candidate, kind.into()).await?;
         if let Some(refusal) = next.refusal() {
             tracing::info!(
                 %task_id,

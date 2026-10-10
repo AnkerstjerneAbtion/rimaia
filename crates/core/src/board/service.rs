@@ -47,7 +47,7 @@ use crate::tasks;
 use crate::tasks::strategy::{prepare_strategy, write_strategy, StrategyPlan};
 use crate::worktree::base_ref;
 
-use super::lease::{self, ClaimRequest, Door, Edges, LeaseTerm};
+use super::lease::{self, Candidate, ClaimRequest, Door, Edges, LeaseTerm, PhaseModels};
 use super::types::{
     Claim, ClaimTarget, FinishReceipt, FinishRun, FreeCapacity, Heartbeat, LeaseRef, NextStep,
     RunContext, StartRun, TeamLimits, TranscriptAck, TranscriptChunk,
@@ -295,11 +295,17 @@ async fn claim_task(
         Route::Plan => (Edges::Plan, RunTrigger::Manual, None),
     };
 
+    let models = PhaseModels::of(&context);
     let granted = lease::claim(
         ctx,
         ClaimRequest {
             task_id,
-            runner_id: runner.id,
+            candidate: Candidate {
+                runner_id: runner.id,
+                provider: runner.provider.id(),
+                catalogue: &context.catalogue,
+                models: &models,
+            },
             term: runner.term,
             edges,
             door,
@@ -467,12 +473,13 @@ pub fn publish_tail(ctx: &ServiceContext, lease: &LeaseRef, tail: RunTail) {
 ///    and the pin set or cleared, in `lease::land`.
 pub async fn finish_run(
     ctx: &ServiceContext,
-    runner_id: &str,
+    runner: Runner<'_>,
     lease: &LeaseRef,
     run_id: &str,
     finish: FinishRun,
 ) -> Result<FinishReceipt> {
     let ctx = &lease_context(ctx, lease)?;
+    let runner_id = runner.id;
 
     let FinishRun {
         mut outcome,
@@ -512,9 +519,23 @@ pub async fn finish_run(
 
     let decision = outcome::decide(ctx, &run, &outcome, window_closes_at).await?;
 
+    // What the model rule reads for the next phase, over the pool and before
+    // the write lock, as a claim reads it. Only a `Continue` consults it, so a
+    // finish that ends the lease reads nothing more.
+    let (catalogue, models) = match decision.next {
+        NextStep::Continue { .. } => model_inputs(ctx, runner.provider, &lease.task_id).await?,
+        NextStep::Released { .. } => (catalogue::Catalogue::default(), PhaseModels::default()),
+    };
+    let candidate = Candidate {
+        runner_id,
+        provider: runner.provider.id(),
+        catalogue: &catalogue,
+        models: &models,
+    };
+
     let mut tx = ctx.begin_immediate().await?;
     let (next, rebalanced) =
-        lease::land(ctx, &mut tx, runner_id, lease, &run, &outcome, decision).await?;
+        lease::land(ctx, &mut tx, &candidate, lease, &run, &outcome, decision).await?;
     tx.commit().await?;
     // A `Continue` lands nothing and keeps the lease, so there is nothing to
     // announce; a `Released` landed the task, its lease and its pin together.
@@ -663,6 +684,34 @@ async fn read_context(
         review: Some(review),
         base,
     })
+}
+
+/// What the model rule reads about `task_id` for `provider`'s runner: the
+/// catalogue the board resolves for that provider in the task's team, and the
+/// models the task's phases would spawn with. The same reads
+/// [`read_context`] makes for these fields, for a `Continue`, which carries no
+/// context (task 067).
+async fn model_inputs(
+    ctx: &ServiceContext,
+    provider: &dyn AgentProvider,
+    task_id: &str,
+) -> Result<(catalogue::Catalogue, PhaseModels)> {
+    let task = tasks::get_task(ctx, task_id).await?;
+    let repository_id = task.task.repository_id.as_str();
+    let team_id = tasks::service::team_of(ctx, task_id).await?;
+
+    let global = strategy::settings::global_default_for(ctx, &team_id).await?;
+    let per_repository = strategy::settings::repository_default(ctx, repository_id).await?;
+    let effective = strategy::effective_strategy(&task.task, &per_repository, &global);
+    let review = review_loop::config::resolve(ctx, task_id, repository_id).await?;
+
+    Ok((
+        catalogue::catalogue_for(ctx, &team_id, provider).await?,
+        PhaseModels {
+            strategy: effective.model,
+            review: review.config.review_model,
+        },
+    ))
 }
 
 /// The team's half of what bounds a run, read once, here, for the team that

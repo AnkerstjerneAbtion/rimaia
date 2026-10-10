@@ -346,7 +346,13 @@ pub fn run() {
                     .into_iter()
                     .map(|lease| lease.task_id)
                     .collect();
-                scheduler::reconcile_unrecorded(&context, &solo.runner_id, &held).await
+                scheduler::reconcile_unrecorded(
+                    &context,
+                    &solo.runner_id,
+                    runner.provider.as_ref(),
+                    &held,
+                )
+                .await
             }) {
                 Ok(unrecorded) => unrecorded,
                 Err(err) => {
