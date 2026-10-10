@@ -25,10 +25,13 @@ use rimaia_core::board::{
     TranscriptAck, TranscriptChunk, TranscriptEnd,
 };
 use rimaia_core::db::{
-    new_id, BoardColumn, ExitClass, Run, RunKind, RunState, RunStatus, StrategyMode,
+    new_id, BoardColumn, ExitClass, Run, RunKind, RunState, RunStatus, Schedule, StrategyMode,
 };
 use rimaia_core::identity::SOLO_RUNNER_LABEL;
-use rimaia_core::machine::{leases, HeldLease, MachineContext};
+use rimaia_core::machine::{
+    leases, Checkout, CheckoutPatch, HeldLease, MachineContext, MachineFuture, MachineStore,
+    WorktreeRecord,
+};
 use rimaia_core::mcp::requests::{PlanSelectionRequest, TaskStrategyRequest};
 use rimaia_core::mcp::server::{LocalTools, RimaiaServer};
 use rimaia_core::repo::{self, NewRepository};
@@ -941,6 +944,122 @@ async fn every_starter_records_its_claim_before_it_spawns() {
         vec![(pass.clone(), LeasePurpose::Strategy, None)],
     );
     assert_eq!(f.held().await, Vec::<HeldLease>::new());
+}
+
+#[tokio::test]
+async fn a_claim_the_runner_cannot_record_is_released_and_not_run() {
+    // Run now and Plan now, the two starters core owns; the loop's is the
+    // runner crate's. Either way the starter answers the store's error, the
+    // board's lease is gone, and run_state is where D31's release rule puts it.
+    let f = Fixture::new().await;
+    let board = f.board(Which::A);
+    let machine = MachineContext {
+        store: Arc::new(RefusesToRecord(Arc::clone(&f.machine().store))),
+        ..f.machine().clone()
+    };
+    let in_flight = InFlight::new();
+
+    let task = f.task("Started by hand").await;
+    let error = claim_manual_start(
+        board.as_ref(),
+        &machine,
+        &f.paths,
+        &f.config(),
+        &in_flight,
+        ManualStart {
+            task_id: task.clone(),
+            trigger: RunTrigger::Manual,
+            continue_session: false,
+        },
+    )
+    .await
+    .err()
+    .expect("a claim this runner could not record is refused");
+
+    assert_eq!(error.to_string(), REFUSED_RECORD);
+    assert_eq!(
+        f.lease_state(&task).await,
+        LeaseState {
+            lease: None,
+            generation: 1,
+            pinned_runner_id: None,
+        },
+        "the claim was released, and a release does not pin",
+    );
+    // The claim took the task to `running`; released with nothing open, it
+    // lands `failed`.
+    assert_eq!(f.run_state(&task).await, RunState::Failed);
+    assert_eq!(f.run_count(&task).await, 0, "nothing was started");
+    assert!(in_flight.is_empty(), "the slot went with the claim");
+
+    let planned = f.task("Planned by hand").await;
+    f.plan_mode(&planned).await;
+    let error = claim_for_planning(
+        board.as_ref(),
+        &machine,
+        &in_flight,
+        &planned,
+        SlotOwner::Manual,
+    )
+    .await
+    .err()
+    .expect("a claim this runner could not record is refused");
+
+    assert_eq!(error.to_string(), REFUSED_RECORD);
+    assert_eq!(f.lease_state(&planned).await.lease, None, "released");
+    assert_eq!(
+        f.run_state(&planned).await,
+        RunState::Idle,
+        "a Plan claim took no edge, so its release moves none",
+    );
+    assert!(in_flight.is_empty(), "the slot went with the claim");
+    assert_eq!(f.held().await, Vec::<HeldLease>::new());
+}
+
+#[tokio::test]
+async fn a_release_that_failed_keeps_the_record_and_one_that_found_no_lease_forgets_it() {
+    // `Conflict` and `NotFound` say the board holds no such lease, so there is
+    // nothing left to reconcile. Any other failure may have left the lease
+    // standing, and the record is what lets the next launch settle it.
+    let f = Fixture::new().await;
+    let cases: [(&str, rimaia_core::Result<()>, bool); 5] = [
+        ("released", Ok(()), false),
+        ("fenced", Err(rimaia_core::Error::conflict("fenced")), false),
+        (
+            "no lease",
+            Err(rimaia_core::Error::not_found("gone")),
+            false,
+        ),
+        (
+            "board unreachable",
+            Err(rimaia_core::Error::Io(std::io::Error::other("unreachable"))),
+            true,
+        ),
+        (
+            "board failed",
+            Err(rimaia_core::Error::internal("the board failed")),
+            true,
+        ),
+    ];
+
+    for (case, released, kept) in cases {
+        let machine = memory_machine(&f.harness);
+        let record = held(&f, "task-1", LeasePurpose::Implementation, None, 1);
+        machine
+            .store
+            .record_held_lease(&record)
+            .await
+            .expect("record");
+
+        leases::forget_released(&machine, "task-1", &released).await;
+
+        let expected = if kept { vec![record] } else { Vec::new() };
+        assert_eq!(
+            leases::held(&machine).await.expect("the record"),
+            expected,
+            "{case}",
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1865,5 +1984,127 @@ impl BoardPort for Witness {
         findings: Vec<NewReviewFinding>,
     ) -> BoardFuture<'a, ()> {
         self.inner.record_review_findings(lease, run_id, findings)
+    }
+}
+
+/// What [`RefusesToRecord`] answers every `record_held_lease` with.
+const REFUSED_RECORD: &str = "the runner's store refused the record";
+
+/// A runner store that cannot note a lease: `record_held_lease` fails, and
+/// every other call goes through to the store it wraps, so a starter's
+/// preflight reads the checkout and settings it always does.
+struct RefusesToRecord(Arc<dyn MachineStore>);
+
+impl MachineStore for RefusesToRecord {
+    fn get_setting<'a>(&'a self, key: &'a str) -> MachineFuture<'a, Option<String>> {
+        self.0.get_setting(key)
+    }
+
+    fn set_setting<'a>(&'a self, key: &'a str, value: &'a str) -> MachineFuture<'a, ()> {
+        self.0.set_setting(key, value)
+    }
+
+    fn clear_setting<'a>(&'a self, key: &'a str) -> MachineFuture<'a, ()> {
+        self.0.clear_setting(key)
+    }
+
+    fn list_checkouts(&self) -> MachineFuture<'_, Vec<Checkout>> {
+        self.0.list_checkouts()
+    }
+
+    fn get_checkout<'a>(&'a self, repository_id: &'a str) -> MachineFuture<'a, Option<Checkout>> {
+        self.0.get_checkout(repository_id)
+    }
+
+    fn insert_checkout<'a>(&'a self, checkout: &'a Checkout) -> MachineFuture<'a, ()> {
+        self.0.insert_checkout(checkout)
+    }
+
+    fn patch_checkout<'a>(
+        &'a self,
+        repository_id: &'a str,
+        patch: &'a CheckoutPatch,
+    ) -> MachineFuture<'a, bool> {
+        self.0.patch_checkout(repository_id, patch)
+    }
+
+    fn remove_checkout<'a>(&'a self, repository_id: &'a str) -> MachineFuture<'a, bool> {
+        self.0.remove_checkout(repository_id)
+    }
+
+    fn get_worktree<'a>(&'a self, task_id: &'a str) -> MachineFuture<'a, Option<WorktreeRecord>> {
+        self.0.get_worktree(task_id)
+    }
+
+    fn list_worktrees(&self) -> MachineFuture<'_, Vec<WorktreeRecord>> {
+        self.0.list_worktrees()
+    }
+
+    fn record_worktree<'a>(&'a self, record: &'a WorktreeRecord) -> MachineFuture<'a, ()> {
+        self.0.record_worktree(record)
+    }
+
+    fn forget_worktree<'a>(&'a self, task_id: &'a str) -> MachineFuture<'a, bool> {
+        self.0.forget_worktree(task_id)
+    }
+
+    fn record_held_lease<'a>(&'a self, _lease: &'a HeldLease) -> MachineFuture<'a, ()> {
+        Box::pin(std::future::ready(Err(rimaia_core::Error::internal(
+            REFUSED_RECORD,
+        ))))
+    }
+
+    fn set_held_lease_run<'a>(
+        &'a self,
+        task_id: &'a str,
+        run_id: Option<&'a str>,
+        purpose: LeasePurpose,
+    ) -> MachineFuture<'a, bool> {
+        self.0.set_held_lease_run(task_id, run_id, purpose)
+    }
+
+    fn forget_held_lease<'a>(&'a self, task_id: &'a str) -> MachineFuture<'a, bool> {
+        self.0.forget_held_lease(task_id)
+    }
+
+    fn list_held_leases(&self) -> MachineFuture<'_, Vec<HeldLease>> {
+        self.0.list_held_leases()
+    }
+
+    fn list_schedules(&self) -> MachineFuture<'_, Vec<Schedule>> {
+        self.0.list_schedules()
+    }
+
+    fn get_schedule<'a>(&'a self, id: &'a str) -> MachineFuture<'a, Option<Schedule>> {
+        self.0.get_schedule(id)
+    }
+
+    fn insert_schedule<'a>(&'a self, schedule: &'a Schedule) -> MachineFuture<'a, ()> {
+        self.0.insert_schedule(schedule)
+    }
+
+    fn update_schedule<'a>(&'a self, schedule: &'a Schedule) -> MachineFuture<'a, bool> {
+        self.0.update_schedule(schedule)
+    }
+
+    fn set_schedule_enabled<'a>(
+        &'a self,
+        id: &'a str,
+        enabled: bool,
+        armed_at: Option<chrono::DateTime<chrono::Utc>>,
+    ) -> MachineFuture<'a, bool> {
+        self.0.set_schedule_enabled(id, enabled, armed_at)
+    }
+
+    fn record_schedule_fire<'a>(
+        &'a self,
+        id: &'a str,
+        fired_at: chrono::DateTime<chrono::Utc>,
+    ) -> MachineFuture<'a, bool> {
+        self.0.record_schedule_fire(id, fired_at)
+    }
+
+    fn delete_schedule<'a>(&'a self, id: &'a str) -> MachineFuture<'a, bool> {
+        self.0.delete_schedule(id)
     }
 }
