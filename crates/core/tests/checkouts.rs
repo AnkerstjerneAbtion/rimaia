@@ -409,7 +409,7 @@ async fn a_new_worktree_writes_its_branch_through_the_board_port() {
     // that refuses it refuses the prepare, after the worktree is on disk.
     let f = Fixture::new().await;
     let task = f.task("Refused", "1. Branch").await;
-    let lease = LeaseRef::solo(task.clone(), f.harness.solo.team_id.clone());
+    let lease = LeaseRef::new(task.clone(), 1, f.harness.solo.team_id.clone());
 
     let error = worktree::prepare(
         f.ctx(),
@@ -938,7 +938,10 @@ async fn queue_plan(f: &Fixture, in_flight: &InFlight) -> Vec<scheduler::QueueEn
     let (repositories, _) = scheduler::for_runner(f.harness.machine(), in_flight)
         .await
         .expect("the runner's view");
-    scheduler::plan(f.ctx(), &repositories.into_iter().collect())
-        .await
-        .expect("the plan")
+    let runner = scheduler::RunnerView::new(
+        f.harness.solo.runner_id.clone(),
+        rimaia_core::runner::provider::ProviderId::ClaudeCode,
+        repositories,
+    );
+    scheduler::plan(f.ctx(), &runner).await.expect("the plan")
 }

@@ -122,6 +122,9 @@ pub fn planner_access() -> crate::runner::strategy::PlannerAccess {
         runner: RunnerConfig::default(),
         in_flight: crate::scheduler::InFlight::new(),
         board: std::sync::Arc::new(crate::testing::board::Unwired),
+        // A runner no board row names: nothing is pinned to it, and a test
+        // that reaches a plan through here pins nothing either.
+        runner_id: "a-runner-this-test-never-registered".to_string(),
     }
 }
 

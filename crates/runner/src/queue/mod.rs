@@ -80,12 +80,11 @@
 //! the free capacity of the moment it started: with one free slot in A and none
 //! in B, a run in B that finishes frees B's slot, but the waiting claim still
 //! says B has none and sleeps through the ready task there. Dropping the
-//! waiting claim and asking again would fix that, except that before task 043
-//! the claim's two edges are two separately committed transactions, so a claim
-//! dropped between them strands its task at `queued`, and one dropped after it
-//! committed leaves a task `running` that nothing supervises. The long poll is
-//! task 053's, once the claim is one transaction and a lost reply is recovered
-//! by lease expiry.
+//! waiting claim and asking again would fix that. Since task 043 the claim is
+//! one transaction, so a claim dropped before its commit writes nothing, but
+//! one dropped after it committed still leaves a task `running` under a lease
+//! nothing supervises, and a solo lease never expires. The long poll is task
+//! 053's, once a lost reply is recovered by lease expiry.
 //!
 //! **No `select!` arm is ever a claim's future**, for the same reason: an arm
 //! that lost the race would drop it.
@@ -236,8 +235,9 @@ use rimaia_core::board::{BoardPort, Claim, ClaimTarget};
 use rimaia_core::db::Schedule;
 use rimaia_core::doctor;
 use rimaia_core::events::ChangeEvent;
-use rimaia_core::machine::MachineContext;
+use rimaia_core::machine::{leases, MachineContext};
 use rimaia_core::paths::AppPaths;
+use rimaia_core::runner::start::record_claim;
 use rimaia_core::runner::{probe_cli, run_task, RunRequest, RunnerConfig};
 use rimaia_core::schedule::window::{self, RunWindow};
 use rimaia_core::schedule::{self, fire, Due};
@@ -245,7 +245,7 @@ use rimaia_core::scheduler::inflight::{Capacity, InFlight, LocalSlot, SlotOwner,
 use rimaia_core::scheduler::state::{self, QueueState};
 use rimaia_core::scheduler::view::{self, QueueStatus};
 use rimaia_core::scheduler::{capacity, pause};
-use rimaia_core::{Error, Result};
+use rimaia_core::{Error, ErrorCode, Result};
 use tokio::sync::broadcast::error::{RecvError, TryRecvError};
 use tokio::sync::{broadcast, watch};
 use tokio::task::JoinSet;
@@ -955,6 +955,9 @@ impl Looping {
             let Some(claim) = self.shared.board.claim(target).await? else {
                 break;
             };
+            // Recorded before anything else can happen to the claim, so a
+            // crash from here on is this runner's to reconcile (task 043).
+            record_claim(self.shared.board.as_ref(), machine, &claim).await?;
 
             // Won, but a Pause, a Stop or a shutdown may have landed while the
             // claim was in flight: release what was just claimed rather than
@@ -962,11 +965,11 @@ impl Looping {
             match self.interrupted().await {
                 Ok(false) => {}
                 Ok(true) => {
-                    release(self.shared.board.as_ref(), &claim).await;
+                    release(self.shared.board.as_ref(), machine, &claim).await;
                     return Ok(if worked { Step::Worked } else { Step::Idle });
                 }
                 Err(error) => {
-                    release(self.shared.board.as_ref(), &claim).await;
+                    release(self.shared.board.as_ref(), machine, &claim).await;
                     return Err(error);
                 }
             }
@@ -1061,7 +1064,7 @@ impl Looping {
             reason = %refused.message(),
             "releasing a claim the run queue could not take a slot for",
         );
-        release(self.shared.board.as_ref(), claim).await;
+        release(self.shared.board.as_ref(), &self.shared.machine, claim).await;
         None
     }
 
@@ -1153,24 +1156,34 @@ async fn supervise(
         ),
         Err(error) => {
             tracing::error!(%task_id, %error, "a queued run could not be completed");
-            // A no-op after `run_task` has already given its claim back, which
-            // it does on every error path: the rule only acts on a task still
-            // `running`.
-            if let Err(error) = board.release(&lease).await {
-                tracing::error!(%task_id, %error, "could not release a queued run that failed");
+            // A backstop. `run_task` gives its claim back on every error path,
+            // and then this lease is already gone, which the board answers
+            // `Conflict`: nothing to release, and nothing to say about it.
+            let released = board.release(&lease).await;
+            match &released {
+                Ok(()) => {}
+                Err(error) if error.code() == ErrorCode::Conflict => {
+                    tracing::debug!(%task_id, "the failed run's claim was already given back");
+                }
+                Err(error) => {
+                    tracing::error!(%task_id, %error, "could not release a queued run that failed");
+                }
             }
+            leases::forget_released(&machine, &task_id, &released).await;
         }
     }
 
     drop(slot);
 }
 
-/// Gives back a claim the queue won and then decided not to use. Best effort,
-/// as every release is.
-async fn release(board: &dyn BoardPort, claim: &Claim) {
-    if let Err(error) = board.release(&claim.lease).await {
+/// Gives back a claim the queue won and then decided not to use, and forgets
+/// this runner's record of it. Best effort, as every release is.
+async fn release(board: &dyn BoardPort, machine: &MachineContext, claim: &Claim) {
+    let released = board.release(&claim.lease).await;
+    if let Err(error) = &released {
         tracing::error!(task_id = %claim.lease.task_id, %error, "could not release a claim the queue did not use");
     }
+    leases::forget_released(machine, &claim.lease.task_id, &released).await;
 }
 
 /// What one pass of the loop came to.
@@ -1436,7 +1449,11 @@ mod tests {
             harness.machine().clone(),
             harness.board(&paths, &runner),
             harness.context.subscribe(),
-            SoloBoard::new(harness.context.clone()),
+            SoloBoard::new(
+                harness.context.clone(),
+                harness.solo.runner_id.clone(),
+                rimaia_core::runner::provider::ProviderId::ClaudeCode,
+            ),
             InFlight::new(),
             paths,
             runner,

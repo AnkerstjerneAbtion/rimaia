@@ -69,8 +69,8 @@ use tokio::process::{Child, Command};
 use tokio::sync::watch;
 
 use crate::board::{
-    BoardPort, Claim, FinishReceipt, FinishRun, ImplementationBase, LeaseRef, NextStep, RunContext,
-    StartRun, TranscriptEnd,
+    BoardPort, Claim, FinishReceipt, FinishRun, ImplementationBase, LeasePurpose, LeaseRef,
+    NextStep, RunContext, StartRun, TranscriptEnd,
 };
 use crate::context::ServiceContext;
 use crate::credentials::inject::ChildEnvironment;
@@ -79,7 +79,7 @@ use crate::db::settings::{self, RunEnvironment};
 use crate::db::Repository;
 use crate::db::{new_id, ExitClass, Run, RunKind, RunStatus};
 use crate::error::{Error, Result};
-use crate::machine::{Checkout, MachineContext};
+use crate::machine::{leases, Checkout, MachineContext};
 use crate::mcp::{Grant, RunGrant, RunHandles, Tool, RUN_MCP_SERVER_NAME};
 use crate::paths::AppPaths;
 use crate::repo;
@@ -608,10 +608,10 @@ pub async fn run_task(
 ) -> Result<Run> {
     let Claim {
         lease,
+        purpose,
         trigger,
         resume,
         context,
-        ..
     } = claim;
     let phases = Phases {
         board,
@@ -638,7 +638,17 @@ pub async fn run_task(
             phases.run(kind, Some(session_id), base).await?
         }
         resume => {
-            run_implementation(&phases, resume.map(|point| point.session_id), &context).await?
+            // The board leased a fresh start that needs ADR-0016's planner as
+            // `strategy` (task 043); that, and nothing derived here, is what
+            // runs the inline planner.
+            let plans = purpose == LeasePurpose::Strategy;
+            run_implementation(
+                &phases,
+                resume.map(|point| point.session_id),
+                &context,
+                plans,
+            )
+            .await?
         }
     };
 
@@ -674,6 +684,7 @@ async fn run_implementation(
     phases: &Phases<'_>,
     resumed: Option<String>,
     context: &RunContext,
+    plans: bool,
 ) -> Result<FinishReceipt> {
     // `prepare_ctx` is reached through `phases` by `prepare_worktree`, its one
     // use until task 044.
@@ -693,17 +704,25 @@ async fn run_implementation(
     // from and the credential the child spawns with (task 066).
     let checkout = released(
         board,
+        machine,
         lease,
         repo::ensure_unattended_runs_allowed(machine, &context.repository).await,
     )
     .await?;
     // Runner-owned, and read once, so the run is negotiated against the same
     // value it is then spawned with.
-    let run_environment = released(board, lease, settings::run_environment(machine).await).await?;
+    let run_environment = released(
+        board,
+        machine,
+        lease,
+        settings::run_environment(machine).await,
+    )
+    .await?;
     // This runner's half of the limits, read when the run starts by the same
     // route as the run environment, never cached across runs (ADR-0028 point
     // 2). The team's half is the claim's context.
-    let runner_limits = released(board, lease, limits::runner_limits(machine).await).await?;
+    let runner_limits =
+        released(board, machine, lease, limits::runner_limits(machine).await).await?;
 
     // Rimaia's conversation id, minted before anything exists so a resume works
     // even against a provider whose child dies before announcing itself
@@ -723,6 +742,7 @@ async fn run_implementation(
 
     let plan = released(
         board,
+        machine,
         lease,
         provider::negotiate(config.provider.capabilities(), &intent).map_err(Error::from),
     )
@@ -733,6 +753,7 @@ async fn run_implementation(
 
     let version = released(
         board,
+        machine,
         lease,
         probe_cli(config.provider.as_ref(), &config.program).await,
     )
@@ -746,12 +767,13 @@ async fn run_implementation(
 
     let worktree = released(
         board,
+        machine,
         lease,
         prepare_worktree(phases, request.in_flight.as_ref(), &context.repository.id).await,
     )
     .await?;
 
-    let context = released(board, lease, board.run_context(lease).await).await?;
+    let context = released(board, machine, lease, board.run_context(lease).await).await?;
 
     // **A resume does not run the planner again**, and this is the easiest
     // thing in the retry loop to get wrong by omission. `strategy::resolve`
@@ -780,10 +802,11 @@ async fn run_implementation(
             &context,
             Path::new(&worktree.path),
             &request.cancel,
+            plans,
         )
         .await;
 
-        match released(board, lease, resolved).await? {
+        match released(board, machine, lease, resolved).await? {
             strategy::Resolution::Ready {
                 model,
                 effort,
@@ -793,7 +816,7 @@ async fn run_implementation(
             // run the very thing the user just cancelled, so the claim goes
             // back and nothing else happens.
             strategy::Resolution::Cancelled => {
-                give_back(board, lease).await;
+                give_back(board, machine, lease).await;
                 return Err(Error::invalid(format!(
                     "\"{}\" was cancelled while its strategy was being planned",
                     context.task.task.title,
@@ -805,7 +828,7 @@ async fn run_implementation(
     // Re-read once more: a planner that wrote a proposal changed this row, and
     // the prompt has to carry what the card now says rather than what it said
     // before the planner ran.
-    let context = released(board, lease, board.run_context(lease).await).await?;
+    let context = released(board, machine, lease, board.run_context(lease).await).await?;
     let detail = &context.task;
     let repository = &context.repository;
 
@@ -843,6 +866,7 @@ async fn run_implementation(
     // recorded for a process that never started.
     let credentials = released(
         board,
+        machine,
         lease,
         repository_credentials(config, repository, &checkout).await,
     )
@@ -867,7 +891,14 @@ async fn run_implementation(
             },
         )
         .await;
-    released(board, lease, started).await?;
+    released(board, machine, lease, started).await?;
+    leases::note_run(
+        machine,
+        &task_id,
+        Some(&run_id),
+        LeasePurpose::Implementation,
+    )
+    .await;
 
     let attempt = Attempt {
         task_id: &task_id,
@@ -1006,7 +1037,14 @@ impl Phases<'_> {
                 },
             )
             .await;
-        released(self.board, self.lease, started).await?;
+        released(self.board, self.machine, self.lease, started).await?;
+        leases::note_run(
+            self.machine,
+            &self.lease.task_id,
+            Some(&prepared.run_id),
+            kind.into(),
+        )
+        .await;
 
         let attempt = Attempt {
             task_id: &self.lease.task_id,
@@ -1312,7 +1350,8 @@ impl Phases<'_> {
                 },
             )
             .await;
-        released(self.board, self.lease, started).await?;
+        released(self.board, self.machine, self.lease, started).await?;
+        leases::note_run(self.machine, task_id, Some(&run_id), pending.kind.into()).await;
 
         let transcript = transcript_path(self.paths, task_id, &run_id);
         let written = transcript
@@ -1331,7 +1370,7 @@ impl Phases<'_> {
                 TranscriptEnd::Complete { length: 0 },
             )
             .await;
-        released(self.board, self.lease, finished).await
+        released(self.board, self.machine, self.lease, finished).await
     }
 
     /// Measures the worktree and reports how a spawned phase ended.
@@ -1370,8 +1409,13 @@ impl Phases<'_> {
                     window_closes_at: None,
                     transcript,
                 };
-                if let Err(nested) = self.board.finish_run(self.lease, run_id, finish).await {
-                    tracing::error!(%run_id, %nested, "could not record a failed run");
+                match self.board.finish_run(self.lease, run_id, finish).await {
+                    Ok(receipt) => {
+                        note_receipt(self.machine, &self.lease.task_id, receipt.next).await;
+                    }
+                    Err(nested) => {
+                        tracing::error!(%run_id, %nested, "could not record a failed run");
+                    }
                 }
                 Err(error)
             }
@@ -1420,6 +1464,7 @@ impl Phases<'_> {
                 },
             )
             .await?;
+        note_receipt(self.machine, task_id, receipt.next).await;
 
         let resume_after = match receipt.next {
             NextStep::Released { resume_after } => resume_after,
@@ -1474,9 +1519,14 @@ fn cancelled_before_spawn() -> RunOutcome {
 /// Explicit at each step of [`run_task`] rather than a guard on drop, because
 /// giving a claim back is an `await` and a report to the board, and neither
 /// belongs in a destructor.
-async fn released<T>(board: &dyn BoardPort, lease: &LeaseRef, result: Result<T>) -> Result<T> {
+async fn released<T>(
+    board: &dyn BoardPort,
+    machine: &MachineContext,
+    lease: &LeaseRef,
+    result: Result<T>,
+) -> Result<T> {
     if result.is_err() {
-        give_back(board, lease).await;
+        give_back(board, machine, lease).await;
     }
     result
 }
@@ -1486,10 +1536,26 @@ async fn released<T>(board: &dyn BoardPort, lease: &LeaseRef, result: Result<T>)
 /// Best effort and deliberately not fatal: the caller is already returning an
 /// error, and replacing it with "and also the release failed" would hide the
 /// thing that actually went wrong. Startup reconciliation is the backstop
-/// (ADR-0011).
-async fn give_back(board: &dyn BoardPort, lease: &LeaseRef) {
-    if let Err(error) = board.release(lease).await {
+/// (ADR-0011), which is why this runner's record of the lease is forgotten
+/// only once the board has no such lease.
+async fn give_back(board: &dyn BoardPort, machine: &MachineContext, lease: &LeaseRef) {
+    let released = board.release(lease).await;
+    if let Err(error) = &released {
         tracing::error!(task_id = %lease.task_id, %error, "could not release a task whose run never finished");
+    }
+    leases::forget_released(machine, &lease.task_id, &released).await;
+}
+
+/// What this runner notes about its lease once the board answered a finish:
+/// a `Released` lease is forgotten, and a `Continue` keeps it with no run and
+/// the next phase's purpose, so a crash before that phase's `start_run` is
+/// released at the next launch rather than finished a second time.
+async fn note_receipt(machine: &MachineContext, task_id: &str, next: NextStep) {
+    match next {
+        NextStep::Released { .. } => leases::forget(machine, task_id).await,
+        NextStep::Continue { kind } => {
+            leases::note_run(machine, task_id, None, kind.into()).await;
+        }
     }
 }
 

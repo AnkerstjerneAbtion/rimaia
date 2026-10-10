@@ -679,8 +679,9 @@ async fn reconcile_one(
 
     machine::local::forget_worktree(machine, &task.id).await?;
     if retained_branch.is_none() && task.branch.is_some() {
-        // Leaseless, at startup: task 043's per-runner reconcile takes this
-        // write over.
+        // Leaseless, at startup, and after the lease steps, so most tasks here
+        // hold no lease to write under. Task 054's `report_runner` takes this
+        // write over the port.
         clear_branch(ctx, &task.id).await?;
     }
     let corrected_run_state = correct_run_state(ctx, &task).await?;
@@ -939,8 +940,7 @@ pub async fn local_path(
 /// Every other branch write goes through the runner's
 /// [`BoardPort::record_branch`] under a lease (task 066). These two have none,
 /// so they share this one named function rather than each issuing a query of
-/// its own; task 054's `report_runner` takes over the first and task 043's
-/// per-runner reconcile the second.
+/// its own; task 054's `report_runner` takes both over the port.
 pub async fn clear_branch(ctx: &ServiceContext, task_id: &str) -> Result<()> {
     let now = ctx.clock.now();
     let scope = ctx.scope.json();

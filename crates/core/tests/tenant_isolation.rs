@@ -602,7 +602,7 @@ async fn a_run_scoped_handle_lists_only_its_own_team() {
 /// A `ScopedTx` counts as a transaction here. It carries the context's scope,
 /// which is why the helpers below may take one, but each of them is still a
 /// door into someone else's transaction, so each is named.
-const STORE_HANDLE_EXCEPTIONS: [(&str, &str); 18] = [
+const STORE_HANDLE_EXCEPTIONS: [(&str, &str); 29] = [
     ("db::connect", "it makes the pool; no context can exist yet"),
     ("db::migrate", "it runs before the context is built"),
     (
@@ -673,6 +673,57 @@ const STORE_HANDLE_EXCEPTIONS: [(&str, &str); 18] = [
         "tasks::service::fetch_task_row",
         "every task write reads the row it changes inside its own transaction; it filters by that \
          transaction's scope and answers a foreign id as a missing one",
+    ),
+    (
+        "tasks::run_state::transition",
+        "a claim takes its run-state edges inside the lease's transaction (043): the one \
+         conditional write of run_state, with the expected state in its WHERE",
+    ),
+    (
+        "tasks::run_state::set_within",
+        "a finish lands its task inside the transaction that deletes its lease and sets its pin \
+         (043); set_run_state is it run in a transaction of its own",
+    ),
+    (
+        "tasks::strategy::write_strategy",
+        "record_strategy writes the planner's strategy inside the transaction its fence read the \
+         lease in (043); it filters by that transaction's scope",
+    ),
+    (
+        "review::findings::record_within",
+        "record_review_findings writes inside the transaction its fence read the lease in (043); \
+         it filters by that transaction's scope",
+    ),
+    (
+        "runner::outcome::insert_run_within",
+        "start_run opens the row and moves its lease onto it in one fenced transaction (043)",
+    ),
+    (
+        "runner::outcome::close_within",
+        "finish_run closes the row inside the transaction its fence read the lease in (043)",
+    ),
+    (
+        "runner::outcome::land_within",
+        "finish_run lands the task, deletes or keeps its lease and sets its pin in one \
+         transaction (043)",
+    ),
+    (
+        "board::lease::eligible",
+        "the claim, selection's plan and a Continue each ask it inside the transaction or on the \
+         connection that acts on the answer (043); it reads one task's pin by id",
+    ),
+    (
+        "board::lease::current",
+        "the fence reads the live lease inside the transaction of the first write it guards \
+         (043); it filters by the lease's team and that transaction's scope",
+    ),
+    (
+        "board::lease::open_run",
+        "start_run moves the lease onto its run inside the transaction that opened the row (043)",
+    ),
+    (
+        "board::lease::land",
+        "finish_run's landing, inside the transaction that lands the task (043)",
     ),
     (
         "tasks::service::team_of_task",

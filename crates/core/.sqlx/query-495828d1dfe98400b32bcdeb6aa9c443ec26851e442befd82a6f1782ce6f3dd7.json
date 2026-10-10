@@ -1,0 +1,62 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT t.lease_generation, t.pinned_runner_id,\n                  l.purpose AS \"purpose?: LeasePurpose\", l.run_id, l.runner_id AS \"runner_id?\",\n                  l.generation AS \"generation?\", l.acquired_at AS \"acquired_at?: DateTime<Utc>\",\n                  l.expires_at AS \"expires_at: DateTime<Utc>\"\n             FROM tasks t LEFT JOIN runner_leases l ON l.task_id = t.id\n            WHERE t.id = ?1 AND t.team_id IN (SELECT value FROM json_each(?2))",
+  "describe": {
+    "columns": [
+      {
+        "name": "lease_generation",
+        "ordinal": 0,
+        "type_info": "Integer"
+      },
+      {
+        "name": "pinned_runner_id",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "purpose?: LeasePurpose",
+        "ordinal": 2,
+        "type_info": "Text"
+      },
+      {
+        "name": "run_id",
+        "ordinal": 3,
+        "type_info": "Text"
+      },
+      {
+        "name": "runner_id?",
+        "ordinal": 4,
+        "type_info": "Text"
+      },
+      {
+        "name": "generation?",
+        "ordinal": 5,
+        "type_info": "Integer"
+      },
+      {
+        "name": "acquired_at?: DateTime<Utc>",
+        "ordinal": 6,
+        "type_info": "Text"
+      },
+      {
+        "name": "expires_at: DateTime<Utc>",
+        "ordinal": 7,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      false,
+      true,
+      false,
+      true,
+      false,
+      false,
+      false,
+      true
+    ]
+  },
+  "hash": "495828d1dfe98400b32bcdeb6aa9c443ec26851e442befd82a6f1782ce6f3dd7"
+}

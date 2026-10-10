@@ -8,7 +8,7 @@
 use crate::board::{BoardPort, Claim, ClaimTarget};
 use crate::db::settings;
 use crate::error::{Error, Result};
-use crate::machine::MachineContext;
+use crate::machine::{leases, MachineContext};
 use crate::paths::AppPaths;
 use crate::repo;
 use crate::scheduler::{InFlight, LocalSlot, SlotOwner};
@@ -43,7 +43,8 @@ pub struct Started {
 }
 
 /// Previews, takes the slot, checks the opt-in, negotiates, probes the CLI,
-/// then claims — and only the claim writes anything.
+/// then claims — and only the claim writes anything — and records the lease
+/// in this runner's own store before it hands the claim back.
 ///
 /// So every refusal before it leaves the task exactly as it was (task 008's
 /// "refused before any run state is written", ADR-0026's for a provider that
@@ -102,7 +103,33 @@ pub async fn claim_manual_start(
         .await?
         .ok_or_else(|| Error::invalid(lost_start(start.continue_session)))?;
 
+    // Recorded before anything is spawned, so a crash from here on is this
+    // runner's to reconcile at its next launch (ADR-0031 point 5).
+    record_claim(board, machine, &claim).await?;
+
     Ok(Started { slot, claim })
+}
+
+/// Notes the lease `claim` granted in this runner's own store, or gives the
+/// claim back and says why not.
+///
+/// Every starter calls this after its claim returns and before it spawns
+/// anything (task 043). A claim the runner could not note is released rather
+/// than run: a run whose lease this runner has no record of would be left for
+/// the solo arm of startup reconciliation to find, and a run this runner cannot
+/// account for is not worth starting.
+pub async fn record_claim(
+    board: &dyn BoardPort,
+    machine: &MachineContext,
+    claim: &Claim,
+) -> Result<()> {
+    if let Err(error) = leases::record(machine, claim).await {
+        if let Err(released) = board.release(&claim.lease).await {
+            tracing::error!(task_id = %claim.lease.task_id, %released, "could not release a claim this runner could not record");
+        }
+        return Err(error);
+    }
+    Ok(())
 }
 
 /// The sentence a person reads when another starter got there first.

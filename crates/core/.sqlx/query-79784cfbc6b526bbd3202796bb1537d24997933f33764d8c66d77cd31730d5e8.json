@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT t.pinned_runner_id AS \"pinned_runner_id?\", r.label AS \"label?\"\n             FROM tasks t LEFT JOIN runners r ON r.id = t.pinned_runner_id\n            WHERE t.id = ?1",
+  "describe": {
+    "columns": [
+      {
+        "name": "pinned_runner_id?",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "label?",
+        "ordinal": 1,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      true,
+      false
+    ]
+  },
+  "hash": "79784cfbc6b526bbd3202796bb1537d24997933f33764d8c66d77cd31730d5e8"
+}

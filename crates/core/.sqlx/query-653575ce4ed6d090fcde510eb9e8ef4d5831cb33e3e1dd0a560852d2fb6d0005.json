@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "DELETE FROM runner_leases WHERE task_id = ?1 AND generation = ?2",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "653575ce4ed6d090fcde510eb9e8ef4d5831cb33e3e1dd0a560852d2fb6d0005"
+}

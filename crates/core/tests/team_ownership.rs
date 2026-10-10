@@ -9,7 +9,7 @@
 use std::sync::Arc;
 
 use pretty_assertions::assert_eq;
-use rimaia_core::board::{BoardPort, ClaimTarget, InProcessBoard, StartRun};
+use rimaia_core::board::{BoardPort, ClaimTarget, InProcessBoard, LeaseTerm, StartRun};
 use rimaia_core::db::{new_id, BoardColumn, RunKind};
 use rimaia_core::events::TeamId;
 use rimaia_core::identity::{create_personal_team, PersonalTeam};
@@ -122,6 +122,7 @@ async fn a_run_records_the_runner_that_started_it() {
         paths.clone(),
         config.provider.clone(),
         second_runner.clone(),
+        LeaseTerm::Never,
     ));
 
     for (board, runner) in [
@@ -168,6 +169,7 @@ async fn a_claims_lease_names_the_tasks_team() {
         paths.clone(),
         RunnerConfig::default().provider,
         h.solo.runner_id.clone(),
+        LeaseTerm::Never,
     );
     let solo_fixture = Registered::new(&h.context, h.machine()).await;
     let other_fixture = Registered::new(

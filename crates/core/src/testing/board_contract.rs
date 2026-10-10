@@ -19,7 +19,8 @@
 //! `NextStep::Continue` (021), team scoping (038,
 //! 039: `a_lease_on_another_teams_task_is_not_found_in_either_spelling`),
 //! `ClaimTarget::Next` (042: the `a_next_claim_…` cases and its race),
-//! fencing and generations (043, whose race case is the lease form of 042's),
+//! fencing and generations (043: the `…generation…`, heartbeat and week-long
+//! cases, and the race, which is the lease form of 042's),
 //! expiry (053), `run_tool` (055), resends (056).
 
 use std::future::Future;
@@ -30,9 +31,10 @@ use std::time::Duration as StdDuration;
 use chrono::Duration;
 use tempfile::TempDir;
 
+use crate::board::lease;
 use crate::board::{
     BoardMethod, BoardPort, Claim, ClaimTarget, FinishRun, FreeCapacity, Heartbeat, LeasePurpose,
-    LeaseRef, NextStep, StartRun, TranscriptChunk, TranscriptEnd,
+    LeaseRef, LeaseTerm, NextStep, StartRun, TranscriptChunk, TranscriptEnd, LEASE_LIFETIME,
 };
 use crate::clock::Clock;
 use crate::context::ServiceContext;
@@ -63,8 +65,15 @@ pub enum Which {
 
 /// What an adapter's test crate implements to run the suite.
 pub trait Harness: Sized {
-    /// A fresh board with two runners attached.
-    fn start() -> impl Future<Output = Self>;
+    /// A fresh board with two runners attached, whose leases never expire:
+    /// solo's term.
+    fn start() -> impl Future<Output = Self> {
+        Self::start_with(LeaseTerm::Never)
+    }
+    /// The same, with the lease term this board grants (task 043). The board
+    /// must be served over more than one database connection, so a race
+    /// between the two runners is a real one.
+    fn start_with(term: LeaseTerm) -> impl Future<Output = Self>;
     /// Runner `A` or `B`'s port onto the one board.
     fn runner(&self, which: Which) -> Arc<dyn BoardPort>;
     /// The board's own context, to arrange and inspect it through core
@@ -109,6 +118,12 @@ macro_rules! board_contract {
             two_runners_claiming_next_for_one_task_get_exactly_one_claim,
             a_waiting_next_claim_returns_as_soon_as_a_task_becomes_startable,
             a_waiting_next_claim_returns_none_once_its_wait_has_passed,
+            two_runners_racing_for_one_task_get_exactly_one_claim,
+            every_lease_method_refuses_a_stale_generation,
+            a_lease_naming_a_missing_task_is_not_found_and_a_released_lease_is_conflict,
+            generation_increases_across_a_release_and_a_reclaim,
+            the_heartbeat_renews_current_leases_and_fences_stale_ones_per_lease,
+            a_solo_lease_survives_a_week_of_clock_time,
         );
     };
     (@cases $harness:ty; $($case:ident),* $(,)?) => {
@@ -414,6 +429,48 @@ fn tail(run_id: &str) -> RunTail {
         turns: 2,
         current_tool: None,
         last_assistant_text: Some("Reading the plan".to_string()),
+    }
+}
+
+/// The live lease the board records for `task_id`, if any, read through the
+/// board's own service.
+async fn lease_of(board: &ServiceContext, task_id: &str) -> Option<lease::Lease> {
+    lease::state_of(board, task_id)
+        .await
+        .expect("read the task's lease")
+        .lease
+}
+
+/// Every row of the three tables a lease method could write, as text, so a
+/// case can assert that a refused call wrote nothing at all.
+async fn rows_a_lease_method_could_write(board: &ServiceContext) -> Vec<String> {
+    let mut rows = Vec::new();
+    for table in ["tasks", "runs", "runner_leases"] {
+        let columns: Vec<String> =
+            sqlx::query_scalar(&format!("SELECT name FROM pragma_table_info('{table}')"))
+                .fetch_all(&board.pool)
+                .await
+                .expect("read a table's columns");
+        let quoted = columns
+            .iter()
+            .map(|column| format!("quote({column})"))
+            .collect::<Vec<_>>()
+            .join(" || '|' || ");
+        let table_rows: Vec<String> =
+            sqlx::query_scalar(&format!("SELECT {quoted} FROM {table} ORDER BY rowid"))
+                .fetch_all(&board.pool)
+                .await
+                .expect("read a table's rows");
+        rows.extend(table_rows.into_iter().map(|row| format!("{table}: {row}")));
+    }
+    rows
+}
+
+/// `lease`, one generation behind.
+fn stale(lease: &LeaseRef) -> LeaseRef {
+    LeaseRef {
+        generation: lease.generation - 1,
+        ..lease.clone()
     }
 }
 
@@ -916,7 +973,7 @@ pub mod cases {
             .sole()
             .expect("one board team")
             .clone();
-        let nowhere = LeaseRef::solo("no-such-task", team);
+        let nowhere = LeaseRef::new("no-such-task", 1, team);
 
         for method in BoardMethod::ALL {
             // The three lease-less methods are scoped by the runner, not by a
@@ -966,14 +1023,14 @@ pub mod cases {
             let missing = call(
                 runner.as_ref(),
                 method,
-                &LeaseRef::solo(never_issued.clone(), own_team.clone()),
+                &LeaseRef::new(never_issued.clone(), 1, own_team.clone()),
             )
             .await
             .expect_err(method.as_str());
 
             for lease in [
-                LeaseRef::solo(theirs.clone(), other.team_id.clone()),
-                LeaseRef::solo(theirs.clone(), own_team.clone()),
+                LeaseRef::new(theirs.clone(), 1, other.team_id.clone()),
+                LeaseRef::new(theirs.clone(), 1, own_team.clone()),
             ] {
                 let error = call(runner.as_ref(), method, &lease)
                     .await
@@ -1468,6 +1525,224 @@ pub mod cases {
                 .expect("read the task"),
             before,
             "nothing was written",
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Leases, fencing and generations (task 043)
+    // -----------------------------------------------------------------------
+
+    pub async fn two_runners_racing_for_one_task_get_exactly_one_claim<H: Harness>() {
+        // The lease form of the `Next` race: two runners name one task at
+        // once, fifty times over, on a board served over several connections.
+        // The claim is one transaction with the lease's primary key behind it,
+        // so every time one wins and the other is told so — never an error,
+        // which is what a refused upgrade of a deferred transaction would be.
+        let harness = H::start().await;
+        let board = harness.board();
+        let arranged = Arranged::new(board).await;
+        let a = harness.runner(Which::A);
+        let b = harness.runner(Which::B);
+
+        for round in 0..50 {
+            let task_id = arranged
+                .task(board, &format!("Wanted by both, {round}"))
+                .await;
+
+            let (first, second) = tokio::join!(
+                a.claim(run_target(&task_id, false)),
+                b.claim(run_target(&task_id, false)),
+            );
+            let first = first.unwrap_or_else(|error| panic!("round {round}, A: {error}"));
+            let second = second.unwrap_or_else(|error| panic!("round {round}, B: {error}"));
+            let claims: Vec<Claim> = [first, second].into_iter().flatten().collect();
+
+            assert_same(claims.len(), 1, &format!("round {round}: one claim"));
+            assert_same(claims[0].lease.generation, 1, "the first generation");
+            let held = lease_of(board, &task_id).await.expect("one lease row");
+            assert_same(held.generation, 1, "the lease row's generation");
+            assert_same(
+                run_state(board, &task_id).await,
+                RunState::Running,
+                "running, once",
+            );
+        }
+    }
+
+    pub async fn every_lease_method_refuses_a_stale_generation<H: Harness>() {
+        let harness = H::start().await;
+        let board = harness.board();
+        let arranged = Arranged::new(board).await;
+        let task_id = arranged.task(board, "Fenced").await;
+        let runner = harness.runner(Which::A);
+        let claim = claimed(runner.as_ref(), run_target(&task_id, false)).await;
+        runner
+            .start_run(&claim.lease, starting(&new_id(), RunKind::Implementation))
+            .await
+            .expect("start the run");
+        let behind = stale(&claim.lease);
+        let before = rows_a_lease_method_could_write(board).await;
+        harness.clock().advance(Duration::seconds(1));
+
+        for method in BoardMethod::ALL {
+            match method {
+                // Unfenced on purpose: the first three act before any lease
+                // exists, and a tail is synchronous and worth nothing stale
+                // (D14), so task 052's handler drops it instead.
+                BoardMethod::Preview
+                | BoardMethod::Claim
+                | BoardMethod::Heartbeat
+                | BoardMethod::PublishTail => continue,
+                BoardMethod::RunContext
+                | BoardMethod::RecordBranch
+                | BoardMethod::StartRun
+                | BoardMethod::AppendTranscript
+                | BoardMethod::FinishRun
+                | BoardMethod::Release
+                | BoardMethod::RecordStrategy
+                | BoardMethod::RecordReviewFindings => {
+                    let error = call(runner.as_ref(), method, &behind)
+                        .await
+                        .expect_err(method.as_str());
+                    assert_same(error.code(), ErrorCode::Conflict, method.as_str());
+                }
+            }
+        }
+
+        assert_same(
+            rows_a_lease_method_could_write(board).await,
+            before,
+            "a fenced report writes nothing",
+        );
+    }
+
+    pub async fn a_lease_naming_a_missing_task_is_not_found_and_a_released_lease_is_conflict<
+        H: Harness,
+    >() {
+        let harness = H::start().await;
+        let board = harness.board();
+        let arranged = Arranged::new(board).await;
+        let task_id = arranged.task(board, "Released").await;
+        let runner = harness.runner(Which::A);
+        let claim = claimed(runner.as_ref(), run_target(&task_id, false)).await;
+        runner.release(&claim.lease).await.expect("release");
+        let missing = LeaseRef {
+            task_id: new_id(),
+            ..claim.lease.clone()
+        };
+
+        for method in BoardMethod::ALL {
+            if !method.takes_a_lease() || method == BoardMethod::PublishTail {
+                continue;
+            }
+            let error = call(runner.as_ref(), method, &missing)
+                .await
+                .expect_err(method.as_str());
+            assert_same(error.code(), ErrorCode::NotFound, method.as_str());
+
+            let error = call(runner.as_ref(), method, &claim.lease)
+                .await
+                .expect_err(method.as_str());
+            assert_same(error.code(), ErrorCode::Conflict, method.as_str());
+        }
+    }
+
+    pub async fn generation_increases_across_a_release_and_a_reclaim<H: Harness>() {
+        let harness = H::start().await;
+        let board = harness.board();
+        let arranged = Arranged::new(board).await;
+        let task_id = arranged.task(board, "Claimed twice").await;
+        let runner = harness.runner(Which::A);
+
+        let first = claimed(runner.as_ref(), run_target(&task_id, false)).await;
+        assert_same(first.lease.generation, 1, "the first claim");
+        runner.release(&first.lease).await.expect("release");
+        let second = claimed(runner.as_ref(), run_target(&task_id, false)).await;
+
+        assert_same(second.lease.generation, 2, "never repeated after a release");
+        let error = runner
+            .run_context(&first.lease)
+            .await
+            .expect_err("the first holder is fenced");
+        assert_same(error.code(), ErrorCode::Conflict, "the error code");
+        runner
+            .run_context(&second.lease)
+            .await
+            .expect("the current holder reads");
+    }
+
+    pub async fn the_heartbeat_renews_current_leases_and_fences_stale_ones_per_lease<H: Harness>() {
+        let harness = H::start_with(LeaseTerm::Renewable(LEASE_LIFETIME)).await;
+        let board = harness.board();
+        let arranged = Arranged::new(board).await;
+        let runner = harness.runner(Which::A);
+        let kept = arranged.task(board, "Kept").await;
+        let moved_on = arranged.task(board, "Moved on").await;
+        let current = claimed(runner.as_ref(), run_target(&kept, false)).await;
+        let lifetime = Duration::from_std(LEASE_LIFETIME).expect("three minutes");
+        assert_same(
+            lease_of(board, &kept)
+                .await
+                .and_then(|lease| lease.expires_at),
+            Some(harness.clock().now() + lifetime),
+            "a renewable lease expires a lifetime after its claim",
+        );
+        let old = claimed(runner.as_ref(), run_target(&moved_on, false)).await;
+        runner.release(&old.lease).await.expect("release");
+        claimed(runner.as_ref(), run_target(&moved_on, false)).await;
+
+        harness.clock().advance(Duration::minutes(2));
+        let heartbeat = runner
+            .heartbeat(&[current.lease.clone(), old.lease.clone()])
+            .await
+            .expect("heartbeat");
+
+        assert_same(heartbeat.fenced, vec![old.lease.clone()], "fenced");
+        assert_same(heartbeat.cancel, Vec::<String>::new(), "cancel");
+        assert_same(
+            lease_of(board, &kept)
+                .await
+                .and_then(|lease| lease.expires_at),
+            Some(harness.clock().now() + lifetime),
+            "the current lease was renewed beside the stale one",
+        );
+    }
+
+    pub async fn a_solo_lease_survives_a_week_of_clock_time<H: Harness>() {
+        let harness = H::start().await;
+        let board = harness.board();
+        let arranged = Arranged::new(board).await;
+        let task_id = arranged.task(board, "A long week").await;
+        let runner = harness.runner(Which::A);
+        let claim = claimed(runner.as_ref(), run_target(&task_id, false)).await;
+        let expires = || async {
+            lease_of(board, &task_id)
+                .await
+                .expect("the lease is still there")
+                .expires_at
+        };
+        assert_same(expires().await, None, "a solo lease never expires");
+
+        harness.clock().advance(Duration::days(7));
+        runner
+            .run_context(&claim.lease)
+            .await
+            .expect("still the holder");
+        let run_id = new_id();
+        runner
+            .start_run(&claim.lease, starting(&run_id, RunKind::Implementation))
+            .await
+            .expect("start the run");
+        assert_same(expires().await, None, "still no expiry");
+        let receipt = runner
+            .finish_run(&claim.lease, &run_id, finishing(succeeded()))
+            .await
+            .expect("finish the run");
+
+        assert_same(
+            receipt.next,
+            NextStep::Released { resume_after: None },
+            "the finish landed",
         );
     }
 }

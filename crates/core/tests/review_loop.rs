@@ -112,9 +112,9 @@ async fn a_successful_implementation_with_the_loop_off_lands_exactly_as_before()
             // `start_run`.
             ChangeEvent::runs(team.clone(), [run.id.clone()]),
             ChangeEvent::tasks(team.clone(), [task.clone()]),
-            // `finish_run`: the row, then the task it lands.
+            // `finish_run`: the row, then the task it lands, its column,
+            // run state and lease in one transaction (task 043).
             ChangeEvent::runs(team.clone(), [run.id.clone()]),
-            ChangeEvent::tasks(team.clone(), [task.clone()]),
             ChangeEvent::tasks(team.clone(), [task.clone()]),
             ChangeEvent::tasks(team.clone(), [task.clone()]),
         ],
@@ -1026,10 +1026,9 @@ async fn the_task_stays_running_between_phases_and_moves_to_in_review_once() {
             ChangeEvent::tasks(team.clone(), [task.clone()]),
             // `record_review_findings`.
             ChangeEvent::tasks(team.clone(), [task.clone()]),
-            // The review's close, then the one move and the one run-state
-            // write the loop's exit makes.
+            // The review's close, then the loop's exit: the move, the
+            // run-state write and the lease in one transaction (task 043).
             ChangeEvent::runs(team.clone(), [review.clone()]),
-            ChangeEvent::tasks(team.clone(), [task.clone()]),
             ChangeEvent::tasks(team.clone(), [task.clone()]),
             ChangeEvent::tasks(team.clone(), [task.clone()]),
         ],
@@ -1354,10 +1353,8 @@ async fn a_review_left_open_by_a_crash_is_reconciled_into_in_review_or_a_review_
     // With retry budget left: offered for resume, as a review.
     let fixture = Fixture::new().await;
     fixture.open_review_left_by_a_crash(0).await;
-    let report = startup::survey(fixture.ctx(), fixture.machine(), &fixture.paths)
-        .await
-        .expect("survey");
-    scheduler::reconcile_interrupted(fixture.ctx(), &report)
+    // Lease-less rows, as a build older than task 043 left them: solo's arm.
+    scheduler::reconcile_unrecorded(fixture.ctx(), &fixture.harness.solo.runner_id, &[])
         .await
         .expect("reconcile");
     let detail = fixture.detail().await;
@@ -1379,10 +1376,8 @@ async fn a_review_left_open_by_a_crash_is_reconciled_into_in_review_or_a_review_
     fixture
         .open_review_left_by_a_crash(scheduler::MAX_TRANSIENT_ATTEMPTS as usize)
         .await;
-    let report = startup::survey(fixture.ctx(), fixture.machine(), &fixture.paths)
-        .await
-        .expect("survey");
-    scheduler::reconcile_interrupted(fixture.ctx(), &report)
+    // Lease-less rows, as a build older than task 043 left them: solo's arm.
+    scheduler::reconcile_unrecorded(fixture.ctx(), &fixture.harness.solo.runner_id, &[])
         .await
         .expect("reconcile");
     let detail = fixture.detail().await;

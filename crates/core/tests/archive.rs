@@ -715,10 +715,15 @@ impl Fixture {
     }
 
     /// Every repository this runner consented to, as the queue reads it.
-    async fn consented(&self) -> std::collections::BTreeSet<String> {
-        rimaia_core::machine::consented_repositories(self.machine())
+    async fn consented(&self) -> rimaia_core::scheduler::RunnerView {
+        let repositories = rimaia_core::machine::consented_repositories(self.machine())
             .await
-            .expect("read the consent")
+            .expect("read the consent");
+        rimaia_core::scheduler::RunnerView::new(
+            self.harness.solo.runner_id.clone(),
+            rimaia_core::runner::provider::ProviderId::ClaudeCode,
+            repositories,
+        )
     }
 
     async fn board(&self) -> Vec<rimaia_core::tasks::TaskSummary> {

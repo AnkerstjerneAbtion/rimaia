@@ -62,7 +62,8 @@ use crate::context::ServiceContext;
 use crate::db::settings::RunEnvironment;
 use crate::db::{new_id, BoardColumn, ExitClass, Repository, StrategyMode};
 use crate::error::{Error, Result};
-use crate::machine::MachineContext;
+use crate::events::RunnerId;
+use crate::machine::{leases, MachineContext};
 use crate::mcp::{Grant, RUN_MCP_SERVER_NAME};
 use crate::paths::AppPaths;
 use crate::scheduler::{InFlight, LocalSlot, SlotOwner, SlotRefused};
@@ -114,7 +115,14 @@ pub enum Resolution {
     Cancelled,
 }
 
-/// Decides how this task should be executed, planning first when it asks for it.
+/// Decides how this task should be executed, planning first when the claim
+/// says to.
+///
+/// `plans` is whether the claim's purpose is `strategy`: the board decided at
+/// the claim whether this fresh start needs ADR-0016's inline planner
+/// (`tasks::strategy::needs_planning`, in `board::lease::claim`), and the
+/// runner runs it exactly then, so the two cannot disagree about it (task
+/// 043).
 ///
 /// **Never returns `Err` for a planner failure.** A non-zero exit, a `max_turns`
 /// cut-off, a usage limit, a stream that never produced a `result`, and a run
@@ -135,8 +143,9 @@ pub async fn resolve(
     context: &RunContext,
     worktree: &Path,
     cancel: &CancelSignal,
+    plans: bool,
 ) -> Result<Resolution> {
-    if !tasks::strategy::needs_planning(&context.task.task, context.strategy.mode) {
+    if !plans {
         return Ok(ready(&context.task, &context.strategy));
     }
 
@@ -524,6 +533,10 @@ pub struct PlannerAccess {
     /// Where a planner's claim and write-backs go (seam-contract D31 point 8).
     /// Built once in `setup()` over the same provider as `runner`.
     pub board: Arc<dyn BoardPort>,
+    /// The runner `board` serves, so a plan this door draws passes over what
+    /// is pinned to another runner exactly as the board's claim does (task
+    /// 043).
+    pub runner_id: RunnerId,
 }
 
 impl std::fmt::Debug for PlannerAccess {
@@ -559,6 +572,11 @@ pub struct PlannerClaim {
 impl PlannerClaim {
     pub fn task_id(&self) -> &str {
         &self.claim.lease.task_id
+    }
+
+    /// The lease the board granted this planner.
+    pub fn lease(&self) -> &crate::board::LeaseRef {
+        &self.claim.lease
     }
 
     pub fn title(&self) -> &str {
@@ -635,9 +653,14 @@ pub async fn claim_for_planning(
             task_id: task_id.to_string(),
         })
         .await?
-        // Only a task deleted since the preview loses a `Plan` claim, which
-        // takes no edge another starter could have taken first.
+        // A `Plan` claim takes no edge, so it is lost only to a task deleted
+        // since the preview or to a lease another starter holds, and this
+        // runner's slot has already ruled out its own.
         .ok_or_else(|| Error::not_found(format!("no task with id {task_id}")))?;
+
+    // Recorded before anything is spawned (task 043), by every door that
+    // plans: the command, both MCP tools and a pass.
+    super::start::record_claim(board, machine, &claim).await?;
 
     Ok(Ok(PlannerClaim { slot, claim }))
 }
@@ -650,8 +673,8 @@ pub async fn claim_for_planning(
 /// is the caller's problem in the way it already was.
 ///
 /// The `Plan` claim is released on every path, after the last strategy write
-/// and before the slot drops. Before task 043 that changes nothing on the board
-/// (a strategy claim took no edge); from 043 it is what deletes the lease row.
+/// and before the slot drops: that deletes the lease row, leaves `run_state`
+/// alone (a strategy claim took no edge), and forgets this runner's record.
 ///
 /// `machine` is this machine's own state and clock. `prepare_ctx` is a board
 /// context held for [`worktree::prepare`](crate::worktree::prepare) and
@@ -669,9 +692,11 @@ pub async fn plan_claimed(
 
     let outcome = plan_under(board, machine, prepare_ctx, paths, config, &claim, &cancel).await;
 
-    if let Err(error) = board.release(&claim.lease).await {
+    let released = board.release(&claim.lease).await;
+    if let Err(error) = &released {
         tracing::warn!(task_id = %claim.lease.task_id, %error, "could not release a planner's claim");
     }
+    leases::forget_released(machine, &claim.lease.task_id, &released).await;
     drop(slot);
 
     outcome

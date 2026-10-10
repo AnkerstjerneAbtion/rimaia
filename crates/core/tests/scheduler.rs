@@ -5,8 +5,8 @@
 #![cfg(unix)]
 
 //! The scheduler's board half, without a loop: the plan the queue's claim is
-//! chosen from, the conditional claim that decides who owns a task, the retry
-//! budget's run kinds, and what a crash leaves behind (tasks 009 and 014;
+//! chosen from, the retry budget's run kinds, and what a crash leaves behind,
+//! reconciled one runner's leases at a time (tasks 009, 014 and 043;
 //! ADR-0007, ADR-0010, ADR-0011, ADR-0012; seam-contract D9, D29).
 //!
 //! Everything here runs against a real database and real git repositories,
@@ -16,12 +16,13 @@
 
 use chrono::{DateTime, TimeDelta, Utc};
 use pretty_assertions::assert_eq;
-use rimaia_core::db::{BoardColumn, ExitClass, RunKind, RunState, RunStatus, Task};
+use rimaia_core::board::StartRun;
+use rimaia_core::db::{new_id, BoardColumn, ExitClass, RunKind, RunState, RunStatus, Task};
 use rimaia_core::repo::{self, NewRepository};
 use rimaia_core::runner::events::TokenUsage;
 use rimaia_core::runner::outcome::{finish_run, start_run, NewRun, RunOutcome, SpawnedAs};
 use rimaia_core::runs::bundle::RunCapture;
-use rimaia_core::scheduler::{self, ClaimOutcome, SkipReason};
+use rimaia_core::scheduler::{self, SkipReason};
 use rimaia_core::startup;
 use rimaia_core::tasks::{self, NewTask, TaskFilter, TaskSummary};
 use rimaia_core::testing::{self, TempRepo, TestContext};
@@ -94,75 +95,9 @@ async fn the_plan_numbers_what_the_queue_will_actually_start() {
 // Claiming
 // ---------------------------------------------------------------------------
 
-#[tokio::test]
-async fn two_concurrent_claims_of_one_task_leave_exactly_one_winner() {
-    // The conditional write, at its narrowest. ADR-0010 requires selection and
-    // the transition to `running` to happen in one transaction so that the UI,
-    // the MCP server and the scheduler cannot double-claim; this is that
-    // property, driven against one pool from two callers at once.
-    let fixture = Fixture::new().await;
-    let task_id = fixture.add_task("Alpha").await;
-
-    let (first, second) = tokio::join!(
-        scheduler::claim(fixture.ctx(), &task_id),
-        scheduler::claim(fixture.ctx(), &task_id),
-    );
-    let outcomes = [
-        first.expect("a lost race is not an error"),
-        second.expect("a lost race is not an error"),
-    ];
-
-    assert_eq!(
-        outcomes
-            .iter()
-            .filter(|outcome| **outcome == ClaimOutcome::Claimed)
-            .count(),
-        1,
-        "exactly one claimer may own the task: {outcomes:?}"
-    );
-    assert!(outcomes.contains(&ClaimOutcome::Lost));
-    assert_eq!(fixture.task(&task_id).await.run_state, RunState::Running);
-}
-
-#[tokio::test]
-async fn a_claim_is_refused_for_every_state_that_means_somebody_already_has_the_task() {
-    // The property the mutual exclusion rests on, asserted state by state
-    // rather than inferred from one race. `queued`, `running` and
-    // `waiting_retry` have no legal edge into `queued`, so the second claimer
-    // is refused whichever of them the first one left behind.
-    let fixture = Fixture::new().await;
-
-    for taken in [RunState::Queued, RunState::Running, RunState::WaitingRetry] {
-        let task_id = fixture.add_task("Taken").await;
-        walk_to(&fixture, &task_id, taken).await;
-
-        assert_eq!(
-            scheduler::claim(fixture.ctx(), &task_id)
-                .await
-                .expect("a lost race is not an error"),
-            ClaimOutcome::Lost,
-            "a task in {taken:?} was claimed out from under whoever has it",
-        );
-        assert_eq!(fixture.task(&task_id).await.run_state, taken);
-    }
-
-    // The other half, and the reason the route is fixed rather than restricted
-    // to `idle`: last night's failure is startable again, which is what makes
-    // "Run now" on a failed card mean anything (ADR-0007's note on that edge —
-    // trying again "re-enters at Queued like every other start").
-    for startable in [RunState::Failed, RunState::Cancelled] {
-        let task_id = fixture.add_task("Startable").await;
-        walk_to(&fixture, &task_id, startable).await;
-
-        assert_eq!(
-            scheduler::claim(fixture.ctx(), &task_id)
-                .await
-                .expect("claim"),
-            ClaimOutcome::Claimed,
-            "{startable:?}",
-        );
-    }
-}
+// The claim's own cases — the race between two claimers and the states that
+// mean somebody already has the task — moved to `tests/leases.rs` with the
+// one-transaction claim (task 043), their interleaving assertions kept.
 
 /// Walks a fresh task through the ADR-0007 machine to `target`, using the one
 /// writer of `run_state` rather than a hand-written `UPDATE`.
@@ -204,15 +139,17 @@ async fn reopening_after_a_crash_shows_one_interrupted_task_and_leaves_the_rest_
     let untouched_after = fixture.add_task("Charlie").await;
 
     // The state a force-quit leaves: a claimed task with an open `runs` row,
-    // written through the same services a real run writes them through.
-    scheduler::claim(fixture.ctx(), &crashed)
-        .await
-        .expect("claim the task the crash caught");
-    let run = start_run(
-        fixture.ctx(),
-        &fixture.paths,
-        NewRun {
-            task_id: crashed.clone(),
+    // written through the same port and the same runner record a real run
+    // writes them through.
+    let board = fixture.board_port();
+    let claim = testing::board::claim_and_record(board.as_ref(), fixture.machine(), &crashed).await;
+    let run_id = new_id();
+    testing::board::start_and_note(
+        board.as_ref(),
+        fixture.machine(),
+        &claim,
+        StartRun {
+            run_id: run_id.clone(),
             kind: RunKind::Implementation,
             session_id: "0b6d3e2e-0000-4000-8000-00000000c0de".to_string(),
             prompt: "implement the plan".to_string(),
@@ -220,26 +157,16 @@ async fn reopening_after_a_crash_shows_one_interrupted_task_and_leaves_the_rest_
             base_sha: None,
         },
     )
-    .await
-    .expect("open the run the crash interrupted");
+    .await;
 
-    let report = startup::survey(fixture.ctx(), fixture.machine(), &fixture.paths)
-        .await
-        .expect("survey the database");
-    assert_eq!(
-        report.tasks_left_running,
-        vec![crashed.clone()],
-        "the survey is what decides what counts as left running",
-    );
-
-    let reconciled = scheduler::reconcile_interrupted(fixture.ctx(), &report)
+    let reconciled = scheduler::reconcile_held(board.as_ref(), fixture.machine())
         .await
         .expect("reconcile");
 
     assert_eq!(reconciled, vec![crashed.clone()]);
     let detail = fixture.detail(&crashed).await;
     let closed = detail.last_run.expect("the interrupted run");
-    assert_eq!(closed.id, run.id);
+    assert_eq!(closed.id, run_id);
     assert_eq!(closed.status, RunStatus::Interrupted);
     assert_eq!(closed.exit_class, Some(ExitClass::Interrupted));
     assert!(closed.ended_at.is_some(), "an interrupted run is over");
@@ -284,14 +211,10 @@ async fn a_task_claimed_before_its_run_row_existed_still_lands_failed() {
     // a disabled Run now button and no way out.
     let fixture = Fixture::new().await;
     let crashed = fixture.add_task("Alpha").await;
-    scheduler::claim(fixture.ctx(), &crashed)
-        .await
-        .expect("claim the task");
+    let board = fixture.board_port();
+    testing::board::claim_and_record(board.as_ref(), fixture.machine(), &crashed).await;
 
-    let report = startup::survey(fixture.ctx(), fixture.machine(), &fixture.paths)
-        .await
-        .expect("survey the database");
-    let reconciled = scheduler::reconcile_interrupted(fixture.ctx(), &report)
+    let reconciled = scheduler::reconcile_held(board.as_ref(), fixture.machine())
         .await
         .expect("reconcile");
 
@@ -303,29 +226,18 @@ async fn a_task_claimed_before_its_run_row_existed_still_lands_failed() {
 
 #[tokio::test]
 async fn a_task_a_crash_caught_still_queued_is_not_stranded() {
-    // Finding 3 of task 009's own verification report: `scheduler::claim`
-    // walks `idle -> queued -> running` as two separately committed
-    // transitions, so a crash between them leaves a task at `queued` with no
+    // Finding 3 of task 009's own verification report: the claim before task
+    // 043 walked `idle -> queued -> running` as two separately committed
+    // transitions, so a crash between them left a task at `queued` with no
     // open run and no legal edge back to `idle` — invisible to
     // `selection::skip_reason` (which only ever claims from `idle`) and to a
-    // "Run now" button disabled by the same badge. Only a database edit
-    // could clear it before this repair existed.
+    // "Run now" button disabled by the same badge. A build older than 043 can
+    // still have left one, with no lease row, which is solo's arm to settle.
     let fixture = Fixture::new().await;
     let crashed = fixture.add_task("Alpha").await;
     walk_to(&fixture, &crashed, RunState::Queued).await;
 
-    let report = startup::survey(fixture.ctx(), fixture.machine(), &fixture.paths)
-        .await
-        .expect("survey the database");
-    assert_eq!(
-        report.tasks_left_running,
-        vec![crashed.clone()],
-        "`running` alone would miss this task entirely",
-    );
-
-    let reconciled = scheduler::reconcile_interrupted(fixture.ctx(), &report)
-        .await
-        .expect("reconcile");
+    let reconciled = fixture.reconcile_unrecorded().await;
 
     assert_eq!(reconciled, vec![crashed.clone()]);
     let detail = fixture.detail(&crashed).await;
@@ -361,12 +273,8 @@ async fn reconciling_a_task_another_repair_already_settled_still_closes_its_run(
     // shows an attempt that never ends.
     let fixture = Fixture::new().await;
     let crashed = fixture.add_task("Alpha").await;
-    scheduler::claim(fixture.ctx(), &crashed)
-        .await
-        .expect("claim the task");
-    let report = startup::survey(fixture.ctx(), fixture.machine(), &fixture.paths)
-        .await
-        .expect("survey the database");
+    // Lease-less rows, as a build older than task 043 left them.
+    walk_to(&fixture, &crashed, RunState::Running).await;
     start_run(
         fixture.ctx(),
         &fixture.paths,
@@ -385,9 +293,7 @@ async fn reconciling_a_task_another_repair_already_settled_still_closes_its_run(
         .await
         .expect("the other repair got there first");
 
-    scheduler::reconcile_interrupted(fixture.ctx(), &report)
-        .await
-        .expect("reconcile");
+    fixture.reconcile_unrecorded().await;
 
     let detail = fixture.detail(&crashed).await;
     let run = detail.last_run.expect("the interrupted run");
@@ -412,11 +318,12 @@ async fn a_clean_previous_exit_leaves_the_reconciliation_nothing_to_do() {
 
     assert!(report.is_empty());
     assert_eq!(
-        scheduler::reconcile_interrupted(fixture.ctx(), &report)
+        scheduler::reconcile_held(fixture.board_port().as_ref(), fixture.machine())
             .await
             .expect("reconcile"),
         Vec::<String>::new()
     );
+    assert_eq!(fixture.reconcile_unrecorded().await, Vec::<String>::new());
 }
 
 #[tokio::test]
@@ -427,13 +334,9 @@ async fn a_reconciled_task_is_not_picked_up_again_by_the_queue() {
     // accumulate in `ready` unless the user acts").
     let fixture = Fixture::new().await;
     let crashed = fixture.add_task("Alpha").await;
-    scheduler::claim(fixture.ctx(), &crashed)
-        .await
-        .expect("claim the task");
-    let report = startup::survey(fixture.ctx(), fixture.machine(), &fixture.paths)
-        .await
-        .expect("survey the database");
-    scheduler::reconcile_interrupted(fixture.ctx(), &report)
+    let board = fixture.board_port();
+    testing::board::claim_and_record(board.as_ref(), fixture.machine(), &crashed).await;
+    scheduler::reconcile_held(board.as_ref(), fixture.machine())
         .await
         .expect("reconcile");
 
@@ -763,10 +666,28 @@ impl Fixture {
 
     /// Every repository this runner consented to, read once per pass as the
     /// queue reads it (task 066).
-    async fn consented(&self) -> std::collections::BTreeSet<String> {
-        rimaia_core::machine::consented_repositories(self.machine())
+    async fn consented(&self) -> rimaia_core::scheduler::RunnerView {
+        let repositories = rimaia_core::machine::consented_repositories(self.machine())
             .await
-            .expect("read the consent")
+            .expect("read the consent");
+        rimaia_core::scheduler::RunnerView::new(
+            self.harness.solo.runner_id.clone(),
+            rimaia_core::runner::provider::ProviderId::ClaudeCode,
+            repositories,
+        )
+    }
+
+    /// The board port the solo runner reaches this board through.
+    fn board_port(&self) -> std::sync::Arc<dyn rimaia_core::board::BoardPort> {
+        self.harness
+            .board(&self.paths, &rimaia_core::runner::RunnerConfig::default())
+    }
+
+    /// Solo's arm of the reconcile, with nothing recorded on the runner.
+    async fn reconcile_unrecorded(&self) -> Vec<String> {
+        scheduler::reconcile_unrecorded(self.ctx(), &self.harness.solo.runner_id, &[])
+            .await
+            .expect("reconcile")
     }
 
     /// How many `runs` rows a task has — the row-level answer to "how many

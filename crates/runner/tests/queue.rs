@@ -68,12 +68,13 @@ use chrono::{DateTime, TimeDelta, Utc};
 use pretty_assertions::assert_eq;
 use rimaia_core::board::{
     BoardFuture, BoardPort, Claim, ClaimTarget, FinishReceipt, FinishRun, Heartbeat,
-    InProcessBoard, LeaseRef, RunContext, StartRun, TranscriptAck, TranscriptChunk,
+    InProcessBoard, LeasePurpose, LeaseRef, LeaseTerm, RunContext, StartRun, TranscriptAck,
+    TranscriptChunk,
 };
 use rimaia_core::db::{
     BoardColumn, ExitClass, OnArchive, RunKind, RunState, RunStatus, ScheduleMode, Task,
 };
-use rimaia_core::machine::Checkout;
+use rimaia_core::machine::{leases, Checkout, HeldLease};
 use rimaia_core::mcp::{Tool, MCP_SERVER_NAME};
 use rimaia_core::repo::{self, NewRepository};
 use rimaia_core::review::findings::NewReviewFinding;
@@ -88,9 +89,8 @@ use rimaia_core::runs::bundle::RunCapture;
 use rimaia_core::schedule::window::RunWindow;
 use rimaia_core::schedule::{self as scheduler_schedule, ScheduleInput};
 use rimaia_core::scheduler::{
-    self, capacity, ClaimOutcome, InFlight, LocalSlot, QueueState, SkipReason, SlotOwner,
+    self, capacity, InFlight, LocalSlot, QueueState, SkipReason, SlotOwner,
 };
-use rimaia_core::startup;
 use rimaia_core::tasks::strategy::StrategyPlan;
 use rimaia_core::tasks::{self, NewTask, TaskFilter, TaskSummary};
 use rimaia_core::testing::board_contract::Which;
@@ -1488,12 +1488,17 @@ async fn the_queue_starts_nothing_for_a_task_something_else_already_claimed() {
     let taken = fixture.add_task("Alpha").await;
     let free = fixture.add_task("Bravo").await;
 
-    assert_eq!(
-        scheduler::claim(fixture.ctx(), &taken)
-            .await
-            .expect("claim the first task"),
-        ClaimOutcome::Claimed
-    );
+    testing::board::claim_run(
+        fixture
+            .harness
+            .board(&fixture.paths, &fixture.runner())
+            .as_ref(),
+        &taken,
+        RunTrigger::Manual,
+        false,
+    )
+    .await
+    .expect("claim the first task");
 
     let mut changes = fixture.ctx().subscribe();
     let queue = fixture.spawn_queue();
@@ -1522,6 +1527,66 @@ async fn the_queue_starts_nothing_for_a_task_something_else_already_claimed() {
     queue.shutdown();
 }
 
+#[tokio::test]
+async fn every_starter_records_its_claim_before_it_spawns() {
+    // The runner loop's half of `crates/core/tests/leases.rs`'s test of the
+    // same name (task 043): the loop records the lease its `Next` claim was
+    // granted before anything is spawned, notes the run once `start_run`
+    // reported it, and forgets the lease when the board released it.
+    let fixture = Fixture::new().await;
+    let task_id = fixture.add_task("Alpha").await;
+    let witness = HeldWitness::over(
+        fixture.harness.board(&fixture.paths, &fixture.runner()),
+        fixture.machine().clone(),
+    );
+    let in_flight = InFlight::new();
+    let mut releases = in_flight.releases();
+    let mut changes = fixture.ctx().subscribe();
+    let queue = fixture.spawn_queue_over(witness.clone(), in_flight.clone());
+    queue.start().await.expect("start the queue");
+
+    let finished = task_id.clone();
+    wait_until(&fixture, &mut changes, "the task to finish", move |board| {
+        board
+            .iter()
+            .any(|task| task.task.id == finished && task.task.column == BoardColumn::InReview)
+    })
+    .await;
+    // The record is forgotten after the board answered, before the slot is
+    // given back.
+    tokio::time::timeout(TEST_TIMEOUT, async {
+        while queue.holds(&task_id) {
+            releases.changed().await.expect("the registry is alive");
+        }
+    })
+    .await
+    .expect("the run gives its slot back");
+
+    let run_id = fixture.last_run_id(&task_id).await;
+    let record = |run_id: Option<&str>| HeldLease {
+        task_id: task_id.clone(),
+        team_id: fixture.harness.solo.team_id.clone(),
+        purpose: LeasePurpose::Implementation,
+        run_id: run_id.map(str::to_string),
+        generation: 1,
+        acquired_at: fixture.harness.clock.now(),
+    };
+    let (before_spawn, at_finish) = witness.seen();
+    assert_eq!(
+        before_spawn,
+        vec![record(None)],
+        "recorded before the spawn"
+    );
+    assert_eq!(at_finish, vec![record(Some(&run_id))], "the run is noted");
+    assert_eq!(
+        leases::held(fixture.machine()).await.expect("the record"),
+        Vec::<HeldLease>::new(),
+        "forgotten after a released finish",
+    );
+
+    queue.shutdown();
+}
+
 // ---------------------------------------------------------------------------
 // What a crash left behind
 // ---------------------------------------------------------------------------
@@ -1542,26 +1607,8 @@ async fn a_launch_offers_a_crashed_run_for_resume_and_starts_nothing_until_the_q
     // when the app is reopened.
     let fixture = Fixture::new().await;
     let crashed = fixture.add_task("Alpha").await;
-    scheduler::claim(fixture.ctx(), &crashed)
-        .await
-        .expect("claim the task the crash caught");
-    start_run(
-        fixture.ctx(),
-        &fixture.paths,
-        NewRun {
-            task_id: crashed.clone(),
-            kind: RunKind::Implementation,
-            session_id: SESSION.to_string(),
-            prompt: "implement the plan".to_string(),
-            // Task 011's column. These runs stand in for attempts a crash
-            // caught, so the base they were built on is not what this test
-            // is about.
-            base_ref: None,
-            base_sha: None,
-        },
-    )
-    .await
-    .expect("open the run the crash interrupted");
+    let board = fixture.harness.board(&fixture.paths, &fixture.runner());
+    fixture.crash_mid_run(board.as_ref(), &crashed).await;
 
     // (3) The exit path's write, replayed: this is the state a previous launch
     // left behind, whatever it had been doing.
@@ -1569,10 +1616,7 @@ async fn a_launch_offers_a_crashed_run_for_resume_and_starts_nothing_until_the_q
         .await
         .expect("quitting always stops the queue");
 
-    let report = startup::survey(fixture.ctx(), fixture.machine(), &fixture.paths)
-        .await
-        .expect("survey the database");
-    scheduler::reconcile_interrupted(fixture.ctx(), &report)
+    scheduler::reconcile_held(board.as_ref(), fixture.machine())
         .await
         .expect("reconcile");
 
@@ -2839,35 +2883,14 @@ async fn a_schedule_firing_tonight_does_not_resume_a_run_last_night_crashed_on()
     // let a schedule quietly override a per-run policy it knows nothing about.
     let fixture = Fixture::new().await;
     let crashed = fixture.add_task("Alpha").await;
-    scheduler::claim(fixture.ctx(), &crashed)
-        .await
-        .expect("claim the task the crash caught");
-    start_run(
-        fixture.ctx(),
-        &fixture.paths,
-        NewRun {
-            task_id: crashed.clone(),
-            kind: RunKind::Implementation,
-            session_id: SESSION.to_string(),
-            prompt: "implement the plan".to_string(),
-            // Task 011's column. These runs stand in for attempts a crash
-            // caught, so the base they were built on is not what this test
-            // is about.
-            base_ref: None,
-            base_sha: None,
-        },
-    )
-    .await
-    .expect("open the run the crash interrupted");
+    let board = fixture.harness.board(&fixture.paths, &fixture.runner());
+    fixture.crash_mid_run(board.as_ref(), &crashed).await;
 
     // The launch after the crash: D15's exit-path write, then the repair.
     scheduler::set_queue_state(fixture.machine(), QueueState::Paused)
         .await
         .expect("quitting always stops the queue");
-    let report = startup::survey(fixture.ctx(), fixture.machine(), &fixture.paths)
-        .await
-        .expect("survey the database");
-    scheduler::reconcile_interrupted(fixture.ctx(), &report)
+    scheduler::reconcile_held(board.as_ref(), fixture.machine())
         .await
         .expect("reconcile");
 
@@ -2929,30 +2952,9 @@ async fn a_schedule_that_does_open_a_window_resumes_exactly_what_start_would() {
     // it.
     let fixture = Fixture::new().await;
     let crashed = fixture.add_task("Alpha").await;
-    scheduler::claim(fixture.ctx(), &crashed)
-        .await
-        .expect("claim the task the crash caught");
-    start_run(
-        fixture.ctx(),
-        &fixture.paths,
-        NewRun {
-            task_id: crashed.clone(),
-            kind: RunKind::Implementation,
-            session_id: SESSION.to_string(),
-            prompt: "implement the plan".to_string(),
-            // Task 011's column. These runs stand in for attempts a crash
-            // caught, so the base they were built on is not what this test
-            // is about.
-            base_ref: None,
-            base_sha: None,
-        },
-    )
-    .await
-    .expect("open the run the crash interrupted");
-    let report = startup::survey(fixture.ctx(), fixture.machine(), &fixture.paths)
-        .await
-        .expect("survey the database");
-    scheduler::reconcile_interrupted(fixture.ctx(), &report)
+    let board = fixture.harness.board(&fixture.paths, &fixture.runner());
+    fixture.crash_mid_run(board.as_ref(), &crashed).await;
+    scheduler::reconcile_held(board.as_ref(), fixture.machine())
         .await
         .expect("reconcile");
 
@@ -4150,7 +4152,11 @@ impl TwoRunners {
             runner.machine.clone(),
             Arc::clone(&runner.board),
             self.harness.context.subscribe(),
-            SoloBoard::new(self.harness.context.clone()),
+            SoloBoard::new(
+                self.harness.context.clone(),
+                runner.runner_id.clone(),
+                rimaia_core::runner::provider::ProviderId::ClaudeCode,
+            ),
             runner.in_flight.clone(),
             runner.paths.clone(),
             RunnerConfig {
@@ -4253,6 +4259,7 @@ impl OneRunner {
             paths.clone(),
             config.provider.clone(),
             runner_id.clone(),
+            LeaseTerm::Never,
         ));
 
         Self {
@@ -4519,7 +4526,11 @@ impl Fixture {
             self.harness.machine().clone(),
             board,
             self.harness.context.subscribe(),
-            SoloBoard::new(self.harness.context.clone()),
+            SoloBoard::new(
+                self.harness.context.clone(),
+                self.harness.solo.runner_id.clone(),
+                rimaia_core::runner::provider::ProviderId::ClaudeCode,
+            ),
             in_flight,
             self.paths.clone(),
             runner,
@@ -4688,12 +4699,41 @@ impl Fixture {
         }
     }
 
+    /// The state a force-quit leaves mid-run: the task claimed and its run
+    /// opened through `board`, both recorded on the runner as every starter
+    /// and `run_task` record them (task 043).
+    async fn crash_mid_run(&self, board: &dyn BoardPort, task_id: &str) {
+        let claim = testing::board::claim_and_record(board, self.machine(), task_id).await;
+        testing::board::start_and_note(
+            board,
+            self.machine(),
+            &claim,
+            StartRun {
+                run_id: rimaia_core::db::new_id(),
+                kind: RunKind::Implementation,
+                session_id: SESSION.to_string(),
+                prompt: "implement the plan".to_string(),
+                // Task 011's column. These runs stand in for attempts a crash
+                // caught, so the base they were built on is not what this
+                // test is about.
+                base_ref: None,
+                base_sha: None,
+            },
+        )
+        .await;
+    }
+
     /// Every repository this runner consented to, read once per pass as the
     /// queue reads it (task 066).
-    async fn consented(&self) -> std::collections::BTreeSet<String> {
-        rimaia_core::machine::consented_repositories(self.machine())
+    async fn consented(&self) -> scheduler::RunnerView {
+        let repositories = rimaia_core::machine::consented_repositories(self.machine())
             .await
-            .expect("read the consent")
+            .expect("read the consent");
+        scheduler::RunnerView::new(
+            self.harness.solo.runner_id.clone(),
+            rimaia_core::runner::provider::ProviderId::ClaudeCode,
+            repositories,
+        )
     }
 
     /// The run id a card would resolve for this task — `get_task(..).last_run`,
@@ -4726,5 +4766,127 @@ impl Fixture {
             .fetch_one(&self.ctx().pool)
             .await
             .expect("count the attempts")
+    }
+}
+
+/// A board port decorator that notes what this runner's store holds at the
+/// first report after a claim (before anything is spawned) and when a run
+/// finishes (after `start_run`). Every call goes through.
+struct HeldWitness {
+    inner: Arc<dyn BoardPort>,
+    machine: rimaia_core::machine::MachineContext,
+    before_spawn: Mutex<Option<Vec<HeldLease>>>,
+    at_finish: Mutex<Option<Vec<HeldLease>>>,
+}
+
+impl HeldWitness {
+    fn over(inner: Arc<dyn BoardPort>, machine: rimaia_core::machine::MachineContext) -> Arc<Self> {
+        Arc::new(Self {
+            inner,
+            machine,
+            before_spawn: Mutex::new(None),
+            at_finish: Mutex::new(None),
+        })
+    }
+
+    fn seen(&self) -> (Vec<HeldLease>, Vec<HeldLease>) {
+        (
+            self.before_spawn
+                .lock()
+                .expect("the witness")
+                .clone()
+                .expect("a report before the spawn"),
+            self.at_finish
+                .lock()
+                .expect("the witness")
+                .clone()
+                .expect("a finish"),
+        )
+    }
+
+    async fn note_before_spawn(&self) {
+        let held = leases::held(&self.machine).await.expect("the record");
+        let mut before = self.before_spawn.lock().expect("the witness");
+        if before.is_none() {
+            *before = Some(held);
+        }
+    }
+}
+
+impl BoardPort for HeldWitness {
+    fn preview<'a>(&'a self, task_id: &'a str) -> BoardFuture<'a, RunContext> {
+        self.inner.preview(task_id)
+    }
+
+    fn claim<'a>(&'a self, target: ClaimTarget) -> BoardFuture<'a, Option<Claim>> {
+        self.inner.claim(target)
+    }
+
+    fn heartbeat<'a>(&'a self, held: &'a [LeaseRef]) -> BoardFuture<'a, Heartbeat> {
+        self.inner.heartbeat(held)
+    }
+
+    fn run_context<'a>(&'a self, lease: &'a LeaseRef) -> BoardFuture<'a, RunContext> {
+        Box::pin(async move {
+            self.note_before_spawn().await;
+            self.inner.run_context(lease).await
+        })
+    }
+
+    fn record_branch<'a>(&'a self, lease: &'a LeaseRef, branch: &'a str) -> BoardFuture<'a, ()> {
+        Box::pin(async move {
+            self.note_before_spawn().await;
+            self.inner.record_branch(lease, branch).await
+        })
+    }
+
+    fn start_run<'a>(&'a self, lease: &'a LeaseRef, run: StartRun) -> BoardFuture<'a, ()> {
+        self.inner.start_run(lease, run)
+    }
+
+    fn append_transcript<'a>(
+        &'a self,
+        lease: &'a LeaseRef,
+        chunk: TranscriptChunk,
+    ) -> BoardFuture<'a, TranscriptAck> {
+        self.inner.append_transcript(lease, chunk)
+    }
+
+    fn publish_tail(&self, lease: &LeaseRef, tail: RunTail) {
+        self.inner.publish_tail(lease, tail);
+    }
+
+    fn finish_run<'a>(
+        &'a self,
+        lease: &'a LeaseRef,
+        run_id: &'a str,
+        finish: FinishRun,
+    ) -> BoardFuture<'a, FinishReceipt> {
+        Box::pin(async move {
+            let held = leases::held(&self.machine).await.expect("the record");
+            *self.at_finish.lock().expect("the witness") = Some(held);
+            self.inner.finish_run(lease, run_id, finish).await
+        })
+    }
+
+    fn release<'a>(&'a self, lease: &'a LeaseRef) -> BoardFuture<'a, ()> {
+        self.inner.release(lease)
+    }
+
+    fn record_strategy<'a>(
+        &'a self,
+        lease: &'a LeaseRef,
+        plan: StrategyPlan,
+    ) -> BoardFuture<'a, ()> {
+        self.inner.record_strategy(lease, plan)
+    }
+
+    fn record_review_findings<'a>(
+        &'a self,
+        lease: &'a LeaseRef,
+        run_id: &'a str,
+        findings: Vec<NewReviewFinding>,
+    ) -> BoardFuture<'a, ()> {
+        self.inner.record_review_findings(lease, run_id, findings)
     }
 }

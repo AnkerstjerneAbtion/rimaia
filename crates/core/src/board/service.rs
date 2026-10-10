@@ -10,20 +10,23 @@
 //!
 //! A method that takes a [`LeaseRef`] runs under the adapter's context
 //! narrowed to the lease's team, and only after checking the adapter's scope
-//! contains that team (D31 point 13). It refuses a task that does not exist,
-//! or that is not in the lease's team, with `NotFound`, in the sentence a
-//! never-issued task gets, and one that also takes a run id refuses a run of
-//! another task the same way. That is all "scoped by `lease`" means before
-//! task 043: there is no lease row to compare a generation against yet, so no
-//! `Conflict` (D8).
-
-use std::collections::BTreeSet;
+//! contains that team (D31 point 13). Then, inside the transaction of the
+//! first write it guards, it reads the live lease with
+//! [`lease::current`](super::lease): a task that does not exist, or that is
+//! not in the lease's team, is `NotFound` in the sentence a never-issued task
+//! gets, and a lease that is not the current one for this runner is
+//! `Conflict` (D8's 043 amendment). One that also takes a run id refuses a run
+//! of another task as `NotFound`, after the fence.
+//!
+//! Every method also takes the runner the adapter serves, which is its scope
+//! and never a request field (D31 point 3): the fence compares the lease's
+//! holder with it.
 
 use chrono::{DateTime, Utc};
 use tokio::sync::broadcast;
 use tokio::sync::broadcast::error::{RecvError, TryRecvError};
 
-use crate::context::{ServiceContext, TeamScope};
+use crate::context::{ScopedTx, ServiceContext, TeamScope};
 use crate::db::{settings, StrategySource};
 use crate::error::{Error, ErrorCode, Result};
 use crate::paths::AppPaths;
@@ -37,14 +40,15 @@ use crate::runner::provider::AgentProvider;
 use crate::runner::RunTrigger;
 use crate::runs::bundle::RunCapture;
 use crate::scheduler::attempts::{self, Ending};
-use crate::scheduler::claim::{self as edges, ClaimOutcome};
-use crate::scheduler::{retry, selection};
+use crate::scheduler::retry;
+use crate::scheduler::selection::{self, RunnerView};
 use crate::strategy::{self, catalogue};
 use crate::tasks;
-use crate::tasks::strategy::{set_task_strategy, StrategyPlan};
+use crate::tasks::strategy::{prepare_strategy, write_strategy, StrategyPlan};
 
+use super::lease::{self, ClaimRequest, Door, Edges, LeaseTerm};
 use super::types::{
-    Claim, ClaimTarget, FinishReceipt, FinishRun, FreeCapacity, Heartbeat, LeasePurpose, LeaseRef,
+    Claim, ClaimTarget, FinishReceipt, FinishRun, FreeCapacity, Heartbeat, LeaseRef, NextStep,
     RunContext, StartRun, TeamLimits, TranscriptAck, TranscriptChunk,
 };
 
@@ -57,16 +61,26 @@ pub async fn preview(
     read_context(ctx, provider, task_id).await
 }
 
+/// The runner an adapter serves: who the board's leases name, and what it
+/// leases for.
+#[derive(Debug, Clone, Copy)]
+pub struct Runner<'a> {
+    pub id: &'a str,
+    pub provider: &'a dyn AgentProvider,
+    /// Whether this board's leases expire. Solo's never do (ADR-0031 point 5).
+    pub term: LeaseTerm,
+}
+
 /// The single path for every process a runner starts (D31 point 4).
 ///
 /// `Run` and `Plan` name their task. `Next` asks the board to choose one, and
 /// is the only place in the workspace that runs selection for a claim (task
-/// 042): task 045 adds its eligibility predicates beside the listed-repository
-/// check in [`claim_next`], and task 043 replaces the edges in [`claim_task`].
-/// Neither touches the runner.
+/// 042): task 045 adds its eligibility predicates to `lease::eligible`, which
+/// both `selection::plan` and the claim transaction ask. Every form takes its
+/// edges and its lease in one transaction (`board::lease`, task 043).
 pub async fn claim(
     ctx: &ServiceContext,
-    provider: &dyn AgentProvider,
+    runner: Runner<'_>,
     target: ClaimTarget,
 ) -> Result<Option<Claim>> {
     match target {
@@ -74,7 +88,7 @@ pub async fn claim(
             capacity,
             repositories,
             wait,
-        } => claim_next(ctx, provider, &capacity, &repositories, wait).await,
+        } => claim_next(ctx, runner, &capacity, &repositories, wait).await,
         ClaimTarget::Run {
             task_id,
             trigger,
@@ -82,24 +96,27 @@ pub async fn claim(
         } => {
             claim_task(
                 ctx,
-                provider,
+                runner,
                 &task_id,
                 Route::Run {
                     trigger,
                     continue_session,
                 },
+                Door::Named,
             )
             .await
         }
-        ClaimTarget::Plan { task_id } => claim_task(ctx, provider, &task_id, Route::Plan).await,
+        ClaimTarget::Plan { task_id } => {
+            claim_task(ctx, runner, &task_id, Route::Plan, Door::Named).await
+        }
     }
 }
 
 /// Which claim [`claim_task`] makes of the task it was named.
 #[derive(Debug, Clone, Copy)]
 enum Route {
-    /// Both `run_state` edges: a fresh start through `claim::claim`, or a due
-    /// retry through `claim_retry` and the point it resumes.
+    /// Both `run_state` edges for a fresh start, or `waiting_retry ->
+    /// running` and the point it resumes for a retry.
     Run {
         trigger: RunTrigger,
         continue_session: bool,
@@ -124,14 +141,18 @@ enum Route {
 /// `earliest_due` wake to this body (D31's 2026-10-10 amendment).
 async fn claim_next(
     ctx: &ServiceContext,
-    provider: &dyn AgentProvider,
+    runner: Runner<'_>,
     capacity: &FreeCapacity,
     repositories: &[String],
     wait: std::time::Duration,
 ) -> Result<Option<Claim>> {
-    let listed: BTreeSet<String> = repositories.iter().cloned().collect();
+    let view = RunnerView {
+        runner_id: runner.id.to_string(),
+        provider: runner.provider.id(),
+        repositories: repositories.iter().cloned().collect(),
+    };
     if wait.is_zero() {
-        return try_next(ctx, provider, capacity, &listed).await;
+        return try_next(ctx, runner, capacity, &view).await;
     }
 
     let mut changes = ctx.subscribe();
@@ -143,7 +164,7 @@ async fn claim_next(
 
     loop {
         drain(&mut changes);
-        if let Some(claim) = try_next(ctx, provider, capacity, &listed).await? {
+        if let Some(claim) = try_next(ctx, runner, capacity, &view).await? {
             return Ok(Some(claim));
         }
         if ctx.clock.now() >= deadline {
@@ -170,24 +191,26 @@ async fn claim_next(
 /// One look at the board for [`claim_next`]: selection, then the claim, then
 /// the next entry if the claim was lost to another starter.
 ///
-/// 1. [`selection::plan`] over the listed repositories. A repository not in
-///    the list is skipped as [`SkipReason::UnattendedRunsNotAllowed`], exactly
-///    as today's opt-in is.
+/// 1. [`selection::plan`] over the runner's view. A repository not in its list
+///    is skipped as [`SkipReason::UnattendedRunsNotAllowed`], exactly as
+///    today's opt-in is, and a task this runner is not eligible for (pinned
+///    to another runner) is passed over before positions are numbered.
 /// 2. [`selection::first_startable`]: the first entry in board order with no
 ///    skip reason and a free slot in its repository, while `capacity.total`
 ///    is above zero. Capacity is not a skip reason (D21 point 3).
-/// 3. The claim, by today's two routes, chosen by what the plan says the entry
-///    is: a fresh start, or a due retry when `resume_after` is set. A lost
-///    race moves to the next entry rather than returning, and costs no slot.
+/// 3. The claim transaction, by what the plan says the entry is: a fresh
+///    start, or a due retry when `resume_after` is set. A lost race, or an
+///    eligibility the transaction no longer agrees with, moves to the next
+///    entry rather than returning, and costs no slot.
 ///
 /// [`SkipReason::UnattendedRunsNotAllowed`]: crate::scheduler::SkipReason::UnattendedRunsNotAllowed
 async fn try_next(
     ctx: &ServiceContext,
-    provider: &dyn AgentProvider,
+    runner: Runner<'_>,
     capacity: &FreeCapacity,
-    listed: &BTreeSet<String>,
+    view: &RunnerView,
 ) -> Result<Option<Claim>> {
-    let mut plan = selection::plan(ctx, listed).await?;
+    let mut plan = selection::plan(ctx, view).await?;
 
     while let Some(entry) = selection::first_startable(&plan, capacity) {
         let task_id = entry.task_id.clone();
@@ -201,7 +224,7 @@ async fn try_next(
             continue_session: entry.resume_after.is_some(),
         };
 
-        if let Some(claim) = claim_task(ctx, provider, &task_id, route).await? {
+        if let Some(claim) = claim_task(ctx, runner, &task_id, route, Door::Next).await? {
             return Ok(Some(claim));
         }
         plan.retain(|entry| entry.task_id != task_id);
@@ -221,47 +244,43 @@ fn drain(changes: &mut broadcast::Receiver<crate::ChangeEvent>) {
     }
 }
 
-/// Today's claim routes for a named task, **reads first, edges last**.
+/// A claim of a named task: **reads first, then one transaction**.
 ///
-/// Everything that can refuse is read before either edge is taken, so a
-/// refusal writes nothing: the context, and for a retry the point it resumes,
-/// of whatever kind was waiting (task 021). Reading the point before the edge
-/// is safe for the same reason the edge is conditional: if another starter
-/// takes the task in between, the edge is the write that loses, and nothing
-/// read here is used. Nothing is read after the edges; a read a later task
-/// adds there must release on `Err`.
+/// Everything a claim returns is read before the transaction opens: the
+/// context, the task's team, and for a retry the point it resumes, of
+/// whatever kind was waiting (task 021). Reading them first is safe for the
+/// reason the transaction is conditional: if another starter takes the task in
+/// between, the transaction is the write that loses, and nothing read here is
+/// used. The transaction itself reads nothing over the pool, because it holds
+/// the write lock.
 ///
-/// A task that is gone by the time it is read is a lost claim, as
-/// `ClaimOutcome::Lost` always said it was, never an error.
+/// A task that is gone by the time it is read is a lost claim, never an
+/// error.
 async fn claim_task(
     ctx: &ServiceContext,
-    provider: &dyn AgentProvider,
+    runner: Runner<'_>,
     task_id: &str,
     route: Route,
+    door: Door,
 ) -> Result<Option<Claim>> {
-    let context = match read_context(ctx, provider, task_id).await {
+    let context = match read_context(ctx, runner.provider, task_id).await {
         Ok(context) => context,
         Err(error) if error.code() == ErrorCode::NotFound => return Ok(None),
         Err(error) => return Err(error),
     };
     // The lease's team is the task's own row's (D31 point 2), read with the
-    // rest, before any edge.
+    // rest, before the transaction.
     let team_id = match tasks::service::team_of(ctx, task_id).await {
         Ok(team_id) => team_id,
         Err(error) if error.code() == ErrorCode::NotFound => return Ok(None),
         Err(error) => return Err(error),
     };
 
-    let (purpose, trigger, resume) = match route {
+    let (edges, trigger, resume) = match route {
         Route::Run {
             trigger,
             continue_session: false,
-        } => {
-            if edges::claim(ctx, task_id).await? == ClaimOutcome::Lost {
-                return Ok(None);
-            }
-            (LeasePurpose::Implementation, trigger, None)
-        }
+        } => (Edges::Fresh, trigger, None),
         Route::Run {
             trigger,
             continue_session: true,
@@ -269,48 +288,78 @@ async fn claim_task(
             // A review or fix resumes as itself (D29 point 3): the kind
             // travels on the point, and the lease's purpose is that kind.
             let point = attempts::resume_point(ctx, task_id).await?;
-            if edges::claim_retry(ctx, task_id).await? == ClaimOutcome::Lost {
-                return Ok(None);
-            }
-            let purpose = point
-                .as_ref()
-                .map_or(LeasePurpose::Implementation, |point| point.kind.into());
-            (purpose, trigger, point)
+            let kind = point.as_ref().map(|point| point.kind);
+            (Edges::Resume { kind }, trigger, point)
         }
-        // D17's planner: a lease and nothing else. No `run_state` edge, because
-        // a planner that took one would need `Running -> Running` later.
-        Route::Plan => (LeasePurpose::Strategy, RunTrigger::Manual, None),
+        Route::Plan => (Edges::Plan, RunTrigger::Manual, None),
+    };
+
+    let granted = lease::claim(
+        ctx,
+        ClaimRequest {
+            task_id,
+            runner_id: runner.id,
+            term: runner.term,
+            edges,
+            door,
+            mode: context.strategy.mode,
+        },
+    )
+    .await?;
+    let Some(granted) = granted else {
+        tracing::debug!(%task_id, "the claim was lost; another starter reached this task first");
+        return Ok(None);
     };
 
     Ok(Some(Claim {
-        lease: LeaseRef::solo(task_id, team_id),
-        purpose,
+        lease: LeaseRef::new(task_id, granted.generation, team_id),
+        purpose: granted.purpose,
         trigger,
         resume,
         context,
     }))
 }
 
-/// Nothing to renew and nothing to fence before task 043, and a solo Cancel
+/// Renews the leases this runner still holds and fences the rest, in one
+/// transaction (D31 point 4). `cancel` is empty in process: a solo Cancel
 /// reaches `InFlight::cancel` directly rather than through here.
-pub fn heartbeat(_held: &[LeaseRef]) -> Heartbeat {
-    Heartbeat::default()
+pub async fn heartbeat(
+    ctx: &ServiceContext,
+    runner: Runner<'_>,
+    held: &[LeaseRef],
+) -> Result<Heartbeat> {
+    lease::heartbeat(ctx, runner.id, runner.term, held).await
 }
 
+/// The context re-read under a lease.
+///
+/// Fenced in a transaction of its own, then read: the method writes nothing,
+/// so there is no write for the fence to share a transaction with, and the
+/// context's reads go over the pool, which a held transaction would block on
+/// the one-connection test pool.
 pub async fn run_context(
     ctx: &ServiceContext,
-    provider: &dyn AgentProvider,
+    runner: Runner<'_>,
     lease: &LeaseRef,
 ) -> Result<RunContext> {
     let ctx = &lease_context(ctx, lease)?;
-    read_context(ctx, provider, &lease.task_id).await
+    let mut tx = ctx.begin_immediate().await?;
+    lease::current(&mut tx, lease, runner.id).await?;
+    tx.commit().await?;
+    read_context(ctx, runner.provider, &lease.task_id).await
 }
 
 /// Writes `tasks.branch` and nothing else: the worktree path is the runner's
 /// (ADR-0028 point 2). Its production caller is `worktree::prepare` (task 066).
-pub async fn record_branch(ctx: &ServiceContext, lease: &LeaseRef, branch: &str) -> Result<()> {
+pub async fn record_branch(
+    ctx: &ServiceContext,
+    runner_id: &str,
+    lease: &LeaseRef,
+    branch: &str,
+) -> Result<()> {
     let ctx = &lease_context(ctx, lease)?;
-    ensure_task(ctx, &lease.task_id).await?;
+    let mut tx = ctx.begin_immediate().await?;
+    lease::current(&mut tx, lease, runner_id).await?;
 
     let now = ctx.clock.now();
     let team_id = sqlx::query_scalar!(
@@ -319,16 +368,19 @@ pub async fn record_branch(ctx: &ServiceContext, lease: &LeaseRef, branch: &str)
         now,
         lease.task_id,
     )
-    .fetch_one(&ctx.pool)
+    .fetch_one(&mut *tx)
     .await?;
+    tx.commit().await?;
 
     ctx.publish(crate::ChangeEvent::tasks(team_id, [lease.task_id.clone()]));
     Ok(())
 }
 
 /// Opens the `runs` row under the id the runner minted, naming `runner_id`,
-/// the runner the adapter serves. In process the transcript path comes from
-/// this board's own `paths` (D31 point 4).
+/// the runner the adapter serves, and moves the lease onto it: its `run_id`
+/// and, as its purpose, the run's kind, under the same generation (task 043).
+/// In process the transcript path comes from this board's own `paths` (D31
+/// point 4).
 pub async fn start_run(
     ctx: &ServiceContext,
     paths: &AppPaths,
@@ -337,12 +389,14 @@ pub async fn start_run(
     run: StartRun,
 ) -> Result<()> {
     let ctx = &lease_context(ctx, lease)?;
-    ensure_task(ctx, &lease.task_id).await?;
+    let mut tx = ctx.begin_immediate().await?;
+    lease::current(&mut tx, lease, runner_id).await?;
 
-    outcome::insert_run(
-        ctx,
+    let team_id = outcome::insert_run_within(
+        &mut tx,
+        ctx.clock.as_ref(),
         paths,
-        run.run_id,
+        &run.run_id,
         Some(runner_id),
         NewRun {
             task_id: lease.task_id.clone(),
@@ -354,6 +408,10 @@ pub async fn start_run(
         },
     )
     .await?;
+    lease::open_run(&mut tx, lease, &run.run_id, run.kind).await?;
+    tx.commit().await?;
+
+    outcome::publish_opened(ctx, team_id, &run.run_id, &lease.task_id);
     Ok(())
 }
 
@@ -361,12 +419,15 @@ pub async fn start_run(
 /// runner's file *is* the board's copy (ADR-0028 point 4).
 pub async fn append_transcript(
     ctx: &ServiceContext,
+    runner_id: &str,
     lease: &LeaseRef,
     chunk: TranscriptChunk,
 ) -> Result<TranscriptAck> {
     let ctx = &lease_context(ctx, lease)?;
-    ensure_task(ctx, &lease.task_id).await?;
-    ensure_run_of_task(ctx, &lease.task_id, &chunk.run_id).await?;
+    let mut tx = ctx.begin_immediate().await?;
+    lease::current(&mut tx, lease, runner_id).await?;
+    ensure_run_of_task(&mut tx, &lease.task_id, &chunk.run_id).await?;
+    tx.commit().await?;
 
     Ok(TranscriptAck {
         stored_through: chunk.offset + chunk.bytes.len() as u64,
@@ -376,6 +437,11 @@ pub async fn append_transcript(
 /// Drops a tail for a lease whose team the adapter's scope does not hold:
 /// synchronous and infallible, it has no `NotFound` to answer with, and a
 /// dropped tail costs nothing (D14).
+///
+/// **Not fenced.** It is synchronous (D31 point 2) and the fence is an async
+/// read, and D14 makes a stale tail worth nothing. Over HTTP the server's
+/// handler is async, and task 052 drops a tail there when `lease::current`
+/// refuses its lease.
 pub fn publish_tail(ctx: &ServiceContext, lease: &LeaseRef, tail: RunTail) {
     if ctx.scope.contains(&lease.team_id) {
         ctx.publish_tail(tail);
@@ -387,19 +453,25 @@ pub fn publish_tail(ctx: &ServiceContext, lease: &LeaseRef, tail: RunTail) {
 ///
 /// A runner that chose its own retry time would be a second copy of
 /// ADR-0011's table on a machine the board does not control, so one that sends
-/// it is refused. The decision is the one `runner::process` used to make
-/// before task 036, minus the usage-limit pause: that is runner-owned state,
-/// and the runner raises it from the [`NextStep`](super::NextStep) this answers. The loop's
+/// it is refused. The usage-limit pause is runner-owned state, and the runner
+/// raises it from the [`NextStep`](super::NextStep) this answers. The loop's
 /// next step is the task-side step's answer, `review_loop::decide`.
+///
+/// Two transactions, both fenced, with the decision read between them (see
+/// `outcome::finish_run_within` for why it cannot be one):
+///
+/// 1. the fence, then the row closed. Until task 056 a row already closed is
+///    refused as "already finalized" after the fence (D31 point 12);
+/// 2. the fence again, then the task landed with the lease deleted or kept
+///    and the pin set or cleared, in `lease::land`.
 pub async fn finish_run(
     ctx: &ServiceContext,
+    runner_id: &str,
     lease: &LeaseRef,
     run_id: &str,
     finish: FinishRun,
 ) -> Result<FinishReceipt> {
     let ctx = &lease_context(ctx, lease)?;
-    ensure_task(ctx, &lease.task_id).await?;
-    ensure_run_of_task(ctx, &lease.task_id, run_id).await?;
 
     let FinishRun {
         mut outcome,
@@ -417,19 +489,42 @@ pub async fn finish_run(
         ));
     }
 
+    // Read before the first transaction opens: the attempt history is read
+    // over the pool, which a held write lock would block.
     outcome.resume_after =
         decide_resume_after(ctx, &lease.task_id, run_id, &outcome, window_closes_at).await;
 
-    let (run, next) = outcome::finish_run_within(
-        ctx,
+    let mut tx = ctx.begin_immediate().await?;
+    lease::current(&mut tx, lease, runner_id).await?;
+    ensure_run_of_task(&mut tx, &lease.task_id, run_id).await?;
+    let run = outcome::close_within(
+        &mut tx,
+        ctx.clock.as_ref(),
         run_id,
         &outcome,
         &RunCapture { head_sha, bundle },
-        window_closes_at,
     )
     .await?;
+    let team_id = tasks::team_of_task(&mut tx, &lease.task_id).await?;
+    tx.commit().await?;
+    outcome::publish_closed(ctx, team_id.clone(), &run);
 
-    Ok(FinishReceipt { run, next })
+    let decision = outcome::decide(ctx, &run, &outcome, window_closes_at).await?;
+
+    let mut tx = ctx.begin_immediate().await?;
+    let (next, rebalanced) =
+        lease::land(ctx, &mut tx, runner_id, lease, &run, &outcome, decision).await?;
+    tx.commit().await?;
+    // A `Continue` lands nothing and keeps the lease, so there is nothing to
+    // announce; a `Released` landed the task, its lease and its pin together.
+    if let NextStep::Released { .. } = next {
+        outcome::publish_landed(ctx, team_id, &lease.task_id, rebalanced);
+    }
+
+    Ok(FinishReceipt {
+        run: outcome::read_back(ctx, run_id).await?,
+        next,
+    })
 }
 
 /// When — or whether — this task is tried again (ADR-0011).
@@ -468,40 +563,64 @@ async fn decide_resume_after(
     })
 }
 
-/// `scheduler::claim::release`'s rule, unchanged: a task still `running`
-/// becomes `failed`, and a verdict already written is kept.
-///
-/// It does not branch on purpose. Before task 043 there is no lease row to
-/// read one from, and a strategy lease meets a `running` task only when a
-/// crash stranded it, which the next launch's reconcile fails anyway.
-pub async fn release(ctx: &ServiceContext, lease: &LeaseRef) -> Result<()> {
+/// Ends a claim no `finish_run` ended: a task still `running` becomes
+/// `failed`, a verdict already written is kept, and the lease is deleted, in
+/// one transaction (`lease::release`).
+pub async fn release(ctx: &ServiceContext, runner_id: &str, lease: &LeaseRef) -> Result<()> {
     let ctx = &lease_context(ctx, lease)?;
-    ensure_task(ctx, &lease.task_id).await?;
-    edges::release(ctx, &lease.task_id).await;
-    Ok(())
+    lease::release(ctx, runner_id, lease).await
 }
 
 pub async fn record_strategy(
     ctx: &ServiceContext,
+    runner_id: &str,
     lease: &LeaseRef,
     plan: StrategyPlan,
 ) -> Result<()> {
     let ctx = &lease_context(ctx, lease)?;
-    ensure_task(ctx, &lease.task_id).await?;
-    set_task_strategy(ctx, &lease.task_id, plan, StrategySource::Planner).await?;
+    // The defaults are read over the pool, before the write lock is taken.
+    let prepared = prepare_strategy(ctx, &lease.task_id, plan).await?;
+
+    let mut tx = ctx.begin_immediate().await?;
+    lease::current(&mut tx, lease, runner_id).await?;
+    write_strategy(
+        &mut tx,
+        ctx.clock.as_ref(),
+        &lease.task_id,
+        prepared,
+        StrategySource::Planner,
+    )
+    .await?;
+    let team_id = tasks::team_of_task(&mut tx, &lease.task_id).await?;
+    tx.commit().await?;
+
+    ctx.publish(crate::ChangeEvent::tasks(team_id, [lease.task_id.clone()]));
     Ok(())
 }
 
 pub async fn record_review_findings(
     ctx: &ServiceContext,
+    runner_id: &str,
     lease: &LeaseRef,
     run_id: &str,
     findings: Vec<NewReviewFinding>,
 ) -> Result<()> {
     let ctx = &lease_context(ctx, lease)?;
-    ensure_task(ctx, &lease.task_id).await?;
-    ensure_run_of_task(ctx, &lease.task_id, run_id).await?;
-    findings::record(ctx, &lease.task_id, run_id, findings).await?;
+    let mut tx = ctx.begin_immediate().await?;
+    lease::current(&mut tx, lease, runner_id).await?;
+    ensure_run_of_task(&mut tx, &lease.task_id, run_id).await?;
+    findings::record_within(
+        &mut tx,
+        ctx.clock.as_ref(),
+        &lease.task_id,
+        run_id,
+        findings,
+    )
+    .await?;
+    let team_id = tasks::team_of_task(&mut tx, &lease.task_id).await?;
+    tx.commit().await?;
+
+    ctx.publish(crate::ChangeEvent::tasks(team_id, [lease.task_id.clone()]));
     Ok(())
 }
 
@@ -618,24 +737,18 @@ fn lease_context(ctx: &ServiceContext, lease: &LeaseRef) -> Result<ServiceContex
     Ok(ctx.with_scope(TeamScope::one(lease.team_id.clone())))
 }
 
-/// `NotFound` for a lease on a task that does not exist in the context's
-/// scope, in the sentence `tasks::get_task` answers the same question with.
-async fn ensure_task(ctx: &ServiceContext, task_id: &str) -> Result<()> {
-    tasks::service::team_of(ctx, task_id).await?;
-    Ok(())
-}
-
 /// `NotFound` for a run that does not exist or belongs to another task: the
 /// lease bounds what a call may touch, and a run outside it is not there.
-async fn ensure_run_of_task(ctx: &ServiceContext, task_id: &str, run_id: &str) -> Result<()> {
-    let scope = ctx.scope.json();
+/// Inside the fenced transaction, after the fence.
+async fn ensure_run_of_task(tx: &mut ScopedTx, task_id: &str, run_id: &str) -> Result<()> {
+    let scope = tx.scope().json();
     let owner: Option<String> = sqlx::query_scalar!(
         "SELECT r.task_id FROM runs r JOIN tasks t ON t.id = r.task_id
           WHERE r.id = ?1 AND t.team_id IN (SELECT value FROM json_each(?2))",
         run_id,
         scope,
     )
-    .fetch_optional(&ctx.pool)
+    .fetch_optional(&mut **tx)
     .await?;
     match owner {
         Some(owner) if owner == task_id => Ok(()),
@@ -643,18 +756,5 @@ async fn ensure_run_of_task(ctx: &ServiceContext, task_id: &str, run_id: &str) -
             "run {run_id} is not a run of task {task_id}"
         ))),
         None => Err(Error::not_found(format!("no run with id {run_id}"))),
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn a_solo_heartbeat_renews_nothing_and_fences_nothing() {
-        assert_eq!(
-            heartbeat(&[LeaseRef::solo("t", "3f2b1c00-0000-4000-8000-0000000000a1")]),
-            Heartbeat::default()
-        );
     }
 }

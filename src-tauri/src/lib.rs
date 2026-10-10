@@ -10,9 +10,9 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
-use rimaia_core::board::{BoardPort, InProcessBoard};
+use rimaia_core::board::{BoardPort, InProcessBoard, LeaseTerm};
 use rimaia_core::db::MutationSource;
-use rimaia_core::machine::MachineContext;
+use rimaia_core::machine::{self, MachineContext};
 use rimaia_core::mcp::{self, McpState, RunHandles};
 use rimaia_core::runner::events::RunTail;
 use rimaia_core::runner::process::DEFAULT_GRACE_PERIOD;
@@ -274,48 +274,108 @@ pub fn run() {
                 tails.clone(),
             ));
 
-            // Task 009's repair for `survey`'s `tasks_left_running` finding
-            // (ADR-0010, ADR-0011, seam-contract D9): a task still `running`
-            // is not a live condition (nothing was running when this process
-            // started), it is what a crash left behind, and it has to be
-            // settled *before* the queue below ever reads the board. A queue
-            // that started selecting while a stale `running` row was still
-            // sitting there could read it as legitimately in flight forever
-            // (nothing in the MVP transitions a task out of `running` except
-            // a run finishing) — this is what finishes it instead, through
-            // the same services every other caller uses
-            // (`runner::outcome::finish_run`, `tasks::set_run_state`), never a
-            // raw `UPDATE`. It shares this startup with `worktree::reconcile`
-            // below in either order — each only acts on a state the other has
-            // not already produced — but it must land before the queue is
-            // built, which is why it is sequenced here rather than after.
-            let reconciled = match tauri::async_runtime::block_on(scheduler::reconcile_interrupted(
-                &context, &report,
+            // Task 020's two shared values are built here, ahead of the queue,
+            // rather than inside `rimaia_runner::queue::build`, because each is shared
+            // with something the queue knows nothing about (see `AppState`'s
+            // own docs): the `RunnerConfig` with every other starter, so a
+            // manual "Run now" and the queue cannot spawn differently
+            // configured processes for the same card; the `RunHandles` with the
+            // MCP server below, which records the address it actually bound
+            // into them on every bind, and with the runner, which mints one
+            // scoped token per run against that same table.
+            let run_handles = RunHandles::default();
+            // The same table the MCP server below records its bound address
+            // into. Cloning it here rather than leaving `RunnerConfig::default`'s
+            // empty one is what lets a strategy run mint a token against an
+            // endpoint that exists — with the default, `mcp_config_json` would
+            // answer `None` forever and no task would ever plan.
+            let runner = RunnerConfig {
+                run_handles: run_handles.clone(),
+                ..RunnerConfig::default()
+            };
+            // The one board port every door that starts a process reaches the
+            // board through (seam-contract D31 point 8): the queue, the MCP
+            // server's planner and the commands, through `AppState`. Built from
+            // the `runner` value above and nothing else, because the board's
+            // provider must be the runner's — a board built for another one
+            // would hand the planner the wrong catalogue, silently.
+            // It serves the solo runner, the one machine a solo board runs on,
+            // and records it on every run it opens (D31 point 9). Its leases
+            // never expire: the board and its one runner are this process
+            // (ADR-0031 point 5). Built before the reconcile below, which
+            // settles this runner's held leases through it.
+            let board_port: Arc<dyn BoardPort> = Arc::new(InProcessBoard::new(
+                context.clone(),
+                paths.clone(),
+                runner.provider.clone(),
+                solo.runner_id.clone(),
+                LeaseTerm::Never,
+            ));
+            // ADR-0031 point 5: this runner reconciles the leases it held, and
+            // nothing else, before the queue below ever reads the board. A task
+            // still `running` is not a live condition (nothing was running when
+            // this process started); it is what a crash left behind, and a queue
+            // that started selecting while it sat there would read it as
+            // legitimately in flight forever. Each lease is settled through the
+            // board port, the same door every report takes: an open run is
+            // finished as interrupted, which lands the task by ADR-0011's table
+            // and pins it here; a lease with no run is released.
+            let reconciled = match tauri::async_runtime::block_on(scheduler::reconcile_held(
+                board_port.as_ref(),
+                &machine,
             )) {
                 Ok(reconciled) => reconciled,
                 Err(err) => {
-                    log_startup_failure("reconcile interrupted runs", &paths.db_file(), &err);
+                    log_startup_failure("reconcile held leases", &runner_db_file, &err);
                     report_startup_failure(
                         app.handle(),
-                        "reconcile runs a previous launch left running",
+                        "reconcile the leases this runner held",
                         Some(&logs_dir),
                         &err,
                     );
                     return Err(err.into());
                 }
             };
-            if !reconciled.is_empty() {
+            // Solo's arm: what the board holds for this runner that its own
+            // record cannot know about — a lease committed just before a crash
+            // stopped the record of it, and tasks an older build left `running`
+            // or `queued` with no lease at all. Neither can exist in team mode.
+            let unrecorded = match tauri::async_runtime::block_on(async {
+                let held: Vec<String> = machine::leases::held(&machine)
+                    .await?
+                    .into_iter()
+                    .map(|lease| lease.task_id)
+                    .collect();
+                scheduler::reconcile_unrecorded(&context, &solo.runner_id, &held).await
+            }) {
+                Ok(unrecorded) => unrecorded,
+                Err(err) => {
+                    log_startup_failure("reconcile unrecorded runs", &paths.db_file(), &err);
+                    report_startup_failure(
+                        app.handle(),
+                        "reconcile runs no lease recorded",
+                        Some(&logs_dir),
+                        &err,
+                    );
+                    return Err(err.into());
+                }
+            };
+            if !reconciled.is_empty() || !unrecorded.is_empty() {
                 tracing::info!(
-                    tasks = reconciled.len(),
+                    tasks = reconciled.len() + unrecorded.len(),
                     "marked tasks a previous launch left running as interrupted",
                 );
             }
 
             // Task 007's repair step for `survey`'s `missing_worktrees` finding
-            // (ADR-0005: "repository state on disk is authoritative"). Placed
-            // after the subscriber above, matching that step's own "subscribe
-            // first, then let writers start" — `reconcile` is itself a writer,
-            // just one that runs once at startup instead of once per command.
+            // (ADR-0005: "repository state on disk is authoritative"). After
+            // both lease steps, never before: its `correct_run_state` moves a
+            // `running` task to `failed` through `set_run_state`, and run first
+            // it would leave that task's lease row behind, so every later claim
+            // of it would be lost. Placed after the subscriber above, matching
+            // that step's own "subscribe first, then let writers start" —
+            // `reconcile` is itself a writer, just one that runs once at
+            // startup instead of once per command.
             // Unlike a failed migration this is recoverable: `reconcile` takes
             // no `Result`, logs and skips whatever it cannot clear, and so
             // cannot itself stop the window from opening.
@@ -340,41 +400,8 @@ pub fn run() {
             // both doors read needs no wiring between them, and is reachable
             // from `rimaia-core` — which is what ADR-0021's known gap was
             // waiting on.
-            //
-            // Task 020's two shared values are built here, ahead of the queue,
-            // rather than inside `rimaia_runner::queue::build`, because each is shared
-            // with something the queue knows nothing about (see `AppState`'s
-            // own docs): the `RunnerConfig` with every other starter, so a
-            // manual "Run now" and the queue cannot spawn differently
-            // configured processes for the same card; the `RunHandles` with the
-            // MCP server below, which records the address it actually bound
-            // into them on every bind, and with the runner, which mints one
-            // scoped token per run against that same table.
-            let run_handles = RunHandles::default();
-            // The same table the MCP server below records its bound address
-            // into. Cloning it here rather than leaving `RunnerConfig::default`'s
-            // empty one is what lets a strategy run mint a token against an
-            // endpoint that exists — with the default, `mcp_config_json` would
-            // answer `None` forever and no task would ever plan.
-            let runner = RunnerConfig {
-                run_handles: run_handles.clone(),
-                ..RunnerConfig::default()
-            };
             let in_flight = InFlight::new();
-            // The one board port every door that starts a process reaches the
-            // board through (seam-contract D31 point 8): the queue, the MCP
-            // server's planner and the commands, through `AppState`. Built from
-            // the `runner` value above and nothing else, because the board's
-            // provider must be the runner's — a board built for another one
-            // would hand the planner the wrong catalogue, silently.
-            // It serves the solo runner, the one machine a solo board runs on,
-            // and records it on every run it opens (D31 point 9).
-            let board_port: Arc<dyn BoardPort> = Arc::new(InProcessBoard::new(
-                context.clone(),
-                paths.clone(),
-                runner.provider.clone(),
-                solo.runner_id.clone(),
-            ));
+
             // The loop is the runner crate's (task 042). It claims through the
             // port, wakes on the board's channel, and reads the board only
             // through `SoloBoard`'s four named reads.
@@ -382,7 +409,11 @@ pub fn run() {
                 machine.clone(),
                 Arc::clone(&board_port),
                 context.subscribe(),
-                SoloBoard::new(context.clone()),
+                SoloBoard::new(
+                    context.clone(),
+                    solo.runner_id.clone(),
+                    runner.provider.id(),
+                ),
                 in_flight.clone(),
                 paths.clone(),
                 runner.clone(),
@@ -406,7 +437,7 @@ pub fn run() {
             // purpose: this is the first thing in this hook that a process
             // *outside* Rimaia can write through, and nothing outside should
             // reach the board until every repair this startup was going to
-            // make has been made — `reconcile_interrupted`, `worktree::reconcile`
+            // make has been made — the two lease steps, `worktree::reconcile`
             // and the queue's own construction all sit above it.
             let mcp_port = tauri::async_runtime::block_on(mcp::configured_port(&machine))
                 .unwrap_or_else(|error| {
@@ -431,6 +462,7 @@ pub fn run() {
                     &runner,
                     &in_flight,
                     &board_port,
+                    &solo.runner_id,
                 )),
             ));
             let mcp_status = mcp_handle.status();

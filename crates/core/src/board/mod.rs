@@ -14,11 +14,13 @@
 //! cross it.
 
 pub mod in_process;
+pub mod lease;
 pub mod port;
 pub mod service;
 pub mod types;
 
 pub use in_process::InProcessBoard;
+pub use lease::{LeaseTerm, LEASE_LIFETIME};
 pub use port::{BoardFuture, BoardPort};
 pub use types::{
     BoardMethod, ChangeSummary, Claim, ClaimTarget, FinishReceipt, FinishRun, FreeCapacity,

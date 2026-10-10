@@ -1,13 +1,26 @@
-//! What a crash left behind, repaired (ADR-0010, ADR-0011, seam-contract D9).
+//! What a crash left behind, repaired one runner at a time (ADR-0031 point 5,
+//! ADR-0010, ADR-0011, seam-contract D9).
 //!
-//! [`startup::survey`](crate::startup::survey) finds it and deliberately
-//! repairs nothing — its own module doc explains why, and the reason is
-//! ADR-0006: a second writer of `run_state`, even a well-meaning one in a
-//! startup hook, is how one invariant becomes two. So the survey stays
-//! read-only and hands this function a list of ids, and this function acts
-//! through the same services every other caller uses:
-//! [`finish_run`](crate::runner::outcome::finish_run) for the `runs` row,
-//! [`set_run_state`] for the task.
+//! # Each runner reconciles the leases it held
+//!
+//! Startup used to sweep every task in `running` or `queued`, whoever started
+//! it. Shared, that would let one laptop's launch close every other machine's
+//! runs, so from task 043 the sweep is three steps, in this order, and each
+//! acts through the same services every other caller uses:
+//!
+//! 1. [`reconcile_held`] walks this runner's own `held_leases` and nothing
+//!    else, through the board port. A lease with an open run is finished with
+//!    the interrupted outcome, which the board lands by ADR-0011's table and
+//!    pins to this runner; a lease with no run is released. A lease the board
+//!    already closed answers `Conflict` or `NotFound`, and the record is
+//!    dropped without touching the board.
+//! 2. [`reconcile_unrecorded`] is solo's alone: what the board holds that the
+//!    runner's record cannot know about. See its own doc for the two sets and
+//!    why team mode has neither.
+//! 3. `worktree::reconcile`, after both lease steps and never before: its
+//!    `correct_run_state` moves a `running` task to `failed` through
+//!    `set_run_state`, and run first it would leave the task's lease row
+//!    behind, so every later claim of the task would be lost.
 //!
 //! # What "interrupted" is (seam-contract D9, and its 2026-09-03 amendment)
 //!
@@ -15,68 +28,31 @@
 //! one of them — SQLite cannot widen a `CHECK`, so that is permanent rather
 //! than provisional. A run that died with the app is recorded on its `runs` row
 //! as `status = 'interrupted'` and `exit_class = 'interrupted'`, and the card
-//! reads the word off its last run. Task 009's acceptance criterion —
-//! "reopening shows accurate state: one `interrupted` task" — is a statement
-//! about what the user sees, and that is still what makes it true.
+//! reads the word off its last run.
 //!
-//! # Where the *task* lands changed with task 014
+//! # Offered, not performed
 //!
-//! D9 as first written said the task "lands in `run_state = 'failed'`", and
-//! this module used to take a second hop, `WaitingRetry -> Failed`, to force
-//! it. Its own comment said why: "nothing in the MVP resumes a `waiting_retry`
-//! task (that is task 014), so it would sit invisible rather than interrupting
-//! the morning review".
-//!
-//! Now something does. ADR-0010:57-59 and ADR-0011's startup reconciliation
-//! both ask for a crashed run to be **offered** for resume, and this is where
-//! that happens: [`interrupted_after`] carries a `resume_after` when ADR-0011's
-//! budget allows one, so the task lands `waiting_retry` with a due deadline,
-//! and lands `failed` exactly when it does not. [`settle`] keeps the second hop
-//! only for the second case.
-//!
-//! **Offered, not performed.** Nothing starts: seam-contract D15 has the exit
-//! path write `paused`, `QueueState`'s default *is* `Paused` and `from_stored`
-//! falls back to it, so a task sitting due at 03:00 waits for a human to press
-//! Start. Three independent things guarantee that, which is why
-//! `a_launch_offers_a_crashed_run_for_resume_and_starts_nothing_until_the_queue_is_started`
-//! asserts all three rather than the outcome alone.
-//!
-//! # A task a crash caught still `queued`
-//!
-//! `startup::survey`'s `tasks_left_running` also reports a task at `queued` —
-//! `scheduler::claim` walks `idle -> queued -> running` as two separately
-//! committed transitions, and a crash between them leaves a task there with
-//! no open run for [`open_runs`] to find and no legal edge back to `idle`.
-//! Left alone it is a trap worse than `running`: `selection::skip_reason`
-//! only ever claims from `idle`, so the queue passes over it forever, and
-//! nothing else in the product writes `run_state` to clear it. [`settle`]
-//! takes it to `Cancelled` rather than `Failed` — ADR-0007's machine has no
-//! `Queued -> Failed` edge, and `Queued -> Cancelled` is already the edge a
-//! task with no live process to kill takes, which is exactly this shape.
-//!
-//! # It shares a startup with `worktree::reconcile`, in either order
-//!
-//! Task 007's repair walks `survey`'s `missing_worktrees` and already lands a
-//! `running` task on `failed` when its directory vanished, so a crash that took
-//! both leaves two repairs looking at one task. They converge whichever runs
-//! first, because each only acts on a state the other has not already produced:
-//! run this one second and [`settle`] finds `failed` and leaves it; run it
-//! first and task 007's `correct_run_state` does. The `runs` row is closed
-//! either way — `finish_run` writes and commits it *before* it applies anything
-//! to the task, so even the ordering where its task-side transition is refused
-//! still leaves a reviewable attempt behind.
+//! The board decides whether a crashed run is worth resuming: ADR-0011's
+//! budget gives it a `resume_after` when it allows one, so the task lands
+//! `waiting_retry` with a due deadline, and `failed` exactly when it does not.
+//! Nothing starts: seam-contract D15 has the exit path write `paused`,
+//! `QueueState`'s default *is* `Paused` and `from_stored` falls back to it, so
+//! a task sitting due at 03:00 waits for a human to press Start.
 
 use chrono::{DateTime, Utc};
 
+use crate::board::lease::{self as board_lease, Lease};
+use crate::board::{service, BoardPort, FinishRun, LeaseRef, TranscriptEnd};
 use crate::context::ServiceContext;
 use crate::db::{ExitClass, RunState, RunStatus};
-use crate::error::Result;
+use crate::error::{ErrorCode, Result};
+use crate::events::TeamId;
+use crate::machine::{leases, MachineContext};
 use crate::runner::events::TokenUsage;
 use crate::runner::outcome::{finish_run, RunOutcome, SpawnedAs};
 use crate::runs::bundle::RunCapture;
 use crate::scheduler::attempts::{self, Ending};
 use crate::scheduler::retry;
-use crate::startup::ReconciliationReport;
 use crate::tasks::set_run_state;
 
 /// What the run row of a process that died with the app says happened to it.
@@ -149,27 +125,68 @@ async fn interrupted_after(ctx: &ServiceContext, task_id: &str, run_id: &str) ->
     outcome
 }
 
-/// Closes out every task a crash left `running`, and reports which ones.
+/// The facts a runner reports for a run that died with the previous launch.
+/// The board decides `resume_after` (D31 point 4), so the outcome carries none.
+fn interrupted_finish() -> FinishRun {
+    FinishRun {
+        outcome: interrupted(),
+        head_sha: None,
+        bundle: None,
+        window_closes_at: None,
+        transcript: TranscriptEnd::KeptOnRunner,
+    }
+}
+
+/// Reconciles every lease this runner recorded holding, and nothing else
+/// (ADR-0031 point 5), and answers the tasks it settled.
 ///
-/// Takes the report rather than re-querying, so there is one definition of
-/// "left running" and the survey stays the only thing that decides what counts
-/// (see this module's header).
+/// - **With an open run**: `finish_run` with the interrupted outcome. The board
+///   decides `resume_after` (D31 point 4) and lands the task by ADR-0011's
+///   table, and the close pins it to this runner. With the budget spent the
+///   board's `resume_after` is `None` and the task lands `failed`, so no second
+///   hop is needed for a held lease.
+/// - **With no run**: `release`. A `strategy` lease from `Plan` leaves
+///   `run_state` alone, and an inline planner's lands `failed`. A run the board
+///   already closed, which a crash between a `Continue` and its note can leave
+///   recorded, is not open: its finish is refused, and the lease is released.
+/// - **`Conflict` or `NotFound`**: the board already closed that lease. The
+///   record is forgotten and nothing on the board is touched.
 ///
-/// One bad row does not stop the rest: a launch that cannot repair one task
-/// still has to repair the others and still has to open the window, so failures
-/// are logged per task and the ids that did land come back.
-pub async fn reconcile_interrupted(
-    ctx: &ServiceContext,
-    report: &ReconciliationReport,
+/// One failure is logged and does not stop the rest, and its record is kept
+/// for the next launch: a launch that cannot settle one lease still has to
+/// settle the others and open its window.
+pub async fn reconcile_held(
+    board: &dyn BoardPort,
+    machine: &MachineContext,
 ) -> Result<Vec<String>> {
     let mut reconciled = Vec::new();
 
-    for task_id in &report.tasks_left_running {
-        match reconcile_one(ctx, task_id).await {
-            Ok(()) => reconciled.push(task_id.clone()),
+    for record in leases::held(machine).await? {
+        let lease = record.lease();
+        let task_id = record.task_id.as_str();
+        let settled = match &record.run_id {
+            Some(run_id) => match board.finish_run(&lease, run_id, interrupted_finish()).await {
+                Err(error) if error.code() == ErrorCode::Invalid => board.release(&lease).await,
+                finished => finished.map(drop),
+            },
+            None => board.release(&lease).await,
+        };
+
+        match settled {
+            Ok(()) => {
+                leases::forget(machine, task_id).await;
+                reconciled.push(record.task_id.clone());
+            }
+            Err(error) if matches!(error.code(), ErrorCode::Conflict | ErrorCode::NotFound) => {
+                tracing::debug!(
+                    %task_id, %error,
+                    "the board already closed a lease this runner recorded; dropping the record",
+                );
+                leases::forget(machine, task_id).await;
+            }
             Err(error) => tracing::error!(
                 %task_id, %error,
-                "could not reconcile a task a previous run left running",
+                "could not reconcile a lease this runner held",
             ),
         }
     }
@@ -177,11 +194,110 @@ pub async fn reconcile_interrupted(
     if !reconciled.is_empty() {
         tracing::warn!(
             tasks = reconciled.len(),
-            "marked runs a previous launch left in flight as interrupted",
+            "marked runs this runner left in flight as interrupted",
         );
     }
-
     Ok(reconciled)
+}
+
+/// What only a solo board can hold for its runner, reconciled through the
+/// same services: run after [`reconcile_held`], with the task ids this runner
+/// still records (`held`).
+///
+/// 1. **Leases the board records for `runner_id` that `held` does not.** The
+///    process died between the claim's commit and the runner's record of it:
+///    two stores cannot share a transaction, and a solo lease never expires,
+///    so without this the task would stay `running` forever. Each is settled
+///    as [`reconcile_held`] settles a record, under the lease itself: its open
+///    run finished as interrupted (and pinned), or the lease released.
+/// 2. **Tasks in `running` or `queued`, or with a run still open, and no
+///    lease row at all.** A build older than task 043 left them. They are
+///    reconciled exactly as before leases existed: each open run closed as
+///    interrupted, then the task walked off whatever the crash caught it in,
+///    `queued -> cancelled` included. An open run counts on its own because
+///    another repair may already have moved the task on, and the row still
+///    has to end.
+///
+/// **In team mode neither set can exist.** The first expires on the server
+/// (task 053). The second cannot be written once the claim writes the edges
+/// and the lease together, so its query is the one task 065 can delete.
+pub async fn reconcile_unrecorded(
+    ctx: &ServiceContext,
+    runner_id: &str,
+    held: &[String],
+) -> Result<Vec<String>> {
+    let mut reconciled = Vec::new();
+
+    for (lease, team_id) in board_lease::held_by(ctx, runner_id).await? {
+        if held.contains(&lease.task_id) {
+            continue;
+        }
+        let task_id = lease.task_id.clone();
+        match settle_unrecorded(ctx, runner_id, &lease, team_id).await {
+            Ok(()) => reconciled.push(task_id),
+            Err(error) => tracing::error!(
+                %task_id, %error,
+                "could not reconcile a lease this runner never recorded",
+            ),
+        }
+    }
+
+    for task_id in leaseless_in_flight(ctx).await? {
+        match reconcile_one(ctx, &task_id).await {
+            Ok(()) => reconciled.push(task_id),
+            Err(error) => tracing::error!(
+                %task_id, %error,
+                "could not reconcile a task a previous build left running",
+            ),
+        }
+    }
+
+    if !reconciled.is_empty() {
+        tracing::warn!(
+            tasks = reconciled.len(),
+            "marked runs no lease record named as interrupted",
+        );
+    }
+    Ok(reconciled)
+}
+
+/// One lease the board holds for this runner that the runner never recorded.
+async fn settle_unrecorded(
+    ctx: &ServiceContext,
+    runner_id: &str,
+    lease: &Lease,
+    team_id: TeamId,
+) -> Result<()> {
+    let reference = LeaseRef::new(lease.task_id.clone(), lease.generation, team_id);
+    let open = open_runs(ctx, &lease.task_id).await?;
+    match lease.run_id.as_ref().filter(|run_id| open.contains(run_id)) {
+        Some(run_id) => {
+            service::finish_run(ctx, runner_id, &reference, run_id, interrupted_finish()).await?;
+        }
+        None => service::release(ctx, runner_id, &reference).await?,
+    }
+    Ok(())
+}
+
+/// Tasks in `running` or `queued`, or with a run still open, that no lease row
+/// names: what a build older than task 043 left, and nothing a 043 claim can
+/// produce.
+async fn leaseless_in_flight(ctx: &ServiceContext) -> Result<Vec<String>> {
+    let scope = ctx.scope.json();
+    let ids = sqlx::query_scalar!(
+        "SELECT t.id FROM tasks t
+          WHERE (t.run_state = ?1 OR t.run_state = ?2
+                 OR EXISTS (SELECT 1 FROM runs r WHERE r.task_id = t.id AND r.ended_at IS NULL))
+            AND t.team_id IN (SELECT value FROM json_each(?3))
+            AND NOT EXISTS (SELECT 1 FROM runner_leases l WHERE l.task_id = t.id)
+          ORDER BY t.id",
+        RunState::Running,
+        RunState::Queued,
+        scope,
+    )
+    .fetch_all(&ctx.pool)
+    .await?;
+    Ok(ids)
 }
 
 async fn reconcile_one(ctx: &ServiceContext, task_id: &str) -> Result<()> {
@@ -248,9 +364,10 @@ async fn open_runs(ctx: &ServiceContext, task_id: &str) -> Result<Vec<String>> {
 /// decides to take it is task 009/014's policy, not this table's". This is task
 /// 014 taking it, on the one condition task 009 could not evaluate.
 ///
-/// `Queued` is the narrower crash: caught between `scheduler::claim`'s two
+/// `Queued` is the narrower crash: caught between the old two-edge claim's
 /// separately committed transitions, before the second — `queued -> running`
 /// — ever ran, so there is no open run for [`open_runs`] to have found above.
+/// Only a build older than task 043 can leave it.
 /// ADR-0007's machine has no `Queued -> Failed` edge, and adding one is a
 /// bigger change than this repair needs; `Queued -> Cancelled` already exists
 /// for exactly this shape of task, "waiting for its turn with no live process

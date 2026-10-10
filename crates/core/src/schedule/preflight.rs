@@ -45,7 +45,7 @@ use crate::db::ScheduleMode;
 use crate::error::Result;
 use crate::machine::MachineContext;
 use crate::schedule::{self, fire};
-use crate::scheduler::selection::{self, QueueEntry};
+use crate::scheduler::selection::{self, QueueEntry, RunnerView};
 
 /// What a schedule would do if it fired now.
 ///
@@ -101,14 +101,15 @@ impl PreflightSummary {
 ///
 /// The schedule is this machine's, from `machine`. The plan is the board's,
 /// read through `board` with the same [`selection::plan`] the queue's claim
-/// runs, over `repositories`: the list `scheduler::view::for_runner` builds,
-/// which is what the runner sends with every `ClaimTarget::Next`. Both doors,
-/// the Tauri command and the local MCP handler, build it there (task 042).
+/// runs, for `runner`: its repositories are the list
+/// `scheduler::view::for_runner` builds, which is what the runner sends with
+/// every `ClaimTarget::Next`. Both doors, the Tauri command and the local MCP
+/// handler, build it there (task 042), with the runner's own id (task 043).
 pub async fn preview(
     machine: &MachineContext,
     board: &ServiceContext,
     schedule_id: &str,
-    repositories: &[String],
+    runner: &RunnerView,
 ) -> Result<PreflightSummary> {
     let schedule = schedule::get(machine, schedule_id).await?;
     let now = machine.clock.now();
@@ -132,6 +133,6 @@ pub async fn preview(
         closes_at,
         mode: schedule.mode,
         max_concurrency: schedule.max_concurrency,
-        plan: selection::plan(board, &repositories.iter().cloned().collect()).await?,
+        plan: selection::plan(board, runner).await?,
     })
 }

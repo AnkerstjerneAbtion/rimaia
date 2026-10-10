@@ -45,16 +45,26 @@
 //! [`SkipReason`], rather than being filtered out of it. ADR-0012 makes the
 //! per-repository opt-in the whole security posture, and a posture the user
 //! cannot see is one they cannot fix at 09:00 when nothing ran overnight.
+//!
+//! The one exception is a task this runner is not eligible for
+//! ([`board::lease::eligible`](crate::board::lease::eligible)): pinned to
+//! another runner, from task 043. It is left out of *this runner's* plan
+//! before positions are numbered, and carries no `SkipReason`, because it is
+//! not a problem with the card: another runner can claim it. Saying which
+//! runner holds it is the card's (task 061).
 
 use std::collections::{BTreeSet, HashMap};
 
 use chrono::{DateTime, Utc};
 use serde::Serialize;
 
-use crate::board::FreeCapacity;
+use crate::board::lease::{self, Eligibility};
+use crate::board::{FreeCapacity, LeasePurpose};
 use crate::context::ServiceContext;
 use crate::db::{BoardColumn, RunState};
 use crate::error::Result;
+use crate::events::RunnerId;
+use crate::runner::provider::ProviderId;
 use crate::scheduler::inflight::Counts;
 use crate::tasks::{self, TaskFilter, TaskSummary};
 
@@ -158,21 +168,52 @@ pub struct QueueEntry {
     pub resume_after: Option<DateTime<Utc>>,
 }
 
-/// Every `ready` task in board order, with the reason the queue will pass over
-/// each one it cannot start.
+/// The runner a plan is drawn for: who it is, what it runs, and the
+/// repositories it lists on every `ClaimTarget::Next` (task 042's view, which
+/// task 043 gives the runner's identity).
 ///
-/// Re-read from scratch on every pass of the queue loop — never a snapshot
-/// taken when the queue was started. That is what makes "a task dragged to the
-/// top mid-queue is picked up next" true rather than aspirational.
-///
-/// `consented` is the set of repositories this runner consented to run
-/// unattended in, read once per pass by
+/// `repositories` is the set this runner consented to run unattended in, read
+/// once per pass by
 /// [`machine::consented_repositories`](crate::machine::consented_repositories)
 /// (task 066). Not the board's `allow_unattended_runs`, which is the team
 /// ceiling since task 038 and is not this runner's to read (task 045): reading
 /// it would skip every repository registered from task 066 on, and keep
 /// offering one whose consent was withdrawn.
-pub async fn plan(ctx: &ServiceContext, consented: &BTreeSet<String>) -> Result<Vec<QueueEntry>> {
+///
+/// `provider` is carried for task 067's model rule, which `lease::eligible`
+/// reads; nothing reads it before then.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RunnerView {
+    pub runner_id: RunnerId,
+    pub provider: ProviderId,
+    pub repositories: BTreeSet<String>,
+}
+
+impl RunnerView {
+    pub fn new(
+        runner_id: impl Into<RunnerId>,
+        provider: ProviderId,
+        repositories: impl IntoIterator<Item = String>,
+    ) -> Self {
+        Self {
+            runner_id: runner_id.into(),
+            provider,
+            repositories: repositories.into_iter().collect(),
+        }
+    }
+}
+
+/// Every `ready` task in board order that `runner` may take, with the reason
+/// the queue will pass over each one it cannot start.
+///
+/// Re-read from scratch on every pass of the queue loop — never a snapshot
+/// taken when the queue was started. That is what makes "a task dragged to the
+/// top mid-queue is picked up next" true rather than aspirational.
+///
+/// A task [`lease::eligible`] refuses `runner` (pinned to another runner) is
+/// left out before positions are numbered, so the plan a card shows and the
+/// task `claim(Next)` takes agree. The claim transaction asks again.
+pub async fn plan(ctx: &ServiceContext, runner: &RunnerView) -> Result<Vec<QueueEntry>> {
     let ready = tasks::list_tasks(
         ctx,
         TaskFilter {
@@ -188,12 +229,26 @@ pub async fn plan(ctx: &ServiceContext, consented: &BTreeSet<String>) -> Result<
     // would not be the plan the batch was taken from.
     let now = ctx.clock.now();
 
+    // Acquired after the list, never across it: the test pool has one
+    // connection.
+    let mut conn = ctx.pool.acquire().await?;
     let mut plan = Vec::with_capacity(ready.len());
     let mut claimable = 0;
     for summary in &ready {
+        // A due retry resumes as the kind that was waiting (D29 point 3).
+        let purpose = match (scheduled_resume(summary), &summary.last_run) {
+            (Some(_), Some(run)) => run.kind.into(),
+            _ => LeasePurpose::Implementation,
+        };
+        if lease::eligible(&mut conn, &summary.task.id, &runner.runner_id, purpose).await?
+            != Eligibility::Eligible
+        {
+            continue;
+        }
+
         let skip = skip_reason(
             summary,
-            consented.contains(&summary.task.repository_id),
+            runner.repositories.contains(&summary.task.repository_id),
             now,
         );
         let queue_position = skip.is_none().then(|| {
@@ -385,7 +440,7 @@ pub fn skip_reason(
     match task.task.run_state {
         RunState::Idle => None,
         RunState::WaitingRetry => match scheduled_resume(task) {
-            // Due: this is ours to claim, through `claim::claim_retry`.
+            // Due: this is ours to claim, as a resume (`board::lease::claim`).
             Some(at) if at <= now => None,
             Some(_) => Some(SkipReason::WaitingForRetry),
             // Waiting on nothing. Whoever put it here did not schedule a

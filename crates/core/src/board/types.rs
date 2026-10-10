@@ -40,7 +40,9 @@ use crate::worktree::DiffStat;
 #[serde(rename_all = "camelCase")]
 pub struct LeaseRef {
     pub task_id: String,
-    /// Always `0` before task 043, which makes it strictly increasing per task.
+    /// The task's lease generation when the claim was granted: strictly
+    /// increasing per task, and never repeated, even after a release (D31
+    /// point 3). A report under any other generation is `Conflict`.
     pub generation: i64,
     /// The task's team, read from its row at claim (D31 point 2). The runner
     /// store cannot join the board, so the lease carries it on every report.
@@ -50,24 +52,37 @@ pub struct LeaseRef {
 }
 
 impl LeaseRef {
-    /// The only lease solo can hold before task 043: generation `0`.
-    pub fn solo(task_id: impl Into<String>, team_id: impl Into<TeamId>) -> Self {
+    pub fn new(task_id: impl Into<String>, generation: i64, team_id: impl Into<TeamId>) -> Self {
         Self {
             task_id: task_id.into(),
-            generation: 0,
+            generation,
             team_id: team_id.into(),
         }
     }
 }
 
-/// What a lease is for, in seam-contract D28's `CHECK` spelling.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+/// What a lease is for, in seam-contract D28's `CHECK` spelling, which is
+/// also how both stores hold it (`runner_leases` and `held_leases`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, sqlx::Type)]
 #[serde(rename_all = "camelCase")]
+#[sqlx(rename_all = "snake_case")]
 pub enum LeasePurpose {
     Implementation,
     Strategy,
     Review,
     Fix,
+}
+
+impl LeasePurpose {
+    /// The `CHECK` spelling, for a store that holds it as text.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            LeasePurpose::Implementation => "implementation",
+            LeasePurpose::Strategy => "strategy",
+            LeasePurpose::Review => "review",
+            LeasePurpose::Fix => "fix",
+        }
+    }
 }
 
 impl From<RunKind> for LeasePurpose {
@@ -243,7 +258,10 @@ pub struct TeamLimits {
     pub disallowed_tools: Option<Vec<String>>,
 }
 
-/// The board's answer to a heartbeat. Both lists are empty in solo.
+/// The board's answer to a heartbeat. In solo `fenced` is empty because
+/// nothing re-claims a solo lease from under its holder, and `cancel` is
+/// empty because a solo Cancel reaches `InFlight::cancel` directly (D31
+/// point 4).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Heartbeat {

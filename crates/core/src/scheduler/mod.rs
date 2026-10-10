@@ -12,13 +12,14 @@
 //! # The board's half
 //!
 //! [`selection`] is pure ordering and eligibility over a board read;
-//! [`claim`] is the conditional write that decides who owns a task *across*
-//! processes; [`attempts`] derives a retry budget from the `runs` rows,
-//! [`retry`] is the policy that spends it and produces deadlines, and
-//! [`reconcile`] repairs what a crash left `running`. The one place that runs
-//! selection for a claim is `board::service`'s body of `ClaimTarget::Next`,
-//! over [`selection::plan`] and [`selection::first_startable`]; task 043
-//! replaces the claim's edges there and touches no runner.
+//! [`claim`] keeps the operator's `give_up`, since the conditional write that
+//! decides who owns a task *across* processes is `board::lease`'s one
+//! transaction (task 043); [`attempts`] derives a retry budget from the `runs`
+//! rows, [`retry`] is the policy that spends it and produces deadlines, and
+//! [`reconcile`] repairs what a crash left behind, one runner's leases at a
+//! time. The one place that runs selection for a claim is `board::service`'s
+//! body of `ClaimTarget::Next`, over [`selection::plan`] and
+//! [`selection::first_startable`].
 //!
 //! # The runner's half, over `MachineContext`
 //!
@@ -43,10 +44,10 @@
 //! # The slot registry
 //!
 //! [`inflight`] is the in-memory fact of which tasks *this* process has a
-//! child for. It is not a claim and not the board's lease: the claim survives a
-//! restart and stops two writers disagreeing about a row, the slot knows
-//! whether the process on the end of that row is ours, and from task 043 the
-//! board's lease (`board::LeaseRef`) is what fences a holder that lost it. A
+//! child for. It is not a claim and not the board's lease: the lease survives a
+//! restart and stops two writers disagreeing about a row, and fences a holder
+//! that lost it (`board::LeaseRef`); the slot knows whether the process on the
+//! end of that row is ours. A
 //! manual start takes its slot before its claim; the runner loop takes it after,
 //! because the board chooses the task (D19's 2026-10-10 amendment).
 //!
@@ -63,7 +64,9 @@
 //! # The scheduler is not a second writer of anything
 //!
 //! Every `run_state` transition goes through
-//! [`set_run_state`](crate::tasks::set_run_state), every `runs` row through
+//! [`set_run_state`](crate::tasks::set_run_state) or the conditional
+//! [`transition`](crate::tasks::run_state::transition) beneath it, every
+//! `runs` row through
 //! [`crate::runner::outcome`], every board move through
 //! [`move_task`](crate::tasks::move_task). There is no `UPDATE tasks` and no
 //! `INSERT INTO runs` anywhere in this module, deliberately: the same invariant
@@ -87,21 +90,21 @@ pub use capacity::{
     set_max_concurrency, set_schedule_mode, Resolved, RunCapacity, DEFAULT_MAX_CONCURRENCY,
     DEFAULT_PER_REPOSITORY, MAX_CONCURRENCY, SCHEDULE_MODE,
 };
-pub use claim::{claim, claim_retry, give_up, release, ClaimOutcome};
+pub use claim::give_up;
 pub use inflight::{
     Capacity, Counts, InFlight, LocalSlot, SlotOwner, SlotRefused, CONCURRENCY_CEILING,
 };
 pub use pause::{
     active_until as usage_limit_pause_until, note_usage_limit, USAGE_LIMIT_PAUSE_UNTIL,
 };
-pub use reconcile::reconcile_interrupted;
+pub use reconcile::{reconcile_held, reconcile_unrecorded};
 pub use retry::{
     decide as decide_retry, AttemptHistory, GiveUpReason, RetryDecision, RetryKind,
     MAX_TRANSIENT_ATTEMPTS, USAGE_LIMIT_FALLBACK_POLL,
 };
 pub use selection::{
     first_startable, next_batch, next_deadline, next_to_start, plan, skip_reason, QueueEntry,
-    SkipReason,
+    RunnerView, SkipReason,
 };
 pub use state::{queue_state, set_queue_state, QueueState, QUEUE_STATE};
 pub use view::{for_runner, QueueStatus};

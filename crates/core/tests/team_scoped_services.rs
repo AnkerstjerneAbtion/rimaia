@@ -1018,8 +1018,10 @@ async fn the_observed_run_cost_is_the_median_of_the_callers_teams_runs() {
 #[tokio::test]
 async fn the_startup_survey_reports_only_its_scopes_tasks() {
     let t = TwoTeams::new().await;
-    // One task per team left running by a crash; the fixture's worktree paths
-    // and transcripts are already missing on disk for both teams.
+    // One task per team left running by a crash, which the survey no longer
+    // reports (the lease reconcile settles it, task 043); the fixture's
+    // worktree paths and transcripts are already missing on disk for both
+    // teams.
     for task_id in [&t.team_a.ready, &t.team_b.ready] {
         sqlx::query("UPDATE tasks SET run_state = ?1 WHERE id = ?2")
             .bind(RunState::Running)
@@ -1036,7 +1038,6 @@ async fn the_startup_survey_reports_only_its_scopes_tasks() {
     let report = startup::survey(&t.a, &t.machine, &t.paths)
         .await
         .expect("survey");
-    assert_eq!(report.tasks_left_running, vec![t.team_a.ready.clone()]);
     assert_eq!(report.missing_worktrees, vec![t.team_a.in_review.clone()]);
     assert_eq!(
         sorted(report.missing_run_logs),
@@ -1050,10 +1051,6 @@ async fn the_startup_survey_reports_only_its_scopes_tasks() {
     let report = startup::survey(&t.both, &t.machine, &t.paths)
         .await
         .expect("survey both");
-    assert_eq!(
-        sorted(report.tasks_left_running),
-        sorted(vec![t.team_a.ready.clone(), t.team_b.ready.clone()])
-    );
     assert_eq!(report.missing_run_logs.len(), 6);
 }
 

@@ -161,6 +161,7 @@ pub fn local_tools(
     runner: &RunnerConfig,
     in_flight: &InFlight,
     board_port: &Arc<dyn BoardPort>,
+    runner_id: &str,
 ) -> LocalTools {
     LocalTools {
         machine: machine.clone(),
@@ -176,6 +177,7 @@ pub fn local_tools(
             runner: runner.clone(),
             in_flight: in_flight.clone(),
             board: Arc::clone(board_port),
+            runner_id: runner_id.to_string(),
         },
     }
 }
@@ -189,6 +191,7 @@ impl AppState {
             &self.runner,
             &self.in_flight,
             &self.board_port,
+            &self.solo.runner_id,
         )
     }
 

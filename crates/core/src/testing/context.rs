@@ -12,7 +12,7 @@ use std::sync::Arc;
 use chrono::{DateTime, Utc};
 use tokio::sync::broadcast::Receiver;
 
-use crate::board::{BoardPort, InProcessBoard};
+use crate::board::{lease, BoardPort, InProcessBoard, LeaseTerm};
 use crate::context::{ServiceContext, TeamScope};
 use crate::db::MutationSource;
 use crate::events::ChangeEvent;
@@ -62,8 +62,25 @@ impl TestContext {
     /// The same, with the clock pinned somewhere else — for a test whose subject
     /// is an absolute time, such as a usage limit's epoch `resetsAt`.
     pub async fn starting_at(start: DateTime<Utc>) -> Self {
-        let clock = TestClock::new(start);
-        let pool = test_pool().await;
+        Self::over(test_pool().await, TestClock::new(start)).await
+    }
+
+    /// The same, over a board database in the file `db_file`, through the
+    /// production [`db::connect`](crate::db::connect) pool: more than one
+    /// connection, so two callers really do run at once (task 043's race
+    /// cases). The in-memory pool has one connection and would serialise
+    /// them, proving nothing.
+    pub async fn over_file(db_file: &std::path::Path) -> Self {
+        let pool = crate::db::connect(db_file)
+            .await
+            .expect("open a file-backed board");
+        crate::db::migrate(&pool)
+            .await
+            .expect("migrate a file-backed board");
+        Self::over(pool, TestClock::new(test_epoch())).await
+    }
+
+    async fn over(pool: sqlx::SqlitePool, clock: TestClock) -> Self {
         // Through the shell's own path rather than rows written here, so every
         // service test runs against the identity a first launch creates (D28
         // part 3).
@@ -125,9 +142,11 @@ impl TestContext {
     /// test's machine store and the branch through an in-process board port
     /// over this test's own context (task 066).
     ///
-    /// Before task 043 a solo lease is a value, not a row, so a test that only
-    /// wants a worktree does not have to claim the task, which would move its
-    /// run state.
+    /// The branch is fenced by a lease (task 043). A task the solo runner
+    /// already holds is prepared under its own lease; otherwise the test
+    /// holds one with no edge for the call and ends it after, so a test that
+    /// only wants a worktree does not have to claim the task, which would move
+    /// its run state.
     pub async fn prepare_worktree(
         &self,
         task_id: &str,
@@ -137,9 +156,19 @@ impl TestContext {
             AppPaths::new(std::env::temp_dir()),
             RunnerConfig::default().provider,
             self.solo.runner_id.clone(),
+            LeaseTerm::Never,
         );
-        let lease = crate::board::LeaseRef::solo(task_id, self.solo.team_id.clone());
-        crate::worktree::prepare(&self.context, &self.machine, &board, &lease).await
+        let held = lease::state_of(&self.context, task_id).await?.lease;
+        if let Some(held) = held {
+            let lease =
+                crate::board::LeaseRef::new(task_id, held.generation, self.solo.team_id.clone());
+            return crate::worktree::prepare(&self.context, &self.machine, &board, &lease).await;
+        }
+
+        let lease = lease::grant_for_test(&self.context, task_id, &self.solo.runner_id).await?;
+        let prepared = crate::worktree::prepare(&self.context, &self.machine, &board, &lease).await;
+        lease::end_for_test(&self.context, &lease).await?;
+        prepared
     }
 
     /// The board port over this test's own context (seam-contract D31 point
@@ -156,6 +185,7 @@ impl TestContext {
             paths.clone(),
             config.provider.clone(),
             self.solo.runner_id.clone(),
+            LeaseTerm::Never,
         ))
     }
 }

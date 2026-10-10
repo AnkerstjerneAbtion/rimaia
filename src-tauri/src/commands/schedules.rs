@@ -76,7 +76,12 @@ pub async fn preview_schedule_preflight(
     id: String,
 ) -> Result<PreflightSummary> {
     let (repositories, _) = scheduler::view::for_runner(&state.machine, &state.in_flight).await?;
-    schedule::preview(&state.machine, &state.context, &id, &repositories).await
+    let runner = scheduler::RunnerView::new(
+        state.solo.runner_id.clone(),
+        state.runner.provider.id(),
+        repositories,
+    );
+    schedule::preview(&state.machine, &state.context, &id, &runner).await
 }
 
 /// Every IANA zone name, for the picker.

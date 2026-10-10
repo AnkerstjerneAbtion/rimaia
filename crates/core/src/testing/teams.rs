@@ -258,6 +258,7 @@ impl TwoTeams {
             self.paths.clone(),
             self.runner.provider.clone(),
             self.team_a.runner_id.clone(),
+            crate::board::LeaseTerm::Never,
         ))
     }
 
@@ -269,6 +270,7 @@ impl TwoTeams {
             runner: self.runner.clone(),
             in_flight: self.in_flight.clone(),
             board: self.board(ctx),
+            runner_id: self.team_a.runner_id.clone(),
         }
     }
 

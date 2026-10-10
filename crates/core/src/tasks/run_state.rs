@@ -1,8 +1,9 @@
 //! `run_state`: the machine's half of ADR-0007's two dimensions, and the one
 //! path that writes it.
 //!
-//! [`set_run_state`] is that path. Nothing else in this crate issues an
-//! `UPDATE tasks SET run_state = ...` — `startup::survey`'s own module docs
+//! [`set_run_state`], and [`transition`], the conditional write beneath it
+//! that a lease transaction takes its edges through, are that path. Nothing
+//! else in this crate issues an `UPDATE tasks SET run_state = ...` — `startup::survey`'s own module docs
 //! say so explicitly, naming this function as the one allowed to make a
 //! transition, because a second writer of `run_state` is the exact bug
 //! ADR-0006 names: the same invariant enforced in two places eventually
@@ -35,7 +36,10 @@
 //! place to change it — not a second switch statement somewhere that
 //! disagrees with it.
 
-use crate::context::ServiceContext;
+use sqlx::SqliteConnection;
+
+use crate::clock::Clock;
+use crate::context::{ScopedTx, ServiceContext};
 use crate::db::{RunState, Task};
 use crate::error::{Error, Result};
 use crate::events::ChangeEvent;
@@ -127,7 +131,9 @@ pub fn is_legal_run_state_transition(from: RunState, to: RunState) -> bool {
 /// Runs inside one transaction so the read of the current state and the
 /// write of the new one cannot interleave with a concurrent caller: two
 /// writers racing to transition the same task must not both succeed from a
-/// state that was only true for one of them.
+/// state that was only true for one of them. The write itself is
+/// [`transition`] from the value it read, so this and a lease transaction
+/// share one conditional `UPDATE`.
 ///
 /// `BEGIN IMMEDIATE` rather than a plain (deferred) `BEGIN`: on the
 /// production pool — more than one connection, unlike the single-connection
@@ -136,33 +142,14 @@ pub fn is_legal_run_state_transition(from: RunState, to: RunState) -> bool {
 /// later `UPDATE` would fail to upgrade with `SQLITE_BUSY_SNAPSHOT`, a
 /// conflict SQLite's busy handler does not retry. That left `busy_timeout`
 /// never applying and the loser reading a raw "database is locked" instead of
-/// the transition refusal `scheduler::claim`'s own `lost_the_race` exists to
-/// recognise — measured at 598 of 600 losers on a ten-connection pool.
-/// Taking the write lock up front makes a second caller wait for it, which
-/// *is* covered by `busy_timeout`, so it always reaches its own read seeing
-/// whatever the first writer already committed rather than racing it.
+/// the transition refusal a claimer exists to recognise — measured at 598 of
+/// 600 losers on a ten-connection pool. Taking the write lock up front makes
+/// a second caller wait for it, which *is* covered by `busy_timeout`, so it
+/// always reaches its own read seeing whatever the first writer already
+/// committed rather than racing it.
 pub async fn set_run_state(ctx: &ServiceContext, id: &str, to: RunState) -> Result<Task> {
     let mut tx = ctx.begin_immediate().await?;
-    let current = fetch_task_row(&mut tx, id).await?;
-
-    if !is_legal_run_state_transition(current.run_state, to) {
-        return Err(Error::invalid(format!(
-            "cannot move task {id} from run state \"{from}\" to \"{to}\": not a legal transition",
-            from = run_state_spelling(current.run_state),
-            to = run_state_spelling(to),
-        )));
-    }
-
-    let now = ctx.clock.now();
-    sqlx::query!(
-        "UPDATE tasks SET run_state = ?1, updated_at = ?2 WHERE id = ?3",
-        to,
-        now,
-        id,
-    )
-    .execute(&mut *tx)
-    .await?;
-
+    set_within(&mut tx, ctx.clock.as_ref(), id, to).await?;
     let team_id = team_of_task(&mut tx, id).await?;
     tx.commit().await?;
 
@@ -172,6 +159,76 @@ pub async fn set_run_state(ctx: &ServiceContext, id: &str, to: RunState) -> Resu
     ctx.publish(ChangeEvent::tasks(team_id, [id.to_string()]));
     let updated = task_row(ctx, id).await?;
     Ok(updated)
+}
+
+/// [`set_run_state`]'s read and write, inside a transaction the caller holds,
+/// commits and publishes for.
+///
+/// For a write that has to land with others or not at all: a finished run
+/// lands its task, deletes its lease and pins it in one transaction
+/// (`board::lease`). The refusal is `set_run_state`'s, word for word.
+pub(crate) async fn set_within(
+    tx: &mut ScopedTx,
+    clock: &dyn Clock,
+    id: &str,
+    to: RunState,
+) -> Result<()> {
+    let current = fetch_task_row(tx, id).await?;
+
+    if !is_legal_run_state_transition(current.run_state, to) {
+        return Err(Error::invalid(format!(
+            "cannot move task {id} from run state \"{from}\" to \"{to}\": not a legal transition",
+            from = run_state_spelling(current.run_state),
+            to = run_state_spelling(to),
+        )));
+    }
+
+    transition(tx, clock, id, current.run_state, to).await?;
+    Ok(())
+}
+
+/// Moves a task from `from` to `to`, **only if it is still in `from`**, and
+/// answers whether a row moved.
+///
+/// The conditional write `scheduler/claim.rs` asked for twice: the expected
+/// state is in the `WHERE`, so a caller that read the row earlier in its own
+/// transaction, or chose the edge from a board read, cannot move a task that
+/// has since left that state. `false` is that race lost, or a task that does
+/// not exist; nothing was written either way.
+///
+/// It runs inside the caller's transaction and never commits or publishes:
+/// the caller does both, after its own commit, with whatever else the
+/// transaction wrote. An edge ADR-0007's machine does not have is an error and
+/// writes nothing, so a caller cannot use this to skip the table.
+///
+/// This file stays the only one that writes `run_state` (ADR-0006).
+pub async fn transition(
+    conn: &mut SqliteConnection,
+    clock: &dyn Clock,
+    id: &str,
+    from: RunState,
+    to: RunState,
+) -> Result<bool> {
+    if !is_legal_run_state_transition(from, to) {
+        return Err(Error::invalid(format!(
+            "cannot move task {id} from run state \"{from}\" to \"{to}\": not a legal transition",
+            from = run_state_spelling(from),
+            to = run_state_spelling(to),
+        )));
+    }
+
+    let now = clock.now();
+    let moved = sqlx::query!(
+        "UPDATE tasks SET run_state = ?1, updated_at = ?2 WHERE id = ?3 AND run_state = ?4",
+        to,
+        now,
+        id,
+        from,
+    )
+    .execute(&mut *conn)
+    .await?
+    .rows_affected();
+    Ok(moved == 1)
 }
 
 /// The schema's own spelling for one `run_state` value — for an error

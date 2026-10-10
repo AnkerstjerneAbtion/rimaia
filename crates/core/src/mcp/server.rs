@@ -1586,15 +1586,15 @@ there in the morning unless somebody acts. A run cannot call it."
         let local = self.local()?;
         let (repositories, _) =
             scheduler::view::for_runner(&local.machine, &local.planner.in_flight).await?;
+        let runner = scheduler::RunnerView::new(
+            local.planner.runner_id.clone(),
+            local.planner.runner.provider.id(),
+            repositories,
+        );
         Ok(Json(
-            schedule::preview(
-                &local.machine,
-                &self.ctx,
-                &request.schedule_id,
-                &repositories,
-            )
-            .await?
-            .into(),
+            schedule::preview(&local.machine, &self.ctx, &request.schedule_id, &runner)
+                .await?
+                .into(),
         ))
     }
 

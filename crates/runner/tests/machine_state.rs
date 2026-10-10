@@ -441,6 +441,7 @@ async fn a_schedule_opens_its_window_from_the_runner_store() {
         paths.clone(),
         runner.provider.clone(),
         solo.runner_id.clone(),
+        rimaia_core::board::LeaseTerm::Never,
     ));
 
     let fires_at = clock.now() + Duration::minutes(10);
@@ -466,7 +467,11 @@ async fn a_schedule_opens_its_window_from_the_runner_store() {
         machine.clone(),
         board_port,
         board.subscribe(),
-        rimaia_runner::queue::SoloBoard::new(board.clone()),
+        rimaia_runner::queue::SoloBoard::new(
+            board.clone(),
+            solo.runner_id.clone(),
+            rimaia_core::runner::provider::ProviderId::ClaudeCode,
+        ),
         InFlight::new(),
         paths,
         runner,

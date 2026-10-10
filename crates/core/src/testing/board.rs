@@ -1,11 +1,13 @@
-//! Board-port helpers for tests: a port that refuses everything, and the
-//! claim a fixture takes before it hands a task to `run_task`.
+//! Board-port helpers for tests: a port that refuses everything, the claim a
+//! fixture takes before it hands a task to `run_task`, and the claim and run a
+//! crash test leaves behind for the lease reconcile (task 043).
 
 use crate::board::{
     BoardFuture, BoardPort, Claim, ClaimTarget, FinishReceipt, FinishRun, Heartbeat, LeaseRef,
     RunContext, StartRun, TranscriptAck, TranscriptChunk,
 };
 use crate::error::{Error, Result};
+use crate::machine::MachineContext;
 use crate::review::findings::NewReviewFinding;
 use crate::runner::events::RunTail;
 use crate::runner::RunTrigger;
@@ -113,4 +115,39 @@ pub async fn claim_run(
         })
         .await?;
     Ok(claim.unwrap_or_else(|| panic!("the fixture's task {task_id} was already claimed")))
+}
+
+/// Claims `task_id` as Run now does and records the lease in `machine`, the
+/// way every starter does before it spawns anything (task 043): the state a
+/// crash leaves when it lands before the first `start_run`.
+pub async fn claim_and_record(
+    board: &dyn BoardPort,
+    machine: &MachineContext,
+    task_id: &str,
+) -> Claim {
+    let claim = claim_run(board, task_id, RunTrigger::Queued, false)
+        .await
+        .expect("claim the task");
+    crate::machine::leases::record(machine, &claim)
+        .await
+        .expect("record the claim on the runner");
+    claim
+}
+
+/// Opens `run` under `claim` and notes it on the runner, as `run_task` does
+/// (task 043): the state a crash leaves mid-run.
+pub async fn start_and_note(
+    board: &dyn BoardPort,
+    machine: &MachineContext,
+    claim: &Claim,
+    run: StartRun,
+) {
+    let run_id = run.run_id.clone();
+    let kind = run.kind;
+    board
+        .start_run(&claim.lease, run)
+        .await
+        .expect("open the run");
+    crate::machine::leases::note_run(machine, &claim.lease.task_id, Some(&run_id), kind.into())
+        .await;
 }

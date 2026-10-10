@@ -12,7 +12,7 @@ use chrono::TimeDelta;
 use pretty_assertions::assert_eq;
 use rimaia_core::board::{
     BoardMethod, BoardPort, Claim, ClaimTarget, FinishReceipt, FinishRun, FreeCapacity, Heartbeat,
-    InProcessBoard, LeasePurpose, LeaseRef, NextStep, RunContext, StartRun, TeamLimits,
+    InProcessBoard, LeasePurpose, LeaseRef, LeaseTerm, NextStep, RunContext, StartRun, TeamLimits,
     TranscriptAck, TranscriptChunk, TranscriptEnd,
 };
 use rimaia_core::db::{BoardColumn, ExitClass, RunKind, RunStatus};
@@ -33,34 +33,42 @@ use tempfile::TempDir;
 
 struct InProcess {
     harness: TestContext,
-    /// Held for its `Drop`: the boards' transcript paths point inside it.
+    /// Held for its `Drop`: the board's database file and the transcript
+    /// paths both point inside it.
     _data: TempDir,
     a: Arc<dyn BoardPort>,
     b: Arc<dyn BoardPort>,
 }
 
 impl Harness for InProcess {
-    async fn start() -> Self {
-        let harness = TestContext::new().await;
+    /// A board in a database file in a `TempDir`, over `db::connect`'s
+    /// multi-connection pool, so two runners' claims race for real (task
+    /// 043): the in-memory pool's one connection would serialise them.
+    async fn start_with(term: LeaseTerm) -> Self {
         let data = tempfile::Builder::new()
             .prefix("rimaia-board-contract-")
             .tempdir()
             .expect("a data directory");
+        let harness = TestContext::over_file(&data.path().join("rimaia.db")).await;
         let paths = AppPaths::new(data.path());
         let config = RunnerConfig::default();
         // Runner A is the solo runner. Runner B is a second machine of the
         // same user, which `runs.runner_id` needs a row for (D31 point 13).
-        let a = harness.board(&paths, &config);
         let second_runner = {
             let mut conn = harness.context.pool.acquire().await.expect("a connection");
             insert_runner(&mut conn, &harness.clock, &harness.solo.user_id, "Runner B").await
         };
-        let b: Arc<dyn BoardPort> = Arc::new(InProcessBoard::new(
-            harness.context.clone(),
-            paths.clone(),
-            config.provider.clone(),
-            second_runner,
-        ));
+        let board = |runner_id: String| -> Arc<dyn BoardPort> {
+            Arc::new(InProcessBoard::new(
+                harness.context.clone(),
+                paths.clone(),
+                config.provider.clone(),
+                runner_id,
+                term,
+            ))
+        };
+        let a = board(harness.solo.runner_id.clone());
+        let b = board(second_runner);
 
         Self {
             harness,
@@ -196,10 +204,7 @@ async fn every_board_dto_round_trips_through_json() {
         .await
         .expect("finish");
 
-    round_trips(&LeaseRef::solo(
-        task.id.clone(),
-        harness.solo.team_id.clone(),
-    ));
+    round_trips(&claim.lease);
     round_trips(&LeasePurpose::Strategy);
     round_trips(&target);
     round_trips(&ClaimTarget::Plan {
@@ -227,7 +232,7 @@ async fn every_board_dto_round_trips_through_json() {
         disallowed_tools: Some(vec!["Bash(git push --force:*)".to_string()]),
     });
     round_trips(&Heartbeat {
-        fenced: vec![LeaseRef::solo("fenced", harness.solo.team_id.clone())],
+        fenced: vec![LeaseRef::new("fenced", 7, harness.solo.team_id.clone())],
         cancel: vec!["cancelled".to_string()],
     });
     round_trips(&start);

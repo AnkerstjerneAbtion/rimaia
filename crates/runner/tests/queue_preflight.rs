@@ -34,7 +34,11 @@ fn build_queue(
         harness.machine().clone(),
         harness.board(&paths, &runner),
         harness.context.subscribe(),
-        SoloBoard::new(harness.context.clone()),
+        SoloBoard::new(
+            harness.context.clone(),
+            harness.solo.runner_id.clone(),
+            rimaia_core::runner::provider::ProviderId::ClaudeCode,
+        ),
         InFlight::new(),
         paths,
         runner,

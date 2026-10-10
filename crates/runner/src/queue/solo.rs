@@ -14,9 +14,11 @@
 use chrono::{DateTime, Utc};
 use rimaia_core::db::MutationSource;
 use rimaia_core::doctor::{self, DoctorReport};
+use rimaia_core::events::RunnerId;
 use rimaia_core::machine::MachineContext;
+use rimaia_core::runner::provider::ProviderId;
 use rimaia_core::schedule::preflight::{self, PreflightSummary};
-use rimaia_core::scheduler::selection::{self, QueueEntry, SkipReason};
+use rimaia_core::scheduler::selection::{self, QueueEntry, RunnerView, SkipReason};
 use rimaia_core::{Result, ServiceContext};
 
 /// The solo board, read in process.
@@ -26,6 +28,10 @@ use rimaia_core::{Result, ServiceContext};
 #[derive(Clone)]
 pub struct SoloBoard {
     ctx: ServiceContext,
+    /// The runner the loop is, so its plans pass over what is pinned to
+    /// another runner exactly as its claims do (task 043).
+    runner_id: RunnerId,
+    provider: ProviderId,
 }
 
 impl SoloBoard {
@@ -33,10 +39,23 @@ impl SoloBoard {
     /// `build` did before task 042: the only write it can reach through here
     /// is `worktree::prepare`'s, made for a run the queue started, and the
     /// shell hands one `Ui` context to every subsystem (ADR-0019).
-    pub fn new(ctx: ServiceContext) -> Self {
+    ///
+    /// `runner_id` and `provider` are the runner the board port serves, so a
+    /// plan drawn here is drawn for the runner that claims.
+    pub fn new(ctx: ServiceContext, runner_id: RunnerId, provider: ProviderId) -> Self {
         Self {
             ctx: ctx.with_source(MutationSource::System),
+            runner_id,
+            provider,
         }
+    }
+
+    fn view(&self, repositories: &[String]) -> RunnerView {
+        RunnerView::new(
+            self.runner_id.clone(),
+            self.provider,
+            repositories.iter().cloned(),
+        )
     }
 
     /// **Read 1: the deadline arm's source** (Scope point 4).
@@ -73,7 +92,7 @@ impl SoloBoard {
     /// board order with the reason a claim would pass over it, planned over
     /// the same repositories the loop sends with `Next`.
     pub async fn plan(&self, repositories: &[String]) -> Result<Vec<QueueEntry>> {
-        selection::plan(&self.ctx, &repositories.iter().cloned().collect()).await
+        selection::plan(&self.ctx, &self.view(repositories)).await
     }
 
     /// **Read 3: the doctor**, which lists the board's repositories by name.
@@ -95,7 +114,7 @@ impl SoloBoard {
         schedule_id: &str,
         repositories: &[String],
     ) -> Result<PreflightSummary> {
-        preflight::preview(machine, &self.ctx, schedule_id, repositories).await
+        preflight::preview(machine, &self.ctx, schedule_id, &self.view(repositories)).await
     }
 
     /// **Not a read: task 044's temporary context.** `run_task` still takes a

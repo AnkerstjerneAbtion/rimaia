@@ -38,7 +38,8 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::context::ServiceContext;
+use crate::clock::Clock;
+use crate::context::{ScopedTx, ServiceContext};
 use crate::db::{StrategyMode, StrategySource, Task};
 use crate::error::{Error, Result};
 use crate::events::ChangeEvent;
@@ -358,18 +359,70 @@ pub async fn set_task_strategy(
     plan: StrategyPlan,
     source: StrategySource,
 ) -> Result<Task> {
-    let plan = plan.repaired();
-    let stored = plan.to_stored()?;
-
-    // Read outside the transaction: `strategy::settings` reads over the pool,
-    // and holding a write transaction open across two more reads to defend against
-    // a settings change landing in the same millisecond would cost more than
-    // the race is worth. The defaults are configuration a human edits, not a
-    // value another writer moves under us.
-    let defaults = resolved_defaults(ctx, task_id).await?;
+    let prepared = prepare_strategy(ctx, task_id, plan).await?;
 
     let mut tx = ctx.begin().await?;
-    let current = fetch_task_row(&mut tx, task_id).await?;
+    write_strategy(&mut tx, ctx.clock.as_ref(), task_id, prepared, source).await?;
+    let team_id = team_of_task(&mut tx, task_id).await?;
+    tx.commit().await?;
+
+    // Publish before the read-back, exactly as `create_task` does and for its
+    // stated reason: the row is committed, so a failed re-read must not cost
+    // the notification for a mutation that already happened (ADR-0018). It is
+    // also how the panel learns a planner wrote back mid-run, which is the only
+    // signal there is — the strategy run has no `runs` row to watch.
+    ctx.publish(ChangeEvent::tasks(team_id, [task_id.to_string()]));
+    task_row(ctx, task_id).await
+}
+
+/// What [`write_strategy`] needs read before its transaction opens.
+pub(crate) struct PreparedStrategy {
+    plan: StrategyPlan,
+    stored: String,
+    defaults: ResolvedDefaults,
+}
+
+/// [`set_task_strategy`]'s reads, made over the pool **before** the write's
+/// transaction opens.
+///
+/// Outside the transaction because `strategy::settings` reads over the pool,
+/// and holding a write transaction open across two more reads to defend
+/// against a settings change landing in the same millisecond would cost more
+/// than the race is worth. The defaults are configuration a human edits, not a
+/// value another writer moves under us.
+pub(crate) async fn prepare_strategy(
+    ctx: &ServiceContext,
+    task_id: &str,
+    plan: StrategyPlan,
+) -> Result<PreparedStrategy> {
+    let plan = plan.repaired();
+    let stored = plan.to_stored()?;
+    let defaults = resolved_defaults(ctx, task_id).await?;
+    Ok(PreparedStrategy {
+        plan,
+        stored,
+        defaults,
+    })
+}
+
+/// [`set_task_strategy`]'s guard and write, inside a transaction the caller
+/// holds, commits and announces.
+///
+/// The board port's `record_strategy` holds the transaction its fence read the
+/// lease in (task 043), so a fenced planner writes nothing.
+pub(crate) async fn write_strategy(
+    tx: &mut ScopedTx,
+    clock: &dyn Clock,
+    task_id: &str,
+    prepared: PreparedStrategy,
+    source: StrategySource,
+) -> Result<()> {
+    let PreparedStrategy {
+        plan,
+        stored,
+        defaults,
+    } = prepared;
+    let current = fetch_task_row(tx, task_id).await?;
 
     if source == StrategySource::Planner {
         let mode = effective_strategy(&current, &defaults.repository, &defaults.global).mode;
@@ -383,7 +436,7 @@ pub async fn set_task_strategy(
         }
     }
 
-    let now = ctx.clock.now();
+    let now = clock.now();
     sqlx::query!(
         r#"UPDATE tasks SET strategy_plan = ?1, strategy_source = ?2, strategy_updated_at = ?3,
             model = ?4, effort = ?5, updated_at = ?3 WHERE id = ?6"#,
@@ -394,19 +447,9 @@ pub async fn set_task_strategy(
         plan.effort,
         task_id,
     )
-    .execute(&mut *tx)
+    .execute(&mut **tx)
     .await?;
-
-    let team_id = team_of_task(&mut tx, task_id).await?;
-    tx.commit().await?;
-
-    // Publish before the read-back, exactly as `create_task` does and for its
-    // stated reason: the row is committed, so a failed re-read must not cost
-    // the notification for a mutation that already happened (ADR-0018). It is
-    // also how the panel learns a planner wrote back mid-run, which is the only
-    // signal there is — the strategy run has no `runs` row to watch.
-    ctx.publish(ChangeEvent::tasks(team_id, [task_id.to_string()]));
-    task_row(ctx, task_id).await
+    Ok(())
 }
 
 /// Takes authorship of a recorded proposal: `strategy_source` flips
@@ -509,7 +552,7 @@ pub async fn clear_task_strategy(ctx: &ServiceContext, task_id: &str) -> Result<
 /// A struct rather than a tuple because the two are trivially swappable at a
 /// call site and [`effective_strategy`] would resolve a global default as a
 /// repository one without complaint.
-pub(super) struct ResolvedDefaults {
+pub(crate) struct ResolvedDefaults {
     pub(super) repository: StrategyDefaults,
     pub(super) global: StrategyDefaults,
 }

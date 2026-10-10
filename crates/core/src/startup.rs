@@ -10,12 +10,15 @@
 //! Three writers share this database (ADR-0003), and a desktop app does not get
 //! a clean shutdown for free: the window can be force-quit, the process killed,
 //! the machine put to sleep mid-`fsync`. [`survey`] answers, on the next launch,
-//! "what did that leave behind" — a task whose `run_state` never left
-//! `running`, a task whose worktree record no longer resolves, a run whose
-//! transcript no longer resolves (ADR-0011's "runs left running by a crash are
-//! marked interrupted and offered for resume", ADR-0013's "reconciled at
-//! startup like worktrees: a runs row pointing at a missing file is marked, not
-//! trusted").
+//! "what did that leave behind" — a task whose worktree record no longer
+//! resolves, a run whose transcript no longer resolves (ADR-0013's "reconciled
+//! at startup like worktrees: a runs row pointing at a missing file is marked,
+//! not trusted").
+//!
+//! A task a crash left `running` is not a finding of the survey's any more.
+//! From task 043 each runner reconciles the leases it held
+//! (`scheduler::reconcile`), so a launch never sweeps another runner's tasks
+//! (ADR-0031 point 5).
 //!
 //! It does not act on any of that. **This module reads and reports; it does not
 //! write.** That is not a shortcut this stage of the project is taking — it is
@@ -51,7 +54,6 @@ use std::collections::HashMap;
 use serde::Serialize;
 
 use crate::context::ServiceContext;
-use crate::db::RunState;
 use crate::error::{Error, Result};
 use crate::machine::MachineContext;
 use crate::paths::AppPaths;
@@ -66,16 +68,6 @@ use crate::runner::events::transcript_path;
 #[derive(Debug, Clone, Default, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ReconciliationReport {
-    /// Ids of tasks whose `run_state` was still `running` or `queued` when
-    /// this process started — the two states a crash, and nothing else, can
-    /// leave a task in. `queued` belongs here too: `scheduler::claim` walks
-    /// `idle -> queued -> running` as two separately committed transitions,
-    /// so a crash between them leaves a task at `queued` with no process
-    /// and no legal edge back to `idle` — invisible to the queue's own
-    /// selection (which only ever claims `idle`) and to a "Run now" button
-    /// disabled by the same badge. Nothing in the MVP transitions a task out
-    /// of either state on its own.
-    pub tasks_left_running: Vec<String>,
     /// Ids of tasks whose worktree record on this machine names a directory
     /// that no longer resolves to anything on disk.
     pub missing_worktrees: Vec<String>,
@@ -87,9 +79,7 @@ pub struct ReconciliationReport {
 impl ReconciliationReport {
     /// True when there is nothing to report: the previous exit was clean.
     pub fn is_empty(&self) -> bool {
-        self.tasks_left_running.is_empty()
-            && self.missing_worktrees.is_empty()
-            && self.missing_run_logs.is_empty()
+        self.missing_worktrees.is_empty() && self.missing_run_logs.is_empty()
     }
 }
 
@@ -108,7 +98,6 @@ pub async fn survey(
     paths: &AppPaths,
 ) -> Result<ReconciliationReport> {
     let report = ReconciliationReport {
-        tasks_left_running: tasks_left_running(ctx).await?,
         missing_worktrees: missing_worktrees(ctx, machine).await?,
         missing_run_logs: missing_run_logs(ctx, paths).await?,
     };
@@ -117,7 +106,6 @@ pub async fn survey(
     // the user reads it the next morning, even before anything acts on it.
     if !report.is_empty() {
         tracing::warn!(
-            tasks_left_running = report.tasks_left_running.len(),
             missing_worktrees = report.missing_worktrees.len(),
             missing_run_logs = report.missing_run_logs.len(),
             "startup reconciliation found state a previous run left behind",
@@ -125,21 +113,6 @@ pub async fn survey(
     }
 
     Ok(report)
-}
-
-async fn tasks_left_running(ctx: &ServiceContext) -> Result<Vec<String>> {
-    let scope = ctx.scope.json();
-    let ids = sqlx::query_scalar!(
-        "SELECT id FROM tasks
-          WHERE (run_state = ?1 OR run_state = ?2)
-            AND team_id IN (SELECT value FROM json_each(?3))",
-        RunState::Running,
-        RunState::Queued,
-        scope,
-    )
-    .fetch_all(&ctx.pool)
-    .await?;
-    Ok(ids)
 }
 
 /// Tasks whose worktree record names a directory that is gone.
@@ -216,6 +189,7 @@ async fn path_is_missing(path: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::db::RunState;
     use crate::machine::{Checkout, WorktreeRecord};
     use crate::testing::TestContext;
     use pretty_assertions::assert_eq;
@@ -349,37 +323,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_task_left_running_is_reported() {
-        let h = Harness::new().await;
-        let repository_id = h.repository().await;
-        let task_id = h.task(&repository_id, RunState::Running).await;
-
-        let report = h.survey().await;
-
-        assert_eq!(report.tasks_left_running, vec![task_id]);
-        assert!(report.missing_worktrees.is_empty());
-        assert!(report.missing_run_logs.is_empty());
-    }
-
-    #[tokio::test]
-    async fn a_task_left_queued_is_reported_too() {
-        // The narrower crash: caught between `scheduler::claim`'s two
-        // separately committed transitions, `idle -> queued` then
-        // `queued -> running`, before the second ever ran. `running` alone
-        // would miss exactly this task — see this module's own doc on why
-        // `queued` belongs in the same finding.
-        let h = Harness::new().await;
-        let repository_id = h.repository().await;
-        let task_id = h.task(&repository_id, RunState::Queued).await;
-
-        let report = h.survey().await;
-
-        assert_eq!(report.tasks_left_running, vec![task_id]);
-        assert!(report.missing_worktrees.is_empty());
-        assert!(report.missing_run_logs.is_empty());
-    }
-
-    #[tokio::test]
     async fn a_deleted_worktree_directory_is_reported() {
         let h = Harness::new().await;
         let repository_id = h.repository().await;
@@ -400,7 +343,6 @@ mod tests {
         let report = h.survey().await;
 
         assert_eq!(report.missing_worktrees, vec![task_id]);
-        assert!(report.tasks_left_running.is_empty());
         assert!(report.missing_run_logs.is_empty());
     }
 
@@ -453,7 +395,6 @@ mod tests {
         let report = h.survey().await;
 
         assert_eq!(report.missing_run_logs, vec![run_id]);
-        assert!(report.tasks_left_running.is_empty());
         assert!(report.missing_worktrees.is_empty());
     }
 
@@ -481,9 +422,10 @@ mod tests {
 
     #[tokio::test]
     async fn the_survey_changes_nothing_it_reports() {
-        // The test that keeps the stub a stub: finding a task stuck `running`
-        // must not itself move it. `set_run_state` (task 004) is the only
-        // writer of `run_state` — see the module docs.
+        // The test that keeps the stub a stub: surveying a board with a task
+        // stuck `running` must not itself move it. `set_run_state` (task 004)
+        // is the only writer of `run_state`, and the lease reconcile is what
+        // settles that task — see the module docs.
         let h = Harness::new().await;
         let repository_id = h.repository().await;
         let task_id = h.task(&repository_id, RunState::Running).await;

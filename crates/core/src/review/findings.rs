@@ -39,6 +39,7 @@ use std::collections::HashMap;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
+use crate::clock::Clock;
 use crate::context::{ScopedTx, ServiceContext};
 use crate::db::{new_id, ExitClass, RunKind, RunStatus};
 use crate::error::{Error, Result};
@@ -197,16 +198,41 @@ pub async fn record(
     review_run_id: &str,
     findings: Vec<NewReviewFinding>,
 ) -> Result<Vec<ReviewFinding>> {
+    // `BEGIN IMMEDIATE`: the run's checks decide whether anything is written,
+    // and a second call racing this one must see the first's witness.
+    let mut tx = ctx.begin_immediate().await?;
+    let recorded = record_within(
+        &mut tx,
+        ctx.clock.as_ref(),
+        task_id,
+        review_run_id,
+        findings,
+    )
+    .await?;
+    let team_id = team_of_task(&mut tx, task_id).await?;
+    tx.commit().await?;
+    ctx.publish(ChangeEvent::tasks(team_id, [task_id.to_string()]));
+    Ok(recorded)
+}
+
+/// [`record`]'s checks and writes, inside a `BEGIN IMMEDIATE` transaction the
+/// caller holds, commits and announces.
+///
+/// The board port's `record_review_findings` holds the transaction its fence
+/// read the lease in (task 043), so a fenced reviewer records nothing.
+pub(crate) async fn record_within(
+    tx: &mut ScopedTx,
+    clock: &dyn Clock,
+    task_id: &str,
+    review_run_id: &str,
+    findings: Vec<NewReviewFinding>,
+) -> Result<Vec<ReviewFinding>> {
     for (index, finding) in findings.iter().enumerate() {
         validate_finding(index, finding)?;
     }
 
-    let now = ctx.clock.now();
-    // `BEGIN IMMEDIATE`: the run's checks below decide whether anything is
-    // written, and a second call racing this one must see the first's witness.
-    let mut tx = ctx.begin_immediate().await?;
-
-    let run = fetch_writer_run(&mut tx, review_run_id).await?;
+    let now = clock.now();
+    let run = fetch_writer_run(tx, review_run_id).await?;
     if run.kind != RunKind::Review {
         return Err(Error::invalid(format!(
             "run {review_run_id} is not a review, so it cannot record review findings"
@@ -233,7 +259,7 @@ pub async fn record(
         let ordinal = ordinal as i64;
         let fingerprint = fingerprint(finding.file.as_deref(), &finding.title);
         let (status, resolution, resolved_at) =
-            match standing_rejection(&mut tx, task_id, &fingerprint).await? {
+            match standing_rejection(tx, task_id, &fingerprint).await? {
                 Some(rejection) => (
                     FindingStatus::Rejected,
                     Some(format!(
@@ -264,7 +290,7 @@ pub async fn record(
             now,
             resolved_at,
         )
-        .execute(&mut *tx)
+        .execute(&mut **tx)
         .await?;
     }
 
@@ -273,7 +299,7 @@ pub async fn record(
         now,
         review_run_id,
     )
-    .execute(&mut *tx)
+    .execute(&mut **tx)
     .await?;
 
     let recorded = sqlx::query_as!(
@@ -286,12 +312,8 @@ pub async fn record(
              FROM review_findings WHERE review_run_id = ?1 ORDER BY ordinal"#,
         review_run_id,
     )
-    .fetch_all(&mut *tx)
+    .fetch_all(&mut **tx)
     .await?;
-
-    let team_id = team_of_task(&mut tx, task_id).await?;
-    tx.commit().await?;
-    ctx.publish(ChangeEvent::tasks(team_id, [task_id.to_string()]));
     Ok(recorded)
 }
 
