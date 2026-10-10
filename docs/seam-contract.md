@@ -6728,7 +6728,9 @@ each meet these again, and left to each implementer they would be decided in fiv
    dependency's implementation and fix runs up to the chosen run's attempt, failed ones
    included (`runs::commit_authors`); its task is the dependency, its revision the commit.
    The strategy planner's guidance in the implementation prompt is not a piece (ADR-0032
-   point 3 exempts execution strategy), and empty content is not a piece.
+   point 3 exempts execution strategy), and empty content is not a piece. The plan is always
+   a piece, blank `plan` and `extra_instructions` included: its revision covers the title,
+   which is never empty, and the links (point 2).
 4. **The current revision, per kind.** The decimal `plan_revision` or
    `review_instructions_revision`; `team_settings.revision` of the key's row in the team; for
    findings, a run the task lists now; for a base commit, the dependency's latest successful

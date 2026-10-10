@@ -161,7 +161,7 @@ pub(crate) async fn inputs(
     composition: &Composition,
 ) -> Result<Option<PieceInputs>> {
     let Some(task) = sqlx::query!(
-        r#"SELECT team_id, plan, extra_instructions, plan_revision, plan_updated_by,
+        r#"SELECT team_id, plan_revision, plan_updated_by,
                   plan_written_during_run AS "plan_written_during_run: bool",
                   review_instructions, review_instructions_revision,
                   review_instructions_updated_by,
@@ -178,14 +178,15 @@ pub(crate) async fn inputs(
 
     let says_something =
         |text: &Option<String>| text.as_deref().is_some_and(|t| !t.trim().is_empty());
-    let plan =
-        (says_something(&task.plan) || says_something(&task.extra_instructions)).then(|| {
-            Revision {
-                revision: task.plan_revision,
-                author: task.plan_updated_by.clone(),
-                written_during_run: task.plan_written_during_run,
-            }
-        });
+    // Listed even when the plan and the extra instructions are blank: the
+    // title and the links are plan content too (ADR-0032's 2026-10-10
+    // amendment), and a title is never empty, so a blank-plan task still
+    // composes text its revision's author wrote.
+    let plan = Some(Revision {
+        revision: task.plan_revision,
+        author: task.plan_updated_by.clone(),
+        written_during_run: task.plan_written_during_run,
+    });
     let task_review_instructions = says_something(&task.review_instructions).then(|| Revision {
         revision: task.review_instructions_revision,
         author: task.review_instructions_updated_by.clone(),

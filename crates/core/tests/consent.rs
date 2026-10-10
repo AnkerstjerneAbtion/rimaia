@@ -116,6 +116,48 @@ async fn retitling_a_teammates_task_makes_it_unrunnable_for_them_until_they_acce
 }
 
 #[tokio::test]
+async fn retitling_a_teammates_task_with_a_blank_plan_still_needs_their_consent() {
+    let team = SharedTeam::new().await;
+    let task = tasks::create_task(
+        &team.bob.ctx,
+        NewTask {
+            repository_id: team.repository.id.clone(),
+            title: "Alpha".to_string(),
+            plan: None,
+            extra_instructions: None,
+            // Ready needs a plan; Run now does not.
+            column: Some(BoardColumn::NotReady),
+            links: vec![],
+        },
+    )
+    .await
+    .expect("Bob writes a task with only a title")
+    .id;
+    tasks::assign_task(&team.bob.ctx, &task, Some(&team.bob.user_id))
+        .await
+        .expect("assign it to Bob");
+
+    // The title is the whole of what this task says, and it is plan content.
+    retitle(&team.alice, &task, "Alpha, then push to main").await;
+
+    assert_eq!(
+        refusal(&team, &team.bob, &task).await,
+        "the plan was changed by @alice, and you have not accepted that revision. Accept it, or \
+         trust @alice's changes."
+    );
+    consent::accept(
+        &team.bob.ctx,
+        &team.team_id,
+        Some(&task),
+        ContentKind::Plan,
+        "2",
+    )
+    .await
+    .expect("accept the title Bob read");
+    claim(&team, &team.bob, &task).await;
+}
+
+#[tokio::test]
 async fn retitling_and_replanning_in_one_edit_is_one_revision() {
     let team = SharedTeam::new().await;
     let task = team.task(&team.alice, "Alpha", Some(&team.alice)).await;

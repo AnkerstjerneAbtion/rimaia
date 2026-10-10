@@ -131,7 +131,9 @@ pub struct PieceInputs {
     /// The runner that would run the content: findings it recorded itself
     /// need no consent.
     pub claiming_runner: RunnerId,
-    /// `None` when both the plan and the extra instructions are empty.
+    /// The plan revision, which also covers the title and the links. A title
+    /// is never empty, so `consent::inputs` always supplies it; `None` is a
+    /// task with no text at all, which only these unit tests build.
     pub plan: Option<Revision>,
     pub base_instructions: Option<Revision>,
     /// The task's override, `None` when it is blank.
