@@ -97,11 +97,24 @@ jobs:
         if: matrix.os == 'ubuntu-latest'
         run: cargo clippy -p rimaia-core --all-targets -- -D warnings
 
+      # Its own line rather than `-p rimaia-core -p rimaia-runner`: one invocation
+      # unifies both crates' features, so a feature only the runner enables would
+      # compile here and nowhere else (seam-contract D33). The runner links
+      # rimaia-core, so the D-Bus step above already covers it.
+      - name: Clippy (runner)
+        if: matrix.os == 'ubuntu-latest'
+        run: cargo clippy -p rimaia-runner --all-targets -- -D warnings
+
       # Verbatim what CLAUDE.md documents, on every platform. No feature flag
       # and no `--no-default-features`: the invocation that diverges from the
       # documented one is the invocation nobody runs locally.
       - name: Test
         run: cargo test -p rimaia-core
+
+      # On every platform, like the core tests: runner.db is a real file in a
+      # TempDir, and its paths are what differ between the three.
+      - name: Test (runner)
+        run: cargo test -p rimaia-runner
 
   shell:
     name: Tauri shell (check only)

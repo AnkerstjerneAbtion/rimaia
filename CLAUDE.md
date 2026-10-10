@@ -51,6 +51,8 @@ which is the run queue.
 | --- | --- |
 | `crates/core/` | `rimaia-core` — all logic. **Must not depend on `tauri`** (ADR-0015) |
 | `crates/core/tests/fixtures/` | Recorded `stream-json` CLI streams and the test-repo builder |
+| `crates/runner/` | `rimaia-runner`: the runner loop, `runner.db` and the headless binary (ADR-0027, ADR-0028) |
+| `crates/runner/migrations/` | `runner.db` migrations. Board migrations stay in `src-tauri/migrations/` |
 | `src-tauri/` | Tauri shell: commands, window, state wiring. Thin |
 | `src-tauri/migrations/` | SQLite migrations (ADR-0003). The test harness applies these too |
 | `src/` | React 19 + TypeScript frontend |
@@ -65,8 +67,10 @@ npm run typecheck                     # tsc --noEmit
 npm run test                          # vitest run
 npm run build                         # tsc && vite build — the only thing that compiles the CSS
 cargo test -p rimaia-core             # logic tests, no system deps needed
+cargo test -p rimaia-runner           # runner loop and runner.db, no system deps needed
 cargo fmt --all --check
 cargo clippy -p rimaia-core --all-targets -- -D warnings
+cargo clippy -p rimaia-runner --all-targets -- -D warnings
 cargo check --workspace --all-targets # includes the Tauri shell
 ./scripts/check-command-wiring.sh     # both generate_handler! lists agree, and every commands.ts name is registered
 ```
@@ -91,14 +95,29 @@ tests without shipping it to consumers. Do not add a feature flag to the CI invo
 it would diverge from the command above for no gain.
 
 `SQLX_OFFLINE=true` is set in CI, so clippy, `cargo test` and `cargo check` all compile the
-query macros against the checked-in `.sqlx/` cache at the workspace root instead of a live
-database. After changing any query — or any migration a query reads — regenerate and
-commit it:
+query macros against a checked-in cache instead of a live database. The board's queries use
+`crates/core/.sqlx/` and the runner's use `crates/runner/.sqlx/`. There is no cache at the
+workspace root, and a test fails if one appears. After changing any query, or any migration a
+query reads, in either crate, regenerate both caches and commit them:
 
 ```bash
-export DATABASE_URL="sqlite:target/sqlx-prepare.db?mode=rwc"
-cargo sqlx migrate run --source src-tauri/migrations
-cargo sqlx prepare --workspace -- --all-targets
+# Absolute paths, passed with -D and never exported (seam-contract D33).
+BOARD_DB="sqlite:$PWD/target/sqlx-prepare-board.db?mode=rwc"
+RUNNER_DB="sqlite:$PWD/target/sqlx-prepare-runner.db?mode=rwc"
+rm -f target/sqlx-prepare-*.db*
+
+# 1. Board: rimaia-core against src-tauri/migrations, into crates/core/.sqlx
+cargo sqlx migrate run --source src-tauri/migrations -D "$BOARD_DB"
+(cd crates/core && cargo sqlx prepare -D "$BOARD_DB" -- --all-targets)
+
+# 2. Runner: rimaia-runner against crates/runner/migrations, into crates/runner/.sqlx.
+#    The check builds rimaia-core offline from the cache step 1 just wrote, so the
+#    prepare below does not rebuild it online against a database with no board tables.
+#    Errors from rimaia-runner in the check come from its stale cache, which the next
+#    line regenerates.
+cargo sqlx migrate run --source crates/runner/migrations -D "$RUNNER_DB"
+SQLX_OFFLINE=true cargo check -p rimaia-runner --all-targets || true
+(cd crates/runner && cargo sqlx prepare -D "$RUNNER_DB" -- --all-targets)
 ```
 
 `--all-targets` matters here for the same reason it does for clippy: the integration tests
@@ -201,15 +220,15 @@ Rules:
   `RIMAIA_DATA_DIR=/tmp/rimaia-<branch> npm run tauri dev`. Every worktree otherwise resolves
   the *same* data directory, so a branch carrying an unmerged migration writes it into the one
   database every other branch reads, and every branch without that file then refuses to start
-  (ADR-0023). It must be an absolute path; a relative one or an unexpanded `~` is refused at
-  startup rather than guessed at.
+  (ADR-0023). It relocates `runner.db` as well as `rimaia.db` (ADR-0028 point 4). It must be
+  an absolute path; a relative one or an unexpanded `~` is refused at startup rather than
+  guessed at.
 - **Board migrations are applied only through `db::migrate`**, which turns foreign keys off
   around the migrator, checks `PRAGMA foreign_key_check` after, and turns them back on
   (seam-contract D28 part 1). Never apply one to a real `rimaia.db` with `cargo sqlx migrate
   run` or the sqlite3 CLI: with enforcement on, a table rebuild's `DROP TABLE` cascades and
   deletes every child row. No migration file begins with `-- no-transaction`. The prepare
-  recipe above is unchanged and still works, because the rebuild's guard passes on an empty
-  `tasks`.
+  recipe above still works, because the rebuild's guard passes on an empty `tasks`.
 - Board `position` is a fractional float; ordering is the priority mechanism. There is no
   separate priority field (ADR-0007).
 - A dependency is satisfied when its run **succeeds**, not when a human marks it done
