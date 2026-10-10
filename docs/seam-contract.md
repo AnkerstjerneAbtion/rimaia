@@ -5432,6 +5432,60 @@ relay's read-only `eligible` refuses with the same `Ineligible` sentences), 057 
 reassigned pin), 061 (renders `get_task_consent`), 072 (judges again at spawn and renders
 `authorship`).
 
+### Amendment, 2026-10-10 — what task 072 decided
+
+The two halves of ADR-0032 that 045 split off: the runner's strategy ceiling at spawn (point
+3's last paragraph) and what the agent is told (point 7). In solo nothing a user can see
+changes: no runner has a ceiling, and `authorship` is `None` in a personal team. Point 2's
+trait gains no method, and no claim, refusal sentence or `judge` changes.
+
+- **The spawn-time `judge`.** `runner::process::judge_at_spawn(machine, context, strategy)`
+  reads `strategy_ceiling` from `runner.db` again and calls `ceiling::judge` against the
+  context's catalogue. It runs in the process that spawns, immediately after 045's consent
+  re-check, in each of the three places that spawn: `run_implementation` (the queue, Run now
+  and Retry now), `Phases::prepare` (every phase a `Continue` starts), and the planner in
+  `runner::strategy::plan` (Plan now and the inline planner). A refusal is 045's
+  strategy-ceiling sentence, and each place handles it exactly as it handles a consent
+  refusal: the implementation releases through `released`, a phase is an unspawned row
+  closed through `finish_run` with the sentence as its reason, and a planner is
+  `Planned::Failed` with it, so Plan now releases and an inline planner falls back to the
+  default chain, whose implementation is then judged on its own strategy. A ceiling that
+  cannot be read refuses, as an unreadable consent does. The sentence's `{label}` is
+  `authorship.runner_label` when the board sent one; in a personal team it sends none and the
+  label is `this runner`.
+- **What is judged.** The phase's strategy from the context: for an implementation, the
+  model and effort the resolution answered (the context's effective strategy, or the row's on
+  a resume) with the effective strategy's origins; for a review or a fix,
+  `PhaseModels::of(context).strategy_for(kind)`, which is what the board judged the
+  `Continue` on; for a planner, `strategy_for(Strategy)`, the catalogue's planner budget.
+- **Where its result replaces the context's strategy.** Only in the `RunIntent` of that one
+  spawn: `intent.model` and `intent.effort`, `Prepared::model` and `effort`, and the
+  planner's intent. Nothing is written back to the board, so `RunnerCeiling` never reaches a
+  `TaskSummary`, a `TaskDetail` or `src/types.ts`. What records the fill is the run itself:
+  `runs.effort` (and `runs.model`, when the CLI's `init` names no other) is what was spawned,
+  and each filled half adds one line to `Attempt::notes`, which `execute` writes to the
+  transcript's stderr before the spawn, ending `(origin: runner_ceiling)`. No column records
+  an origin, because none existed and this task adds no migration.
+- **The prompt.** The four composers with a `# Task context` (`compose_prompt`,
+  `compose_strategy_prompt`, `compose_review_prompt`, `compose_fix_prompt`) take
+  `authorship: Option<&RunAuthorship>` after `repo` and pass it to `task_context`, which
+  renders ADR-0032 point 7's two lines after `- Base ref:` and before `- Links:`. Every
+  spawning caller passes `context.authorship`. `preview_composed_prompt` passes `None`: it
+  holds no lease, and before 059 the desktop composes only for a personal team, where the
+  value is `None` anyway.
+- **The ceiling's writer.** `consent::ceiling::set_strategy_ceiling(machine, ceiling)` is
+  the key's one writer, behind the local commands `get_strategy_ceiling` and
+  `set_strategy_ceiling` and the local MCP tools of the same names, both refused to every
+  grant. It refuses a `models` list that is empty, or holds a blank id, and a blank
+  `max_effort`. A ceiling with neither half is stored as such and reads back as none.
+- **The tests.** `crates/core/tests/ceiling_at_spawn.rs` for the four doors and the fill,
+  and `a_review_phase_reached_through_continue_with_a_model_outside_the_ceiling_is_released`
+  in point 13's suite.
+
+**Binds.** 052 (its runner sends the ceiling and judges at spawn unchanged, and a refusal
+reaches the board as the phase's reason), 058 (the headless runner spawns through the same
+three places), 069 (renders the two commands and describes the fill rule in `ceilingNote`).
+
 ---
 
 ## D32 — One command registry: board and local commands, one dispatcher, one caller
@@ -5931,7 +5985,7 @@ recorded no-tool commands).
 - **046** carries all nine points. It also rewrites two pieces of text that describe two
   lists: the script's line in CLAUDE.md's command list, and the comment above the handler
   list in `lib.rs`.
-- **033–045 and 066:** any command one of them adds is appended to the appendix (point 8).
+- **033–045, 066 and 072:** any command one of them adds is appended to the appendix (point 8).
 - **041 and 066:** follow the local-handler rule as the 2026-10-04 amendment below states it.
   066 takes `worktreeRoot` out of `update_repository`.
 - **045:** `set_repository_unattended_runs` stays the runner's consent. The team ceiling
@@ -6157,6 +6211,19 @@ refused to every run grant (D30). None is rendered yet: 061 and 069 put them in 
 | `accept_content` | consent | board | Write | 046 | One acceptance of the current revision of one piece of content (ADR-0032 point 3). A stale revision is `invalid`, naming the current one. Refused to every grant: a run that could accept would launder consent through its own handle. Task 045 |
 | `set_repository_unattended_ceiling` | repositories | board | Write | 046 | The team ceiling, `repositories.allow_unattended_runs` (ADR-0032 point 4). Owner only, the first role check (ADR-0029 §3, generalised by 051); `invalid` on a personal team. `set_repository_unattended_runs` stays the runner's local consent. Task 045 |
 | `get_task_consent` | consent | board | Read | 046 | Eligibility, the pin, the team ceiling and every missing piece for one of the caller's runners, as a camelCase DTO with no path (ADR-0028 §2). Task 045 |
+
+#### Added by task 072
+
+Two local commands, as point 8 requires. Each reads or writes the runner setting
+`strategy_ceiling` through the machine store and issues no board query (the 2026-10-04
+amendment above). Each is paired with a local MCP tool of the same name on 041's
+host-injected router, refused to every run grant (D30). Neither is rendered yet: 069 puts them
+in the interface.
+
+| Command | Group | Kind | Effect | From | Note |
+| --- | --- | --- | --- | --- | --- |
+| `get_strategy_ceiling` | settings | local | — | 046 | This runner's strategy ceiling, `{ models, maxEffort }`, either half `null` for no limit (ADR-0032 point 3, ADR-0028 §2). No ceiling is every existing install. Task 072 |
+| `set_strategy_ceiling` | settings | local | — | 046 | Replaces the ceiling whole. The next claim carries it and the next spawn is judged against it (D31's 072 amendment). An empty `models` list is `invalid`. Task 072 |
 
 ---
 
