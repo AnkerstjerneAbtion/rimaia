@@ -1080,6 +1080,79 @@ async fn a_held_lease_the_board_already_closed_is_dropped_without_touching_the_b
 }
 
 #[tokio::test]
+async fn a_held_lease_whose_run_the_board_already_closed_is_released() {
+    // The crash landed between a `Continue` and the runner's note of it: the
+    // board closed the implementation and kept the lease for the review, and
+    // the record still names the closed run. Finishing it again is refused as
+    // already finalized, so the lease is released, and a task still `running`
+    // with nothing open lands `failed` (D31's release rule).
+    let f = Fixture::new().await;
+    f.turn_the_loop_on().await;
+    let task = f.task("Crashed after a Continue").await;
+    let board = f.board(Which::A);
+    let claim = claim_and_record(board.as_ref(), f.machine(), &task).await;
+    let implementation = new_id();
+    start_and_note(
+        board.as_ref(),
+        f.machine(),
+        &claim,
+        starting(&implementation, RunKind::Implementation),
+    )
+    .await;
+    let next = board
+        .finish_run(
+            &claim.lease,
+            &implementation,
+            finishing_at(succeeded(), "a1"),
+        )
+        .await
+        .expect("finish the implementation")
+        .next;
+    assert_eq!(
+        next,
+        NextStep::Continue {
+            kind: RunKind::Review
+        }
+    );
+    assert_eq!(
+        f.held().await,
+        vec![held(
+            &f,
+            &task,
+            LeasePurpose::Implementation,
+            Some(&implementation),
+            claim.lease.generation,
+        )],
+        "the record still names the run the board closed",
+    );
+    let closed_before = f.runs(&task).await;
+    // Later, so a second close would show in the row's timestamps.
+    f.harness.clock.advance(chrono::Duration::seconds(30));
+
+    let reconciled = scheduler::reconcile_held(board.as_ref(), f.machine())
+        .await
+        .expect("reconcile");
+
+    assert_eq!(reconciled, vec![task.clone()]);
+    assert_eq!(f.held().await, Vec::<HeldLease>::new(), "forgotten");
+    assert_eq!(
+        f.lease_state(&task).await,
+        LeaseState {
+            lease: None,
+            generation: claim.lease.generation,
+            pinned_runner_id: None,
+        },
+        "released, and a release does not pin",
+    );
+    assert_eq!(f.run_state(&task).await, RunState::Failed);
+    assert_eq!(
+        f.runs(&task).await,
+        closed_before,
+        "the closed run is not closed again"
+    );
+}
+
+#[tokio::test]
 async fn a_strategy_lease_held_at_a_crash_is_released_and_run_state_is_untouched() {
     let f = Fixture::new().await;
     let task = f.task("Planning when it crashed").await;
