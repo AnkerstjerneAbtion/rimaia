@@ -122,9 +122,13 @@ impl SharedTeam {
                 .expect("bob");
             let team_id = create_shared_team(&mut tx, &clock, "Acme", &alice.user_id).await;
             add_member(&mut tx, &clock, &team_id, &bob.user_id, Role::Member).await;
-            let alice_runner =
-                crate::testing::db::insert_runner(&mut tx, &clock, &alice.user_id, "Alice's laptop")
-                    .await;
+            let alice_runner = crate::testing::db::insert_runner(
+                &mut tx,
+                &clock,
+                &alice.user_id,
+                "Alice's laptop",
+            )
+            .await;
             let bob_runner =
                 crate::testing::db::insert_runner(&mut tx, &clock, &bob.user_id, "Mac mini").await;
             tx.commit().await.expect("commit the shared team");
@@ -237,9 +241,13 @@ impl SharedTeam {
         )
         .await
         .expect("create a task");
-        tasks::assign_task(&by.ctx, &task.id, assignee.map(|member| member.user_id.as_str()))
-            .await
-            .expect("assign the task");
+        tasks::assign_task(
+            &by.ctx,
+            &task.id,
+            assignee.map(|member| member.user_id.as_str()),
+        )
+        .await
+        .expect("assign the task");
         task.id
     }
 }

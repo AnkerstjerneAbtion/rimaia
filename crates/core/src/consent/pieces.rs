@@ -344,8 +344,14 @@ mod tests {
             base_instructions: revision(2, "olga"),
             task_review_instructions: revision(3, "rita"),
             team_review_instructions: revision(5, "olga"),
-            findings_to_fix: vec![run("review-mine", ME, "bob"), run("review-theirs", OTHER, "carol")],
-            rejections: vec![run("fix-mine", ME, "bob"), run("fix-theirs", OTHER, "carol")],
+            findings_to_fix: vec![
+                run("review-mine", ME, "bob"),
+                run("review-theirs", OTHER, "carol"),
+            ],
+            rejections: vec![
+                run("fix-mine", ME, "bob"),
+                run("fix-theirs", OTHER, "carol"),
+            ],
             base_commit: Some(BaseCommitInput {
                 task_id: "dependency".to_string(),
                 commit: "abc123".to_string(),
@@ -369,7 +375,12 @@ mod tests {
     }
 
     fn base_commit() -> Piece {
-        piece(ContentKind::BaseCommit, Some("dependency"), "abc123", "alice")
+        piece(
+            ContentKind::BaseCommit,
+            Some("dependency"),
+            "abc123",
+            "alice",
+        )
     }
 
     /// An empty plan, a blank override, a base on the default branch and no
@@ -422,7 +433,12 @@ mod tests {
             vec![
                 plan(),
                 piece(ContentKind::TaskReviewInstructions, Some(TASK), "3", "rita"),
-                piece(ContentKind::ReviewFindings, Some(TASK), "fix-theirs", "carol"),
+                piece(
+                    ContentKind::ReviewFindings,
+                    Some(TASK),
+                    "fix-theirs",
+                    "carol"
+                ),
                 base_commit(),
             ]
         );
@@ -448,7 +464,12 @@ mod tests {
             vec![
                 plan(),
                 piece(ContentKind::BaseInstructions, None, "2", "olga"),
-                piece(ContentKind::ReviewFindings, Some(TASK), "review-theirs", "carol"),
+                piece(
+                    ContentKind::ReviewFindings,
+                    Some(TASK),
+                    "review-theirs",
+                    "carol"
+                ),
                 base_commit(),
             ]
         );
@@ -481,7 +502,10 @@ mod tests {
         // Trusting one owner leaves the other's work waiting; one acceptance
         // of the commit covers both.
         let trusted = vec!["alice".to_string()];
-        assert_eq!(consents("carol", &pieces[0], &[], &trusted), Consent::Consents);
+        assert_eq!(
+            consents("carol", &pieces[0], &[], &trusted),
+            Consent::Consents
+        );
         assert!(matches!(
             consents("carol", &pieces[1], &[], &trusted),
             Consent::Missing {

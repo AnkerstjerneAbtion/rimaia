@@ -93,8 +93,8 @@ use crate::tasks::strategy::needs_planning;
 
 use crate::consent::ceiling::{self, PhaseStrategy, StrategyCeiling};
 use crate::consent::pieces::pieces_for;
-use crate::consent::{self, Composition, Ineligible, TeamCeiling};
 pub use crate::consent::Route;
+use crate::consent::{self, Composition, Ineligible, TeamCeiling};
 use crate::runner::provider::ProviderId;
 use crate::strategy::catalogue::{runs_on, Catalogue};
 use crate::strategy::StrategyOrigin;
@@ -428,9 +428,10 @@ pub async fn eligible(
     let strategy = candidate.models.strategy_for(purpose, candidate.catalogue);
     if let Err(exceeded) = ceiling::judge(&strategy, candidate.ceiling, candidate.catalogue) {
         return refuse(Ineligible::CeilingExceeded {
-            label: runner
-                .as_ref()
-                .map_or_else(|| candidate.runner_id.to_string(), |runner| runner.label.clone()),
+            label: runner.as_ref().map_or_else(
+                || candidate.runner_id.to_string(),
+                |runner| runner.label.clone(),
+            ),
             exceeded,
         });
     }
@@ -810,7 +811,11 @@ pub(crate) async fn release(ctx: &ServiceContext, runner_id: &str, lease: &Lease
 /// [`release`]'s landing, inside a transaction that has already fenced
 /// `lease`: a task still `running` taken to `failed`, and the lease deleted.
 /// `run_context` ends a lease whose consent was lost with exactly this.
-pub(crate) async fn end_within(ctx: &ServiceContext, tx: &mut ScopedTx, lease: &LeaseRef) -> Result<()> {
+pub(crate) async fn end_within(
+    ctx: &ServiceContext,
+    tx: &mut ScopedTx,
+    lease: &LeaseRef,
+) -> Result<()> {
     let task = fetch_task_row(tx, &lease.task_id).await?;
     if task.run_state == RunState::Running {
         transition(

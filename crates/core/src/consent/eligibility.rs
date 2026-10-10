@@ -79,7 +79,11 @@ pub struct RunnerFacts<'a> {
 /// - unassigned, `assigned_then_pool`, in a team the runner opted into:
 ///   [`Pool`](Eligibility::Pool);
 /// - otherwise not eligible.
-pub fn decide(task: &TaskFacts<'_>, runner: &RunnerFacts<'_>, pool_teams: &[TeamId]) -> Eligibility {
+pub fn decide(
+    task: &TaskFacts<'_>,
+    runner: &RunnerFacts<'_>,
+    pool_teams: &[TeamId],
+) -> Eligibility {
     match task.assignee_id {
         Some(assignee) if assignee == runner.owner => Eligibility::Assigned,
         Some(_) => Eligibility::NotEligible(Reason::AssignedToSomeoneElse),
@@ -118,7 +122,10 @@ mod tests {
     #[test]
     fn a_runner_never_runs_a_task_assigned_to_someone_else() {
         let pool = vec![SHARED.to_string()];
-        for policy in [RunnerEligibility::Assigned, RunnerEligibility::AssignedThenPool] {
+        for policy in [
+            RunnerEligibility::Assigned,
+            RunnerEligibility::AssignedThenPool,
+        ] {
             assert_eq!(
                 decide(&task(Some("alice")), &bobs(policy), &pool),
                 Eligibility::NotEligible(Reason::AssignedToSomeoneElse),
@@ -163,11 +170,19 @@ mod tests {
         let elsewhere = vec!["team-other".to_string()];
 
         assert_eq!(
-            decide(&task(None), &bobs(RunnerEligibility::AssignedThenPool), &opted_in),
+            decide(
+                &task(None),
+                &bobs(RunnerEligibility::AssignedThenPool),
+                &opted_in
+            ),
             Eligibility::Pool
         );
         assert_eq!(
-            decide(&task(None), &bobs(RunnerEligibility::AssignedThenPool), &elsewhere),
+            decide(
+                &task(None),
+                &bobs(RunnerEligibility::AssignedThenPool),
+                &elsewhere
+            ),
             Eligibility::NotEligible(Reason::Unassigned)
         );
         // A pool list without the policy is not a pool.

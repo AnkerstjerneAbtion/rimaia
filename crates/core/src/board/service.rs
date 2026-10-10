@@ -63,7 +63,11 @@ use crate::db::RunKind;
 /// 045). It takes no ceiling: it passes `StrategyCeiling::default()`, so it
 /// reports eligibility and consent refusals only, and a ceiling refusal comes
 /// from the claim.
-pub async fn preview(ctx: &ServiceContext, runner: Runner<'_>, task_id: &str) -> Result<RunContext> {
+pub async fn preview(
+    ctx: &ServiceContext,
+    runner: Runner<'_>,
+    task_id: &str,
+) -> Result<RunContext> {
     let context = read_context(ctx, runner, task_id).await?;
     let purpose = consent::purpose_now(ctx, &context.task.task).await?;
     let composition = Composition::of(&context);
@@ -480,9 +484,14 @@ pub async fn run_context(
     // never composed. The lease really ends, so the runner's reaction to
     // `Conflict` is the right one, and a solo lease is not left `running`
     // with no holder.
-    if let Some(refused) =
-        lease::consent_refusal(&mut tx, &lease.task_id, runner.id, held.purpose, &composition)
-            .await?
+    if let Some(refused) = lease::consent_refusal(
+        &mut tx,
+        &lease.task_id,
+        runner.id,
+        held.purpose,
+        &composition,
+    )
+    .await?
     {
         lease::end_within(ctx, &mut tx, lease).await?;
         let team_id = tasks::team_of_task(&mut tx, &lease.task_id).await?;
@@ -802,7 +811,11 @@ pub async fn record_review_findings(
 }
 
 /// What a run of `task_id` is composed from and bounded by, read once.
-async fn read_context(ctx: &ServiceContext, runner: Runner<'_>, task_id: &str) -> Result<RunContext> {
+async fn read_context(
+    ctx: &ServiceContext,
+    runner: Runner<'_>,
+    task_id: &str,
+) -> Result<RunContext> {
     let provider = runner.provider;
     let task = tasks::get_task(ctx, task_id).await?;
     let repository = crate::repo::get(ctx, &task.task.repository_id).await?;

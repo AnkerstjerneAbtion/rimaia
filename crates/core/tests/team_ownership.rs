@@ -10,13 +10,13 @@ use std::sync::Arc;
 
 use pretty_assertions::assert_eq;
 use rimaia_core::board::{BoardPort, ClaimTarget, InProcessBoard, LeaseTerm, StartRun};
+use rimaia_core::consent::{self, eligibility::RunnerEligibility};
 use rimaia_core::db::{new_id, BoardColumn, RunKind};
 use rimaia_core::events::TeamId;
 use rimaia_core::identity::{create_personal_team, PersonalTeam};
 use rimaia_core::repo::{self, NewRepository};
 use rimaia_core::runner::{RunTrigger, RunnerConfig};
 use rimaia_core::tasks::{self, NewTask};
-use rimaia_core::consent::{self, eligibility::RunnerEligibility};
 use rimaia_core::testing::db::insert_runner;
 use rimaia_core::testing::shared::create_shared_team;
 use rimaia_core::testing::{TempRepo, TestContext};
@@ -192,7 +192,7 @@ async fn a_claims_lease_names_the_tasks_team() {
         &both,
         &h.solo.runner_id,
         RunnerEligibility::AssignedThenPool,
-        &[second.team_id.clone()],
+        std::slice::from_ref(&second.team_id),
     )
     .await
     .expect("the runner takes the shared team's pool");

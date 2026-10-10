@@ -60,9 +60,9 @@ use chrono::{DateTime, Utc};
 use serde::Serialize;
 
 use crate::board::lease::{self, Candidate, PhaseModels, Route, Verdict};
+use crate::board::{FreeCapacity, LeasePurpose};
 use crate::consent::ceiling::StrategyCeiling;
 use crate::consent::{self, Composition};
-use crate::board::{FreeCapacity, LeasePurpose};
 use crate::context::ServiceContext;
 use crate::db::{BoardColumn, RunState};
 use crate::error::Result;
@@ -360,7 +360,14 @@ async fn candidates(
     ctx: &ServiceContext,
     runner: &RunnerView,
     ready: &[TaskSummary],
-) -> Result<Vec<(LeasePurpose, Arc<RepositoryDefaults>, PhaseModels, Composition)>> {
+) -> Result<
+    Vec<(
+        LeasePurpose,
+        Arc<RepositoryDefaults>,
+        PhaseModels,
+        Composition,
+    )>,
+> {
     let mut by_repository: HashMap<String, Arc<RepositoryDefaults>> = HashMap::new();
     let mut candidates = Vec::with_capacity(ready.len());
 

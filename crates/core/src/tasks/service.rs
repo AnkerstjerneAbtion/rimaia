@@ -639,8 +639,7 @@ pub async fn update_task(ctx: &ServiceContext, id: &str, patch: TaskPatch) -> Re
     // when the patch could change a plan revision.
     let touches_plan =
         !matches!(patch.plan, Patch::Unset) || !matches!(patch.extra_instructions, Patch::Unset);
-    let during_run =
-        touches_plan && crate::consent::written_during_run(ctx, &ctx.actor).await?;
+    let during_run = touches_plan && crate::consent::written_during_run(ctx, &ctx.actor).await?;
 
     let mut tx = ctx.begin().await?;
     let current = fetch_task_row(&mut tx, id).await?;

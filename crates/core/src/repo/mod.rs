@@ -525,7 +525,9 @@ pub async fn set_repository_unattended_ceiling(
     .fetch_one(&mut *tx)
     .await?;
     if team.personal_user_id.is_some() {
-        return Err(Error::invalid(crate::consent::personal_team_has_no_ceiling()));
+        return Err(Error::invalid(
+            crate::consent::personal_team_has_no_ceiling(),
+        ));
     }
     if team.role.as_deref() != Some(crate::identity::Role::Owner.as_str()) {
         return Err(Error::invalid(crate::consent::ceiling_needs_an_owner()));
@@ -539,7 +541,10 @@ pub async fn set_repository_unattended_ceiling(
     .await?;
     tx.commit().await?;
 
-    ctx.publish(ChangeEvent::repositories(team_id, [repository_id.to_string()]));
+    ctx.publish(ChangeEvent::repositories(
+        team_id,
+        [repository_id.to_string()],
+    ));
     get(ctx, repository_id).await
 }
 

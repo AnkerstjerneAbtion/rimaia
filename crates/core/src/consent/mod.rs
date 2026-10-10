@@ -76,7 +76,12 @@ impl Composition {
         let (findings_to_fix, rejections) = match &context.review {
             Some(review) => (
                 distinct(review.open_blocking.iter().map(|f| Some(&f.review_run_id))),
-                distinct(review.rejected.iter().map(|f| f.resolved_by_run_id.as_ref())),
+                distinct(
+                    review
+                        .rejected
+                        .iter()
+                        .map(|f| f.resolved_by_run_id.as_ref()),
+                ),
             ),
             None => (Vec::new(), Vec::new()),
         };
@@ -169,14 +174,16 @@ pub(crate) async fn inputs(
         return Ok(None);
     };
 
-    let says_something = |text: &Option<String>| text.as_deref().is_some_and(|t| !t.trim().is_empty());
-    let plan = (says_something(&task.plan) || says_something(&task.extra_instructions)).then(|| {
-        Revision {
-            revision: task.plan_revision,
-            author: task.plan_updated_by.clone(),
-            written_during_run: task.plan_written_during_run,
-        }
-    });
+    let says_something =
+        |text: &Option<String>| text.as_deref().is_some_and(|t| !t.trim().is_empty());
+    let plan =
+        (says_something(&task.plan) || says_something(&task.extra_instructions)).then(|| {
+            Revision {
+                revision: task.plan_revision,
+                author: task.plan_updated_by.clone(),
+                written_during_run: task.plan_written_during_run,
+            }
+        });
     let task_review_instructions = says_something(&task.review_instructions).then(|| Revision {
         revision: task.review_instructions_revision,
         author: task.review_instructions_updated_by.clone(),
@@ -197,9 +204,10 @@ pub(crate) async fn inputs(
 
     let base_commit = match &composition.base {
         Some(base) => {
-            let attempt = sqlx::query_scalar!("SELECT attempt FROM runs WHERE id = ?1", base.run_id)
-                .fetch_optional(&mut *conn)
-                .await?;
+            let attempt =
+                sqlx::query_scalar!("SELECT attempt FROM runs WHERE id = ?1", base.run_id)
+                    .fetch_optional(&mut *conn)
+                    .await?;
             let owners = match attempt {
                 Some(attempt) => crate::runs::commit_authors(conn, &base.task_id, attempt).await?,
                 // The run the base names is gone: nobody can be credited
@@ -352,7 +360,10 @@ impl TaskRow {
     }
 }
 
-pub(crate) async fn task_row(conn: &mut SqliteConnection, task_id: &str) -> Result<Option<TaskRow>> {
+pub(crate) async fn task_row(
+    conn: &mut SqliteConnection,
+    task_id: &str,
+) -> Result<Option<TaskRow>> {
     let row = sqlx::query!(
         r#"SELECT t.team_id, tm.personal_user_id, t.assignee_id, a.login AS "assignee_login?",
                   t.pinned_runner_id, p.label AS "pinned_label?", r.name AS repository_name,
@@ -460,10 +471,12 @@ async fn what(conn: &mut SqliteConnection, piece: &Piece) -> Result<String> {
         }
         ContentKind::BaseCommit => {
             let title = match piece.task_id.as_deref() {
-                Some(task_id) => sqlx::query_scalar!("SELECT title FROM tasks WHERE id = ?1", task_id)
-                    .fetch_optional(&mut *conn)
-                    .await?
-                    .unwrap_or_default(),
+                Some(task_id) => {
+                    sqlx::query_scalar!("SELECT title FROM tasks WHERE id = ?1", task_id)
+                        .fetch_optional(&mut *conn)
+                        .await?
+                        .unwrap_or_default()
+                }
                 None => String::new(),
             };
             format!("commit {} from \"{title}\"", piece.revision)
@@ -480,16 +493,30 @@ async fn what(conn: &mut SqliteConnection, piece: &Piece) -> Result<String> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Ineligible {
     /// ADR-0031 point 4: another runner holds the task's next attempt.
-    PinnedElsewhere { label: String },
+    PinnedElsewhere {
+        label: String,
+    },
     /// Pinned to this runner, then assigned to someone else: nobody can take
     /// it until someone chooses to run it elsewhere (task 057).
-    PinnedThenReassigned { label: String, login: String },
-    AssignedToSomeoneElse { login: String },
-    OutsideThePool { label: String },
+    PinnedThenReassigned {
+        label: String,
+        login: String,
+    },
+    AssignedToSomeoneElse {
+        login: String,
+    },
+    OutsideThePool {
+        label: String,
+    },
     /// ADR-0032 point 4: the team does not allow unattended runs here.
-    ForbiddenByTeam { repository: String },
+    ForbiddenByTeam {
+        repository: String,
+    },
     /// Task 067's model rule.
-    ModelNotOffered { model: String, provider: ProviderId },
+    ModelNotOffered {
+        model: String,
+        provider: ProviderId,
+    },
     /// The runner's strategy ceiling, a cost control.
     CeilingExceeded {
         label: String,
@@ -564,9 +591,9 @@ impl Ineligible {
                 "{what} was changed by @{login}, and you have not accepted that revision. Accept \
                  it, or trust @{login}'s changes."
             ),
-            Ineligible::ConsentMissing { what, .. } => format!(
-                "{what} was changed by a former member. Accept that revision to run it."
-            ),
+            Ineligible::ConsentMissing { what, .. } => {
+                format!("{what} was changed by a former member. Accept that revision to run it.")
+            }
         }
     }
 
@@ -599,9 +626,7 @@ pub(crate) fn not_eligible(
     let label = runner.map_or_else(|| runner_id.to_string(), |runner| runner.label.clone());
     let login = task.assignee_login.clone().unwrap_or_default();
     match reason {
-        Reason::AssignedToSomeoneElse
-            if task.pinned_runner_id.as_deref() == Some(runner_id) =>
-        {
+        Reason::AssignedToSomeoneElse if task.pinned_runner_id.as_deref() == Some(runner_id) => {
             Ineligible::PinnedThenReassigned { label, login }
         }
         Reason::AssignedToSomeoneElse => Ineligible::AssignedToSomeoneElse { login },
@@ -677,7 +702,8 @@ pub async fn written_during_run(ctx: &ServiceContext, actor: &str) -> Result<boo
         let findings = matches!(lease.purpose, LeasePurpose::Review | LeasePurpose::Fix);
         let composition = composition(&scoped, &lease.task_id, findings).await?;
         let mut conn = ctx.pool.acquire().await?;
-        let Some(inputs) = inputs(&mut conn, &lease.task_id, &lease.runner_id, &composition).await?
+        let Some(inputs) =
+            inputs(&mut conn, &lease.task_id, &lease.runner_id, &composition).await?
         else {
             continue;
         };
@@ -877,7 +903,12 @@ pub async fn accept(
     Ok(())
 }
 
-fn current_piece(kind: ContentKind, task_id: Option<&str>, revision: i64, author: Option<UserId>) -> Piece {
+fn current_piece(
+    kind: ContentKind,
+    task_id: Option<&str>,
+    revision: i64,
+    author: Option<UserId>,
+) -> Piece {
     Piece {
         kind,
         task_id: task_id.map(str::to_string),
@@ -889,7 +920,11 @@ fn current_piece(kind: ContentKind, task_id: Option<&str>, revision: i64, author
 
 /// Every piece of `kind` that `task_id` lists now, for any purpose and
 /// whichever runner would run it.
-async fn current_listed(ctx: &ServiceContext, task_id: &str, kind: ContentKind) -> Result<Vec<Piece>> {
+async fn current_listed(
+    ctx: &ServiceContext,
+    task_id: &str,
+    kind: ContentKind,
+) -> Result<Vec<Piece>> {
     let composition = composition(ctx, task_id, kind == ContentKind::ReviewFindings).await?;
     let mut conn = ctx.pool.acquire().await?;
     // No runner's id: every recorded run is "another runner's" here.
@@ -897,7 +932,11 @@ async fn current_listed(ctx: &ServiceContext, task_id: &str, kind: ContentKind) 
         return Ok(Vec::new());
     };
     let mut listed: Vec<Piece> = Vec::new();
-    for purpose in [LeasePurpose::Fix, LeasePurpose::Review, LeasePurpose::Implementation] {
+    for purpose in [
+        LeasePurpose::Fix,
+        LeasePurpose::Review,
+        LeasePurpose::Implementation,
+    ] {
         for piece in pieces_for(purpose, &inputs) {
             if piece.kind == kind && !listed.contains(&piece) {
                 listed.push(piece);
@@ -1009,7 +1048,10 @@ pub async fn status(ctx: &ServiceContext, task_id: &str, runner_id: &str) -> Res
 /// The purpose a claim of `task` would lease now: the kind a due retry
 /// resumes as, the planner for a fresh start that needs one, the
 /// implementation otherwise.
-pub(crate) async fn purpose_now(ctx: &ServiceContext, task: &crate::db::Task) -> Result<LeasePurpose> {
+pub(crate) async fn purpose_now(
+    ctx: &ServiceContext,
+    task: &crate::db::Task,
+) -> Result<LeasePurpose> {
     if task.run_state == crate::db::RunState::WaitingRetry {
         if let Some(point) = crate::scheduler::attempts::resume_point(ctx, &task.id).await? {
             return Ok(point.kind.into());
@@ -1017,7 +1059,8 @@ pub(crate) async fn purpose_now(ctx: &ServiceContext, task: &crate::db::Task) ->
     }
     let team_id = crate::tasks::service::team_of(ctx, &task.id).await?;
     let global = crate::strategy::settings::global_default_for(ctx, &team_id).await?;
-    let repository = crate::strategy::settings::repository_default(ctx, &task.repository_id).await?;
+    let repository =
+        crate::strategy::settings::repository_default(ctx, &task.repository_id).await?;
     let mode = crate::strategy::effective_strategy(task, &repository, &global).mode;
     Ok(if crate::tasks::strategy::needs_planning(task, mode) {
         LeasePurpose::Strategy
@@ -1068,9 +1111,12 @@ pub async fn set_runner_eligibility(
     )
     .execute(&mut *tx)
     .await?;
-    sqlx::query!("DELETE FROM runner_pool_teams WHERE runner_id = ?1", runner_id)
-        .execute(&mut *tx)
-        .await?;
+    sqlx::query!(
+        "DELETE FROM runner_pool_teams WHERE runner_id = ?1",
+        runner_id
+    )
+    .execute(&mut *tx)
+    .await?;
     for team_id in &teams {
         sqlx::query!(
             "INSERT INTO runner_pool_teams (runner_id, team_id) VALUES (?1, ?2)",
@@ -1121,7 +1167,10 @@ pub(crate) async fn ensure_member(
 
 /// Scope 11's stale-acceptance sentence.
 pub fn stale_acceptance(given: &str, what: &str, current: &str, who: Option<&str>) -> String {
-    let who = who.map_or_else(|| "a former member".to_string(), |login| format!("@{login}"));
+    let who = who.map_or_else(
+        || "a former member".to_string(),
+        |login| format!("@{login}"),
+    );
     format!(
         "revision {given} is not current: {what} is at revision {current}, changed by {who}. \
          Read it before accepting it."
@@ -1240,8 +1289,13 @@ mod tests {
     fn a_composition_names_each_run_behind_its_findings_once() {
         assert_eq!(
             distinct(
-                [Some(&"a".to_string()), None, Some(&"b".to_string()), Some(&"a".to_string())]
-                    .into_iter()
+                [
+                    Some(&"a".to_string()),
+                    None,
+                    Some(&"b".to_string()),
+                    Some(&"a".to_string())
+                ]
+                .into_iter()
             ),
             vec!["a".to_string(), "b".to_string()]
         );

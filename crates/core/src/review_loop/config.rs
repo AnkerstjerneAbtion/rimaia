@@ -705,8 +705,14 @@ pub async fn set_task_review(
     )
     .execute(&mut *tx)
     .await?;
-    write_review_instructions(&mut tx, task_id, instructions.as_deref(), &ctx.actor, during_run)
-        .await?;
+    write_review_instructions(
+        &mut tx,
+        task_id,
+        instructions.as_deref(),
+        &ctx.actor,
+        during_run,
+    )
+    .await?;
     tx.commit().await?;
 
     ctx.publish(ChangeEvent::tasks(team_id, [task_id.to_string()]));

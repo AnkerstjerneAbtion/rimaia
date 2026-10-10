@@ -33,37 +33,67 @@ async fn a_board_migrated_through_consent_attributes_everything_to_the_solo_user
         .fetch_one(&after)
         .await
         .expect("the adopted user");
-    let tasks: Vec<(String, Option<String>, Option<String>, Option<String>, Option<String>, i64)> =
-        sqlx::query_as(
-            "SELECT id, created_by, plan_updated_by, assignee_id, review_instructions_updated_by,
+    let tasks: Vec<TaskAttribution> = sqlx::query_as(
+        "SELECT id, created_by, plan_updated_by, assignee_id, review_instructions_updated_by,
                     plan_revision
                FROM tasks ORDER BY id",
-        )
-        .fetch_all(&after)
-        .await
-        .expect("read the tasks");
+    )
+    .fetch_all(&after)
+    .await
+    .expect("read the tasks");
     let solo = Some(solo);
     assert_eq!(
         tasks,
         vec![
-            (TASK_WITH_OVERRIDE.to_string(), solo.clone(), solo.clone(), None, solo.clone(), 1),
-            (TASK_WITHOUT.to_string(), solo.clone(), solo.clone(), None, None, 1),
+            (
+                TASK_WITH_OVERRIDE.to_string(),
+                solo.clone(),
+                solo.clone(),
+                None,
+                solo.clone(),
+                1
+            ),
+            (
+                TASK_WITHOUT.to_string(),
+                solo.clone(),
+                solo.clone(),
+                None,
+                None,
+                1
+            ),
         ]
     );
 
-    let settings: Vec<(String, Option<String>, i64)> = sqlx::query_as(
-        "SELECT key, updated_by, revision FROM team_settings ORDER BY key",
-    )
-    .fetch_all(&after)
-    .await
-    .expect("read the team settings");
-    assert!(!settings.is_empty(), "the adoption copied the team's settings");
+    let settings: Vec<(String, Option<String>, i64)> =
+        sqlx::query_as("SELECT key, updated_by, revision FROM team_settings ORDER BY key")
+            .fetch_all(&after)
+            .await
+            .expect("read the team settings");
+    assert!(
+        !settings.is_empty(),
+        "the adoption copied the team's settings"
+    );
     for (key, updated_by, revision) in &settings {
         assert_eq!((updated_by, *revision), (&solo, 1), "{key}");
     }
 
-    assert_eq!(dangling(&after).await, 0, "pragma_foreign_key_check is empty");
+    assert_eq!(
+        dangling(&after).await,
+        0,
+        "pragma_foreign_key_check is empty"
+    );
 }
+
+/// `(id, created_by, plan_updated_by, assignee_id,
+/// review_instructions_updated_by, plan_revision)`.
+type TaskAttribution = (
+    String,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    i64,
+);
 
 const TASK_WITH_OVERRIDE: &str = "3f2b1c00-0000-4000-8000-000000000101";
 const TASK_WITHOUT: &str = "3f2b1c00-0000-4000-8000-000000000102";
