@@ -19,7 +19,9 @@ use pretty_assertions::assert_eq;
 use rimaia_core::board::{
     ClaimTarget, FinishRun, FreeCapacity, LeasePurpose, NextStep, StartRun, TranscriptEnd,
 };
-use rimaia_core::consent::ceiling::{strategy_ceiling, StrategyCeiling, STRATEGY_CEILING};
+use rimaia_core::consent::ceiling::{
+    set_strategy_ceiling, strategy_ceiling, StrategyCeiling, STRATEGY_CEILING,
+};
 use rimaia_core::db::{BoardColumn, ExitClass, RunKind, RunState, RunStatus};
 use rimaia_core::events::TaskId;
 use rimaia_core::review_loop::config as review_config;
@@ -220,6 +222,49 @@ async fn a_stored_ceiling_that_does_not_parse_reads_as_no_ceiling() {
         .await
         .expect("store a value that is not JSON");
     assert_eq!(read().await, StrategyCeiling::default());
+}
+
+#[tokio::test]
+async fn a_set_ceiling_is_what_the_next_read_returns_and_an_empty_model_list_is_refused() {
+    let harness = TestContext::new().await;
+    let machine = harness.machine();
+    let ceiling = StrategyCeiling {
+        models: Some(vec!["sonnet".to_string(), "haiku".to_string()]),
+        max_effort: Some("medium".to_string()),
+    };
+
+    set_strategy_ceiling(machine, &ceiling)
+        .await
+        .expect("store a ceiling");
+    assert_eq!(strategy_ceiling(machine).await.expect("read it"), ceiling);
+
+    // A list of no models would refuse every task that names one and fill
+    // none: refused, and what was stored stands.
+    let error = set_strategy_ceiling(
+        machine,
+        &StrategyCeiling {
+            models: Some(vec![]),
+            max_effort: None,
+        },
+    )
+    .await
+    .expect_err("an empty list is refused");
+    assert_eq!(error.code(), ErrorCode::Invalid);
+    assert_eq!(
+        error.to_string(),
+        "a strategy ceiling must allow at least one model; leave `models` unset to allow any \
+         model"
+    );
+    assert_eq!(strategy_ceiling(machine).await.expect("read it"), ceiling);
+
+    // Neither half is no ceiling, exactly as an install that never set one.
+    set_strategy_ceiling(machine, &StrategyCeiling::default())
+        .await
+        .expect("clear the ceiling");
+    assert_eq!(
+        strategy_ceiling(machine).await.expect("read it"),
+        StrategyCeiling::default()
+    );
 }
 
 // ---------------------------------------------------------------------------

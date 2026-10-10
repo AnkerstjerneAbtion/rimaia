@@ -275,6 +275,11 @@ pub enum Tool {
     AcceptContent,
     SetRepositoryUnattendedCeiling,
     GetTaskConsent,
+
+    // Task 072. This runner's strategy ceiling, a runner setting (ADR-0032
+    // point 3). Both are refused to a run — see `run_access`.
+    GetStrategyCeiling,
+    SetStrategyCeiling,
 }
 
 /// What a [`RunScope::Run`] may do with one tool — ADR-0006's amendment table,
@@ -291,7 +296,7 @@ pub enum RunAccess {
 
 impl Tool {
     /// Every tool with a recorded decision, so a test can walk the table.
-    pub const ALL: [Tool; 68] = [
+    pub const ALL: [Tool; 70] = [
         Tool::AddTaskLink,
         Tool::CreateTask,
         Tool::GetBaseInstructions,
@@ -360,6 +365,8 @@ impl Tool {
         Tool::AcceptContent,
         Tool::SetRepositoryUnattendedCeiling,
         Tool::GetTaskConsent,
+        Tool::GetStrategyCeiling,
+        Tool::SetStrategyCeiling,
     ];
 
     /// The wired name — what `tools/list` advertises and what the ADR table
@@ -434,6 +441,8 @@ impl Tool {
             Tool::AcceptContent => "accept_content",
             Tool::SetRepositoryUnattendedCeiling => "set_repository_unattended_ceiling",
             Tool::GetTaskConsent => "get_task_consent",
+            Tool::GetStrategyCeiling => "get_strategy_ceiling",
+            Tool::SetStrategyCeiling => "set_strategy_ceiling",
         }
     }
 
@@ -693,6 +702,14 @@ impl Tool {
             | Tool::AcceptContent
             | Tool::SetRepositoryUnattendedCeiling
             | Tool::GetTaskConsent => RunAccess::Refused,
+
+            // Task 072, ADR-0021 point 4's second permanent refusal verbatim:
+            // the strategy ceiling is the run configuration of this machine. A
+            // run that raised it would be deciding what its own owner's
+            // subscription pays for, and one that lowered it would refuse every
+            // later run on the machine. The read is refused with the write, as
+            // `get_run_capacity` is: a run cannot act on the answer.
+            Tool::GetStrategyCeiling | Tool::SetStrategyCeiling => RunAccess::Refused,
         }
     }
 }

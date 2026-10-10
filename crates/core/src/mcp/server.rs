@@ -47,10 +47,10 @@ use crate::mcp::requests::{
     SetMaxConcurrencyRequest, SetRepositoryMaxConcurrencyRequest, SetRepositoryOnArchiveRequest,
     SetRepositoryReviewConfigRequest, SetRepositoryUnattendedCeilingRequest,
     SetReviewSettingsRequest, SetScheduleEnabledRequest, SetScheduleModeRequest,
-    SetStrategyApprovalRequest, SetStrategyCatalogueRequest, SetStrategyDefaultsRequest,
-    SetTaskDependenciesRequest, SetTaskReviewRequest, SetTaskStrategyRequest,
-    SetWorktreeAutoCleanupRequest, SubscriptionCostRequest, TaskStrategyRequest,
-    UpdateScheduleRequest, UpdateTaskRequest,
+    SetStrategyApprovalRequest, SetStrategyCatalogueRequest, SetStrategyCeilingRequest,
+    SetStrategyDefaultsRequest, SetTaskDependenciesRequest, SetTaskReviewRequest,
+    SetTaskStrategyRequest, SetWorktreeAutoCleanupRequest, SubscriptionCostRequest,
+    TaskStrategyRequest, UpdateScheduleRequest, UpdateTaskRequest,
 };
 use crate::mcp::responses::{
     AcceptedView, AnalyticsView, ArchiveReportView, ArchivedTaskView, BaseInstructionsView,
@@ -59,9 +59,9 @@ use crate::mcp::responses::{
     PreflightView, RepositoryListView, RepositoryOnArchiveView, RepositoryView, ReviewDigestView,
     ReviewFindingView, ReviewFindingsView, ReviewHistoryView, ReviewOutcomeView, ReviewedTaskView,
     RunCapacityView, ScheduleDeletedView, ScheduleListView, ScheduleView, StrategyApprovalView,
-    SubscriptionCostView, TaskConsentView, TaskDependentsView, TaskListItem, TaskListView,
-    TaskView, TimezoneListView, UnattendedCeilingView, WorktreeAutoCleanupView, WorktreeListView,
-    WorktreeView,
+    StrategyCeilingView, SubscriptionCostView, TaskConsentView, TaskDependentsView, TaskListItem,
+    TaskListView, TaskView, TimezoneListView, UnattendedCeilingView, WorktreeAutoCleanupView,
+    WorktreeListView, WorktreeView,
 };
 use crate::mcp::scope::{RunScope, Tool};
 use crate::review;
@@ -1451,6 +1451,48 @@ not is gone. `off` restores the default."
         }))
     }
 
+    // -----------------------------------------------------------------------
+    // The strategy ceiling (task 072, ADR-0032 point 3). Runner settings, so
+    // local, and refused to every run.
+    // -----------------------------------------------------------------------
+
+    #[tool(
+        description = "Read this computer's strategy ceiling: the models, and the highest effort, \
+a run here may spend the owner's subscription on. Call this before explaining why a task was \
+refused with a sentence about a strategy ceiling, or why a run spawned with a model nobody chose: \
+a task naming a model or an effort above the ceiling is refused and never lowered, and a task \
+naming none spawns with the first allowed model and the highest allowed effort. `null` on either \
+half is no limit on it, which is every computer that never set one."
+    )]
+    pub async fn get_strategy_ceiling(&self) -> Result<Json<StrategyCeilingView>, ToolError> {
+        self.scope.authorize(Tool::GetStrategyCeiling, None)?;
+        let local = self.local()?;
+        Ok(Json(
+            crate::consent::ceiling::strategy_ceiling(&local.machine)
+                .await?
+                .into(),
+        ))
+    }
+
+    #[tool(
+        description = "Replace this computer's strategy ceiling. Call it only when the owner asks \
+to cap what runs here cost: send `models` (ids from `get_strategy_catalogue`, the first filling a \
+task that names none) and `max_effort` (one catalogue effort; efforts are listed cheapest first), \
+or `null` for no limit on that half. It replaces the whole ceiling. Tasks that already name \
+something above it will be refused on this computer until their model or effort changes, and a \
+run already in flight keeps what it was spawned with."
+    )]
+    pub async fn set_strategy_ceiling(
+        &self,
+        Parameters(request): Parameters<SetStrategyCeilingRequest>,
+    ) -> Result<Json<StrategyCeilingView>, ToolError> {
+        self.scope.authorize(Tool::SetStrategyCeiling, None)?;
+        let local = self.local()?;
+        let ceiling = request.into();
+        crate::consent::ceiling::set_strategy_ceiling(&local.machine, &ceiling).await?;
+        Ok(Json(ceiling.into()))
+    }
+
     #[tool(
         description = "Call this to choose what archiving a task in one repository cleans up: `none` leaves \
 everything alone, `remove_worktree` deletes the task's checkout using Rimaia's own guards (it \
@@ -1857,7 +1899,7 @@ mod tests {
     /// capability parity a rule. What replaces a count is the property that
     /// actually matters — a registered tool with no run-scope decision cannot
     /// reach the wire.
-    const REGISTERED_TOOLS: [&str; 68] = [
+    const REGISTERED_TOOLS: [&str; 70] = [
         "accept_content",
         "accept_task_strategy",
         "add_task_link",
@@ -1881,6 +1923,7 @@ mod tests {
         "get_run_capacity",
         "get_strategy_approval",
         "get_strategy_catalogue",
+        "get_strategy_ceiling",
         "get_strategy_defaults",
         "get_subscription_cost",
         "get_task",
@@ -1917,6 +1960,7 @@ mod tests {
         "set_schedule_mode",
         "set_strategy_approval",
         "set_strategy_catalogue",
+        "set_strategy_ceiling",
         "set_strategy_defaults",
         "set_subscription_cost",
         "set_task_dependencies",

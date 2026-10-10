@@ -782,6 +782,19 @@ export interface RunCostSummary {
 
 export type RunEnvironment = "inherit" | "strict_local";
 
+/**
+ * Mirrors `rimaia_core::consent::ceiling::StrategyCeiling` (ADR-0032 point 3,
+ * task 072): this runner's cap on what a run may spend its owner's
+ * subscription on. `null` on either half is no limit on it, which is every
+ * install that never set one. A task naming a model outside `models`, or an
+ * effort above `maxEffort`, is refused on this runner and never lowered; a
+ * task naming neither spawns with the first of `models` and with `maxEffort`.
+ */
+export interface StrategyCeiling {
+  models: string[] | null;
+  maxEffort: string | null;
+}
+
 // ---------------------------------------------------------------------------
 // Execution strategy (task 020) — mirrors `rimaia_core::strategy` and the
 // `strategy_plan` envelope seam-contract D17.3 fixes (ADR-0016).

@@ -19,6 +19,7 @@ use serde::Deserialize;
 
 use chrono::{DateTime, Utc};
 
+use crate::consent::ceiling::StrategyCeiling;
 use crate::db::settings::Dismissal;
 use crate::db::{BoardColumn, OnArchive, RunState, ScheduleMode, StrategyMode};
 use crate::doctor::Check;
@@ -678,6 +679,32 @@ pub struct SetScheduleEnabledRequest {
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub struct SetWorktreeAutoCleanupRequest {
     pub setting: AutoCleanup,
+}
+
+/// This runner's strategy ceiling, whole (task 072, ADR-0032 point 3). Both
+/// fields replace what is stored; an omitted one is "no limit" on that half.
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct SetStrategyCeilingRequest {
+    /// The model ids a run on this machine may spawn with, from
+    /// `get_strategy_catalogue`. The first fills a run that names no model.
+    /// Omit it, or send `null`, to allow any model.
+    #[serde(default)]
+    pub models: Option<Vec<String>>,
+    /// The most expensive effort a run may spawn with, an id from the
+    /// catalogue, which lists efforts cheapest first. It fills a run that
+    /// names no effort. Omit it, or send `null`, for no limit.
+    #[serde(default)]
+    pub max_effort: Option<String>,
+}
+
+impl From<SetStrategyCeilingRequest> for StrategyCeiling {
+    fn from(request: SetStrategyCeilingRequest) -> Self {
+        Self {
+            models: request.models,
+            max_effort: request.max_effort,
+        }
+    }
 }
 
 /// One repository, by id (task 022).

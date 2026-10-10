@@ -18,6 +18,7 @@ use serde::Serialize;
 
 use crate::analytics::{Analytics, RunOutcomes};
 use crate::archive::OnArchiveOutcome;
+use crate::consent::ceiling::StrategyCeiling;
 use crate::credentials::StoreStatus;
 use crate::db::settings::Dismissal;
 use crate::db::Task;
@@ -1075,6 +1076,25 @@ pub struct WorktreeListView {
 #[serde(rename_all = "snake_case")]
 pub struct WorktreeAutoCleanupView {
     pub setting: AutoCleanup,
+}
+
+/// This runner's strategy ceiling, in the tool surface's `snake_case`
+/// (D16.1) rather than the Tauri boundary's camelCase. `null` on either half
+/// is no limit on it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub struct StrategyCeilingView {
+    pub models: Option<Vec<String>>,
+    pub max_effort: Option<String>,
+}
+
+impl From<StrategyCeiling> for StrategyCeilingView {
+    fn from(ceiling: StrategyCeiling) -> Self {
+        Self {
+            models: ceiling.models,
+            max_effort: ceiling.max_effort,
+        }
+    }
 }
 
 /// What a repository's archive cleanup did to one task (ADR-0025 point 6).

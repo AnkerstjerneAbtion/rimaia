@@ -1,5 +1,5 @@
-//! Base instructions and run-environment commands (task 006, ADR-0009,
-//! ADR-0012, seam-contract D3).
+//! Base instructions, run-environment and strategy-ceiling commands (task
+//! 006, ADR-0009, ADR-0012, seam-contract D3; task 072, ADR-0032).
 //!
 //! Every rule — what an absent key means, how `run_environment` parses, how
 //! a prompt is actually composed from them — lives in
@@ -10,6 +10,7 @@
 //! matches what a run would receive, byte for byte — cannot drift into a
 //! frontend-side approximation.
 
+use rimaia_core::consent::ceiling::{self, StrategyCeiling};
 use rimaia_core::db::{settings, RunEnvironment};
 use rimaia_core::runner::outcome::{self, RunCostSummary};
 use rimaia_core::runner::prompt;
@@ -40,6 +41,26 @@ pub async fn get_run_environment(state: State<'_, AppState>) -> Result<RunEnviro
 #[tauri::command]
 pub async fn set_run_environment(state: State<'_, AppState>, value: RunEnvironment) -> Result<()> {
     settings::set_run_environment(&state.machine, value).await
+}
+
+/// This runner's strategy ceiling (ADR-0032 point 3, task 072): the models
+/// and the highest effort a run on this machine may spend its owner's
+/// subscription on. A runner setting, so local (seam-contract D32); no ceiling
+/// is every existing install.
+#[tauri::command]
+pub async fn get_strategy_ceiling(state: State<'_, AppState>) -> Result<StrategyCeiling> {
+    ceiling::strategy_ceiling(&state.machine).await
+}
+
+/// Replaces this runner's strategy ceiling. The next claim carries it and the
+/// next spawn is judged against it; a run already spawned keeps what it was
+/// spawned with.
+#[tauri::command]
+pub async fn set_strategy_ceiling(
+    state: State<'_, AppState>,
+    ceiling: StrategyCeiling,
+) -> Result<()> {
+    ceiling::set_strategy_ceiling(&state.machine, &ceiling).await
 }
 
 /// What runs on this machine have actually cost, so the environment toggle can

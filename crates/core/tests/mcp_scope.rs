@@ -266,6 +266,9 @@ fn expected_access(tool: Tool, kind: GrantKind) -> RunAccess {
             | Tool::AcceptContent
             | Tool::SetRepositoryUnattendedCeiling
             | Tool::GetTaskConsent => RunAccess::Refused,
+            // Task 072. This machine's strategy ceiling is run configuration
+            // (ADR-0021 point 4); see `a_run_cannot_read_or_change_the_strategy_ceiling`.
+            Tool::GetStrategyCeiling | Tool::SetStrategyCeiling => RunAccess::Refused,
     }
 }
 
@@ -1822,9 +1825,10 @@ async fn the_run_scoped_server_reports_its_own_name() {
 // Board tools in core, machine tools injected by the host (task 041)
 // ---------------------------------------------------------------------------
 
-/// The 22 tools that inspect, reconfigure or spawn on this machine: the local
-/// router, as task 041's Scope names it.
-const LOCAL_TOOLS: [&str; 23] = [
+/// The tools that inspect, reconfigure or spawn on this machine: the local
+/// router, as task 041's Scope names it, with 066's `list_checkouts` and
+/// 072's two strategy-ceiling tools.
+const LOCAL_TOOLS: [&str; 25] = [
     "run_doctor",
     "dismiss_onboarding",
     "dismiss_doctor_warning",
@@ -1848,6 +1852,8 @@ const LOCAL_TOOLS: [&str; 23] = [
     "list_timezones",
     "plan_task_strategy",
     "plan_tasks_strategy",
+    "get_strategy_ceiling",
+    "set_strategy_ceiling",
 ];
 
 /// Every tool name a client listing `url` is offered, sorted.
@@ -2402,6 +2408,80 @@ async fn solo_team(pool: &SqlitePool) -> String {
     .await
     .expect("the board's solo identity")
     .team_id
+}
+
+#[tokio::test]
+async fn a_run_cannot_read_or_change_the_strategy_ceiling() {
+    // Task 072. The ceiling decides what this machine's owner pays for: a run
+    // raising it would spend on its own authority, and one lowering it would
+    // refuse every later run here. Refused to every grant, through the
+    // run-scoped route a run actually reaches, before anything is read or
+    // written; the operator's door is the control.
+    let h = TestContext::new().await;
+    let handles = RunHandles::default();
+    let (handle, server) = serving(&h, &handles).await;
+    let operator = handle.url().expect("the server is listening");
+    let set = json!({ "models": ["haiku"], "max_effort": "low" });
+
+    for grant in every_grant() {
+        let granted = handles.grant("task-1", &h.solo.team_id, grant);
+        let client = ()
+            .serve(StreamableHttpClientTransport::with_client(
+                reqwest::Client::default(),
+                StreamableHttpClientTransportConfig::with_uri(scoped_url(&handles, &granted)),
+            ))
+            .await
+            .expect("a run's own handle answers `initialize`");
+        let read = client
+            .call_tool(CallToolRequestParams::new("get_strategy_ceiling"))
+            .await
+            .expect("a refusal is a tool result");
+        assert_refusal(&read, &not_available("get_strategy_ceiling", "task-1"));
+        let written = client
+            .call_tool(
+                CallToolRequestParams::new("set_strategy_ceiling")
+                    .with_arguments(set.as_object().expect("an object").clone()),
+            )
+            .await
+            .expect("a refusal is a tool result");
+        assert_refusal(&written, &not_available("set_strategy_ceiling", "task-1"));
+        let _ = client.cancel().await;
+    }
+    assert_eq!(
+        rimaia_core::consent::ceiling::strategy_ceiling(h.machine())
+            .await
+            .expect("read the ceiling"),
+        Default::default(),
+        "no run stored a ceiling"
+    );
+
+    let client = ()
+        .serve(StreamableHttpClientTransport::with_client(
+            reqwest::Client::default(),
+            StreamableHttpClientTransportConfig::with_uri(operator),
+        ))
+        .await
+        .expect("the operator's door answers `initialize`");
+    let written = client
+        .call_tool(
+            CallToolRequestParams::new("set_strategy_ceiling")
+                .with_arguments(set.as_object().expect("an object").clone()),
+        )
+        .await
+        .expect("the operator sets the ceiling");
+    assert_eq!(written.is_error, Some(false), "{written:?}");
+    let read = client
+        .call_tool(CallToolRequestParams::new("get_strategy_ceiling"))
+        .await
+        .expect("the operator reads it back");
+    assert_eq!(
+        read.structured_content,
+        Some(json!({ "models": ["haiku"], "max_effort": "low" }))
+    );
+    let _ = client.cancel().await;
+
+    handle.shutdown();
+    server.await.expect("the server task ends");
 }
 
 #[tokio::test]

@@ -263,6 +263,14 @@ fn cases() -> Vec<Case> {
             Writes,
             |_| json!({ "setting": "off" }),
         ),
+        // This machine's strategy ceiling: a runner setting, which no team
+        // owns and none of team B's rows can reach (task 072).
+        case("get_strategy_ceiling", Reads, |_| Value::Null),
+        case(
+            "set_strategy_ceiling",
+            Writes,
+            |_| json!({ "models": ["sonnet"], "max_effort": "medium" }),
+        ),
         case(
             "archive_task",
             Writes,

@@ -59,6 +59,7 @@ import type {
   SearchHit,
   StrategyApproval,
   StrategyCatalogueView,
+  StrategyCeiling,
   StrategyDefaults,
   Task,
   TaskConsent,
@@ -572,6 +573,18 @@ export async function getRunCostSummary(): Promise<RunCostSummary> {
 
 export function setRunEnvironment(value: RunEnvironment): Promise<void> {
   return call<void>("set_run_environment", { value });
+}
+
+/** This runner's strategy ceiling — see `StrategyCeiling`. A local runner
+ *  setting (seam-contract D32). */
+export function getStrategyCeiling(): Promise<StrategyCeiling> {
+  return call<StrategyCeiling>("get_strategy_ceiling");
+}
+
+/** Replaces this runner's strategy ceiling whole. The next claim and the next
+ *  spawn read it; a run already spawned keeps what it was spawned with. */
+export function setStrategyCeiling(ceiling: StrategyCeiling): Promise<void> {
+  return call<void>("set_strategy_ceiling", { ceiling });
 }
 
 /**

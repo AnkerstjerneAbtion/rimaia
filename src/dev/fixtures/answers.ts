@@ -23,6 +23,7 @@ import type {
   Schedule,
   ScheduleView,
   StrategyCatalogueView,
+  StrategyCeiling,
   Task,
   TaskConsent,
   TaskDependent,
@@ -366,6 +367,9 @@ export const ANSWERS: Record<string, Answer> = {
     providerDisplayName: "Claude Code",
   }),
   set_run_environment: done,
+  // No install has a strategy ceiling until its owner sets one (task 072).
+  get_strategy_ceiling: (): StrategyCeiling => ({ models: null, maxEffort: null }),
+  set_strategy_ceiling: done,
   preview_composed_prompt: (args, s) => `Implement: ${findTask(s, args.taskId).title}`,
 
   // --- strategy ---------------------------------------------------------

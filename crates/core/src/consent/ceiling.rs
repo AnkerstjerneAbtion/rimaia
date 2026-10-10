@@ -8,7 +8,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::error::Result;
+use crate::error::{Error, Result};
 use crate::machine::MachineContext;
 use crate::strategy::{Catalogue, StrategyOrigin};
 
@@ -40,8 +40,8 @@ impl StrategyCeiling {
 /// Read straight through the machine store, like `runner::limits`' two
 /// override keys, and for their reason: it is not in
 /// `db::settings::RUNNER_KEYS`, because the board's `settings` never held it
-/// and task 040's adoption has nothing to copy. The local commands that write
-/// it are task 072's.
+/// and task 040's adoption has nothing to copy. [`set_strategy_ceiling`] is
+/// its one writer, behind the local commands and tools of the same name.
 pub const STRATEGY_CEILING: &str = "strategy_ceiling";
 
 /// This runner's ceiling, read when each run starts by the route
@@ -56,6 +56,45 @@ pub async fn strategy_ceiling(machine: &MachineContext) -> Result<StrategyCeilin
         tracing::warn!(value = stored, %error, "unusable strategy_ceiling; no ceiling applies");
         StrategyCeiling::default()
     }))
+}
+
+/// Stores this runner's ceiling, replacing the one before it whole. A ceiling
+/// with neither half reads back exactly as an absent key: no ceiling.
+///
+/// Read by the next claim and the next spawn, never by one already judged. A
+/// list of no models is refused rather than stored: it would refuse every
+/// task that names a model and fill none, which nobody means; `None` is "any
+/// model". A blank id is refused for the same reason.
+pub async fn set_strategy_ceiling(
+    machine: &MachineContext,
+    ceiling: &StrategyCeiling,
+) -> Result<()> {
+    if let Some(models) = &ceiling.models {
+        if models.is_empty() {
+            return Err(Error::invalid(
+                "a strategy ceiling must allow at least one model; leave `models` unset to allow \
+                 any model",
+            ));
+        }
+        if models.iter().any(|model| model.trim().is_empty()) {
+            return Err(Error::invalid(
+                "a strategy ceiling's model ids cannot be blank",
+            ));
+        }
+    }
+    if ceiling
+        .max_effort
+        .as_deref()
+        .is_some_and(|effort| effort.trim().is_empty())
+    {
+        return Err(Error::invalid(
+            "a strategy ceiling's highest effort cannot be blank; leave it unset for no limit",
+        ));
+    }
+
+    let stored = serde_json::to_string(ceiling)
+        .map_err(|error| Error::internal(format!("a strategy ceiling must serialize: {error}")))?;
+    machine.store.set_setting(STRATEGY_CEILING, &stored).await
 }
 
 /// What one phase would spawn with, and where each half came from.
