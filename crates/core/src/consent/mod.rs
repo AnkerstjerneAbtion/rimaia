@@ -65,7 +65,10 @@ use pieces::{
 pub struct Composition {
     /// The review runs whose open blocking findings a fix acts on.
     pub findings_to_fix: Vec<RunId>,
-    /// The fix runs whose rejection reasons a review is told.
+    /// The runs whose text fills a review's `# Findings already rejected`:
+    /// each rejected finding's review run, which wrote its title and
+    /// location, and its fix run, which wrote the reason (ADR-0032 point 3
+    /// credits each to the owner of the runner it ran on).
     pub rejections: Vec<RunId>,
     /// 044's dependency base, when the base is a dependency's commit.
     pub base: Option<BaseDependency>,
@@ -78,12 +81,7 @@ impl Composition {
         let (findings_to_fix, rejections) = match &context.review {
             Some(review) => (
                 distinct(review.open_blocking.iter().map(|f| Some(&f.review_run_id))),
-                distinct(
-                    review
-                        .rejected
-                        .iter()
-                        .map(|f| f.resolved_by_run_id.as_ref()),
-                ),
+                rejection_runs(&review.rejected),
             ),
             None => (Vec::new(), Vec::new()),
         };
@@ -93,6 +91,17 @@ impl Composition {
             base: context.base.dependency.clone(),
         }
     }
+}
+
+/// [`Composition::rejections`] for `rejected`: per finding, the review run
+/// that recorded it, then the fix run that rejected it.
+fn rejection_runs(rejected: &[crate::review::ReviewFinding]) -> Vec<RunId> {
+    distinct(rejected.iter().flat_map(|finding| {
+        [
+            Some(&finding.review_run_id),
+            finding.resolved_by_run_id.as_ref(),
+        ]
+    }))
 }
 
 fn distinct<'a>(ids: impl Iterator<Item = Option<&'a String>>) -> Vec<RunId> {
@@ -134,12 +143,7 @@ pub async fn composition(
         .map(|finding| Some(&finding.review_run_id));
     Ok(Composition {
         findings_to_fix: distinct(open),
-        rejections: distinct(
-            review
-                .rejected
-                .iter()
-                .map(|finding| finding.resolved_by_run_id.as_ref()),
-        ),
+        rejections: rejection_runs(&review.rejected),
         base,
     })
 }

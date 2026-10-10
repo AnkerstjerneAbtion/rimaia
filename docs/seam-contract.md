@@ -6738,14 +6738,16 @@ each meet these again, and left to each implementer they would be decided in fiv
    commit; review, plan · the effective review instructions · findings from another runner ·
    base commit; fix, plan · base instructions · findings from another runner · base commit.
    Findings are one piece per run on a runner other than the claiming one: for a fix, the
-   review runs whose open blocking findings it acts on; for a review, the fix runs whose
-   rejection reasons it is told. Their revision is the run id and their author the owner of
-   the run's runner. ADR-0016's inline planner is leased as `strategy` and composes the
-   implementation under the same lease, so its claim and `run_context` judge the strategy and
-   the implementation pieces together (`Composes::PlannerThenImplementation`); Plan now judges
-   the strategy pieces alone. The base commit is one piece per distinct owner of the runners
-   of the dependency's implementation and fix runs up to the chosen run's attempt, failed ones
-   included (`runs::commit_authors`); its task is the dependency, its revision the commit.
+   review runs whose open blocking findings it acts on; for a review, the runs whose text
+   fills `# Findings already rejected`, which are each rejected finding's review run (its title
+   and location) and its fix run (the reason). Their revision is the run id and their author
+   the owner of the run's runner. ADR-0016's inline planner is leased as `strategy` and
+   composes the implementation under the same lease, so its claim and `run_context` judge the
+   strategy and the implementation pieces together (`Composes::PlannerThenImplementation`);
+   Plan now judges the strategy pieces alone. The base commit is one piece per distinct owner
+   of the runners of the dependency's implementation and fix runs up to the chosen run's
+   attempt, failed ones included (`runs::commit_authors`); its task is the dependency, its
+   revision the commit.
    The strategy planner's guidance in the implementation prompt is not a piece (ADR-0032
    point 3 exempts execution strategy), and empty content is not a piece. The plan is always
    a piece, blank `plan` and `extra_instructions` included: its revision covers the title,

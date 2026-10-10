@@ -141,8 +141,9 @@ pub struct PieceInputs {
     pub team_review_instructions: Option<Revision>,
     /// For `fix`: the review runs whose open findings the fix acts on.
     pub findings_to_fix: Vec<RunOnRunner>,
-    /// For `review`: the fix runs whose rejection reasons fill
-    /// `# Findings already rejected`.
+    /// For `review`: the runs whose text fills `# Findings already
+    /// rejected`, the review runs that recorded the findings and the fix runs
+    /// that rejected them.
     pub rejections: Vec<RunOnRunner>,
     /// Present only when the base is a dependency's commit.
     pub base_commit: Option<BaseCommitInput>,

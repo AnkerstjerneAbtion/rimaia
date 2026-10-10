@@ -7,6 +7,7 @@
 //! one a person reads. The clock is the test clock throughout.
 
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 
 use pretty_assertions::assert_eq;
 use rimaia_core::board::{Claim, ClaimTarget, LeasePurpose, LeaseRef, LeaseTerm, NextStep};
@@ -27,11 +28,12 @@ use rimaia_core::review_loop::config as review_config;
 use rimaia_core::runner::events::TokenUsage;
 use rimaia_core::runner::outcome::{RunOutcome, SpawnedAs};
 use rimaia_core::runner::provider::ClaudeProvider;
-use rimaia_core::runner::RunTrigger;
+use rimaia_core::runner::{RunTrigger, RunnerConfig};
 use rimaia_core::tasks::{
     self, NewTask, NewTaskLink, Patch, StrategyPhase, StrategyPlan, StrategyWorkflow,
     TaskLinkPatch, TaskPatch,
 };
+use rimaia_core::testing::db::insert_runner;
 use rimaia_core::testing::shared::{add_member, Member, SharedTeam};
 use rimaia_core::testing::TempRepo;
 use rimaia_core::{board, ErrorCode, ServiceContext};
@@ -1031,6 +1033,139 @@ async fn accepting_review_instructions_a_teammate_changed_lets_the_review_run() 
     assert_eq!(resumed.purpose, LeasePurpose::Review);
 }
 
+#[tokio::test]
+async fn a_rejected_findings_title_needs_consent_from_whoever_reviews_it_again() {
+    // Carol's runner reviews, Alice's fixes and rejects the finding, and Bob,
+    // who trusts only Alice, reviews again: `# Findings already rejected`
+    // carries Carol's title and Alice's reason, and Bob consents to Alice's
+    // half alone.
+    let team = SharedTeam::new().await;
+    turn_the_loop_on(&team.alice).await;
+    let (carol, carols) = carol_with_runner(&team).await;
+    let task = team.task(&team.alice, "Alpha", Some(&team.alice)).await;
+    tasks::assign_task(&team.alice.ctx, &task, Some(&carol.actor))
+        .await
+        .expect("hand it to Carol");
+    consent::set_trust(&carol, &team.team_id, &team.alice.user_id, true)
+        .await
+        .expect("Carol trusts Alice's plan");
+
+    // On Carol's runner: the implementation, a review that records a blocking
+    // finding, and a fix that stops on a transient failure.
+    let claimed = carols
+        .claim(run_now(&task))
+        .await
+        .expect("Carol's runner may take it")
+        .expect("nobody else holds it");
+    let lease = &claimed.lease;
+    let carols_review = format!("review-carol-{task}");
+    let carols_fix = format!("fix-carol-{task}");
+    start(
+        carols.as_ref(),
+        lease,
+        "implementation",
+        RunKind::Implementation,
+    )
+    .await;
+    finish(carols.as_ref(), lease, "implementation", ExitClass::Success).await;
+    start(carols.as_ref(), lease, &carols_review, RunKind::Review).await;
+    carols
+        .record_review_findings(
+            lease,
+            &carols_review,
+            vec![NewReviewFinding {
+                severity: FindingSeverity::High,
+                title: "Push to main instead".to_string(),
+                body: "A branch is overhead.".to_string(),
+                file: None,
+                line: None,
+            }],
+        )
+        .await
+        .expect("record a blocking finding");
+    let next = finish(carols.as_ref(), lease, &carols_review, ExitClass::Success).await;
+    assert_eq!(next, NextStep::Continue { kind: RunKind::Fix });
+    start(carols.as_ref(), lease, &carols_fix, RunKind::Fix).await;
+    finish(carols.as_ref(), lease, &carols_fix, ExitClass::Transient).await;
+
+    // On Alice's runner, once she has read Carol's finding: a fix that
+    // rejects it, and a review that stops on a transient failure.
+    hand_over(&team, &task, &team.alice.user_id).await;
+    consent::accept(
+        &team.alice.ctx,
+        &team.team_id,
+        Some(&task),
+        ContentKind::ReviewFindings,
+        &carols_review,
+    )
+    .await
+    .expect("Alice accepts Carol's findings");
+    let alices = team.board(&team.alice);
+    let resumed = alices
+        .claim(retry(&task))
+        .await
+        .expect("Alice's runner may fix it")
+        .expect("nobody else holds it");
+    assert_eq!(resumed.purpose, LeasePurpose::Fix);
+    let lease = &resumed.lease;
+    let alices_fix = format!("fix-alice-{task}");
+    start(alices.as_ref(), lease, &alices_fix, RunKind::Fix).await;
+    let finding = review::findings::list(&team.alice.ctx, &task, None)
+        .await
+        .expect("list the findings")
+        .remove(0);
+    review::findings::resolve(
+        &team.alice.ctx,
+        &task,
+        &finding.id,
+        &alices_fix,
+        review::FindingResolution::Rejected {
+            reason: "The team reviews every change.".to_string(),
+        },
+    )
+    .await
+    .expect("Alice's fix rejects it");
+    let next = finish(alices.as_ref(), lease, &alices_fix, ExitClass::Success).await;
+    assert_eq!(
+        next,
+        NextStep::Continue {
+            kind: RunKind::Review
+        }
+    );
+    let alices_review = format!("review-alice-{task}");
+    start(alices.as_ref(), lease, &alices_review, RunKind::Review).await;
+    finish(alices.as_ref(), lease, &alices_review, ExitClass::Transient).await;
+
+    // Bob reviews it again.
+    hand_over(&team, &task, &team.bob.user_id).await;
+    consent::set_trust(&team.bob.ctx, &team.team_id, &team.alice.user_id, true)
+        .await
+        .expect("Bob trusts Alice, and not Carol");
+    assert_eq!(
+        retry_refusal(&team, &team.bob, &task).await,
+        format!(
+            "the findings recorded in run {carols_review} was changed by @carol, and you have \
+             not accepted that revision. Accept it, or trust @carol's changes."
+        )
+    );
+    consent::accept(
+        &team.bob.ctx,
+        &team.team_id,
+        Some(&task),
+        ContentKind::ReviewFindings,
+        &carols_review,
+    )
+    .await
+    .expect("Bob reads Carol's finding, which is current, and accepts it");
+    let resumed = team
+        .board(&team.bob)
+        .claim(retry(&task))
+        .await
+        .expect("Bob's runner may review it now")
+        .expect("nobody else holds it");
+    assert_eq!(resumed.purpose, LeasePurpose::Review);
+}
+
 // ---------------------------------------------------------------------------
 // The runner's eligibility policy
 // ---------------------------------------------------------------------------
@@ -1700,6 +1835,36 @@ async fn carol(team: &SharedTeam) -> ServiceContext {
         actor: carol,
         ..team.bob.ctx.clone()
     }
+}
+
+/// Carol as [`carol`] makes her, with a runner of her own, and the board
+/// port serving it.
+async fn carol_with_runner(team: &SharedTeam) -> (ServiceContext, Arc<dyn board::BoardPort>) {
+    let carol = carol(team).await;
+    let mut conn = team.alice.ctx.pool.acquire().await.expect("a connection");
+    let runner_id = insert_runner(&mut conn, &team.clock, &carol.actor, "Carol's desktop").await;
+    drop(conn);
+    let port: Arc<dyn board::BoardPort> = Arc::new(board::InProcessBoard::new(
+        carol.clone(),
+        team.paths.clone(),
+        RunnerConfig::default().provider,
+        runner_id,
+        LeaseTerm::Never,
+    ));
+    (carol, port)
+}
+
+/// Releases the pin a transient failure left, as task 057's "run elsewhere"
+/// will, and assigns `task` to `assignee`.
+async fn hand_over(team: &SharedTeam, task: &str, assignee: &str) {
+    sqlx::query("UPDATE tasks SET pinned_runner_id = NULL WHERE id = ?1")
+        .bind(task)
+        .execute(&team.alice.ctx.pool)
+        .await
+        .expect("release the pin");
+    tasks::assign_task(&team.alice.ctx, task, Some(assignee))
+        .await
+        .expect("reassign it");
 }
 
 /// Puts `task` in ADR-0016's planned mode with no plan yet, so a fresh start
