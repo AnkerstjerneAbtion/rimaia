@@ -471,6 +471,18 @@ export interface Task {
    *  the board" — a third axis, orthogonal to both `column` and `runState`,
    *  and deliberately not a fifth `BoardColumn`. */
   archivedAt: string | null;
+  /** Who wrote the task (task 045). `null` for a deleted account. Optional
+   *  until the interface renders it (task 061). */
+  createdBy?: string | null;
+  /** The one person whose runners run this task (ADR-0032 point 1); `null` is
+   *  the team's pool. In a personal team an unassigned task is its owner's. */
+  assigneeId?: string | null;
+  assignedBy?: string | null;
+  /** ADR-0032 point 3's revision of `plan` and `extraInstructions` together:
+   *  what an acceptance names. */
+  planRevision?: number;
+  /** Who wrote the current plan revision; `null` for a deleted account. */
+  planUpdatedBy?: string | null;
 }
 
 /** Mirrors `rimaia_core::db::TaskLink`. One `{label, url}` external reference. */
@@ -1006,7 +1018,12 @@ export type SkipReason =
   | "dependency_not_satisfied"
   | "already_in_flight"
   | "waiting_for_retry"
-  | "needs_attention";
+  | "needs_attention"
+  // Task 045 (ADR-0032), each persisting until a person acts: reassigning the
+  // card or joining the pool, accepting or trusting, asking a team owner.
+  | "not_eligible"
+  | "consent_missing"
+  | "forbidden_by_team";
 
 /**
  * Mirrors `rimaia_core::scheduler::QueueEntry`. One `ready` task as the queue
@@ -1928,4 +1945,53 @@ export interface LoopHistory {
  *  returned: grouping into loops is core's, not the view's. */
 export interface ReviewHistory {
   loops: LoopHistory[];
+}
+
+/**
+ * Mirrors `rimaia_core::consent::pieces::ContentKind`: the consent-gated
+ * content a run executes (ADR-0032 point 3), in the `acceptances` table's
+ * spelling.
+ */
+export type ContentKind =
+  | "plan"
+  | "task_review_instructions"
+  | "base_instructions"
+  | "review_instructions"
+  | "review_findings"
+  | "base_commit";
+
+/** Mirrors `rimaia_core::consent::EligibilityStatus`: whether a runner may take
+ *  a task at all (ADR-0032 point 2). */
+export type EligibilityStatus = "assigned" | "pool" | "assigned_to_someone_else" | "unassigned";
+
+/** Mirrors `rimaia_core::consent::TeamCeiling` (ADR-0032 point 4). A personal
+ *  team does not consult it: the runner's own consent is the whole decision. */
+export type TeamCeiling = "not_consulted" | "allowed" | "forbidden";
+
+/** Mirrors `rimaia_core::consent::pieces::MissingReason`: which sentence a
+ *  missing piece is refused with. */
+export type MissingReason = "not_accepted" | "former_member" | "written_during_run";
+
+/** Mirrors `rimaia_core::consent::MissingPiece`: one piece the runner's owner
+ *  has neither written, accepted nor trusted. */
+export interface MissingPiece {
+  kind: ContentKind;
+  taskId: string | null;
+  /** What `acceptContent` names: a decimal revision, a run id or a commit. */
+  revision: string;
+  /** `null` for a former member. */
+  authorLogin: string | null;
+  reason: MissingReason;
+}
+
+/**
+ * Mirrors `rimaia_core::consent::TaskConsent`, from `get_task_consent` (task
+ * 045): everything that decides whether one of the user's runners would take
+ * a task. No component renders it yet (task 061 does).
+ */
+export interface TaskConsent {
+  eligibility: EligibilityStatus;
+  pinnedRunnerId: string | null;
+  teamCeiling: TeamCeiling;
+  missing: MissingPiece[];
 }

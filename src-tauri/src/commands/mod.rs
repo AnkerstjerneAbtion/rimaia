@@ -7,6 +7,7 @@
 
 pub mod analytics;
 pub mod app;
+pub mod consent;
 pub mod doctor;
 pub mod mcp;
 pub mod queue;

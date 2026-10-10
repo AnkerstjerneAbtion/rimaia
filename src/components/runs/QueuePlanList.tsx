@@ -19,6 +19,9 @@ export const QUEUE_SKIP_LABELS: Record<SkipReason, string> = {
   already_in_flight: "already started",
   waiting_for_retry: "waiting to resume",
   needs_attention: "the last run did not succeed",
+  not_eligible: "assigned to someone else, or outside the pool this runner takes",
+  consent_missing: "waiting for you to accept a change",
+  forbidden_by_team: "the team does not allow unattended runs in this repository",
 };
 
 interface QueuePlanListProps {

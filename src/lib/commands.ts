@@ -9,6 +9,7 @@ import type {
   BoardColumn,
   CheckoutView,
   CleanupReport,
+  ContentKind,
   CredentialStatus,
   DetectedOpenInTarget,
   DiffSummary,
@@ -60,6 +61,7 @@ import type {
   StrategyCatalogueView,
   StrategyDefaults,
   Task,
+  TaskConsent,
   TaskDependent,
   TaskDetail,
   TaskFilterInput,
@@ -197,6 +199,16 @@ export function setRepositoryWorktreeRoot(
  *  this computer's consent (task 066). */
 export function setRepositoryUnattendedRuns(id: string, allow: boolean): Promise<CheckoutView> {
   return call<CheckoutView>("set_repository_unattended_runs", { id, allow });
+}
+
+/**
+ * Sets the team ceiling: whether a shared team allows unattended runs in this
+ * repository at all (ADR-0032 point 4). Only a team owner may, and a personal
+ * team has none — this machine's consent, {@link setRepositoryUnattendedRuns},
+ * is the whole decision there.
+ */
+export function setRepositoryUnattendedCeiling(id: string, allowed: boolean): Promise<Repository> {
+  return call<Repository>("set_repository_unattended_ceiling", { id, allowed });
 }
 
 /**
@@ -503,6 +515,32 @@ export function reorderTaskLink(
  */
 export function setTaskDependencies(taskId: string, dependsOn: string[]): Promise<string[]> {
   return call<string[]>("set_task_dependencies", { taskId, dependsOn });
+}
+
+/** Assigns a task to one member of its team, whose runners alone will run it;
+ *  `null` returns it to the team's pool (ADR-0032 point 1). */
+export function assignTask(taskId: string, assigneeId: string | null): Promise<Task> {
+  return call<Task>("assign_task", { taskId, assigneeId });
+}
+
+/**
+ * Records that the user read `revision` of one piece of content a teammate
+ * changed and accepts running it (ADR-0032 point 3). `taskId` is `null`
+ * exactly for the team's base and review instructions; for a base commit it is
+ * the dependency that made the commit. Only the current revision is accepted.
+ */
+export function acceptContent(
+  teamId: string,
+  taskId: string | null,
+  kind: ContentKind,
+  revision: string,
+): Promise<void> {
+  return call<void>("accept_content", { teamId, taskId, kind, revision });
+}
+
+/** Why one of the user's runners would or would not take a task. */
+export function getTaskConsent(taskId: string, runnerId: string): Promise<TaskConsent> {
+  return call<TaskConsent>("get_task_consent", { taskId, runnerId });
 }
 
 /** The dependencies keeping a task out of the queue, whole rows, in the order

@@ -6072,6 +6072,18 @@ board query of its own (the 2026-10-04 amendment above).
 | `list_local_worktrees` | worktree | local | — | 046 | `{ taskId, path }` from this machine's worktree records; what task DTOs carried as `worktreePath`. Paired with the existing `list_worktrees` tool, which already serves this machine's worktree paths. Task 066 |
 | `get_run_log_path` | runs | local | — | 046 | One run's transcript path on this machine, derived from its ids (ADR-0013); what `Run.logPath` carried. A new ADR-0021 point 1 gap, recorded as point 9 records the existing ones; 056 replaces the derivation with `transcript_uploads.path`, and 071 closes the gap. Task 066 |
 
+#### Added by task 045
+
+Four board commands, as point 8 requires, each paired with an MCP tool of the same name and
+refused to every run grant (D30). None is rendered yet: 061 and 069 put them in the interface.
+
+| Command | Group | Kind | Effect | From | Note |
+| --- | --- | --- | --- | --- | --- |
+| `assign_task` | tasks | board | Write | 046 | `assignee_id` and `assigned_by` (ADR-0032 point 1). The assignee must be a member of the task's team, or `not_found` worded as for a user who does not exist. Exposed unchanged on the hosted surface by 060. Task 045 |
+| `accept_content` | consent | board | Write | 046 | One acceptance of the current revision of one piece of content (ADR-0032 point 3). A stale revision is `invalid`, naming the current one. Refused to every grant: a run that could accept would launder consent through its own handle. Task 045 |
+| `set_repository_unattended_ceiling` | repositories | board | Write | 046 | The team ceiling, `repositories.allow_unattended_runs` (ADR-0032 point 4). Owner only, the first role check (ADR-0029 §3, generalised by 051); `invalid` on a personal team. `set_repository_unattended_runs` stays the runner's local consent. Task 045 |
+| `get_task_consent` | consent | board | Read | 046 | Eligibility, the pin, the team ceiling and every missing piece for one of the caller's runners, as a camelCase DTO with no path (ADR-0028 §2). Task 045 |
+
 ---
 
 ## D33 — Two offline query caches, one per schema (amends D5)

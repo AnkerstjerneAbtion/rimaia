@@ -208,6 +208,17 @@ pub async fn update_task(
     .await
 }
 
+/// Assigns a task to one member of its team, or returns it to the pool with
+/// `None` (ADR-0032 point 1).
+#[tauri::command]
+pub async fn assign_task(
+    state: State<'_, AppState>,
+    task_id: String,
+    assignee_id: Option<String>,
+) -> Result<Task> {
+    tasks::assign_task(&state.context, &task_id, assignee_id.as_deref()).await
+}
+
 /// Deletes a task. Refused, naming what still depends on it, when another
 /// task does.
 #[tauri::command]

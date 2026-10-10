@@ -182,6 +182,19 @@ pub async fn set_repository_unattended_runs(
     repo::set_allow_unattended_runs(&state.context, &state.machine, &id, allow).await
 }
 
+/// Sets the team ceiling: whether the repository's team allows unattended runs
+/// in it at all (ADR-0032 point 4). A board command, refused to a member and
+/// on a personal team; [`set_repository_unattended_runs`] stays this runner's
+/// own consent.
+#[tauri::command]
+pub async fn set_repository_unattended_ceiling(
+    state: State<'_, AppState>,
+    id: String,
+    allowed: bool,
+) -> Result<Repository> {
+    repo::set_repository_unattended_ceiling(&state.context, &id, allowed).await
+}
+
 /// Removes a repository. Refused, naming how many, when any task still
 /// references it; then this machine forgets its worktree records and its
 /// checkout (task 066).

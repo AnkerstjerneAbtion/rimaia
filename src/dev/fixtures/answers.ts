@@ -24,6 +24,7 @@ import type {
   ScheduleView,
   StrategyCatalogueView,
   Task,
+  TaskConsent,
   TaskDependent,
   TaskDetail,
   TaskFilterInput,
@@ -279,6 +280,9 @@ export const ANSWERS: Record<string, Answer> = {
   set_repository_unattended_runs: (args, s) => checkoutOf(s, args.id),
   set_repository_on_archive: (args, s) => checkoutOf(s, args.id),
   set_repository_max_concurrency: (args, s) => checkoutOf(s, args.id),
+  // Fixture mode is a solo board, and a personal team has no ceiling (task 045).
+  set_repository_unattended_ceiling: () =>
+    refuse("invalid", "a personal team has no ceiling: this machine's own consent decides."),
   remove_repository: done,
   get_repository_remote_info: () => ({
     remoteUrl: "git@github.com:example/rimaia-app.git",
@@ -332,6 +336,19 @@ export const ANSWERS: Record<string, Answer> = {
   remove_task_link: done,
   reorder_task_link: unsupported("fixture mode does not edit links"),
   set_task_dependencies: (args) => (Array.isArray(args.dependsOn) ? args.dependsOn : []),
+  // Task 045's, answered as a solo board answers: every task is the owner's
+  // own, nothing needs accepting, and the team ceiling is not consulted.
+  assign_task: (args, s) => findTask(s, args.taskId),
+  accept_content: () => undefined,
+  get_task_consent: (args, s): TaskConsent => {
+    findTask(s, args.taskId);
+    return {
+      eligibility: "assigned",
+      pinnedRunnerId: null,
+      teamCeiling: "not_consulted",
+      missing: [],
+    };
+  },
   get_blocking_reason: (args, s): Task[] => {
     const blocked = s.tasks.find((candidate) => candidate.id === args.taskId);
     return blocked?.blockingTitle ? [blocked] : [];
