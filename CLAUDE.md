@@ -229,6 +229,11 @@ Rules:
   run` or the sqlite3 CLI: with enforcement on, a table rebuild's `DROP TABLE` cascades and
   deletes every child row. No migration file begins with `-- no-transaction`. The prepare
   recipe above still works, because the rebuild's guard passes on an empty `tasks`.
+- **Machine state lives in `runner.db`, behind `rimaia_core::machine`; its rules stay in
+  core.** The runner keys, schedules, checkouts and worktree records are reached through a
+  `MachineContext` (`AppState.machine`, `TestContext::machine()`), never the board's
+  context. `rimaia-runner` stores them and decides nothing (seam-contract D31's
+  2026-10-10 amendment).
 - Board `position` is a fractional float; ordering is the priority mechanism. There is no
   separate priority field (ADR-0007).
 - A dependency is satisfied when its run **succeeds**, not when a human marks it done

@@ -4843,6 +4843,85 @@ neither, and gives the carried core types only the `Deserialize` derive, so thei
 `FreeCapacity`), 052 (`Catalogue` on the wire), 056 (the residual window, if the outbox
 changes when `finish_run` is heard).
 
+### Amendment, 2026-10-10 — the machine port, beside the board port (task 041)
+
+Point 14 keeps runner-owned state off the board port and says it is "read through
+`ServiceContext` until 041 and 066 move them to `runner.db`". Task 041 moved it, and the
+move needed a second port, because the rules for those facts stay in `rimaia-core` while
+the queries that store them live in `rimaia-runner` (D33 point 2), and core never depends
+on the runner (ADR-0027 point 6). What it is, so 042, 043, 046, 048, 059 and 066 build on
+one shape:
+
+- **The module is `rimaia_core::machine`.** `port.rs` defines `MachineStore`, the storage
+  half of every runner-owned fact, object-safe with boxed futures (`MachineFuture`) for
+  point 2's reason, held as `Arc<dyn MachineStore>`. Four groups of methods, each storage
+  only: settings (get, set, clear a `runner_settings` key), checkouts (list, get, insert,
+  patch, remove), worktree records (get, list, record, forget) and schedules (one method
+  per write `schedule::` makes). A refusal the schema enforces is `Error::invalid` with the
+  sentence `port.rs` names, in both implementations. `types.rs` defines `Checkout`,
+  `CheckoutPatch` and `WorktreeRecord`; `Schedule` keeps its type in `db::models`.
+- **`MachineContext { store, clock, changes, event_team }`** is the runner-side
+  counterpart of `ServiceContext`: no pool, no team scope, no `MutationSource`. In solo
+  `changes` is the board context's sender, and `event_team` is the solo team, read by
+  nothing but `MachineContext::publish`, which builds every machine event under it. Each
+  publish site names task 048, which replaces both fields with `LocalEvents`.
+- **The rules stay where D3 put them** and take `&MachineContext` as their first argument:
+  `scheduler::{state, pause, capacity}`, `schedule::window`, the `schedule::` CRUD,
+  `db::settings::{run_environment, onboarding_dismissed, doctor_dismissals}` and their
+  setters, `mcp::settings` and `worktree::cleanup::{auto_cleanup, set_auto_cleanup}`.
+  039's board-context runner accessors are gone; `db::settings::{get_runner, set_runner,
+  clear_runner}` are their machine-store replacements. Where a function still needs a
+  board fact until 066, it takes the board context as a second argument and names it:
+  `capacity::resolve(machine, board)` for each repository's cap, `doctor::run(machine,
+  board, env)` for the repository list, `schedule::preview(machine, board, id)` for the
+  plan. `run_task` and `plan_claimed` take `(board_port, machine, prepare_ctx, …)`, the
+  board context held only for `worktree::prepare` until 044; the run's transcript stream
+  is built with `EventStream::forwarding(clock, …)`, so it needs no board context either.
+- **Two implementations, one contract.** `rimaia-runner` implements `MachineStore` on
+  `RunnerStore` with checked queries: the production implementation, and the only one.
+  `testing::machine::MemoryMachine` is core's in-memory implementation, for core's tests.
+  `testing::machine_contract`'s `machine_store_contract!(Harness)` runs one suite over
+  both, from `crates/core/tests/machine_store_memory.rs` and
+  `crates/runner/tests/machine_store_sqlite.rs` (point 13's pattern), covering the
+  `worktrees → checkouts` foreign key both ways, the primary keys, absent against empty
+  settings and every nullable column. 043 adds `held_leases` methods and their cases here.
+- **Built once in each place** (point 8's shape): `src-tauri`'s `setup()` puts the
+  `RunnerStore` on `AppState.runner_store` and the context on `AppState.machine`, and
+  hands the same context to `scheduler::build`, which now takes it; `testing::context`
+  exposes `TestContext::machine()` over a `MemoryMachine` sharing the test's clock,
+  channel and solo team, and `testing::teams::TwoTeams` carries one as `machine`.
+- **Machine reactions to board actions** take `Option<&MachineContext>`:
+  `tasks::{archive_task, archive_tasks, move_task}` and `review::{approve, reject}`. Given a
+  machine they react on it (the on-archive policy, D20.3's auto-removal, reject's worktree
+  removal before its transaction); with `None` the board write stands alone and an archive
+  reports `Nothing`. The shell passes `Some(&state.machine)`; the MCP board tool passes
+  `self.local.as_ref().map(|l| &l.machine)`. 046 point 3a carries these on
+  `BoardRequest.machine`.
+- **`LocalTools { machine, doctor, planner }`** is what the MCP server's local router
+  reaches this machine through. `RimaiaServer`'s tools are two `#[tool_router]` blocks,
+  `board_router` and `local_router`, combined with `+` (`RimaiaServer::tool_router`, which
+  the anti-drift test iterates) when the host passes `Some(LocalTools)`, and the board
+  router alone with `None`, where a local tool is an unknown tool. `mcp::build`,
+  `RimaiaServer::new` and `RimaiaServer::scoped` take `local: Option<LocalTools>`, and the
+  shell passes `Some` to both doors, so a run is offered all 22 local tools and refused
+  them by `RunScope::authorize`. The server also takes the agent provider whose catalogue
+  its board tools read, as its own `provider` field rather than off `LocalTools`, because
+  the board router serves without a machine: it is point 9's `InProcessBoard` provider on
+  the MCP side, read for the catalogue and nothing else, and 046 replaces it with D32's
+  `ProviderProfile`.
+- **Adoption.** `machine::adoption::read_board(ctx)` is the one board read 040's
+  `machine_state` step makes, and `machine::adoption::machine_state` the pure mapping that
+  skips a pathless repository and its worktrees and derives a missing root with
+  `repo::default_worktree_root`, the function `register` uses. `adopt_board` takes the
+  shell's `AppPaths` for that root. 065 deletes `read_board`.
+
+**Binds.** 042 (the loop reads only through `MachineContext`, and adds the runner's
+`max_turns` and `disallowed_tools` overrides as two more `runner_settings` keys), 043
+(`held_leases` on the port and in the suite), 044 (removes `prepare_ctx`), 046 (point 3a;
+its server passes `None` for `LocalTools`), 048 (replaces `changes` and `event_team`), 059
+(converts the board reads the local handlers make through named core functions), 065
+(deletes `read_board`), 066 (reads checkouts and worktree records through the port).
+
 ---
 
 ## D32 — One command registry: board and local commands, one dispatcher, one caller
