@@ -181,3 +181,5 @@ avoided by refusing to consult the remote.
 `WorktreeStatus.dependency_warning` deliberately does *not* follow that rule: it is always
 computed against the current dependency set. It is advice about what to do next, and neither
 "merge them" nor "serialize the work" is an instruction about the past.
+
+**2026-10-10, task 044:** [ADR-0033](0033-repositories-belong-to-the-team-checkouts-to-the-runner.md) point 5 replaces "the dependency's branch" in points 3 and 4 above with "the dependency's latest successful implementation or fix `head_sha`". Satisfaction (point 2) is unchanged.
