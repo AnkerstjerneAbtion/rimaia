@@ -631,8 +631,8 @@ const STORE_HANDLE_EXCEPTIONS: [(&str, &str); 18] = [
     (
         "db::settings::set_team_in",
         "it writes a team's row inside a save that writes two keys as one (the review loop's \
-         instructions and configuration); it takes the context for the scope and checks the \
-         key's placement",
+         instructions and configuration) and deletes one inside a repository's removal; it takes \
+         the context for the scope and checks the key's placement",
     ),
     (
         "context::ServiceContext::begin",

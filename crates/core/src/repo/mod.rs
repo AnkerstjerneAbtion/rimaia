@@ -450,9 +450,9 @@ pub fn ensure_unattended_runs_allowed(repository: &Repository) -> Result<()> {
 /// `team_settings` under a key rather than in a column (seam-contract D17.1).
 /// A settings key is not a foreign key and nothing cascades, so this is the
 /// only thing standing between removing a repository and leaving configuration
-/// behind that no screen will ever show again. Only after the repository's
-/// delete commits, so a refused removal has not thrown that configuration away
-/// on its way to the refusal.
+/// behind that no screen will ever show again. In the same transaction as the
+/// repository's delete, so a refused removal has not thrown that configuration
+/// away on its way to the refusal, and the removal announces only itself.
 pub async fn remove(ctx: &ServiceContext, id: &str) -> Result<()> {
     let mut tx = ctx.begin().await?;
 
@@ -487,18 +487,23 @@ pub async fn remove(ctx: &ServiceContext, id: &str) -> Result<()> {
         .execute(&mut *tx)
         .await?;
 
-    tx.commit().await?;
-    ctx.publish(ChangeEvent::repositories(team_id.clone(), [id.to_string()]));
+    // Through the one statement that writes `team_settings`, so the checks
+    // tasks 045 and 051 hang there cover a removal too. The key is spelled by
+    // the module that owns it, not with a `format!` here: two spellings of
+    // `strategy_default.<id>` would leak a row per removed repository and
+    // nothing would ever notice (seam-contract D3, D17.1).
+    crate::db::settings::set_team_in(
+        ctx,
+        &mut tx,
+        &team_id,
+        &crate::strategy::settings::repository_default_key(id),
+        None,
+    )
+    .await?;
 
-    // After the commit rather than inside it, because `set_team` is the one
-    // writer of `team_settings` and runs on its own statement. A refused
-    // removal returned above and kept its default; a crash between the two
-    // leaves a row keyed by an id nothing will ever read again, which is the
-    // cheaper failure. Spelled through the module that owns the key, not with
-    // a `format!` here: two spellings of `strategy_default.<id>` would leak a
-    // row per removed repository and nothing would ever notice (seam-contract
-    // D3, D17.1).
-    crate::strategy::settings::delete_repository_default(ctx, &team_id, id).await
+    tx.commit().await?;
+    ctx.publish(ChangeEvent::repositories(team_id, [id.to_string()]));
+    Ok(())
 }
 
 /// Fresh inspection of `repository`'s remote and PR readiness. Never fails on

@@ -184,21 +184,6 @@ pub async fn set_repository_default(
     store_defaults(ctx, &team_id, &repository_default_key(repository_id), value).await
 }
 
-/// Removes `repository_id`'s defaults, leaving no orphan row behind (D17.1).
-///
-/// Called by [`crate::repo::remove`] once the repository's own delete has
-/// committed, so a removal refused because tasks still reference it has not
-/// thrown the repository's configuration away on the way to the refusal. It
-/// goes through [`settings::set_team`] like every other team-settings write,
-/// so the checks tasks 045 and 051 hang there cover it too.
-pub(crate) async fn delete_repository_default(
-    ctx: &ServiceContext,
-    team_id: &str,
-    repository_id: &str,
-) -> Result<()> {
-    settings::set_team(ctx, team_id, &repository_default_key(repository_id), None).await
-}
-
 /// How much of a proposal a human has to look at before it runs, for the
 /// context's one team. Absent means [`StrategyApproval::Automatic`].
 pub async fn approval(ctx: &ServiceContext) -> Result<StrategyApproval> {
@@ -410,10 +395,48 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn removing_a_repository_announces_only_the_repository_change() {
+        // The default leaves inside the removal's own transaction, so the
+        // removal is one write and one announcement, as it was in solo before
+        // team settings had a writer of their own (039's Goal).
+        let mut h = TestContext::new().await;
+        let registered = registered(&h).await;
+        let repository = &registered.repository;
+        set_repository_default(
+            &h.context,
+            &repository.id,
+            &StrategyDefaults {
+                mode: StrategyMode::Planned,
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("store a repository default");
+        while h.changes.try_recv().is_ok() {}
+
+        repo::remove(&h.context, &repository.id)
+            .await
+            .expect("removal with no referencing tasks must succeed");
+
+        let mut published = Vec::new();
+        while let Ok(event) = h.changes.try_recv() {
+            published.push(event);
+        }
+        assert_eq!(
+            published,
+            vec![ChangeEvent::repositories(
+                h.solo.team_id.clone(),
+                [repository.id.clone()]
+            )]
+        );
+    }
+
+    #[tokio::test]
     async fn a_refused_repository_removal_keeps_its_strategy_default() {
-        // Why the default is removed only once the repository's delete has
-        // committed: a repository that is still referenced is still configured.
-        let h = TestContext::new().await;
+        // Why the default is removed in the repository's own transaction: a
+        // refusal rolls both back, and a repository that is still referenced
+        // is still configured.
+        let mut h = TestContext::new().await;
         let registered = registered(&h).await;
         let repository = &registered.repository;
 
@@ -439,11 +462,16 @@ mod tests {
         .execute(&h.context.pool)
         .await
         .expect("insert a referencing task");
+        while h.changes.try_recv().is_ok() {}
 
         repo::remove(&h.context, &repository.id)
             .await
             .expect_err("removal must be refused while a task references it");
 
+        assert!(
+            h.changes.try_recv().is_err(),
+            "a refused removal changed nothing, so it announces nothing"
+        );
         assert_eq!(
             repository_default(&h.context, &repository.id)
                 .await

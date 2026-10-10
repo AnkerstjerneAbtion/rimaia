@@ -287,8 +287,9 @@ pub(crate) async fn set_team(
 /// revision and authorship columns here and task 051 the owner check, so a key
 /// added later inherits both without anyone having to remember them. Removal
 /// comes here too, for the same reason: a delete that bypassed this function
-/// would be a write those checks never see. Its one caller today is a
-/// repository's strategy default leaving with its repository (D17.1).
+/// would be a write those checks never see. Its callers today are the review
+/// loop's save and a repository's strategy default leaving inside its
+/// repository's removal (D17.1).
 pub(crate) async fn set_team_in(
     ctx: &ServiceContext,
     conn: &mut SqliteConnection,
