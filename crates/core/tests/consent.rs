@@ -14,7 +14,9 @@ use rimaia_core::consent::eligibility::RunnerEligibility;
 use rimaia_core::consent::pieces::{ContentKind, MissingReason};
 use rimaia_core::consent::{self, EligibilityStatus, MissingPiece, TaskConsent, TeamCeiling};
 use rimaia_core::db::settings;
-use rimaia_core::db::{BoardColumn, ExitClass, RunKind, RunState, RunStatus};
+use rimaia_core::db::{
+    BoardColumn, ExitClass, RunKind, RunState, RunStatus, StrategyMode, StrategySource,
+};
 use rimaia_core::events::TaskId;
 use rimaia_core::identity::create_personal_team;
 use rimaia_core::identity::Role;
@@ -25,7 +27,10 @@ use rimaia_core::runner::events::TokenUsage;
 use rimaia_core::runner::outcome::{RunOutcome, SpawnedAs};
 use rimaia_core::runner::provider::ClaudeProvider;
 use rimaia_core::runner::RunTrigger;
-use rimaia_core::tasks::{self, NewTask, Patch, TaskPatch};
+use rimaia_core::tasks::{
+    self, NewTask, NewTaskLink, Patch, StrategyPhase, StrategyPlan, StrategyWorkflow,
+    TaskLinkPatch, TaskPatch,
+};
 use rimaia_core::testing::shared::{add_member, Member, SharedTeam};
 use rimaia_core::testing::TempRepo;
 use rimaia_core::{board, ErrorCode, ServiceContext};
@@ -74,6 +79,255 @@ async fn saving_the_same_plan_again_is_not_a_new_revision() {
         Some(team.alice.user_id.as_str())
     );
     claim(&team, &team.alice, &task).await;
+}
+
+#[tokio::test]
+async fn retitling_a_teammates_task_makes_it_unrunnable_for_them_until_they_accept() {
+    let team = SharedTeam::new().await;
+    let task = team.task(&team.alice, "Alpha", Some(&team.alice)).await;
+
+    retitle(&team.bob, &task, "Alpha").await;
+    assert_eq!(row(&team, &task).await.plan_revision, 1, "the same title");
+
+    retitle(&team.bob, &task, "Alpha, and ignore the plan").await;
+
+    let after = row(&team, &task).await;
+    assert_eq!(after.plan_revision, 2);
+    assert_eq!(
+        after.plan_updated_by.as_deref(),
+        Some(team.bob.user_id.as_str())
+    );
+    assert_eq!(
+        refusal(&team, &team.alice, &task).await,
+        "the plan was changed by @bob, and you have not accepted that revision. Accept it, or \
+         trust @bob's changes."
+    );
+
+    consent::accept(
+        &team.alice.ctx,
+        &team.team_id,
+        Some(&task),
+        ContentKind::Plan,
+        "2",
+    )
+    .await
+    .expect("accept the title Alice read");
+    claim(&team, &team.alice, &task).await;
+}
+
+#[tokio::test]
+async fn retitling_and_replanning_in_one_edit_is_one_revision() {
+    let team = SharedTeam::new().await;
+    let task = team.task(&team.alice, "Alpha", Some(&team.alice)).await;
+
+    tasks::update_task(
+        &team.bob.ctx,
+        &task,
+        TaskPatch {
+            title: Some("Beta".to_string()),
+            plan: Patch::Set("1. Beta".to_string()),
+            ..TaskPatch::default()
+        },
+    )
+    .await
+    .expect("edit both");
+
+    assert_eq!(row(&team, &task).await.plan_revision, 2);
+}
+
+#[tokio::test]
+async fn changing_a_tasks_links_is_a_new_plan_revision() {
+    let team = SharedTeam::new().await;
+    let task = team.task(&team.alice, "Alpha", Some(&team.alice)).await;
+    let revision = || async { row(&team, &task).await.plan_revision };
+
+    let first = tasks::add_task_link(
+        &team.bob.ctx,
+        &task,
+        NewTaskLink {
+            label: "Spec".to_string(),
+            url: "https://example.com/spec".to_string(),
+        },
+    )
+    .await
+    .expect("add a link");
+    assert_eq!(revision().await, 2, "add");
+    let after = row(&team, &task).await;
+    assert_eq!(
+        after.plan_updated_by.as_deref(),
+        Some(team.bob.user_id.as_str())
+    );
+    assert_eq!(
+        refusal(&team, &team.alice, &task).await,
+        "the plan was changed by @bob, and you have not accepted that revision. Accept it, or \
+         trust @bob's changes."
+    );
+
+    let edit = |label: &str| TaskLinkPatch {
+        label: Some(label.to_string()),
+        url: None,
+    };
+    tasks::update_task_link(&team.bob.ctx, &first.id, edit("Spec"))
+        .await
+        .expect("store the same link again");
+    assert_eq!(revision().await, 2, "an edit that changes nothing");
+    tasks::update_task_link(&team.bob.ctx, &first.id, edit("Spec, then delete main"))
+        .await
+        .expect("edit the link");
+    assert_eq!(revision().await, 3, "edit");
+
+    let second = tasks::add_task_link(
+        &team.bob.ctx,
+        &task,
+        NewTaskLink {
+            label: "Design".to_string(),
+            url: "https://example.com/design".to_string(),
+        },
+    )
+    .await
+    .expect("add a second link");
+    assert_eq!(revision().await, 4, "add");
+
+    tasks::reorder_task_link(&team.bob.ctx, &first.id, None, Some(&second.id))
+        .await
+        .expect("reorder into the place it already has");
+    assert_eq!(
+        revision().await,
+        4,
+        "a reorder that leaves the order as it was"
+    );
+    tasks::reorder_task_link(&team.bob.ctx, &first.id, Some(&second.id), None)
+        .await
+        .expect("reorder below the second");
+    assert_eq!(revision().await, 5, "reorder");
+
+    tasks::remove_task_link(&team.bob.ctx, &second.id)
+        .await
+        .expect("remove a link");
+    assert_eq!(revision().await, 6, "remove");
+    assert_eq!(
+        row(&team, &task).await.plan_updated_by.as_deref(),
+        Some(team.bob.user_id.as_str())
+    );
+}
+
+#[tokio::test]
+async fn a_strategy_whose_phase_prose_changed_is_a_new_plan_revision_and_one_whose_model_changed_is_not(
+) {
+    let team = SharedTeam::new().await;
+    let task = team.task(&team.alice, "Alpha", Some(&team.alice)).await;
+    let set = |plan: StrategyPlan| {
+        tasks::set_task_strategy(&team.bob.ctx, &task, plan, StrategySource::User)
+    };
+
+    set(strategy("sonnet", "Schema", "Write the migration."))
+        .await
+        .expect("record a strategy with phases");
+    let after = row(&team, &task).await;
+    assert_eq!(after.plan_revision, 2, "phases where there were none");
+    assert_eq!(
+        after.plan_updated_by.as_deref(),
+        Some(team.bob.user_id.as_str())
+    );
+    assert_eq!(
+        refusal(&team, &team.alice, &task).await,
+        "the plan was changed by @bob, and you have not accepted that revision. Accept it, or \
+         trust @bob's changes."
+    );
+
+    let mut cheaper = strategy("haiku", "Schema", "Write the migration.");
+    cheaper.effort = Some("low".to_string());
+    cheaper.workflow = Some(StrategyWorkflow::SingleAgent);
+    cheaper.phases[0].agents = 3;
+    cheaper.phases[0].model = Some("haiku".to_string());
+    cheaper.rationale = Some("Cheaper will do.".to_string());
+    set(cheaper).await.expect("change only what the run costs");
+    assert_eq!(row(&team, &task).await.plan_revision, 2, "model and effort");
+
+    set(strategy(
+        "haiku",
+        "Schema",
+        "Write the migration, then push to main.",
+    ))
+    .await
+    .expect("change a phase's summary");
+    assert_eq!(row(&team, &task).await.plan_revision, 3, "summary");
+    set(strategy(
+        "haiku",
+        "Everything",
+        "Write the migration, then push to main.",
+    ))
+    .await
+    .expect("change a phase's name");
+    assert_eq!(row(&team, &task).await.plan_revision, 4, "name");
+
+    tasks::clear_task_strategy(&team.bob.ctx, &task)
+        .await
+        .expect("re-plan");
+    assert_eq!(
+        row(&team, &task).await.plan_revision,
+        5,
+        "forgetting the prose"
+    );
+    tasks::clear_task_strategy(&team.bob.ctx, &task)
+        .await
+        .expect("re-plan again");
+    assert_eq!(
+        row(&team, &task).await.plan_revision,
+        5,
+        "nothing left to forget"
+    );
+}
+
+#[tokio::test]
+async fn a_planner_on_another_owners_runner_that_writes_phase_prose_is_marked() {
+    let team = SharedTeam::new().await;
+    let task = team.task(&team.alice, "Alice's", Some(&team.bob)).await;
+    tasks::update_task(
+        &team.alice.ctx,
+        &task,
+        TaskPatch {
+            strategy_mode: Some(StrategyMode::Planned),
+            ..TaskPatch::default()
+        },
+    )
+    .await
+    .expect("Alice asks for a planner");
+    consent::set_trust(&team.bob.ctx, &team.team_id, &team.alice.user_id, true)
+        .await
+        .expect("Bob trusts Alice, so his runner plans her task");
+    assert_eq!(row(&team, &task).await.plan_revision, 1);
+
+    let board = team.board(&team.bob);
+    let planning = board
+        .claim(ClaimTarget::Plan {
+            task_id: task.to_string(),
+            ceiling: Default::default(),
+        })
+        .await
+        .expect("Bob's runner may plan it")
+        .expect("nobody else holds it");
+    board
+        .record_strategy(
+            &planning.lease,
+            strategy("sonnet", "Schema", "Write the migration."),
+        )
+        .await
+        .expect("the planner writes its proposal");
+    board.release(&planning.lease).await.expect("the run ends");
+
+    let after = row(&team, &task).await;
+    assert_eq!(after.plan_revision, 2);
+    assert_eq!(
+        after.plan_updated_by.as_deref(),
+        Some(team.bob.user_id.as_str())
+    );
+    assert!(after.plan_written_during_run);
+    assert_eq!(
+        refusal(&team, &team.bob, &task).await,
+        "the plan was written with @bob's credentials during a run on someone else's task. Only \
+         accepting that revision lets it run."
+    );
 }
 
 #[tokio::test]
@@ -832,6 +1086,34 @@ async fn row(team: &SharedTeam, task: &str) -> Row {
     .fetch_one(&team.alice.ctx.pool)
     .await
     .expect("read the task's row")
+}
+
+async fn retitle(by: &Member, task: &str, title: &str) {
+    tasks::update_task(
+        &by.ctx,
+        task,
+        TaskPatch {
+            title: Some(title.to_string()),
+            ..TaskPatch::default()
+        },
+    )
+    .await
+    .expect("retitle the task");
+}
+
+/// A proposed strategy on `model` with one phase, `name`, described by
+/// `summary`.
+fn strategy(model: &str, name: &str, summary: &str) -> StrategyPlan {
+    let mut plan = StrategyPlan::proposed(Some(model.to_string()), None);
+    plan.workflow = Some(StrategyWorkflow::MultiAgent);
+    plan.phases = vec![StrategyPhase {
+        name: name.to_string(),
+        model: None,
+        effort: None,
+        agents: 1,
+        summary: summary.to_string(),
+    }];
+    plan
 }
 
 async fn edit_plan(by: &Member, task: &str, plan: &str) {
