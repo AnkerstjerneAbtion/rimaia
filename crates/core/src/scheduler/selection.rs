@@ -51,6 +51,7 @@ use std::collections::{BTreeSet, HashMap};
 use chrono::{DateTime, Utc};
 use serde::Serialize;
 
+use crate::board::FreeCapacity;
 use crate::context::ServiceContext;
 use crate::db::{BoardColumn, RunState};
 use crate::error::Result;
@@ -311,6 +312,26 @@ pub fn next_batch<'a>(
     }
 
     batch
+}
+
+/// The entry a `ClaimTarget::Next` claims first: the first in board order with
+/// no skip reason and a free slot in its repository, or `None` when there is
+/// none or `capacity.total` is zero (task 042).
+///
+/// `capacity` is what the runner has *free*, already net of its own in-flight
+/// runs, so nothing here subtracts: a `per_repository` of one is one more run,
+/// not a cap of one. A repository missing from it has no free slot, the
+/// reading [`next_batch`] gives a missing key ("never unbounded"). Capacity is
+/// still not a [`SkipReason`], for the reason `next_batch` gives.
+pub fn first_startable<'a>(
+    plan: &'a [QueueEntry],
+    capacity: &FreeCapacity,
+) -> Option<&'a QueueEntry> {
+    if capacity.total == 0 {
+        return None;
+    }
+    plan.iter()
+        .find(|entry| entry.skip.is_none() && capacity.for_repository(&entry.repository_id) > 0)
 }
 
 /// The task the queue would claim next, or `None` when there is nothing to do.
@@ -760,6 +781,76 @@ mod tests {
             next_batch(&plan, &over, 2, &caps(&[])),
             Vec::<&QueueEntry>::new()
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // first_startable (task 042, `ClaimTarget::Next`)
+    // -----------------------------------------------------------------------
+
+    fn free(total: usize, pairs: &[(&str, usize)]) -> FreeCapacity {
+        FreeCapacity {
+            total,
+            per_repository: pairs
+                .iter()
+                .map(|(id, slots)| ((*id).to_string(), *slots))
+                .collect(),
+        }
+    }
+
+    fn first<'a>(plan: &'a [QueueEntry], capacity: &FreeCapacity) -> Option<&'a str> {
+        first_startable(plan, capacity).map(|entry| entry.task_id.as_str())
+    }
+
+    #[test]
+    fn the_first_startable_entry_is_taken_in_board_order() {
+        let plan = vec![
+            in_repository("first", "a"),
+            in_repository("second", "b"),
+            in_repository("third", "c"),
+        ];
+
+        assert_eq!(
+            first(&plan, &free(3, &[("a", 1), ("b", 1), ("c", 1)])),
+            Some("first")
+        );
+    }
+
+    #[test]
+    fn a_skipped_entry_is_passed_over_for_the_next_startable_one() {
+        let plan = vec![
+            QueueEntry {
+                repository_id: "a".to_string(),
+                ..entry("skipped", Some(SkipReason::NeedsAttention), None)
+            },
+            in_repository("startable", "a"),
+        ];
+
+        assert_eq!(first(&plan, &free(1, &[("a", 1)])), Some("startable"));
+    }
+
+    #[test]
+    fn a_repository_with_no_free_slot_is_stepped_over() {
+        let plan = vec![in_repository("a1", "a"), in_repository("b1", "b")];
+
+        assert_eq!(first(&plan, &free(2, &[("a", 0), ("b", 1)])), Some("b1"));
+        assert_eq!(first(&plan, &free(2, &[("a", 0), ("b", 0)])), None);
+    }
+
+    #[test]
+    fn a_repository_missing_from_the_free_slots_has_none() {
+        // The conservative reading of a missing key, applied to a value that
+        // is already net: never "unbounded".
+        let plan = vec![in_repository("gone1", "gone"), in_repository("b1", "b")];
+
+        assert_eq!(first(&plan, &free(4, &[("b", 1)])), Some("b1"));
+        assert_eq!(first(&plan[..1], &free(4, &[("b", 1)])), None);
+    }
+
+    #[test]
+    fn no_free_capacity_starts_nothing_whatever_the_repositories_say() {
+        let plan = vec![in_repository("first", "a")];
+
+        assert_eq!(first(&plan, &free(0, &[("a", 4)])), None);
     }
 
     #[test]

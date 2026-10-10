@@ -17,18 +17,22 @@
 //!
 //! Each later task adds its own cases here (D31 point 13): the review loop's
 //! `NextStep::Continue` (021), team scoping (038,
-//! 039: `a_lease_on_another_teams_task_is_not_found_in_either_spelling`), fencing and generations (043), expiry (053), `run_tool` (055),
-//! resends (056).
+//! 039: `a_lease_on_another_teams_task_is_not_found_in_either_spelling`),
+//! `ClaimTarget::Next` (042: the `a_next_claim_…` cases and its race),
+//! fencing and generations (043, whose race case is the lease form of 042's),
+//! expiry (053), `run_tool` (055), resends (056).
 
 use std::future::Future;
 use std::sync::Arc;
+
+use std::time::Duration as StdDuration;
 
 use chrono::Duration;
 use tempfile::TempDir;
 
 use crate::board::{
-    BoardMethod, BoardPort, Claim, ClaimTarget, FinishRun, Heartbeat, LeasePurpose, LeaseRef,
-    NextStep, StartRun, TranscriptChunk, TranscriptEnd,
+    BoardMethod, BoardPort, Claim, ClaimTarget, FinishRun, FreeCapacity, Heartbeat, LeasePurpose,
+    LeaseRef, NextStep, StartRun, TranscriptChunk, TranscriptEnd,
 };
 use crate::clock::Clock;
 use crate::context::ServiceContext;
@@ -96,6 +100,15 @@ macro_rules! board_contract {
             finish_run_continues_to_a_review_when_the_loop_is_on,
             finish_run_releases_an_implementation_when_the_loop_is_off,
             finish_run_releases_a_clean_review_and_lands_the_task,
+            a_next_claim_takes_the_top_startable_task_in_board_order,
+            a_next_claim_passes_over_a_repository_the_runner_did_not_list,
+            a_next_claim_takes_a_listed_repository_whatever_its_ceiling_column_says,
+            a_next_claim_honours_each_repositorys_free_slots,
+            a_next_claim_with_no_free_capacity_claims_nothing_and_writes_nothing,
+            a_next_claim_resumes_a_due_retry_with_the_session_it_continues,
+            two_runners_claiming_next_for_one_task_get_exactly_one_claim,
+            a_waiting_next_claim_returns_as_soon_as_a_task_becomes_startable,
+            a_waiting_next_claim_returns_none_once_its_wait_has_passed,
         );
     };
     (@cases $harness:ty; $($case:ident),* $(,)?) => {
@@ -152,6 +165,11 @@ impl Arranged {
     }
 
     async fn task(&self, board: &ServiceContext, title: &str) -> String {
+        self.task_in(board, title, BoardColumn::Ready).await
+    }
+
+    /// A task appended to `column`, so creation order is board order.
+    async fn task_in(&self, board: &ServiceContext, title: &str, column: BoardColumn) -> String {
         tasks::create_task(
             board,
             NewTask {
@@ -159,7 +177,7 @@ impl Arranged {
                 title: title.to_string(),
                 plan: Some("1. Do the work".to_string()),
                 extra_instructions: None,
-                column: Some(BoardColumn::Ready),
+                column: Some(column),
                 links: vec![],
             },
         )
@@ -318,6 +336,66 @@ async fn call(runner: &dyn BoardPort, method: BoardMethod, lease: &LeaseRef) -> 
                 .await
         }
     }
+}
+
+/// A `Next` claim over `repositories`, with `total` free slots overall and
+/// `per_repository` free in each, that does not wait.
+fn next_target(
+    repositories: &[&str],
+    total: usize,
+    per_repository: &[(&str, usize)],
+) -> ClaimTarget {
+    next_target_waiting(repositories, total, per_repository, StdDuration::ZERO)
+}
+
+fn next_target_waiting(
+    repositories: &[&str],
+    total: usize,
+    per_repository: &[(&str, usize)],
+    wait: StdDuration,
+) -> ClaimTarget {
+    ClaimTarget::Next {
+        capacity: FreeCapacity {
+            total,
+            per_repository: per_repository
+                .iter()
+                .map(|(id, slots)| ((*id).to_string(), *slots))
+                .collect(),
+        },
+        repositories: repositories.iter().map(|id| (*id).to_string()).collect(),
+        wait,
+    }
+}
+
+/// Walks `task_id` through ADR-0007's machine with the one writer of
+/// `run_state`, never a hand-written `UPDATE`.
+async fn walk(board: &ServiceContext, task_id: &str, route: &[RunState]) {
+    for state in route {
+        tasks::set_run_state(board, task_id, *state)
+            .await
+            .unwrap_or_else(|error| panic!("walk {task_id} to {state:?}: {error}"));
+    }
+}
+
+/// Yields long enough for a spawned claim to have reached its wait. Not a
+/// sleep: it costs no wall-clock time and guesses no duration.
+async fn converge() {
+    for _ in 0..2_000 {
+        tokio::task::yield_now().await;
+    }
+}
+
+/// A failure bound on a claim a case expects to return, so a claim that never
+/// wakes fails with a sentence rather than hanging the job.
+async fn joined(
+    handle: tokio::task::JoinHandle<Result<Option<Claim>>>,
+    what: &str,
+) -> Option<Claim> {
+    tokio::time::timeout(StdDuration::from_secs(30), handle)
+        .await
+        .unwrap_or_else(|_| panic!("timed out waiting for {what}"))
+        .expect("the claim task does not panic")
+        .expect("a waiting claim is not an error")
 }
 
 /// `assert_eq!` with a label. `pretty_assertions` is a dev-dependency, which
@@ -1034,6 +1112,363 @@ pub mod cases {
             detail.review_loop.map(|summary| summary.verdict),
             Some(Verdict::Clean),
             "the verdict",
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // `ClaimTarget::Next` (task 042): the board chooses
+    // -----------------------------------------------------------------------
+
+    pub async fn a_next_claim_takes_the_top_startable_task_in_board_order<H: Harness>() {
+        let harness = H::start().await;
+        let board = harness.board();
+        let arranged = Arranged::new(board).await;
+        let failed = arranged.task(board, "Failed last night").await;
+        let top = arranged.task(board, "Top").await;
+        let below = arranged.task(board, "Below").await;
+        walk(
+            board,
+            &failed,
+            &[RunState::Queued, RunState::Running, RunState::Failed],
+        )
+        .await;
+        let repository = arranged.repository_id.as_str();
+
+        let claim = claimed(
+            harness.runner(Which::A).as_ref(),
+            next_target(&[repository], 2, &[(repository, 1)]),
+        )
+        .await;
+
+        assert_same(claim.lease.task_id.clone(), top.clone(), "the task chosen");
+        assert_same(claim.purpose, LeasePurpose::Implementation, "purpose");
+        assert_same(claim.trigger, RunTrigger::Queued, "trigger");
+        assert_same(claim.resume, None, "a fresh start resumes nothing");
+        assert_same(
+            claim.context.task.task.id,
+            top.clone(),
+            "the context's task",
+        );
+        assert_same(
+            run_state(board, &top).await,
+            RunState::Running,
+            "a Next claim takes both edges",
+        );
+        assert_same(
+            run_state(board, &below).await,
+            RunState::Idle,
+            "one claim, one task",
+        );
+        assert_same(run_state(board, &failed).await, RunState::Failed, "skipped");
+    }
+
+    pub async fn a_next_claim_passes_over_a_repository_the_runner_did_not_list<H: Harness>() {
+        let harness = H::start().await;
+        let board = harness.board();
+        let unlisted = Arranged::new(board).await;
+        let listed = Arranged::new(board).await;
+        let elsewhere = unlisted
+            .task(board, "In a repository with no consent")
+            .await;
+        let mine = listed.task(board, "In a listed repository").await;
+
+        let claim = claimed(
+            harness.runner(Which::A).as_ref(),
+            next_target(
+                &[&listed.repository_id],
+                2,
+                &[(&unlisted.repository_id, 1), (&listed.repository_id, 1)],
+            ),
+        )
+        .await;
+
+        assert_same(
+            claim.lease.task_id.clone(),
+            mine,
+            "the listed repository's task",
+        );
+        assert_same(
+            run_state(board, &elsewhere).await,
+            RunState::Idle,
+            "an unlisted repository is not opted in",
+        );
+    }
+
+    pub async fn a_next_claim_takes_a_listed_repository_whatever_its_ceiling_column_says<
+        H: Harness,
+    >() {
+        let harness = H::start().await;
+        let board = harness.board();
+        let arranged = Arranged::new(board).await;
+        let task_id = arranged.task(board, "Registered after 066").await;
+        assert_same(
+            repo::get(board, &arranged.repository_id)
+                .await
+                .expect("read the repository")
+                .allow_unattended_runs,
+            false,
+            "registering through core services leaves the team ceiling at 0",
+        );
+        let repository = arranged.repository_id.as_str();
+
+        let claim = harness
+            .runner(Which::A)
+            .claim(next_target(&[repository], 1, &[(repository, 1)]))
+            .await
+            .expect("claim");
+
+        assert_same(
+            claim.map(|claim| claim.lease.task_id),
+            Some(task_id),
+            "042 reads no ceiling; 045 adds it with its personal-team exemption",
+        );
+    }
+
+    pub async fn a_next_claim_honours_each_repositorys_free_slots<H: Harness>() {
+        let harness = H::start().await;
+        let board = harness.board();
+        let full = Arranged::new(board).await;
+        let unnamed = Arranged::new(board).await;
+        let free = Arranged::new(board).await;
+        let in_full = full.task(board, "In a full repository").await;
+        let in_unnamed = unnamed.task(board, "In a repository with no entry").await;
+        let in_free = free.task(board, "In a repository with room").await;
+        let runner = harness.runner(Which::A);
+
+        // `full` reports no free slot and `unnamed` reports none at all, which
+        // is the same answer: the capacity is net, and a missing key is no slot.
+        let repositories = [
+            full.repository_id.as_str(),
+            unnamed.repository_id.as_str(),
+            free.repository_id.as_str(),
+        ];
+        let claim = claimed(
+            runner.as_ref(),
+            next_target(
+                &repositories,
+                3,
+                &[(&full.repository_id, 0), (&free.repository_id, 1)],
+            ),
+        )
+        .await;
+        assert_same(claim.lease.task_id, in_free, "the one repository with room");
+
+        // One free slot means one more run, never a cap the board subtracts
+        // the running task from again.
+        let again = claimed(
+            runner.as_ref(),
+            next_target(&repositories, 1, &[(&full.repository_id, 1)]),
+        )
+        .await;
+        assert_same(again.lease.task_id, in_full, "a free slot in `full` now");
+        assert_same(
+            run_state(board, &in_unnamed).await,
+            RunState::Idle,
+            "never offered",
+        );
+    }
+
+    pub async fn a_next_claim_with_no_free_capacity_claims_nothing_and_writes_nothing<
+        H: Harness,
+    >() {
+        let harness = H::start().await;
+        let board = harness.board();
+        let arranged = Arranged::new(board).await;
+        let task_id = arranged.task(board, "Ready, with nowhere to run").await;
+        let before = tasks::get_task(board, &task_id)
+            .await
+            .expect("read the task");
+        harness.clock().advance(Duration::seconds(1));
+        let repository = arranged.repository_id.as_str();
+
+        let claim = harness
+            .runner(Which::A)
+            .claim(next_target(&[repository], 0, &[(repository, 2)]))
+            .await
+            .expect("no capacity is not an error");
+
+        assert!(claim.is_none(), "a full runner got a claim: {claim:?}");
+        assert_same(
+            tasks::get_task(board, &task_id)
+                .await
+                .expect("read the task"),
+            before,
+            "nothing was written",
+        );
+        assert_same(run_count(board, &task_id).await, 0, "runs");
+    }
+
+    pub async fn a_next_claim_resumes_a_due_retry_with_the_session_it_continues<H: Harness>() {
+        let harness = H::start().await;
+        let board = harness.board();
+        let arranged = Arranged::new(board).await;
+        let task_id = arranged.task(board, "Hit a wall").await;
+        walk(board, &task_id, &[RunState::Queued, RunState::Running]).await;
+        let run = outcome::start_run(
+            board,
+            &crate::paths::AppPaths::new(std::env::temp_dir().join("rimaia-contract-unused")),
+            NewRun {
+                task_id: task_id.clone(),
+                kind: RunKind::Implementation,
+                session_id: "the-first-session".to_string(),
+                prompt: "do the work".to_string(),
+                base_ref: None,
+                base_sha: None,
+            },
+        )
+        .await
+        .expect("open the first attempt");
+        outcome::finish_run(
+            board,
+            &run.id,
+            &RunOutcome {
+                resume_after: Some(harness.clock().now() + Duration::minutes(5)),
+                ..transient()
+            },
+            &RunCapture::default(),
+        )
+        .await
+        .expect("close it as retryable");
+        let repository = arranged.repository_id.as_str();
+        let runner = harness.runner(Which::A);
+
+        let early = runner
+            .claim(next_target(&[repository], 1, &[(repository, 1)]))
+            .await
+            .expect("claim");
+        assert!(early.is_none(), "a retry that is not due yet: {early:?}");
+
+        harness.clock().advance(Duration::minutes(6));
+        let claim = claimed(
+            runner.as_ref(),
+            next_target(&[repository], 1, &[(repository, 1)]),
+        )
+        .await;
+
+        assert_same(
+            claim.lease.task_id.clone(),
+            task_id.clone(),
+            "the due retry",
+        );
+        assert_same(
+            claim.resume,
+            Some(ResumePoint {
+                kind: RunKind::Implementation,
+                session_id: "the-first-session".to_string(),
+            }),
+            "the point the retry resumes",
+        );
+        assert_same(claim.trigger, RunTrigger::Queued, "trigger");
+        assert_same(
+            run_state(board, &task_id).await,
+            RunState::Running,
+            "waiting_retry -> running",
+        );
+    }
+
+    pub async fn two_runners_claiming_next_for_one_task_get_exactly_one_claim<H: Harness>() {
+        let harness = H::start().await;
+        let board = harness.board();
+        let arranged = Arranged::new(board).await;
+        let task_id = arranged.task(board, "Wanted by both").await;
+        let repository = arranged.repository_id.as_str();
+        let a = harness.runner(Which::A);
+        let b = harness.runner(Which::B);
+
+        let (first, second) = tokio::join!(
+            a.claim(next_target(&[repository], 1, &[(repository, 1)])),
+            b.claim(next_target(&[repository], 1, &[(repository, 1)])),
+        );
+        let claims: Vec<Claim> = [first, second]
+            .into_iter()
+            .map(|claim| claim.expect("a lost race is not an error"))
+            .flatten()
+            .collect();
+
+        assert_same(claims.len(), 1, "exactly one runner holds the task");
+        assert_same(claims[0].lease.task_id.clone(), task_id.clone(), "the task");
+        assert_same(
+            run_state(board, &task_id).await,
+            RunState::Running,
+            "running, once",
+        );
+        assert_same(run_count(board, &task_id).await, 0, "runs");
+    }
+
+    pub async fn a_waiting_next_claim_returns_as_soon_as_a_task_becomes_startable<H: Harness>() {
+        let harness = H::start().await;
+        let board = harness.board();
+        let arranged = Arranged::new(board).await;
+        let task_id = arranged
+            .task_in(board, "Not ready yet", BoardColumn::NotReady)
+            .await;
+        let repository = arranged.repository_id.clone();
+        let runner = harness.runner(Which::A);
+
+        let waiting = tokio::spawn(async move {
+            runner
+                .claim(next_target_waiting(
+                    &[&repository],
+                    1,
+                    &[(&repository, 1)],
+                    StdDuration::from_secs(60),
+                ))
+                .await
+        });
+        converge().await;
+        assert!(
+            !waiting.is_finished(),
+            "a claim with nothing startable and a minute to wait returned early"
+        );
+
+        tasks::move_task(board, None, &task_id, BoardColumn::Ready, None, None)
+            .await
+            .expect("move the task to ready");
+
+        let claim = joined(waiting, "the claim to wake on the move").await;
+        assert_same(
+            claim.map(|claim| claim.lease.task_id),
+            Some(task_id),
+            "the task that became startable, with the clock not advanced",
+        );
+    }
+
+    pub async fn a_waiting_next_claim_returns_none_once_its_wait_has_passed<H: Harness>() {
+        let harness = H::start().await;
+        let board = harness.board();
+        let arranged = Arranged::new(board).await;
+        let task_id = arranged
+            .task_in(board, "Never made ready", BoardColumn::NotReady)
+            .await;
+        let before = tasks::get_task(board, &task_id)
+            .await
+            .expect("read the task");
+        let repository = arranged.repository_id.clone();
+        let runner = harness.runner(Which::A);
+
+        let waiting = tokio::spawn(async move {
+            runner
+                .claim(next_target_waiting(
+                    &[&repository],
+                    1,
+                    &[(&repository, 1)],
+                    StdDuration::from_secs(30),
+                ))
+                .await
+        });
+        converge().await;
+        assert!(!waiting.is_finished(), "returned before its wait passed");
+
+        harness.clock().advance(Duration::seconds(31));
+
+        let claim = joined(waiting, "the claim to give up at its deadline").await;
+        assert!(claim.is_none(), "nothing was startable: {claim:?}");
+        assert_same(
+            tasks::get_task(board, &task_id)
+                .await
+                .expect("read the task"),
+            before,
+            "nothing was written",
         );
     }
 }

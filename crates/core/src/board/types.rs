@@ -14,6 +14,9 @@
 //! `Catalogue` is the one that still refuses unknown keys, deliberately; the
 //! D31 amendment of 2026-10-09 leaves that to task 052.
 
+use std::collections::BTreeMap;
+use std::time::Duration;
+
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
@@ -79,12 +82,25 @@ impl From<RunKind> for LeasePurpose {
 }
 
 /// What a runner asks the board to let it start (D31 point 4).
-///
-/// `Next`, the runner loop's form, is task 042's: a variant whose only body
-/// was a refusal could not be told apart from a bug.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", rename_all_fields = "camelCase")]
 pub enum ClaimTarget {
+    /// The runner loop's form (task 042): the board picks the task, by board
+    /// order, dependencies and each repository's free slots, among the
+    /// repositories the runner listed.
+    Next {
+        /// What the runner has free, already net of its own in-flight runs.
+        capacity: FreeCapacity,
+        /// The repositories this runner has a checkout of and has consented to
+        /// run unattended in. Before task 045 a repository is opted in exactly
+        /// when it is listed here.
+        repositories: Vec<String>,
+        /// How long the board may wait for something to become claimable. In
+        /// process it waits on its change channel and the injected clock; the
+        /// solo loop always sends zero (D31's 2026-10-10 amendment).
+        #[serde(with = "duration_millis")]
+        wait: Duration,
+    },
     /// Run now (`continue_session: false`), or Retry now and a due retry
     /// (`true`). Only the second comes back with [`Claim::resume`] set.
     Run {
@@ -94,6 +110,45 @@ pub enum ClaimTarget {
     },
     /// A planner: purpose `strategy`, no `runs` row and no `run_state` edge.
     Plan { task_id: String },
+}
+
+/// What a runner can still take on, sent with every
+/// [`ClaimTarget::Next`].
+///
+/// **Net, never a cap.** A `per_repository` of 1 means one more run in that
+/// repository, not a limit of one: the runner has already subtracted what it
+/// is running, so the board must not subtract again. A listed repository that
+/// is missing from `per_repository` has no free slot, the conservative reading
+/// `selection::next_batch` gives a missing key.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FreeCapacity {
+    pub total: usize,
+    pub per_repository: BTreeMap<String, usize>,
+}
+
+impl FreeCapacity {
+    /// The free slots in `repository_id`, and none for one the map does not
+    /// name.
+    pub fn for_repository(&self, repository_id: &str) -> usize {
+        self.per_repository.get(repository_id).copied().unwrap_or(0)
+    }
+}
+
+/// [`ClaimTarget::Next`]'s `wait` as integer milliseconds (`"wait": 0`), so
+/// task 052's JSON has one form rather than serde's `{ secs, nanos }`.
+mod duration_millis {
+    use std::time::Duration;
+
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    pub fn serialize<S: Serializer>(wait: &Duration, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_u64(u64::try_from(wait.as_millis()).unwrap_or(u64::MAX))
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Duration, D::Error> {
+        u64::deserialize(deserializer).map(Duration::from_millis)
+    }
 }
 
 /// A claim the board granted.

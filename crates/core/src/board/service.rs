@@ -17,7 +17,11 @@
 //! task 043: there is no lease row to compare a generation against yet, so no
 //! `Conflict` (D8).
 
+use std::collections::BTreeSet;
+
 use chrono::{DateTime, Utc};
+use tokio::sync::broadcast;
+use tokio::sync::broadcast::error::{RecvError, TryRecvError};
 
 use crate::context::{ServiceContext, TeamScope};
 use crate::db::{settings, StrategySource};
@@ -33,14 +37,14 @@ use crate::runner::RunTrigger;
 use crate::runs::bundle::RunCapture;
 use crate::scheduler::attempts::{self, Ending};
 use crate::scheduler::claim::{self as edges, ClaimOutcome};
-use crate::scheduler::retry;
+use crate::scheduler::{retry, selection};
 use crate::strategy::{self, catalogue};
 use crate::tasks;
 use crate::tasks::strategy::{set_task_strategy, StrategyPlan};
 
 use super::types::{
-    Claim, ClaimTarget, FinishReceipt, FinishRun, Heartbeat, LeasePurpose, LeaseRef, RunContext,
-    StartRun, TeamLimits, TranscriptAck, TranscriptChunk,
+    Claim, ClaimTarget, FinishReceipt, FinishRun, FreeCapacity, Heartbeat, LeasePurpose, LeaseRef,
+    RunContext, StartRun, TeamLimits, TranscriptAck, TranscriptChunk,
 };
 
 /// The context a claim of `task_id` would carry. Writes nothing.
@@ -52,59 +56,219 @@ pub async fn preview(
     read_context(ctx, provider, task_id).await
 }
 
-/// Today's claim routes, **reads first, edges last**.
+/// The single path for every process a runner starts (D31 point 4).
 ///
-/// Everything that can refuse is read before either edge is taken, so a
-/// refusal writes nothing: the context, and for a retry the point it resumes,
-/// of whatever kind was waiting (task 021). Reading the point
-/// before the edge is safe because every caller holds D19's slot, so nothing
-/// else in the process can start a run of this task in between. Nothing is
-/// read after the edges; a read a later task adds there must release on `Err`.
-///
-/// A task that is gone by the time it is read is a lost claim, as
-/// `ClaimOutcome::Lost` always said it was, never an error.
+/// `Run` and `Plan` name their task. `Next` asks the board to choose one, and
+/// is the only place in the workspace that runs selection for a claim (task
+/// 042): task 045 adds its eligibility predicates beside the listed-repository
+/// check in [`claim_next`], and task 043 replaces the edges in [`claim_task`].
+/// Neither touches the runner.
 pub async fn claim(
     ctx: &ServiceContext,
     provider: &dyn AgentProvider,
     target: ClaimTarget,
 ) -> Result<Option<Claim>> {
-    let task_id = match &target {
-        ClaimTarget::Run { task_id, .. } | ClaimTarget::Plan { task_id } => task_id.clone(),
-    };
+    match target {
+        ClaimTarget::Next {
+            capacity,
+            repositories,
+            wait,
+        } => claim_next(ctx, provider, &capacity, &repositories, wait).await,
+        ClaimTarget::Run {
+            task_id,
+            trigger,
+            continue_session,
+        } => {
+            claim_task(
+                ctx,
+                provider,
+                &task_id,
+                Route::Run {
+                    trigger,
+                    continue_session,
+                },
+            )
+            .await
+        }
+        ClaimTarget::Plan { task_id } => claim_task(ctx, provider, &task_id, Route::Plan).await,
+    }
+}
 
-    let context = match read_context(ctx, provider, &task_id).await {
+/// Which claim [`claim_task`] makes of the task it was named.
+#[derive(Debug, Clone, Copy)]
+enum Route {
+    /// Both `run_state` edges: a fresh start through `claim::claim`, or a due
+    /// retry through `claim_retry` and the point it resumes.
+    Run {
+        trigger: RunTrigger,
+        continue_session: bool,
+    },
+    /// D17's planner: a lease and nothing else.
+    Plan,
+}
+
+/// `ClaimTarget::Next`'s body: the top startable task in board order, among
+/// the repositories the runner listed and within the capacity it reported.
+///
+/// Tries once. With a `wait` it then sleeps until a change event or the
+/// deadline, whichever comes first, and tries again, returning `None` once the
+/// deadline has passed with nothing claimed. Both waits are the context's, its
+/// change channel and its injected clock, never a `tokio` timer (D31 point 4),
+/// so a test drives it by publishing and by advancing a `TestClock`. The
+/// channel is subscribed before the first try, so a change that lands between
+/// a try and the wait is still buffered and wakes it.
+///
+/// The solo loop always sends a zero `wait`, and so never subscribes here; the
+/// waiting form is task 053's long poll, which adds the clamp and the
+/// `earliest_due` wake to this body (D31's 2026-10-10 amendment).
+async fn claim_next(
+    ctx: &ServiceContext,
+    provider: &dyn AgentProvider,
+    capacity: &FreeCapacity,
+    repositories: &[String],
+    wait: std::time::Duration,
+) -> Result<Option<Claim>> {
+    let listed: BTreeSet<String> = repositories.iter().cloned().collect();
+    if wait.is_zero() {
+        return try_next(ctx, provider, capacity, &listed).await;
+    }
+
+    let mut changes = ctx.subscribe();
+    let now = ctx.clock.now();
+    let deadline = chrono::Duration::from_std(wait)
+        .ok()
+        .and_then(|wait| now.checked_add_signed(wait))
+        .unwrap_or(DateTime::<Utc>::MAX_UTC);
+
+    loop {
+        drain(&mut changes);
+        if let Some(claim) = try_next(ctx, provider, capacity, &listed).await? {
+            return Ok(Some(claim));
+        }
+        if ctx.clock.now() >= deadline {
+            return Ok(None);
+        }
+
+        let due = ctx.clock.sleep_until(deadline);
+        tokio::select! {
+            // Every arm is cancel-safe: `recv` keeps its place in the channel,
+            // and a clock wait holds nothing. `Lagged` is a wake like any
+            // other, since the answer to both is to look again.
+            event = changes.recv() => {
+                if matches!(event, Err(RecvError::Closed)) {
+                    // Nothing can publish any more; only the clock can change
+                    // the answer now.
+                    ctx.clock.sleep_until(deadline).await;
+                }
+            }
+            () = due => {}
+        }
+    }
+}
+
+/// One look at the board for [`claim_next`]: selection, then the claim, then
+/// the next entry if the claim was lost to another starter.
+///
+/// 1. [`selection::plan`] over the listed repositories. A repository not in
+///    the list is skipped as [`SkipReason::UnattendedRunsNotAllowed`], exactly
+///    as today's opt-in is.
+/// 2. [`selection::first_startable`]: the first entry in board order with no
+///    skip reason and a free slot in its repository, while `capacity.total`
+///    is above zero. Capacity is not a skip reason (D21 point 3).
+/// 3. The claim, by today's two routes, chosen by what the plan says the entry
+///    is: a fresh start, or a due retry when `resume_after` is set. A lost
+///    race moves to the next entry rather than returning, and costs no slot.
+///
+/// [`SkipReason::UnattendedRunsNotAllowed`]: crate::scheduler::SkipReason::UnattendedRunsNotAllowed
+async fn try_next(
+    ctx: &ServiceContext,
+    provider: &dyn AgentProvider,
+    capacity: &FreeCapacity,
+    listed: &BTreeSet<String>,
+) -> Result<Option<Claim>> {
+    let mut plan = selection::plan(ctx, listed).await?;
+
+    while let Some(entry) = selection::first_startable(&plan, capacity) {
+        let task_id = entry.task_id.clone();
+        let route = Route::Run {
+            // ADR-0012: the unattended path, behind the opt-in the plan just
+            // applied.
+            trigger: RunTrigger::Queued,
+            // `resume_after` is populated only for a task in `waiting_retry`
+            // (`QueueEntry::resume_after`), so this is what the entry is, not
+            // a guess.
+            continue_session: entry.resume_after.is_some(),
+        };
+
+        if let Some(claim) = claim_task(ctx, provider, &task_id, route).await? {
+            return Ok(Some(claim));
+        }
+        plan.retain(|entry| entry.task_id != task_id);
+    }
+
+    Ok(None)
+}
+
+/// Throws away every change event already buffered: the look that follows
+/// re-reads the board, which is all any of them asks for.
+fn drain(changes: &mut broadcast::Receiver<crate::ChangeEvent>) {
+    loop {
+        match changes.try_recv() {
+            Ok(_) | Err(TryRecvError::Lagged(_)) => continue,
+            Err(TryRecvError::Empty | TryRecvError::Closed) => return,
+        }
+    }
+}
+
+/// Today's claim routes for a named task, **reads first, edges last**.
+///
+/// Everything that can refuse is read before either edge is taken, so a
+/// refusal writes nothing: the context, and for a retry the point it resumes,
+/// of whatever kind was waiting (task 021). Reading the point before the edge
+/// is safe for the same reason the edge is conditional: if another starter
+/// takes the task in between, the edge is the write that loses, and nothing
+/// read here is used. Nothing is read after the edges; a read a later task
+/// adds there must release on `Err`.
+///
+/// A task that is gone by the time it is read is a lost claim, as
+/// `ClaimOutcome::Lost` always said it was, never an error.
+async fn claim_task(
+    ctx: &ServiceContext,
+    provider: &dyn AgentProvider,
+    task_id: &str,
+    route: Route,
+) -> Result<Option<Claim>> {
+    let context = match read_context(ctx, provider, task_id).await {
         Ok(context) => context,
         Err(error) if error.code() == ErrorCode::NotFound => return Ok(None),
         Err(error) => return Err(error),
     };
     // The lease's team is the task's own row's (D31 point 2), read with the
     // rest, before any edge.
-    let team_id = match tasks::service::team_of(ctx, &task_id).await {
+    let team_id = match tasks::service::team_of(ctx, task_id).await {
         Ok(team_id) => team_id,
         Err(error) if error.code() == ErrorCode::NotFound => return Ok(None),
         Err(error) => return Err(error),
     };
 
-    let (purpose, trigger, resume) = match target {
-        ClaimTarget::Run {
+    let (purpose, trigger, resume) = match route {
+        Route::Run {
             trigger,
             continue_session: false,
-            ..
         } => {
-            if edges::claim(ctx, &task_id).await? == ClaimOutcome::Lost {
+            if edges::claim(ctx, task_id).await? == ClaimOutcome::Lost {
                 return Ok(None);
             }
             (LeasePurpose::Implementation, trigger, None)
         }
-        ClaimTarget::Run {
+        Route::Run {
             trigger,
             continue_session: true,
-            ..
         } => {
             // A review or fix resumes as itself (D29 point 3): the kind
             // travels on the point, and the lease's purpose is that kind.
-            let point = attempts::resume_point(ctx, &task_id).await?;
-            if edges::claim_retry(ctx, &task_id).await? == ClaimOutcome::Lost {
+            let point = attempts::resume_point(ctx, task_id).await?;
+            if edges::claim_retry(ctx, task_id).await? == ClaimOutcome::Lost {
                 return Ok(None);
             }
             let purpose = point
@@ -114,7 +278,7 @@ pub async fn claim(
         }
         // D17's planner: a lease and nothing else. No `run_state` edge, because
         // a planner that took one would need `Running -> Running` later.
-        ClaimTarget::Plan { .. } => (LeasePurpose::Strategy, RunTrigger::Manual, None),
+        Route::Plan => (LeasePurpose::Strategy, RunTrigger::Manual, None),
     };
 
     Ok(Some(Claim {

@@ -5,12 +5,13 @@
 //! test context. Task 052 invokes the same macro over HTTP; nothing in a case
 //! knows which adapter it is talking to.
 
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use chrono::TimeDelta;
 use pretty_assertions::assert_eq;
 use rimaia_core::board::{
-    BoardMethod, BoardPort, Claim, ClaimTarget, FinishReceipt, FinishRun, Heartbeat,
+    BoardMethod, BoardPort, Claim, ClaimTarget, FinishReceipt, FinishRun, FreeCapacity, Heartbeat,
     InProcessBoard, LeasePurpose, LeaseRef, NextStep, RunContext, StartRun, TeamLimits,
     TranscriptAck, TranscriptChunk, TranscriptEnd,
 };
@@ -201,7 +202,17 @@ async fn every_board_dto_round_trips_through_json() {
     ));
     round_trips(&LeasePurpose::Strategy);
     round_trips(&target);
-    round_trips(&ClaimTarget::Plan { task_id: task.id });
+    round_trips(&ClaimTarget::Plan {
+        task_id: task.id.clone(),
+    });
+    round_trips(&ClaimTarget::Next {
+        capacity: FreeCapacity {
+            total: 2,
+            per_repository: BTreeMap::from([(task.repository_id.clone(), 1)]),
+        },
+        repositories: vec![task.repository_id.clone()],
+        wait: std::time::Duration::from_millis(1_500),
+    });
     round_trips(&claim);
     round_trips(&Claim {
         resume: Some(ResumePoint {
@@ -235,6 +246,25 @@ async fn every_board_dto_round_trips_through_json() {
     for method in BoardMethod::ALL {
         round_trips(&method);
     }
+}
+
+#[test]
+fn a_next_claims_wait_crosses_the_wire_as_integer_milliseconds() {
+    // One JSON form for task 052, rather than serde's `{ secs, nanos }`, and
+    // the field names D31 point 2 spells.
+    let next = ClaimTarget::Next {
+        capacity: FreeCapacity {
+            total: 1,
+            per_repository: BTreeMap::from([("repo-a".to_string(), 1)]),
+        },
+        repositories: vec!["repo-a".to_string()],
+        wait: std::time::Duration::ZERO,
+    };
+
+    assert_eq!(
+        serde_json::to_string(&next).expect("serialize"),
+        r#"{"next":{"capacity":{"total":1,"perRepository":{"repo-a":1}},"repositories":["repo-a"],"wait":0}}"#,
+    );
 }
 
 #[test]
