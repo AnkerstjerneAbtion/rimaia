@@ -627,7 +627,7 @@ async fn a_run_scoped_handle_lists_only_its_own_team() {
 /// A `ScopedTx` counts as a transaction here. It carries the context's scope,
 /// which is why the helpers below may take one, but each of them is still a
 /// door into someone else's transaction, so each is named.
-const STORE_HANDLE_EXCEPTIONS: [(&str, &str); 39] = [
+const STORE_HANDLE_EXCEPTIONS: [(&str, &str); 40] = [
     ("db::connect", "it makes the pool; no context can exist yet"),
     ("db::migrate", "it runs before the context is built"),
     (
@@ -773,6 +773,12 @@ const STORE_HANDLE_EXCEPTIONS: [(&str, &str); 39] = [
         "consent::inputs",
         "eligible reads the revisions a run would execute inside the claim's transaction (045); \
          it reads one task by id, which the caller has already scoped",
+    ),
+    (
+        "consent::context_is_current",
+        "run_context compares the context it read with the database inside its fence's \
+         transaction, so consent judges the text it returns (045); it reads one task by id, \
+         which the caller has already scoped, and that task's own team's settings",
     ),
     (
         "consent::missing",
