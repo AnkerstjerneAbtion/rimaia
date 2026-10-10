@@ -17,11 +17,11 @@
 use chrono::{DateTime, TimeDelta, Utc};
 use pretty_assertions::assert_eq;
 use rimaia_core::board::StartRun;
-use rimaia_core::runner::provider::ClaudeProvider;
 use rimaia_core::db::{new_id, BoardColumn, ExitClass, RunKind, RunState, RunStatus, Task};
 use rimaia_core::repo::{self, NewRepository};
 use rimaia_core::runner::events::TokenUsage;
 use rimaia_core::runner::outcome::{finish_run, start_run, NewRun, RunOutcome, SpawnedAs};
+use rimaia_core::runner::provider::ClaudeProvider;
 use rimaia_core::runs::bundle::RunCapture;
 use rimaia_core::scheduler::{self, SkipReason};
 use rimaia_core::startup;
@@ -692,8 +692,8 @@ impl Fixture {
             &ClaudeProvider,
             &[],
         )
-            .await
-            .expect("reconcile")
+        .await
+        .expect("reconcile")
     }
 
     /// How many `runs` rows a task has — the row-level answer to "how many

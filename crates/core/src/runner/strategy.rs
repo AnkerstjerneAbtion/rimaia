@@ -73,9 +73,9 @@ use crate::tasks::{self, TaskDetail, TaskFilter, TaskSummary};
 
 use super::limits::{self, RunnerLimits};
 use super::process::{Attempt, CancelSignal, PermissionMode, RunnerConfig};
-use super::start::Starter;
 use super::prompt::{compose_strategy_prompt, compose_strategy_system_append, StrategyGuidance};
 use super::provider::{self, ForbiddenOperation, RimaiaHandle, RunIntent, SessionIntent};
+use super::start::Starter;
 
 /// What a planner is denied on top of the implementation blocklist.
 ///

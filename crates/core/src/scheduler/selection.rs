@@ -65,12 +65,12 @@ use crate::context::ServiceContext;
 use crate::db::{BoardColumn, RunState};
 use crate::error::Result;
 use crate::events::RunnerId;
-use crate::runner::provider::ProviderId;
 use crate::review_loop::config as review_config;
+use crate::runner::provider::ProviderId;
 use crate::scheduler::inflight::Counts;
 use crate::strategy::catalogue::{catalogue_for_provider, Catalogue};
-use crate::strategy::settings::{self as strategy_settings, StrategyDefaults};
 use crate::strategy::effective_strategy;
+use crate::strategy::settings::{self as strategy_settings, StrategyDefaults};
 use crate::tasks::strategy::needs_planning;
 use crate::tasks::{self, TaskFilter, TaskSummary};
 
@@ -317,8 +317,7 @@ async fn candidates(
                 let team_id = crate::repo::team_of(ctx, repository_id).await?;
                 let defaults = Arc::new(RepositoryDefaults {
                     catalogue: catalogue_for_provider(ctx, &team_id, runner.provider).await?,
-                    repository: strategy_settings::repository_default(ctx, repository_id)
-                        .await?,
+                    repository: strategy_settings::repository_default(ctx, repository_id).await?,
                     global: strategy_settings::global_default_for(ctx, &team_id).await?,
                 });
                 by_repository.insert(repository_id.clone(), Arc::clone(&defaults));

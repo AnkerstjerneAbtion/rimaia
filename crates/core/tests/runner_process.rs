@@ -55,8 +55,8 @@ use std::process::Command;
 use std::time::Duration;
 
 use pretty_assertions::assert_eq;
-use rimaia_core::board::OwnerPresence;
 use rimaia_core::board::service::team_disallowed_tools;
+use rimaia_core::board::OwnerPresence;
 use rimaia_core::db::settings::{self, RunEnvironment};
 use rimaia_core::db::{BoardColumn, ExitClass, Run, RunState, RunStatus, Task};
 use rimaia_core::mcp::{MCP_SERVER_NAME, RUN_MCP_SERVER_NAME};

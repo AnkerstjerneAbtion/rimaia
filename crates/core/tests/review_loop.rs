@@ -1362,8 +1362,8 @@ async fn a_review_left_open_by_a_crash_is_reconciled_into_in_review_or_a_review_
         &ClaudeProvider,
         &[],
     )
-        .await
-        .expect("reconcile");
+    .await
+    .expect("reconcile");
     let detail = fixture.detail().await;
     assert_eq!(detail.task.run_state, RunState::WaitingRetry);
     let last = detail.last_run.expect("the closed review");
@@ -1390,8 +1390,8 @@ async fn a_review_left_open_by_a_crash_is_reconciled_into_in_review_or_a_review_
         &ClaudeProvider,
         &[],
     )
-        .await
-        .expect("reconcile");
+    .await
+    .expect("reconcile");
     let detail = fixture.detail().await;
     assert_eq!(detail.task.column, BoardColumn::InReview);
     assert_eq!(detail.task.run_state, RunState::Idle);

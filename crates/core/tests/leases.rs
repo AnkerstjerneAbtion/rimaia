@@ -18,8 +18,8 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use pretty_assertions::assert_eq;
-use rimaia_core::board::OwnerPresence;
 use rimaia_core::board::lease::{self, Lease, LeaseState};
+use rimaia_core::board::OwnerPresence;
 use rimaia_core::board::{
     BoardFuture, BoardPort, Claim, ClaimTarget, FinishReceipt, FinishRun, Heartbeat,
     InProcessBoard, LeasePurpose, LeaseRef, LeaseTerm, NextStep, RunContext, StartRun,
@@ -886,8 +886,8 @@ async fn every_starter_records_its_claim_before_it_spawns() {
         SlotOwner::Manual,
     )
     .await
-        .expect("the claim")
-        .expect("nothing refused it");
+    .expect("the claim")
+    .expect("nothing refused it");
     let generation = claim.lease().generation;
     plan_claimed(&spy, f.machine(), &f.paths, &config, claim)
         .await
@@ -1810,8 +1810,8 @@ impl Fixture {
             &ClaudeProvider,
             &held,
         )
-            .await
-            .expect("reconcile")
+        .await
+        .expect("reconcile")
     }
 
     async fn assert_lease_on(

@@ -191,7 +191,11 @@ pub async fn catalogue_for_provider(
 
 /// The team's stored catalogue filled from `default`, or `default` itself
 /// when the key is absent or will not parse.
-async fn resolved_over(ctx: &ServiceContext, team_id: &str, default: Catalogue) -> Result<Catalogue> {
+async fn resolved_over(
+    ctx: &ServiceContext,
+    team_id: &str,
+    default: Catalogue,
+) -> Result<Catalogue> {
     let Some(stored) = settings::get_team(ctx, team_id, STRATEGY_CATALOGUE).await? else {
         return Ok(default);
     };

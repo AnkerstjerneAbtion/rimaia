@@ -10,8 +10,8 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use pretty_assertions::assert_eq;
-use rimaia_core::board::OwnerPresence;
 use rimaia_core::board::LeaseRef;
+use rimaia_core::board::OwnerPresence;
 use rimaia_core::db::{BoardColumn, MutationSource, RunState};
 use rimaia_core::mcp::requests::{GetTaskRequest, ListTasksRequest};
 use rimaia_core::mcp::RimaiaServer;
