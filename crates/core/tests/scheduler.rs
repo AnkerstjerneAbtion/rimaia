@@ -133,6 +133,83 @@ async fn five_ready_tasks_run_in_board_order_without_intervention() {
 }
 
 #[tokio::test]
+async fn the_queue_never_claims_another_teams_task() {
+    // Task 039: the queue's selection acts on its context's one team. Team B's
+    // task is first in priority — the lowest position on the board — and in a
+    // repository that opted in, so the only thing keeping it out of this
+    // queue is the scope.
+    let fixture = Fixture::new().await;
+    let mine = fixture.add_task("Team A's task").await;
+
+    let team_b = {
+        let mut tx = fixture.ctx().pool.begin().await.expect("a transaction");
+        let team =
+            rimaia_core::identity::create_personal_team(&mut tx, &fixture.harness.clock, "grace")
+                .await
+                .expect("a second team");
+        tx.commit().await.expect("commit the second team");
+        team
+    };
+    let as_b = fixture
+        .ctx()
+        .with_scope(rimaia_core::TeamScope::one(team_b.team_id.clone()));
+    let their_repository = TempRepo::init();
+    let registered = repo::register(
+        &as_b,
+        &fixture.paths.worktrees_dir(),
+        NewRepository {
+            path: their_repository.path().to_string_lossy().into_owned(),
+            name: None,
+            worktree_root: None,
+        },
+    )
+    .await
+    .expect("register team B's repository");
+    repo::set_allow_unattended_runs(&as_b, &registered.id, true)
+        .await
+        .expect("team B opts in");
+    let theirs = tasks::create_task(
+        &as_b,
+        NewTask {
+            repository_id: registered.id.clone(),
+            title: "Team B's task".to_string(),
+            plan: Some("1. Implement it".to_string()),
+            extra_instructions: None,
+            column: Some(BoardColumn::Ready),
+            links: vec![],
+        },
+    )
+    .await
+    .expect("team B's ready task")
+    .id;
+    sqlx::query("UPDATE tasks SET position = -100.0 WHERE id = ?1")
+        .bind(&theirs)
+        .execute(&fixture.ctx().pool)
+        .await
+        .expect("put team B's task first in priority");
+
+    let mut changes = fixture.ctx().subscribe();
+    let queue = fixture.spawn_queue();
+    queue.start().await.expect("start the queue");
+    wait_until_in_review(&fixture, &mut changes, &mine).await;
+    queue.shutdown();
+
+    assert_eq!(
+        fixture.cli.started(),
+        vec![mine.clone()],
+        "only team A's task ran"
+    );
+    fixture.cli.assert_nothing_fell_through();
+    let untouched = tasks::get_task(&as_b, &theirs)
+        .await
+        .expect("read team B's task");
+    assert_eq!(untouched.task.column, BoardColumn::Ready);
+    assert_eq!(untouched.task.run_state, RunState::Idle);
+    assert_eq!(untouched.last_run, None, "and no run was opened for it");
+    drop(their_repository);
+}
+
+#[tokio::test]
 async fn a_to_b_to_c_run_in_dependency_order_in_one_queue_pass() {
     // Task 011's first acceptance criterion, and the reason ADR-0008 does not
     // wait for a human: "A → B → C in `ready` run in dependency order in a

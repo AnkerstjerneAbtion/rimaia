@@ -17,7 +17,7 @@
 //!
 //! Each later task adds its own cases here (D31 point 13): the review loop's
 //! `NextStep::Continue` (021), team scoping (038,
-//! 039), fencing and generations (043), expiry (053), `run_tool` (055),
+//! 039: `a_lease_on_another_teams_task_is_not_found_in_either_spelling`), fencing and generations (043), expiry (053), `run_tool` (055),
 //! resends (056).
 
 use std::future::Future;
@@ -91,6 +91,7 @@ macro_rules! board_contract {
             a_finish_for_another_tasks_run_is_not_found,
             a_solo_heartbeat_fences_nothing_and_cancels_nothing,
             every_lease_method_answers_not_found_for_a_task_that_does_not_exist,
+            a_lease_on_another_teams_task_is_not_found_in_either_spelling,
             finish_run_continues_to_a_review_when_the_loop_is_on,
             finish_run_releases_an_implementation_when_the_loop_is_off,
             finish_run_releases_a_clean_review_and_lands_the_task,
@@ -839,6 +840,69 @@ pub mod cases {
                 .expect_err(method.as_str());
             assert_same(error.code(), ErrorCode::NotFound, method.as_str());
         }
+    }
+
+    /// D31 point 13's 038/039 case. A lease naming another team's task is
+    /// `NotFound` in both spellings — with that team's id, and with the
+    /// runner's own team on the other team's task — exactly as a never-issued
+    /// task is, because the adapter narrows to `LeaseRef.team_id` only after
+    /// checking its own scope holds it, and the scoped query refuses a
+    /// mismatched pair.
+    pub async fn a_lease_on_another_teams_task_is_not_found_in_either_spelling<H: Harness>() {
+        let harness = H::start().await;
+        let board = harness.board();
+        let own_team = board.scope.sole().expect("one board team").clone();
+        // Another team on the same board, made the way a sign-up makes one.
+        let other = {
+            let mut tx = board.pool.begin().await.expect("a transaction");
+            let team = crate::identity::create_personal_team(&mut tx, harness.clock(), "grace")
+                .await
+                .expect("a second team");
+            tx.commit().await.expect("commit the second team");
+            team
+        };
+        let other_board = board.with_scope(crate::TeamScope::one(other.team_id.clone()));
+        let arranged = Arranged::new(&other_board).await;
+        let theirs = arranged.task(&other_board, "Theirs").await;
+        let runner = harness.runner(Which::A);
+
+        for method in BoardMethod::ALL {
+            // The lease-less methods are scoped by the runner, not by a lease,
+            // and `publish_tail` cannot fail.
+            if !method.takes_a_lease() || method == BoardMethod::PublishTail {
+                continue;
+            }
+            let never_issued = new_id();
+            let missing = call(
+                runner.as_ref(),
+                method,
+                &LeaseRef::solo(never_issued.clone(), own_team.clone()),
+            )
+            .await
+            .expect_err(method.as_str());
+
+            for lease in [
+                LeaseRef::solo(theirs.clone(), other.team_id.clone()),
+                LeaseRef::solo(theirs.clone(), own_team.clone()),
+            ] {
+                let error = call(runner.as_ref(), method, &lease)
+                    .await
+                    .expect_err(method.as_str());
+                assert_same(error.code(), ErrorCode::NotFound, method.as_str());
+                assert_same(
+                    error.to_string(),
+                    missing.to_string().replace(&never_issued, &theirs),
+                    method.as_str(),
+                );
+            }
+        }
+
+        assert_same(
+            run_state(&other_board, &theirs).await,
+            RunState::Idle,
+            "their task is where it was",
+        );
+        assert_same(run_count(&other_board, &theirs).await, 0, "and has no run");
     }
 
     pub async fn finish_run_continues_to_a_review_when_the_loop_is_on<H: Harness>() {

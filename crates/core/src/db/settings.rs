@@ -737,7 +737,9 @@ mod tests {
                 .await
                 .err(),
             get_user(&h.context, BASE_INSTRUCTIONS).await.err(),
-            set_user(&h.context, ONBOARDING_DISMISSED, "true").await.err(),
+            set_user(&h.context, ONBOARDING_DISMISSED, "true")
+                .await
+                .err(),
             get_runner(&h.context, BASE_INSTRUCTIONS).await.err(),
             set_runner(&h.context, SUBSCRIPTION_MONTHLY_USD, "1")
                 .await

@@ -50,15 +50,31 @@ pub async fn test_pool() -> SqlitePool {
 ///
 /// A fixture, not a pairing service: pairing is tasks 047 and 052's, and
 /// outside this module nothing but `identity::ensure_solo` creates a runner.
+///
+/// Its own statement rather than `identity`'s, which is private to that module
+/// so that no production function outside it takes a bare connection (task
+/// 039's `no_service_takes_a_pool_without_a_scope`). Same columns, same
+/// provider.
 pub async fn insert_runner(
     conn: &mut SqliteConnection,
     clock: &dyn Clock,
     user_id: &str,
     label: &str,
 ) -> RunnerId {
-    crate::identity::insert_runner(conn, clock, user_id, label)
-        .await
-        .expect("a runner for an existing user must insert")
+    let runner_id = crate::db::new_id();
+    sqlx::query(
+        "INSERT INTO runners (id, user_id, label, provider, paired_at)
+         VALUES (?1, ?2, ?3, ?4, ?5)",
+    )
+    .bind(&runner_id)
+    .bind(user_id)
+    .bind(label)
+    .bind(crate::runner::provider::ProviderId::ClaudeCode.as_str())
+    .bind(clock.now())
+    .execute(&mut *conn)
+    .await
+    .expect("a runner for an existing user must insert");
+    runner_id
 }
 
 #[cfg(test)]

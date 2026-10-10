@@ -215,9 +215,9 @@ pub async fn ensure_solo(pool: &SqlitePool, clock: &dyn Clock) -> Result<SoloIde
 
 /// A `runners` row for `user_id`, running the default provider.
 ///
-/// Crate-private: outside the test harness, [`ensure_solo`] is the only thing
-/// that creates a runner. Pairing one is tasks 047 and 052's.
-pub(crate) async fn insert_runner(
+/// Private: [`ensure_solo`] is the only thing that creates a runner. Pairing
+/// one is tasks 047 and 052's; the test harness has a fixture of its own.
+async fn insert_runner(
     conn: &mut SqliteConnection,
     clock: &dyn Clock,
     user_id: &str,
