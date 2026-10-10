@@ -6,6 +6,7 @@ status: ready
 depends_on: ["040"]
 adrs: ["0028", "0033", "0035", "0032", "0031", "0021", "0027"]
 size: L
+landed: "#34"
 ---
 
 # Machine state moves to the runner
