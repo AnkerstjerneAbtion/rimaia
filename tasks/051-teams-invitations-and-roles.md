@@ -3,7 +3,7 @@ id: "051"
 title: Teams, invitations and roles
 milestone: v0.5
 status: ready
-depends_on: ["050"]
+depends_on: ["050", "073"]
 adrs: ["0021", "0029", "0030", "0031", "0032", "0037"]
 size: L
 ---

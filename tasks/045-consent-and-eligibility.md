@@ -427,6 +427,10 @@ not allow unattended runs in this repository`.
 - **Acceptance the runner can verify** (signatures): ADR-0032 point 4 leaves it undecided.
 - **Moving `max_turns` or `disallowed_tools` to "the stricter of team and runner":** 042.
   The strategy ceiling is a separate setting with its own rule.
+- **The strategy catalogue's labels and the repository's name and default branch** reaching
+  prompts: 073, under ADR-0032's amendment "every prompt input has a class". This task leaves
+  them as they are, which is safe only because no shared team can have a second member
+  before 051, and 073 is ordered before it.
 - **Any migration other than `20261003120200_consent.sql`.** If a column is missing from D28
   part 6, stop and ask (D28's D4 amendment).
 
