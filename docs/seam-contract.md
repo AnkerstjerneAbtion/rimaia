@@ -6708,7 +6708,15 @@ each meet these again, and left to each implementer they would be decided in fiv
    `db::settings::set_team_in`), and each writes only when the value changes. Saving the same
    text again bumps nothing, so it undoes nobody's acceptance. The plan's revision covers
    `plan` and `extra_instructions` together, so 034's review note is a plan revision by the
-   reviewer, inside the verdict's transaction.
+   reviewer, inside the verdict's transaction. It also covers the title, the links and the
+   strategy's phase names and summaries (ADR-0032's 2026-10-10 amendment, "the title, links
+   and strategy prose are plan content"): `update_task`, the four link services,
+   `write_strategy` and `clear_task_strategy` compare what they store with what was there
+   and call `tasks::service::record_plan_revision` only when it differs. Links compare as
+   the prompt lists them (label and url, in order), so a reorder into the same order is not
+   a revision; one edit that changes the title and the plan is one revision. A strategy
+   write that changes only the model, effort, workflow, agent counts or rationale bumps
+   nothing, and a planner on another owner's runner that writes phase prose sets the mark.
 3. **The pieces.** `pieces_for(purpose, inputs)` lists what the composer for that purpose
    reads: implementation, plan · base instructions · base commit; strategy, plan · base
    commit; review, plan · the effective review instructions · findings from another runner ·
