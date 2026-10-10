@@ -6,6 +6,7 @@ status: ready
 depends_on: ["039"]
 adrs: ["0028", "0023", "0027", "0003"]
 size: L
+landed: "#34"
 ---
 
 # The runner store
