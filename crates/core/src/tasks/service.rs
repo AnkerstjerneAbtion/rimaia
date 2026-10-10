@@ -636,9 +636,11 @@ fn strongest_origin(effective: &EffectiveStrategy) -> StrategyOrigin {
 )]
 pub async fn update_task(ctx: &ServiceContext, id: &str, patch: TaskPatch) -> Result<Task> {
     // Point 6's mark, read over the pool before the transaction, and only
-    // when the patch could change a plan revision.
-    let touches_plan =
-        !matches!(patch.plan, Patch::Unset) || !matches!(patch.extra_instructions, Patch::Unset);
+    // when the patch could change a plan revision. The title is plan content
+    // (ADR-0032's 2026-10-10 amendment), so a retitle can.
+    let touches_plan = patch.title.is_some()
+        || !matches!(patch.plan, Patch::Unset)
+        || !matches!(patch.extra_instructions, Patch::Unset);
     let during_run = touches_plan && crate::consent::written_during_run(ctx, &ctx.actor).await?;
 
     let mut tx = ctx.begin().await?;
@@ -658,8 +660,9 @@ pub async fn update_task(ctx: &ServiceContext, id: &str, patch: TaskPatch) -> Re
             validate_title(&title)?;
             title
         }
-        None => current.title,
+        None => current.title.clone(),
     };
+    let retitled = title != current.title;
     let plan = normalize_plan(patch.plan.apply(current.plan));
     let extra_instructions = patch.extra_instructions.apply(current.extra_instructions);
     // Whether the patch *mentioned* either field — set or cleared — not whether
@@ -694,7 +697,7 @@ pub async fn update_task(ctx: &ServiceContext, id: &str, patch: TaskPatch) -> Re
     )
     .execute(&mut *tx)
     .await?;
-    write_plan(
+    let plan_written = write_plan(
         &mut tx,
         id,
         plan.as_deref(),
@@ -703,6 +706,10 @@ pub async fn update_task(ctx: &ServiceContext, id: &str, patch: TaskPatch) -> Re
         during_run,
     )
     .await?;
+    // One edit is one revision, however many plan fields it changed.
+    if retitled && !plan_written {
+        record_plan_revision(&mut tx, id, &ctx.actor, during_run).await?;
+    }
 
     tx.commit().await?;
 
@@ -722,7 +729,10 @@ pub async fn update_task(ctx: &ServiceContext, id: &str, patch: TaskPatch) -> Re
 
 /// The plan helper (ADR-0032 point 3): every write of `plan` or
 /// `extra_instructions` after a task is created goes through here, so every
-/// one records a revision, its author and point 6's mark.
+/// one records a revision, its author and point 6's mark. The rest of the
+/// plan's content (the title, the links and the strategy's phase prose) is
+/// written by its own service, which calls [`record_plan_revision`] when its
+/// value changed.
 ///
 /// **Storing the same text again is not an edit.** It bumps nothing, so it
 /// does not undo anyone's acceptance; the statement writes only when either
@@ -749,6 +759,33 @@ pub(crate) async fn write_plan(
     .execute(&mut *conn)
     .await?;
     Ok(written.rows_affected() > 0)
+}
+
+/// The plan helper's other half: a new plan revision for a change to plan
+/// content stored outside `plan` and `extra_instructions`. ADR-0032's
+/// 2026-10-10 amendment makes the title, the links and the strategy's phase
+/// names and summaries plan content, because each reaches the prompt.
+///
+/// Unconditional, so the caller decides that the value changed: storing the
+/// same title, links or prose again is not an edit, and must not reach here.
+pub(crate) async fn record_plan_revision(
+    conn: &mut SqliteConnection,
+    id: &str,
+    author: &str,
+    written_during_run: bool,
+) -> Result<()> {
+    sqlx::query!(
+        "UPDATE tasks
+            SET plan_revision = plan_revision + 1, plan_updated_by = ?1,
+                plan_written_during_run = ?2
+          WHERE id = ?3",
+        author,
+        written_during_run,
+        id,
+    )
+    .execute(&mut *conn)
+    .await?;
+    Ok(())
 }
 
 /// Assigns a task to one member of its team, or returns it to the pool with

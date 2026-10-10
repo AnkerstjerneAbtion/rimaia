@@ -45,7 +45,7 @@ use crate::error::{Error, Result};
 use crate::events::ChangeEvent;
 use crate::strategy::settings as strategy_settings;
 use crate::strategy::{effective_strategy, StrategyDefaults};
-use crate::tasks::service::{fetch_task_row, task_row, team_of_task};
+use crate::tasks::service::{fetch_task_row, record_plan_revision, task_row, team_of_task};
 
 /// The envelope version this build writes. Stamped by
 /// [`set_task_strategy`], never taken from the caller — a proposal that
@@ -380,6 +380,10 @@ pub(crate) struct PreparedStrategy {
     plan: StrategyPlan,
     stored: String,
     defaults: ResolvedDefaults,
+    /// Who is writing, and point 6's mark, for the plan revision a change to
+    /// the phase prose records.
+    author: String,
+    written_during_run: bool,
 }
 
 /// [`set_task_strategy`]'s reads, made over the pool **before** the write's
@@ -398,10 +402,13 @@ pub(crate) async fn prepare_strategy(
     let plan = plan.repaired();
     let stored = plan.to_stored()?;
     let defaults = resolved_defaults(ctx, task_id).await?;
+    let written_during_run = crate::consent::written_during_run(ctx, &ctx.actor).await?;
     Ok(PreparedStrategy {
         plan,
         stored,
         defaults,
+        author: ctx.actor.clone(),
+        written_during_run,
     })
 }
 
@@ -421,6 +428,8 @@ pub(crate) async fn write_strategy(
         plan,
         stored,
         defaults,
+        author,
+        written_during_run,
     } = prepared;
     let current = fetch_task_row(tx, task_id).await?;
 
@@ -449,7 +458,30 @@ pub(crate) async fn write_strategy(
     )
     .execute(&mut **tx)
     .await?;
+
+    let stored_before = StrategyPlan::from_stored(current.strategy_plan.as_deref());
+    if phase_prose(stored_before.as_ref()) != phase_prose(Some(&plan)) {
+        record_plan_revision(tx, task_id, &author, written_during_run).await?;
+    }
     Ok(())
+}
+
+/// The free text of a strategy's phases, in order: each phase's `name` and
+/// `summary`. ADR-0032's 2026-10-10 amendment makes it plan content, because
+/// the implementation prompt's strategy guidance renders it.
+///
+/// The rest of the envelope is not: the model, effort, workflow and agent
+/// counts change what a run costs, not what it is told, and the runner's
+/// strategy ceiling governs them (ADR-0032 point 3). The rationale is read by a
+/// human on the card and never reaches a prompt.
+fn phase_prose(plan: Option<&StrategyPlan>) -> Vec<(&str, &str)> {
+    plan.map(|plan| {
+        plan.phases
+            .iter()
+            .map(|phase| (phase.name.as_str(), phase.summary.as_str()))
+            .collect()
+    })
+    .unwrap_or_default()
 }
 
 /// Takes authorship of a recorded proposal: `strategy_source` flips
@@ -527,8 +559,9 @@ pub async fn accept_task_strategy(ctx: &ServiceContext, task_id: &str) -> Result
     )
 )]
 pub async fn clear_task_strategy(ctx: &ServiceContext, task_id: &str) -> Result<Task> {
+    let written_during_run = crate::consent::written_during_run(ctx, &ctx.actor).await?;
     let mut tx = ctx.begin().await?;
-    fetch_task_row(&mut tx, task_id).await?;
+    let current = fetch_task_row(&mut tx, task_id).await?;
 
     let now = ctx.clock.now();
     sqlx::query!(
@@ -539,6 +572,12 @@ pub async fn clear_task_strategy(ctx: &ServiceContext, task_id: &str) -> Result<
     )
     .execute(&mut *tx)
     .await?;
+    // Forgetting phase prose changes what the next prompt is told as much as
+    // rewriting it does, so it is a plan revision like any other edit to it.
+    let stored_before = StrategyPlan::from_stored(current.strategy_plan.as_deref());
+    if !phase_prose(stored_before.as_ref()).is_empty() {
+        record_plan_revision(&mut tx, task_id, &ctx.actor, written_during_run).await?;
+    }
 
     let team_id = team_of_task(&mut tx, task_id).await?;
     tx.commit().await?;

@@ -627,7 +627,7 @@ async fn a_run_scoped_handle_lists_only_its_own_team() {
 /// A `ScopedTx` counts as a transaction here. It carries the context's scope,
 /// which is why the helpers below may take one, but each of them is still a
 /// door into someone else's transaction, so each is named.
-const STORE_HANDLE_EXCEPTIONS: [(&str, &str); 40] = [
+const STORE_HANDLE_EXCEPTIONS: [(&str, &str); 41] = [
     ("db::connect", "it makes the pool; no context can exist yet"),
     ("db::migrate", "it runs before the context is built"),
     (
@@ -759,6 +759,12 @@ const STORE_HANDLE_EXCEPTIONS: [(&str, &str); 40] = [
         "tasks::service::write_plan",
         "the plan helper: update_task and a review note record a plan revision inside the \
          transaction that read the task (045)",
+    ),
+    (
+        "tasks::service::record_plan_revision",
+        "the plan helper's other half: a retitle, a link edit and a strategy write record a plan \
+         revision inside the transaction that changed the content (045); it writes one task \
+         already read in that transaction's scope",
     ),
     (
         "board::lease::consent_refusal",

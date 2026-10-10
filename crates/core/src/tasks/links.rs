@@ -17,7 +17,7 @@ use crate::db::TaskLink;
 use crate::error::{Error, Result};
 use crate::events::{ChangeEvent, TeamId};
 use crate::tasks::position::{position_between, rebalanced_positions, Placement};
-use crate::tasks::service::fetch_task_row;
+use crate::tasks::service::{fetch_task_row, record_plan_revision};
 use crate::tasks::types::{NewTaskLink, TaskLinkPatch};
 
 /// Appends a link to the bottom of a task's link list.
@@ -35,9 +35,11 @@ pub async fn add_task_link(
     input: NewTaskLink,
 ) -> Result<TaskLink> {
     validate_link(&input.label, &input.url)?;
+    let during_run = crate::consent::written_during_run(ctx, &ctx.actor).await?;
 
     let mut tx = ctx.begin().await?;
     fetch_task_row(&mut tx, task_id).await?;
+    let before = link_contents(&mut tx, task_id).await?;
 
     let position = append_link_position(&mut tx, task_id).await?;
     let id = crate::db::new_id();
@@ -53,6 +55,7 @@ pub async fn add_task_link(
     .execute(&mut *tx)
     .await?;
 
+    revise_if_links_changed(ctx, &mut tx, task_id, before, during_run).await?;
     let team_id = stamp_task_updated_at(ctx, &mut tx, task_id).await?;
 
     tx.commit().await?;
@@ -82,9 +85,11 @@ pub async fn update_task_link(
     link_id: &str,
     patch: TaskLinkPatch,
 ) -> Result<TaskLink> {
+    let during_run = crate::consent::written_during_run(ctx, &ctx.actor).await?;
     let mut tx = ctx.begin().await?;
     let scope = tx.scope().json();
     let current = fetch_link_row(&mut *tx, &scope, link_id).await?;
+    let before = link_contents(&mut tx, &current.task_id).await?;
 
     let label = patch.label.unwrap_or(current.label);
     let url = patch.url.unwrap_or(current.url);
@@ -99,6 +104,7 @@ pub async fn update_task_link(
     .execute(&mut *tx)
     .await?;
 
+    revise_if_links_changed(ctx, &mut tx, &current.task_id, before, during_run).await?;
     let team_id = stamp_task_updated_at(ctx, &mut tx, &current.task_id).await?;
 
     tx.commit().await?;
@@ -130,14 +136,17 @@ pub async fn get_task_link(ctx: &ServiceContext, link_id: &str) -> Result<TaskLi
     )
 )]
 pub async fn remove_task_link(ctx: &ServiceContext, link_id: &str) -> Result<()> {
+    let during_run = crate::consent::written_during_run(ctx, &ctx.actor).await?;
     let mut tx = ctx.begin().await?;
     let scope = tx.scope().json();
     let current = fetch_link_row(&mut *tx, &scope, link_id).await?;
+    let before = link_contents(&mut tx, &current.task_id).await?;
 
     sqlx::query!("DELETE FROM task_links WHERE id = ?1", link_id)
         .execute(&mut *tx)
         .await?;
 
+    revise_if_links_changed(ctx, &mut tx, &current.task_id, before, during_run).await?;
     let team_id = stamp_task_updated_at(ctx, &mut tx, &current.task_id).await?;
 
     tx.commit().await?;
@@ -168,9 +177,11 @@ pub async fn reorder_task_link(
         return Err(Error::invalid("a link cannot be reordered next to itself"));
     }
 
+    let during_run = crate::consent::written_during_run(ctx, &ctx.actor).await?;
     let mut tx = ctx.begin().await?;
     let scope = tx.scope().json();
     let current = fetch_link_row(&mut *tx, &scope, link_id).await?;
+    let before = link_contents(&mut tx, &current.task_id).await?;
 
     let position =
         resolve_link_position(&mut tx, &current.task_id, link_id, before_id, after_id).await?;
@@ -183,6 +194,7 @@ pub async fn reorder_task_link(
     .execute(&mut *tx)
     .await?;
 
+    revise_if_links_changed(ctx, &mut tx, &current.task_id, before, during_run).await?;
     let team_id = stamp_task_updated_at(ctx, &mut tx, &current.task_id).await?;
 
     tx.commit().await?;
@@ -203,6 +215,40 @@ fn validate_link(label: &str, url: &str) -> Result<()> {
     }
     if url.trim().is_empty() {
         return Err(Error::invalid("a task link needs a non-blank url"));
+    }
+    Ok(())
+}
+
+/// A task's links as the prompt lists them: each label and url, in order.
+async fn link_contents(tx: &mut SqliteConnection, task_id: &str) -> Result<Vec<(String, String)>> {
+    let links = sqlx::query!(
+        "SELECT label, url FROM task_links WHERE task_id = ?1 ORDER BY position ASC, id ASC",
+        task_id,
+    )
+    .fetch_all(&mut *tx)
+    .await?;
+    Ok(links
+        .into_iter()
+        .map(|link| (link.label, link.url))
+        .collect())
+}
+
+/// Records a plan revision when the task's links now read differently from
+/// `before` (ADR-0032's 2026-10-10 amendment: the links are plan content).
+///
+/// Compared as the prompt lists them rather than assumed from which service
+/// ran, so an edit that stores the same label and url, or a reorder that
+/// leaves the order as it was, is not a revision and undoes nobody's
+/// acceptance.
+async fn revise_if_links_changed(
+    ctx: &ServiceContext,
+    tx: &mut SqliteConnection,
+    task_id: &str,
+    before: Vec<(String, String)>,
+    during_run: bool,
+) -> Result<()> {
+    if link_contents(&mut *tx, task_id).await? != before {
+        record_plan_revision(tx, task_id, &ctx.actor, during_run).await?;
     }
     Ok(())
 }
