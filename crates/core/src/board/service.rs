@@ -462,50 +462,118 @@ pub async fn heartbeat(
 
 /// The context re-read under a lease.
 ///
-/// Fenced in a transaction of its own, then read: the method writes nothing,
-/// so there is no write for the fence to share a transaction with, and the
-/// context's reads go over the pool, which a held transaction would block on
-/// the one-connection test pool.
+/// Read over the pool, which a held transaction would block on the
+/// one-connection test pool, then fenced in a transaction of its own that
+/// re-checks consent on the context it returns (D31 point 6), and ends the
+/// lease when consent was lost. A context an edit overtook in between is read
+/// again rather than judged.
 pub async fn run_context(
     ctx: &ServiceContext,
     runner: Runner<'_>,
     lease: &LeaseRef,
 ) -> Result<RunContext> {
-    let ctx = &lease_context(ctx, lease)?;
-    // Read first, over the pool, because the consent re-check below needs the
-    // composition, and the fence's transaction holds the one test connection.
-    // A stale lease's read is thrown away by the fence.
-    let context = read_context(ctx, runner, &lease.task_id).await?;
-    let composition = Composition::of(&context);
+    fenced_context(ctx, runner, lease, || std::future::ready(())).await
+}
 
-    let mut tx = ctx.begin_immediate().await?;
-    let held = lease::current(&mut tx, lease, runner.id).await?;
-    // D31 point 6: a plan edited between the claim and the composition is
-    // never composed. The lease really ends, so the runner's reaction to
-    // `Conflict` is the right one, and a solo lease is not left `running`
-    // with no holder.
-    if let Some(refused) = lease::consent_refusal(
-        &mut tx,
-        &lease.task_id,
-        runner.id,
-        held.purpose,
-        &composition,
-    )
-    .await?
-    {
-        lease::end_within(ctx, &mut tx, lease).await?;
-        let team_id = tasks::team_of_task(&mut tx, &lease.task_id).await?;
+/// [`run_context`], awaiting `between` after each read of the context and
+/// before the fence's transaction opens: how a test lands an edit in the one
+/// window a read over the pool leaves. Nothing in production calls it.
+#[cfg(any(test, feature = "testing"))]
+pub async fn run_context_with_edit_between<F, Fut>(
+    ctx: &ServiceContext,
+    runner: Runner<'_>,
+    lease: &LeaseRef,
+    between: F,
+) -> Result<RunContext>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = ()>,
+{
+    fenced_context(ctx, runner, lease, between).await
+}
+
+/// How many times [`run_context`] reads the context before it gives up on
+/// content that changes between every read and its fence. An edit lands in
+/// that window only by racing a read that takes milliseconds, so a second
+/// read settles any real board; the bound only keeps a pathological one from
+/// spinning.
+const CONTEXT_READS: usize = 3;
+
+async fn fenced_context<F, Fut>(
+    ctx: &ServiceContext,
+    runner: Runner<'_>,
+    lease: &LeaseRef,
+    mut between: F,
+) -> Result<RunContext>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = ()>,
+{
+    let ctx = &lease_context(ctx, lease)?;
+    for _ in 0..CONTEXT_READS {
+        // Read first, over the pool, because the consent re-check below needs
+        // the composition, and the fence's transaction holds the one test
+        // connection. A stale lease's read is thrown away by the fence.
+        let context = read_context(ctx, runner, &lease.task_id).await?;
+        between().await;
+        let composition = Composition::of(&context);
+
+        let mut tx = ctx.begin_immediate().await?;
+        let held = lease::current(&mut tx, lease, runner.id).await?;
+        // Consent is judged on the revisions the transaction reads, so it
+        // must be the text this read returns. An edit that landed in between
+        // makes this read stale: drop it, writing nothing, and read again.
+        if !consent::context_is_current(&mut tx, &lease.task_id, &context).await? {
+            continue;
+        }
+        // D31 point 6: a plan edited between the claim and the composition
+        // is never composed. The lease really ends, so the runner's reaction
+        // to `Conflict` is the right one, and a solo lease is not left
+        // `running` with no holder.
+        if let Some(refused) = lease::consent_refusal(
+            &mut tx,
+            &lease.task_id,
+            runner.id,
+            held.purpose,
+            &composition,
+        )
+        .await?
+        {
+            return Err(end_before_composition(ctx, tx, lease, &refused.refusal()).await?);
+        }
         tx.commit().await?;
-        ctx.publish(crate::ChangeEvent::tasks(team_id, [lease.task_id.clone()]));
-        return Err(Error::conflict(format!(
-            "this runner's lease on task {} (generation {}) has ended: {}",
-            lease.task_id,
-            lease.generation,
-            refused.refusal()
-        )));
+        return Ok(context);
     }
+
+    // Never once current: nothing read can be shown to be what consent
+    // judged, so it ends as a lost consent does.
+    let mut tx = ctx.begin_immediate().await?;
+    lease::current(&mut tx, lease, runner.id).await?;
+    Err(end_before_composition(
+        ctx,
+        tx,
+        lease,
+        "what it would run changed each time it was read.",
+    )
+    .await?)
+}
+
+/// Ends `lease` in `tx` with `release`'s semantics, commits, and answers the
+/// `Conflict` the runner is sent, naming `why`.
+async fn end_before_composition(
+    ctx: &ServiceContext,
+    mut tx: ScopedTx,
+    lease: &LeaseRef,
+    why: &str,
+) -> Result<Error> {
+    lease::end_within(ctx, &mut tx, lease).await?;
+    let team_id = tasks::team_of_task(&mut tx, &lease.task_id).await?;
     tx.commit().await?;
-    Ok(context)
+    ctx.publish(crate::ChangeEvent::tasks(team_id, [lease.task_id.clone()]));
+    Ok(Error::conflict(format!(
+        "this runner's lease on task {} (generation {}) has ended: {why}",
+        lease.task_id, lease.generation,
+    )))
 }
 
 /// Writes `tasks.branch` and nothing else: the worktree path is the runner's

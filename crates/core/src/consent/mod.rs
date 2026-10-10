@@ -13,7 +13,9 @@
 //! transaction reads goes over the connection it holds. Every *revision*
 //! (the plan, the instructions), every author, every acceptance and every
 //! trust row is read there, by [`inputs`] and [`missing`]: an edit that lands
-//! between a read and the claim is either seen or loses the write lock.
+//! between a read and the claim is either seen or loses the write lock. A
+//! context read before the transaction is judged only once
+//! [`context_is_current`] says it holds the text whose revisions were read.
 //!
 //! What a composer includes besides those, which findings and which base
 //! commit, is a [`Composition`]: read with the claim's context before the
@@ -234,6 +236,61 @@ pub(crate) async fn inputs(
         rejections,
         base_commit,
     }))
+}
+
+/// Whether `context`, read over the pool, still holds the consent-gated text
+/// the database holds now, read on the caller's connection.
+///
+/// [`inputs`] reads revisions inside the transaction, and `run_context`
+/// returns a context read before it opened, so consent judges a revision
+/// only when this says the two agree: the plan by its revision, read in the
+/// same row as its text, and the team's instructions and a task's override
+/// by their text, which is what the composers read. A task that is gone is
+/// current: whether it exists is the caller's question.
+pub(crate) async fn context_is_current(
+    conn: &mut SqliteConnection,
+    task_id: &str,
+    context: &RunContext,
+) -> Result<bool> {
+    let Some(task) = sqlx::query!(
+        "SELECT team_id, plan_revision, review_instructions FROM tasks WHERE id = ?1",
+        task_id,
+    )
+    .fetch_optional(&mut *conn)
+    .await?
+    else {
+        return Ok(true);
+    };
+    if task.plan_revision != context.task.task.plan_revision {
+        return Ok(false);
+    }
+    let base = team_value(conn, &task.team_id, BASE_INSTRUCTIONS).await?;
+    if base != context.base_instructions {
+        return Ok(false);
+    }
+    if let Some(review) = &context.review {
+        let team = team_value(conn, &task.team_id, REVIEW_INSTRUCTIONS).await?;
+        let effective = crate::review_loop::config::effective_instructions(
+            task.review_instructions.as_deref(),
+            &team,
+        );
+        if effective != review.instructions {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+/// One team setting's text as a composer reads it: empty when absent.
+async fn team_value(conn: &mut SqliteConnection, team_id: &str, key: &str) -> Result<String> {
+    Ok(sqlx::query_scalar!(
+        "SELECT value FROM team_settings WHERE team_id = ?1 AND key = ?2",
+        team_id,
+        key,
+    )
+    .fetch_optional(&mut *conn)
+    .await?
+    .unwrap_or_default())
 }
 
 /// One team setting as a revisioned text, `None` when it is absent or blank.

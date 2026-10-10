@@ -5390,6 +5390,14 @@ Amendments, as 043 set the precedent; point 2's trait gains no method.
   the lease and lands the task as `release` lands it (`lease::end_within`), commits, and
   answers `Conflict` naming the refusal. The lease really is gone, so point 11's reaction is
   correct, and a solo lease (`LeaseTerm::Never`) is never left `running` with no holder.
+  Consent reads revisions inside the transaction and the context was read before it, so the
+  re-check first asks `consent::context_is_current`: the plan's revision, the base
+  instructions and the effective review instructions the context holds against the
+  database's. A context an edit overtook is dropped, writing nothing, and read again, so
+  consent always judges the text that is returned. After three stale reads the lease ends as
+  a lost consent does, with `Conflict` naming "what it would run changed each time it was
+  read." `service::run_context_with_edit_between` (`testing` feature) is how a test lands an
+  edit in that window.
 - **`Harness::start_shared`**, beside `owner(which)` and `runner_id(which)`: a server-shaped
   board with one shared team, `alice` owning it and runner `A` (`Alice's laptop`), `bob` a
   member owning runner `B` (`Mac mini`), both adapters scoped to the team and `board()` acting

@@ -6,15 +6,18 @@
 //! runner asks, through the board port's claim, so the sentence asserted is the
 //! one a person reads. The clock is the test clock throughout.
 
+use std::sync::atomic::{AtomicUsize, Ordering};
+
 use pretty_assertions::assert_eq;
-use rimaia_core::board::{Claim, ClaimTarget, LeaseRef};
+use rimaia_core::board::{Claim, ClaimTarget, LeaseRef, LeaseTerm};
 use rimaia_core::consent::eligibility::RunnerEligibility;
 use rimaia_core::consent::pieces::{ContentKind, MissingReason};
 use rimaia_core::consent::{self, EligibilityStatus, MissingPiece, TaskConsent, TeamCeiling};
 use rimaia_core::db::settings;
-use rimaia_core::db::{BoardColumn, ExitClass, RunKind, RunStatus};
+use rimaia_core::db::{BoardColumn, ExitClass, RunKind, RunState, RunStatus};
 use rimaia_core::events::TaskId;
 use rimaia_core::identity::create_personal_team;
+use rimaia_core::identity::Role;
 use rimaia_core::repo::{self, NewRepository};
 use rimaia_core::review;
 use rimaia_core::review_loop::config as review_config;
@@ -23,9 +26,9 @@ use rimaia_core::runner::outcome::{RunOutcome, SpawnedAs};
 use rimaia_core::runner::provider::ClaudeProvider;
 use rimaia_core::runner::RunTrigger;
 use rimaia_core::tasks::{self, NewTask, Patch, TaskPatch};
-use rimaia_core::testing::shared::{Member, SharedTeam};
+use rimaia_core::testing::shared::{add_member, Member, SharedTeam};
 use rimaia_core::testing::TempRepo;
-use rimaia_core::{board, ErrorCode};
+use rimaia_core::{board, ErrorCode, ServiceContext};
 use serde_json::json;
 
 // ---------------------------------------------------------------------------
@@ -391,6 +394,134 @@ async fn planning_while_your_runner_works_on_your_own_task_is_not_marked() {
 }
 
 // ---------------------------------------------------------------------------
+// D31 point 6: what run_context returns is what consent judged
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn a_plan_edited_after_the_context_was_read_is_never_composed() {
+    let team = SharedTeam::new().await;
+    let carol = carol(&team).await;
+    consent::set_trust(&team.bob.ctx, &team.team_id, &carol.actor, true)
+        .await
+        .expect("Bob trusts Carol, and not Alice");
+    let task = team.task(&team.bob, "Bob's", Some(&team.bob)).await;
+    let claimed = claim(&team, &team.bob, &task).await;
+    // Alice's revision, which Bob has neither accepted nor trusts, is what
+    // the read sees.
+    edit_plan(&team.alice, &task, "1. Alice's way").await;
+
+    // Carol saves a revision after the read and before the fence. Consent
+    // passes on hers, so hers is the only one that may be composed.
+    let edits = AtomicUsize::new(0);
+    let context = board::service::run_context_with_edit_between(
+        &team.bob.ctx,
+        bobs_runner(&team),
+        &claimed.lease,
+        || {
+            let first = edits.fetch_add(1, Ordering::SeqCst) == 0;
+            let carol = carol.clone();
+            let task = task.clone();
+            async move {
+                if first {
+                    edit_plan_as(&carol, &task, "1. Carol's way").await;
+                }
+            }
+        },
+    )
+    .await
+    .expect("Bob trusts the revision now current");
+
+    assert_eq!(context.task.task.plan.as_deref(), Some("1. Carol's way"));
+    assert_eq!(context.task.task.plan_revision, 3);
+    assert_eq!(
+        context.task.task.plan_updated_by.as_deref(),
+        Some(carol.actor.as_str())
+    );
+}
+
+#[tokio::test]
+async fn base_instructions_edited_after_the_context_was_read_are_never_composed() {
+    let team = SharedTeam::new().await;
+    let carol = carol(&team).await;
+    consent::set_trust(&team.bob.ctx, &team.team_id, &carol.actor, true)
+        .await
+        .expect("Bob trusts Carol, and not Alice");
+    let task = team.task(&team.bob, "Bob's", Some(&team.bob)).await;
+    let claimed = claim(&team, &team.bob, &task).await;
+    settings::set_base_instructions(&team.alice.ctx, "Alice's rules.")
+        .await
+        .expect("Alice edits the base instructions");
+
+    let edits = AtomicUsize::new(0);
+    let context = board::service::run_context_with_edit_between(
+        &team.bob.ctx,
+        bobs_runner(&team),
+        &claimed.lease,
+        || {
+            let first = edits.fetch_add(1, Ordering::SeqCst) == 0;
+            let carol = carol.clone();
+            async move {
+                if first {
+                    settings::set_base_instructions(&carol, "Carol's rules.")
+                        .await
+                        .expect("Carol edits them after the read");
+                }
+            }
+        },
+    )
+    .await
+    .expect("Bob trusts the revision now current");
+
+    assert_eq!(context.base_instructions, "Carol's rules.");
+}
+
+#[tokio::test]
+async fn a_plan_that_keeps_changing_while_it_is_read_ends_the_lease() {
+    let team = SharedTeam::new().await;
+    let task = team.task(&team.bob, "Bob's", Some(&team.bob)).await;
+    let claimed = claim(&team, &team.bob, &task).await;
+
+    let edits = AtomicUsize::new(0);
+    let error = board::service::run_context_with_edit_between(
+        &team.bob.ctx,
+        bobs_runner(&team),
+        &claimed.lease,
+        || {
+            let edit = edits.fetch_add(1, Ordering::SeqCst);
+            let ctx = team.bob.ctx.clone();
+            let task = task.clone();
+            async move { edit_plan_as(&ctx, &task, &format!("1. Draft {edit}")).await }
+        },
+    )
+    .await
+    .expect_err("no read is ever the current one");
+
+    assert_eq!(error.code(), ErrorCode::Conflict);
+    assert_eq!(
+        error.to_string(),
+        format!(
+            "this runner's lease on task {task} (generation {}) has ended: what it would run \
+             changed each time it was read.",
+            claimed.lease.generation
+        )
+    );
+    let leases: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM runner_leases WHERE task_id = ?1")
+        .bind(&task)
+        .fetch_one(&team.bob.ctx.pool)
+        .await
+        .expect("count the leases");
+    assert_eq!(leases, 0, "the lease really ended");
+    let detail = tasks::get_task(&team.bob.ctx, &task)
+        .await
+        .expect("read the task");
+    assert_eq!(
+        detail.task.run_state,
+        RunState::Failed,
+        "where release lands it"
+    );
+}
+
+// ---------------------------------------------------------------------------
 // The base commit
 // ---------------------------------------------------------------------------
 
@@ -704,8 +835,12 @@ async fn row(team: &SharedTeam, task: &str) -> Row {
 }
 
 async fn edit_plan(by: &Member, task: &str, plan: &str) {
+    edit_plan_as(&by.ctx, task, plan).await;
+}
+
+async fn edit_plan_as(ctx: &ServiceContext, task: &str, plan: &str) {
     tasks::update_task(
-        &by.ctx,
+        ctx,
         task,
         TaskPatch {
             plan: Patch::Set(plan.to_string()),
@@ -714,6 +849,30 @@ async fn edit_plan(by: &Member, task: &str, plan: &str) {
     )
     .await
     .expect("edit the plan");
+}
+
+/// A third member of the shared team, acting in it: the stand-in for task
+/// 051's invitation, as `testing::shared` adds Bob.
+async fn carol(team: &SharedTeam) -> ServiceContext {
+    let mut conn = team.alice.ctx.pool.acquire().await.expect("a connection");
+    let carol = create_personal_team(&mut conn, &team.clock, "carol")
+        .await
+        .expect("carol signs up")
+        .user_id;
+    add_member(&mut conn, &team.clock, &team.team_id, &carol, Role::Member).await;
+    ServiceContext {
+        actor: carol,
+        ..team.bob.ctx.clone()
+    }
+}
+
+/// Bob's runner, as the in-process board names it to the service.
+fn bobs_runner(team: &SharedTeam) -> board::service::Runner<'_> {
+    board::service::Runner {
+        id: &team.bob.runner_id,
+        provider: &ClaudeProvider,
+        term: LeaseTerm::Never,
+    }
 }
 
 fn run_now(task: &str) -> ClaimTarget {
