@@ -6917,10 +6917,11 @@ the question again.
    | Base instructions | `# Base instructions` (implementation, fix) | 1 | rendered |
    | Review instructions, team and task override | `# Review instructions` (review) | 1 | rendered |
    | Findings: title, body, file, line, resolution | `# Findings to address` (fix, fix continuation), `# Findings already rejected` (review) | 1: a findings piece when another runner's run wrote them, otherwise this runner's own run's output (D36 point 3) | rendered |
-   | Changed file paths in the review bundle | `# The change` | 1: the worktree's own commits, this runner's runs on a base the owner consented to | rendered |
-   | Base commit, head commit, diff counts | `# The change` and its two `git` commands | 2 | rendered |
-   | Task branch | `- Branch:`, the system append, `{{task.branch}}` | 2: `worktree::naming` builds it, `rimaia/<task-id>-<slug>`, from a `[a-z0-9-]` slug of the same task's title | rendered |
-   | Loop base ref when a dependency is the base | `- Base ref:` and `# The change` (review, fix) | 2: the dependency's branch, built the same way, read only when the dependency's commit is the base, which is itself a piece | rendered |
+   | Changed file paths in the review bundle | `# The change` | 1 when the newest row ran on the claiming runner: its own run's output. Otherwise 4: another member's runner wrote them | **counts only**: the board reads the context with `ChangeSummary::files` set to `None`, and the counts line ends in a full stop |
+   | Diff counts | `# The change` | 2: numbers | rendered |
+   | Base commit, head commit | `# The change` and its two `git` commands | 3: a runner reports them, held on write to `naming::COMMIT_RULE` (point 3) | rendered |
+   | Task branch | `- Branch:`, the system append, `{{task.branch}}` | 3 on write: a runner records it, held to `naming::TASK_BRANCH_RULE` (point 3). The slug is still free `[a-z0-9-]` text, so a shared team renders the branch only when `naming::derives_from` holds for the title rendered beside it: every byte is then the task's id (2), a slug of that consented title (1) or a collision number (2). Otherwise 4 | the line is omitted, the system append says "on the branch Rimaia created for this task", and the variable expands to `HEAD`, which in the run's worktree is that branch |
+   | Loop base ref when a dependency is the base | `- Base ref:` and `# The change` (review, fix) | a runner records it at `start_run`, held to `board::BASE_REF_RULE` (point 3). The default branch is 3 and a commit is 3. A dependency's branch is a slug of the dependency's title, which running this task consents to nothing of: 4 | the base commit stands in for the label in both places. With no base commit recorded, both `- Base ref:` lines and the two `git` commands are omitted |
    | Task id | `# How to answer` (strategy, review, fix), the strategy system append | 2 | rendered |
    | Finding id and severity | `# Findings to address` | 2: an id, and an enum | rendered |
    | Plan revision, plan author's login, runner owner's login | the authorship lines (072) | 2: a count, and logins constrained at sign-up (047) | rendered |
@@ -6932,7 +6933,9 @@ the question again.
    | Catalogue labels | `# Available models`, `# Available effort levels` | 4 | **ids only** |
    | Repository name | `- Repository:`, `{{repo.name}}` | 4 | **the line is omitted; the variable expands to the repository's id** |
 
-   Nothing else the composers render is team-writable. The rule classified every value, so
+   Nothing else the composers render is written by a member or a runner. A runner is a
+   writer like a member: it is one member's machine, and a value it reports is rendered on
+   another's (D36 point 3 says the same of findings). The rule classified every value, so
    ADR-0032 gains no amendment.
 
 2. **How a composer knows.** Every composer that renders team text takes a
@@ -6943,8 +6946,12 @@ the question again.
    `PromptTeam::of`. It is never inferred from `authorship` being `None`, which a shared team's
    context read without a runner also has. The Settings preview, which holds no lease, reads
    the kind through `tasks::team_kind_of_task`. **A personal team's prompts are byte for byte
-   what they were**, and the system appends and resume texts take no `PromptTeam`, since every
-   value they render is class 1, 2 or 3.
+   what they were.** The resume texts and the strategy and review system appends take no
+   `PromptTeam`, since every value they render is class 1, 2 or 3. The implementation and fix
+   system append takes one for the branch alone. The bundle's paths are decided where the
+   context is read, since the composer does not know the claiming runner:
+   `review_loop::context` takes it when the team is shared, and keeps the paths only when the
+   newest row ran on it.
 
 3. **The write rules, in `rimaia-core`'s services**, so every door shares them (ADR-0006):
 
@@ -6959,6 +6966,24 @@ the question again.
      ASCII space, not a no-break one), at most 100 bytes. Registration's discovered branch is
      held to it too.
 
+   - **Task branch** (`board::service::record_branch`, the `BoardPort` write): what
+     `worktree::naming` builds for this task, `rimaia/<task-id>` optionally followed by `-` and
+     `[a-z0-9]` words joined by single hyphens, at most 200 bytes (`naming::is_branch_of`), or
+     the value already recorded, written back unchanged. The slug is not compared with the
+     title, which may change between the claim and the write; the render rule in point 1 is
+     what holds the slug to the title.
+   - **Run base** (`board::service::start_run`): `base_sha` a full commit, and `base_ref` the
+     repository's default branch, any task branch's shape (`naming::is_task_branch`), a full
+     commit, or a label or commit a run of this task already recorded. The last is D29
+     point 4: a review or fix records its implementation's base, which may predate a renamed
+     default branch.
+   - **Head commit** (`board::service::finish_run`): a full commit. A full commit is 40 or 64
+     lowercase hexadecimal digits (`naming::is_commit_sha`), as git prints one.
+
+   Each check runs after the lease's fence, so a stale lease still answers `Conflict`. The
+   bundle's paths are not checked, since a path may hold a space or any character a file name
+   can; point 1 withholds them instead.
+
    Each refusal is `Invalid`, exact:
 
    | Field | Sentence |
@@ -6966,10 +6991,16 @@ the question again.
    | catalogue model id | `the catalogue's model id "{id}" is refused: an id is 1 to 64 letters, digits, '.', '_', ':' or '-', and starts with a letter or a digit` |
    | catalogue effort id | `the catalogue's effort id "{id}" is refused: an id is 1 to 64 letters, digits, '.', '_', ':' or '-', and starts with a letter or a digit` |
    | default branch | `the default branch "{branch}" is refused: a default branch is a valid git branch name, with no whitespace, of at most 100 bytes` |
+   | task branch | `the branch "{branch}" is refused: a task's branch is rimaia/ and the task's id, optionally followed by a hyphen and lowercase letters, digits and single hyphens, of at most 200 bytes` |
+   | base ref | `the base ref "{base_ref}" is refused: a run's base ref is the repository's default branch, a task's branch, a full commit sha, or a base a run of this task already recorded` |
+   | base commit | `the base commit "{sha}" is refused: a commit is a full sha, 40 or 64 lowercase hexadecimal digits` |
+   | head commit | `the head commit "{sha}" is refused: a commit is a full sha, 40 or 64 lowercase hexadecimal digits` |
 
-   `{id}` and `{branch}` are quoted as Rust's `Debug` quotes a string, so whitespace nobody can
-   see is written escaped (`\u{a0}`). The rule halves are `catalogue::ID_RULE` and
-   `repo::DEFAULT_BRANCH_RULE`, so 060, 061 and 069 render the same words.
+   Values are quoted as Rust's `Debug` quotes a string, so whitespace nobody can see is
+   written escaped (`\u{a0}`). The rule halves are `catalogue::ID_RULE`,
+   `repo::DEFAULT_BRANCH_RULE`, `worktree::naming::TASK_BRANCH_RULE`,
+   `worktree::naming::COMMIT_RULE` and `board::BASE_REF_RULE`, so 060, 061 and 069 render the
+   same words.
 
 4. **A value stored before the rules is never rewritten.** The doctor reports each one as a
    warning naming its field, under a ninth check, `Check::PromptInputs` (`prompt_inputs`,
@@ -6985,17 +7016,24 @@ the question again.
    Composers do not re-check a class 3 value, because a shared team cannot hold an unchecked
    one: a repository never leaves its team (039 refuses the move, and 051 copies tasks, not
    repositories), the catalogue is a team setting, and no shared team can be written to before
-   this task. A pre-rule value lives in a personal team, where it runs as before.
+   this task. A pre-rule value lives in a personal team, where it runs as before. The runner's
+   reports are not part of the doctor's check: a pre-rule branch, base or commit was written
+   by Rimaia's own runner in a personal team, and a branch a copied task carries no longer
+   derives from the copy's id, so point 1's render rule leaves it out.
 
 5. **The canary test** (`crates/core/tests/prompt_inputs.rs`) writes every team-writable text
    field in the table, through the services, as `CANARY-<field>`, composes every prompt kind
    from the claiming runner's context, and asserts each class 1 and class 3 canary appears,
-   no class 4 canary does, and no other canary does either. Its solo case pins the personal
-   team's prompts. A task that adds a team-writable field a prompt renders adds its row to
-   point 1 and its canary to the test, in the same diff.
+   no class 4 canary does, and no other canary does either. A second case writes the
+   runner's reports from Alice's runner through the `BoardPort`: a canary branch, base ref,
+   base commit and head commit are each refused, and a canary bundle path, rendered in Alice's
+   own runner's prompts, reaches none of Bob's. Its solo case pins the personal team's
+   prompts. A task that adds a team-writable or runner-written field a prompt renders adds
+   its row to point 1 and its canary to the test, in the same diff.
 
 **Why.** (1) replaces finding channels by review with a list a reviewer can check a diff
-against. (2) keeps the kind a fact the board states, rather than one a composer guesses from
+against. It counts a runner as a writer because 057's run elsewhere and D36's findings from
+another runner already carry a runner's output to another member's machine. (2) keeps the kind a fact the board states, rather than one a composer guesses from
 an absent field, and keeps solo's strings untouched. (3) puts each rule where every door
 already goes, and quotes values so a refusal shows what was refused. (4) follows the
 append-only spirit of a stored value: a rule that rewrote the operator's text would be a
@@ -7012,8 +7050,17 @@ amendment.
 - **051** and every later task: no class 4 value reaches a shared team's prompt, and the
   canary test fails on any new one.
 - **060, 061 and 069** render point 3's refusal sentences.
-- Any task that adds a team-writable field a composer renders: a row in point 1 and a canary
-  in the test.
+- **052 and 053**: the HTTP door calls the same `board::service` functions, so it keeps
+  point 3's checks on `record_branch`, `start_run` and `finish_run`, and the read that
+  withholds another runner's bundle paths. The contract suite's
+  `record_branch_refuses_a_branch_naming_could_not_build_for_the_task`,
+  `start_run_refuses_a_base_that_is_neither_a_branch_rimaia_knows_nor_a_commit` and
+  `finish_run_refuses_a_head_that_is_not_a_commit` bind the adapter.
+- **057**: `push_target` reads the recorded branch, which point 3 already holds to
+  `worktree::naming`'s shape. Run elsewhere composes from a branch and bundle another runner
+  wrote, which point 1 renders by the same rules.
+- Any task that adds a team-writable or runner-written field a composer renders: a row in
+  point 1 and a canary in the test.
 
 ---
 
@@ -7073,12 +7120,12 @@ An implementation task reads the entries its number appears in, before writing c
 | [049](../tasks/049-frontend-transport.md) | D4 · D6 · D7 · D8 · D14 · D20 · D28 · D32 · D33 · D34 |
 | [050](../tasks/050-the-web-shell.md) | D4 · D6 · D7 · D8 · D10 · D11 · D12 · D14 · D22 · D28 · D29 · D32 · D33 · D34 |
 | [051](../tasks/051-teams-invitations-and-roles.md) | D2 · D3 · D4 · D6 · D7 · D8 · D10 · D16 · D28 · D32 · D33 · D34, and the entries 045, 048, 050 and 073 add |
-| [052](../tasks/052-the-runner-protocol-and-an-http-board-adapter.md) | D4 · D6 · D8 · D10 · D14 · D19 · D28 · D29 · D31 · D32 · D33 · D34 |
-| [053](../tasks/053-leases-across-the-network.md) | D4 · D6 · D8 · D9 · D11 · D12 · D14 · D17 · D19 · D21 · D28 · D29 · D31 · D32 · D33 |
+| [052](../tasks/052-the-runner-protocol-and-an-http-board-adapter.md) | D4 · D6 · D8 · D10 · D14 · D19 · D28 · D29 · D31 · D32 · D33 · D34 · D37 |
+| [053](../tasks/053-leases-across-the-network.md) | D4 · D6 · D8 · D9 · D11 · D12 · D14 · D17 · D19 · D21 · D28 · D29 · D31 · D32 · D33 · D37 |
 | [054](../tasks/054-repositories-by-remote.md) | D2 · D4 · D6 · D7 · D8 · D10 · D11 · D20 · D22 · D25 · D26 · D28 · D30 · D31 · D32 · D33 · D34 |
 | [055](../tasks/055-the-run-scoped-proxy-and-consent-laundering.md) | D4 · D6 · D8 · D17 · D27 · D28 · D29 · D30 · D31 · D32 · D33 · D34 |
 | [056](../tasks/056-transcripts-leave-the-machine.md) | D3 · D4 · D5 · D6 · D8 · D9 · D10 · D14 · D17 · D18 · D19 · D20 · D23 · D25 · D28 · D29 · D31 · D32 · D33 · D34 |
-| [057](../tasks/057-push-postcondition-and-run-elsewhere.md) | D4 · D6 · D8 · D9 · D12 · D17 · D20 · D23 · D25 · D28 · D29 · D30 · D31 · D32 · D33 · D34 |
+| [057](../tasks/057-push-postcondition-and-run-elsewhere.md) | D4 · D6 · D8 · D9 · D12 · D17 · D20 · D23 · D25 · D28 · D29 · D30 · D31 · D32 · D33 · D34 · D37 |
 | [058](../tasks/058-the-headless-runner.md) | D3 · D4 · D6 · D8 · D9 · D10 · D11 · D15 · D19 · D20 · D22 · D25 · D28 · D30 · D31 · D32 · D33 · D34 |
 | [059](../tasks/059-desktop-connected-mode.md) | D3 · D4 · D6 · D7 · D8 · D10 · D11 · D15 · D16 · D19 · D20 · D25 · D27 · D28 · D29 · D30 · D31 · D32 · D33 · D34 · D35 |
 | [060](../tasks/060-hosted-mcp.md) | D4 · D6 · D8 · D16 · D17 · D19 · D20 · D23 · D25 · D28 · D30 · D31 · D32 · D33 · D34 · D35, and the entries 045, 048, 050, 051 and 073 add |
