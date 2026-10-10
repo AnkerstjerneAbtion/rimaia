@@ -840,6 +840,10 @@ describe("Board", () => {
     render(<Board />);
 
     const cardA = (await screen.findByText("Wire the board")).closest<HTMLElement>(".task-card")!;
+    // dnd-kit picks up new announcements in an effect, so the card can be on
+    // screen while the monitor still holds the empty board's, which read the
+    // raw id. Flush effects before the drag starts.
+    await act(async () => {});
     cardA.focus();
     fireEvent.keyDown(cardA, { key: " ", code: "Space" });
 

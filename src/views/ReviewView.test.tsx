@@ -156,6 +156,9 @@ describe("the overnight digest", () => {
   it("leaves Enter to a focused button, so the copy button still copies", async () => {
     render(<ReviewView now={NOW} />);
     const copy = await screen.findByRole("button", { name: "Copy summary" });
+    // Disabled until the digest arrives, and a disabled button takes no
+    // focus: Enter would then reach the panel and start the review.
+    await waitFor(() => expect(copy).toBeEnabled());
     copy.focus();
 
     await user.keyboard("{Enter}");
