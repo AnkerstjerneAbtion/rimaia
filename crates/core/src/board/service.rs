@@ -919,6 +919,7 @@ async fn read_context(
     // worktree from it without reading the dependency graph (D31 point 6).
     let base = base_ref::resolve(ctx, &task.task, &repository).await?;
     let authorship = authorship(ctx, &task.task, runner.id).await?;
+    let team_kind = tasks::team_kind_of_task(ctx, task_id).await?;
 
     Ok(RunContext {
         task,
@@ -930,6 +931,7 @@ async fn read_context(
         review: Some(review),
         base,
         authorship,
+        team_kind,
     })
 }
 

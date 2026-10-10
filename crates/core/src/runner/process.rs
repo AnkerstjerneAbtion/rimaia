@@ -94,7 +94,7 @@ use crate::runner::outcome::{PullRequestWatch, RunOutcome, SpawnedAs, Terminatio
 use crate::runner::prompt::{
     compose_fix_continuation, compose_fix_prompt, compose_fix_resume, compose_prompt,
     compose_resume_prompt, compose_review_prompt, compose_review_resume,
-    compose_review_system_append, compose_system_append,
+    compose_review_system_append, compose_system_append, PromptTeam,
 };
 use crate::runner::provider::{
     self, claude, AgentProvider, ForbiddenOperation, PromptStyle, RimaiaHandle, RunIntent, RunPlan,
@@ -842,7 +842,7 @@ async fn run_implementation(
             &context.base_instructions,
             detail,
             repository,
-            context.authorship.as_ref(),
+            PromptTeam::of(&context),
             guidance.as_ref(),
             config.provider.fanout_noun(),
         ),
@@ -1309,7 +1309,7 @@ impl Phases<'_> {
             (RunKind::Review, PromptStyle::Composed) => compose_review_prompt(
                 detail,
                 repository,
-                context.authorship.as_ref(),
+                PromptTeam::of(&context),
                 &review,
                 &tool_name,
             ),
@@ -1321,7 +1321,7 @@ impl Phases<'_> {
                 &context.base_instructions,
                 detail,
                 repository,
-                context.authorship.as_ref(),
+                PromptTeam::of(&context),
                 &review,
                 &tool_name,
             ),

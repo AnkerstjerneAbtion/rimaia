@@ -66,7 +66,7 @@ use rimaia_core::runner::limits::DISALLOWED_TOOLS;
 use rimaia_core::runner::process::{
     inherited_identity_vars, is_process_identity, verify_permission_mode, DEFAULT_DISALLOWED_TOOLS,
 };
-use rimaia_core::runner::prompt::compose_prompt;
+use rimaia_core::runner::prompt::{compose_prompt, PromptTeam};
 use rimaia_core::runner::provider::{
     claude, AgentProvider, ClaudeProvider, ForbiddenOperation, ProviderId, RimaiaHandle,
     SessionIntent,
@@ -1975,7 +1975,14 @@ impl RunnerFixture {
             .await
             .expect("read the base instructions");
 
-        compose_prompt(&base, &detail, &repository, None, None, "subagents")
+        compose_prompt(
+            &base,
+            &detail,
+            &repository,
+            PromptTeam::Personal,
+            None,
+            "subagents",
+        )
     }
 
     /// The JSONL transcript, line by line.

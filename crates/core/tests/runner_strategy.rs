@@ -69,7 +69,7 @@ use rimaia_core::runner::limits::{DEFAULT_MAX_TURNS, MAX_TURNS};
 use rimaia_core::runner::process::DEFAULT_DISALLOWED_TOOLS;
 use rimaia_core::runner::prompt::{
     compose_prompt, compose_strategy_prompt, compose_strategy_system_append, compose_system_append,
-    StrategyGuidance,
+    PromptTeam, StrategyGuidance,
 };
 use rimaia_core::runner::provider::ClaudeProvider;
 use rimaia_core::runner::strategy::{
@@ -444,7 +444,7 @@ async fn each_run_is_sent_its_own_prompt_and_the_proposal_reaches_the_implementa
         compose_strategy_prompt(
             &detail,
             &repository,
-            None,
+            PromptTeam::Personal,
             &catalogue,
             SET_TASK_STRATEGY_TOOL,
             "subagents",
@@ -472,7 +472,7 @@ async fn each_run_is_sent_its_own_prompt_and_the_proposal_reaches_the_implementa
             &base,
             &detail,
             &repository,
-            None,
+            PromptTeam::Personal,
             guidance.as_ref(),
             "subagents"
         )
@@ -514,7 +514,7 @@ async fn the_planner_prompt_names_the_branch_prepare_created() {
     let expected = compose_strategy_prompt(
         &detail,
         &fixture.repository().await,
-        None,
+        PromptTeam::Personal,
         &catalogue,
         SET_TASK_STRATEGY_TOOL,
         "subagents",

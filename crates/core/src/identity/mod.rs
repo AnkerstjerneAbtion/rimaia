@@ -19,6 +19,7 @@ use std::fmt;
 use std::str::FromStr;
 
 use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
 use sqlx::{SqliteConnection, SqlitePool};
 
 use crate::clock::Clock;
@@ -83,6 +84,31 @@ impl FromStr for Role {
             other => Err(Error::invalid(format!(
                 "`{other}` is not a team role: a role is `owner` or `member`"
             ))),
+        }
+    }
+}
+
+/// Whether a team is one person's own or one people share (ADR-0029 point 2):
+/// `teams.personal_user_id` set, or not.
+///
+/// What a composer reads to decide which inputs a prompt may render
+/// (ADR-0032's amendment "every prompt input has a class", seam-contract
+/// D37). In a personal team every author is the runner's owner, so nothing
+/// changes there; in a shared team a value nobody consented to, and no write
+/// constrained, is not rendered.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TeamKind {
+    Personal,
+    Shared,
+}
+
+impl TeamKind {
+    /// The kind of a team whose `personal_user_id` is `personal_user_id`.
+    pub fn of<T>(personal_user_id: Option<T>) -> Self {
+        match personal_user_id {
+            Some(_) => TeamKind::Personal,
+            None => TeamKind::Shared,
         }
     }
 }

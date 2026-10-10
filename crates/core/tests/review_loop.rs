@@ -41,6 +41,7 @@ use rimaia_core::runner::outcome::{start_run, NewRun};
 use rimaia_core::runner::process::DEFAULT_DISALLOWED_TOOLS;
 use rimaia_core::runner::prompt::{
     compose_fix_prompt, compose_fix_resume, compose_review_resume, compose_review_system_append,
+    PromptTeam,
 };
 use rimaia_core::runner::provider::{ClaudeProvider, ProviderId};
 use rimaia_core::runner::{
@@ -1217,7 +1218,7 @@ async fn a_resumed_fix_with_no_implementation_session_opens_a_fresh_one_and_says
         &context.base_instructions,
         &context.task,
         &context.repository,
-        None,
+        PromptTeam::Personal,
         &review,
         RESOLVE_TOOL,
     );
@@ -1303,7 +1304,7 @@ async fn a_resumed_fix_on_a_provider_that_cannot_continue_opens_a_fresh_one_and_
         &context.base_instructions,
         &context.task,
         &context.repository,
-        None,
+        PromptTeam::Personal,
         &review,
         LEDGER_RESOLVE_TOOL,
     );

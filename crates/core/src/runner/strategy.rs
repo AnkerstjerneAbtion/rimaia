@@ -74,7 +74,9 @@ use crate::tasks::{self, TaskDetail, TaskFilter, TaskSummary};
 
 use super::limits::{self, RunnerLimits};
 use super::process::{Attempt, CancelSignal, PermissionMode, RunnerConfig};
-use super::prompt::{compose_strategy_prompt, compose_strategy_system_append, StrategyGuidance};
+use super::prompt::{
+    compose_strategy_prompt, compose_strategy_system_append, PromptTeam, StrategyGuidance,
+};
 use super::provider::{self, ForbiddenOperation, RimaiaHandle, RunIntent, SessionIntent};
 use super::start::Starter;
 
@@ -279,7 +281,7 @@ async fn plan(
     let prompt = compose_strategy_prompt(
         detail,
         repository,
-        context.authorship.as_ref(),
+        PromptTeam::of(context),
         catalogue,
         &tool,
         config.provider.fanout_noun(),

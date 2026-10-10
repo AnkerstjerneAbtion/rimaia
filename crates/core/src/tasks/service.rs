@@ -28,6 +28,7 @@ use crate::db::{
 };
 use crate::error::{Error, Result};
 use crate::events::{ChangeEvent, TeamId};
+use crate::identity::TeamKind;
 use crate::machine::MachineContext;
 use crate::review_loop::{self, ReviewConfig, ReviewLoopSummary};
 use crate::strategy::{effective_strategy, EffectiveStrategy, StrategyOrigin};
@@ -1603,6 +1604,25 @@ pub(crate) async fn team_of_task(tx: &mut ScopedTx, id: &str) -> Result<TeamId> 
 /// [`team_of_task`] over the pool.
 pub(crate) async fn team_of(ctx: &ServiceContext, id: &str) -> Result<TeamId> {
     select_task_team(&ctx.pool, &ctx.scope.json(), id).await
+}
+
+/// Whether the team that owns task `id` is a personal or a shared one: what a
+/// prompt composed for the task may render (seam-contract D37). A task outside
+/// the context's scope is answered as a never-issued one.
+pub async fn team_kind_of_task(ctx: &ServiceContext, id: &str) -> Result<TeamKind> {
+    let scope = ctx.scope.json();
+    let personal_user_id = sqlx::query_scalar!(
+        "SELECT tm.personal_user_id
+           FROM tasks t
+           JOIN teams tm ON tm.id = t.team_id
+          WHERE t.id = ?1 AND t.team_id IN (SELECT value FROM json_each(?2))",
+        id,
+        scope,
+    )
+    .fetch_optional(&ctx.pool)
+    .await?
+    .ok_or_else(|| Error::not_found(format!("no task with id {id}")))?;
+    Ok(TeamKind::of(personal_user_id))
 }
 
 async fn select_task_team<'e, E>(executor: E, scope: &str, id: &str) -> Result<TeamId>

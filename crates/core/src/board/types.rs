@@ -23,6 +23,7 @@ use serde::{Deserialize, Serialize};
 use crate::consent::ceiling::StrategyCeiling;
 use crate::db::{Repository, Run, RunKind};
 use crate::events::TeamId;
+use crate::identity::TeamKind;
 use crate::review::findings::ReviewFinding;
 use crate::review_loop::EffectiveReviewConfig;
 use crate::runner::outcome::RunOutcome;
@@ -238,6 +239,12 @@ pub struct RunContext {
     /// runner.
     #[serde(default)]
     pub authorship: Option<RunAuthorship>,
+    /// Whether the task's team is a personal or a shared one, which decides
+    /// what the composers may render (ADR-0032's amendment "every prompt
+    /// input has a class", seam-contract D37). Not inferred from
+    /// [`authorship`](Self::authorship), which is also `None` in a shared
+    /// team for a context read without a runner.
+    pub team_kind: TeamKind,
 }
 
 /// The two facts ADR-0032 point 7 has the agent told, in `# Task context`.

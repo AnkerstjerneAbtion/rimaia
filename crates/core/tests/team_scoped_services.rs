@@ -25,7 +25,7 @@ use rimaia_core::review_loop::config as review_config;
 use rimaia_core::runner::events::transcript_path;
 use rimaia_core::runner::limits::{DISALLOWED_TOOLS, MAX_TURNS};
 use rimaia_core::runner::outcome::observed_run_cost;
-use rimaia_core::runner::prompt::{compose_prompt, StrategyGuidance};
+use rimaia_core::runner::prompt::{compose_prompt, PromptTeam, StrategyGuidance};
 use rimaia_core::runner::provider::{AgentProvider, ClaudeProvider};
 use rimaia_core::runner::strategy::claim_for_planning;
 use rimaia_core::runner::Starter;
@@ -448,7 +448,7 @@ async fn each_team_composes_its_own_base_instructions() {
             base,
             &context.task,
             &context.repository,
-            None,
+            PromptTeam::of(&context),
             guidance.as_ref(),
             ClaudeProvider.fanout_noun(),
         )

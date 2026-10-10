@@ -94,16 +94,17 @@ pub async fn preview_composed_prompt(
     let detail = tasks::get_task(&state.context, &task_id).await?;
     let repository = repo::get(&state.context, &detail.task.repository_id).await?;
     let guidance = prompt::StrategyGuidance::for_task(&detail);
+    let team_kind = tasks::team_kind_of_task(&state.context, &task_id).await?;
 
     Ok(prompt::compose_prompt(
         &base,
         &detail,
         &repository,
         // ADR-0032 point 7's facts name the runner a lease was granted to,
-        // and a preview holds no lease. They are `None` in a personal team,
+        // and a preview holds no lease. A personal team has none, and it is
         // the only one the desktop composes for before 059, so the preview
         // and a run still agree there byte for byte.
-        None,
+        prompt::PromptTeam::from_kind(team_kind, None),
         guidance.as_ref(),
         state.runner.provider.fanout_noun(),
     ))

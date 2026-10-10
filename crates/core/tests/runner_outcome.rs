@@ -34,7 +34,7 @@ use rimaia_core::runner::events::{
 use rimaia_core::runner::outcome::{
     classify, finish_run, start_run, NewRun, PullRequestWatch, RunOutcome, SpawnedAs, Termination,
 };
-use rimaia_core::runner::prompt::compose_prompt;
+use rimaia_core::runner::prompt::{compose_prompt, PromptTeam};
 use rimaia_core::runner::provider::{AgentProvider, ClaudeProvider};
 use rimaia_core::runs::bundle::RunCapture;
 use rimaia_core::tasks::{self, NewTask};
@@ -1575,7 +1575,14 @@ impl RunFixture {
             .await
             .expect("read the base instructions");
 
-        compose_prompt(&base, &detail, &repository, None, None, "subagents")
+        compose_prompt(
+            &base,
+            &detail,
+            &repository,
+            PromptTeam::Personal,
+            None,
+            "subagents",
+        )
     }
 
     async fn start(&mut self, prompt: &str) -> rimaia_core::db::Run {
