@@ -253,6 +253,7 @@ pub fn run_state_spelling(state: RunState) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::testing::TestContext;
     use pretty_assertions::assert_eq;
 
     /// ADR-0015 names `set_run_state` — every legal and illegal transition —
@@ -337,5 +338,142 @@ mod tests {
             RunState::Running,
             RunState::Cancelled
         ));
+    }
+
+    // -----------------------------------------------------------------------
+    // `transition`, the conditional write, against a real database
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn a_transition_from_the_state_the_task_is_in_moves_it_and_answers_true() {
+        let h = TestContext::new().await;
+        let id = seed_task(&h).await;
+        h.clock.advance(chrono::Duration::seconds(30));
+
+        let mut conn = h.context.pool.acquire().await.expect("a connection");
+        let moved = transition(&mut conn, &h.clock, &id, RunState::Idle, RunState::Queued)
+            .await
+            .expect("idle -> queued is legal");
+        drop(conn);
+
+        assert!(moved);
+        assert_eq!(
+            row(&h, &id).await,
+            (RunState::Queued, h.clock.now()),
+            "moved, and stamped now",
+        );
+    }
+
+    #[tokio::test]
+    async fn a_transition_from_a_state_the_task_has_left_moves_nothing_and_answers_false() {
+        let h = TestContext::new().await;
+        let id = seed_task(&h).await;
+        for state in [RunState::Queued, RunState::Running, RunState::Failed] {
+            set_run_state(&h.context, &id, state)
+                .await
+                .unwrap_or_else(|error| panic!("walk to {state:?}: {error}"));
+        }
+        let before = row(&h, &id).await;
+        h.clock.advance(chrono::Duration::seconds(30));
+
+        // Idle -> Queued is a legal edge; the task is simply no longer idle.
+        let mut conn = h.context.pool.acquire().await.expect("a connection");
+        let moved = transition(&mut conn, &h.clock, &id, RunState::Idle, RunState::Queued)
+            .await
+            .expect("a lost race is an answer, not an error");
+        drop(conn);
+
+        assert!(!moved);
+        assert_eq!(row(&h, &id).await, before, "nothing was written");
+        assert_eq!(before.0, RunState::Failed);
+    }
+
+    #[tokio::test]
+    async fn a_transition_naming_a_task_that_does_not_exist_answers_false() {
+        let h = TestContext::new().await;
+
+        let mut conn = h.context.pool.acquire().await.expect("a connection");
+        let moved = transition(
+            &mut conn,
+            &h.clock,
+            "no-such-task",
+            RunState::Idle,
+            RunState::Queued,
+        )
+        .await
+        .expect("a missing row is an answer, not an error");
+
+        assert!(!moved);
+    }
+
+    #[tokio::test]
+    async fn an_illegal_transition_is_refused_before_any_write() {
+        // The task *is* idle, so the conditional `UPDATE` would match it: only
+        // the table check standing in front of it keeps it from writing.
+        let h = TestContext::new().await;
+        let id = seed_task(&h).await;
+        let before = row(&h, &id).await;
+        h.clock.advance(chrono::Duration::seconds(30));
+
+        let mut conn = h.context.pool.acquire().await.expect("a connection");
+        let error = transition(&mut conn, &h.clock, &id, RunState::Idle, RunState::Running)
+            .await
+            .expect_err("idle -> running skips queued");
+        drop(conn);
+
+        assert_eq!(error.code(), crate::ErrorCode::Invalid);
+        assert_eq!(
+            error.to_string(),
+            format!(
+                "cannot move task {id} from run state \"idle\" to \"running\": not a legal transition"
+            ),
+        );
+        assert_eq!(
+            row(&h, &id).await,
+            before,
+            "run_state and updated_at unchanged"
+        );
+        assert_eq!(before.0, RunState::Idle);
+    }
+
+    /// An idle task in a repository seeded directly: this module's subject is
+    /// `run_state`, and `repo::register` would drag a real checkout into it.
+    async fn seed_task(h: &TestContext) -> String {
+        let repository_id = crate::db::new_id();
+        sqlx::query(
+            "INSERT INTO repositories (id, team_id, name, default_branch, created_at)
+             VALUES (?1, ?2, 'rimaia', 'main', ?3)",
+        )
+        .bind(&repository_id)
+        .bind(h.context.scope.sole().expect("the harness's solo team"))
+        .bind(h.clock.now())
+        .execute(&h.context.pool)
+        .await
+        .expect("seed a repository");
+
+        let task = crate::tasks::create_task(
+            &h.context,
+            crate::tasks::NewTask {
+                repository_id,
+                title: "Move me".to_string(),
+                plan: None,
+                extra_instructions: None,
+                column: None,
+                links: vec![],
+            },
+        )
+        .await
+        .expect("create a task");
+        assert_eq!(task.run_state, RunState::Idle);
+        task.id
+    }
+
+    /// The two columns a transition writes, read straight off the row.
+    async fn row(h: &TestContext, id: &str) -> (RunState, chrono::DateTime<chrono::Utc>) {
+        let task = crate::tasks::get_task(&h.context, id)
+            .await
+            .expect("read the task")
+            .task;
+        (task.run_state, task.updated_at)
     }
 }
