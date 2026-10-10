@@ -599,7 +599,7 @@ async fn a_run_scoped_handle_lists_only_its_own_team() {
 /// A `ScopedTx` counts as a transaction here. It carries the context's scope,
 /// which is why the helpers below may take one, but each of them is still a
 /// door into someone else's transaction, so each is named.
-const STORE_HANDLE_EXCEPTIONS: [(&str, &str); 17] = [
+const STORE_HANDLE_EXCEPTIONS: [(&str, &str); 18] = [
     ("db::connect", "it makes the pool; no context can exist yet"),
     ("db::migrate", "it runs before the context is built"),
     (
@@ -627,6 +627,12 @@ const STORE_HANDLE_EXCEPTIONS: [(&str, &str); 17] = [
         "db::settings::set_user_in",
         "it writes the actor's row inside a review action's or mark_seen's transaction; it takes \
          the context for the actor and checks the key's placement",
+    ),
+    (
+        "db::settings::set_team_in",
+        "it writes a team's row inside a save that writes two keys as one (the review loop's \
+         instructions and configuration); it takes the context for the scope and checks the \
+         key's placement",
     ),
     (
         "context::ServiceContext::begin",
@@ -747,15 +753,16 @@ fn no_service_takes_a_pool_without_a_scope() {
 }
 
 /// The functions allowed a statement that writes a split settings table, each
-/// with why. Task 039 makes `set_team` and `set_user_in` the one writer of
+/// with why. Task 039 makes `set_team_in` and `set_user_in` the one writer of
 /// their table, so tasks 045 and 051 can hang their checks on it and a key
 /// added later inherits them; a second writer would be a write those checks
 /// never see.
 const SETTINGS_WRITERS: [(&str, &str, &str); 3] = [
     (
         "team_settings",
-        "db::settings::set_team",
-        "the one writer: it sets a team key and, with `None`, removes it",
+        "db::settings::set_team_in",
+        "the one writer: it sets a team key and, with `None`, removes it; set_team is it run \
+         over the pool",
     ),
     (
         "team_settings",
@@ -829,7 +836,7 @@ fn each_split_settings_table_has_one_writer() {
         .collect();
     assert_eq!(
         writers, expected,
-        "write team_settings through db::settings::set_team and user_settings through \
+        "write team_settings through db::settings::set_team_in and user_settings through \
          set_user_in; an exception needs an entry in SETTINGS_WRITERS with its reason"
     );
 }

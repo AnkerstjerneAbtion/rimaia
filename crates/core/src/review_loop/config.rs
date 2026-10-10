@@ -589,13 +589,21 @@ pub async fn set_review_settings(
     )?;
     let stored = config.to_stored()?.unwrap_or_else(|| "{}".to_string());
 
-    // Two writes through the one team-settings writer rather than one
-    // transaction of raw statements: `set_team` is where task 045's revision
-    // and task 051's owner check land, and each write announces itself. The
-    // configuration goes second, so a failure between the two leaves the loop
-    // as it was configured with new instructions, never the other way round.
-    settings::set_team(ctx, &team_id, REVIEW_INSTRUCTIONS, Some(instructions)).await?;
-    settings::set_team(ctx, &team_id, REVIEW_CONFIG, Some(&stored)).await?;
+    // Both keys through the one team-settings statement, in one transaction
+    // and announced once: the instructions and the configuration are one save,
+    // and neither commits without the other.
+    let mut tx = ctx.begin().await?;
+    settings::set_team_in(
+        ctx,
+        &mut tx,
+        &team_id,
+        REVIEW_INSTRUCTIONS,
+        Some(instructions),
+    )
+    .await?;
+    settings::set_team_in(ctx, &mut tx, &team_id, REVIEW_CONFIG, Some(&stored)).await?;
+    tx.commit().await?;
+    ctx.publish(ChangeEvent::settings(team_id));
 
     Ok(ReviewSettings {
         instructions: instructions.to_string(),

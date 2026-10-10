@@ -141,6 +141,29 @@ async fn the_loop_is_off_on_a_fresh_database() {
 }
 
 #[tokio::test]
+async fn saving_the_global_settings_commits_both_keys_and_announces_once() {
+    let mut fixture = Fixture::new().await;
+    drain(&mut fixture.harness);
+
+    fixture.enable(json!({})).await;
+
+    let settings = review_config::get_review_settings(fixture.ctx())
+        .await
+        .expect("read the global settings");
+    assert_eq!(settings.instructions, "Run /review.");
+    assert_eq!(
+        settings.config.enabled,
+        Some(review_config::ReviewEnabled::OnCostAcknowledged),
+        "the configuration saved with them"
+    );
+    assert_eq!(
+        drain(&mut fixture.harness),
+        vec![ChangeEvent::settings(fixture.harness.solo.team_id.clone())],
+        "the instructions and the configuration are one save"
+    );
+}
+
+#[tokio::test]
 async fn enabling_the_loop_requires_the_cost_acknowledged_spelling() {
     let fixture = Fixture::new().await;
     let provider = ClaudeProvider;

@@ -261,18 +261,37 @@ pub(crate) async fn get_team(
 /// Writes one team's value for a team key, or removes it with `None`, and
 /// announces the change to that team.
 ///
-/// **The one writer of `team_settings`.** Task 045 adds the revision and
-/// authorship columns here and task 051 the owner check, so a key added later
-/// inherits both without anyone having to remember them. Removal comes here
-/// too, for the same reason: a delete that bypassed this function would be a
-/// write those checks never see. Its one caller today is a repository's
-/// strategy default leaving with its repository (D17.1).
-///
-/// One statement, so the `execute` *is* the commit; the publication still
-/// follows it, because ADR-0018's rule is about what a subscriber can read
-/// when it re-reads.
+/// [`set_team_in`] run over the pool: one statement, so the `execute` *is* the
+/// commit; the publication still follows it, because ADR-0018's rule is about
+/// what a subscriber can read when it re-reads.
 pub(crate) async fn set_team(
     ctx: &ServiceContext,
+    team_id: &str,
+    key: &str,
+    value: Option<&str>,
+) -> Result<()> {
+    let mut conn = ctx.pool.acquire().await?;
+    set_team_in(ctx, &mut conn, team_id, key, value).await?;
+    drop(conn);
+
+    ctx.publish(ChangeEvent::settings(team_id.to_string()));
+    Ok(())
+}
+
+/// [`set_team`]'s statement, on a connection the caller's transaction holds,
+/// publishing nothing: the caller announces after its own commit. A save that
+/// writes two keys together (the review loop's instructions and configuration)
+/// commits them as one and announces once.
+///
+/// **The one statement that writes `team_settings`.** Task 045 adds the
+/// revision and authorship columns here and task 051 the owner check, so a key
+/// added later inherits both without anyone having to remember them. Removal
+/// comes here too, for the same reason: a delete that bypassed this function
+/// would be a write those checks never see. Its one caller today is a
+/// repository's strategy default leaving with its repository (D17.1).
+pub(crate) async fn set_team_in(
+    ctx: &ServiceContext,
+    conn: &mut SqliteConnection,
     team_id: &str,
     key: &str,
     value: Option<&str>,
@@ -288,7 +307,7 @@ pub(crate) async fn set_team(
                 key,
                 value,
             )
-            .execute(&ctx.pool)
+            .execute(&mut *conn)
             .await?;
         }
         None => {
@@ -297,12 +316,10 @@ pub(crate) async fn set_team(
                 team_id,
                 key,
             )
-            .execute(&ctx.pool)
+            .execute(&mut *conn)
             .await?;
         }
     }
-
-    ctx.publish(ChangeEvent::settings(team_id.to_string()));
     Ok(())
 }
 
