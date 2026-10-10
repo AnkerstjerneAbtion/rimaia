@@ -17,9 +17,10 @@ use std::sync::Arc;
 
 use chrono::{DateTime, Duration, Utc};
 
+use crate::board::LeasePurpose;
 use crate::db::{OnArchive, Schedule, ScheduleMode};
 use crate::error::ErrorCode;
-use crate::machine::{Checkout, CheckoutPatch, MachineStore, WorktreeRecord};
+use crate::machine::{Checkout, CheckoutPatch, HeldLease, MachineStore, WorktreeRecord};
 use crate::tasks::Patch;
 use crate::testing::test_epoch;
 
@@ -54,6 +55,10 @@ macro_rules! machine_store_contract {
             enabling_and_firing_write_only_their_columns,
             a_write_to_an_unknown_schedule_answers_false,
             schedules_list_by_name_then_id,
+            a_held_lease_round_trips_every_column,
+            recording_a_held_lease_on_a_task_again_replaces_it,
+            noting_a_held_leases_run_writes_the_run_and_the_purpose,
+            forgetting_a_held_lease_answers_whether_there_was_one,
         );
     };
     (@cases $harness:ty; $($case:ident),* $(,)?) => {
@@ -124,6 +129,18 @@ fn schedule(id: &str, name: &str) -> Schedule {
         stop_at: Some("06:00".to_string()),
         last_fired_at: Some(at(30)),
         armed_at: Some(at(10)),
+    }
+}
+
+/// A held lease with every column set, its run included.
+fn held_lease(task_id: &str, generation: i64) -> HeldLease {
+    HeldLease {
+        task_id: task_id.to_string(),
+        team_id: "3f2b1c00-0000-4000-8000-0000000000a1".to_string(),
+        purpose: LeasePurpose::Review,
+        run_id: Some(format!("run-of-{task_id}")),
+        generation,
+        acquired_at: at(7),
     }
 }
 
@@ -597,6 +614,148 @@ pub mod cases {
                 ("Nightly".to_string(), "schedule-2".to_string()),
                 ("Nightly".to_string(), "schedule-3".to_string()),
             ]
+        );
+    }
+
+    pub async fn a_held_lease_round_trips_every_column<H: Harness>() {
+        let harness = H::start().await;
+        let store = harness.store();
+        let full = held_lease("task-1", 7);
+        // `run_id` NULL, as a lease is until `start_run`, and every purpose's
+        // spelling through the column.
+        let bare = HeldLease {
+            purpose: LeasePurpose::Strategy,
+            run_id: None,
+            ..held_lease("task-2", 1)
+        };
+
+        store.record_held_lease(&full).await.expect("record");
+        store.record_held_lease(&bare).await.expect("record");
+        for (task, purpose) in [
+            ("task-3", LeasePurpose::Implementation),
+            ("task-4", LeasePurpose::Fix),
+        ] {
+            store
+                .record_held_lease(&HeldLease {
+                    purpose,
+                    ..held_lease(task, 1)
+                })
+                .await
+                .expect("record");
+        }
+
+        let listed = store.list_held_leases().await.expect("list");
+        assert_eq!(
+            listed
+                .iter()
+                .map(|lease| (lease.task_id.as_str(), lease.purpose))
+                .collect::<Vec<_>>(),
+            [
+                ("task-1", LeasePurpose::Review),
+                ("task-2", LeasePurpose::Strategy),
+                ("task-3", LeasePurpose::Implementation),
+                ("task-4", LeasePurpose::Fix),
+            ],
+            "listed in task order, every purpose intact"
+        );
+        assert_eq!(listed[0], full);
+        assert_eq!(listed[1], bare);
+    }
+
+    pub async fn recording_a_held_lease_on_a_task_again_replaces_it<H: Harness>() {
+        // The primary key on `task_id`: one row per task, and a second record
+        // replaces the first rather than refusing, because the board holds at
+        // most one lease per task and a row a missed forget left behind must
+        // not refuse the next claim's record.
+        let harness = H::start().await;
+        let store = harness.store();
+        store
+            .record_held_lease(&held_lease("task-1", 1))
+            .await
+            .expect("record");
+
+        let reclaimed = HeldLease {
+            purpose: LeasePurpose::Implementation,
+            run_id: None,
+            acquired_at: at(90),
+            ..held_lease("task-1", 2)
+        };
+        store
+            .record_held_lease(&reclaimed)
+            .await
+            .expect("record again");
+
+        assert_eq!(
+            store.list_held_leases().await.expect("list"),
+            vec![reclaimed]
+        );
+    }
+
+    pub async fn noting_a_held_leases_run_writes_the_run_and_the_purpose<H: Harness>() {
+        let harness = H::start().await;
+        let store = harness.store();
+        let recorded = HeldLease {
+            purpose: LeasePurpose::Strategy,
+            run_id: None,
+            ..held_lease("task-1", 3)
+        };
+        store.record_held_lease(&recorded).await.expect("record");
+
+        assert!(store
+            .set_held_lease_run("task-1", Some("run-9"), LeasePurpose::Implementation)
+            .await
+            .expect("note the run"));
+        assert_eq!(
+            store.list_held_leases().await.expect("list"),
+            vec![HeldLease {
+                purpose: LeasePurpose::Implementation,
+                run_id: Some("run-9".to_string()),
+                ..recorded.clone()
+            }],
+            "the run and the purpose, and nothing else"
+        );
+
+        assert!(store
+            .set_held_lease_run("task-1", None, LeasePurpose::Review)
+            .await
+            .expect("clear the run"));
+        assert_eq!(
+            store.list_held_leases().await.expect("list"),
+            vec![HeldLease {
+                purpose: LeasePurpose::Review,
+                run_id: None,
+                ..recorded
+            }]
+        );
+        assert!(!store
+            .set_held_lease_run("task-2", Some("run-9"), LeasePurpose::Fix)
+            .await
+            .expect("an unknown task"));
+    }
+
+    pub async fn forgetting_a_held_lease_answers_whether_there_was_one<H: Harness>() {
+        let harness = H::start().await;
+        let store = harness.store();
+        store
+            .record_held_lease(&held_lease("task-1", 1))
+            .await
+            .expect("record");
+        store
+            .record_held_lease(&held_lease("task-2", 1))
+            .await
+            .expect("record");
+
+        assert!(store.forget_held_lease("task-1").await.expect("forget"));
+        assert!(!store.forget_held_lease("task-1").await.expect("again"));
+        assert_eq!(
+            store
+                .list_held_leases()
+                .await
+                .expect("list")
+                .into_iter()
+                .map(|lease| lease.task_id)
+                .collect::<Vec<_>>(),
+            ["task-2"]
         );
     }
 }

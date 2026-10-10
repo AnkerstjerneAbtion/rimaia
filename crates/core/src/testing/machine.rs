@@ -17,11 +17,14 @@ use std::sync::{Mutex, MutexGuard};
 
 use chrono::{DateTime, Utc};
 
+use crate::board::LeasePurpose;
 use crate::db::Schedule;
 use crate::machine::port::{
     checkout_in_use, duplicate_checkout, duplicate_schedule, unknown_checkout,
 };
-use crate::machine::{Checkout, CheckoutPatch, MachineFuture, MachineStore, WorktreeRecord};
+use crate::machine::{
+    Checkout, CheckoutPatch, HeldLease, MachineFuture, MachineStore, WorktreeRecord,
+};
 
 #[derive(Debug, Default)]
 pub struct MemoryMachine {
@@ -33,6 +36,7 @@ struct State {
     settings: BTreeMap<String, String>,
     checkouts: BTreeMap<String, Checkout>,
     worktrees: BTreeMap<String, WorktreeRecord>,
+    held_leases: BTreeMap<String, HeldLease>,
     schedules: BTreeMap<String, Schedule>,
 }
 
@@ -136,6 +140,36 @@ impl MachineStore for MemoryMachine {
 
     fn forget_worktree<'a>(&'a self, task_id: &'a str) -> MachineFuture<'a, bool> {
         done(Ok(self.state().worktrees.remove(task_id).is_some()))
+    }
+
+    fn record_held_lease<'a>(&'a self, lease: &'a HeldLease) -> MachineFuture<'a, ()> {
+        self.state()
+            .held_leases
+            .insert(lease.task_id.clone(), lease.clone());
+        done(Ok(()))
+    }
+
+    fn set_held_lease_run<'a>(
+        &'a self,
+        task_id: &'a str,
+        run_id: Option<&'a str>,
+        purpose: LeasePurpose,
+    ) -> MachineFuture<'a, bool> {
+        let mut state = self.state();
+        let Some(lease) = state.held_leases.get_mut(task_id) else {
+            return done(Ok(false));
+        };
+        lease.run_id = run_id.map(str::to_string);
+        lease.purpose = purpose;
+        done(Ok(true))
+    }
+
+    fn forget_held_lease<'a>(&'a self, task_id: &'a str) -> MachineFuture<'a, bool> {
+        done(Ok(self.state().held_leases.remove(task_id).is_some()))
+    }
+
+    fn list_held_leases(&self) -> MachineFuture<'_, Vec<HeldLease>> {
+        done(Ok(self.state().held_leases.values().cloned().collect()))
     }
 
     fn list_schedules(&self) -> MachineFuture<'_, Vec<Schedule>> {

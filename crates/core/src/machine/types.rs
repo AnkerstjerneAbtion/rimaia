@@ -7,7 +7,9 @@
 use chrono::{DateTime, Utc};
 use serde::Serialize;
 
+use crate::board::{LeasePurpose, LeaseRef};
 use crate::db::OnArchive;
+use crate::events::TeamId;
 use crate::tasks::Patch;
 
 /// One row of `checkouts`: this machine's clone of one board repository
@@ -98,4 +100,31 @@ pub struct WorktreeRecord {
     /// ADR-0031 point 4's fence after "run elsewhere" (task 057): the worktree
     /// is kept and never pushed from.
     pub fenced_at: Option<DateTime<Utc>>,
+}
+
+/// One row of `held_leases`: a lease this runner holds on the board, so its
+/// startup reconciles only its own (ADR-0031 point 5) and a heartbeat can name
+/// each one as a [`LeaseRef`] (seam-contract D28).
+///
+/// A record of what the board granted, never an authority: the board's
+/// `runner_leases` row decides, and a record the board no longer agrees with
+/// is answered `Conflict` or `NotFound` and dropped (task 043).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HeldLease {
+    pub task_id: String,
+    /// The task's team, which the runner store cannot join for.
+    pub team_id: TeamId,
+    pub purpose: LeasePurpose,
+    /// The run the lease is open for, once `start_run` has reported it.
+    pub run_id: Option<String>,
+    pub generation: i64,
+    pub acquired_at: DateTime<Utc>,
+}
+
+impl HeldLease {
+    /// The reference every report under this lease carries.
+    pub fn lease(&self) -> LeaseRef {
+        LeaseRef::new(self.task_id.clone(), self.generation, self.team_id.clone())
+    }
 }

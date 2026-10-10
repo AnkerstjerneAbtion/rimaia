@@ -18,6 +18,7 @@
 
 pub mod adoption;
 pub mod context;
+pub mod leases;
 pub mod local;
 pub mod port;
 pub mod types;
@@ -25,4 +26,4 @@ pub mod types;
 pub use context::MachineContext;
 pub use local::{checkout_of, consented_repositories, not_set_up, CheckoutView};
 pub use port::{MachineFuture, MachineStore};
-pub use types::{Checkout, CheckoutPatch, WorktreeRecord};
+pub use types::{Checkout, CheckoutPatch, HeldLease, WorktreeRecord};

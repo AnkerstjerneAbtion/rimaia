@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "DELETE FROM held_leases WHERE task_id = ?1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": []
+  },
+  "hash": "dd6a0200f48f086135f546357c3b8dfacd15e78525c9e0d29e274f2e0bc37131"
+}

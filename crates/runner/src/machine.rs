@@ -10,11 +10,14 @@
 //! because adoption writes the same rows inside its own transaction.
 
 use chrono::{DateTime, Utc};
+use rimaia_core::board::LeasePurpose;
 use rimaia_core::db::{OnArchive, Schedule, ScheduleMode};
 use rimaia_core::machine::port::{
     checkout_in_use, duplicate_checkout, duplicate_schedule, unknown_checkout,
 };
-use rimaia_core::machine::{Checkout, CheckoutPatch, MachineFuture, MachineStore, WorktreeRecord};
+use rimaia_core::machine::{
+    Checkout, CheckoutPatch, HeldLease, MachineFuture, MachineStore, WorktreeRecord,
+};
 use rimaia_core::Result;
 use sqlx::SqliteConnection;
 
@@ -336,6 +339,73 @@ impl MachineStore for RunnerStore {
                 .execute(self.pool())
                 .await?;
             Ok(forgotten.rows_affected() > 0)
+        })
+    }
+
+    fn record_held_lease<'a>(&'a self, lease: &'a HeldLease) -> MachineFuture<'a, ()> {
+        Box::pin(async move {
+            // A replace, not a refusal: one row per task, and a row a missed
+            // forget left behind must not refuse the next claim's record.
+            sqlx::query!(
+                r#"INSERT INTO held_leases
+                    (task_id, team_id, purpose, run_id, generation, acquired_at)
+                   VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+                   ON CONFLICT (task_id) DO UPDATE SET
+                    team_id = excluded.team_id, purpose = excluded.purpose,
+                    run_id = excluded.run_id, generation = excluded.generation,
+                    acquired_at = excluded.acquired_at"#,
+                lease.task_id,
+                lease.team_id,
+                lease.purpose,
+                lease.run_id,
+                lease.generation,
+                lease.acquired_at,
+            )
+            .execute(self.pool())
+            .await?;
+            Ok(())
+        })
+    }
+
+    fn set_held_lease_run<'a>(
+        &'a self,
+        task_id: &'a str,
+        run_id: Option<&'a str>,
+        purpose: LeasePurpose,
+    ) -> MachineFuture<'a, bool> {
+        Box::pin(async move {
+            let updated = sqlx::query!(
+                "UPDATE held_leases SET run_id = ?2, purpose = ?3 WHERE task_id = ?1",
+                task_id,
+                run_id,
+                purpose,
+            )
+            .execute(self.pool())
+            .await?;
+            Ok(updated.rows_affected() > 0)
+        })
+    }
+
+    fn forget_held_lease<'a>(&'a self, task_id: &'a str) -> MachineFuture<'a, bool> {
+        Box::pin(async move {
+            let forgotten = sqlx::query!("DELETE FROM held_leases WHERE task_id = ?1", task_id)
+                .execute(self.pool())
+                .await?;
+            Ok(forgotten.rows_affected() > 0)
+        })
+    }
+
+    fn list_held_leases(&self) -> MachineFuture<'_, Vec<HeldLease>> {
+        Box::pin(async move {
+            let leases = sqlx::query_as!(
+                HeldLease,
+                r#"SELECT task_id, team_id, purpose AS "purpose: LeasePurpose", run_id,
+                          generation, acquired_at AS "acquired_at: DateTime<Utc>"
+                     FROM held_leases ORDER BY task_id"#
+            )
+            .fetch_all(self.pool())
+            .await?;
+            Ok(leases)
         })
     }
 

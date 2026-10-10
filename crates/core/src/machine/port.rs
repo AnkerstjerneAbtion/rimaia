@@ -9,7 +9,9 @@ use chrono::{DateTime, Utc};
 use crate::db::Schedule;
 use crate::error::Result;
 
-use super::types::{Checkout, CheckoutPatch, WorktreeRecord};
+use crate::board::LeasePurpose;
+
+use super::types::{Checkout, CheckoutPatch, HeldLease, WorktreeRecord};
 
 /// What every store method returns.
 ///
@@ -85,6 +87,28 @@ pub trait MachineStore: Send + Sync + 'static {
 
     /// Forgets a task's worktree, and answers whether there was one.
     fn forget_worktree<'a>(&'a self, task_id: &'a str) -> MachineFuture<'a, bool>;
+
+    // Held leases: the board leases this runner holds (task 043).
+
+    /// Records a lease, replacing an earlier record for the same task: one
+    /// row per task, because the board holds at most one lease per task, and
+    /// a record a missed forget left behind must not refuse the next claim's.
+    fn record_held_lease<'a>(&'a self, lease: &'a HeldLease) -> MachineFuture<'a, ()>;
+
+    /// Writes a held lease's run and purpose together, and answers whether
+    /// the task has a record.
+    fn set_held_lease_run<'a>(
+        &'a self,
+        task_id: &'a str,
+        run_id: Option<&'a str>,
+        purpose: LeasePurpose,
+    ) -> MachineFuture<'a, bool>;
+
+    /// Forgets a task's held lease, and answers whether there was one.
+    fn forget_held_lease<'a>(&'a self, task_id: &'a str) -> MachineFuture<'a, bool>;
+
+    /// Every held lease, ordered by task id.
+    fn list_held_leases(&self) -> MachineFuture<'_, Vec<HeldLease>>;
 
     // Schedules: task 013's table, one operation per write `schedule::`
     // performs.
