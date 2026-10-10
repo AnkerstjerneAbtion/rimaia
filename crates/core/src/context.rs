@@ -127,12 +127,17 @@ impl TeamScope {
 /// A transaction opened through a [`ServiceContext`], carrying the scope its
 /// queries filter by.
 ///
-/// The only way a helper outside its own module reaches the store partway
-/// through someone else's transaction: a review verdict moves its card, a run
-/// opens under its task. Such a helper takes `&mut ScopedTx` rather than a
-/// bare connection, so it cannot be handed a connection with no scope behind
-/// it, and it filters by [`scope`](Self::scope) like every other service.
-/// `no_service_takes_a_pool_without_a_scope` is the test that holds the line.
+/// What a helper takes when it reaches the store partway through someone
+/// else's transaction: a review verdict moves its card, a run opens under its
+/// task. It takes `&mut ScopedTx` rather than a bare connection, so it cannot
+/// be handed a connection with no scope behind it, and it filters by
+/// [`scope`](Self::scope) like every other service.
+///
+/// It is still a transaction, so it buys no way around task 039's rule:
+/// `no_service_takes_a_pool_without_a_scope` scans it as it scans
+/// `Transaction`, and every function visible outside its module that takes or
+/// returns one has its own entry, with a reason, in that test's
+/// `STORE_HANDLE_EXCEPTIONS`. A private helper needs none.
 ///
 /// It is always a real transaction, which a bare `&mut SqliteConnection` is
 /// not: a pooled connection in autocommit satisfies that type just as well,

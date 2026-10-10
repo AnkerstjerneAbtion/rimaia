@@ -508,6 +508,13 @@ every command).
   - `db::settings::get_user_in` and `db::settings::set_user_in`: they read and write the
     actor's row inside a review action's or `mark_seen`'s transaction; they take the context
     for the actor, and check the key's placement like every accessor.
+  - the helpers that share a caller's transaction across modules, each with its own entry
+    and reason: `ServiceContext::begin` and `begin_immediate`, `repo::team_of_repository`,
+    `review::digest::advance_marker`, `tasks::dependencies::dependents_in`,
+    `tasks::position::rebalance_column`, and `tasks::service::{move_within,
+    fetch_task_row, team_of_task}`. They take `context::ScopedTx`, a transaction that
+    carries the context's scope, and the test scans `ScopedTx` exactly as it scans
+    `Transaction`, so the type is no way around this list.
 
   A later task that needs an exception appends an entry with its reason in the same commit.
   040's `runner_placed` takes a context and needs none.

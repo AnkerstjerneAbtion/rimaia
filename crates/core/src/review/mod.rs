@@ -55,8 +55,9 @@ pub async fn dependents(ctx: &ServiceContext, task_id: &str) -> Result<Vec<Depen
 
 /// [`dependents`] inside a transaction the caller holds, so a review action
 /// reads them in the transaction that still has `task.branch` naming the
-/// reviewed branch. Only dependents in the transaction's scope.
-pub(crate) async fn dependents_of_task(tx: &mut ScopedTx, task: &Task) -> Result<Vec<Dependent>> {
+/// reviewed branch. Only dependents in the transaction's scope. Private:
+/// `review::actions` sits under this module and needs no wider door.
+async fn dependents_of_task(tx: &mut ScopedTx, task: &Task) -> Result<Vec<Dependent>> {
     let rows = dependents_in(tx, &task.id).await?;
 
     let mut dependents = Vec::with_capacity(rows.len());

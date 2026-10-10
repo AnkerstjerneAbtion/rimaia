@@ -595,7 +595,11 @@ async fn a_run_scoped_handle_lists_only_its_own_team() {
 /// The functions allowed a store handle in their signature, each with why. A
 /// later task that needs one appends an entry, with its reason, in the same
 /// commit.
-const STORE_HANDLE_EXCEPTIONS: [(&str, &str); 8] = [
+///
+/// A `ScopedTx` counts as a transaction here. It carries the context's scope,
+/// which is why the helpers below may take one, but each of them is still a
+/// door into someone else's transaction, so each is named.
+const STORE_HANDLE_EXCEPTIONS: [(&str, &str); 17] = [
     ("db::connect", "it makes the pool; no context can exist yet"),
     ("db::migrate", "it runs before the context is built"),
     (
@@ -623,6 +627,48 @@ const STORE_HANDLE_EXCEPTIONS: [(&str, &str); 8] = [
         "db::settings::set_user_in",
         "it writes the actor's row inside a review action's or mark_seen's transaction; it takes \
          the context for the actor and checks the key's placement",
+    ),
+    (
+        "context::ServiceContext::begin",
+        "it opens the transaction a service shares with its helpers, carrying the context's scope",
+    ),
+    (
+        "context::ServiceContext::begin_immediate",
+        "it opens that transaction as BEGIN IMMEDIATE, for a read the write after it depends on",
+    ),
+    (
+        "repo::team_of_repository",
+        "a task's create and repository move resolve the repository's team inside their own \
+         transaction; it filters by that transaction's scope",
+    ),
+    (
+        "review::digest::advance_marker",
+        "a verdict advances the actor's marker inside its own transaction, so the column move and \
+         the marker commit together (034); it is set_user_in's caller",
+    ),
+    (
+        "tasks::dependencies::dependents_in",
+        "deleting a task and a review action read its dependents inside the transaction that read \
+         the task; it filters by that transaction's scope",
+    ),
+    (
+        "tasks::position::rebalance_column",
+        "a move renumbers its column inside its own transaction, or a failure part-way reorders \
+         the column (its doc comment); the caller has already scoped the repository",
+    ),
+    (
+        "tasks::service::move_within",
+        "a review action writes its note and moves the card in one transaction (034)",
+    ),
+    (
+        "tasks::service::fetch_task_row",
+        "every task write reads the row it changes inside its own transaction; it filters by that \
+         transaction's scope and answers a foreign id as a missing one",
+    ),
+    (
+        "tasks::service::team_of_task",
+        "every write that names a task resolves the task's team inside its own transaction, for \
+         its event; it filters by that transaction's scope",
     ),
 ];
 
@@ -653,6 +699,7 @@ fn no_service_takes_a_pool_without_a_scope() {
                     "SqliteConnection",
                     "PoolConnection",
                     "Transaction",
+                    "ScopedTx",
                     "Executor",
                     "SqliteExecutor",
                     "Acquire",
@@ -684,8 +731,8 @@ fn no_service_takes_a_pool_without_a_scope() {
     assert_eq!(
         violations,
         Vec::<String>::new(),
-        "take `&ServiceContext`, or a `ScopedTx` to share a transaction; an exception needs an \
-         entry in STORE_HANDLE_EXCEPTIONS with its reason"
+        "take `&ServiceContext`, or keep a helper that shares a transaction private to its \
+         module; an exception needs an entry in STORE_HANDLE_EXCEPTIONS with its reason"
     );
     let stale: Vec<&str> = STORE_HANDLE_EXCEPTIONS
         .iter()
