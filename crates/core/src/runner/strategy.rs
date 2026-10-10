@@ -278,6 +278,7 @@ async fn plan(
     let prompt = compose_strategy_prompt(
         detail,
         repository,
+        context.authorship.as_ref(),
         catalogue,
         &tool,
         config.provider.fanout_noun(),

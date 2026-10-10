@@ -444,6 +444,7 @@ async fn each_run_is_sent_its_own_prompt_and_the_proposal_reaches_the_implementa
         compose_strategy_prompt(
             &detail,
             &repository,
+            None,
             &catalogue,
             SET_TASK_STRATEGY_TOOL,
             "subagents",
@@ -467,7 +468,14 @@ async fn each_run_is_sent_its_own_prompt_and_the_proposal_reaches_the_implementa
     );
     assert_eq!(
         cli.stdin(2),
-        compose_prompt(&base, &detail, &repository, guidance.as_ref(), "subagents")
+        compose_prompt(
+            &base,
+            &detail,
+            &repository,
+            None,
+            guidance.as_ref(),
+            "subagents"
+        )
     );
 }
 
@@ -506,6 +514,7 @@ async fn the_planner_prompt_names_the_branch_prepare_created() {
     let expected = compose_strategy_prompt(
         &detail,
         &fixture.repository().await,
+        None,
         &catalogue,
         SET_TASK_STRATEGY_TOOL,
         "subagents",

@@ -448,6 +448,7 @@ async fn each_team_composes_its_own_base_instructions() {
             base,
             &context.task,
             &context.repository,
+            None,
             guidance.as_ref(),
             ClaudeProvider.fanout_noun(),
         )

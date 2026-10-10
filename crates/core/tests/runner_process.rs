@@ -1975,7 +1975,7 @@ impl RunnerFixture {
             .await
             .expect("read the base instructions");
 
-        compose_prompt(&base, &detail, &repository, None, "subagents")
+        compose_prompt(&base, &detail, &repository, None, None, "subagents")
     }
 
     /// The JSONL transcript, line by line.

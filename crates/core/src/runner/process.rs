@@ -839,6 +839,7 @@ async fn run_implementation(
             &context.base_instructions,
             detail,
             repository,
+            context.authorship.as_ref(),
             guidance.as_ref(),
             config.provider.fanout_noun(),
         ),
@@ -1294,9 +1295,13 @@ impl Phases<'_> {
             (RunKind::Review, PromptStyle::Continuation) => {
                 compose_review_resume(detail, &tool_name, review.phase_recorded)
             }
-            (RunKind::Review, PromptStyle::Composed) => {
-                compose_review_prompt(detail, repository, &review, &tool_name)
-            }
+            (RunKind::Review, PromptStyle::Composed) => compose_review_prompt(
+                detail,
+                repository,
+                context.authorship.as_ref(),
+                &review,
+                &tool_name,
+            ),
             (_, PromptStyle::Continuation) if from_implementation => {
                 compose_fix_continuation(detail, &review, &tool_name)
             }
@@ -1305,6 +1310,7 @@ impl Phases<'_> {
                 &context.base_instructions,
                 detail,
                 repository,
+                context.authorship.as_ref(),
                 &review,
                 &tool_name,
             ),

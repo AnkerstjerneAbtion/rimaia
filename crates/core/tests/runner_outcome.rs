@@ -1575,7 +1575,7 @@ impl RunFixture {
             .await
             .expect("read the base instructions");
 
-        compose_prompt(&base, &detail, &repository, None, "subagents")
+        compose_prompt(&base, &detail, &repository, None, None, "subagents")
     }
 
     async fn start(&mut self, prompt: &str) -> rimaia_core::db::Run {

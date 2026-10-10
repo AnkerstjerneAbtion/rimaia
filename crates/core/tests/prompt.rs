@@ -26,7 +26,7 @@
 
 use chrono::{DateTime, Utc};
 use pretty_assertions::assert_eq;
-use rimaia_core::board::{ChangeSummary, ImplementationBase, ReviewContext};
+use rimaia_core::board::{ChangeSummary, ImplementationBase, ReviewContext, RunAuthorship};
 use rimaia_core::db::{
     BoardColumn, MutationSource, Repository, RunState, StrategyMode, Task, TaskLink,
 };
@@ -64,6 +64,7 @@ fn a_prompt_with_every_section_reads_in_the_order_adr_0009_fixes() {
          Run the project's tests and linters before you finish.",
         &task(),
         &repository(),
+        None,
         None,
         FANOUT_NOUN,
     );
@@ -109,6 +110,7 @@ fn a_task_with_no_plan_omits_the_plan_section_and_its_heading() {
             &task,
             &repository(),
             None,
+            None,
             FANOUT_NOUN
         ),
         r#"# Base instructions
@@ -147,12 +149,14 @@ fn a_plan_of_nothing_but_whitespace_is_the_same_as_no_plan() {
             &blank,
             &repository(),
             None,
+            None,
             FANOUT_NOUN
         ),
         compose_prompt(
             "Commit as you work.",
             &absent,
             &repository(),
+            None,
             None,
             FANOUT_NOUN
         )
@@ -169,6 +173,7 @@ fn a_task_with_no_extra_instructions_omits_that_section_and_its_heading() {
             "Commit as you work.",
             &task,
             &repository(),
+            None,
             None,
             FANOUT_NOUN
         ),
@@ -206,6 +211,7 @@ fn a_task_with_no_links_omits_the_links_line_rather_than_rendering_an_empty_one(
             &task,
             &repository(),
             None,
+            None,
             FANOUT_NOUN
         ),
         r#"# Base instructions
@@ -240,7 +246,7 @@ fn blank_base_instructions_omit_the_base_instructions_section() {
     task.task.extra_instructions = None;
 
     assert_eq!(
-        compose_prompt("", &task, &repository(), None, FANOUT_NOUN),
+        compose_prompt("", &task, &repository(), None, None, FANOUT_NOUN),
         r#"# Task context
 
 - Title: Wire the board to the store
@@ -272,6 +278,7 @@ fn a_task_with_no_worktree_yet_omits_the_branch_line() {
             "Commit as you work.",
             &task,
             &repository(),
+            None,
             None,
             FANOUT_NOUN
         ),
@@ -309,6 +316,7 @@ fn an_unknown_template_variable_survives_into_the_composed_prompt_verbatim() {
             &task,
             &repository(),
             None,
+            None,
             FANOUT_NOUN,
         ),
         r#"# Base instructions
@@ -339,6 +347,7 @@ fn every_known_template_variable_expands_in_the_base_instructions() {
              {{task.links}}",
             &task,
             &repository(),
+            None,
             None,
             FANOUT_NOUN,
         ),
@@ -373,8 +382,22 @@ fn editing_base_instructions_cannot_reach_a_prompt_already_composed() {
     let task = task();
     let repository = repository();
 
-    let stored = compose_prompt("Open a draft PR.", &task, &repository, None, FANOUT_NOUN);
-    let recomposed = compose_prompt("Never open a PR.", &task, &repository, None, FANOUT_NOUN);
+    let stored = compose_prompt(
+        "Open a draft PR.",
+        &task,
+        &repository,
+        None,
+        None,
+        FANOUT_NOUN,
+    );
+    let recomposed = compose_prompt(
+        "Never open a PR.",
+        &task,
+        &repository,
+        None,
+        None,
+        FANOUT_NOUN,
+    );
 
     assert!(stored.contains("Open a draft PR."));
     assert!(!stored.contains("Never open a PR."));
@@ -424,6 +447,7 @@ Skip the migration, it already landed."#;
             &task(),
             &repository(),
             None,
+            None,
             FANOUT_NOUN
         ),
         expected
@@ -441,6 +465,7 @@ Skip the migration, it already landed."#;
             "Commit as you work.",
             &failed,
             &repository(),
+            None,
             StrategyGuidance::for_task(&failed).as_ref(),
             FANOUT_NOUN,
         ),
@@ -459,6 +484,7 @@ Skip the migration, it already landed."#;
             "Commit as you work.",
             &single_agent,
             &repository(),
+            None,
             StrategyGuidance::for_task(&single_agent).as_ref(),
             FANOUT_NOUN,
         ),
@@ -486,6 +512,7 @@ fn a_multi_agent_proposal_lands_between_the_plan_and_the_extra_instructions() {
             "Commit as you work.",
             &task,
             &repository(),
+            None,
             Some(&guidance),
             FANOUT_NOUN
         ),
@@ -539,6 +566,7 @@ fn the_strategy_prompt_has_exactly_the_sections_task_020_specifies() {
         compose_strategy_prompt(
             &task(),
             &repository(),
+            None,
             &ClaudeProvider.default_catalogue(),
             TOOL,
             FANOUT_NOUN
@@ -616,6 +644,7 @@ fn the_strategy_prompt_never_carries_the_base_instructions() {
     let composed = compose_strategy_prompt(
         &task(),
         &repository(),
+        None,
         &ClaudeProvider.default_catalogue(),
         TOOL,
         FANOUT_NOUN,
@@ -658,6 +687,7 @@ fn the_strategy_prompt_names_the_task_id_and_the_write_back_tool() {
     let composed = compose_strategy_prompt(
         &task,
         &repository(),
+        None,
         &ClaudeProvider.default_catalogue(),
         TOOL,
         FANOUT_NOUN,
@@ -695,7 +725,8 @@ fn the_strategy_prompt_lists_every_model_and_effort_in_the_catalogue() {
         ..Catalogue::default()
     };
 
-    let composed = compose_strategy_prompt(&task(), &repository(), &catalogue, TOOL, FANOUT_NOUN);
+    let composed =
+        compose_strategy_prompt(&task(), &repository(), None, &catalogue, TOOL, FANOUT_NOUN);
 
     assert_eq!(
         section(&composed, "# Available models"),
@@ -715,7 +746,7 @@ fn the_strategy_prompt_lists_every_model_and_effort_in_the_catalogue() {
     };
 
     assert!(
-        !compose_strategy_prompt(&task(), &repository(), &emptied, TOOL, FANOUT_NOUN)
+        !compose_strategy_prompt(&task(), &repository(), None, &emptied, TOOL, FANOUT_NOUN)
             .contains("# Available models"),
         "an empty list is an omitted section, not an empty one"
     );
@@ -1014,7 +1045,8 @@ const RESOLVE_TOOL: &str = "mcp__rimaia-run__resolve_review_finding";
 
 #[test]
 fn review_prompt_composes_its_eight_sections_in_order() {
-    let composed = compose_review_prompt(&task(), &repository(), &review_context(), RECORD_TOOL);
+    let composed =
+        compose_review_prompt(&task(), &repository(), None, &review_context(), RECORD_TOOL);
 
     assert_eq!(
         composed,
@@ -1103,7 +1135,7 @@ fn review_prompt_omits_empty_sections_with_their_heading() {
         ..review_context()
     };
 
-    let composed = compose_review_prompt(&bare, &repository(), &review, RECORD_TOOL);
+    let composed = compose_review_prompt(&bare, &repository(), None, &review, RECORD_TOOL);
 
     assert_eq!(
         headings(&composed),
@@ -1124,7 +1156,7 @@ fn review_prompt_without_a_bundle_names_the_commits_only() {
         ..review_context()
     };
 
-    let composed = compose_review_prompt(&task(), &repository(), &review, RECORD_TOOL);
+    let composed = compose_review_prompt(&task(), &repository(), None, &review, RECORD_TOOL);
 
     assert_eq!(
         section(&composed, "# The change"),
@@ -1155,21 +1187,21 @@ fn review_and_fix_task_context_name_the_rows_base_ref() {
 
     assert_eq!(
         section(
-            &compose_review_prompt(&task(), &repository(), &review, RECORD_TOOL),
+            &compose_review_prompt(&task(), &repository(), None, &review, RECORD_TOOL),
             "# Task context"
         ),
         expected
     );
     assert_eq!(
         section(
-            &compose_fix_prompt("", &task(), &repository(), &review, RESOLVE_TOOL),
+            &compose_fix_prompt("", &task(), &repository(), None, &review, RESOLVE_TOOL),
             "# Task context"
         ),
         expected
     );
     assert_eq!(
         section(
-            &compose_prompt("", &task(), &repository(), None, FANOUT_NOUN),
+            &compose_prompt("", &task(), &repository(), None, None, FANOUT_NOUN),
             "# Task context"
         ),
         expected.replace("rimaia/the-store", "main")
@@ -1183,7 +1215,7 @@ fn a_task_review_override_replaces_the_global_instructions() {
         ..review_context()
     };
 
-    let composed = compose_review_prompt(&task(), &repository(), &review, RECORD_TOOL);
+    let composed = compose_review_prompt(&task(), &repository(), None, &review, RECORD_TOOL);
 
     assert_eq!(
         section(&composed, "# Review instructions"),
@@ -1198,7 +1230,7 @@ fn a_blank_task_override_falls_back_to_the_global_instructions() {
         ..review_context()
     };
 
-    let composed = compose_review_prompt(&task(), &repository(), &review, RECORD_TOOL);
+    let composed = compose_review_prompt(&task(), &repository(), None, &review, RECORD_TOOL);
 
     assert_eq!(section(&composed, "# Review instructions"), "Run /review.");
 }
@@ -1215,7 +1247,7 @@ fn review_instructions_expand_template_variables_and_keep_unknown_ones() {
         ..review_context()
     };
 
-    let composed = compose_review_prompt(&task(), &repository(), &review, RECORD_TOOL);
+    let composed = compose_review_prompt(&task(), &repository(), None, &review, RECORD_TOOL);
 
     assert_eq!(
         section(&composed, "# Review instructions"),
@@ -1274,6 +1306,7 @@ fn fresh_fix_prompt_composes_base_instructions_plan_and_findings_in_order() {
         "Commit as you work on {{task.branch}}.",
         &task(),
         &repository(),
+        None,
         &review_context(),
         RESOLVE_TOOL,
     );
@@ -1431,5 +1464,302 @@ fn finding(
         resolved_by_run_id: resolution.map(|_| "fix-1".to_string()),
         created_at: timestamp(),
         resolved_at: None,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// What the agent is told about the situation (ADR-0032 point 7, task 072)
+// ---------------------------------------------------------------------------
+
+/// Bob's runner executing revision 4 of a plan `author` wrote, on a shared
+/// team.
+fn authorship(author: Option<&str>) -> RunAuthorship {
+    RunAuthorship {
+        plan_revision: 4,
+        plan_author: author.map(str::to_string),
+        runner_owner: "bob".to_string(),
+        runner_label: "Mac mini".to_string(),
+    }
+}
+
+/// A catalogue of one model and one effort, so the strategy prompt's whole
+/// string stays readable.
+fn one_choice_catalogue() -> Catalogue {
+    Catalogue {
+        models: vec![entry("sonnet", "Sonnet")],
+        efforts: vec![entry("medium", "Medium")],
+        ..Catalogue::default()
+    }
+}
+
+#[test]
+fn a_team_prompt_states_who_wrote_the_plan_and_whose_machine_runs_it() {
+    let alice = authorship(Some("alice"));
+    let mut bare = task();
+    bare.links = vec![];
+    bare.task.extra_instructions = None;
+
+    assert_eq!(
+        compose_prompt(
+            "Commit as you work.",
+            &task(),
+            &repository(),
+            Some(&alice),
+            None,
+            FANOUT_NOUN
+        ),
+        r#"# Base instructions
+
+Commit as you work.
+
+# Task context
+
+- Title: Wire the board to the store
+- Repository: rimaia
+- Branch: rimaia/wire-the-board
+- Base ref: main
+- Plan revision: 4, written by @alice
+- Running on: @bob's runner "Mac mini", with @bob's credentials
+- Links:
+  - [Asana](https://app.asana.com/0/1/2)
+  - [Design doc](https://docs.example.com/board)
+
+# Plan
+
+## Steps
+
+1. Read the store.
+2. Wire the board to it.
+
+# Extra instructions
+
+Skip the migration, it already landed."#,
+        "the implementation"
+    );
+
+    assert_eq!(
+        compose_strategy_prompt(
+            &bare,
+            &repository(),
+            Some(&alice),
+            &one_choice_catalogue(),
+            TOOL,
+            FANOUT_NOUN
+        ),
+        r#"# Your job
+
+You are choosing how another agent should execute the task below. You are not implementing it, and nothing you decide here is code.
+
+Read the plan and answer three questions:
+
+- **Which model should run it.** Pick from the models listed below.
+- **How much reasoning effort it needs.** Pick from the effort levels listed below. Reach for the expensive end only where the plan genuinely earns it: every task in the queue is paid for out of one subscription, and effort spent on a mechanical task is effort a hard one later tonight will not have.
+- **Whether the work fans out.** Most tasks do not. Propose a multi-agent workflow only when the plan holds parts that can genuinely be worked in parallel, and name those phases; the agent that implements this task will run them itself, with its own subagents.
+
+The plan and any extra instructions below are what you are judging, not what you are carrying out.
+
+# Task context
+
+- Title: Wire the board to the store
+- Repository: rimaia
+- Branch: rimaia/wire-the-board
+- Base ref: main
+- Plan revision: 4, written by @alice
+- Running on: @bob's runner "Mac mini", with @bob's credentials
+
+# Plan
+
+## Steps
+
+1. Read the store.
+2. Wire the board to it.
+
+# Available models
+
+- `sonnet` — Sonnet
+
+# Available effort levels
+
+- `medium` — Medium
+
+# How to answer
+
+Answer with one tool call and nothing else.
+
+Call `mcp__rimaia__set_task_strategy` exactly once, with:
+
+- `task_id`: `3f2b1c00-0000-4000-8000-000000000001` — this task, and no other. A call naming a different task is refused.
+- `model`: one id from **Available models** above, copied verbatim.
+- `effort`: one id from **Available effort levels** above, copied verbatim.
+- `rationale`: one to three sentences on why that pairing suits this plan. A human reads it on the card.
+- `workflow`: `multi_agent`, with a `phases` list, only if the work genuinely fans out into parts that can be worked in parallel. Otherwise `single_agent`, and no phases.
+
+Then stop. Print nothing else: the tool call is the only answer that reaches Rimaia, and prose beside it is read by nobody. Do not edit files, run commands, or open a pull request."#,
+        "the strategy planner"
+    );
+
+    let review = ReviewContext {
+        instructions: String::new(),
+        rejected: vec![],
+        change: None,
+        ..review_context()
+    };
+    assert_eq!(
+        compose_review_prompt(&bare, &repository(), Some(&alice), &review, RECORD_TOOL),
+        r#"# Your job
+
+You are reviewing a change another agent made for the task below. You did not write it, and you have none of the context it was written in: that is the point. A session reviewing its own work grades itself generously.
+
+Judge the change as it is committed on this branch: whether it does what the plan asks, whether it is correct, and whether anything in it would stop a careful human from merging it. Report what you find; do not fix it. A later run decides what to do about each finding, and may disagree with you.
+
+# Task context
+
+- Title: Wire the board to the store
+- Repository: rimaia
+- Branch: rimaia/wire-the-board
+- Base ref: rimaia/the-store
+- Plan revision: 4, written by @alice
+- Running on: @bob's runner "Mac mini", with @bob's credentials
+
+# Plan
+
+## Steps
+
+1. Read the store.
+2. Wire the board to it.
+
+# The change
+
+- Base ref: `rimaia/the-store`
+- Base commit: `1111111111111111111111111111111111111111`
+- Head commit: `2222222222222222222222222222222222222222`
+
+Read the whole change against its base in this worktree:
+
+- `git log --oneline 1111111111111111111111111111111111111111..2222222222222222222222222222222222222222`
+- `git diff 1111111111111111111111111111111111111111...2222222222222222222222222222222222222222`
+
+# How to answer
+
+Answer by calling `mcp__rimaia-run__record_review_findings` exactly once, as the last thing you do, with:
+
+- `task_id`: `3f2b1c00-0000-4000-8000-000000000001` — this task, and no other.
+- `findings`: every problem you found, most important first, or `[]` if you found nothing. A review that never calls is recorded as a failed review, never as a clean one.
+
+Each finding has:
+
+- `severity`: `critical`, `high`, `medium` or `low`.
+- `title`: one line naming the problem.
+- `body`: what is wrong, and why it matters.
+- `file`: the repository-relative path it is in. Leave it out for a finding about the change as a whole.
+- `line`: a line in that file, when there is one.
+
+Do not edit files, commit or push. Your findings are the whole of your answer."#,
+        "the review"
+    );
+
+    assert_eq!(
+        compose_fix_prompt(
+            "Commit as you work on {{task.branch}}.",
+            &bare,
+            &repository(),
+            Some(&alice),
+            &review_context(),
+            RESOLVE_TOOL,
+        ),
+        format!(
+            r#"# Base instructions
+
+Commit as you work on rimaia/wire-the-board.
+
+# Task context
+
+- Title: Wire the board to the store
+- Repository: rimaia
+- Branch: rimaia/wire-the-board
+- Base ref: rimaia/the-store
+- Plan revision: 4, written by @alice
+- Running on: @bob's runner "Mac mini", with @bob's credentials
+
+# Plan
+
+## Steps
+
+1. Read the store.
+2. Wire the board to it.
+
+{FIX_ENDING}"#
+        ),
+        "the fix"
+    );
+}
+
+#[test]
+fn a_deleted_author_is_named_a_former_member() {
+    let former = authorship(None);
+
+    assert_eq!(
+        section(
+            &compose_prompt("", &task(), &repository(), Some(&former), None, FANOUT_NOUN),
+            "# Task context"
+        ),
+        "- Title: Wire the board to the store\n\
+         - Repository: rimaia\n\
+         - Branch: rimaia/wire-the-board\n\
+         - Base ref: main\n\
+         - Plan revision: 4, written by a former member\n\
+         - Running on: @bob's runner \"Mac mini\", with @bob's credentials\n\
+         - Links:\n  \
+         - [Asana](https://app.asana.com/0/1/2)\n  \
+         - [Design doc](https://docs.example.com/board)"
+    );
+}
+
+#[test]
+fn a_personal_team_prompt_is_unchanged() {
+    // `authorship` is `None` in a personal team, and every composer with a
+    // `# Task context` then renders exactly the lines it rendered before task
+    // 072: title, repository, branch, base ref and links, and nothing between
+    // the base ref and the links. The whole-string tests above pin the rest.
+    let expected = "- Title: Wire the board to the store\n\
+                    - Repository: rimaia\n\
+                    - Branch: rimaia/wire-the-board\n\
+                    - Base ref: main\n\
+                    - Links:\n  \
+                    - [Asana](https://app.asana.com/0/1/2)\n  \
+                    - [Design doc](https://docs.example.com/board)";
+    let on_the_loops_base = expected.replace("- Base ref: main", "- Base ref: rimaia/the-store");
+    let review = review_context();
+
+    for (composer, composed, context) in [
+        (
+            "implementation",
+            compose_prompt("", &task(), &repository(), None, None, FANOUT_NOUN),
+            expected.to_string(),
+        ),
+        (
+            "strategy",
+            compose_strategy_prompt(
+                &task(),
+                &repository(),
+                None,
+                &one_choice_catalogue(),
+                TOOL,
+                FANOUT_NOUN,
+            ),
+            expected.to_string(),
+        ),
+        (
+            "review",
+            compose_review_prompt(&task(), &repository(), None, &review, RECORD_TOOL),
+            on_the_loops_base.clone(),
+        ),
+        (
+            "fix",
+            compose_fix_prompt("", &task(), &repository(), None, &review, RESOLVE_TOOL),
+            on_the_loops_base.clone(),
+        ),
+    ] {
+        assert_eq!(section(&composed, "# Task context"), context, "{composer}");
     }
 }

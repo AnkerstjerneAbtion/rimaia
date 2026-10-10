@@ -78,6 +78,11 @@ pub async fn preview_composed_prompt(
         &base,
         &detail,
         &repository,
+        // ADR-0032 point 7's facts name the runner a lease was granted to,
+        // and a preview holds no lease. They are `None` in a personal team,
+        // the only one the desktop composes for before 059, so the preview
+        // and a run still agree there byte for byte.
+        None,
         guidance.as_ref(),
         state.runner.provider.fanout_noun(),
     ))

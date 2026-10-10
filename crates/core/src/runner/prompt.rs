@@ -52,7 +52,7 @@
 
 use serde::Deserialize;
 
-use crate::board::ReviewContext;
+use crate::board::{ReviewContext, RunAuthorship};
 use crate::db::{Repository, TaskLink};
 use crate::review::findings::{FindingSeverity, ReviewFinding};
 use crate::strategy::{Catalogue, CatalogueEntry};
@@ -118,6 +118,7 @@ pub fn compose_prompt(
     base: &str,
     task: &TaskDetail,
     repo: &Repository,
+    authorship: Option<&RunAuthorship>,
     guidance: Option<&StrategyGuidance>,
     fanout_noun: &str,
 ) -> String {
@@ -132,7 +133,7 @@ pub fn compose_prompt(
     push_section(
         &mut sections,
         TASK_CONTEXT_HEADING,
-        &task_context(task, repo, &repo.default_branch),
+        &task_context(task, repo, &repo.default_branch, authorship),
     );
     push_section(
         &mut sections,
@@ -182,6 +183,7 @@ pub fn compose_prompt(
 pub fn compose_strategy_prompt(
     task: &TaskDetail,
     repo: &Repository,
+    authorship: Option<&RunAuthorship>,
     catalogue: &Catalogue,
     tool: &str,
     fanout_noun: &str,
@@ -191,7 +193,7 @@ pub fn compose_strategy_prompt(
     push_section(
         &mut sections,
         TASK_CONTEXT_HEADING,
-        &task_context(task, repo, &repo.default_branch),
+        &task_context(task, repo, &repo.default_branch, authorship),
     );
     push_section(
         &mut sections,
@@ -309,6 +311,7 @@ pub fn compose_resume_prompt(task: &TaskDetail) -> String {
 pub fn compose_review_prompt(
     task: &TaskDetail,
     repo: &Repository,
+    authorship: Option<&RunAuthorship>,
     review: &ReviewContext,
     tool: &str,
 ) -> String {
@@ -318,7 +321,7 @@ pub fn compose_review_prompt(
     push_section(
         &mut sections,
         TASK_CONTEXT_HEADING,
-        &task_context(task, repo, base_ref),
+        &task_context(task, repo, base_ref, authorship),
     );
     push_section(
         &mut sections,
@@ -379,6 +382,7 @@ pub fn compose_fix_prompt(
     base: &str,
     task: &TaskDetail,
     repo: &Repository,
+    authorship: Option<&RunAuthorship>,
     review: &ReviewContext,
     tool: &str,
 ) -> String {
@@ -392,7 +396,7 @@ pub fn compose_fix_prompt(
     push_section(
         &mut sections,
         TASK_CONTEXT_HEADING,
-        &task_context(task, repo, base_ref),
+        &task_context(task, repo, base_ref, authorship),
     );
     push_section(
         &mut sections,
@@ -652,7 +656,8 @@ fn push_section(sections: &mut Vec<String>, heading: &str, body: &str) {
     sections.push(format!("{heading}{SECTION_SEPARATOR}{body}"));
 }
 
-/// Title, repository, branch, base ref and links, as a Markdown list.
+/// Title, repository, branch, base ref, authorship and links, as a Markdown
+/// list.
 ///
 /// A line whose value does not exist is omitted rather than rendered empty: an
 /// agent told `- Branch:` with nothing after it learns less than one told
@@ -662,7 +667,19 @@ fn push_section(sections: &mut Vec<String>, heading: &str, body: &str) {
 /// repository's default branch, so their exact strings are unchanged; the
 /// review and fix prompts pass the base the loop's rows recorded, which since
 /// task 011 can be a dependency's branch, so it agrees with `# The change`.
-fn task_context(task: &TaskDetail, repo: &Repository, base_ref: &str) -> String {
+///
+/// `authorship` is ADR-0032 point 7's two facts: who wrote the plan revision
+/// being executed, and whose machine and credentials run it. They describe
+/// the situation rather than bind the agent, so they belong here and never in
+/// `--append-system-prompt` (ADR-0009). `None` in a personal team, where
+/// every author and the machine's owner are one person, so a solo prompt is
+/// byte for byte what it was.
+fn task_context(
+    task: &TaskDetail,
+    repo: &Repository,
+    base_ref: &str,
+    authorship: Option<&RunAuthorship>,
+) -> String {
     let mut lines = vec![
         format!("- Title: {}", task.task.title),
         format!("- Repository: {}", repo.name),
@@ -671,6 +688,21 @@ fn task_context(task: &TaskDetail, repo: &Repository, base_ref: &str) -> String 
         lines.push(format!("- Branch: {branch}"));
     }
     lines.push(format!("- Base ref: {base_ref}"));
+    if let Some(authorship) = authorship {
+        let author = match authorship.plan_author.as_deref() {
+            Some(login) => format!("@{login}"),
+            None => "a former member".to_string(),
+        };
+        let owner = &authorship.runner_owner;
+        lines.push(format!(
+            "- Plan revision: {}, written by {author}",
+            authorship.plan_revision
+        ));
+        lines.push(format!(
+            "- Running on: @{owner}'s runner \"{}\", with @{owner}'s credentials",
+            authorship.runner_label
+        ));
+    }
     if !task.links.is_empty() {
         lines.push("- Links:".to_string());
         for link in &task.links {
