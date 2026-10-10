@@ -438,10 +438,7 @@ every command).
   `set_base_instructions`, the `settings` row for `base_instructions` is unchanged, and a
   stale value in it is never read.
 - `db::settings::get` and `db::settings::set` are not `pub`. The per-placement accessors
-  are `pub(crate)`, and `set_team` is the only function that writes `team_settings`,
-  removals included (`None` deletes the row), beside the seed row 038's
-  `identity::create_personal_team` writes as the team comes into being.
-  `each_split_settings_table_has_one_writer` holds both tables to their one writer.
+  are `pub(crate)`, and `set_team` is the only function that writes `team_settings`.
   034's `set_in` is gone: `grep -rn "set_in(" crates/core/src` returns nothing, and
   `set_user_in` is the only statement that writes `user_settings`.
 - `the_digest_marker_is_written_to_the_actors_user_settings_row`. Under the `a` context,
@@ -508,13 +505,6 @@ every command).
   - `db::settings::get_user_in` and `db::settings::set_user_in`: they read and write the
     actor's row inside a review action's or `mark_seen`'s transaction; they take the context
     for the actor, and check the key's placement like every accessor.
-  - the helpers that share a caller's transaction across modules, each with its own entry
-    and reason: `ServiceContext::begin` and `begin_immediate`, `repo::team_of_repository`,
-    `review::digest::advance_marker`, `tasks::dependencies::dependents_in`,
-    `tasks::position::rebalance_column`, and `tasks::service::{move_within,
-    fetch_task_row, team_of_task}`. They take `context::ScopedTx`, a transaction that
-    carries the context's scope, and the test scans `ScopedTx` exactly as it scans
-    `Transaction`, so the type is no way around this list.
 
   A later task that needs an exception appends an entry with its reason in the same commit.
   040's `runner_placed` takes a context and needs none.

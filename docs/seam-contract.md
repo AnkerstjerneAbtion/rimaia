@@ -3448,6 +3448,89 @@ copy and the `team_settings` exclusion) name it, already applied above. No migra
 the key, and none may before 038. **Binds.** 034 (writes it), 038 (moves it), 017 (reads the
 digest it bounds).
 
+### Amendment, 2026-10-10 — what task 039 found scoping the services
+
+Task 039's acceptance criteria name the functions that share a transaction across modules,
+and the one writer of `team_settings`. Building it needed four decisions the criteria do
+not state. They are recorded here; the task file is unchanged. Each one binds the tasks
+that follow.
+
+**1. `context::ScopedTx` is the transaction a helper takes when it shares a caller's
+transaction across modules.** `ServiceContext::begin` and `begin_immediate` return it. It
+wraps a `sqlx::Transaction` together with the context's `TeamScope`, exposes that scope as
+`scope()`, and derefs to `SqliteConnection`, so a private helper that takes a bare
+connection is handed `&mut tx` as before. There are two reasons for it.
+
+- A helper reached from another module needs the scope to filter by, and the transaction
+  is the only argument it is handed. Passing the scope separately would be a second
+  argument that can disagree with the first.
+- `&mut SqliteConnection` is also satisfied by a pooled connection in autocommit. A
+  helper that renumbers a column (`tasks::position::rebalance_column`) or reads a row
+  before writing it (`tasks::service::fetch_task_row`) must not run outside a
+  transaction. `ScopedTx` can only be built from a context, so it is always a real
+  transaction.
+
+It buys no way around the structural test. `no_service_takes_a_pool_without_a_scope` treats
+`ScopedTx` exactly like `Transaction`. A function visible outside its module that takes or
+returns one needs its own `STORE_HANDLE_EXCEPTIONS` entry, with a reason. A private helper
+needs none. `ScopedTx` is exported from `lib.rs`. Tasks 040–046 use it, not a bare
+`Transaction`, when a transaction crosses a module boundary inside `rimaia-core`.
+
+**2. The exception list gains nine entries beyond the eight 039's criterion names.** The
+criterion's closing line, "a later task that needs an exception appends an entry with its
+reason in the same commit", applied to 039 itself. Each entry and its reason, as written in
+`crates/core/tests/tenant_isolation.rs`:
+
+| Entry | Reason |
+| --- | --- |
+| `context::ServiceContext::begin` | It opens the transaction a service shares with its helpers, and gives it the context's scope. |
+| `context::ServiceContext::begin_immediate` | The same, as `BEGIN IMMEDIATE`, for a read that the write after it depends on. |
+| `repo::team_of_repository` | A task's create and its repository move resolve the repository's team inside their own transaction. It filters by that transaction's scope. |
+| `review::digest::advance_marker` | A verdict advances the actor's marker inside its own transaction, so the column move and the marker commit together (034). It calls `set_user_in`. |
+| `tasks::dependencies::dependents_in` | Deleting a task, and a review action, read the task's dependents inside the transaction that read the task. It filters by that transaction's scope. |
+| `tasks::position::rebalance_column` | A move renumbers its column inside its own transaction; a failure partway through would otherwise leave the column reordered. The caller has already scoped the repository. |
+| `tasks::service::move_within` | A review action writes its note and moves the card in one transaction (034). |
+| `tasks::service::fetch_task_row` | Every task write reads the row it changes inside its own transaction. It filters by that transaction's scope and answers a foreign id the way it answers a missing one. |
+| `tasks::service::team_of_task` | Every write that names a task resolves the task's team, for its event, inside its own transaction. It filters by that transaction's scope. |
+
+None takes a pool. The helpers that read board rows filter by `tx.scope()`, or act on a
+row their caller has already resolved under it. `advance_marker` writes the actor's own row,
+which no team scope governs (D28 part 4).
+
+**3. `set_team` takes `value: Option<&str>`. `None` deletes the row.** The criterion calls
+`set_team` the one writer of `team_settings`, so that 045's revision and authorship columns
+and 051's owner check reach every write. A delete is a write. A separate delete function
+would be a second writer that both checks miss. A removal is checked against the scope and
+the key's placement exactly as a write is, and it publishes `ChangeEvent::settings(team_id)`.
+`each_split_settings_table_has_one_writer` scans for every statement that writes either
+split table, and allows two writers of `team_settings`: `set_team`, and the
+`base_instructions` seed row that `identity::create_personal_team` writes as the team comes
+into being. That seed is part 3's, and no `set_team` can run before its team exists. Read
+039's "`set_team` is the only function that writes `team_settings`" as saying this.
+
+**4. A removed repository's strategy default is deleted after the removal commits.**
+D17.1 has `repo::remove` delete `strategy_default.<repository_id>` so that no row is left
+behind. Before 039 the delete ran inside the removal's transaction. It now goes through
+`set_team(.., None)`, which runs on its own statement, so it runs after `repo::remove`
+commits and publishes. Consequences:
+
+- A removal refused partway through (tasks still reference the repository) keeps its
+  default, as before.
+- If the delete fails after the commit, the repository is gone, the row stays, and
+  `repo::remove` returns the delete's error. The row is keyed by an id nothing will read
+  again. This residual costs less than a second writer of `team_settings` would.
+- A removal publishes two events, `Repositories` and then `Settings`, both naming the
+  repository's team.
+
+D17.1's test still holds (`removing_a_repository_removes_its_strategy_default_row`), and so
+does `a_refused_repository_removal_keeps_its_strategy_default`, both in
+`strategy/settings.rs`.
+
+**Binds.** 040–046 (`ScopedTx` across modules; an exception appended with its reason in the
+same commit), 045 (decides what a removal records, since a deleted row has no revision to
+carry), 051 (its owner check covers both branches of `set_team`), 065 (drops the legacy
+`settings` table that 039 leaves unread).
+
 ---
 
 ## D29 — Runs have a kind, and every reader of `runs` says which kinds it means
