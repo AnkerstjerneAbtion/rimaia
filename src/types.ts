@@ -52,7 +52,8 @@ export type DoctorCheck =
   | "data_directory"
   | "disk_space"
   | "repository_path"
-  | "mcp_port";
+  | "mcp_port"
+  | "prompt_inputs";
 
 /** Mirrors `rimaia_core::doctor::CheckStatus`. Only `fail` blocks queue start. */
 export type DoctorStatus = "pass" | "warn" | "fail";

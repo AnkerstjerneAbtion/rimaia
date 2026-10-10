@@ -2,9 +2,13 @@
 //! D22).
 //!
 //! Eight checks, each corresponding to one way an overnight queue can waste a
-//! night. That is the criterion for adding a ninth, and it is the task file's
+//! night. That is the criterion for adding another, and it is the task file's
 //! own: a check that does not map to a wasted night is noise on a panel the
 //! user is meant to read.
+//!
+//! The ninth, [`Check::PromptInputs`], is the one exception, and it only ever
+//! warns: task 073 asks the doctor to name a value stored before its write
+//! rules that those rules would refuse now (seam-contract D37).
 //!
 //! # It is a preflight, not a watchdog
 //!
@@ -52,6 +56,7 @@ use crate::paths::AppPaths;
 use crate::repo;
 use crate::runner::provider::{claude::ClaudeProvider, AgentProvider};
 use crate::runner::RunnerConfig;
+use crate::strategy::catalogue;
 
 pub use checks::{MINIMUM_GIT_VERSION, ROOMY_DISK_BYTES, USABLE_DISK_BYTES};
 
@@ -86,6 +91,9 @@ pub enum Check {
     DiskSpace,
     RepositoryPath,
     McpPort,
+    /// A catalogue id or default branch stored before task 073's write
+    /// rules, which they would refuse now. Warns only (D37).
+    PromptInputs,
 }
 
 impl Check {
@@ -93,7 +101,7 @@ impl Check {
     /// then storage, then what is registered in this installation. The order is
     /// fixed here rather than left to whatever order [`run`] happens to await
     /// in, so the panel does not reshuffle between two runs of the doctor.
-    pub const ALL: [Check; 8] = [
+    pub const ALL: [Check; 9] = [
         Check::ClaudeCli,
         Check::ClaudeAuthenticated,
         Check::Git,
@@ -102,6 +110,7 @@ impl Check {
         Check::DiskSpace,
         Check::RepositoryPath,
         Check::McpPort,
+        Check::PromptInputs,
     ];
 
     pub const fn as_str(self) -> &'static str {
@@ -114,6 +123,7 @@ impl Check {
             Check::DiskSpace => "disk_space",
             Check::RepositoryPath => "repository_path",
             Check::McpPort => "mcp_port",
+            Check::PromptInputs => "prompt_inputs",
         }
     }
 
@@ -128,6 +138,7 @@ impl Check {
             Check::DiskSpace => "Free disk space",
             Check::RepositoryPath => "Registered repository",
             Check::McpPort => "MCP server",
+            Check::PromptInputs => "Prompt inputs",
         }
     }
 }
@@ -492,9 +503,10 @@ impl Environment {
 /// a panel can help with.
 ///
 /// The port, the dismissals and every clone it checks are this machine's, from
-/// `machine`. The board is read through `board`, by [`repo::list`], only for
-/// each repository's name; a repository this machine has no checkout of has
-/// nothing here to check, and gets no row (task 066).
+/// `machine`. The board is read through `board`, by [`repo::list`], for each
+/// repository's name and default branch, and for the stored catalogue's ids
+/// (task 073); a repository this machine has no checkout of has nothing here
+/// to check, and gets no row (task 066).
 pub async fn run(
     machine: &MachineContext,
     board: &ServiceContext,
@@ -526,13 +538,17 @@ pub async fn run(
     // repository, and a machine with a dozen registered repositories should not
     // answer a Re-check click with two dozen simultaneous `git` processes. The
     // doctor has seconds to spend and no deadline to meet.
-    for repository in &repositories {
+    let mut checked_out = Vec::with_capacity(repositories.len());
+    for repository in repositories {
         let Some(checkout) = machine.store.get_checkout(&repository.id).await? else {
             continue;
         };
-        results.push(checks::repository_path(repository, &checkout).await?);
-        results.push(checks::github_cli(repository, &checkout, &environment.programs.gh).await?);
+        results.push(checks::repository_path(&repository, &checkout).await?);
+        results.push(checks::github_cli(&repository, &checkout, &environment.programs.gh).await?);
+        checked_out.push(repository);
     }
+    let invalid_ids = catalogue::stored_invalid_ids(board).await?;
+    results.extend(checks::prompt_inputs(&invalid_ids, &checked_out).await?);
 
     Ok(DoctorReport::new(results, dismissals))
 }

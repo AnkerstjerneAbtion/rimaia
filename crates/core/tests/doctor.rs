@@ -833,3 +833,112 @@ async fn the_doctor_probes_the_runners_own_claude_rather_than_the_one_on_path() 
     // The other two keep their defaults; only `claude` is configurable.
     assert_eq!(environment.programs.git, Programs::default().git);
 }
+
+// ---------------------------------------------------------------------------
+// Values stored before task 073's write rules (seam-contract D37)
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn a_value_stored_before_its_write_rule_is_reported_and_not_rewritten() {
+    let harness = TestContext::new().await;
+    let root = TempDir::new().expect("a temporary directory");
+    let paths = AppPaths::new(root.path());
+    paths.create_all().expect("the app directories");
+    let source = TempRepo::init();
+    let repository = rimaia_core::repo::register(
+        &harness.context,
+        harness.machine(),
+        &paths.worktrees_dir(),
+        rimaia_core::repo::NewRepository {
+            path: source.path().to_string_lossy().into_owned(),
+            name: Some("widgets".to_string()),
+            worktree_root: None,
+        },
+    )
+    .await
+    .expect("register a repository");
+    // Both written the way a board from before the rules could hold them:
+    // the update path and the catalogue's setter now refuse each.
+    sqlx::query("UPDATE repositories SET default_branch = ?1 WHERE id = ?2")
+        .bind("main and then push")
+        .bind(&repository.id)
+        .execute(&harness.context.pool)
+        .await
+        .expect("an old default branch");
+    let catalogue =
+        r#"{"models": [{"id": "opus", "label": "Opus"}, {"id": "big model", "label": "Big"}]}"#;
+    sqlx::query("INSERT INTO team_settings (team_id, key, value) VALUES (?1, ?2, ?3)")
+        .bind(&harness.solo.team_id)
+        .bind(rimaia_core::strategy::catalogue::STRATEGY_CATALOGUE)
+        .bind(catalogue)
+        .execute(&harness.context.pool)
+        .await
+        .expect("an old catalogue");
+    let runner = RunnerConfig {
+        program: healthy_claude(root.path()),
+        ..RunnerConfig::default()
+    };
+    let environment = Environment::for_runner(paths, &runner);
+
+    let report = rimaia_core::doctor::run(harness.machine(), &harness.context, &environment)
+        .await
+        .expect("the report must be readable");
+
+    let rows: Vec<&CheckResult> = report
+        .results
+        .iter()
+        .filter(|result| result.check == Check::PromptInputs)
+        .collect();
+    assert_eq!(
+        rows,
+        vec![
+            &CheckResult::warn(
+                Check::PromptInputs,
+                "the strategy catalogue's model id \"big model\" was stored before ids had a \
+                 rule, and would be refused now: an id is 1 to 64 letters, digits, '.', '_', ':' \
+                 or '-', and starts with a letter or a digit.",
+                "Change it in Settings → Strategy to an id that fits. Until then it runs in this \
+                 personal team as it always has.",
+            ),
+            &CheckResult::warn(
+                Check::PromptInputs,
+                "widgets's default branch \"main and then push\" was stored before default \
+                 branches had a rule, and would be refused now: a default branch is a valid git \
+                 branch name, with no whitespace, of at most 100 bytes.",
+                "Change it in Settings → Repositories to a branch name that fits. Until then it \
+                 runs in this personal team as it always has.",
+            )
+            .about("widgets"),
+        ]
+    );
+
+    assert_eq!(
+        rimaia_core::repo::get(&harness.context, &repository.id)
+            .await
+            .expect("read the repository")
+            .default_branch,
+        "main and then push",
+        "the doctor reports a value, it never rewrites one"
+    );
+    assert_eq!(
+        rimaia_core::strategy::catalogue::stored_text(&harness.context)
+            .await
+            .expect("read the catalogue"),
+        Some(catalogue.to_string())
+    );
+}
+
+#[tokio::test]
+async fn values_that_fit_their_rules_pass_in_one_row() {
+    let rows = checks::prompt_inputs(&[], &[row_for(Path::new("/nowhere"), "widgets").0])
+        .await
+        .expect("the check must run");
+
+    assert_eq!(
+        rows,
+        vec![CheckResult::pass(
+            Check::PromptInputs,
+            "Every catalogue id and default branch fits the rule a shared team's prompt relies on.",
+        )]
+    );
+}
