@@ -21,6 +21,7 @@ use rimaia_core::machine::MachineContext;
 use rimaia_core::repo::{self, NewRepository};
 use rimaia_core::review::{self, findings, FindingResolution};
 use rimaia_core::review_loop::config as review_config;
+use rimaia_core::runner::events::transcript_path;
 use rimaia_core::runner::outcome::observed_run_cost;
 use rimaia_core::runner::process::{self, DISALLOWED_TOOLS, MAX_TURNS};
 use rimaia_core::runner::prompt::{compose_prompt, StrategyGuidance};
@@ -98,14 +99,18 @@ async fn a_foreign_id_is_answered_exactly_as_a_missing_one() {
         )
         .await
     });
-    probe!("get_run", b.implementation_run, |id| runs::get_run(a, id)
-        .await);
+    probe!("get_run", b.implementation_run, |id| runs::get_run(
+        a, &t.paths, id
+    )
+    .await);
     probe!("read_run_transcript_page", b.implementation_run, |id| {
         // The command's body: the scoped row read, then the page.
         match runs::get_run_row(a, id).await {
-            Ok(run) => transcript::read_page(Path::new(&run.log_path), 0, 10)
-                .await
-                .map(|_| ()),
+            Ok(run) => {
+                transcript::read_page(&transcript_path(&t.paths, &run.task_id, &run.id), 0, 10)
+                    .await
+                    .map(|_| ())
+            }
             Err(error) => Err(error),
         }
     });
@@ -113,9 +118,15 @@ async fn a_foreign_id_is_answered_exactly_as_a_missing_one() {
         tasks::accept_task_strategy(a, id).await
     });
     probe!("plan_task_strategy", b.ready, |id| {
-        claim_for_planning(board.as_ref(), &t.in_flight, id, LeaseOwner::Manual)
-            .await
-            .map(|claimed| claimed.is_ok())
+        claim_for_planning(
+            board.as_ref(),
+            &t.machine,
+            &t.in_flight,
+            id,
+            LeaseOwner::Manual,
+        )
+        .await
+        .map(|claimed| claimed.is_ok())
     });
     probe!("approve", b.in_review, |id| review::approve(a, None, id)
         .await);
@@ -305,6 +316,7 @@ async fn a_context_reaching_two_teams_is_refused_an_entity_less_call() {
             "register_repository",
             repo::register(
                 both,
+                &t.machine,
                 worktrees.path(),
                 NewRepository {
                     path: directory.path().to_string_lossy().into_owned(),
@@ -329,7 +341,9 @@ async fn a_context_reaching_two_teams_is_refused_an_entity_less_call() {
         ),
         (
             "get_review_digest",
-            review::digest(both).await.expect_err("get_review_digest"),
+            review::digest(both, Some(&t.machine))
+                .await
+                .expect_err("get_review_digest"),
         ),
         (
             "mark_review_digest_seen",
@@ -369,30 +383,43 @@ async fn a_context_reaching_two_teams_is_refused_an_entity_less_call() {
 }
 
 #[tokio::test]
-async fn registering_a_directory_another_team_registered_reveals_nothing() {
+async fn registering_a_clone_this_machine_already_maps_reveals_no_team() {
+    // One clone, one checkout per machine (task 066): the duplicate check reads
+    // this machine's checkouts, whichever team's repository the clone was
+    // registered for. The refusal names only the path the caller supplied,
+    // never the repository or the team holding the existing checkout. Mapping
+    // one clone to two teams' repositories by remote is task 054's.
     let t = TwoTeams::new().await;
     let worktrees = tempfile::tempdir().expect("a worktrees directory");
+    let team_b_clone = t
+        .machine
+        .store
+        .get_checkout(&t.team_b.repository.id)
+        .await
+        .expect("read")
+        .expect("team B's checkout")
+        .path;
 
-    let registered = repo::register(
+    let refusal = repo::register(
         &t.a,
+        &t.machine,
         worktrees.path(),
         NewRepository {
-            path: t.team_b.repository.path.clone(),
+            path: team_b_clone.clone(),
             name: Some("Team A's copy".to_string()),
             worktree_root: None,
         },
     )
     .await
-    .expect("one directory, registered by a second team");
+    .expect_err("this machine already has a checkout of the clone");
 
-    let listed: Vec<String> = repo::list(&t.a)
-        .await
-        .expect("team A's repositories")
-        .into_iter()
-        .map(|repository| repository.id)
-        .collect();
-    assert!(listed.contains(&registered.id));
-    assert!(!listed.contains(&t.team_b.repository.id));
+    assert_eq!(
+        refusal.to_string(),
+        format!("{team_b_clone} is already registered")
+    );
+    let message = refusal.to_string();
+    assert!(!message.contains(&t.team_b.team_id), "{message}");
+    assert!(!message.contains(&t.team_b.repository.id), "{message}");
 }
 
 // ---------------------------------------------------------------------------
@@ -833,7 +860,10 @@ async fn the_digest_marker_is_written_to_the_actors_user_settings_row() {
         "mark_seen writes A's owner's row"
     );
     assert_eq!(
-        review::digest(&t.a).await.expect("the digest").since,
+        review::digest(&t.a, Some(&t.machine))
+            .await
+            .expect("the digest")
+            .since,
         earlier,
         "the window starts at the actor's marker, never at the stale legacy row"
     );
@@ -1002,7 +1032,9 @@ async fn the_startup_survey_reports_only_its_scopes_tasks() {
         ids
     };
 
-    let report = startup::survey(&t.a).await.expect("survey");
+    let report = startup::survey(&t.a, &t.machine, &t.paths)
+        .await
+        .expect("survey");
     assert_eq!(report.tasks_left_running, vec![t.team_a.ready.clone()]);
     assert_eq!(report.missing_worktrees, vec![t.team_a.in_review.clone()]);
     assert_eq!(
@@ -1014,7 +1046,9 @@ async fn the_startup_survey_reports_only_its_scopes_tasks() {
         ])
     );
 
-    let report = startup::survey(&t.both).await.expect("survey both");
+    let report = startup::survey(&t.both, &t.machine, &t.paths)
+        .await
+        .expect("survey both");
     assert_eq!(
         sorted(report.tasks_left_running),
         sorted(vec![t.team_a.ready.clone(), t.team_b.ready.clone()])
@@ -1042,7 +1076,7 @@ async fn the_run_history_lists_only_the_callers_teams_runs() {
         t.team_a.fix_run.clone(),
     ]);
 
-    let listed = runs::list_runs(&t.a, runs::RunFilter::default())
+    let listed = runs::list_runs(&t.a, &t.paths, runs::RunFilter::default())
         .await
         .expect("team A's history");
     assert_eq!(
@@ -1052,7 +1086,7 @@ async fn the_run_history_lists_only_the_callers_teams_runs() {
 
     // Entity-less, so a context reaching two teams is refused rather than
     // handed a merged history.
-    let refusal = runs::list_runs(&t.both, runs::RunFilter::default())
+    let refusal = runs::list_runs(&t.both, &t.paths, runs::RunFilter::default())
         .await
         .expect_err("list_runs under both");
     assert_eq!(refusal.code(), ErrorCode::Invalid);
@@ -1080,7 +1114,7 @@ async fn the_run_history_lists_only_the_callers_teams_runs() {
 async fn the_worktree_inventory_lists_only_its_teams_worktrees() {
     let t = TwoTeams::new().await;
 
-    let inventory = rimaia_core::worktree::cleanup::inventory(&t.a)
+    let inventory = rimaia_core::worktree::cleanup::inventory(&t.a, &t.machine)
         .await
         .expect("team A's inventory");
     assert_eq!(
@@ -1092,7 +1126,7 @@ async fn the_worktree_inventory_lists_only_its_teams_worktrees() {
         vec![t.team_a.in_review.clone()]
     );
 
-    let refusal = rimaia_core::worktree::cleanup::inventory(&t.both)
+    let refusal = rimaia_core::worktree::cleanup::inventory(&t.both, &t.machine)
         .await
         .expect_err("inventory under both");
     assert_eq!(refusal.code(), ErrorCode::Invalid);

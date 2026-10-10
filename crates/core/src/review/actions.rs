@@ -148,10 +148,8 @@ async fn decide(
     let task = task_row(ctx, id).await?;
     ensure_decidable(&task, action, note)?;
 
-    if action == Action::Reject && machine.is_some() {
-        // The paths are still read off the board's row; task 066 moves them
-        // to the worktree record and the checkout.
-        set_aside_worktree(ctx, &task).await?;
+    if let (Action::Reject, Some(machine)) = (action, machine) {
+        set_aside_worktree(ctx, machine, &task).await?;
     }
 
     // `BEGIN IMMEDIATE` for `move_into_column`'s reason: the reads below decide
@@ -295,18 +293,23 @@ fn ensure_decidable(task: &Task, action: Action, note: Option<&str>) -> Result<(
 }
 
 /// Reject's local half, and the only part of it that touches this machine's
-/// disk: refuse a worktree holding uncommitted work, then remove the directory.
-/// The branch stays in git, and `worktree::remove` clears `worktree_path` itself.
+/// disk: refuse a worktree holding uncommitted work, then remove the directory
+/// and forget this machine's record of it. The branch stays in git; the note,
+/// `branch = NULL`, the move and the marker are the board's half.
 ///
 /// One function, so that team mode can move exactly this to the runner that
 /// holds the worktree and leave the rest of `reject` on the board (ADR-0033
 /// point 7).
-async fn set_aside_worktree(ctx: &ServiceContext, task: &Task) -> Result<()> {
-    let Some(recorded) = task.worktree_path.as_deref() else {
+async fn set_aside_worktree(
+    ctx: &ServiceContext,
+    machine: &MachineContext,
+    task: &Task,
+) -> Result<()> {
+    let Some(recorded) = crate::machine::local::worktree_path(machine, &task.id).await? else {
         return Ok(());
     };
 
-    let changes = cleanup::uncommitted_change_count(Path::new(recorded)).await?;
+    let changes = cleanup::uncommitted_change_count(Path::new(&recorded)).await?;
     if changes > 0 {
         return Err(Error::invalid(cleanup::uncommitted_changes_sentence(
             &task.title,
@@ -315,7 +318,8 @@ async fn set_aside_worktree(ctx: &ServiceContext, task: &Task) -> Result<()> {
         )));
     }
 
-    worktree::remove(ctx, &task.id, false, ForceRemoval::No).await
+    // Forgets the record once the directory is gone.
+    worktree::remove(ctx, machine, &task.id, false, ForceRemoval::No).await
 }
 
 /// The one place a review writes `extra_instructions`, so that task 045's

@@ -44,22 +44,16 @@ use crate::worktree::{AutoCleanup, WorktreeInventoryEntry};
 use std::collections::BTreeMap;
 
 /// One registered repository, as `list_repositories` reports it.
+///
+/// The board's half only (task 066): no path and nothing else that is true of
+/// one machine. This machine's clone of it, its cap and its consent are
+/// `list_checkouts`'s [`CheckoutView`].
 #[derive(Debug, Clone, PartialEq, Serialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub struct RepositoryView {
     pub id: String,
     pub name: String,
-    pub path: String,
     pub default_branch: String,
-    /// ADR-0012's per-repository opt-in. Surfaced because it is the difference
-    /// between a task that will run unattended tonight and one that will sit
-    /// in `ready` waiting for a human to say yes.
-    pub allow_unattended_runs: bool,
-    /// ADR-0010's per-repository cap, `1` unless the operator opted out.
-    /// Surfaced for the same reason as the flag above: it is the difference
-    /// between two of this repository's tasks running tonight and them running
-    /// one after the other.
-    pub max_concurrency: i64,
 }
 
 impl From<Repository> for RepositoryView {
@@ -67,12 +61,54 @@ impl From<Repository> for RepositoryView {
         Self {
             id: repository.id,
             name: repository.name,
-            path: repository.path,
             default_branch: repository.default_branch,
-            allow_unattended_runs: repository.allow_unattended_runs,
-            max_concurrency: repository.max_concurrency,
         }
     }
+}
+
+/// This machine's clone of one repository, as `list_checkouts` and
+/// `set_repository_max_concurrency` report it (D16.1's snake case).
+///
+/// A local tool's view, so it may carry a path: it describes this machine to
+/// the operator's own MCP client, which read the same facts off
+/// `list_repositories` until task 066 (ADR-0021).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub struct CheckoutView {
+    pub repository_id: String,
+    pub path: String,
+    pub worktree_root: String,
+    /// ADR-0010's per-repository cap, `1` unless the operator opted out: the
+    /// difference between two of this repository's tasks running tonight and
+    /// them running one after the other.
+    pub max_concurrency: i64,
+    /// This runner's consent to unattended runs (ADR-0012, ADR-0032 point 4):
+    /// the difference between a task that will run unattended tonight and one
+    /// that will sit in `ready` waiting for a human to say yes.
+    pub unattended_consent: bool,
+    pub on_archive: OnArchive,
+    pub on_archive_script: Option<String>,
+}
+
+impl From<crate::machine::CheckoutView> for CheckoutView {
+    fn from(checkout: crate::machine::CheckoutView) -> Self {
+        Self {
+            repository_id: checkout.repository_id,
+            path: checkout.path,
+            worktree_root: checkout.worktree_root,
+            max_concurrency: checkout.max_concurrency,
+            unattended_consent: checkout.unattended_consent,
+            on_archive: checkout.on_archive,
+            on_archive_script: checkout.on_archive_script,
+        }
+    }
+}
+
+/// `list_checkouts`' answer.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub struct CheckoutListView {
+    pub checkouts: Vec<CheckoutView>,
 }
 
 /// One task in full: the plan, the links, what it depends on, and how its last
@@ -99,7 +135,6 @@ pub struct TaskView {
     pub column: BoardColumn,
     pub run_state: RunState,
     pub branch: Option<String>,
-    pub worktree_path: Option<String>,
     pub model: Option<String>,
     pub effort: Option<String>,
     /// How `model` and `effort` get chosen (ADR-0016). The **stored** mode, not
@@ -222,7 +257,6 @@ impl From<TaskDetail> for TaskView {
             column: task.column,
             run_state: task.run_state,
             branch: task.branch,
-            worktree_path: task.worktree_path,
             model: task.model,
             effort: task.effort,
             strategy_mode: task.strategy_mode,
@@ -329,7 +363,13 @@ pub struct CredentialStatusView {
 }
 
 impl CredentialStatusView {
-    pub fn new(repository: &Repository, store: StoreStatus) -> Self {
+    /// The board's name for the repository, this machine's checkout for the
+    /// metadata (task 066).
+    pub fn new(
+        repository: &Repository,
+        checkout: &crate::machine::Checkout,
+        store: StoreStatus,
+    ) -> Self {
         let (keychain, keychain_detail) = match &store {
             StoreStatus::Stored => ("stored", None),
             StoreStatus::Absent => ("absent", None),
@@ -338,10 +378,10 @@ impl CredentialStatusView {
         Self {
             repository_id: repository.id.clone(),
             repository: repository.name.clone(),
-            configured: repository.credential_added_at.is_some(),
-            login: repository.credential_login.clone(),
-            label: repository.credential_label.clone(),
-            added_at: repository.credential_added_at,
+            configured: crate::repo::has_credential(checkout),
+            login: checkout.credential_login.clone(),
+            label: checkout.credential_label.clone(),
+            added_at: checkout.credential_added_at,
             keychain: keychain.to_string(),
             keychain_detail,
         }
@@ -1180,7 +1220,6 @@ pub struct ReviewedTaskView {
     pub column: BoardColumn,
     pub run_state: RunState,
     pub branch: Option<String>,
-    pub worktree_path: Option<String>,
     /// Including any review note the verdict appended.
     pub extra_instructions: Option<String>,
 }
@@ -1194,7 +1233,6 @@ impl From<Task> for ReviewedTaskView {
             column: task.column,
             run_state: task.run_state,
             branch: task.branch,
-            worktree_path: task.worktree_path,
             extra_instructions: task.extra_instructions,
         }
     }
@@ -1590,7 +1628,6 @@ mod tests {
             position: 1.5,
             run_state: RunState::Idle,
             branch: None,
-            worktree_path: None,
             strategy_mode: StrategyMode::Default,
             model: Some("opus".to_string()),
             effort: None,
@@ -1769,7 +1806,6 @@ mod tests {
             error_message: Some("usage limit reached".to_string()),
             num_turns: Some(12),
             cost_usd: Some(1.5),
-            log_path: "/tmp/run-1.jsonl".to_string(),
             pr_url: None,
             resume_after: None,
             base_ref: None,

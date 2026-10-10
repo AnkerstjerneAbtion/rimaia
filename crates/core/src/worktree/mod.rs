@@ -7,15 +7,21 @@
 //!
 //! # What this module owns
 //!
-//! `tasks.branch` and `tasks.worktree_path`. ADR-0005 puts them there — "the
-//! database records the worktree path and branch" — and nothing in task 004
-//! writes them, so [`write_worktree_columns`] is their single writer, the way
-//! `tasks::set_run_state` is `run_state`'s. What this module deliberately does
-//! **not** own is `run_state` itself: reconciliation corrects it by calling
-//! that function, never by issuing its own `UPDATE`, because a second writer of
-//! an invariant is the bug ADR-0006 names. `startup::survey`'s module doc
-//! states the same split from the other side, and names task 007 as the thing
-//! that acts on its `missing_worktrees` findings.
+//! A task's worktree and its branch. ADR-0005 records both, and since task 066
+//! they live in two places, because they are two kinds of fact (ADR-0028
+//! point 2): **where** the worktree is belongs to this machine, and is its
+//! [`WorktreeRecord`] in the machine store; **which branch** holds the work
+//! belongs to the board, and is `tasks.branch`. [`prepare`] writes the branch
+//! through the runner's `BoardPort::record_branch`, under the lease it runs
+//! for; the two writes that have no lease go through [`clear_branch`]. No code
+//! writes `tasks.worktree_path` any more, and no board query reads it.
+//!
+//! What this module deliberately does **not** own is `run_state` itself:
+//! reconciliation corrects it by calling that function, never by issuing its
+//! own `UPDATE`, because a second writer of an invariant is the bug ADR-0006
+//! names. `startup::survey`'s module doc states the same split from the other
+//! side, and names task 007 as the thing that acts on its `missing_worktrees`
+//! findings.
 //!
 //! # Repository state on disk is authoritative
 //!
@@ -64,10 +70,12 @@ use std::path::{Path, PathBuf};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
+use crate::board::{BoardPort, LeaseRef};
 use crate::context::ServiceContext;
 use crate::db::{Repository, RunState, Task};
 use crate::error::{Error, Result};
 use crate::events::ChangeEvent;
+use crate::machine::{self, Checkout, MachineContext, WorktreeRecord};
 
 /// A task's worktree: where it is, what branch it is on, and what that branch
 /// was created from.
@@ -130,8 +138,9 @@ pub struct WorktreeStatus {
     /// directory, not a worktree, and running an agent in it would produce
     /// commits on nothing.
     pub exists: bool,
-    /// What the row records, whether or not it still resolves — the panel
-    /// shows the path so the user can go and look, including when it is gone.
+    /// What this machine's record says, whether or not it still resolves —
+    /// the panel shows the path so the user can go and look, including when it
+    /// is gone. A local DTO, so it may carry one (task 066).
     pub path: Option<String>,
     pub branch: Option<String>,
     /// What the last attempt was actually built on when there was one, and a
@@ -244,12 +253,12 @@ impl ForceRemoval {
 #[serde(rename_all = "camelCase")]
 pub struct ReconciledWorktree {
     pub task_id: String,
-    /// The `worktree_path` that was cleared, as it was recorded — so a log
+    /// The worktree record that was forgotten, as it was recorded — so a log
     /// line or a startup notice can name the directory that went missing.
     pub cleared_path: String,
-    /// The branch left on the row because it still exists in the repository,
+    /// The branch left on the task because it still exists in the repository,
     /// holding whatever the run committed. `None` when the branch was gone
-    /// too and the row was cleared of it as well.
+    /// too and the task was cleared of it as well.
     pub retained_branch: Option<String>,
     /// What [`crate::tasks::set_run_state`] moved the task to, when it was in
     /// a state that assumed the worktree was still there.
@@ -260,7 +269,7 @@ pub struct ReconciledWorktree {
 struct Location {
     /// The repository's own work tree.
     repository: PathBuf,
-    /// `repositories.worktree_root` — `<app-data>/worktrees/<repo-slug>` by
+    /// The checkout's `worktree_root` — `<app-data>/worktrees/<repo-slug>` by
     /// default (ADR-0005), overridable per repository by task 003.
     root: PathBuf,
 }
@@ -285,10 +294,25 @@ struct Location {
 /// Refuses a worktree root inside the repository working tree, and any path
 /// outside the configured root — see [`safety`] for why neither check is a
 /// string comparison.
-pub async fn prepare(ctx: &ServiceContext, task_id: &str) -> Result<Worktree> {
-    let task = fetch_task(ctx, task_id).await?;
+///
+/// Runs under `lease`, for the task it names. The clone and the root come
+/// from this machine's checkout, and a repository with none is refused as
+/// [`machine::not_set_up`] before anything is touched. A fresh worktree is
+/// recorded in the machine store, and its branch on the board through
+/// [`BoardPort::record_branch`] (task 066, D31's table). `ctx` is the board
+/// context `run_task` and `plan_claimed` keep for this one call, for the task
+/// read and the base ref, until task 044's `RunContext::base` replaces it.
+pub async fn prepare(
+    ctx: &ServiceContext,
+    machine: &MachineContext,
+    board: &dyn BoardPort,
+    lease: &LeaseRef,
+) -> Result<Worktree> {
+    let task = fetch_task(ctx, &lease.task_id).await?;
     let repository = crate::repo::get(ctx, &task.repository_id).await?;
-    let location = locate(&repository).await?;
+    let checkout = machine::checkout_of(machine, &repository).await?;
+    let location = locate(&repository, &checkout).await?;
+    let recorded = machine::local::worktree_path(machine, &task.id).await?;
     // Fresh, never the recorded value: this call is what produces the next
     // attempt, so the answer has to describe the dependency graph as it is now.
     let resolved = base_ref::resolve(ctx, &task, &repository).await?;
@@ -301,8 +325,14 @@ pub async fn prepare(ctx: &ServiceContext, task_id: &str) -> Result<Worktree> {
         tracing::warn!(task_id = %task.id, %base_ref, "{warning}");
     }
 
-    if let Some(mut existing) =
-        existing_worktree(&location, &task, &base_ref, resolved.warning.clone()).await?
+    if let Some(mut existing) = existing_worktree(
+        &location,
+        &task,
+        recorded.as_deref(),
+        &base_ref,
+        resolved.warning.clone(),
+    )
+    .await?
     {
         existing.base_sha = fork_point(Path::new(&existing.path), &base_ref).await;
         return Ok(existing);
@@ -348,7 +378,17 @@ pub async fn prepare(ctx: &ServiceContext, task_id: &str) -> Result<Worktree> {
 
     let base_sha = fork_point(&path, &base_ref).await;
     let path = path_to_string(&path)?;
-    write_worktree_columns(ctx, &task.id, Some(&branch), Some(&path)).await?;
+    machine::local::record_worktree(
+        machine,
+        &WorktreeRecord {
+            task_id: task.id.clone(),
+            repository_id: repository.id.clone(),
+            path: path.clone(),
+            fenced_at: None,
+        },
+    )
+    .await?;
+    board.record_branch(lease, &branch).await?;
 
     Ok(Worktree {
         task_id: task.id,
@@ -393,11 +433,17 @@ pub async fn has_tracked_changes(path: &Path) -> Result<bool> {
 }
 
 /// Everything the task detail panel needs about a worktree, computed fresh
-/// from git.
-pub async fn status(ctx: &ServiceContext, task_id: &str) -> Result<WorktreeStatus> {
+/// from git in this machine's checkout, or [`machine::not_set_up`].
+pub async fn status(
+    ctx: &ServiceContext,
+    machine: &MachineContext,
+    task_id: &str,
+) -> Result<WorktreeStatus> {
     let task = fetch_task(ctx, task_id).await?;
     let repository = crate::repo::get(ctx, &task.repository_id).await?;
-    let repository_path = locate_repository(&repository).await?;
+    let checkout = machine::checkout_of(machine, &repository).await?;
+    let repository_path = locate_repository(&repository, &checkout).await?;
+    let recorded = machine::local::worktree_path(machine, &task.id).await?;
     let resolved = base_ref::resolve(ctx, &task, &repository).await?;
     let base_ref = recorded_base_ref(ctx, &task.id)
         .await?
@@ -406,7 +452,7 @@ pub async fn status(ctx: &ServiceContext, task_id: &str) -> Result<WorktreeStatu
     let mut status = WorktreeStatus {
         task_id: task.id.clone(),
         exists: false,
-        path: task.worktree_path.clone(),
+        path: recorded.clone(),
         branch: task.branch.clone(),
         base_ref: base_ref.clone(),
         dependency_warning: resolved.warning,
@@ -436,7 +482,13 @@ pub async fn status(ctx: &ServiceContext, task_id: &str) -> Result<WorktreeStatu
 
     // Dirtiness is the one thing that needs the working tree itself, so it is
     // asked only once git has confirmed there is one.
-    if let Some((path, _)) = live_worktree(&repository_path, &task).await? {
+    if let Some((path, _)) = live_worktree(
+        &repository_path,
+        recorded.as_deref(),
+        task.branch.as_deref(),
+    )
+    .await?
+    {
         status.exists = true;
         status.dirty = git::is_dirty(&path).await?;
     }
@@ -449,10 +501,19 @@ pub async fn status(ctx: &ServiceContext, task_id: &str) -> Result<WorktreeStatu
 /// Both are measured against the merge base of the base ref and the branch,
 /// not against the base ref's current tip: a base branch that moved on after
 /// the worktree was created must not show up as work the agent undid.
-pub async fn diff_summary(ctx: &ServiceContext, task_id: &str) -> Result<DiffSummary> {
+///
+/// Live git in this machine's checkout, so a repository with none is refused
+/// as [`machine::not_set_up`]; every other client reads the review bundle
+/// (ADR-0033 point 7).
+pub async fn diff_summary(
+    ctx: &ServiceContext,
+    machine: &MachineContext,
+    task_id: &str,
+) -> Result<DiffSummary> {
     let task = fetch_task(ctx, task_id).await?;
     let repository = crate::repo::get(ctx, &task.repository_id).await?;
-    let repository_path = locate_repository(&repository).await?;
+    let checkout = machine::checkout_of(machine, &repository).await?;
+    let repository_path = locate_repository(&repository, &checkout).await?;
     let base_ref = match recorded_base_ref(ctx, &task.id).await? {
         Some(recorded) => recorded,
         None => base_ref::resolve(ctx, &task, &repository).await?.base_ref,
@@ -490,17 +551,23 @@ pub async fn diff_summary(ctx: &ServiceContext, task_id: &str) -> Result<DiffSum
 /// Cleanup is never automatic on failure (ADR-0005); this is the explicit act,
 /// and `force` is the user's explicit answer to the one question it cannot
 /// decide for them.
+///
+/// The directory is the one this machine's record names, and the record is
+/// forgotten once it is gone.
 pub async fn remove(
     ctx: &ServiceContext,
+    machine: &MachineContext,
     task_id: &str,
     delete_branch: bool,
     force: ForceRemoval,
 ) -> Result<()> {
     let task = fetch_task(ctx, task_id).await?;
     let repository = crate::repo::get(ctx, &task.repository_id).await?;
-    let location = locate(&repository).await?;
+    let checkout = machine::checkout_of(machine, &repository).await?;
+    let location = locate(&repository, &checkout).await?;
+    let recorded = machine::local::worktree_path(machine, &task.id).await?;
 
-    if let Some(recorded) = task.worktree_path.as_deref() {
+    if let Some(recorded) = recorded.as_deref() {
         let path = safety::resolve(Path::new(recorded)).await?;
         safety::ensure_within_root(&path, &location.root).await?;
 
@@ -514,23 +581,23 @@ pub async fn remove(
         git::worktree_prune(&location.repository).await?;
     }
 
-    let branch = match (delete_branch, task.branch.as_deref()) {
+    machine::local::forget_worktree(machine, &task.id).await?;
+
+    if let (true, Some(branch)) = (delete_branch, task.branch.as_deref()) {
         // After the worktree is gone, never before: git refuses to delete a
         // branch that is checked out in a worktree, and this is that branch.
-        (true, Some(branch)) => {
-            if git::branch_exists(&location.repository, branch).await? {
-                git::delete_branch(&location.repository, branch).await?;
-            }
-            None
+        if git::branch_exists(&location.repository, branch).await? {
+            git::delete_branch(&location.repository, branch).await?;
         }
-        (_, current) => current.map(str::to_string),
-    };
-
-    write_worktree_columns(ctx, &task.id, branch.as_deref(), None).await
+        // No lease covers a removal, so the branch is cleared through the one
+        // leaseless board write. Task 054's `report_runner` takes it over.
+        clear_branch(ctx, &task.id).await?;
+    }
+    Ok(())
 }
 
-/// Repairs the tasks `startup::survey` reported as having a `worktree_path`
-/// that no longer resolves.
+/// Repairs the tasks `startup::survey` reported as having a worktree record
+/// whose directory no longer resolves.
 ///
 /// Takes the ids rather than re-running the scan, because that is the split
 /// `startup::survey`'s own module doc describes: it "hands each of those tasks
@@ -543,11 +610,15 @@ pub async fn remove(
 /// repository has itself been moved off the disk is not a reason for the app
 /// not to start; a failure is logged and the next id is tried. What it returns
 /// is what it actually repaired.
-pub async fn reconcile(ctx: &ServiceContext, task_ids: &[String]) -> Vec<ReconciledWorktree> {
+pub async fn reconcile(
+    ctx: &ServiceContext,
+    machine: &MachineContext,
+    task_ids: &[String],
+) -> Vec<ReconciledWorktree> {
     let mut reconciled = Vec::new();
 
     for task_id in task_ids {
-        match reconcile_one(ctx, task_id).await {
+        match reconcile_one(ctx, machine, task_id).await {
             Ok(Some(record)) => reconciled.push(record),
             Ok(None) => {}
             Err(error) => tracing::warn!(
@@ -561,17 +632,21 @@ pub async fn reconcile(ctx: &ServiceContext, task_ids: &[String]) -> Vec<Reconci
     if !reconciled.is_empty() {
         tracing::info!(
             count = reconciled.len(),
-            "cleared worktree paths that no longer exist on disk",
+            "forgot worktree records whose directories no longer exist on disk",
         );
     }
     reconciled
 }
 
-async fn reconcile_one(ctx: &ServiceContext, task_id: &str) -> Result<Option<ReconciledWorktree>> {
-    let task = fetch_task(ctx, task_id).await?;
-    let Some(recorded) = task.worktree_path.clone() else {
+async fn reconcile_one(
+    ctx: &ServiceContext,
+    machine: &MachineContext,
+    task_id: &str,
+) -> Result<Option<ReconciledWorktree>> {
+    let Some(recorded) = machine::local::worktree_path(machine, task_id).await? else {
         return Ok(None);
     };
+    let task = fetch_task(ctx, task_id).await?;
 
     let path = safety::resolve(Path::new(&recorded)).await?;
     // Only a clean "not found" counts as missing, for the reason
@@ -582,7 +657,8 @@ async fn reconcile_one(ctx: &ServiceContext, task_id: &str) -> Result<Option<Rec
     }
 
     let repository = crate::repo::get(ctx, &task.repository_id).await?;
-    let repository_path = safety::resolve(Path::new(&repository.path)).await?;
+    let checkout = machine::checkout_of(machine, &repository).await?;
+    let repository_path = safety::resolve(Path::new(&checkout.path)).await?;
 
     // Best effort: the repository may have moved too, and that is not a reason
     // to leave the row claiming a worktree that is not there.
@@ -601,7 +677,12 @@ async fn reconcile_one(ctx: &ServiceContext, task_id: &str) -> Result<Option<Rec
         _ => None,
     };
 
-    write_worktree_columns(ctx, &task.id, retained_branch.as_deref(), None).await?;
+    machine::local::forget_worktree(machine, &task.id).await?;
+    if retained_branch.is_none() && task.branch.is_some() {
+        // Leaseless, at startup: task 043's per-runner reconcile takes this
+        // write over.
+        clear_branch(ctx, &task.id).await?;
+    }
     let corrected_run_state = correct_run_state(ctx, &task).await?;
 
     Ok(Some(ReconciledWorktree {
@@ -681,10 +762,10 @@ async fn recorded_base_ref(ctx: &ServiceContext, task_id: &str) -> Result<Option
 /// but a directory can be moved afterwards — the root is resolved as far as it
 /// exists, and only then is containment decided, so a root configured inside
 /// the repository is refused *before* anything creates it there.
-async fn locate(repository: &Repository) -> Result<Location> {
-    let repository_path = locate_repository(repository).await?;
+async fn locate(repository: &Repository, checkout: &Checkout) -> Result<Location> {
+    let repository_path = locate_repository(repository, checkout).await?;
 
-    let root = safety::resolve(Path::new(&repository.worktree_root)).await?;
+    let root = safety::resolve(Path::new(&checkout.worktree_root)).await?;
     safety::ensure_outside_repository(&root, &repository_path).await?;
 
     Ok(Location {
@@ -701,12 +782,12 @@ async fn locate(repository: &Repository) -> Result<Location> {
 /// `cwd` and surface as an `Error::internal` carrying a raw OS error, where a
 /// repository moved or deleted out from under the app is exactly the
 /// user-fixable condition [`Error::invalid`] exists for.
-async fn locate_repository(repository: &Repository) -> Result<PathBuf> {
-    let repository_path = safety::resolve(Path::new(&repository.path)).await?;
+async fn locate_repository(repository: &Repository, checkout: &Checkout) -> Result<PathBuf> {
+    let repository_path = safety::resolve(Path::new(&checkout.path)).await?;
     if !matches!(tokio::fs::try_exists(&repository_path).await, Ok(true)) {
         return Err(Error::invalid(format!(
             "{} no longer exists — \"{}\" has been moved or deleted",
-            repository.path, repository.name,
+            checkout.path, repository.name,
         )));
     }
     Ok(repository_path)
@@ -716,10 +797,13 @@ async fn locate_repository(repository: &Repository) -> Result<PathBuf> {
 async fn existing_worktree(
     location: &Location,
     task: &Task,
+    recorded: Option<&str>,
     base_ref: &str,
     dependency_warning: Option<String>,
 ) -> Result<Option<Worktree>> {
-    let Some((path, branch)) = live_worktree(&location.repository, task).await? else {
+    let Some((path, branch)) =
+        live_worktree(&location.repository, recorded, task.branch.as_deref()).await?
+    else {
         return Ok(None);
     };
     // Checked even on the idempotent path: a `worktree_root` edited in
@@ -741,17 +825,20 @@ async fn existing_worktree(
     }))
 }
 
-/// The task's worktree path and branch, when the row records both, the
-/// directory is on disk, **and** git still lists it as a worktree on that
-/// branch.
+/// The task's worktree path and branch, when this machine records the one and
+/// the board the other, the directory is on disk, **and** git still lists it
+/// as a worktree on that branch.
 ///
 /// The third condition is the one a `try_exists` would miss. A directory whose
 /// administrative data under `.git/worktrees/` has been pruned is an ordinary
 /// directory: git commands run inside it fail, and an agent started there
 /// would produce nothing recoverable.
-async fn live_worktree(repository_path: &Path, task: &Task) -> Result<Option<(PathBuf, String)>> {
-    let (Some(recorded), Some(branch)) = (task.worktree_path.as_deref(), task.branch.as_deref())
-    else {
+async fn live_worktree(
+    repository_path: &Path,
+    recorded: Option<&str>,
+    branch: Option<&str>,
+) -> Result<Option<(PathBuf, String)>> {
+    let (Some(recorded), Some(branch)) = (recorded, branch) else {
         return Ok(None);
     };
 
@@ -822,26 +909,45 @@ async fn ensure_base_ref_exists(
     )))
 }
 
-/// The one place `tasks.branch` and `tasks.worktree_path` are written.
+/// Where `task_id`'s worktree is on this machine, for a caller that hands the
+/// directory to something else: the file manager, an editor (task 026).
 ///
-/// One function rather than four `UPDATE`s, so "a task's branch and its
-/// worktree path are set and cleared together" is a property of the signature
-/// instead of a convention. See this module's own doc for why these two
-/// columns are worktree state rather than task 004's.
-async fn write_worktree_columns(
+/// The task is read through the board context, so another team's is as
+/// missing as one never created; the path is this machine's record (task
+/// 066). A task with none is refused as not set up on this computer when its
+/// repository has no checkout here, which is the more useful of the two
+/// sentences, and as having no worktree yet otherwise.
+pub async fn local_path(
     ctx: &ServiceContext,
+    machine: &MachineContext,
     task_id: &str,
-    branch: Option<&str>,
-    worktree_path: Option<&str>,
-) -> Result<()> {
+) -> Result<String> {
+    let task = fetch_task(ctx, task_id).await?;
+    if let Some(path) = machine::local::worktree_path(machine, &task.id).await? {
+        return Ok(path);
+    }
+    let repository = crate::repo::get(ctx, &task.repository_id).await?;
+    machine::checkout_of(machine, &repository).await?;
+    Err(Error::invalid(
+        "this task has no worktree yet — start a run to create one",
+    ))
+}
+
+/// Clears `tasks.branch` where no lease covers the write: a removal that
+/// deleted the branch, and startup reconciliation finding it gone.
+///
+/// Every other branch write goes through the runner's
+/// [`BoardPort::record_branch`] under a lease (task 066). These two have none,
+/// so they share this one named function rather than each issuing a query of
+/// its own; task 054's `report_runner` takes over the first and task 043's
+/// per-runner reconcile the second.
+pub async fn clear_branch(ctx: &ServiceContext, task_id: &str) -> Result<()> {
     let now = ctx.clock.now();
     let scope = ctx.scope.json();
     let team_id = sqlx::query_scalar!(
-        "UPDATE tasks SET branch = ?1, worktree_path = ?2, updated_at = ?3
-          WHERE id = ?4 AND team_id IN (SELECT value FROM json_each(?5))
+        "UPDATE tasks SET branch = NULL, updated_at = ?1
+          WHERE id = ?2 AND team_id IN (SELECT value FROM json_each(?3))
          RETURNING team_id",
-        branch,
-        worktree_path,
         now,
         task_id,
         scope,

@@ -861,10 +861,6 @@ fn task() -> TaskDetail {
             position: 0.0,
             run_state: RunState::Queued,
             branch: Some("rimaia/wire-the-board".to_string()),
-            worktree_path: Some(
-                "/Users/someone/Library/Application Support/com.rimaia.app/worktrees/3f2b1c00"
-                    .to_string(),
-            ),
             strategy_mode: StrategyMode::Default,
             model: None,
             effort: None,
@@ -901,22 +897,10 @@ fn task() -> TaskDetail {
 fn repository() -> Repository {
     Repository {
         id: "3f2b1c00-0000-4000-8000-000000000002".to_string(),
-        // A path with a space, like every other fixture in this crate: nothing
-        // here shells out, but the composed prompt is read by something that
-        // will.
-        path: "/Users/someone/Code/My Projects/rimaia".to_string(),
         name: "rimaia".to_string(),
         default_branch: "main".to_string(),
-        worktree_root: "/Users/someone/Library/Application Support/com.rimaia.app/worktrees"
-            .to_string(),
         allow_unattended_runs: true,
-        max_concurrency: 1,
         created_at: timestamp(),
-        credential_login: None,
-        credential_label: None,
-        credential_added_at: None,
-        on_archive: rimaia_core::db::OnArchive::None,
-        on_archive_script: None,
     }
 }
 

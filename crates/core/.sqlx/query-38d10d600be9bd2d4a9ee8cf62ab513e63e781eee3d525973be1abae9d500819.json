@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE tasks SET branch = NULL, updated_at = ?1\n          WHERE id = ?2 AND team_id IN (SELECT value FROM json_each(?3))\n         RETURNING team_id",
+  "describe": {
+    "columns": [
+      {
+        "name": "team_id",
+        "ordinal": 0,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "38d10d600be9bd2d4a9ee8cf62ab513e63e781eee3d525973be1abae9d500819"
+}

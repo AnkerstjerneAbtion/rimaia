@@ -305,7 +305,6 @@ mod tests {
             position,
             run_state: RunState::Idle,
             branch: branch.map(str::to_string),
-            worktree_path: None,
             strategy_mode: StrategyMode::Default,
             model: None,
             effort: None,

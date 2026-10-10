@@ -465,7 +465,11 @@ impl QueueHandle {
         Ok(QueueStatus {
             state: state::queue_state(machine).await?,
             running_task_ids: self.in_flight_task_ids(),
-            plan: selection::plan(&self.shared.ctx).await?,
+            plan: selection::plan(
+                &self.shared.ctx,
+                &crate::machine::consented_repositories(machine).await?,
+            )
+            .await?,
             last_step_error: self.shared.step_error(),
             usage_limit_pause_until: pause::active_until(machine, machine.clock.now()).await?,
             window: window::active(machine).await?,
@@ -911,8 +915,9 @@ impl QueueTask {
         // Read fresh every pass, never held: the operator may flip the mode or
         // raise a repository's cap at 23:00 with runs already in flight, and
         // the pass after that write is the one that has to notice.
-        let capacity = capacity::resolve(machine, ctx).await?;
-        let plan = selection::plan(ctx).await?;
+        let capacity = capacity::resolve(machine).await?;
+        let consented = crate::machine::consented_repositories(machine).await?;
+        let plan = selection::plan(ctx, &consented).await?;
         let batch = selection::next_batch(
             &plan,
             &self.shared.in_flight.counts(),

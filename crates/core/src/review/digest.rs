@@ -12,13 +12,13 @@
 //! every kind, as D29 point 7 counts spend.
 
 use std::cmp::Ordering;
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use crate::context::{ScopedTx, ServiceContext};
 use crate::db::{settings, BoardColumn, RunKind, RunState, RunStatus};
 use crate::error::{Error, Result};
 use crate::events::ChangeEvent;
-use crate::repo;
+use crate::machine::MachineContext;
 use crate::review::findings;
 use crate::review_loop;
 use crate::scheduler::selection::{skip_reason, SkipReason};
@@ -241,7 +241,13 @@ impl WindowRun {
 /// Entity-less, so it reads one team's queue (ADR-0035 point 2): the team whose
 /// `in_review` a verdict empties when it advances the marker. The window's
 /// start is the actor's own marker.
-pub async fn digest(ctx: &ServiceContext) -> Result<Digest> {
+///
+/// "Skipped: unattended runs not allowed" is this runner's consent, which only
+/// a caller holding a machine can read (task 066): the shell and the solo MCP
+/// server pass `Some`, as they do for the machine reactions. With `None`, a
+/// server's call until task 045 puts consent on the board, no task is reported
+/// as skipped for consent; the digest never claims a refusal it cannot see.
+pub async fn digest(ctx: &ServiceContext, machine: Option<&MachineContext>) -> Result<Digest> {
     let team_id = ctx.scope.sole()?.clone();
     let until = ctx.clock.now();
     let since = seen_through(ctx)
@@ -297,19 +303,17 @@ pub async fn digest(ctx: &ServiceContext) -> Result<Digest> {
     // without the gate a repository that never opted in would put an entry in
     // every digest for good, and the marker could never empty it.
     if !entries.is_empty() {
-        let opted_in: HashSet<String> = repo::list(ctx)
-            .await?
-            .into_iter()
-            .filter(repo::allows_unattended_runs)
-            .map(|repository| repository.id)
-            .collect();
+        let consented: Option<BTreeSet<String>> = match machine {
+            Some(machine) => Some(crate::machine::consented_repositories(machine).await?),
+            None => None,
+        };
         for summary in &tasks {
             if summary.task.column != BoardColumn::Ready
                 || rows_by_task.contains_key(summary.task.id.as_str())
             {
                 continue;
             }
-            if let Some(entry) = context_entry(summary, &opted_in, until) {
+            if let Some(entry) = context_entry(summary, consented.as_ref(), until) {
                 entries.push((entry, summary));
             }
         }
@@ -429,13 +433,15 @@ async fn review_loops(ctx: &ServiceContext) -> Result<HashMap<String, DigestLoop
 /// not re-implemented.
 fn context_entry(
     summary: &TaskSummary,
-    opted_in: &HashSet<String>,
+    consented: Option<&BTreeSet<String>>,
     now: DateTime<Utc>,
 ) -> Option<DigestEntry> {
     let (outcome, blocking_title, skip) = if summary.blocked_by_incomplete {
         (DigestOutcome::Blocked, summary.blocking_title.clone(), None)
     } else {
-        match skip_reason(summary, opted_in.contains(&summary.task.repository_id), now) {
+        let consented =
+            consented.is_none_or(|consented| consented.contains(&summary.task.repository_id));
+        match skip_reason(summary, consented, now) {
             Some(
                 reason @ (SkipReason::UnattendedRunsNotAllowed
                 | SkipReason::NeedsAttention

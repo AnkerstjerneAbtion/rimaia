@@ -18,6 +18,7 @@ use tokio::process::Command;
 
 use crate::db::Repository;
 use crate::error::Result;
+use crate::machine::Checkout;
 use crate::paths::{AppPaths, DataDirOrigin, DATA_DIR_ENV};
 use crate::repo::{self, GhStatus};
 use crate::runner::probe_cli;
@@ -431,18 +432,20 @@ pub fn disk_space(paths: &AppPaths) -> CheckResult {
 /// Narrowing this to "only repositories with a `ready` task" would need the
 /// selection plan the doctor deliberately does not read, and is left to whoever
 /// finds the over-blocking worse than the wasted night (seam-contract D22).
-pub async fn repository_path(repository: &Repository) -> Result<CheckResult> {
-    Ok(match repo::path_problem(repository).await? {
+///
+/// The path is this machine's checkout's (task 066).
+pub async fn repository_path(repository: &Repository, checkout: &Checkout) -> Result<CheckResult> {
+    Ok(match repo::path_problem(checkout).await? {
         None => CheckResult::pass(
             Check::RepositoryPath,
-            format!("{} is at {}.", repository.name, repository.path),
+            format!("{} is at {}.", repository.name, checkout.path),
         )
         .about(&repository.name),
         Some(problem) => CheckResult::fail(
             Check::RepositoryPath,
             format!(
                 "{} is registered at {}, but {problem}.",
-                repository.name, repository.path
+                repository.name, checkout.path
             ),
             format!(
                 "Remove \"{}\" in Settings → Repositories and register it at its new path, then \
@@ -465,8 +468,12 @@ pub async fn repository_path(repository: &Repository) -> Result<CheckResult> {
 /// acceptance criterion, and because an installation-wide "gh is not
 /// authenticated" tells the user nothing about which of five repositories is
 /// affected.
-pub async fn github_cli(repository: &Repository, program: &Path) -> Result<CheckResult> {
-    let status = repo::gh_status(repository, program).await?;
+pub async fn github_cli(
+    repository: &Repository,
+    checkout: &Checkout,
+    program: &Path,
+) -> Result<CheckResult> {
+    let status = repo::gh_status(checkout, program).await?;
     Ok(match status {
         GhStatus::Ready => CheckResult::pass(
             Check::GitHubCli,

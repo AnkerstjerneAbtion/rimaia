@@ -203,3 +203,25 @@ impl MachineStore for MemoryMachine {
         done(Ok(self.state().schedules.remove(id).is_some()))
     }
 }
+
+/// A checkout of `repository_id` at `path`, with every other field at what
+/// registration gives a new one: a cap of one, no consent, no archive policy,
+/// no credential, and its worktrees in a sibling directory of the clone.
+///
+/// For a test that seeds a board row directly and needs this machine to have
+/// the clone it names (task 066).
+pub fn checkout_at(repository_id: &str, path: &std::path::Path) -> Checkout {
+    Checkout {
+        repository_id: repository_id.to_string(),
+        path: path.to_string_lossy().into_owned(),
+        worktree_root: format!("{}-worktrees", path.to_string_lossy()),
+        max_concurrency: 1,
+        unattended_consent: false,
+        on_archive: crate::db::OnArchive::None,
+        on_archive_script: None,
+        credential_login: None,
+        credential_label: None,
+        credential_added_at: None,
+        created_at: crate::testing::test_epoch(),
+    }
+}

@@ -271,6 +271,7 @@ mod tests {
             .expect("a worktrees directory");
         let repository = repo::register(
             &h.context,
+            h.machine(),
             worktrees.path(),
             repo::NewRepository {
                 path: source.path().to_str().expect("a UTF-8 path").to_string(),
@@ -377,7 +378,7 @@ mod tests {
         .await
         .expect("store a repository default");
 
-        repo::remove(&h.context, &repository.id)
+        repo::remove(&h.context, Some(h.machine()), &repository.id)
             .await
             .expect("removal with no referencing tasks must succeed");
 
@@ -414,7 +415,10 @@ mod tests {
         .expect("store a repository default");
         while h.changes.try_recv().is_ok() {}
 
-        repo::remove(&h.context, &repository.id)
+        // The board's removal alone: given a machine, forgetting the checkout
+        // announces the same repository again, which is the machine's event
+        // and not this one's subject.
+        repo::remove(&h.context, None, &repository.id)
             .await
             .expect("removal with no referencing tasks must succeed");
 
@@ -464,7 +468,7 @@ mod tests {
         .expect("insert a referencing task");
         while h.changes.try_recv().is_ok() {}
 
-        repo::remove(&h.context, &repository.id)
+        repo::remove(&h.context, Some(h.machine()), &repository.id)
             .await
             .expect_err("removal must be refused while a task references it");
 

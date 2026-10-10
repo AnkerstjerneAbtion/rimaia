@@ -56,10 +56,11 @@ pub async fn get_task_dependents(
     review::dependents(&state.context, &task_id).await
 }
 
-/// What the queue did since the last finished review.
+/// What the queue did since the last finished review, with this runner's
+/// consent read off its checkouts (task 066).
 #[tauri::command]
 pub async fn get_review_digest(state: State<'_, AppState>) -> Result<Digest> {
-    review::digest(&state.context).await
+    review::digest(&state.context, Some(&state.machine)).await
 }
 
 /// Marks the digest seen through `through`, normally the `until` it was read at.

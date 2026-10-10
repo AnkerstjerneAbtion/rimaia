@@ -46,7 +46,7 @@
 //! per-repository opt-in the whole security posture, and a posture the user
 //! cannot see is one they cannot fix at 09:00 when nothing ran overnight.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap};
 
 use chrono::{DateTime, Utc};
 use serde::Serialize;
@@ -54,7 +54,6 @@ use serde::Serialize;
 use crate::context::ServiceContext;
 use crate::db::{BoardColumn, RunState};
 use crate::error::Result;
-use crate::repo;
 use crate::scheduler::inflight::Counts;
 use crate::tasks::{self, TaskFilter, TaskSummary};
 
@@ -164,7 +163,15 @@ pub struct QueueEntry {
 /// Re-read from scratch on every pass of the queue loop — never a snapshot
 /// taken when the queue was started. That is what makes "a task dragged to the
 /// top mid-queue is picked up next" true rather than aspirational.
-pub async fn plan(ctx: &ServiceContext) -> Result<Vec<QueueEntry>> {
+///
+/// `consented` is the set of repositories this runner consented to run
+/// unattended in, read once per pass by
+/// [`machine::consented_repositories`](crate::machine::consented_repositories)
+/// (task 066). Not the board's `allow_unattended_runs`, which is the team
+/// ceiling since task 038 and is not this runner's to read (task 045): reading
+/// it would skip every repository registered from task 066 on, and keep
+/// offering one whose consent was withdrawn.
+pub async fn plan(ctx: &ServiceContext, consented: &BTreeSet<String>) -> Result<Vec<QueueEntry>> {
     let ready = tasks::list_tasks(
         ctx,
         TaskFilter {
@@ -173,16 +180,6 @@ pub async fn plan(ctx: &ServiceContext) -> Result<Vec<QueueEntry>> {
         },
     )
     .await?;
-
-    // One read of the repository table rather than one per task: a board of
-    // fifty cards is served by a handful of repositories, and this runs on
-    // every pass of the loop.
-    let opted_in: HashSet<String> = repo::list(ctx)
-        .await?
-        .into_iter()
-        .filter(repo::allows_unattended_runs)
-        .map(|repository| repository.id)
-        .collect();
 
     // One instant for the whole pass, not one per entry: two tasks whose
     // deadlines straddle the microsecond between two `now()` calls would
@@ -193,7 +190,11 @@ pub async fn plan(ctx: &ServiceContext) -> Result<Vec<QueueEntry>> {
     let mut plan = Vec::with_capacity(ready.len());
     let mut claimable = 0;
     for summary in &ready {
-        let skip = skip_reason(summary, opted_in.contains(&summary.task.repository_id), now);
+        let skip = skip_reason(
+            summary,
+            consented.contains(&summary.task.repository_id),
+            now,
+        );
         let queue_position = skip.is_none().then(|| {
             claimable += 1;
             claimable
@@ -384,6 +385,7 @@ mod tests {
     use crate::strategy::StrategyOrigin;
     use crate::tasks::LastRunSummary;
     use pretty_assertions::assert_eq;
+    use std::collections::HashSet;
 
     /// The instant every test below judges a deadline against.
     const NOW: &str = "2026-08-20T02:00:00Z";
@@ -405,7 +407,6 @@ mod tests {
                 position: 1.0,
                 run_state,
                 branch: None,
-                worktree_path: None,
                 strategy_mode: StrategyMode::Default,
                 model: None,
                 effort: None,

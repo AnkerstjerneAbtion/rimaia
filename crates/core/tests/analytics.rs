@@ -50,6 +50,7 @@ impl Fixture {
 
         let registered = repo::register(
             &harness.context,
+            harness.machine(),
             &paths.worktrees_dir(),
             NewRepository {
                 path: repository.path().to_string_lossy().into_owned(),
@@ -111,15 +112,16 @@ impl Fixture {
         .await
         .expect("open a run row");
 
-        // The transcript the prune test deletes. `start_run` records the path;
+        // The transcript the prune test deletes, where the run's ids put it;
         // nothing creates the file, because the runner streams into it.
+        let log_path = rimaia_core::runner::events::transcript_path(&self.paths, task_id, &run.id);
         std::fs::create_dir_all(
-            std::path::Path::new(&run.log_path)
+            log_path
                 .parent()
                 .expect("a transcript lives in a directory"),
         )
         .expect("the transcript directory");
-        std::fs::write(&run.log_path, "{}\n").expect("a transcript to prune");
+        std::fs::write(&log_path, "{}\n").expect("a transcript to prune");
 
         finish_run(
             &self.harness.context,

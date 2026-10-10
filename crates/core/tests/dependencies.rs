@@ -379,15 +379,16 @@ async fn the_delete_refusal_inflects_for_more_than_one_dependent() {
 
 const NOW: &str = "2026-08-20T02:00:00+00:00";
 
-async fn seed_repository(pool: &SqlitePool, name: &str, path: &str) -> String {
+/// A repository on the board alone. `_path` is what a clone of it would be
+/// at, and is no board fact since task 066.
+async fn seed_repository(pool: &SqlitePool, name: &str, _path: &str) -> String {
     let id = rimaia_core::db::new_id();
     let team_id = solo_team(pool).await;
     sqlx::query!(
-        r#"INSERT INTO repositories (id, team_id, name, path, default_branch, worktree_root, allow_unattended_runs, created_at)
-           VALUES (?1, ?5, ?2, ?3, 'main', '/tmp/rimaia-worktrees', 0, ?4)"#,
+        r#"INSERT INTO repositories (id, team_id, name, default_branch, allow_unattended_runs, created_at)
+           VALUES (?1, ?4, ?2, 'main', 0, ?3)"#,
         id,
         name,
-        path,
         NOW,
         team_id,
     )

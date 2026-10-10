@@ -14,9 +14,9 @@ use crate::tasks::Patch;
 /// (ADR-0028 point 2, ADR-0033 point 2).
 ///
 /// Keyed by the board's repository id, with no foreign key into the board,
-/// which is another file in solo and another machine in team mode. Task 066
-/// moves the readers of these columns off the board's `repositories` row; until
-/// then the board's copy is the one read, and this one is written by adoption.
+/// which is another file in solo and another machine in team mode. Since task
+/// 066 this is the only copy any reader reads: the board's retired columns are
+/// read by nothing but adoption, until task 065 drops them.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Checkout {

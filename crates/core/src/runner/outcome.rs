@@ -658,7 +658,9 @@ pub struct NewRun {
 /// ADR-0010 requires for selection.
 ///
 /// `log_path` is computed rather than passed, because ADR-0013 makes it a pure
-/// function of the task and run ids and the run id is minted here.
+/// function of the task and run ids. It is still written, as D31 point 4 says,
+/// until task 056's `transcript_key` replaces it, and nothing reads it: every
+/// reader derives the path from the ids instead (task 066).
 ///
 /// The row names no runner: that is the board port's to record, from the
 /// runner its adapter serves (D31 point 4), and `runs.runner_id` is nullable
@@ -714,7 +716,8 @@ pub(crate) async fn insert_run(
     // `base_sha` rides along: it is what that name resolved to, at the same
     // moment.
     sqlx::query!(
-        r#"INSERT INTO runs
+        r#"-- runs.log_path written until 056
+           INSERT INTO runs
             (id, task_id, attempt, kind, status, session_id, prompt, started_at, log_path,
              base_ref, base_sha, runner_id)
            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)"#,
@@ -1022,15 +1025,13 @@ async fn fetch_run_row<'e, E>(executor: E, scope: &str, id: &str) -> Result<Run>
 where
     E: sqlx::Executor<'e, Database = sqlx::Sqlite>,
 {
-    // `log_path!`: every row a solo board holds was opened by a runner on this
-    // machine, which always fills it. Task 066 retires this reader.
     sqlx::query_as!(
         Run,
         r#"SELECT r.id, r.task_id, r.attempt, r.kind AS "kind: RunKind",
             r.status AS "status: RunStatus", r.session_id, r.prompt,
             r.started_at AS "started_at: DateTime<Utc>", r.ended_at AS "ended_at: DateTime<Utc>",
             r.exit_class AS "exit_class: ExitClass", r.error_message, r.num_turns, r.cost_usd,
-            r.log_path AS "log_path!", r.pr_url, r.resume_after AS "resume_after: DateTime<Utc>",
+            r.pr_url, r.resume_after AS "resume_after: DateTime<Utc>",
             r.base_ref, r.model, r.effort, r.run_environment, r.input_tokens, r.output_tokens,
             r.cache_read_tokens, r.cache_creation_tokens, r.head_sha, r.base_sha
            FROM runs r JOIN tasks t ON t.id = r.task_id

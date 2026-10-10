@@ -71,8 +71,9 @@ pub struct TeamBoard {
     pub repository: Repository,
     pub not_ready: TaskId,
     pub ready: TaskId,
-    /// Carries the runs, the bundle and the findings, a worktree path that is
-    /// missing on disk, and the dependency edge (it depends on [`done`]).
+    /// Carries the runs, the bundle and the findings, a worktree record whose
+    /// directory is missing on disk, and the dependency edge (it depends on
+    /// [`done`]).
     ///
     /// [`done`]: Self::done
     pub in_review: TaskId,
@@ -201,8 +202,15 @@ impl TwoTeams {
         let paths = AppPaths::new(PathBuf::from(data.path()));
         paths.create_all().expect("the app directories");
 
-        let team_a = arrange(&a, &clock, &paths, Marking::Plain).await;
-        let team_b = arrange(&b, &clock, &paths, Marking::Sentinel).await;
+        let machine = MachineContext {
+            store: Arc::new(MemoryMachine::new()),
+            clock: Arc::new(clock.clone()),
+            changes: a.changes.clone(),
+            event_team: personal_a.team_id.clone(),
+        };
+
+        let team_a = arrange(&a, &machine, &clock, &paths, Marking::Plain).await;
+        let team_b = arrange(&b, &machine, &clock, &paths, Marking::Sentinel).await;
 
         let cli = FakeCli::new();
         let handles = RunHandles::default();
@@ -217,12 +225,6 @@ impl TwoTeams {
         let (doctor_root, mut doctor) = crate::testing::doctor::temp_environment();
         doctor.programs.agent = runner.program.clone();
         doctor.run_handles = handles.clone();
-        let machine = MachineContext {
-            store: Arc::new(MemoryMachine::new()),
-            clock: Arc::new(clock.clone()),
-            changes: a.changes.clone(),
-            event_team: personal_a.team_id.clone(),
-        };
 
         Self {
             a,
@@ -449,6 +451,7 @@ impl Marking {
 /// services wherever one exists.
 async fn arrange(
     ctx: &ServiceContext,
+    machine: &MachineContext,
     clock: &TestClock,
     paths: &AppPaths,
     marking: Marking,
@@ -472,8 +475,9 @@ async fn arrange(
         })
         .tempdir()
         .expect("a worktrees directory");
-    let registered = repo::register(
+    let repository = repo::register(
         ctx,
+        machine,
         worktrees.path(),
         NewRepository {
             path: source.path().to_string_lossy().into_owned(),
@@ -483,7 +487,7 @@ async fn arrange(
     )
     .await
     .expect("register the team's repository");
-    let repository = repo::set_allow_unattended_runs(ctx, &registered.id, true)
+    repo::set_allow_unattended_runs(ctx, machine, &repository.id, true)
         .await
         .expect("opt the repository in");
 
@@ -532,18 +536,27 @@ async fn arrange(
     .expect("a link")
     .id;
 
-    // A worktree the board records and the disk does not hold, for the
-    // startup survey.
+    // A worktree this machine records and the disk does not hold, for the
+    // startup survey, on a task whose branch the board records.
     let missing_worktree = paths
         .worktrees_dir()
         .join(marking.text("missing-worktree").replace(' ', "-"));
-    sqlx::query("UPDATE tasks SET worktree_path = ?1, branch = ?2 WHERE id = ?3")
-        .bind(missing_worktree.to_string_lossy().into_owned())
+    sqlx::query("UPDATE tasks SET branch = ?1 WHERE id = ?2")
         .bind(marking.text("branch").replace(' ', "-"))
         .bind(&in_review)
         .execute(&ctx.pool)
         .await
-        .expect("record a worktree path");
+        .expect("record a branch");
+    machine
+        .store
+        .record_worktree(&crate::machine::WorktreeRecord {
+            task_id: in_review.clone(),
+            repository_id: repository.id.clone(),
+            path: missing_worktree.to_string_lossy().into_owned(),
+            fenced_at: None,
+        })
+        .await
+        .expect("record a worktree");
 
     let run_costs = match marking {
         Marking::Plain => [1.5, 0.5, 2.5],
@@ -556,7 +569,6 @@ async fn arrange(
         runs.push(
             insert_run(
                 ctx,
-                paths,
                 RunRow {
                     task_id: &in_review,
                     runner_id: &runner_id,
@@ -706,10 +718,9 @@ struct RunRow<'a> {
 }
 
 /// A closed run with every capture column set. Its transcript is never
-/// written, so the startup survey finds it missing.
-async fn insert_run(ctx: &ServiceContext, paths: &AppPaths, row: RunRow<'_>) -> RunId {
+/// written at the path its ids derive, so the startup survey finds it missing.
+async fn insert_run(ctx: &ServiceContext, row: RunRow<'_>) -> RunId {
     let id = crate::db::new_id();
-    let log_path = crate::runner::events::transcript_path(paths, row.task_id, &id);
     let ended_at = row.started_at + Duration::minutes(10);
     let recorded = (row.kind == RunKind::Review).then_some(ended_at);
     let pr_url = (row.kind == RunKind::Implementation).then(|| {
@@ -721,13 +732,13 @@ async fn insert_run(ctx: &ServiceContext, paths: &AppPaths, row: RunRow<'_>) -> 
     sqlx::query(
         "INSERT INTO runs
             (id, task_id, attempt, kind, status, session_id, prompt, started_at, ended_at,
-             exit_class, num_turns, cost_usd, log_path, pr_url, base_ref, model, effort,
+             exit_class, num_turns, cost_usd, pr_url, base_ref, model, effort,
              run_environment, input_tokens, output_tokens, cache_read_tokens,
              cache_creation_tokens, head_sha, base_sha, findings_recorded_at, runner_id)
-         VALUES (?1, ?2, ?3, ?4, 'succeeded', ?1, ?5, ?6, ?7, 'success', 12, ?8, ?9, ?10,
-                 'main', ?11, 'high', 'inherit', 1000, 200, 300, 400,
+         VALUES (?1, ?2, ?3, ?4, 'succeeded', ?1, ?5, ?6, ?7, 'success', 12, ?8, ?9,
+                 'main', ?10, 'high', 'inherit', 1000, 200, 300, 400,
                  'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
-                 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb', ?12, ?13)",
+                 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb', ?11, ?12)",
     )
     .bind(&id)
     .bind(row.task_id)
@@ -737,7 +748,6 @@ async fn insert_run(ctx: &ServiceContext, paths: &AppPaths, row: RunRow<'_>) -> 
     .bind(row.started_at)
     .bind(ended_at)
     .bind(row.cost_usd)
-    .bind(log_path.to_string_lossy().into_owned())
     .bind(pr_url)
     .bind(row.marking.text("model").replace(' ', "-"))
     .bind(recorded)

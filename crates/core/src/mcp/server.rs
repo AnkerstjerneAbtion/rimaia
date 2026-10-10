@@ -34,7 +34,7 @@ use crate::analytics::{self, Period};
 use crate::context::{ServiceContext, TeamScope};
 use crate::db::{BoardColumn, StrategySource};
 use crate::doctor;
-use crate::machine::MachineContext;
+use crate::machine::{self, MachineContext};
 use crate::mcp::error::ToolError;
 use crate::mcp::requests::{
     AddTaskLinkRequest, AnalyticsRequest, ArchiveTaskRequest, ArchiveTasksRequest, ClearableField,
@@ -51,14 +51,14 @@ use crate::mcp::requests::{
     TaskStrategyRequest, UpdateScheduleRequest, UpdateTaskRequest,
 };
 use crate::mcp::responses::{
-    AnalyticsView, ArchiveReportView, ArchivedTaskView, BaseInstructionsView, CredentialStatusView,
-    DigestMarkerView, DismissalView, DoctorDismissalsView, DoctorReportView, OnboardingView,
-    PlanPassView, PlanResultView, PreflightView, RepositoryListView, RepositoryOnArchiveView,
-    RepositoryView, ReviewDigestView, ReviewFindingView, ReviewFindingsView, ReviewHistoryView,
-    ReviewOutcomeView, ReviewedTaskView, RunCapacityView, ScheduleDeletedView, ScheduleListView,
-    ScheduleView, StrategyApprovalView, SubscriptionCostView, TaskDependentsView, TaskListItem,
-    TaskListView, TaskView, TimezoneListView, WorktreeAutoCleanupView, WorktreeListView,
-    WorktreeView,
+    AnalyticsView, ArchiveReportView, ArchivedTaskView, BaseInstructionsView, CheckoutListView,
+    CheckoutView, CredentialStatusView, DigestMarkerView, DismissalView, DoctorDismissalsView,
+    DoctorReportView, OnboardingView, PlanPassView, PlanResultView, PreflightView,
+    RepositoryListView, RepositoryOnArchiveView, RepositoryView, ReviewDigestView,
+    ReviewFindingView, ReviewFindingsView, ReviewHistoryView, ReviewOutcomeView, ReviewedTaskView,
+    RunCapacityView, ScheduleDeletedView, ScheduleListView, ScheduleView, StrategyApprovalView,
+    SubscriptionCostView, TaskDependentsView, TaskListItem, TaskListView, TaskView,
+    TimezoneListView, WorktreeAutoCleanupView, WorktreeListView, WorktreeView,
 };
 use crate::mcp::scope::{RunScope, Tool};
 use crate::review;
@@ -834,7 +834,9 @@ recorded. A quiet board gives an empty digest. Call this to brief a human on the
     )]
     pub async fn get_review_digest(&self) -> Result<Json<ReviewDigestView>, ToolError> {
         self.scope.authorize(Tool::GetReviewDigest, None)?;
-        let digest = review::digest(&self.ctx).await?;
+        // This runner's consent, when the server has a machine to read it on
+        // (task 066); the shell's server always does.
+        let digest = review::digest(&self.ctx, self.local.as_ref().map(|l| &l.machine)).await?;
         Ok(Json(digest.into()))
     }
 
@@ -1141,6 +1143,7 @@ a task that already carries a proposal is re-planned, which is what this tool me
 
         let claim = runner_strategy::claim_for_planning(
             local.planner.board.as_ref(),
+            &local.machine,
             &local.planner.in_flight,
             &request.task_id,
             scheduler::LeaseOwner::Manual,
@@ -1233,6 +1236,7 @@ removes one: a live forge token has no business travelling over this protocol."
         let local = self.local()?;
 
         let repository = repo::get(&self.ctx, &request.repository_id).await?;
+        let checkout = machine::checkout_of(&local.machine, &repository).await?;
         let store = local
             .planner
             .runner
@@ -1240,7 +1244,11 @@ removes one: a live forge token has no business travelling over this protocol."
             .status(&repository.id)
             .await;
 
-        Ok(Json(CredentialStatusView::new(&repository, store)))
+        Ok(Json(CredentialStatusView::new(
+            &repository,
+            &checkout,
+            store,
+        )))
     }
 
     #[tool(
@@ -1303,8 +1311,9 @@ where a human confirms it."
     )]
     pub async fn list_worktrees(&self) -> Result<Json<WorktreeListView>, ToolError> {
         self.scope.authorize(Tool::ListWorktrees, None)?;
+        let local = self.local()?;
 
-        let inventory = worktree::inventory(&self.ctx).await?;
+        let inventory = worktree::inventory(&self.ctx, &local.machine).await?;
         Ok(Json(WorktreeListView {
             worktrees: inventory
                 .entries
@@ -1365,17 +1374,19 @@ RIMAIA_REPOSITORY_PATH, RIMAIA_BRANCH and RIMAIA_WORKTREE_PATH in its environmen
         Parameters(request): Parameters<SetRepositoryOnArchiveRequest>,
     ) -> Result<Json<RepositoryOnArchiveView>, ToolError> {
         self.scope.authorize(Tool::SetRepositoryOnArchive, None)?;
-        let repository = archive::set_repository_on_archive(
+        let local = self.local()?;
+        let checkout = archive::set_repository_on_archive(
             &self.ctx,
+            &local.machine,
             &request.repository_id,
             request.on_archive,
             request.script,
         )
         .await?;
         Ok(Json(RepositoryOnArchiveView {
-            repository_id: repository.id,
-            on_archive: repository.on_archive,
-            script: repository.on_archive_script,
+            repository_id: checkout.repository_id,
+            on_archive: checkout.on_archive,
+            script: checkout.on_archive_script,
         }))
     }
 
@@ -1439,13 +1450,30 @@ safe kind and needs nothing here."
     pub async fn set_repository_max_concurrency(
         &self,
         Parameters(request): Parameters<SetRepositoryMaxConcurrencyRequest>,
-    ) -> Result<Json<RepositoryView>, ToolError> {
+    ) -> Result<Json<CheckoutView>, ToolError> {
         self.scope
             .authorize(Tool::SetRepositoryMaxConcurrency, None)?;
-        let repository =
-            repo::set_max_concurrency(&self.ctx, &request.repository_id, request.max_concurrency)
-                .await?;
-        Ok(Json(RepositoryView::from(repository)))
+        let local = self.local()?;
+        let checkout = repo::set_max_concurrency(
+            &self.ctx,
+            &local.machine,
+            &request.repository_id,
+            request.max_concurrency,
+        )
+        .await?;
+        Ok(Json(CheckoutView::from(checkout)))
+    }
+
+    #[tool(
+        description = "List this computer's clone of each repository: where it is, where its worktrees go, how many runs it holds at once, whether unattended runs are allowed in it here, and what archiving a task in it cleans up. Call this before explaining why a repository's tasks are not running tonight, or when the user asks where a project lives on disk. A repository from `list_repositories` that is missing here is not set up on this computer, and nothing of it runs here."
+    )]
+    pub async fn list_checkouts(&self) -> Result<Json<CheckoutListView>, ToolError> {
+        self.scope.authorize(Tool::ListCheckouts, None)?;
+        let local = self.local()?;
+        let checkouts = repo::checkouts(&self.ctx, &local.machine).await?;
+        Ok(Json(CheckoutListView {
+            checkouts: checkouts.into_iter().map(CheckoutView::from).collect(),
+        }))
     }
     // -----------------------------------------------------------------------
     // Schedules (task 013, ADR-0010). Operator-only, every one.
@@ -1730,7 +1758,7 @@ mod tests {
     /// capability parity a rule. What replaces a count is the property that
     /// actually matters — a registered tool with no run-scope decision cannot
     /// reach the wire.
-    const REGISTERED_TOOLS: [&str; 63] = [
+    const REGISTERED_TOOLS: [&str; 64] = [
         "accept_task_strategy",
         "add_task_link",
         "approve_task",
@@ -1758,6 +1786,7 @@ mod tests {
         "get_task_dependents",
         "get_worktree_auto_cleanup",
         "give_up_on_task",
+        "list_checkouts",
         "list_repositories",
         "list_review_findings",
         "list_schedules",

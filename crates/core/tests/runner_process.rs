@@ -1060,11 +1060,9 @@ async fn the_transcript_is_the_stream_verbatim_and_valid_jsonl() {
     for line in &written {
         serde_json::from_str::<serde_json::Value>(line).expect("every line is a JSON document");
     }
-    assert_eq!(
-        run.log_path,
-        transcript_path(&fixture.paths, &fixture.task_id, &run.id)
-            .to_string_lossy()
-            .into_owned()
+    assert!(
+        transcript_path(&fixture.paths, &fixture.task_id, &run.id).is_file(),
+        "ADR-0013's path, derived from the ids, is where the transcript is"
     );
 }
 
@@ -1129,9 +1127,9 @@ async fn the_child_works_in_the_tasks_worktree_and_never_in_the_repository() {
     fixture.run(&cli).await.expect("the run completes");
 
     let worktree = fixture
-        .task()
+        .harness
+        .worktree_path(&fixture.task_id)
         .await
-        .worktree_path
         .expect("task 007 recorded one");
     assert_eq!(canonical(&cli.child_cwd()), canonical(&worktree));
     assert_ne!(
@@ -1790,6 +1788,7 @@ impl RunnerFixture {
 
         let registered = repo::register(
             &harness.context,
+            harness.machine(),
             &paths.worktrees_dir(),
             NewRepository {
                 path: repository.path().to_string_lossy().into_owned(),
@@ -1801,9 +1800,14 @@ impl RunnerFixture {
         .expect("register the test repository");
 
         if opt_in {
-            repo::set_allow_unattended_runs(&harness.context, &registered.id, true)
-                .await
-                .expect("ADR-0012's per-repository opt-in");
+            repo::set_allow_unattended_runs(
+                &harness.context,
+                harness.machine(),
+                &registered.id,
+                true,
+            )
+            .await
+            .expect("ADR-0012's per-repository opt-in");
         }
 
         let task = tasks::create_task(

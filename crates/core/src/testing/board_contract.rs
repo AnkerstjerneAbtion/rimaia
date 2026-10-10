@@ -36,6 +36,7 @@ use crate::db::{
     new_id, BoardColumn, ExitClass, RunKind, RunState, RunStatus, StrategyMode, StrategySource,
 };
 use crate::error::{ErrorCode, Result};
+use crate::machine::MachineContext;
 use crate::repo::{self, NewRepository};
 use crate::review::findings::{self, FindingSeverity, NewReviewFinding};
 use crate::review_loop::{config as review_config, Verdict};
@@ -86,7 +87,7 @@ macro_rules! board_contract {
             a_published_tail_reaches_a_tail_subscriber,
             a_transcript_chunk_is_acknowledged_through_its_end,
             start_run_records_the_run_id_the_runner_minted,
-            record_branch_sets_the_branch_and_never_the_worktree_path,
+            record_branch_sets_the_branch,
             review_findings_recorded_through_the_port_land_on_their_review_run,
             a_finish_for_another_tasks_run_is_not_found,
             a_solo_heartbeat_fences_nothing_and_cancels_nothing,
@@ -122,8 +123,17 @@ impl Arranged {
             .prefix("rimaia-contract-worktrees-")
             .tempdir()
             .expect("a worktrees directory");
+        // A machine of its own, used only to register through the service: the
+        // board port never reads a clone, so nothing in a case touches it.
+        let machine = MachineContext {
+            store: std::sync::Arc::new(crate::testing::machine::MemoryMachine::new()),
+            clock: board.clock.clone(),
+            changes: board.changes.clone(),
+            event_team: board.scope.sole().expect("a solo board").clone(),
+        };
         let registered = repo::register(
             board,
+            &machine,
             worktrees.path(),
             NewRepository {
                 path: repository.path().to_string_lossy().into_owned(),
@@ -706,7 +716,7 @@ pub mod cases {
         );
     }
 
-    pub async fn record_branch_sets_the_branch_and_never_the_worktree_path<H: Harness>() {
+    pub async fn record_branch_sets_the_branch<H: Harness>() {
         let harness = H::start().await;
         let arranged = Arranged::new(harness.board()).await;
         let task_id = arranged.task(harness.board(), "Branched").await;
@@ -722,8 +732,10 @@ pub mod cases {
             .await
             .expect("read the task")
             .task;
+        // The task row carries no worktree path at all since task 066; that
+        // the column stays NULL is `a_new_worktree_is_recorded_on_the_runner_
+        // and_not_the_board`'s to assert, over real git.
         assert_same(task.branch, Some("rimaia/branched".to_string()), "branch");
-        assert_same(task.worktree_path, None, "worktree path");
     }
 
     pub async fn review_findings_recorded_through_the_port_land_on_their_review_run<H: Harness>() {

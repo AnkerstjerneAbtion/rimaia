@@ -44,8 +44,9 @@ use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
 
 use crate::context::ServiceContext;
-use crate::db::{OnArchive, Repository, Task};
+use crate::db::{OnArchive, Task};
 use crate::error::{Error, Result};
+use crate::machine::{self, Checkout, CheckoutPatch, CheckoutView, MachineContext};
 use crate::runner::process::{set_process_group, signal_group, strip_process_identity, Signal};
 use crate::worktree::cleanup::{remove_worktree, RemovalAuthorization};
 
@@ -132,12 +133,17 @@ impl OnArchiveOutcome {
 /// path, or a path with any other mode, is refused rather than silently
 /// half-applied, because ADR-0025 point 4 makes this one slot and a row that
 /// spells `script` with nothing to run is not one of its three states.
+///
+/// This machine's configuration since task 066 (ADR-0033 point 8): it is
+/// written to the checkout, because the worktree it cleans up and the script it
+/// runs are both on this machine.
 pub async fn set_repository_on_archive(
     ctx: &ServiceContext,
+    machine: &MachineContext,
     repository_id: &str,
     on_archive: OnArchive,
     script: Option<String>,
-) -> Result<Repository> {
+) -> Result<CheckoutView> {
     let script = match (on_archive, script) {
         (OnArchive::Script, Some(path)) => Some(validate_script_path(&path).await?),
         (OnArchive::Script, None) => {
@@ -152,30 +158,18 @@ pub async fn set_repository_on_archive(
         (_, _) => None,
     };
 
-    let stored = on_archive.as_str();
-    let scope = ctx.scope.json();
-    let Some(team_id) = sqlx::query_scalar!(
-        "UPDATE repositories SET on_archive = ?1, on_archive_script = ?2
-          WHERE id = ?3 AND team_id IN (SELECT value FROM json_each(?4))
-         RETURNING team_id",
-        stored,
-        script,
-        repository_id,
-        scope,
-    )
-    .fetch_optional(&ctx.pool)
-    .await?
-    else {
-        return Err(Error::not_found(format!(
-            "no repository with id {repository_id}"
-        )));
+    let repository = crate::repo::get(ctx, repository_id).await?;
+    let patch = CheckoutPatch {
+        on_archive: Some(on_archive),
+        on_archive_script: match script {
+            Some(script) => crate::tasks::Patch::Set(script),
+            None => crate::tasks::Patch::Clear,
+        },
+        ..CheckoutPatch::default()
     };
-
-    ctx.publish(crate::events::ChangeEvent::repositories(
-        team_id,
-        [repository_id.to_string()],
-    ));
-    crate::repo::get(ctx, repository_id).await
+    Ok(machine::local::patch_checkout(machine, &repository, &patch)
+        .await?
+        .into())
 }
 
 /// The four properties a stored script path must have, checked against the
@@ -239,27 +233,47 @@ fn is_executable(_metadata: &std::fs::Metadata) -> bool {
 // Running it
 // ---------------------------------------------------------------------------
 
-/// Runs whatever `task`'s repository configured, after the archive committed.
+/// Runs whatever this machine's checkout of `task`'s repository configured,
+/// after the archive committed.
 ///
 /// Never returns `Err`. Everything that can go wrong is an
 /// [`OnArchiveOutcome::Failed`] the caller carries back to the user, for the
 /// reason the module header gives: the archive has already happened, and a
 /// `?` here would be a subprocess putting a committed transaction in doubt.
-pub async fn run_on_archive(ctx: &ServiceContext, task: &Task) -> OnArchiveOutcome {
-    let repository = match crate::repo::get(ctx, &task.repository_id).await {
-        Ok(repository) => repository,
+///
+/// The policy and the script come from the checkout and the worktree from its
+/// record (task 066). A repository this machine has no checkout of has nothing
+/// here to clean up, so it reports [`OnArchiveOutcome::Nothing`].
+pub async fn run_on_archive(
+    ctx: &ServiceContext,
+    machine: &MachineContext,
+    task: &Task,
+) -> OnArchiveOutcome {
+    let checkout = match machine.store.get_checkout(&task.repository_id).await {
+        Ok(Some(checkout)) => checkout,
+        Ok(None) => return OnArchiveOutcome::Nothing,
         Err(error) => {
             return OnArchiveOutcome::Failed {
                 reason: format!("could not read the repository's archive policy: {error}"),
             }
         }
     };
+    let worktree_path = match machine::local::worktree_path(machine, &task.id).await {
+        Ok(path) => path,
+        Err(error) => {
+            return OnArchiveOutcome::Failed {
+                reason: format!("could not read where the task's worktree is: {error}"),
+            }
+        }
+    };
 
-    match repository.on_archive {
+    match checkout.on_archive {
         OnArchive::None => OnArchiveOutcome::Nothing,
-        OnArchive::RemoveWorktree => remove_this_worktree(ctx, task).await,
-        OnArchive::Script => match repository.on_archive_script.as_deref() {
-            Some(script) => run_script(ctx, &repository, task, script).await,
+        OnArchive::RemoveWorktree => {
+            remove_this_worktree(ctx, machine, task, worktree_path.is_some()).await
+        }
+        OnArchive::Script => match checkout.on_archive_script.as_deref() {
+            Some(script) => run_script(ctx, &checkout, task, worktree_path, script).await,
             // A row spelling `script` with no path should be unreachable —
             // `set_repository_on_archive` refuses to write one — so this is the
             // hand-edited-database case D-for-tolerance covers everywhere else:
@@ -278,12 +292,17 @@ pub async fn run_on_archive(ctx: &ServiceContext, task: &Task) -> OnArchiveOutco
 /// reason: an automatic action gets strictly less authority than a human
 /// clicking a button, because there is nobody present to read the refusal it
 /// would otherwise be overriding.
-async fn remove_this_worktree(ctx: &ServiceContext, task: &Task) -> OnArchiveOutcome {
-    if task.worktree_path.is_none() {
+async fn remove_this_worktree(
+    ctx: &ServiceContext,
+    machine: &MachineContext,
+    task: &Task,
+    has_worktree: bool,
+) -> OnArchiveOutcome {
+    if !has_worktree {
         return OnArchiveOutcome::Nothing;
     }
 
-    match remove_worktree(ctx, &task.id, RemovalAuthorization::default()).await {
+    match remove_worktree(ctx, machine, &task.id, RemovalAuthorization::default()).await {
         Ok(removed) => OnArchiveOutcome::WorktreeRemoved {
             bytes_freed: removed.bytes_freed,
         },
@@ -318,13 +337,14 @@ async fn remove_this_worktree(ctx: &ServiceContext, task: &Task) -> OnArchiveOut
 ///   by one signal rather than leaking them.
 async fn run_script(
     ctx: &ServiceContext,
-    repository: &Repository,
+    checkout: &Checkout,
     task: &Task,
+    worktree_path: Option<String>,
     script: &str,
 ) -> OnArchiveOutcome {
     let mut command = Command::new(script);
     command
-        .current_dir(&repository.path)
+        .current_dir(&checkout.path)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -336,12 +356,9 @@ async fn run_script(
     command
         .env("RIMAIA_TASK_ID", &task.id)
         .env("RIMAIA_TASK_TITLE", &task.title)
-        .env("RIMAIA_REPOSITORY_PATH", &repository.path)
+        .env("RIMAIA_REPOSITORY_PATH", &checkout.path)
         .env("RIMAIA_BRANCH", task.branch.clone().unwrap_or_default())
-        .env(
-            "RIMAIA_WORKTREE_PATH",
-            task.worktree_path.clone().unwrap_or_default(),
-        );
+        .env("RIMAIA_WORKTREE_PATH", worktree_path.unwrap_or_default());
 
     let mut child = match command.spawn() {
         Ok(child) => child,

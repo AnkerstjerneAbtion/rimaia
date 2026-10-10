@@ -528,6 +528,7 @@ impl Fixture {
         let repository = TempRepo::init();
         let registered = repo::register(
             &harness.context,
+            harness.machine(),
             &paths.worktrees_dir(),
             NewRepository {
                 path: repository.path().to_string_lossy().into_owned(),
@@ -537,7 +538,7 @@ impl Fixture {
         )
         .await
         .expect("register a test repository");
-        repo::set_allow_unattended_runs(&harness.context, &registered.id, true)
+        repo::set_allow_unattended_runs(&harness.context, harness.machine(), &registered.id, true)
             .await
             .expect("ADR-0012's per-repository opt-in");
 

@@ -254,6 +254,9 @@ fn cases() -> Vec<Case> {
         ),
         case("list_timezones", Reads, |_| Value::Null),
         case("list_worktrees", Reads, |_| Value::Null),
+        // One machine holds both teams' clones here; team A is told only of
+        // its own (task 066).
+        case("list_checkouts", Reads, |_| Value::Null),
         case("get_worktree_auto_cleanup", Reads, |_| Value::Null),
         case(
             "set_worktree_auto_cleanup",

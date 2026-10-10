@@ -104,7 +104,9 @@ async fn a_successful_implementation_with_the_loop_off_lands_exactly_as_before()
     assert_eq!(
         drain(&mut fixture.harness),
         vec![
-            // `worktree::prepare` records the branch it created.
+            // `worktree::prepare` records the worktree in this machine's
+            // store, then the branch it created on the board (task 066).
+            ChangeEvent::tasks(team.clone(), [task.clone()]),
             ChangeEvent::tasks(team.clone(), [task.clone()]),
             // `start_run`.
             ChangeEvent::runs(team.clone(), [run.id.clone()]),
@@ -615,9 +617,15 @@ async fn a_fix_phase_spawn_carries_the_repository_credentials_and_strips_claude_
             &Secret::new(SENTINEL).expect("a token"),
         )
         .expect("store the token");
-    repo::set_credential_metadata(fixture.ctx(), &fixture.repository_id, Some("ea"), Some("t"))
-        .await
-        .expect("record the credential");
+    repo::set_credential_metadata(
+        fixture.ctx(),
+        fixture.machine(),
+        &fixture.repository_id,
+        Some("ea"),
+        Some("t"),
+    )
+    .await
+    .expect("record the credential");
     fixture.enable(json!({})).await;
     let task = fixture.task_id.clone();
     fixture.reviews_on(2, vec![high("The retry never stops")]);
@@ -735,7 +743,7 @@ async fn a_review_refused_before_spawn_is_recorded_as_a_failed_review_row() {
             reason: UnreviewedReason::ReviewFailed
         }
     );
-    let report = startup::survey(fixture.ctx())
+    let report = startup::survey(fixture.ctx(), fixture.machine(), &fixture.paths)
         .await
         .expect("survey the store");
     assert_eq!(report.missing_run_logs, Vec::<String>::new());
@@ -958,6 +966,8 @@ async fn the_task_stays_running_between_phases_and_moves_to_in_review_once() {
     assert_eq!(
         drain(&mut fixture.harness),
         vec![
+            // The worktree record and the branch (task 066).
+            ChangeEvent::tasks(team.clone(), [task.clone()]),
             ChangeEvent::tasks(team.clone(), [task.clone()]),
             ChangeEvent::runs(team.clone(), [implementation.clone()]),
             ChangeEvent::tasks(team.clone(), [task.clone()]),
@@ -1267,7 +1277,9 @@ async fn a_retried_review_counts_once_in_the_digest_and_the_summary() {
     let summary = fixture.detail().await.review_loop.expect("the loop");
     assert_eq!(summary.reviews, 1);
     assert_eq!(summary.verdict, Verdict::Clean);
-    let digest = review::digest(fixture.ctx()).await.expect("the digest");
+    let digest = review::digest(fixture.ctx(), Some(fixture.machine()))
+        .await
+        .expect("the digest");
     let entry = digest
         .entries
         .iter()
@@ -1291,7 +1303,9 @@ async fn a_review_left_open_by_a_crash_is_reconciled_into_in_review_or_a_review_
     // With retry budget left: offered for resume, as a review.
     let fixture = Fixture::new().await;
     fixture.open_review_left_by_a_crash(0).await;
-    let report = startup::survey(fixture.ctx()).await.expect("survey");
+    let report = startup::survey(fixture.ctx(), fixture.machine(), &fixture.paths)
+        .await
+        .expect("survey");
     scheduler::reconcile_interrupted(fixture.ctx(), &report)
         .await
         .expect("reconcile");
@@ -1314,7 +1328,9 @@ async fn a_review_left_open_by_a_crash_is_reconciled_into_in_review_or_a_review_
     fixture
         .open_review_left_by_a_crash(scheduler::MAX_TRANSIENT_ATTEMPTS as usize)
         .await;
-    let report = startup::survey(fixture.ctx()).await.expect("survey");
+    let report = startup::survey(fixture.ctx(), fixture.machine(), &fixture.paths)
+        .await
+        .expect("survey");
     scheduler::reconcile_interrupted(fixture.ctx(), &report)
         .await
         .expect("reconcile");
@@ -1424,6 +1440,7 @@ impl Fixture {
         let repository = TempRepo::init();
         let registered = repo::register(
             &harness.context,
+            harness.machine(),
             &paths.worktrees_dir(),
             NewRepository {
                 path: repository.path().to_string_lossy().into_owned(),
@@ -1433,7 +1450,7 @@ impl Fixture {
         )
         .await
         .expect("register a test repository");
-        repo::set_allow_unattended_runs(&harness.context, &registered.id, true)
+        repo::set_allow_unattended_runs(&harness.context, harness.machine(), &registered.id, true)
             .await
             .expect("ADR-0012's per-repository opt-in");
 

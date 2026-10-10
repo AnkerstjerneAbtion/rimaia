@@ -232,7 +232,10 @@ impl<'r> FromRow<'r, SqliteRow> for TaskSummary {
 /// [`the_summary_query_ranks_columns_the_way_board_rank_does`](tests::the_summary_query_ranks_columns_the_way_board_rank_does)
 /// pins this literal against.
 const TASK_SUMMARY_SELECT: &str = r#"
-SELECT t.*,
+SELECT t.id, t.repository_id, t.title, t.plan, t.extra_instructions, t.board_column,
+       t.position, t.run_state, t.branch, t.strategy_mode, t.model, t.effort,
+       t.strategy_plan, t.strategy_source, t.strategy_updated_at, t.created_at,
+       t.updated_at, t.source, t.archived_at,
        (SELECT count(*) FROM task_links WHERE task_id = t.id) AS link_count,
        (SELECT count(*) FROM task_dependencies WHERE task_id = t.id) AS dependency_count,
        EXISTS (SELECT 1
@@ -885,16 +888,16 @@ pub async fn archive_task(
 
     ctx.publish(ChangeEvent::tasks(team_id.clone(), [id.to_string()]));
 
-    // The reaction still reads its policy and paths off the board's row; task
-    // 066 moves those reads to the checkout and the worktree record.
+    // The policy and script come from this machine's checkout, and the
+    // worktree from its record (task 066).
     let cleanup = match machine {
-        Some(_) => crate::archive::run_on_archive(ctx, &task).await,
+        Some(machine) => crate::archive::run_on_archive(ctx, machine, &task).await,
         None => OnArchiveOutcome::Nothing,
     };
     if cleanup.needs_attention() {
         tracing::info!(task_id = %id, ?cleanup, "an archive's cleanup did not go cleanly");
     }
-    // The cleanup may have cleared `worktree_path`, which is a card the archive
+    // The cleanup may have removed the worktree, which a card in the archive
     // view renders. One more event rather than one before the action, because
     // the first publish is what makes the board drop the card promptly and this
     // one only corrects what the archive list shows.
@@ -1347,15 +1350,21 @@ async fn ensure_repository_is_in_the_tasks_team(
 }
 
 /// Seam-contract D13's guard: a task's repository may be changed only while
-/// it has no worktree and no runs.
+/// it has no recorded branch and no runs.
 ///
 /// Before either exists a task is a title and a plan, and mis-filing one is
-/// an obvious mistake to want to undo. After: ADR-0005 has tied `branch` and
-/// `worktree_path` to that repository — the same act creates both, so the
-/// recorded worktree is the fact this reads — `runs` rows reference
-/// transcripts produced inside it, and ADR-0008's branch chaining resolves a
-/// base ref within it. A task moved out from under any of that is a task
-/// whose recorded state describes a place it no longer lives.
+/// an obvious mistake to want to undo. After: ADR-0005 has tied the task's
+/// branch to that repository, `runs` rows reference transcripts produced
+/// inside it, and ADR-0008's branch chaining resolves a base ref within it. A
+/// task moved out from under any of that is a task whose recorded state
+/// describes a place it no longer lives.
+///
+/// The branch, not the worktree, since task 066 (D13's 2026-10-10 amendment):
+/// a board rule cannot see a path, which is one machine's fact, and the branch
+/// is the board-side fact ADR-0005 ties to one repository — the same act that
+/// recorded it created the worktree. A task whose worktree was removed with its
+/// branch kept is therefore no longer reassignable, which is intended: its
+/// branch is still in the old repository.
 ///
 /// Each refusal names what blocks it, because the panel renders this message
 /// verbatim beside the selector it has disabled — and disabling that control
@@ -1364,13 +1373,20 @@ async fn ensure_repository_is_in_the_tasks_team(
 /// paths is a bug (ADR-0006). `Error::invalid` and no new `ErrorCode`
 /// (seam-contract D8): the specificity that matters is in the sentence.
 ///
-/// The worktree is checked first: it is already on the row where the run count
+/// The branch is checked first: it is already on the row where the run count
 /// is a query, and when both hold it is the more useful of the two messages —
-/// it names a place on disk the user can go and look at.
+/// it names the branch the user can go and look at.
 async fn ensure_repository_is_reassignable(tx: &mut ScopedTx, task: &Task) -> Result<()> {
-    if let Some(worktree_path) = &task.worktree_path {
+    if let Some(branch) = &task.branch {
+        let repository_name: String = sqlx::query_scalar!(
+            "SELECT name FROM repositories WHERE id = ?1",
+            task.repository_id,
+        )
+        .fetch_one(&mut **tx)
+        .await?;
         return Err(Error::invalid(format!(
-            "cannot move \"{title}\" to another repository: it already has a worktree at {worktree_path}",
+            "cannot move \"{title}\" to another repository: it already has a branch, {branch}, \
+             in {repository_name}",
             title = task.title,
         )));
     }
@@ -1430,7 +1446,7 @@ where
         Task,
         r#"SELECT id, repository_id, title, plan, extra_instructions,
             board_column AS "column: BoardColumn", position, run_state AS "run_state: RunState",
-            branch, worktree_path, strategy_mode AS "strategy_mode: StrategyMode", model, effort,
+            branch, strategy_mode AS "strategy_mode: StrategyMode", model, effort,
             strategy_plan, strategy_source AS "strategy_source: StrategySource",
             strategy_updated_at AS "strategy_updated_at: DateTime<Utc>",
             created_at AS "created_at: DateTime<Utc>", updated_at AS "updated_at: DateTime<Utc>",
@@ -1478,15 +1494,13 @@ where
 /// scope.
 async fn fetch_last_run(ctx: &ServiceContext, task_id: &str) -> Result<Option<Run>> {
     let scope = ctx.scope.json();
-    // `log_path!`: every run a solo board holds was opened on this machine,
-    // which always fills it. Task 066 retires this reader.
     let run = sqlx::query_as!(
         Run,
         r#"SELECT r.id, r.task_id, r.attempt, r.kind AS "kind: RunKind",
             r.status AS "status: RunStatus", r.session_id, r.prompt,
             r.started_at AS "started_at: DateTime<Utc>", r.ended_at AS "ended_at: DateTime<Utc>",
             r.exit_class AS "exit_class: ExitClass", r.error_message, r.num_turns, r.cost_usd,
-            r.log_path AS "log_path!", r.pr_url, r.resume_after AS "resume_after: DateTime<Utc>",
+            r.pr_url, r.resume_after AS "resume_after: DateTime<Utc>",
             r.base_ref, r.model, r.effort, r.run_environment, r.input_tokens, r.output_tokens,
             r.cache_read_tokens, r.cache_creation_tokens, r.head_sha, r.base_sha
            FROM runs r
@@ -1720,7 +1734,6 @@ mod tests {
                 position: 1.5,
                 run_state: RunState::Failed,
                 branch: None,
-                worktree_path: None,
                 strategy_mode: StrategyMode::Default,
                 model: None,
                 effort: None,
@@ -1798,7 +1811,6 @@ mod tests {
                 position: 0.0,
                 run_state: RunState::Idle,
                 branch: None,
-                worktree_path: None,
                 strategy_mode: StrategyMode::Default,
                 model: None,
                 effort: None,
@@ -2109,13 +2121,11 @@ mod tests {
     async fn seed_repository(ctx: &ServiceContext, name: &str) -> String {
         let id = crate::db::new_id();
         sqlx::query(
-            "INSERT INTO repositories (id, team_id, name, path, default_branch, worktree_root,
-                allow_unattended_runs, created_at)
-             VALUES (?1, ?5, ?2, ?3, 'main', '/tmp/rimaia-worktrees', 0, ?4)",
+            "INSERT INTO repositories (id, team_id, name, default_branch, created_at)
+             VALUES (?1, ?4, ?2, 'main', ?3)",
         )
         .bind(&id)
         .bind(name)
-        .bind(format!("/tmp/{name}"))
         .bind(ctx.clock.now())
         .bind(ctx.scope.sole().expect("the harness's solo team"))
         .execute(&ctx.pool)
@@ -2138,7 +2148,6 @@ mod tests {
                 position: 1.0,
                 run_state: RunState::Idle,
                 branch: None,
-                worktree_path: None,
                 strategy_mode: mode,
                 model: model.map(str::to_string),
                 effort: None,

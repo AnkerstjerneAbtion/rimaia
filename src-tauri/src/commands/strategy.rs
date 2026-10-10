@@ -247,6 +247,7 @@ pub async fn plan_task_strategy(state: State<'_, AppState>, task_id: String) -> 
     let board = state.board_port.clone();
     let claim = runner_strategy::claim_for_planning(
         board.as_ref(),
+        &state.machine,
         &state.in_flight,
         &task_id,
         LeaseOwner::Manual,

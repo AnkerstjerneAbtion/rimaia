@@ -33,7 +33,6 @@ use rimaia_core::mcp::{
     self, Grant, GrantKind, McpHandle, RimaiaServer, RunAccess, RunGrant, RunHandles, RunScope,
     Tool,
 };
-use rimaia_core::repo;
 use rimaia_core::review;
 use rimaia_core::runner::outcome::{start_run, NewRun};
 use rimaia_core::schedule::{self, ScheduleInput};
@@ -168,6 +167,9 @@ fn expected_access(tool: Tool, kind: GrantKind) -> RunAccess {
             | Tool::SetScheduleMode
             | Tool::SetMaxConcurrency
             | Tool::SetRepositoryMaxConcurrency
+            // Task 066's: where every clone is, its cap and this runner's
+            // consent, refused with the caps it reports.
+            | Tool::ListCheckouts
             // Task 014's, and it is the first of ADR-0021 point 4's two
             // refusals rather than the second: ending a retry loop is a
             // statement about whether the work will be attempted at all, and a
@@ -668,6 +670,7 @@ async fn nothing_task_012_added_is_reachable_from_a_run_either() {
     // because a run cannot act on the answer.
     let h = TestContext::new().await;
     let repository_id = seed_repository(&h.context.pool, "rimaia", "/tmp/rimaia").await;
+    seed_checkout(&h, &repository_id).await;
     let mine = create_task(&h, &repository_id, "Mine").await;
     let run = scoped(&h, &mine.id);
 
@@ -713,9 +716,12 @@ async fn nothing_task_012_added_is_reachable_from_a_run_either() {
     assert_eq!(capacity.mode, ScheduleMode::Sequential);
     assert_eq!(capacity.max_concurrency, DEFAULT_MAX_CONCURRENCY);
     assert_eq!(
-        repo::get(&h.context, &repository_id)
+        h.machine()
+            .store
+            .get_checkout(&repository_id)
             .await
-            .expect("read the repository back")
+            .expect("read the checkout back")
+            .expect("the repository has a checkout")
             .max_concurrency,
         1,
     );
@@ -1092,6 +1098,7 @@ async fn the_operator_reads_and_writes_the_run_capacity_over_mcp() {
     // setter that stored nothing would pass a smoke test.
     let h = TestContext::new().await;
     let repository_id = seed_repository(&h.context.pool, "rimaia", "/tmp/rimaia").await;
+    seed_checkout(&h, &repository_id).await;
     let operator = RimaiaServer::new(
         h.context.clone(),
         testing::doctor::provider(),
@@ -1138,6 +1145,20 @@ async fn the_operator_reads_and_writes_the_run_capacity_over_mcp() {
         .expect("raise one repository's cap")
         .0;
     assert_eq!(repository.max_concurrency, 2);
+    // This machine's checkout, in D16.1's snake case (task 066), rather than
+    // the board's `RepositoryView`, which no longer carries the cap.
+    assert_eq!(
+        serde_json::to_value(&repository).expect("serialize"),
+        json!({
+            "repository_id": repository_id,
+            "path": "/tmp/rimaia",
+            "worktree_root": "/tmp/rimaia-worktrees",
+            "max_concurrency": 2,
+            "unattended_consent": false,
+            "on_archive": "none",
+            "on_archive_script": null,
+        })
+    );
 
     // A value no form would send is refused with a sentence rather than
     // clamped — the write side of the read-tolerant/write-strict asymmetry.
@@ -1796,7 +1817,7 @@ async fn the_run_scoped_server_reports_its_own_name() {
 
 /// The 22 tools that inspect, reconfigure or spawn on this machine: the local
 /// router, as task 041's Scope names it.
-const LOCAL_TOOLS: [&str; 22] = [
+const LOCAL_TOOLS: [&str; 23] = [
     "run_doctor",
     "dismiss_onboarding",
     "dismiss_doctor_warning",
@@ -1810,6 +1831,7 @@ const LOCAL_TOOLS: [&str; 22] = [
     "set_schedule_mode",
     "set_max_concurrency",
     "set_repository_max_concurrency",
+    "list_checkouts",
     "list_schedules",
     "create_schedule",
     "update_schedule",
@@ -2139,6 +2161,19 @@ async fn seed_repository(pool: &SqlitePool, name: &str, path: &str) -> String {
     .await
     .expect("seed a repository");
     id
+}
+
+/// This machine's checkout of a seeded repository, for a tool that reads or
+/// writes one (task 066).
+async fn seed_checkout(h: &TestContext, repository_id: &str) {
+    h.machine()
+        .store
+        .insert_checkout(&testing::machine::checkout_at(
+            repository_id,
+            std::path::Path::new("/tmp/rimaia"),
+        ))
+        .await
+        .expect("seed a checkout");
 }
 
 async fn create_task(h: &TestContext, repository_id: &str, title: &str) -> rimaia_core::db::Task {

@@ -98,8 +98,9 @@ impl PreflightSummary {
 
 /// What `schedule_id` would do, against the board as it is right now.
 ///
-/// The schedule is this machine's, from `machine`; the plan is the board's,
-/// read through `board` with the same [`selection::plan`] the queue calls.
+/// The schedule and the consent are this machine's, from `machine`; the plan is
+/// the board's, read through `board` with the same [`selection::plan`] the queue
+/// calls.
 pub async fn preview(
     machine: &MachineContext,
     board: &ServiceContext,
@@ -127,6 +128,10 @@ pub async fn preview(
         closes_at,
         mode: schedule.mode,
         max_concurrency: schedule.max_concurrency,
-        plan: selection::plan(board).await?,
+        plan: selection::plan(
+            board,
+            &crate::machine::consented_repositories(machine).await?,
+        )
+        .await?,
     })
 }

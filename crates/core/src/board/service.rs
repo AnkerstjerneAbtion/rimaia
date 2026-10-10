@@ -142,7 +142,7 @@ pub async fn run_context(
 }
 
 /// Writes `tasks.branch` and nothing else: the worktree path is the runner's
-/// (ADR-0028 point 2). No production caller until task 066.
+/// (ADR-0028 point 2). Its production caller is `worktree::prepare` (task 066).
 pub async fn record_branch(ctx: &ServiceContext, lease: &LeaseRef, branch: &str) -> Result<()> {
     let ctx = &lease_context(ctx, lease)?;
     ensure_task(ctx, &lease.task_id).await?;

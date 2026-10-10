@@ -176,6 +176,10 @@ pub enum Tool {
     SetMaxConcurrency,
     SetRepositoryMaxConcurrency,
 
+    /// Task 066's. This machine's clone of each repository, which
+    /// `list_repositories` carried until no board DTO held a path.
+    ListCheckouts,
+
     /// Task 014's one. `retry_task_now` is deliberately **not** here — see
     /// `run_access` and seam-contract D23.
     GiveUpOnTask,
@@ -280,7 +284,7 @@ pub enum RunAccess {
 
 impl Tool {
     /// Every tool with a recorded decision, so a test can walk the table.
-    pub const ALL: [Tool; 63] = [
+    pub const ALL: [Tool; 64] = [
         Tool::AddTaskLink,
         Tool::CreateTask,
         Tool::GetBaseInstructions,
@@ -304,6 +308,7 @@ impl Tool {
         Tool::SetScheduleMode,
         Tool::SetMaxConcurrency,
         Tool::SetRepositoryMaxConcurrency,
+        Tool::ListCheckouts,
         Tool::GiveUpOnTask,
         Tool::RunDoctor,
         Tool::DismissOnboarding,
@@ -373,6 +378,7 @@ impl Tool {
             Tool::SetScheduleMode => "set_schedule_mode",
             Tool::SetMaxConcurrency => "set_max_concurrency",
             Tool::SetRepositoryMaxConcurrency => "set_repository_max_concurrency",
+            Tool::ListCheckouts => "list_checkouts",
             Tool::GiveUpOnTask => "give_up_on_task",
             Tool::RunDoctor => "run_doctor",
             Tool::DismissOnboarding => "dismiss_onboarding",
@@ -527,6 +533,11 @@ impl Tool {
             | Tool::SetScheduleMode
             | Tool::SetMaxConcurrency
             | Tool::SetRepositoryMaxConcurrency
+            // Task 066's, refused with the caps it reports: where every clone
+            // lives on this machine, each one's cap and this runner's consent
+            // are the same run configuration, and the paths are the
+            // reconnaissance `run_doctor` is refused for below.
+            | Tool::ListCheckouts
             // Task 014's, and it is the *first* kind of permanent refusal
             // ADR-0021 point 4 names rather than the second: giving up on a
             // task ends a retry loop, and a run that could end its own would

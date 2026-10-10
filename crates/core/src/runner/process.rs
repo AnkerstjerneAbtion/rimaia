@@ -79,7 +79,7 @@ use crate::db::settings::{self, RunEnvironment};
 use crate::db::Repository;
 use crate::db::{new_id, ExitClass, Run, RunKind, RunStatus};
 use crate::error::{Error, Result};
-use crate::machine::MachineContext;
+use crate::machine::{Checkout, MachineContext};
 use crate::mcp::{Grant, RunGrant, RunHandles, Tool, RUN_MCP_SERVER_NAME};
 use crate::paths::AppPaths;
 use crate::repo;
@@ -667,18 +667,25 @@ pub struct Attempt<'a> {
 /// the lock past this point would turn a per-repository cap of two into a
 /// sequential queue wearing a parallel label.
 async fn prepare_worktree(
-    ctx: &ServiceContext,
+    phases: &Phases<'_>,
     in_flight: Option<&InFlight>,
     repository_id: &str,
-    task_id: &str,
 ) -> Result<Worktree> {
+    let prepare = || {
+        worktree::prepare(
+            phases.prepare_ctx,
+            phases.machine,
+            phases.board,
+            phases.lease,
+        )
+    };
     match in_flight {
         Some(registry) => {
             let lock = registry.preparation_lock(repository_id);
             let _held = lock.lock().await;
-            worktree::prepare(ctx, task_id).await
+            prepare().await
         }
-        None => worktree::prepare(ctx, task_id).await,
+        None => prepare().await,
     }
 }
 
@@ -837,10 +844,12 @@ async fn run_implementation(
     resumed: Option<String>,
     context: &RunContext,
 ) -> Result<FinishReceipt> {
+    // `prepare_ctx` is reached through `phases` by `prepare_worktree`, its one
+    // use until task 044.
     let Phases {
         board,
         machine,
-        prepare_ctx,
+        prepare_ctx: _,
         paths,
         config,
         lease,
@@ -849,10 +858,12 @@ async fn run_implementation(
     } = *phases;
     let task_id = lease.task_id.clone();
 
-    released(
+    // This runner's consent and its checkout: the clone the worktree is made
+    // from and the credential the child spawns with (task 066).
+    let checkout = released(
         board,
         lease,
-        repo::ensure_unattended_runs_allowed(&context.repository),
+        repo::ensure_unattended_runs_allowed(machine, &context.repository).await,
     )
     .await?;
     // Runner-owned, and read once, so the run is negotiated against the same
@@ -900,13 +911,7 @@ async fn run_implementation(
     let worktree = released(
         board,
         lease,
-        prepare_worktree(
-            prepare_ctx,
-            request.in_flight.as_ref(),
-            &context.repository.id,
-            &task_id,
-        )
-        .await,
+        prepare_worktree(phases, request.in_flight.as_ref(), &context.repository.id).await,
     )
     .await?;
 
@@ -1003,7 +1008,7 @@ async fn run_implementation(
     let credentials = released(
         board,
         lease,
-        repository_credentials(config, repository).await,
+        repository_credentials(config, repository, &checkout).await,
     )
     .await?;
 
@@ -1242,14 +1247,13 @@ impl Phases<'_> {
         let run_environment = settings::run_environment(self.machine)
             .await
             .map_err(|error| error.to_string())?;
-        repo::ensure_unattended_runs_allowed(&context.repository)
+        let checkout = repo::ensure_unattended_runs_allowed(self.machine, &context.repository)
+            .await
             .map_err(|error| error.to_string())?;
 
-        let worktree = context
-            .task
-            .task
-            .worktree_path
-            .as_deref()
+        let worktree = crate::machine::local::worktree_path(self.machine, task_id)
+            .await
+            .map_err(|error| error.to_string())?
             .map(PathBuf::from)
             .filter(|path| path.is_dir())
             .ok_or_else(|| {
@@ -1423,7 +1427,7 @@ impl Phases<'_> {
         };
         prepared.plan = plan;
 
-        prepared.credentials = repository_credentials(config, repository)
+        prepared.credentials = repository_credentials(config, repository, &checkout)
             .await
             .map_err(|error| error.to_string())?;
         probe_cli(config.provider.as_ref(), &config.program)
@@ -1437,7 +1441,7 @@ impl Phases<'_> {
     /// through `finish_run`, so the exit table lands the task and the history
     /// shows why (ADR-0017's 2026-10-09 amendment).
     ///
-    /// The row gets an empty transcript at its `log_path`, so
+    /// The row gets an empty transcript at its derived path, so
     /// `startup::missing_run_logs` does not report it on every launch. Only a
     /// row that cannot be written falls back to `release`.
     async fn unspawned(&self, pending: &Pending, outcome: RunOutcome) -> Result<FinishReceipt> {
@@ -2158,8 +2162,9 @@ impl Drop for ChildProcess {
 pub(crate) async fn repository_credentials(
     config: &RunnerConfig,
     repository: &Repository,
+    checkout: &Checkout,
 ) -> Result<ChildEnvironment> {
-    if !repo::has_credential(repository) {
+    if !repo::has_credential(checkout) {
         return Ok(ChildEnvironment::ambient());
     }
 

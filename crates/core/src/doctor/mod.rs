@@ -491,9 +491,10 @@ impl Environment {
 /// readable. Both mean a store is unavailable, which no remediation string on
 /// a panel can help with.
 ///
-/// The port and the dismissals are this machine's, from `machine`. The
-/// repositories whose clones it checks are still listed off the board through
-/// `board`, by [`repo::list`], until task 066 reads them from the checkouts.
+/// The port, the dismissals and every clone it checks are this machine's, from
+/// `machine`. The board is read through `board`, by [`repo::list`], only for
+/// each repository's name; a repository this machine has no checkout of has
+/// nothing here to check, and gets no row (task 066).
 pub async fn run(
     machine: &MachineContext,
     board: &ServiceContext,
@@ -526,8 +527,11 @@ pub async fn run(
     // answer a Re-check click with two dozen simultaneous `git` processes. The
     // doctor has seconds to spend and no deadline to meet.
     for repository in &repositories {
-        results.push(checks::repository_path(repository).await?);
-        results.push(checks::github_cli(repository, &environment.programs.gh).await?);
+        let Some(checkout) = machine.store.get_checkout(&repository.id).await? else {
+            continue;
+        };
+        results.push(checks::repository_path(repository, &checkout).await?);
+        results.push(checks::github_cli(repository, &checkout, &environment.programs.gh).await?);
     }
 
     Ok(DoctorReport::new(results, dismissals))

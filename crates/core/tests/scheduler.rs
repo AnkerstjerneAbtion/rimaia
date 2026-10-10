@@ -156,6 +156,7 @@ async fn the_queue_never_claims_another_teams_task() {
     let their_repository = TempRepo::init();
     let registered = repo::register(
         &as_b,
+        fixture.machine(),
         &fixture.paths.worktrees_dir(),
         NewRepository {
             path: their_repository.path().to_string_lossy().into_owned(),
@@ -165,7 +166,7 @@ async fn the_queue_never_claims_another_teams_task() {
     )
     .await
     .expect("register team B's repository");
-    repo::set_allow_unattended_runs(&as_b, &registered.id, true)
+    repo::set_allow_unattended_runs(&as_b, fixture.machine(), &registered.id, true)
         .await
         .expect("team B opts in");
     let theirs = tasks::create_task(
@@ -234,7 +235,7 @@ async fn a_to_b_to_c_run_in_dependency_order_in_one_queue_pass() {
 
     // Before anything runs: two of the three cards are held, each naming its
     // own blocker, and only A is claimable.
-    let plan = scheduler::selection::plan(fixture.ctx())
+    let plan = scheduler::selection::plan(fixture.ctx(), &fixture.consented().await)
         .await
         .expect("the queue's own plan");
     assert_eq!(
@@ -484,7 +485,9 @@ async fn a_repository_without_the_opt_in_is_skipped_with_the_reason_rather_than_
     assert_eq!(fixture.cli.started(), vec![runnable]);
     assert_eq!(fixture.task(&locked).await.run_state, RunState::Idle);
 
-    let plan = scheduler::plan(fixture.ctx()).await.expect("read the plan");
+    let plan = scheduler::plan(fixture.ctx(), &fixture.consented().await)
+        .await
+        .expect("read the plan");
     let entry = plan
         .iter()
         .find(|entry| entry.task_id == locked)
@@ -513,7 +516,9 @@ async fn the_plan_numbers_what_the_queue_will_actually_start() {
     let locked = fixture.add_task_in(&locked_repository, "Locked").await;
     let second = fixture.add_task("Bravo").await;
 
-    let plan = scheduler::plan(fixture.ctx()).await.expect("read the plan");
+    let plan = scheduler::plan(fixture.ctx(), &fixture.consented().await)
+        .await
+        .expect("read the plan");
     let positions: Vec<(&str, Option<i64>)> = plan
         .iter()
         .map(|entry| (entry.task_id.as_str(), entry.queue_position))
@@ -923,7 +928,7 @@ async fn a_dependent_task_never_starts_before_its_dependency_succeeds_even_with_
     );
     assert_eq!(fixture.task(&dependent).await.run_state, RunState::Blocked);
     assert_eq!(
-        scheduler::plan(fixture.ctx())
+        scheduler::plan(fixture.ctx(), &fixture.consented().await)
             .await
             .expect("read the plan")
             .iter()
@@ -1613,7 +1618,7 @@ async fn reopening_after_a_crash_shows_one_interrupted_task_and_leaves_the_rest_
     .await
     .expect("open the run the crash interrupted");
 
-    let report = startup::survey(fixture.ctx())
+    let report = startup::survey(fixture.ctx(), fixture.machine(), &fixture.paths)
         .await
         .expect("survey the database");
     assert_eq!(
@@ -1678,7 +1683,7 @@ async fn a_task_claimed_before_its_run_row_existed_still_lands_failed() {
         .await
         .expect("claim the task");
 
-    let report = startup::survey(fixture.ctx())
+    let report = startup::survey(fixture.ctx(), fixture.machine(), &fixture.paths)
         .await
         .expect("survey the database");
     let reconciled = scheduler::reconcile_interrupted(fixture.ctx(), &report)
@@ -1704,7 +1709,7 @@ async fn a_task_a_crash_caught_still_queued_is_not_stranded() {
     let crashed = fixture.add_task("Alpha").await;
     walk_to(&fixture, &crashed, RunState::Queued).await;
 
-    let report = startup::survey(fixture.ctx())
+    let report = startup::survey(fixture.ctx(), fixture.machine(), &fixture.paths)
         .await
         .expect("survey the database");
     assert_eq!(
@@ -1730,7 +1735,9 @@ async fn a_task_a_crash_caught_still_queued_is_not_stranded() {
     // The queue must not spend the rest of the night trying to claim it
     // again — it now reads exactly like any other task the user has to act
     // on before it runs.
-    let plan = scheduler::plan(fixture.ctx()).await.expect("read the plan");
+    let plan = scheduler::plan(fixture.ctx(), &fixture.consented().await)
+        .await
+        .expect("read the plan");
     assert_eq!(
         plan.iter()
             .find(|entry| entry.task_id == crashed)
@@ -1752,7 +1759,7 @@ async fn reconciling_a_task_another_repair_already_settled_still_closes_its_run(
     scheduler::claim(fixture.ctx(), &crashed)
         .await
         .expect("claim the task");
-    let report = startup::survey(fixture.ctx())
+    let report = startup::survey(fixture.ctx(), fixture.machine(), &fixture.paths)
         .await
         .expect("survey the database");
     start_run(
@@ -1794,7 +1801,7 @@ async fn a_clean_previous_exit_leaves_the_reconciliation_nothing_to_do() {
     let fixture = Fixture::new().await;
     fixture.add_task("Alpha").await;
 
-    let report = startup::survey(fixture.ctx())
+    let report = startup::survey(fixture.ctx(), fixture.machine(), &fixture.paths)
         .await
         .expect("survey the database");
 
@@ -1818,14 +1825,16 @@ async fn a_reconciled_task_is_not_picked_up_again_by_the_queue() {
     scheduler::claim(fixture.ctx(), &crashed)
         .await
         .expect("claim the task");
-    let report = startup::survey(fixture.ctx())
+    let report = startup::survey(fixture.ctx(), fixture.machine(), &fixture.paths)
         .await
         .expect("survey the database");
     scheduler::reconcile_interrupted(fixture.ctx(), &report)
         .await
         .expect("reconcile");
 
-    let plan = scheduler::plan(fixture.ctx()).await.expect("read the plan");
+    let plan = scheduler::plan(fixture.ctx(), &fixture.consented().await)
+        .await
+        .expect("read the plan");
 
     assert_eq!(
         plan.iter()
@@ -1879,7 +1888,7 @@ async fn a_launch_offers_a_crashed_run_for_resume_and_starts_nothing_until_the_q
         .await
         .expect("quitting always stops the queue");
 
-    let report = startup::survey(fixture.ctx())
+    let report = startup::survey(fixture.ctx(), fixture.machine(), &fixture.paths)
         .await
         .expect("survey the database");
     scheduler::reconcile_interrupted(fixture.ctx(), &report)
@@ -1896,7 +1905,7 @@ async fn a_launch_offers_a_crashed_run_for_resume_and_starts_nothing_until_the_q
         .expect("an interruption is resumed once, immediately");
     assert!(due <= fixture.harness.clock.now(), "{due} is not yet due");
     assert_eq!(
-        scheduler::plan(fixture.ctx())
+        scheduler::plan(fixture.ctx(), &fixture.consented().await)
             .await
             .expect("read the plan")
             .iter()
@@ -2353,7 +2362,7 @@ async fn a_waiting_retry_task_releases_its_slot_so_another_task_runs_while_it_wa
         RunState::WaitingRetry,
     );
     assert_eq!(
-        scheduler::plan(fixture.ctx())
+        scheduler::plan(fixture.ctx(), &fixture.consented().await)
             .await
             .expect("read the plan")
             .iter()
@@ -3317,7 +3326,7 @@ async fn a_schedule_firing_tonight_does_not_resume_a_run_last_night_crashed_on()
     scheduler::set_queue_state(fixture.machine(), QueueState::Paused)
         .await
         .expect("quitting always stops the queue");
-    let report = startup::survey(fixture.ctx())
+    let report = startup::survey(fixture.ctx(), fixture.machine(), &fixture.paths)
         .await
         .expect("survey the database");
     scheduler::reconcile_interrupted(fixture.ctx(), &report)
@@ -3331,7 +3340,7 @@ async fn a_schedule_firing_tonight_does_not_resume_a_run_last_night_crashed_on()
         RunState::WaitingRetry
     );
     assert_eq!(
-        scheduler::plan(fixture.ctx())
+        scheduler::plan(fixture.ctx(), &fixture.consented().await)
             .await
             .expect("read the plan")
             .iter()
@@ -3402,7 +3411,7 @@ async fn a_schedule_that_does_open_a_window_resumes_exactly_what_start_would() {
     )
     .await
     .expect("open the run the crash interrupted");
-    let report = startup::survey(fixture.ctx())
+    let report = startup::survey(fixture.ctx(), fixture.machine(), &fixture.paths)
         .await
         .expect("survey the database");
     scheduler::reconcile_interrupted(fixture.ctx(), &report)
@@ -3646,6 +3655,21 @@ fn position_of(positions: &[(&str, Option<i64>)], task_id: &str) -> Option<i64> 
 // A board with runnable tasks on it
 // ---------------------------------------------------------------------------
 
+/// A task as this file reads it: the board's row, and this machine's record of
+/// its worktree.
+struct TaskOnThisMachine {
+    task: Task,
+    worktree_path: Option<String>,
+}
+
+impl std::ops::Deref for TaskOnThisMachine {
+    type Target = Task;
+
+    fn deref(&self) -> &Task {
+        &self.task
+    }
+}
+
 struct Fixture {
     harness: TestContext,
     /// Held for their `Drop`; the paths below point inside them.
@@ -3746,7 +3770,7 @@ impl Fixture {
 
     /// ADR-0010's per-repository opt-out, for this fixture's own repository.
     async fn opt_repository_out_of_the_cap(&self, limit: i64) {
-        repo::set_max_concurrency(self.ctx(), &self.repository_id, limit)
+        repo::set_max_concurrency(self.ctx(), self.machine(), &self.repository_id, limit)
             .await
             .expect("raise this repository's own cap");
     }
@@ -3756,6 +3780,7 @@ impl Fixture {
         let repository = TempRepo::init();
         let registered = repo::register(
             self.ctx(),
+            self.machine(),
             &self.paths.worktrees_dir(),
             NewRepository {
                 path: repository.path().to_string_lossy().into_owned(),
@@ -3768,7 +3793,7 @@ impl Fixture {
         self._repositories.push(repository);
 
         if opt_in {
-            repo::set_allow_unattended_runs(self.ctx(), &registered.id, true)
+            repo::set_allow_unattended_runs(self.ctx(), self.machine(), &registered.id, true)
                 .await
                 .expect("ADR-0012's per-repository opt-in");
         }
@@ -3882,8 +3907,21 @@ impl Fixture {
             .expect("read the task")
     }
 
-    async fn task(&self, task_id: &str) -> Task {
-        self.detail(task_id).await.task
+    /// The task row, with where this machine records its worktree beside it:
+    /// the path left the board's row in task 066 for the machine store.
+    async fn task(&self, task_id: &str) -> TaskOnThisMachine {
+        TaskOnThisMachine {
+            task: self.detail(task_id).await.task,
+            worktree_path: self.harness.worktree_path(task_id).await,
+        }
+    }
+
+    /// Every repository this runner consented to, read once per pass as the
+    /// queue reads it (task 066).
+    async fn consented(&self) -> std::collections::BTreeSet<String> {
+        rimaia_core::machine::consented_repositories(self.machine())
+            .await
+            .expect("read the consent")
     }
 
     /// The run id a card would resolve for this task — `get_task(..).last_run`,

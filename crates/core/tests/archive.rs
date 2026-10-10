@@ -29,7 +29,7 @@ use rimaia_core::db::{BoardColumn, OnArchive, Repository, RunKind, RunState, Tas
 use rimaia_core::repo::{self, NewRepository};
 use rimaia_core::tasks::{self, ArchiveFilter, NewTask, TaskFilter};
 use rimaia_core::testing::{TempRepo, TestContext};
-use rimaia_core::{worktree, ServiceContext};
+use rimaia_core::ServiceContext;
 
 /// The last component of the fixture's `worktree_root`. The space is
 /// load-bearing — see the module docs.
@@ -130,20 +130,20 @@ async fn archiving_a_queued_task_removes_it_from_the_next_selection() {
     // the claim is about the queue and the queue is what would have run it
     // tonight (seam-contract D26.1).
     let f = Fixture::new().await;
-    repo::set_allow_unattended_runs(f.ctx(), &f.repository.id, true)
+    repo::set_allow_unattended_runs(f.ctx(), f.machine(), &f.repository.id, true)
         .await
         .expect("opt the fixture repository in");
     let stays = f.task("Run this one").await;
     let goes = f.task("Not any more").await;
 
-    let before = rimaia_core::scheduler::selection::plan(f.ctx())
+    let before = rimaia_core::scheduler::selection::plan(f.ctx(), &f.consented().await)
         .await
         .expect("plan");
     assert_eq!(before.len(), 2);
 
     f.archive(&goes.id).await;
 
-    let after = rimaia_core::scheduler::selection::plan(f.ctx())
+    let after = rimaia_core::scheduler::selection::plan(f.ctx(), &f.consented().await)
         .await
         .expect("plan");
     assert_eq!(after.len(), 1);
@@ -184,7 +184,9 @@ async fn an_archived_task_keeps_its_runs_its_links_and_its_dependency_edges() {
     assert_eq!(detail.links.len(), 1);
     assert!(detail.task.archived_at.is_some());
     assert!(
-        rimaia_core::runs::get_run(f.ctx(), &run_id).await.is_ok(),
+        rimaia_core::runs::get_run(f.ctx(), &f.paths, &run_id)
+            .await
+            .is_ok(),
         "archiving must not touch the runs table",
     );
 
@@ -256,7 +258,7 @@ async fn the_remove_worktree_preset_reclaims_the_checkout() {
     let f = Fixture::new().await;
     f.set_on_archive(OnArchive::RemoveWorktree, None).await;
     let task = f.task("Finished with this").await;
-    let prepared = worktree::prepare(f.ctx(), &task.id).await.expect("prepare");
+    let prepared = f.harness.prepare_worktree(&task.id).await.expect("prepare");
     assert!(Path::new(&prepared.path).exists());
 
     let archived = f.archive(&task.id).await;
@@ -266,7 +268,7 @@ async fn the_remove_worktree_preset_reclaims_the_checkout() {
         other => panic!("expected the worktree to be removed, got {other:?}"),
     }
     assert!(!Path::new(&prepared.path).exists());
-    assert!(f.reload(&task.id).await.worktree_path.is_none());
+    assert!(f.harness.worktree_path(&task.id).await.is_none());
 }
 
 #[tokio::test]
@@ -276,7 +278,7 @@ async fn the_remove_worktree_preset_refuses_a_dirty_worktree_and_archives_anyway
     let f = Fixture::new().await;
     f.set_on_archive(OnArchive::RemoveWorktree, None).await;
     let task = f.task("Has a stray file in it").await;
-    let prepared = worktree::prepare(f.ctx(), &task.id).await.expect("prepare");
+    let prepared = f.harness.prepare_worktree(&task.id).await.expect("prepare");
     tokio::fs::write(Path::new(&prepared.path).join("scratch.txt"), "notes")
         .await
         .expect("dirty the worktree");
@@ -309,10 +311,12 @@ async fn archiving_without_a_machine_reports_nothing_and_leaves_the_worktree() {
     f.set_on_archive(OnArchive::RemoveWorktree, None).await;
     let single = f.task("Archived alone with no machine").await;
     let bulk = f.task("Archived in bulk with no machine").await;
-    let single_worktree = worktree::prepare(f.ctx(), &single.id)
+    let single_worktree = f
+        .harness
+        .prepare_worktree(&single.id)
         .await
         .expect("prepare");
-    let bulk_worktree = worktree::prepare(f.ctx(), &bulk.id).await.expect("prepare");
+    let bulk_worktree = f.harness.prepare_worktree(&bulk.id).await.expect("prepare");
 
     let archived = tasks::archive_task(f.ctx(), None, &single.id)
         .await
@@ -330,7 +334,7 @@ async fn archiving_without_a_machine_reports_nothing_and_leaves_the_worktree() {
         assert!(after.archived_at.is_some(), "{}", task.title);
         assert!(Path::new(&prepared.path).exists(), "{}", task.title);
         assert_eq!(
-            after.worktree_path.as_deref(),
+            f.harness.worktree_path(&task.id).await.as_deref(),
             Some(prepared.path.as_str()),
             "{}",
             task.title
@@ -378,7 +382,7 @@ async fn a_script_runs_with_the_documented_environment_and_the_repository_as_its
         .await;
     f.set_on_archive(OnArchive::Script, Some(script)).await;
     let task = f.task("Tear down the container").await;
-    let prepared = worktree::prepare(f.ctx(), &task.id).await.expect("prepare");
+    let prepared = f.harness.prepare_worktree(&task.id).await.expect("prepare");
 
     // Set on *this* process, so the test proves the strip rather than the
     // absence of a variable nobody set.
@@ -428,7 +432,7 @@ async fn a_script_runs_with_the_documented_environment_and_the_repository_as_its
         .expect("the script reported its cwd");
     assert_eq!(
         canonical(Path::new(cwd)),
-        canonical(Path::new(&f.repository.path)),
+        canonical(Path::new(&f.reload_checkout().await.path)),
     );
 }
 
@@ -512,6 +516,7 @@ async fn a_script_mode_without_a_path_is_refused() {
 
     let error = rimaia_core::archive::set_repository_on_archive(
         f.ctx(),
+        f.machine(),
         &f.repository.id,
         OnArchive::Script,
         None,
@@ -533,6 +538,7 @@ async fn a_script_path_that_is_not_executable_is_refused_at_write_time() {
 
     let error = rimaia_core::archive::set_repository_on_archive(
         f.ctx(),
+        f.machine(),
         &f.repository.id,
         OnArchive::Script,
         Some(path.to_string_lossy().into_owned()),
@@ -541,7 +547,7 @@ async fn a_script_path_that_is_not_executable_is_refused_at_write_time() {
     .expect_err("a file with no executable bit must be refused");
 
     assert!(error.to_string().contains("chmod +x"), "{error}");
-    assert_eq!(f.reload_repository().await.on_archive, OnArchive::None);
+    assert_eq!(f.reload_checkout().await.on_archive, OnArchive::None);
 }
 
 #[cfg(unix)]
@@ -552,13 +558,13 @@ async fn switching_away_from_script_clears_the_stored_path() {
     let f = Fixture::new().await;
     let script = f.script("cleanup.sh", "#!/bin/sh\nexit 0\n").await;
     f.set_on_archive(OnArchive::Script, Some(script)).await;
-    assert!(f.reload_repository().await.on_archive_script.is_some());
+    assert!(f.reload_checkout().await.on_archive_script.is_some());
 
     f.set_on_archive(OnArchive::RemoveWorktree, None).await;
 
-    let repository = f.reload_repository().await;
-    assert_eq!(repository.on_archive, OnArchive::RemoveWorktree);
-    assert_eq!(repository.on_archive_script, None);
+    let checkout = f.reload_checkout().await;
+    assert_eq!(checkout.on_archive, OnArchive::RemoveWorktree);
+    assert_eq!(checkout.on_archive_script, None);
 }
 
 // ---------------------------------------------------------------------------
@@ -597,6 +603,7 @@ impl Fixture {
         let harness = TestContext::new().await;
         let repository = repo::register(
             &harness.context,
+            harness.machine(),
             worktrees.path(),
             NewRepository {
                 path: source
@@ -667,6 +674,7 @@ impl Fixture {
     async fn set_on_archive(&self, mode: OnArchive, script: Option<String>) {
         rimaia_core::archive::set_repository_on_archive(
             self.ctx(),
+            self.machine(),
             &self.repository.id,
             mode,
             script,
@@ -695,10 +703,22 @@ impl Fixture {
             .task
     }
 
-    async fn reload_repository(&self) -> Repository {
-        repo::get(self.ctx(), &self.repository.id)
+    /// This machine's checkout of the fixture repository, where its archive
+    /// policy and its clone are since task 066.
+    async fn reload_checkout(&self) -> rimaia_core::machine::Checkout {
+        self.machine()
+            .store
+            .get_checkout(&self.repository.id)
             .await
-            .expect("read the repository back")
+            .expect("read the checkout")
+            .expect("the fixture repository has a checkout")
+    }
+
+    /// Every repository this runner consented to, as the queue reads it.
+    async fn consented(&self) -> std::collections::BTreeSet<String> {
+        rimaia_core::machine::consented_repositories(self.machine())
+            .await
+            .expect("read the consent")
     }
 
     async fn board(&self) -> Vec<rimaia_core::tasks::TaskSummary> {

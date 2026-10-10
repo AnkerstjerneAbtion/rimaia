@@ -506,7 +506,9 @@ async fn a_digest_after_six_tasks_reports_each_outcome() {
     f.run_row(RunRow::new(&uncosted, 1).window(-20, Some(-10)).cost(None))
         .await;
 
-    let digest = review::digest(f.ctx()).await.expect("digest");
+    let digest = review::digest(f.ctx(), Some(f.machine()))
+        .await
+        .expect("digest");
 
     let entry = |task_id: &str, title: &str, column, outcome| DigestEntry {
         task_id: task_id.to_string(),
@@ -691,7 +693,9 @@ async fn failures_and_blocked_chains_lead_the_digest() {
         .expect("edge");
     f.task_in(&unopted, "Skipped", BoardColumn::Ready).await;
 
-    let digest = review::digest(f.ctx()).await.expect("digest");
+    let digest = review::digest(f.ctx(), Some(f.machine()))
+        .await
+        .expect("digest");
 
     assert_eq!(
         digest
@@ -734,7 +738,9 @@ async fn a_task_with_three_runs_in_the_window_is_one_entry_with_the_newest_rows_
     f.run_row(RunRow::new(&id, 3).window(-100, Some(-90)).cost(Some(1.5)))
         .await;
 
-    let digest = review::digest(f.ctx()).await.expect("digest");
+    let digest = review::digest(f.ctx(), Some(f.machine()))
+        .await
+        .expect("digest");
 
     assert_eq!(digest.entries.len(), 1);
     let entry = &digest.entries[0];
@@ -778,7 +784,9 @@ async fn a_looped_task_is_one_digest_entry() {
     f.run_row(RunRow::new(&plain, 1).window(-100, Some(-90)))
         .await;
 
-    let digest = review::digest(f.ctx()).await.expect("digest");
+    let digest = review::digest(f.ctx(), Some(f.machine()))
+        .await
+        .expect("digest");
 
     let looped_entries: Vec<&DigestEntry> = digest
         .entries
@@ -853,7 +861,9 @@ async fn a_board_with_only_blocked_or_unopted_ready_tasks_has_an_empty_digest() 
         .expect("edge");
     f.task_in(&unopted, "Unopted", BoardColumn::Ready).await;
 
-    let digest = review::digest(f.ctx()).await.expect("digest");
+    let digest = review::digest(f.ctx(), Some(f.machine()))
+        .await
+        .expect("digest");
 
     assert_eq!(digest.entries, vec![]);
     assert_eq!(
@@ -885,7 +895,9 @@ async fn a_run_that_ended_at_or_before_the_marker_is_not_in_the_digest() {
     .await;
     review::mark_seen(f.ctx(), marker).await.expect("mark seen");
 
-    let digest = review::digest(f.ctx()).await.expect("digest");
+    let digest = review::digest(f.ctx(), Some(f.machine()))
+        .await
+        .expect("digest");
 
     assert_eq!(digest.since, marker);
     assert_eq!(
@@ -912,7 +924,9 @@ async fn without_a_marker_the_digest_covers_the_last_24_hours() {
     f.run_row(RunRow::new(&outside, 1).window(-1600, Some(-1500)))
         .await;
 
-    let digest = review::digest(f.ctx()).await.expect("digest");
+    let digest = review::digest(f.ctx(), Some(f.machine()))
+        .await
+        .expect("digest");
 
     assert_eq!(digest.since, test_epoch() - Duration::hours(24));
     assert_eq!(
@@ -933,7 +947,9 @@ async fn archived_tasks_are_not_in_the_digest() {
     f.set(&id, "archived_at = '2026-08-19T00:00:00+00:00'")
         .await;
 
-    let digest = review::digest(f.ctx()).await.expect("digest");
+    let digest = review::digest(f.ctx(), Some(f.machine()))
+        .await
+        .expect("digest");
 
     assert_eq!(digest.entries, vec![]);
     assert_eq!(digest.totals.runs, 0);
@@ -1007,12 +1023,16 @@ async fn the_review_that_empties_the_queue_leaves_an_empty_digest() {
         tasks::set_task_dependencies(f.ctx(), &blocked, &[upstream])
             .await
             .expect("edge");
-        let before = review::digest(f.ctx()).await.expect("digest");
+        let before = review::digest(f.ctx(), Some(f.machine()))
+            .await
+            .expect("digest");
         assert_eq!(before.entries.len(), 3, "the night had something to say");
 
         f.decide(verdict, &id, "A note.").await.expect("decide");
 
-        let after = review::digest(f.ctx()).await.expect("digest");
+        let after = review::digest(f.ctx(), Some(f.machine()))
+            .await
+            .expect("digest");
         assert_eq!(after.entries, vec![], "{verdict:?}");
         assert_eq!(after.totals.runs, 0, "{verdict:?}");
     }
@@ -1091,8 +1111,9 @@ mod end_to_end {
 
         f.run(&cli, &id).await.expect("the first run");
         let reviewed = f.reload(&id).await;
+        let reviewed_worktree = f.harness.worktree_path(&id).await;
         assert_eq!(reviewed.column, BoardColumn::InReview);
-        let checkout = PathBuf::from(reviewed.worktree_path.clone().expect("a worktree"));
+        let checkout = PathBuf::from(reviewed_worktree.clone().expect("a worktree"));
         let branch = reviewed.branch.clone().expect("a branch");
         let reviewed_commit = git(&checkout, &["rev-parse", "HEAD"]);
 
@@ -1102,7 +1123,7 @@ mod end_to_end {
                 .expect("request changes");
 
         assert_eq!(outcome.task.column, BoardColumn::Ready);
-        assert_eq!(outcome.task.worktree_path, reviewed.worktree_path);
+        assert_eq!(f.harness.worktree_path(&id).await, reviewed_worktree);
         assert_eq!(outcome.task.branch, reviewed.branch);
         assert_eq!(outcome.set_aside_branch, None);
         assert!(checkout.exists());
@@ -1111,7 +1132,8 @@ mod end_to_end {
 
         let after = f.reload(&id).await;
         assert_eq!(
-            after.worktree_path, reviewed.worktree_path,
+            f.harness.worktree_path(&id).await,
+            reviewed_worktree,
             "the same directory"
         );
         assert_eq!(
@@ -1155,7 +1177,8 @@ mod end_to_end {
         f.run(&cli, &id).await.expect("the first run");
         f.run(&cli, &dependent).await.expect("the dependent's run");
         let reviewed = f.reload(&id).await;
-        let checkout = PathBuf::from(reviewed.worktree_path.clone().expect("a worktree"));
+        let reviewed_worktree = f.harness.worktree_path(&id).await;
+        let checkout = PathBuf::from(reviewed_worktree.clone().expect("a worktree"));
         let branch = reviewed.branch.clone().expect("a branch");
         let rejected_commit = git(&checkout, &["rev-parse", "HEAD"]);
 
@@ -1164,7 +1187,7 @@ mod end_to_end {
             .expect("reject");
 
         assert_eq!(outcome.task.branch, None);
-        assert_eq!(outcome.task.worktree_path, None);
+        assert_eq!(f.harness.worktree_path(&id).await, None);
         assert_eq!(outcome.task.column, BoardColumn::Ready);
         assert_eq!(outcome.set_aside_branch.as_deref(), Some(branch.as_str()));
         assert!(!checkout.exists(), "the directory is gone");
@@ -1189,7 +1212,7 @@ mod end_to_end {
 
         let after = f.reload(&id).await;
         assert_eq!(after.branch, Some(format!("{branch}-2")));
-        let fresh = PathBuf::from(after.worktree_path.expect("a new worktree"));
+        let fresh = PathBuf::from(f.harness.worktree_path(&id).await.expect("a new worktree"));
         assert!(
             !is_ancestor(&fresh, &rejected_commit, "HEAD"),
             "the new branch does not contain the rejected commit"
@@ -1215,7 +1238,8 @@ mod end_to_end {
         cli.replays(&id, "success", 0);
         f.run(&cli, &id).await.expect("the run");
         let reviewed = f.reload(&id).await;
-        let checkout = PathBuf::from(reviewed.worktree_path.clone().expect("a worktree"));
+        let reviewed_worktree = f.harness.worktree_path(&id).await;
+        let checkout = PathBuf::from(reviewed_worktree.clone().expect("a worktree"));
 
         std::fs::write(checkout.join("one.txt"), "x\n").expect("a stray file");
         let one = review::reject(f.ctx(), Some(f.machine()), &id, "No.")
@@ -1241,7 +1265,7 @@ mod end_to_end {
 
         let after = f.reload(&id).await;
         assert!(checkout.exists());
-        assert_eq!(after.worktree_path, reviewed.worktree_path);
+        assert_eq!(f.harness.worktree_path(&id).await, reviewed_worktree);
         assert_eq!(after.branch, reviewed.branch);
         assert_eq!(after.column, BoardColumn::InReview);
         assert_eq!(after.extra_instructions, reviewed.extra_instructions);
@@ -1263,7 +1287,8 @@ mod end_to_end {
         cli.replays(&id, "success", 0);
         f.run(&cli, &id).await.expect("the run");
         let reviewed = f.reload(&id).await;
-        let checkout = PathBuf::from(reviewed.worktree_path.clone().expect("a worktree"));
+        let reviewed_worktree = f.harness.worktree_path(&id).await;
+        let checkout = PathBuf::from(reviewed_worktree.clone().expect("a worktree"));
         std::fs::write(checkout.join("stray.txt"), "x\n").expect("a stray file");
 
         let outcome = review::reject(f.ctx(), None, &id, "Wrong approach.")
@@ -1275,7 +1300,7 @@ mod end_to_end {
         assert_eq!(outcome.set_aside_branch, reviewed.branch);
         assert!(checkout.exists(), "the directory is left on disk");
         assert!(checkout.join("stray.txt").exists(), "and so is its work");
-        assert_eq!(outcome.task.worktree_path, reviewed.worktree_path);
+        assert_eq!(f.harness.worktree_path(&id).await, reviewed_worktree);
     }
 
     #[tokio::test]
@@ -1285,14 +1310,14 @@ mod end_to_end {
         let id = f.main_task.clone();
         cli.replays(&id, "success", 0);
         f.run(&cli, &id).await.expect("the run");
-        let checkout = PathBuf::from(f.reload(&id).await.worktree_path.expect("a worktree"));
+        let checkout = PathBuf::from(f.harness.worktree_path(&id).await.expect("a worktree"));
         std::fs::remove_dir_all(&checkout).expect("remove the directory behind the app's back");
 
         let outcome = review::reject(f.ctx(), Some(f.machine()), &id, "Start over.")
             .await
             .expect("nothing on disk is nothing to lose");
 
-        assert_eq!(outcome.task.worktree_path, None);
+        assert_eq!(f.harness.worktree_path(&id).await, None);
         assert_eq!(outcome.task.branch, None);
         assert_eq!(outcome.task.column, BoardColumn::Ready);
     }
@@ -1308,7 +1333,7 @@ mod end_to_end {
         // No commits: automatic removal never forces past unpushed work.
         cli.replays(&id, "success", 0);
         f.run(&cli, &id).await.expect("the run");
-        let checkout = PathBuf::from(f.reload(&id).await.worktree_path.expect("a worktree"));
+        let checkout = PathBuf::from(f.harness.worktree_path(&id).await.expect("a worktree"));
         assert!(checkout.exists());
 
         let approved = review::approve(f.ctx(), Some(f.machine()), &id)
@@ -1317,7 +1342,7 @@ mod end_to_end {
 
         assert_eq!(approved.column, BoardColumn::Done);
         assert!(!checkout.exists());
-        assert_eq!(f.reload(&id).await.worktree_path, None);
+        assert_eq!(f.harness.worktree_path(&id).await, None);
     }
 
     #[tokio::test]
@@ -1330,7 +1355,8 @@ mod end_to_end {
         f.set(&id, "plan = NULL, extra_instructions = 'Keep it small.'")
             .await;
         let before = f.reload(&id).await;
-        let checkout = PathBuf::from(before.worktree_path.clone().expect("a worktree"));
+        let before_worktree = f.harness.worktree_path(&id).await;
+        let checkout = PathBuf::from(before_worktree.clone().expect("a worktree"));
 
         let error = review::reject(f.ctx(), Some(f.machine()), &id, "Wrong approach.")
             .await
@@ -1342,7 +1368,7 @@ mod end_to_end {
         );
         let after = f.reload(&id).await;
         assert!(checkout.exists(), "no git ran before the refusal");
-        assert_eq!(after.worktree_path, before.worktree_path);
+        assert_eq!(f.harness.worktree_path(&id).await, before_worktree);
         assert_eq!(after.branch, before.branch);
         assert_eq!(after.extra_instructions.as_deref(), Some("Keep it small."));
         assert_eq!(after.column, BoardColumn::InReview);
@@ -1432,6 +1458,7 @@ impl Fixture {
         paths.create_all().expect("the app data directories");
         let registered = repo::register(
             &harness.context,
+            harness.machine(),
             &paths.worktrees_dir(),
             NewRepository {
                 path: source.path().to_string_lossy().into_owned(),
@@ -1441,7 +1468,7 @@ impl Fixture {
         )
         .await
         .expect("register the test repository");
-        repo::set_allow_unattended_runs(&harness.context, &registered.id, true)
+        repo::set_allow_unattended_runs(&harness.context, harness.machine(), &registered.id, true)
             .await
             .expect("ADR-0012's per-repository opt-in");
 

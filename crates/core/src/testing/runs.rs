@@ -79,10 +79,10 @@ pub async fn seed_row(ctx: &ServiceContext, task_id: &str, row: SeededRow<'_>) -
     let recorded_at = row.recorded.then_some(now);
     sqlx::query(
         "INSERT INTO runs (id, task_id, attempt, kind, status, session_id, prompt, started_at,
-                           ended_at, exit_class, log_path, head_sha, findings_recorded_at)
+                           ended_at, exit_class, head_sha, findings_recorded_at)
          VALUES (?1, ?2,
                  (SELECT coalesce(max(attempt), 0) + 1 FROM runs WHERE task_id = ?2),
-                 ?3, ?4, ?5, 'a prompt', ?6, ?7, ?8, ?1, ?9, ?10)",
+                 ?3, ?4, ?5, 'a prompt', ?6, ?7, ?8, ?9, ?10)",
     )
     .bind(&id)
     .bind(task_id)

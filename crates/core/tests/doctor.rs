@@ -37,6 +37,7 @@ use rimaia_core::db::Repository;
 use rimaia_core::doctor::{
     checks, Check, CheckResult, CheckStatus, DoctorReport, Environment, Programs,
 };
+use rimaia_core::machine::Checkout;
 use rimaia_core::paths::DATA_DIR_ENV;
 use rimaia_core::runner::provider::ClaudeProvider;
 use rimaia_core::runner::RunnerConfig;
@@ -81,7 +82,7 @@ fn healthy_claude(dir: &Path) -> PathBuf {
 /// --hostname` is a question that applies. [`TempRepo::with_remote`] points at a
 /// bare local path on purpose, which correctly has no host at all — good for the
 /// tests that must never touch `gh`, useless for the ones that must.
-fn repo_with_a_github_remote() -> (TempRepo, Repository) {
+fn repo_with_a_github_remote() -> (TempRepo, (Repository, Checkout)) {
     let repo = TempRepo::init();
     let status = std::process::Command::new("git")
         .current_dir(repo.path())
@@ -99,27 +100,26 @@ fn repo_with_a_github_remote() -> (TempRepo, Repository) {
     (repo, row)
 }
 
-/// A `Repository` row built directly rather than registered.
+/// A board row and this machine's checkout of it, built directly rather than
+/// registered.
 ///
-/// The per-repository checks take a row and a program path and touch no
-/// database, which is the whole reason they are shaped that way — a test of
-/// "this directory moved" has no business also exercising registration.
-fn row_for(path: &Path, name: &str) -> Repository {
-    Repository {
-        id: format!("repository-{name}"),
+/// The per-repository checks take a row, its checkout and a program path and
+/// touch no database, which is the whole reason they are shaped that way — a
+/// test of "this directory moved" has no business also exercising
+/// registration.
+fn row_for(path: &Path, name: &str) -> (Repository, Checkout) {
+    let id = format!("repository-{name}");
+    let repository = Repository {
+        id: id.clone(),
         name: name.to_string(),
-        path: path.display().to_string(),
         default_branch: "main".to_string(),
-        worktree_root: path.join("worktrees").display().to_string(),
         allow_unattended_runs: true,
-        max_concurrency: 1,
         created_at: rimaia_core::testing::test_epoch(),
-        credential_login: None,
-        credential_label: None,
-        credential_added_at: None,
-        on_archive: rimaia_core::db::OnArchive::None,
-        on_archive_script: None,
-    }
+    };
+    (
+        repository,
+        rimaia_core::testing::machine::checkout_at(&id, path),
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -377,7 +377,7 @@ async fn an_unauthenticated_gh_warns_and_names_the_repository() {
     );
     let (_repo, row) = repo_with_a_github_remote();
 
-    let result = checks::github_cli(&row, &gh)
+    let result = checks::github_cli(&row.0, &row.1, &gh)
         .await
         .expect("git must be runnable");
 
@@ -404,7 +404,7 @@ async fn a_missing_gh_is_told_apart_from_an_unauthenticated_one() {
     let absent = dir.path().join("gh-that-was-never-installed");
     let (_repo, row) = repo_with_a_github_remote();
 
-    let result = checks::github_cli(&row, &absent)
+    let result = checks::github_cli(&row.0, &row.1, &absent)
         .await
         .expect("git must be runnable");
 
@@ -425,7 +425,7 @@ async fn a_repository_with_no_remote_host_never_asks_gh_anything() {
     let repo = TempRepo::init().with_remote();
     let row = row_for(repo.path(), "local-only");
 
-    let result = checks::github_cli(&row, &gh)
+    let result = checks::github_cli(&row.0, &row.1, &gh)
         .await
         .expect("git must be runnable");
 
@@ -444,9 +444,10 @@ async fn a_repository_whose_path_has_moved_is_reported_rather_than_discovered_at
     std::fs::create_dir(&original).expect("the project directory");
     let repo = TempRepo::init();
     let row = row_for(&original, "moved-away");
+    let still_there = row_for(repo.path(), "still-there");
 
     assert_eq!(
-        checks::repository_path(&row_for(repo.path(), "still-there"))
+        checks::repository_path(&still_there.0, &still_there.1)
             .await
             .expect("git must be runnable")
             .status,
@@ -456,7 +457,7 @@ async fn a_repository_whose_path_has_moved_is_reported_rather_than_discovered_at
 
     std::fs::rename(&original, root.path().join("project-renamed")).expect("the rename");
 
-    let result = checks::repository_path(&row)
+    let result = checks::repository_path(&row.0, &row.1)
         .await
         .expect("git must be runnable");
 
@@ -477,7 +478,7 @@ async fn a_directory_that_is_no_longer_a_git_repository_is_reported_too() {
     let row = row_for(repo.path(), "de-gitted");
     std::fs::remove_dir_all(repo.path().join(".git")).expect("the .git directory");
 
-    let result = checks::repository_path(&row)
+    let result = checks::repository_path(&row.0, &row.1)
         .await
         .expect("git must be runnable");
 

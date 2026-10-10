@@ -60,11 +60,9 @@
 
 use std::collections::HashMap;
 
-use crate::context::ServiceContext;
 use crate::db::{settings, ScheduleMode};
 use crate::error::{Error, Result};
 use crate::machine::MachineContext;
-use crate::repo;
 use crate::schedule::window;
 use crate::scheduler::inflight::CONCURRENCY_CEILING;
 
@@ -150,10 +148,10 @@ pub async fn configured(machine: &MachineContext) -> Result<RunCapacity> {
 /// direction and not the other. One place decides, so the loop needs no branch
 /// and neither mode has a special case.
 ///
-/// The mode, the global limit and the window are this machine's, from
-/// `machine`. Each repository's own cap is still read off the board's
-/// repository rows through `board` until task 066 moves it to the checkout.
-pub async fn resolve(machine: &MachineContext, board: &ServiceContext) -> Result<Resolved> {
+/// Every input is this machine's: the mode, the global limit and the window,
+/// and each repository's own cap off its checkout (task 066). A repository
+/// with no checkout here runs nothing here, and has no entry.
+pub async fn resolve(machine: &MachineContext) -> Result<Resolved> {
     let window = window::active(machine).await?;
     let (mode, limit) = match &window {
         Some(window) => (
@@ -181,14 +179,15 @@ pub async fn resolve(machine: &MachineContext, board: &ServiceContext) -> Result
         ScheduleMode::Parallel => limit,
     };
 
-    let per_repository = repo::list(board)
+    let per_repository = machine
+        .store
+        .list_checkouts()
         .await?
         .into_iter()
-        .map(|repository| {
-            (
-                repository.id,
-                usable_repository_concurrency(&repository.name, repository.max_concurrency),
-            )
+        .map(|checkout| {
+            let cap =
+                usable_repository_concurrency(&checkout.repository_id, checkout.max_concurrency);
+            (checkout.repository_id, cap)
         })
         .collect();
 
@@ -287,15 +286,16 @@ fn mode_from_stored(value: &str) -> ScheduleMode {
 /// A stored per-repository cap, held to the range that has a meaning.
 ///
 /// The column is `NOT NULL DEFAULT 1`, so the only way to reach either arm is a
-/// hand-edited row — which ADR-0003 says will happen. Naming the repository in
-/// the warning matters here in a way it does not for the global keys: the
-/// operator has to know *which* row to fix.
+/// hand-edited row — which ADR-0003 says will happen. Naming the row in the
+/// warning matters here in a way it does not for the global keys: the operator
+/// has to know *which* row to fix. A checkout's is its repository id; a
+/// window's, its schedule name.
 fn usable_repository_concurrency(name: &str, stored: i64) -> usize {
     if stored < 1 {
         tracing::warn!(
             repository = name,
             value = stored,
-            "unusable repositories.max_concurrency; falling back to one run at a time"
+            "unusable checkouts.max_concurrency; falling back to one run at a time"
         );
         return DEFAULT_PER_REPOSITORY;
     }
@@ -306,7 +306,7 @@ fn usable_repository_concurrency(name: &str, stored: i64) -> usize {
             repository = name,
             value,
             ceiling = CONCURRENCY_CEILING,
-            "repositories.max_concurrency is above the ceiling; using the ceiling"
+            "checkouts.max_concurrency is above the ceiling; using the ceiling"
         );
         return CONCURRENCY_CEILING;
     }
@@ -328,10 +328,7 @@ mod tests {
             ScheduleMode::Sequential
         );
         assert_eq!(
-            resolve(harness.machine(), &harness.context)
-                .await
-                .expect("resolve")
-                .global,
+            resolve(harness.machine()).await.expect("resolve").global,
             1,
             "the default configuration is exactly what task 009 shipped"
         );
@@ -351,13 +348,7 @@ mod tests {
             .await
             .expect("stay sequential");
 
-        assert_eq!(
-            resolve(harness.machine(), &harness.context)
-                .await
-                .expect("resolve")
-                .global,
-            1
-        );
+        assert_eq!(resolve(harness.machine()).await.expect("resolve").global, 1);
         assert_eq!(
             max_concurrency(harness.machine()).await.expect("read"),
             4,
@@ -367,13 +358,7 @@ mod tests {
         set_schedule_mode(harness.machine(), ScheduleMode::Parallel)
             .await
             .expect("turn parallelism on");
-        assert_eq!(
-            resolve(harness.machine(), &harness.context)
-                .await
-                .expect("resolve")
-                .global,
-            4
-        );
+        assert_eq!(resolve(harness.machine()).await.expect("resolve").global, 4);
     }
 
     #[tokio::test]

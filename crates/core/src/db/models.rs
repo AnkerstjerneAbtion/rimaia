@@ -443,76 +443,31 @@ impl MutationSource {
     }
 }
 
-/// A registered local git repository (ADR-0005).
+/// A repository on the board (ADR-0005, ADR-0033 point 1).
 ///
-/// The repository on disk is authoritative: this row records what Rimaia was told,
-/// and startup reconciliation trusts the filesystem where the two disagree. Which
-/// is also why there is no `remote_url` — `git remote get-url` answers it every
-/// time and a cached copy can only go stale.
+/// The board's half only. Everything true of one machine's clone (where it
+/// is, where its worktrees go, how many runs it holds, the runner's consent,
+/// the archive policy and the credential metadata) is that machine's
+/// [`Checkout`](crate::machine::Checkout) since task 066, so no board DTO
+/// carries an absolute path (ADR-0028 point 2). The repository on disk is
+/// still authoritative about itself, which is also why there is no
+/// `remote_url`: `git remote get-url` answers it every time.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, sqlx::FromRow)]
 #[serde(rename_all = "camelCase")]
 pub struct Repository {
     pub id: String,
     pub name: String,
-    /// `String`, not `PathBuf`: the column is `TEXT`, it is a string again the
-    /// moment it crosses to the frontend, and callers that touch the filesystem
-    /// take a `Path::new` on it.
-    pub path: String,
     pub default_branch: String,
-    pub worktree_root: String,
-    /// ADR-0012's per-repository opt-in to `--permission-mode bypassPermissions`.
-    /// Never widened without amending that ADR.
+    /// ADR-0032 point 4's team ceiling on unattended runs: what this column
+    /// became when the runner's own consent moved to the checkout.
+    ///
+    /// **Not serialized**, to the frontend or to MCP, until task 045 names it
+    /// and gives it a command. Nothing reads it before then either: the
+    /// consent a run needs is the checkout's
+    /// [`unattended_consent`](crate::machine::Checkout::unattended_consent).
+    #[serde(skip)]
     pub allow_unattended_runs: bool,
-    /// How many runs this repository will hold at once (ADR-0010), `1` unless
-    /// the user opted out.
-    ///
-    /// A cap of its own rather than a share of the global `max_concurrency`,
-    /// because the thing it protects is not the machine: "two agents in two
-    /// worktrees of the same repo is safe for git, but they will fight over
-    /// ports, test databases, and lockfiles." Worktree isolation (ADR-0005)
-    /// does nothing about any of those, which is why raising this is a
-    /// deliberate per-repository act and not a consequence of turning
-    /// parallelism on.
-    ///
-    /// `i64` because SQLite's `INTEGER` is one and D10's argument against
-    /// clever column types applies here too; [`scheduler::capacity`] is what
-    /// turns a hand-edited `0` into a usable number.
-    ///
-    /// [`scheduler::capacity`]: crate::scheduler::capacity
-    pub max_concurrency: i64,
     pub created_at: DateTime<Utc>,
-    /// The forge login this repository's own token resolved to (task 022,
-    /// ADR-0020), or `None` when it carries no credential.
-    ///
-    /// **It doubles as the flag.** A repository with a login is one a run must
-    /// spawn with its own token, and one whose keychain item has since
-    /// vanished refuses to start rather than falling back to the operator's
-    /// ambient login — which is why the spawn path reads this column instead of
-    /// asking the keychain whether anything is there. A keychain that cannot be
-    /// reached has to be a refusal, not an absence.
-    ///
-    /// `unverified` when `gh` was not installed at save time: a missing local
-    /// tool says nothing about the token, so the save is allowed and marked.
-    pub credential_login: Option<String>,
-    /// What the user called it — "fine-grained, rimaia only, expires March".
-    pub credential_label: Option<String>,
-    pub credential_added_at: Option<DateTime<Utc>>,
-    /// What archiving a task in this repository cleans up (ADR-0025 point 4).
-    ///
-    /// One slot, three states, mutually exclusive **by construction** rather
-    /// than by a rule in a service: two live fields would let Rimaia's guarded
-    /// removal run against a directory a script had already deleted, and would
-    /// make "what happens when I archive" a two-field question.
-    pub on_archive: OnArchive,
-    /// The executable [`OnArchive::Script`] names — an absolute path to one
-    /// file, never a command line (ADR-0025 point 5).
-    ///
-    /// Meaningful only when [`on_archive`](Repository::on_archive) is
-    /// [`Script`](OnArchive::Script), and validated when it is *written* rather
-    /// than when an archive fires: a path that is relative, missing, a
-    /// directory or not executable is a form error at 11am, not a surprise at
-    /// 3am.
-    pub on_archive_script: Option<String>,
 }
 
 /// What one archive cleans up, per repository (ADR-0025 point 4).
@@ -596,8 +551,10 @@ pub struct Task {
     /// arithmetic lives in [`crate::tasks`] rather than on this struct.
     pub position: f64,
     pub run_state: RunState,
+    /// The task's branch (ADR-0005), recorded by the runner that made it. Where
+    /// its worktree is on that machine is the machine's own record, never this
+    /// row (ADR-0028 point 2, task 066).
     pub branch: Option<String>,
-    pub worktree_path: Option<String>,
     pub strategy_mode: StrategyMode,
     /// Free text, not an enum. ADR-0016 populates both dropdowns from
     /// configuration because models ship faster than releases do, so a closed set
@@ -666,8 +623,11 @@ pub struct TaskDependency {
 
 /// One attempt (ADR-0011), holding only what the UI queries.
 ///
-/// The event stream itself is a JSONL file at [`log_path`](Run::log_path), which is
-/// how ADR-0013 keeps megabytes of transcript out of every board query.
+/// The event stream itself is a JSONL file whose path is a pure function of the
+/// task and run ids (ADR-0013, `runner::events::transcript_path`), which is how
+/// megabytes of transcript stay out of every board query. The `log_path` column
+/// is still written until task 056 and read by nothing (task 066): a path is
+/// one machine's fact, and no board DTO carries one.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, sqlx::FromRow)]
 #[serde(rename_all = "camelCase")]
 pub struct Run {
@@ -696,10 +656,6 @@ pub struct Run {
     /// Both arrive on the terminal `result` event; neither is derived.
     pub num_turns: Option<i64>,
     pub cost_usd: Option<f64>,
-    /// Known at row creation, being a pure function of the task and run ids
-    /// (ADR-0013). A row whose file has vanished is marked at startup rather than
-    /// trusted — a reconciliation rule, not a reason for this to be optional.
-    pub log_path: String,
     pub pr_url: Option<String>,
     /// When the next attempt may start: the usage-limit reset plus jitter, or the
     /// current backoff step (ADR-0011).
@@ -942,7 +898,6 @@ mod tests {
             position: 1.5,
             run_state: RunState::WaitingRetry,
             branch: Some("rimaia/wire-the-board".to_string()),
-            worktree_path: None,
             strategy_mode: StrategyMode::Planned,
             model: Some("opus".to_string()),
             effort: None,
@@ -969,7 +924,6 @@ mod tests {
                 "position": 1.5,
                 "runState": "waiting_retry",
                 "branch": "rimaia/wire-the-board",
-                "worktreePath": null,
                 "strategyMode": "planned",
                 "model": "opus",
                 "effort": null,
@@ -991,22 +945,13 @@ mod tests {
     }
 
     #[test]
-    fn a_repository_serializes_its_booleans_and_timestamps_for_the_frontend() {
+    fn a_repository_serializes_no_machine_fact_and_not_the_team_ceiling() {
         let repository = Repository {
             id: "3f2b1c00-0000-4000-8000-000000000003".to_string(),
             name: "rimaia".to_string(),
-            path: "/Users/someone/Code/My Projects/rimaia".to_string(),
             default_branch: "main".to_string(),
-            worktree_root: "/Users/someone/Library/Application Support/com.rimaia.app/worktrees"
-                .to_string(),
             allow_unattended_runs: true,
-            max_concurrency: 1,
             created_at: timestamp("2026-08-20T12:00:00Z"),
-            credential_login: None,
-            credential_label: None,
-            credential_added_at: None,
-            on_archive: OnArchive::None,
-            on_archive_script: None,
         };
 
         assert_eq!(
@@ -1014,25 +959,13 @@ mod tests {
             json!({
                 "id": "3f2b1c00-0000-4000-8000-000000000003",
                 "name": "rimaia",
-                "path": "/Users/someone/Code/My Projects/rimaia",
                 "defaultBranch": "main",
-                "worktreeRoot": "/Users/someone/Library/Application Support/com.rimaia.app/worktrees",
-                "allowUnattendedRuns": true,
-                "maxConcurrency": 1,
                 // RFC 3339 UTC, which is byte-for-byte what the TEXT column holds.
                 "createdAt": "2026-08-20T12:00:00Z",
-                // Task 022's three, and `null` is the shape that matters: a
-                // repository with no credential says so on the wire rather
-                // than omitting the fields, so the pane renders "not
-                // configured" instead of "unknown".
-                "credentialLogin": null,
-                "credentialLabel": null,
-                "credentialAddedAt": null,
-                // ADR-0025's cleanup slot. `"none"` rather than an omitted
-                // field for the same reason as the three above: the Settings
-                // pane renders a chosen "do nothing", not an unknown.
-                "onArchive": "none",
-                "onArchiveScript": null,
+                // No path, root, cap, consent, archive policy or credential:
+                // those are the checkout's (task 066). And no
+                // `allowUnattendedRuns`: the team ceiling is not on the wire
+                // until task 045 names it.
             })
         );
     }

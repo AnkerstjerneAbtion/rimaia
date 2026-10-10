@@ -71,7 +71,10 @@ pub async fn claim_manual_start(
         .acquire_unbounded(&start.task_id, &preview.repository.id, LeaseOwner::Manual)
         .map_err(|refused| Error::invalid(refused.message()))?;
 
-    repo::ensure_unattended_runs_allowed(&preview.repository)?;
+    // This runner's consent, from its checkout; a repository with no checkout
+    // here is refused as not set up on this computer. Either way before the
+    // claim, so nothing is written (task 066).
+    repo::ensure_unattended_runs_allowed(machine, &preview.repository).await?;
 
     let run_environment = settings::run_environment(machine).await?;
     let home = paths.provider_home(config.provider.id(), &start.task_id);

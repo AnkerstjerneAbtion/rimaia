@@ -744,15 +744,20 @@ async fn a_started_run_records_its_prompt_verbatim_beside_its_transcript_path() 
     assert_eq!(run.ended_at, None);
     assert_eq!(run.exit_class, None);
     assert_eq!(run.pr_url, None);
+    let log_path: String = sqlx::query_scalar("SELECT log_path FROM runs WHERE id = ?1")
+        .bind(&run.id)
+        .fetch_one(&fixture.harness.context.pool)
+        .await
+        .expect("read the column start_run still writes");
     assert_eq!(
-        run.log_path,
+        log_path,
         fixture
             .paths
             .runs_dir()
             .join(&fixture.task_id)
             .join(format!("{}.jsonl", run.id))
             .to_string_lossy(),
-        "ADR-0013's path is a pure function of the task and run ids"
+        "ADR-0013's path is a pure function of the task and run ids, written until task 056"
     );
 
     assert_eq!(
@@ -1664,8 +1669,8 @@ async fn seed_repository(pool: &SqlitePool) -> String {
     let id = rimaia_core::db::new_id();
     let team_id = solo_team(pool).await;
     sqlx::query!(
-        r#"INSERT INTO repositories (id, team_id, name, path, default_branch, worktree_root, allow_unattended_runs, created_at)
-           VALUES (?1, ?3, 'rimaia', '/tmp/rimaia', 'main', '/tmp/rimaia-worktrees', 1, ?2)"#,
+        r#"INSERT INTO repositories (id, team_id, name, default_branch, allow_unattended_runs, created_at)
+           VALUES (?1, ?3, 'rimaia', 'main', 1, ?2)"#,
         id,
         NOW,
         team_id,

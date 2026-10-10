@@ -513,7 +513,11 @@ async fn a_strategy_run_opens_no_runs_row_and_borrows_the_task_s_own_worktree() 
     );
 
     // One worktree and one branch for the task, shared by both spawns.
-    let worktree = detail.task.worktree_path.expect("task 007 prepared one");
+    let worktree = fixture
+        .harness
+        .worktree_path(&detail.task.id)
+        .await
+        .expect("task 007 prepared one");
     assert_eq!(canonical(&cli.cwd(1)), canonical(&worktree));
     assert_eq!(canonical(&cli.cwd(2)), canonical(&worktree));
     assert_ne!(
@@ -981,9 +985,14 @@ async fn a_pass_and_the_queue_cannot_start_two_processes_for_one_task() {
 #[tokio::test]
 async fn a_repository_without_the_unattended_opt_in_is_skipped_with_the_services_own_reason() {
     let fixture = StrategyFixture::planned().await;
-    repo::set_allow_unattended_runs(&fixture.harness.context, &fixture.repository_id, false)
-        .await
-        .expect("withdraw ADR-0012's opt-in");
+    repo::set_allow_unattended_runs(
+        &fixture.harness.context,
+        fixture.harness.machine(),
+        &fixture.repository_id,
+        false,
+    )
+    .await
+    .expect("withdraw ADR-0012's opt-in");
 
     let pass = plan_selection(
         &fixture,
@@ -1420,6 +1429,7 @@ impl StrategyFixture {
 
         let registered = repo::register(
             &harness.context,
+            harness.machine(),
             &paths.worktrees_dir(),
             NewRepository {
                 path: repository.path().to_string_lossy().into_owned(),
@@ -1430,7 +1440,7 @@ impl StrategyFixture {
         .await
         .expect("register the test repository");
 
-        repo::set_allow_unattended_runs(&harness.context, &registered.id, true)
+        repo::set_allow_unattended_runs(&harness.context, harness.machine(), &registered.id, true)
             .await
             .expect("ADR-0012's per-repository opt-in");
 

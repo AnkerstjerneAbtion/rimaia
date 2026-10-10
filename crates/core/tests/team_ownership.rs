@@ -33,6 +33,7 @@ async fn a_change_event_names_the_team_of_the_row_it_announces() {
     // one team.
     let registered = repo::register(
         &h.context.with_scope(TeamScope::one(second.team_id.clone())),
+        h.machine(),
         worktrees.path(),
         NewRepository {
             path: repository.path().to_string_lossy().into_owned(),
@@ -62,7 +63,11 @@ async fn a_change_event_names_the_team_of_the_row_it_announces() {
     assert_eq!(
         drain(&mut h),
         vec![
-            ChangeEvent::repositories(second.team_id.clone(), [registered.id]),
+            ChangeEvent::repositories(second.team_id.clone(), [registered.id.clone()]),
+            // This machine's checkout, which belongs to no team: it rides the
+            // board's channel under the machine's `event_team`, the solo team,
+            // until task 048 moves it to `LocalEvents` (task 066).
+            ChangeEvent::repositories(h.solo.team_id.clone(), [registered.id]),
             ChangeEvent::tasks(second.team_id.clone(), [task.id]),
         ]
     );
@@ -72,7 +77,7 @@ async fn a_change_event_names_the_team_of_the_row_it_announces() {
 async fn a_task_takes_its_repositorys_team() {
     let h = TestContext::new().await;
     let second = second_team(&h).await;
-    let fixture = Registered::new(&h.context).await;
+    let fixture = Registered::new(&h.context, h.machine()).await;
 
     let task = fixture.task(&h.context, "Owned").await;
 
@@ -106,7 +111,7 @@ async fn a_run_records_the_runner_that_started_it() {
     let data = scratch_dir();
     let paths = AppPaths::new(data.path());
     let config = RunnerConfig::default();
-    let fixture = Registered::new(&h.context).await;
+    let fixture = Registered::new(&h.context, h.machine()).await;
     let second_runner = {
         let mut conn = h.context.pool.acquire().await.expect("a connection");
         insert_runner(&mut conn, &h.clock, &h.solo.user_id, "Another computer").await
@@ -164,9 +169,12 @@ async fn a_claims_lease_names_the_tasks_team() {
         RunnerConfig::default().provider,
         h.solo.runner_id.clone(),
     );
-    let solo_fixture = Registered::new(&h.context).await;
-    let other_fixture =
-        Registered::new(&h.context.with_scope(TeamScope::one(second.team_id.clone()))).await;
+    let solo_fixture = Registered::new(&h.context, h.machine()).await;
+    let other_fixture = Registered::new(
+        &h.context.with_scope(TeamScope::one(second.team_id.clone())),
+        h.machine(),
+    )
+    .await;
 
     for (fixture, team) in [
         (solo_fixture, h.solo.team_id.clone()),
@@ -209,11 +217,12 @@ struct Registered {
 }
 
 impl Registered {
-    async fn new(ctx: &ServiceContext) -> Self {
+    async fn new(ctx: &ServiceContext, machine: &rimaia_core::machine::MachineContext) -> Self {
         let repository = TempRepo::init();
         let worktrees = scratch_dir();
         let registered = repo::register(
             ctx,
+            machine,
             worktrees.path(),
             NewRepository {
                 path: repository.path().to_string_lossy().into_owned(),

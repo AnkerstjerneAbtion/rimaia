@@ -112,6 +112,36 @@ impl TestContext {
         &self.machine
     }
 
+    /// Where this machine's store records `task_id`'s worktree, if anywhere:
+    /// what a test reads where it read `tasks.worktree_path` before task 066.
+    pub async fn worktree_path(&self, task_id: &str) -> Option<String> {
+        crate::machine::local::worktree_path(&self.machine, task_id)
+            .await
+            .expect("the machine store answers")
+    }
+
+    /// [`worktree::prepare`](crate::worktree::prepare) for `task_id`, the way
+    /// a runner calls it: under the solo lease, recording the path in this
+    /// test's machine store and the branch through an in-process board port
+    /// over this test's own context (task 066).
+    ///
+    /// Before task 043 a solo lease is a value, not a row, so a test that only
+    /// wants a worktree does not have to claim the task, which would move its
+    /// run state.
+    pub async fn prepare_worktree(
+        &self,
+        task_id: &str,
+    ) -> crate::Result<crate::worktree::Worktree> {
+        let board = InProcessBoard::new(
+            self.context.clone(),
+            AppPaths::new(std::env::temp_dir()),
+            RunnerConfig::default().provider,
+            self.solo.runner_id.clone(),
+        );
+        let lease = crate::board::LeaseRef::solo(task_id, self.solo.team_id.clone());
+        crate::worktree::prepare(&self.context, &self.machine, &board, &lease).await
+    }
+
     /// The board port over this test's own context (seam-contract D31 point
     /// 8), so what a test arranges through `context` is what the runner reads
     /// through the port.

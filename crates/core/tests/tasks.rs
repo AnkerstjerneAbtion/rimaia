@@ -1133,17 +1133,15 @@ async fn a_patch_that_omits_the_repository_leaves_the_task_where_it_is_filed() {
 }
 
 #[tokio::test]
-async fn refiling_a_task_that_has_a_worktree_is_refused_and_names_the_worktree() {
+async fn refiling_a_task_that_has_a_branch_is_refused_and_names_the_branch() {
+    // D13's 2026-10-10 amendment: the branch, not the worktree, because a
+    // board rule cannot see a path and the branch is what ADR-0005 ties to one
+    // repository.
     let mut h = TestContext::new().await;
     let origin = seed_repository(&h.context.pool).await;
     let destination = seed_repository(&h.context.pool).await;
     let task = create_ready(&h, &origin, "already started", "a plan").await;
-    seed_worktree_path(
-        &h.context.pool,
-        &task.id,
-        "/tmp/rimaia-worktrees/rimaia/already-started",
-    )
-    .await;
+    seed_branch(&h.context.pool, &task.id, "rimaia/already-started").await;
     h.changes.try_recv().expect("drain the create event");
 
     let error = tasks::update_task(
@@ -1155,12 +1153,13 @@ async fn refiling_a_task_that_has_a_worktree_is_refused_and_names_the_worktree()
         },
     )
     .await
-    .expect_err("a task with a worktree must not change repository");
+    .expect_err("a task with a branch must not change repository");
 
     assert_eq!(error.code(), ErrorCode::Invalid);
     assert_eq!(
         error.to_string(),
-        "cannot move \"already started\" to another repository: it already has a worktree at /tmp/rimaia-worktrees/rimaia/already-started"
+        "cannot move \"already started\" to another repository: it already has a branch, \
+         rimaia/already-started, in rimaia"
     );
     assert_eq!(
         tasks::get_task(&h.context, &task.id)
@@ -2370,26 +2369,27 @@ async fn column_titles(h: &TestContext, repository_id: &str, column: BoardColumn
     .collect()
 }
 
-/// Task 007 is what will write `worktree_path`, so seam-contract D13's guard
-/// has nothing in this crate to put one on a row with — the same reason
-/// [`seed_run`] exists for task 008's table.
-async fn seed_worktree_path(pool: &SqlitePool, task_id: &str, worktree_path: &str) {
+/// The runner records a task's branch through the board port when it creates
+/// the worktree, so seam-contract D13's guard is tested against a branch
+/// written directly — the same reason [`seed_run`] exists for task 008's
+/// table.
+async fn seed_branch(pool: &SqlitePool, task_id: &str, branch: &str) {
     sqlx::query!(
-        "UPDATE tasks SET worktree_path = ?1 WHERE id = ?2",
-        worktree_path,
+        "UPDATE tasks SET branch = ?1 WHERE id = ?2",
+        branch,
         task_id,
     )
     .execute(pool)
     .await
-    .expect("seed a worktree path");
+    .expect("seed a branch");
 }
 
 async fn seed_repository(pool: &SqlitePool) -> String {
     let id = rimaia_core::db::new_id();
     let team_id = solo_team(pool).await;
     sqlx::query!(
-        r#"INSERT INTO repositories (id, team_id, name, path, default_branch, worktree_root, allow_unattended_runs, created_at)
-           VALUES (?1, ?3, 'rimaia', '/tmp/rimaia', 'main', '/tmp/rimaia-worktrees', 0, ?2)"#,
+        r#"INSERT INTO repositories (id, team_id, name, default_branch, allow_unattended_runs, created_at)
+           VALUES (?1, ?3, 'rimaia', 'main', 0, ?2)"#,
         id,
         NOW,
         team_id,
@@ -2446,14 +2446,13 @@ async fn seed_dependency(pool: &SqlitePool, task_id: &str, depends_on_task_id: &
 async fn seed_run(pool: &SqlitePool, task_id: &str, attempt: i64, session_id: &str) -> String {
     let id = rimaia_core::db::new_id();
     sqlx::query!(
-        r#"INSERT INTO runs (id, task_id, attempt, status, session_id, prompt, started_at, log_path)
-           VALUES (?1, ?2, ?3, 'running', ?4, 'do the thing', ?5, ?6)"#,
+        r#"INSERT INTO runs (id, task_id, attempt, status, session_id, prompt, started_at)
+           VALUES (?1, ?2, ?3, 'running', ?4, 'do the thing', ?5)"#,
         id,
         task_id,
         attempt,
         session_id,
         NOW,
-        id,
     )
     .execute(pool)
     .await
@@ -2475,8 +2474,8 @@ async fn seed_finished_run(
 ) -> String {
     let id = rimaia_core::db::new_id();
     sqlx::query!(
-        r#"INSERT INTO runs (id, task_id, attempt, status, session_id, prompt, started_at, ended_at, exit_class, log_path)
-           VALUES (?1, ?2, ?3, ?4, 'session-1', 'do the thing', ?5, ?6, ?7, ?1)"#,
+        r#"INSERT INTO runs (id, task_id, attempt, status, session_id, prompt, started_at, ended_at, exit_class)
+           VALUES (?1, ?2, ?3, ?4, 'session-1', 'do the thing', ?5, ?6, ?7)"#,
         id,
         task_id,
         attempt,

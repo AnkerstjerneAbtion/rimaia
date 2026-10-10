@@ -24,6 +24,7 @@ use std::process::Command;
 use pretty_assertions::assert_eq;
 use rimaia_core::db::{BoardColumn, ExitClass, Run, RunKind, RunState, RunStatus};
 use rimaia_core::repo::{self, NewRepository};
+use rimaia_core::runner::events::transcript_path;
 use rimaia_core::runner::events::TokenUsage;
 use rimaia_core::runner::outcome::{finish_run, start_run, NewRun, RunOutcome, SpawnedAs};
 use rimaia_core::runs::bundle::{PatchInclusion, ReviewBundle, RunCapture, PATCH_CAP_BYTES};
@@ -53,7 +54,9 @@ const PINNED: [&str; 8] = [
 #[tokio::test]
 async fn a_bundle_records_the_files_commits_and_patch_between_the_fork_point_and_head() {
     let f = Fixture::new().await;
-    let worktree = worktree::prepare(f.ctx(), &f.task_id)
+    let worktree = f
+        .harness
+        .prepare_worktree(&f.task_id)
         .await
         .expect("prepare");
     let checkout = PathBuf::from(&worktree.path);
@@ -87,7 +90,7 @@ async fn a_bundle_records_the_files_commits_and_patch_between_the_fork_point_and
     );
     assert!(!recorded.patch_truncated);
 
-    let live = worktree::diff_summary(f.ctx(), &f.task_id)
+    let live = worktree::diff_summary(f.ctx(), f.machine(), &f.task_id)
         .await
         .expect("the live summary");
     assert_eq!(recorded.diff, live.diff);
@@ -370,7 +373,9 @@ async fn a_submodule_change_is_one_file_and_one_section_under_diff_submodule_dif
 #[tokio::test]
 async fn a_branch_with_no_commits_ahead_records_head_but_no_bundle() {
     let f = Fixture::new().await;
-    let worktree = worktree::prepare(f.ctx(), &f.task_id)
+    let worktree = f
+        .harness
+        .prepare_worktree(&f.task_id)
         .await
         .expect("prepare");
     let checkout = PathBuf::from(&worktree.path);
@@ -413,7 +418,9 @@ async fn a_bundle_that_cannot_be_built_keeps_head_sha() {
 async fn the_fork_point_of_a_resumed_worktree_is_where_it_branched_not_where_the_base_is_now() {
     let f = Fixture::new().await;
     let original_tip = f.source.head_sha();
-    let first = worktree::prepare(f.ctx(), &f.task_id)
+    let first = f
+        .harness
+        .prepare_worktree(&f.task_id)
         .await
         .expect("prepare");
     commit_in(
@@ -433,7 +440,9 @@ async fn the_fork_point_of_a_resumed_worktree_is_where_it_branched_not_where_the
     let moved_tip = f.source.head_sha();
     assert_ne!(moved_tip, original_tip);
 
-    let resumed = worktree::prepare(f.ctx(), &f.task_id)
+    let resumed = f
+        .harness
+        .prepare_worktree(&f.task_id)
         .await
         .expect("prepare again");
 
@@ -608,7 +617,7 @@ mod end_to_end {
         assert_eq!(task.column, BoardColumn::InReview);
         assert_eq!(run.head_sha, None);
         assert_eq!(
-            runs::get_run(f.ctx(), &run.id)
+            runs::get_run(f.ctx(), &f.paths, &run.id)
                 .await
                 .expect("readable")
                 .review,
@@ -662,7 +671,9 @@ mod end_to_end {
 async fn a_run_stays_reviewable_after_its_worktree_and_branch_are_deleted() {
     let f = Fixture::new().await;
     let run = f.record_a_run_that_commits().await;
-    let before = runs::get_run(f.ctx(), &run.id).await.expect("get_run");
+    let before = runs::get_run(f.ctx(), &f.paths, &run.id)
+        .await
+        .expect("get_run");
     assert!(matches!(
         before.review,
         RunReview::Recorded { bundle: Some(_) }
@@ -670,6 +681,7 @@ async fn a_run_stays_reviewable_after_its_worktree_and_branch_are_deleted() {
 
     worktree::remove_worktree(
         f.ctx(),
+        f.machine(),
         &f.task_id,
         RemovalAuthorization {
             uncommitted_changes: ForceRemoval::ConfirmedByUser,
@@ -684,8 +696,10 @@ async fn a_run_stays_reviewable_after_its_worktree_and_branch_are_deleted() {
     std::fs::remove_dir_all(f.source.path()).expect("delete the clone");
 
     // What `main`'s `get_run` called, which is how this proves no git ran.
-    assert!(worktree::diff_summary(f.ctx(), &f.task_id).await.is_err());
-    let after = runs::get_run(f.ctx(), &run.id)
+    assert!(worktree::diff_summary(f.ctx(), f.machine(), &f.task_id)
+        .await
+        .is_err());
+    let after = runs::get_run(f.ctx(), &f.paths, &run.id)
         .await
         .expect("get_run needs no clone");
     assert_eq!(after.review, before.review);
@@ -697,13 +711,16 @@ async fn a_run_recorded_before_bundles_reads_as_not_recorded() {
     let f = Fixture::new().await;
     f.claim().await;
     let run = f.start(None).await;
-    std::fs::create_dir_all(Path::new(&run.log_path).parent().expect("a directory"))
+    let log_path = transcript_path(&f.paths, &run.task_id, &run.id);
+    std::fs::create_dir_all(log_path.parent().expect("a directory"))
         .expect("the transcript directory");
-    std::fs::write(&run.log_path, "{}\n").expect("a transcript");
+    std::fs::write(&log_path, "{}\n").expect("a transcript");
     finish(f.ctx(), &run.id, &RunCapture::default()).await;
     std::fs::remove_dir_all(f.source.path()).expect("delete the clone");
 
-    let detail = runs::get_run(f.ctx(), &run.id).await.expect("get_run");
+    let detail = runs::get_run(f.ctx(), &f.paths, &run.id)
+        .await
+        .expect("get_run");
 
     assert_eq!(detail.review, RunReview::NotRecorded);
     assert_eq!(detail.run.head_sha, None);
@@ -714,13 +731,17 @@ async fn a_run_recorded_before_bundles_reads_as_not_recorded() {
 #[tokio::test]
 async fn an_in_flight_run_reads_as_not_recorded() {
     let f = Fixture::new().await;
-    let worktree = worktree::prepare(f.ctx(), &f.task_id)
+    let worktree = f
+        .harness
+        .prepare_worktree(&f.task_id)
         .await
         .expect("prepare");
     f.claim().await;
     let run = f.start(worktree.base_sha.clone()).await;
 
-    let detail = runs::get_run(f.ctx(), &run.id).await.expect("get_run");
+    let detail = runs::get_run(f.ctx(), &f.paths, &run.id)
+        .await
+        .expect("get_run");
 
     assert_eq!(detail.review, RunReview::NotRecorded);
     assert!(detail.run.base_sha.is_some(), "written at the open");
@@ -729,7 +750,9 @@ async fn an_in_flight_run_reads_as_not_recorded() {
 #[tokio::test]
 async fn a_run_that_ended_with_nothing_to_review_reads_as_recorded_and_empty() {
     let f = Fixture::new().await;
-    let worktree = worktree::prepare(f.ctx(), &f.task_id)
+    let worktree = f
+        .harness
+        .prepare_worktree(&f.task_id)
         .await
         .expect("prepare");
     f.claim().await;
@@ -737,7 +760,9 @@ async fn a_run_that_ended_with_nothing_to_review_reads_as_recorded_and_empty() {
     let capture = bundle::capture(Path::new(&worktree.path), worktree.base_sha.as_deref()).await;
     finish(f.ctx(), &run.id, &capture).await;
 
-    let detail = runs::get_run(f.ctx(), &run.id).await.expect("get_run");
+    let detail = runs::get_run(f.ctx(), &f.paths, &run.id)
+        .await
+        .expect("get_run");
 
     assert!(detail.run.head_sha.is_some());
     assert_eq!(detail.run.head_sha, detail.run.base_sha);
@@ -759,7 +784,9 @@ async fn a_run_whose_fork_point_is_unknown_is_not_reported_as_empty() {
     )
     .await;
 
-    let detail = runs::get_run(f.ctx(), &run.id).await.expect("get_run");
+    let detail = runs::get_run(f.ctx(), &f.paths, &run.id)
+        .await
+        .expect("get_run");
 
     assert_eq!(detail.run.head_sha, Some(f.source.head_sha()));
     assert_eq!(detail.review, RunReview::NotRecorded);
@@ -782,7 +809,9 @@ async fn a_bundle_that_cannot_be_built_keeps_head_sha_and_reads_as_not_recorded(
     )
     .await;
 
-    let detail = runs::get_run(f.ctx(), &run.id).await.expect("get_run");
+    let detail = runs::get_run(f.ctx(), &f.paths, &run.id)
+        .await
+        .expect("get_run");
 
     assert_eq!(detail.run.head_sha, Some(head));
     assert_eq!(detail.run.base_sha, Some(base));
@@ -808,7 +837,7 @@ async fn a_bundle_without_a_head_commit_is_dropped_and_the_finish_still_succeeds
 
     assert_eq!(f.bundle_rows().await, 0);
     assert_eq!(
-        runs::get_run(f.ctx(), &run.id)
+        runs::get_run(f.ctx(), &f.paths, &run.id)
             .await
             .expect("get_run")
             .review,
@@ -826,7 +855,7 @@ async fn a_stored_bundle_whose_json_does_not_parse_is_an_internal_error() {
         .await
         .expect("corrupt the row");
 
-    let error = runs::get_run(f.ctx(), &run.id)
+    let error = runs::get_run(f.ctx(), &f.paths, &run.id)
         .await
         .expect_err("never an empty list");
 
@@ -837,17 +866,22 @@ async fn a_stored_bundle_whose_json_does_not_parse_is_an_internal_error() {
 async fn pruning_transcripts_keeps_every_bundle() {
     let f = Fixture::new().await;
     let run = f.record_a_run_that_commits().await;
-    std::fs::create_dir_all(Path::new(&run.log_path).parent().expect("a directory"))
+    let log_path = transcript_path(&f.paths, &run.task_id, &run.id);
+    std::fs::create_dir_all(log_path.parent().expect("a directory"))
         .expect("the transcript directory");
-    std::fs::write(&run.log_path, "{}\n").expect("a transcript");
-    let before = runs::get_run(f.ctx(), &run.id).await.expect("get_run");
+    std::fs::write(&log_path, "{}\n").expect("a transcript");
+    let before = runs::get_run(f.ctx(), &f.paths, &run.id)
+        .await
+        .expect("get_run");
 
     let pruned = runs::prune_logs(f.ctx(), &f.paths, PruneCriterion::Task(f.task_id.clone()))
         .await
         .expect("prune");
 
     assert_eq!(pruned.runs_pruned, 1);
-    let after = runs::get_run(f.ctx(), &run.id).await.expect("get_run");
+    let after = runs::get_run(f.ctx(), &f.paths, &run.id)
+        .await
+        .expect("get_run");
     assert!(!after.log_available, "the transcript went");
     assert_eq!(after.review, before.review, "the bundle did not");
     let RunReview::Recorded {
@@ -882,7 +916,7 @@ async fn listing_runs_never_reads_review_bundles() {
         .await
         .expect("drop the table");
 
-    let listed = runs::list_runs(f.ctx(), RunFilter::default())
+    let listed = runs::list_runs(f.ctx(), &f.paths, RunFilter::default())
         .await
         .expect("list_runs never joins review_bundles");
     let for_task = runs::list_runs_for_task(f.ctx(), &f.task_id)
@@ -932,6 +966,7 @@ impl Fixture {
 
         let registered = repo::register(
             &harness.context,
+            harness.machine(),
             &paths.worktrees_dir(),
             NewRepository {
                 path: source.path().to_string_lossy().into_owned(),
@@ -941,7 +976,7 @@ impl Fixture {
         )
         .await
         .expect("register the test repository");
-        repo::set_allow_unattended_runs(&harness.context, &registered.id, true)
+        repo::set_allow_unattended_runs(&harness.context, harness.machine(), &registered.id, true)
             .await
             .expect("ADR-0012's per-repository opt-in");
 
@@ -987,9 +1022,9 @@ impl Fixture {
     #[cfg_attr(not(unix), allow(dead_code))]
     async fn worktree_path(&self) -> PathBuf {
         PathBuf::from(
-            self.task()
+            self.harness
+                .worktree_path(&self.task_id)
                 .await
-                .worktree_path
                 .expect("the run prepared a worktree"),
         )
     }
@@ -1024,7 +1059,9 @@ impl Fixture {
     /// The runner's sequence without the child: prepare, open, commit in the
     /// worktree, capture, finish.
     async fn record_a_run_that_commits(&self) -> Run {
-        let worktree = worktree::prepare(self.ctx(), &self.task_id)
+        let worktree = self
+            .harness
+            .prepare_worktree(&self.task_id)
             .await
             .expect("prepare");
         self.claim().await;
@@ -1054,7 +1091,7 @@ impl Fixture {
 
     #[cfg_attr(not(unix), allow(dead_code))]
     async fn recorded_bundle(&self, run_id: &str) -> rimaia_core::runs::bundle::StoredBundle {
-        match runs::get_run(self.ctx(), run_id)
+        match runs::get_run(self.ctx(), &self.paths, run_id)
             .await
             .expect("get_run")
             .review

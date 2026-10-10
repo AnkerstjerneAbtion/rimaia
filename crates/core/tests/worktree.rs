@@ -42,7 +42,9 @@ async fn preparing_a_worktree_checks_out_the_base_on_a_namespaced_branch() {
     let f = Fixture::new().await;
     let task = f.task("Wire the board to the store").await;
 
-    let worktree = worktree::prepare(f.ctx(), &task.id)
+    let worktree = f
+        .harness
+        .prepare_worktree(&task.id)
         .await
         .expect("prepare must create a worktree");
 
@@ -83,7 +85,7 @@ async fn a_worktree_is_created_from_the_default_branch_and_not_from_head() {
     let f = Fixture::with_source(source).await;
     let task = f.task("Add parser").await;
 
-    let worktree = worktree::prepare(f.ctx(), &task.id).await.expect("prepare");
+    let worktree = f.harness.prepare_worktree(&task.id).await.expect("prepare");
 
     assert_eq!(
         git(Path::new(&worktree.path), &["rev-parse", "HEAD"]),
@@ -98,12 +100,12 @@ async fn a_prepared_worktree_is_recorded_on_the_task_row_and_published() {
     let task = f.task("Add parser").await;
     f.drain_changes();
 
-    let worktree = worktree::prepare(f.ctx(), &task.id).await.expect("prepare");
+    let worktree = f.harness.prepare_worktree(&task.id).await.expect("prepare");
 
     let stored = f.reload(&task.id).await;
     assert_eq!(stored.branch.as_deref(), Some(worktree.branch.as_str()));
     assert_eq!(
-        stored.worktree_path.as_deref(),
+        f.harness.worktree_path(&task.id).await.as_deref(),
         Some(worktree.path.as_str())
     );
     assert_eq!(
@@ -126,14 +128,14 @@ async fn repository_and_worktree_paths_containing_spaces_survive_every_git_call(
     assert!(f.root().to_string_lossy().contains(' '));
     let task = f.task("Add parser").await;
 
-    let worktree = worktree::prepare(f.ctx(), &task.id).await.expect("prepare");
+    let worktree = f.harness.prepare_worktree(&task.id).await.expect("prepare");
 
     assert!(worktree.path.contains(' '));
     assert!(PathBuf::from(&worktree.path).join("README.md").is_file());
     // The one call that runs git *inside* the space-bearing worktree rather
     // than pointing at it from the repository.
     assert!(
-        worktree::status(f.ctx(), &task.id)
+        worktree::status(f.ctx(), f.machine(), &task.id)
             .await
             .expect("status")
             .exists
@@ -154,7 +156,9 @@ async fn a_repository_that_cannot_be_fetched_still_gets_its_worktree() {
     let f = Fixture::with_source(source).await;
     let task = f.task("Add parser").await;
 
-    let worktree = worktree::prepare(f.ctx(), &task.id)
+    let worktree = f
+        .harness
+        .prepare_worktree(&task.id)
         .await
         .expect("an unreachable remote must not fail prepare");
 
@@ -176,7 +180,9 @@ async fn a_default_branch_that_does_not_exist_is_refused_by_name() {
     .expect("update the default branch");
     let task = f.task("Add parser").await;
 
-    let error = worktree::prepare(f.ctx(), &task.id)
+    let error = f
+        .harness
+        .prepare_worktree(&task.id)
         .await
         .expect_err("a base ref that is not in the repository must be refused");
 
@@ -198,9 +204,11 @@ async fn a_default_branch_that_does_not_exist_is_refused_by_name() {
 async fn preparing_twice_returns_the_same_worktree_and_does_not_error() {
     let f = Fixture::new().await;
     let task = f.task("Add parser").await;
-    let first = worktree::prepare(f.ctx(), &task.id).await.expect("prepare");
+    let first = f.harness.prepare_worktree(&task.id).await.expect("prepare");
 
-    let second = worktree::prepare(f.ctx(), &task.id)
+    let second = f
+        .harness
+        .prepare_worktree(&task.id)
         .await
         .expect("preparing twice must not error");
 
@@ -220,7 +228,7 @@ async fn preparing_again_keeps_work_the_previous_attempt_committed() {
     // wrong, so this asserts the commit itself.
     let f = Fixture::new().await;
     let task = f.task("Add parser").await;
-    let first = worktree::prepare(f.ctx(), &task.id).await.expect("prepare");
+    let first = f.harness.prepare_worktree(&task.id).await.expect("prepare");
     commit_in(
         Path::new(&first.path),
         "parser.rs",
@@ -229,7 +237,7 @@ async fn preparing_again_keeps_work_the_previous_attempt_committed() {
     );
     let after_work = git(Path::new(&first.path), &["rev-parse", "HEAD"]);
 
-    let second = worktree::prepare(f.ctx(), &task.id).await.expect("prepare");
+    let second = f.harness.prepare_worktree(&task.id).await.expect("prepare");
 
     assert_eq!(second.path, first.path);
     assert_eq!(second.branch, first.branch);
@@ -248,7 +256,7 @@ async fn preparing_after_the_directory_vanished_rebuilds_it_on_the_same_branch()
     // would refuse to check it out again until that record goes.
     let f = Fixture::new().await;
     let task = f.task("Add parser").await;
-    let first = worktree::prepare(f.ctx(), &task.id).await.expect("prepare");
+    let first = f.harness.prepare_worktree(&task.id).await.expect("prepare");
     commit_in(
         Path::new(&first.path),
         "parser.rs",
@@ -258,7 +266,9 @@ async fn preparing_after_the_directory_vanished_rebuilds_it_on_the_same_branch()
     let committed = git(Path::new(&first.path), &["rev-parse", "HEAD"]);
     std::fs::remove_dir_all(&first.path).expect("delete the worktree behind the app's back");
 
-    let second = worktree::prepare(f.ctx(), &task.id)
+    let second = f
+        .harness
+        .prepare_worktree(&task.id)
         .await
         .expect("a vanished directory must not wedge the task");
 
@@ -281,10 +291,10 @@ async fn preparing_onto_a_directory_left_detached_is_refused_with_an_actionable_
     // service must say something a user can act on instead.
     let f = Fixture::new().await;
     let task = f.task("Add parser").await;
-    let first = worktree::prepare(f.ctx(), &task.id).await.expect("prepare");
+    let first = f.harness.prepare_worktree(&task.id).await.expect("prepare");
     git(Path::new(&first.path), &["checkout", "--detach"]);
 
-    let error = worktree::prepare(f.ctx(), &task.id)
+    let error = f.harness.prepare_worktree(&task.id)
         .await
         .expect_err("a directory git no longer lists on this branch must not reach git's own \"already exists\"");
 
@@ -321,7 +331,7 @@ async fn a_dependent_branches_from_its_dependency_and_git_merge_base_proves_it()
 
     // A runs: its worktree exists, it commits, and its card is filed for review
     // — which is the whole of what ADR-0008 calls "satisfied".
-    let a_worktree = worktree::prepare(f.ctx(), &a.id).await.expect("prepare A");
+    let a_worktree = f.harness.prepare_worktree(&a.id).await.expect("prepare A");
     commit_in(
         Path::new(&a_worktree.path),
         "endpoint.rs",
@@ -335,7 +345,7 @@ async fn a_dependent_branches_from_its_dependency_and_git_merge_base_proves_it()
         .await
         .expect("B depends on A");
 
-    let b_worktree = worktree::prepare(f.ctx(), &b.id).await.expect("prepare B");
+    let b_worktree = f.harness.prepare_worktree(&b.id).await.expect("prepare B");
 
     assert_eq!(b_worktree.base_ref, a_worktree.branch);
     assert_eq!(
@@ -369,7 +379,7 @@ async fn an_unsatisfied_dependency_leaves_the_dependent_on_the_default_branch() 
     let f = Fixture::new().await;
     let a = f.task("Add the API endpoint").await;
     let b = f.task("Call it from the UI").await;
-    let a_worktree = worktree::prepare(f.ctx(), &a.id).await.expect("prepare A");
+    let a_worktree = f.harness.prepare_worktree(&a.id).await.expect("prepare A");
     commit_in(
         Path::new(&a_worktree.path),
         "endpoint.rs",
@@ -380,7 +390,7 @@ async fn an_unsatisfied_dependency_leaves_the_dependent_on_the_default_branch() 
         .await
         .expect("B depends on A");
 
-    let b_worktree = worktree::prepare(f.ctx(), &b.id).await.expect("prepare B");
+    let b_worktree = f.harness.prepare_worktree(&b.id).await.expect("prepare B");
 
     assert_eq!(b_worktree.base_ref, "main");
     assert_eq!(
@@ -410,7 +420,7 @@ async fn a_dependency_that_has_never_run_cannot_be_a_base() {
         .await
         .expect("B depends on A");
 
-    let b_worktree = worktree::prepare(f.ctx(), &b.id).await.expect("prepare B");
+    let b_worktree = f.harness.prepare_worktree(&b.id).await.expect("prepare B");
 
     assert_eq!(b_worktree.base_ref, "main");
     assert_eq!(
@@ -433,7 +443,7 @@ async fn two_dependencies_base_off_the_higher_one_and_warn_about_the_other() {
     let b = f.task("Add the schema").await;
     let c = f.task("Call them from the UI").await;
 
-    let a_worktree = worktree::prepare(f.ctx(), &a.id).await.expect("prepare A");
+    let a_worktree = f.harness.prepare_worktree(&a.id).await.expect("prepare A");
     commit_in(
         Path::new(&a_worktree.path),
         "endpoint.rs",
@@ -443,7 +453,7 @@ async fn two_dependencies_base_off_the_higher_one_and_warn_about_the_other() {
     let a_tip = git(Path::new(&a_worktree.path), &["rev-parse", "HEAD"]);
     file_for_review(&f, &a.id).await;
 
-    let b_worktree = worktree::prepare(f.ctx(), &b.id).await.expect("prepare B");
+    let b_worktree = f.harness.prepare_worktree(&b.id).await.expect("prepare B");
     commit_in(Path::new(&b_worktree.path), "schema.rs", "// B\n", "Add B");
     file_for_review(&f, &b.id).await;
 
@@ -451,7 +461,7 @@ async fn two_dependencies_base_off_the_higher_one_and_warn_about_the_other() {
         .await
         .expect("C depends on both");
 
-    let c_worktree = worktree::prepare(f.ctx(), &c.id).await.expect("prepare C");
+    let c_worktree = f.harness.prepare_worktree(&c.id).await.expect("prepare C");
 
     assert_eq!(c_worktree.base_ref, a_worktree.branch);
     assert_eq!(
@@ -480,7 +490,7 @@ async fn the_resolved_base_is_recorded_on_the_run() {
     let f = Fixture::new().await;
     let a = f.task("Add the API endpoint").await;
     let b = f.task("Call it from the UI").await;
-    let a_worktree = worktree::prepare(f.ctx(), &a.id).await.expect("prepare A");
+    let a_worktree = f.harness.prepare_worktree(&a.id).await.expect("prepare A");
     commit_in(
         Path::new(&a_worktree.path),
         "endpoint.rs",
@@ -492,7 +502,7 @@ async fn the_resolved_base_is_recorded_on_the_run() {
         .await
         .expect("B depends on A");
 
-    let b_worktree = worktree::prepare(f.ctx(), &b.id).await.expect("prepare B");
+    let b_worktree = f.harness.prepare_worktree(&b.id).await.expect("prepare B");
     let data = scratch_dir("rimaia-run-data-");
     let paths = AppPaths::new(data.path());
     paths.create_all().expect("the app data directories");
@@ -519,12 +529,14 @@ async fn the_resolved_base_is_recorded_on_the_run() {
         .await
         .expect("clear B's dependencies");
 
-    let status = worktree::status(f.ctx(), &b.id).await.expect("status");
+    let status = worktree::status(f.ctx(), f.machine(), &b.id)
+        .await
+        .expect("status");
     assert_eq!(
         status.base_ref, a_worktree.branch,
         "a re-resolution would say `main` and silently re-measure the diff",
     );
-    let summary = worktree::diff_summary(f.ctx(), &b.id)
+    let summary = worktree::diff_summary(f.ctx(), f.machine(), &b.id)
         .await
         .expect("diff summary");
     assert_eq!(summary.base_ref, a_worktree.branch);
@@ -537,7 +549,9 @@ async fn a_task_that_has_never_run_reports_a_freshly_resolved_base() {
     let f = Fixture::new().await;
     let task = f.task("Add parser").await;
 
-    let status = worktree::status(f.ctx(), &task.id).await.expect("status");
+    let status = worktree::status(f.ctx(), f.machine(), &task.id)
+        .await
+        .expect("status");
 
     assert_eq!(status.base_ref, "main");
     assert_eq!(status.dependency_warning, None);
@@ -568,7 +582,9 @@ async fn an_over_long_title_truncates_to_a_branch_name_git_itself_accepts() {
         .task(&"Refactor the exceedingly verbose configuration loader ".repeat(12))
         .await;
 
-    let worktree = worktree::prepare(f.ctx(), &task.id)
+    let worktree = f
+        .harness
+        .prepare_worktree(&task.id)
         .await
         .expect("an over-long title must still produce a usable branch");
 
@@ -601,7 +617,7 @@ async fn a_colliding_branch_name_gets_a_suffix_rather_than_being_reused() {
     git(f.source.path(), &["branch", &taken]);
     let taken_sha = git(f.source.path(), &["rev-parse", &taken]);
 
-    let worktree = worktree::prepare(f.ctx(), &task.id).await.expect("prepare");
+    let worktree = f.harness.prepare_worktree(&task.id).await.expect("prepare");
 
     assert_eq!(worktree.branch, format!("{taken}-2"));
     assert_eq!(
@@ -625,10 +641,10 @@ async fn a_colliding_branch_name_gets_a_suffix_rather_than_being_reused() {
 async fn removing_clears_both_the_directory_and_gits_worktree_metadata() {
     let f = Fixture::new().await;
     let task = f.task("Add parser").await;
-    let worktree = worktree::prepare(f.ctx(), &task.id).await.expect("prepare");
+    let worktree = f.harness.prepare_worktree(&task.id).await.expect("prepare");
     assert_eq!(f.linked_worktrees().len(), 1);
 
-    worktree::remove(f.ctx(), &task.id, false, ForceRemoval::No)
+    worktree::remove(f.ctx(), f.machine(), &task.id, false, ForceRemoval::No)
         .await
         .expect("remove a clean worktree");
 
@@ -638,7 +654,7 @@ async fn removing_clears_both_the_directory_and_gits_worktree_metadata() {
         "git's own record must go too — `rm -rf` is exactly what leaves it behind"
     );
     let stored = f.reload(&task.id).await;
-    assert_eq!(stored.worktree_path, None);
+    assert_eq!(f.harness.worktree_path(&task.id).await, None);
     assert_eq!(
         stored.branch.as_deref(),
         Some(worktree.branch.as_str()),
@@ -651,7 +667,7 @@ async fn removing_clears_both_the_directory_and_gits_worktree_metadata() {
 async fn removing_with_delete_branch_takes_the_branch_and_the_row_reference_too() {
     let f = Fixture::new().await;
     let task = f.task("Add parser").await;
-    let worktree = worktree::prepare(f.ctx(), &task.id).await.expect("prepare");
+    let worktree = f.harness.prepare_worktree(&task.id).await.expect("prepare");
     commit_in(
         Path::new(&worktree.path),
         "parser.rs",
@@ -659,7 +675,7 @@ async fn removing_with_delete_branch_takes_the_branch_and_the_row_reference_too(
         "Add parser",
     );
 
-    worktree::remove(f.ctx(), &task.id, true, ForceRemoval::No)
+    worktree::remove(f.ctx(), f.machine(), &task.id, true, ForceRemoval::No)
         .await
         .expect("remove and delete the branch");
 
@@ -669,18 +685,18 @@ async fn removing_with_delete_branch_takes_the_branch_and_the_row_reference_too(
     );
     let stored = f.reload(&task.id).await;
     assert_eq!(stored.branch, None);
-    assert_eq!(stored.worktree_path, None);
+    assert_eq!(f.harness.worktree_path(&task.id).await, None);
 }
 
 #[tokio::test]
 async fn removing_a_dirty_worktree_is_refused_until_the_user_confirms() {
     let f = Fixture::new().await;
     let task = f.task("Add parser").await;
-    let worktree = worktree::prepare(f.ctx(), &task.id).await.expect("prepare");
+    let worktree = f.harness.prepare_worktree(&task.id).await.expect("prepare");
     std::fs::write(Path::new(&worktree.path).join("scratch.txt"), "unsaved\n")
         .expect("leave uncommitted work behind");
 
-    let error = worktree::remove(f.ctx(), &task.id, false, ForceRemoval::No)
+    let error = worktree::remove(f.ctx(), f.machine(), &task.id, false, ForceRemoval::No)
         .await
         .expect_err("uncommitted work must not be discarded unasked");
 
@@ -692,9 +708,15 @@ async fn removing_a_dirty_worktree_is_refused_until_the_user_confirms() {
     );
     assert!(Path::new(&worktree.path).exists());
 
-    worktree::remove(f.ctx(), &task.id, false, ForceRemoval::ConfirmedByUser)
-        .await
-        .expect("an explicit confirmation removes it");
+    worktree::remove(
+        f.ctx(),
+        f.machine(),
+        &task.id,
+        false,
+        ForceRemoval::ConfirmedByUser,
+    )
+    .await
+    .expect("an explicit confirmation removes it");
     assert!(!Path::new(&worktree.path).exists());
 }
 
@@ -704,7 +726,7 @@ async fn only_tracked_changes_count_as_changes_to_the_tracked_files() {
     // those must not refuse a review; an edit to a tracked file must.
     let f = Fixture::new().await;
     let task = f.task("Add parser").await;
-    let worktree = worktree::prepare(f.ctx(), &task.id).await.expect("prepare");
+    let worktree = f.harness.prepare_worktree(&task.id).await.expect("prepare");
     let path = Path::new(&worktree.path);
     assert!(!worktree::has_tracked_changes(path).await.expect("clean"));
 
@@ -729,11 +751,11 @@ async fn removing_a_task_that_has_no_worktree_is_not_an_error() {
     let f = Fixture::new().await;
     let task = f.task("Add parser").await;
 
-    worktree::remove(f.ctx(), &task.id, true, ForceRemoval::No)
+    worktree::remove(f.ctx(), f.machine(), &task.id, true, ForceRemoval::No)
         .await
         .expect("removal is idempotent, the same way prepare is");
 
-    assert_eq!(f.reload(&task.id).await.worktree_path, None);
+    assert_eq!(f.harness.worktree_path(&task.id).await, None);
 }
 
 // ---------------------------------------------------------------------------
@@ -744,7 +766,7 @@ async fn removing_a_task_that_has_no_worktree_is_not_an_error() {
 async fn a_worktree_deleted_behind_the_apps_back_is_reconciled_at_the_next_startup() {
     let f = Fixture::new().await;
     let task = f.task("Add parser").await;
-    let worktree = worktree::prepare(f.ctx(), &task.id).await.expect("prepare");
+    let worktree = f.harness.prepare_worktree(&task.id).await.expect("prepare");
     commit_in(
         Path::new(&worktree.path),
         "parser.rs",
@@ -756,9 +778,11 @@ async fn a_worktree_deleted_behind_the_apps_back_is_reconciled_at_the_next_start
 
     // Exactly the hand-off `startup::survey`'s module doc describes: it reports
     // the ids, this acts on them.
-    let report = rimaia_core::startup::survey(f.ctx()).await.expect("survey");
+    let report = rimaia_core::startup::survey(f.ctx(), f.machine(), &f.no_runs())
+        .await
+        .expect("survey");
     assert_eq!(report.missing_worktrees, vec![task.id.clone()]);
-    let reconciled = worktree::reconcile(f.ctx(), &report.missing_worktrees).await;
+    let reconciled = worktree::reconcile(f.ctx(), f.machine(), &report.missing_worktrees).await;
 
     assert_eq!(reconciled.len(), 1);
     assert_eq!(reconciled[0].task_id, task.id);
@@ -771,7 +795,7 @@ async fn a_worktree_deleted_behind_the_apps_back_is_reconciled_at_the_next_start
     assert_eq!(reconciled[0].corrected_run_state, None);
 
     let stored = f.reload(&task.id).await;
-    assert_eq!(stored.worktree_path, None);
+    assert_eq!(f.harness.worktree_path(&task.id).await, None);
     assert_eq!(stored.branch.as_deref(), Some(worktree.branch.as_str()));
     assert!(
         f.linked_worktrees().is_empty(),
@@ -791,7 +815,7 @@ async fn a_reconciled_task_can_be_prepared_again_onto_the_branch_it_kept() {
     // worktree made are still the starting point.
     let f = Fixture::new().await;
     let task = f.task("Add parser").await;
-    let first = worktree::prepare(f.ctx(), &task.id).await.expect("prepare");
+    let first = f.harness.prepare_worktree(&task.id).await.expect("prepare");
     commit_in(
         Path::new(&first.path),
         "parser.rs",
@@ -800,9 +824,11 @@ async fn a_reconciled_task_can_be_prepared_again_onto_the_branch_it_kept() {
     );
     let committed = git(Path::new(&first.path), &["rev-parse", "HEAD"]);
     std::fs::remove_dir_all(&first.path).expect("delete the worktree");
-    worktree::reconcile(f.ctx(), std::slice::from_ref(&task.id)).await;
+    worktree::reconcile(f.ctx(), f.machine(), std::slice::from_ref(&task.id)).await;
 
-    let second = worktree::prepare(f.ctx(), &task.id)
+    let second = f
+        .harness
+        .prepare_worktree(&task.id)
         .await
         .expect("prepare must work again after reconciliation");
 
@@ -825,7 +851,7 @@ async fn reconciling_moves_a_task_left_running_to_failed_through_the_state_machi
     // rather than a silent `UPDATE`.
     let f = Fixture::new().await;
     let task = f.task("Add parser").await;
-    let worktree = worktree::prepare(f.ctx(), &task.id).await.expect("prepare");
+    let worktree = f.harness.prepare_worktree(&task.id).await.expect("prepare");
     tasks::set_run_state(f.ctx(), &task.id, RunState::Queued)
         .await
         .expect("queue");
@@ -834,7 +860,8 @@ async fn reconciling_moves_a_task_left_running_to_failed_through_the_state_machi
         .expect("run");
     std::fs::remove_dir_all(&worktree.path).expect("delete the worktree");
 
-    let reconciled = worktree::reconcile(f.ctx(), std::slice::from_ref(&task.id)).await;
+    let reconciled =
+        worktree::reconcile(f.ctx(), f.machine(), std::slice::from_ref(&task.id)).await;
 
     assert_eq!(reconciled[0].corrected_run_state, Some(RunState::Failed));
     assert_eq!(f.reload(&task.id).await.run_state, RunState::Failed);
@@ -846,14 +873,14 @@ async fn reconciling_leaves_a_worktree_that_is_still_there_completely_alone() {
     // worktree off its task.
     let f = Fixture::new().await;
     let task = f.task("Add parser").await;
-    let worktree = worktree::prepare(f.ctx(), &task.id).await.expect("prepare");
+    let worktree = f.harness.prepare_worktree(&task.id).await.expect("prepare");
 
-    let reconciled = worktree::reconcile(f.ctx(), std::slice::from_ref(&task.id)).await;
+    let reconciled =
+        worktree::reconcile(f.ctx(), f.machine(), std::slice::from_ref(&task.id)).await;
 
     assert!(reconciled.is_empty());
-    let stored = f.reload(&task.id).await;
     assert_eq!(
-        stored.worktree_path.as_deref(),
+        f.harness.worktree_path(&task.id).await.as_deref(),
         Some(worktree.path.as_str())
     );
     assert_eq!(f.linked_worktrees().len(), 1);
@@ -863,13 +890,14 @@ async fn reconciling_leaves_a_worktree_that_is_still_there_completely_alone() {
 async fn reconciling_clears_a_branch_that_did_not_outlive_the_directory_either() {
     let f = Fixture::new().await;
     let task = f.task("Add parser").await;
-    let worktree = worktree::prepare(f.ctx(), &task.id).await.expect("prepare");
+    let worktree = f.harness.prepare_worktree(&task.id).await.expect("prepare");
     std::fs::remove_dir_all(&worktree.path).expect("delete the worktree");
     // Both halves gone, the way a user cleaning up by hand would leave it.
     git(f.source.path(), &["worktree", "prune"]);
     git(f.source.path(), &["branch", "-D", &worktree.branch]);
 
-    let reconciled = worktree::reconcile(f.ctx(), std::slice::from_ref(&task.id)).await;
+    let reconciled =
+        worktree::reconcile(f.ctx(), f.machine(), std::slice::from_ref(&task.id)).await;
 
     assert_eq!(reconciled[0].retained_branch, None);
     assert_eq!(f.reload(&task.id).await.branch, None);
@@ -881,7 +909,7 @@ async fn reconciling_a_task_id_that_no_longer_exists_is_survivable() {
     // the app not to start.
     let f = Fixture::new().await;
 
-    let reconciled = worktree::reconcile(f.ctx(), &["not-a-task".to_string()]).await;
+    let reconciled = worktree::reconcile(f.ctx(), f.machine(), &["not-a-task".to_string()]).await;
 
     assert!(reconciled.is_empty());
 }
@@ -897,7 +925,9 @@ async fn a_worktree_root_inside_the_repository_is_refused() {
     let f = Fixture::with_worktree_root(source, &inside).await;
     let task = f.task("Add parser").await;
 
-    let error = worktree::prepare(f.ctx(), &task.id)
+    let error = f
+        .harness
+        .prepare_worktree(&task.id)
         .await
         .expect_err("ADR-0005 keeps worktrees out of the repository");
 
@@ -927,7 +957,9 @@ async fn a_worktree_root_reaching_the_repository_through_a_symlink_is_still_refu
     let f = Fixture::with_worktree_root(source, &link.join("worktrees")).await;
     let task = f.task("Add parser").await;
 
-    let error = worktree::prepare(f.ctx(), &task.id)
+    let error = f
+        .harness
+        .prepare_worktree(&task.id)
         .await
         .expect_err("a symlink into the repository is still the repository");
 
@@ -954,7 +986,9 @@ async fn a_worktree_root_reached_through_a_symlink_outside_the_repository_is_all
     let f = Fixture::with_worktree_root(source, &link.join(WORKTREE_ROOT_DIR)).await;
     let task = f.task("Add parser").await;
 
-    let worktree = worktree::prepare(f.ctx(), &task.id)
+    let worktree = f
+        .harness
+        .prepare_worktree(&task.id)
         .await
         .expect("a symlinked root outside the repository is fine");
 
@@ -967,22 +1001,28 @@ async fn a_worktree_root_reached_through_a_symlink_outside_the_repository_is_all
 
 #[tokio::test]
 async fn a_recorded_path_outside_the_worktree_root_is_refused_and_left_untouched() {
-    // The row is the one input this service cannot validate up front: a
+    // The record is the one input this service cannot validate up front: a
     // `worktree_root` edited in Settings, a hand-edit through the sqlite3 CLI
     // ADR-0003 counts as a feature, or a bug in an older version. What is
     // behind the guard is a `git worktree remove`, so being wrong deletes a
     // directory the user did not offer.
     let f = Fixture::new().await;
     let task = f.task("Add parser").await;
-    worktree::prepare(f.ctx(), &task.id).await.expect("prepare");
+    f.harness.prepare_worktree(&task.id).await.expect("prepare");
     let elsewhere = scratch_dir("rimaia-elsewhere-");
     let stray = elsewhere.path().join("not ours");
     std::fs::create_dir(&stray).expect("create a directory outside the root");
-    point_task_at(&f.ctx().pool, &task.id, stray.to_str().unwrap()).await;
+    point_task_at(&f, &task.id, stray.to_str().unwrap()).await;
 
-    let error = worktree::remove(f.ctx(), &task.id, false, ForceRemoval::ConfirmedByUser)
-        .await
-        .expect_err("a path outside the worktree root must be refused");
+    let error = worktree::remove(
+        f.ctx(),
+        f.machine(),
+        &task.id,
+        false,
+        ForceRemoval::ConfirmedByUser,
+    )
+    .await
+    .expect_err("a path outside the worktree root must be refused");
 
     assert!(
         error
@@ -1001,7 +1041,9 @@ async fn a_worktree_root_containing_a_parent_segment_is_refused() {
     let f = Fixture::with_worktree_root(source, &root).await;
     let task = f.task("Add parser").await;
 
-    let error = worktree::prepare(f.ctx(), &task.id)
+    let error = f
+        .harness
+        .prepare_worktree(&task.id)
         .await
         .expect_err("`..` cannot be resolved without guessing");
 
@@ -1019,7 +1061,7 @@ async fn a_worktree_root_containing_a_parent_segment_is_refused() {
 async fn status_reports_ahead_behind_the_commit_count_and_the_diff() {
     let f = Fixture::new().await;
     let task = f.task("Add parser").await;
-    let worktree = worktree::prepare(f.ctx(), &task.id).await.expect("prepare");
+    let worktree = f.harness.prepare_worktree(&task.id).await.expect("prepare");
     commit_in(
         Path::new(&worktree.path),
         "parser.rs",
@@ -1041,7 +1083,9 @@ async fn status_reports_ahead_behind_the_commit_count_and_the_diff() {
         "Add changelog",
     );
 
-    let status = worktree::status(f.ctx(), &task.id).await.expect("status");
+    let status = worktree::status(f.ctx(), f.machine(), &task.id)
+        .await
+        .expect("status");
 
     assert!(status.exists);
     assert_eq!(status.branch.as_deref(), Some(worktree.branch.as_str()));
@@ -1059,14 +1103,22 @@ async fn status_reports_ahead_behind_the_commit_count_and_the_diff() {
 async fn status_reports_untracked_work_as_dirty() {
     let f = Fixture::new().await;
     let task = f.task("Add parser").await;
-    let worktree = worktree::prepare(f.ctx(), &task.id).await.expect("prepare");
-    assert!(!worktree::status(f.ctx(), &task.id).await.unwrap().dirty);
+    let worktree = f.harness.prepare_worktree(&task.id).await.expect("prepare");
+    assert!(
+        !worktree::status(f.ctx(), f.machine(), &task.id)
+            .await
+            .unwrap()
+            .dirty
+    );
 
     std::fs::write(Path::new(&worktree.path).join("scratch.txt"), "unsaved\n")
         .expect("leave uncommitted work behind");
 
     assert!(
-        worktree::status(f.ctx(), &task.id).await.unwrap().dirty,
+        worktree::status(f.ctx(), f.machine(), &task.id)
+            .await
+            .unwrap()
+            .dirty,
         "untracked files are work a removal would destroy, so they count"
     );
 }
@@ -1076,7 +1128,9 @@ async fn status_for_a_task_that_has_never_run_reports_no_worktree_rather_than_fa
     let f = Fixture::new().await;
     let task = f.task("Add parser").await;
 
-    let status = worktree::status(f.ctx(), &task.id).await.expect("status");
+    let status = worktree::status(f.ctx(), f.machine(), &task.id)
+        .await
+        .expect("status");
 
     assert!(!status.exists);
     assert_eq!(status.path, None);
@@ -1090,7 +1144,7 @@ async fn status_for_a_task_that_has_never_run_reports_no_worktree_rather_than_fa
 async fn status_of_a_worktree_deleted_behind_the_apps_back_reports_it_gone() {
     let f = Fixture::new().await;
     let task = f.task("Add parser").await;
-    let worktree = worktree::prepare(f.ctx(), &task.id).await.expect("prepare");
+    let worktree = f.harness.prepare_worktree(&task.id).await.expect("prepare");
     commit_in(
         Path::new(&worktree.path),
         "parser.rs",
@@ -1099,7 +1153,9 @@ async fn status_of_a_worktree_deleted_behind_the_apps_back_reports_it_gone() {
     );
     std::fs::remove_dir_all(&worktree.path).expect("delete the worktree");
 
-    let status = worktree::status(f.ctx(), &task.id).await.expect("status");
+    let status = worktree::status(f.ctx(), f.machine(), &task.id)
+        .await
+        .expect("status");
 
     assert!(!status.exists);
     assert_eq!(
@@ -1123,12 +1179,13 @@ async fn status_of_a_repository_moved_or_deleted_is_refused_with_an_actionable_m
     // `locate`, and `status` must give the same one.
     let f = Fixture::new().await;
     let task = f.task("Add parser").await;
-    worktree::prepare(f.ctx(), &task.id)
+    f.harness
+        .prepare_worktree(&task.id)
         .await
         .expect("prepare so the task has a branch to check status for");
     std::fs::remove_dir_all(f.source.path()).expect("delete the repository behind the app's back");
 
-    let error = worktree::status(f.ctx(), &task.id)
+    let error = worktree::status(f.ctx(), f.machine(), &task.id)
         .await
         .expect_err("a moved repository must not reach git as a missing cwd");
 
@@ -1142,7 +1199,7 @@ async fn status_of_a_repository_moved_or_deleted_is_refused_with_an_actionable_m
 async fn diff_summary_lists_the_commits_on_the_branch_newest_first() {
     let f = Fixture::new().await;
     let task = f.task("Add parser").await;
-    let worktree = worktree::prepare(f.ctx(), &task.id).await.expect("prepare");
+    let worktree = f.harness.prepare_worktree(&task.id).await.expect("prepare");
     commit_in(
         Path::new(&worktree.path),
         "parser.rs",
@@ -1156,7 +1213,7 @@ async fn diff_summary_lists_the_commits_on_the_branch_newest_first() {
         "Add the lexer",
     );
 
-    let summary = worktree::diff_summary(f.ctx(), &task.id)
+    let summary = worktree::diff_summary(f.ctx(), f.machine(), &task.id)
         .await
         .expect("diff_summary");
 
@@ -1198,7 +1255,7 @@ async fn a_commits_committed_at_is_the_committer_date_not_the_author_date() {
     // stored order and the claimed order silently disagree after a rebase.
     let f = Fixture::new().await;
     let task = f.task("Add parser").await;
-    let worktree = worktree::prepare(f.ctx(), &task.id).await.expect("prepare");
+    let worktree = f.harness.prepare_worktree(&task.id).await.expect("prepare");
     commit_with_dates(
         Path::new(&worktree.path),
         "parser.rs",
@@ -1208,7 +1265,7 @@ async fn a_commits_committed_at_is_the_committer_date_not_the_author_date() {
         "2026-08-20T12:00:00+00:00",
     );
 
-    let summary = worktree::diff_summary(f.ctx(), &task.id)
+    let summary = worktree::diff_summary(f.ctx(), f.machine(), &task.id)
         .await
         .expect("diff_summary");
 
@@ -1226,7 +1283,7 @@ async fn diff_summary_for_a_task_that_has_never_run_is_empty_rather_than_an_erro
     let f = Fixture::new().await;
     let task = f.task("Add parser").await;
 
-    let summary = worktree::diff_summary(f.ctx(), &task.id)
+    let summary = worktree::diff_summary(f.ctx(), f.machine(), &task.id)
         .await
         .expect("diff_summary");
 
@@ -1239,12 +1296,13 @@ async fn diff_summary_for_a_task_that_has_never_run_is_empty_rather_than_an_erro
 async fn diff_summary_of_a_repository_moved_or_deleted_is_refused_with_an_actionable_message() {
     let f = Fixture::new().await;
     let task = f.task("Add parser").await;
-    worktree::prepare(f.ctx(), &task.id)
+    f.harness
+        .prepare_worktree(&task.id)
         .await
         .expect("prepare so the task has a branch to summarise");
     std::fs::remove_dir_all(f.source.path()).expect("delete the repository behind the app's back");
 
-    let error = worktree::diff_summary(f.ctx(), &task.id)
+    let error = worktree::diff_summary(f.ctx(), f.machine(), &task.id)
         .await
         .expect_err("a moved repository must not reach git as a missing cwd");
 
@@ -1293,6 +1351,7 @@ impl Fixture {
         let harness = TestContext::new().await;
         let repository = repo::register(
             &harness.context,
+            harness.machine(),
             worktrees.path(),
             NewRepository {
                 path: source
@@ -1324,6 +1383,12 @@ impl Fixture {
     /// it (task 041).
     fn machine(&self) -> &rimaia_core::machine::MachineContext {
         self.harness.machine()
+    }
+
+    /// A data directory with no run transcripts in it, for a survey whose
+    /// subject is worktrees.
+    fn no_runs(&self) -> rimaia_core::AppPaths {
+        rimaia_core::AppPaths::new(self._worktrees.path().join("no-data"))
     }
 
     /// The `worktree_root` in the form the service records paths under —
@@ -1410,15 +1475,19 @@ fn parse_worktree_list(stdout: &str) -> Vec<ListedWorktree> {
 
 /// Points a task's `worktree_path` somewhere the service never would, for the
 /// safety test whose subject is precisely a row that cannot be trusted.
-async fn point_task_at(pool: &sqlx::SqlitePool, task_id: &str, path: &str) {
-    sqlx::query!(
-        "UPDATE tasks SET worktree_path = ?1 WHERE id = ?2",
-        path,
-        task_id
-    )
-    .execute(pool)
-    .await
-    .expect("point the task at a path outside its worktree root");
+/// Rewrites this machine's record of the task's worktree, as a hand-edit of
+/// `runner.db` or an older version's bug would.
+async fn point_task_at(f: &Fixture, task_id: &str, path: &str) {
+    f.machine()
+        .store
+        .record_worktree(&rimaia_core::machine::WorktreeRecord {
+            task_id: task_id.to_string(),
+            repository_id: f.repository.id.clone(),
+            path: path.to_string(),
+            fenced_at: None,
+        })
+        .await
+        .expect("point the task at a path outside its worktree root");
 }
 
 fn branch_exists(dir: &Path, branch: &str) -> bool {

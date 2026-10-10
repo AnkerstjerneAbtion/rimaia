@@ -259,7 +259,8 @@ async fn plan(
         ));
     };
 
-    let credentials = super::process::repository_credentials(config, repository).await?;
+    let checkout = crate::machine::checkout_of(machine, repository).await?;
+    let credentials = super::process::repository_credentials(config, repository, &checkout).await?;
     let tool = config
         .provider
         .tool_handle(RUN_MCP_SERVER_NAME, "set_task_strategy");
@@ -581,6 +582,7 @@ impl PlannerClaim {
 /// of a review aid (task 023's Out of scope).
 pub async fn claim_for_planning(
     board: &dyn BoardPort,
+    machine: &MachineContext,
     in_flight: &InFlight,
     task_id: &str,
     owner: LeaseOwner,
@@ -588,7 +590,10 @@ pub async fn claim_for_planning(
     let preview = board.preview(task_id).await?;
     let repository = &preview.repository;
 
-    if let Err(error) = crate::repo::ensure_unattended_runs_allowed(repository) {
+    // This runner's consent, off its checkout (task 066). A repository with no
+    // checkout here is the same skip, in the "not set up on this computer"
+    // sentence, because there is nothing here to plan in.
+    if let Err(error) = crate::repo::ensure_unattended_runs_allowed(machine, repository).await {
         return Ok(Err(PlanSkip::RepositoryNotOptedIn {
             repository: repository.name.clone(),
             reason: error.to_string(),
@@ -672,7 +677,7 @@ async fn plan_under(
     // operator's (ADR-0005). `prepare` is idempotent, so a task that already has
     // one is unchanged and a task that does not gets the same worktree its
     // implementation run would have used.
-    let worktree = crate::worktree::prepare(prepare_ctx, task_id).await?;
+    let worktree = crate::worktree::prepare(prepare_ctx, machine, board, lease).await?;
 
     match plan(
         board,
@@ -989,7 +994,9 @@ pub async fn plan_all(
             // `Manual`, because a pass is a person at the machine: a Stop
             // pressed on the queue must not kill a preflight they started
             // deliberately.
-            match claim_for_planning(board, in_flight, &task_id, LeaseOwner::Manual).await? {
+            match claim_for_planning(board, machine, in_flight, &task_id, LeaseOwner::Manual)
+                .await?
+            {
                 Ok(claim) => plan_claimed(board, machine, ctx, paths, config, claim).await?,
                 Err(skip) => PlanOutcome::Skipped(skip),
             }

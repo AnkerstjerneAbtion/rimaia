@@ -299,7 +299,6 @@ mod tests {
             position: 1.0,
             run_state: RunState::Idle,
             branch: None,
-            worktree_path: None,
             strategy_mode: mode,
             model: model.map(str::to_string),
             effort: effort.map(str::to_string),

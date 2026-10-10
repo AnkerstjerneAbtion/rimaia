@@ -114,6 +114,7 @@ async fn every_board_dto_round_trips_through_json() {
     let repository = TempRepo::init();
     let registered = repo::register(
         &harness.context,
+        harness.machine(),
         &paths.worktrees_dir(),
         NewRepository {
             path: repository.path().to_string_lossy().into_owned(),

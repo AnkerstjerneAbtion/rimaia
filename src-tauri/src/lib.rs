@@ -230,20 +230,23 @@ pub fn run() {
             // otherwise only reads (see its module docs); repairing a stuck
             // `running` task, a vanished worktree or a missing run log belongs to
             // tasks 004, 007 and 008 respectively, not to startup. It runs under
-            // the context, so it reports only the solo team's rows (task 039).
-            let report = match tauri::async_runtime::block_on(startup::survey(&context)) {
-                Ok(report) => report,
-                Err(err) => {
-                    log_startup_failure("startup survey", &paths.db_file(), &err);
-                    report_startup_failure(
-                        app.handle(),
-                        "survey what the last launch left behind",
-                        Some(&logs_dir),
-                        &err,
-                    );
-                    return Err(err.into());
-                }
-            };
+            // the context, so it reports only the solo team's rows (task 039),
+            // and reads worktrees from this machine's records and transcripts
+            // from the paths their ids derive (task 066).
+            let report =
+                match tauri::async_runtime::block_on(startup::survey(&context, &machine, &paths)) {
+                    Ok(report) => report,
+                    Err(err) => {
+                        log_startup_failure("startup survey", &paths.db_file(), &err);
+                        report_startup_failure(
+                            app.handle(),
+                            "survey what the last launch left behind",
+                            Some(&logs_dir),
+                            &err,
+                        );
+                        return Err(err.into());
+                    }
+                };
 
             // Subscribed once, here, for the life of the app (ADR-0018): the
             // shell is the only thing that turns a `ChangeEvent` into a Tauri
@@ -317,6 +320,7 @@ pub fn run() {
             // cannot itself stop the window from opening.
             tauri::async_runtime::block_on(worktree::reconcile(
                 &context,
+                &machine,
                 &report.missing_worktrees,
             ));
 
@@ -497,8 +501,10 @@ pub fn run() {
         commands::app::reveal_app_data_dir,
         commands::app::debug_provoke_error,
         commands::repositories::list_repositories,
+        commands::repositories::list_checkouts,
         commands::repositories::register_repository,
         commands::repositories::update_repository,
+        commands::repositories::set_repository_worktree_root,
         commands::repositories::set_repository_unattended_runs,
         commands::repositories::set_repository_on_archive,
         commands::repositories::set_repository_max_concurrency,
@@ -564,6 +570,7 @@ pub fn run() {
         commands::worktree::cleanup_merged_worktrees,
         commands::worktree::get_worktree_auto_cleanup,
         commands::worktree::set_worktree_auto_cleanup,
+        commands::worktree::list_local_worktrees,
         commands::runs::start_task_run,
         commands::runs::cancel_task_run,
         commands::runs::retry_task_now,
@@ -576,6 +583,7 @@ pub fn run() {
         commands::runs::search_run_transcript,
         commands::runs::summarize_run_transcript,
         commands::runs::reveal_run_log,
+        commands::runs::get_run_log_path,
         commands::runs::get_run_log_size,
         commands::runs::prune_run_logs,
         commands::queue::start_queue,
@@ -609,8 +617,10 @@ pub fn run() {
         commands::app::get_app_info,
         commands::app::reveal_app_data_dir,
         commands::repositories::list_repositories,
+        commands::repositories::list_checkouts,
         commands::repositories::register_repository,
         commands::repositories::update_repository,
+        commands::repositories::set_repository_worktree_root,
         commands::repositories::set_repository_unattended_runs,
         commands::repositories::set_repository_on_archive,
         commands::repositories::set_repository_max_concurrency,
@@ -676,6 +686,7 @@ pub fn run() {
         commands::worktree::cleanup_merged_worktrees,
         commands::worktree::get_worktree_auto_cleanup,
         commands::worktree::set_worktree_auto_cleanup,
+        commands::worktree::list_local_worktrees,
         commands::runs::start_task_run,
         commands::runs::cancel_task_run,
         commands::runs::retry_task_now,
@@ -688,6 +699,7 @@ pub fn run() {
         commands::runs::search_run_transcript,
         commands::runs::summarize_run_transcript,
         commands::runs::reveal_run_log,
+        commands::runs::get_run_log_path,
         commands::runs::get_run_log_size,
         commands::runs::prune_run_logs,
         commands::queue::start_queue,

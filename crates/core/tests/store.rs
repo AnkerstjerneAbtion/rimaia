@@ -158,13 +158,11 @@ async fn a_repository_round_trips_every_field_exactly() {
     let team_id = solo_team(&pool).await;
     sqlx::query!(
         "INSERT INTO repositories
-            (id, team_id, name, path, default_branch, worktree_root, allow_unattended_runs, created_at)
-         VALUES (?1, ?8, ?2, ?3, ?4, ?5, ?6, ?7)",
+            (id, team_id, name, default_branch, allow_unattended_runs, created_at)
+         VALUES (?1, ?6, ?2, ?3, ?4, ?5)",
         id,
         "rimaia",
-        "/Users/someone/Code/My Projects/rimaia",
         "main",
-        "/Users/someone/Library/Application Support/com.rimaia.app/worktrees",
         true,
         created_at,
         team_id,
@@ -180,18 +178,9 @@ async fn a_repository_round_trips_every_field_exactly() {
         Repository {
             id: id.clone(),
             name: "rimaia".to_string(),
-            path: "/Users/someone/Code/My Projects/rimaia".to_string(),
             default_branch: "main".to_string(),
-            worktree_root: "/Users/someone/Library/Application Support/com.rimaia.app/worktrees"
-                .to_string(),
             allow_unattended_runs: true,
-            max_concurrency: 1,
             created_at,
-            credential_login: None,
-            credential_label: None,
-            credential_added_at: None,
-            on_archive: rimaia_core::db::OnArchive::None,
-            on_archive_script: None,
         }
     );
 }
@@ -203,8 +192,8 @@ async fn a_repository_inserted_without_allow_unattended_runs_defaults_to_false()
 
     let team_id = solo_team(&pool).await;
     sqlx::query!(
-        "INSERT INTO repositories (id, team_id, name, path, default_branch, worktree_root, created_at)
-         VALUES (?1, ?3, 'rimaia', '/tmp/rimaia', 'main', '/tmp/rimaia-worktrees', ?2)",
+        "INSERT INTO repositories (id, team_id, name, default_branch, created_at)
+         VALUES (?1, ?3, 'rimaia', 'main', ?2)",
         id,
         NOW,
         team_id,
@@ -261,9 +250,9 @@ async fn a_task_round_trips_every_field_exactly() {
     sqlx::query!(
         "INSERT INTO tasks (
             id, team_id, repository_id, title, plan, extra_instructions, board_column, position,
-            run_state, branch, worktree_path, strategy_mode, model, effort, strategy_plan,
+            run_state, branch, strategy_mode, model, effort, strategy_plan,
             strategy_source, strategy_updated_at, created_at, updated_at, source
-         ) VALUES (?1, ?20, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)",
+         ) VALUES (?1, ?19, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)",
         id,
         repository_id,
         "Wire the board to the store",
@@ -273,7 +262,6 @@ async fn a_task_round_trips_every_field_exactly() {
         1.5,
         RunState::WaitingRetry,
         "rimaia/wire-the-board",
-        "/tmp/rimaia-worktrees/wire-the-board",
         StrategyMode::Planned,
         "opus",
         "high",
@@ -303,7 +291,6 @@ async fn a_task_round_trips_every_field_exactly() {
             position: 1.5,
             run_state: RunState::WaitingRetry,
             branch: Some("rimaia/wire-the-board".to_string()),
-            worktree_path: Some("/tmp/rimaia-worktrees/wire-the-board".to_string()),
             strategy_mode: StrategyMode::Planned,
             model: Some("opus".to_string()),
             effort: Some("high".to_string()),
@@ -424,12 +411,12 @@ async fn a_run_round_trips_every_field_exactly() {
     sqlx::query!(
         "INSERT INTO runs (
             id, task_id, attempt, status, session_id, prompt, started_at, ended_at,
-            exit_class, error_message, num_turns, cost_usd, log_path, pr_url, resume_after,
+            exit_class, error_message, num_turns, cost_usd, pr_url, resume_after,
             base_ref, model, effort, run_environment,
             input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens,
             head_sha, base_sha
-         ) VALUES (?1, ?2, 2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14,
-                   ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24)",
+         ) VALUES (?1, ?2, 2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13,
+                   ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23)",
         id,
         task_id,
         RunStatus::Failed,
@@ -441,7 +428,6 @@ async fn a_run_round_trips_every_field_exactly() {
         "hit the five-hour window",
         7_i64,
         1.2345,
-        "/tmp/rimaia-runs/task/run.jsonl",
         "https://github.com/example/pr/9",
         resume_after,
         "main",
@@ -477,7 +463,6 @@ async fn a_run_round_trips_every_field_exactly() {
             error_message: Some("hit the five-hour window".to_string()),
             num_turns: Some(7),
             cost_usd: Some(1.2345),
-            log_path: "/tmp/rimaia-runs/task/run.jsonl".to_string(),
             pr_url: Some("https://github.com/example/pr/9".to_string()),
             resume_after: Some(resume_after),
             base_ref: Some("main".to_string()),
@@ -512,15 +497,14 @@ async fn a_run_round_trips_while_still_in_flight() {
     let started_at: DateTime<Utc> = "2026-08-20T03:00:00Z".parse().expect("rfc3339");
 
     sqlx::query!(
-        "INSERT INTO runs (id, task_id, attempt, status, session_id, prompt, started_at, log_path)
-         VALUES (?1, ?2, 1, ?3, ?4, ?5, ?6, ?7)",
+        "INSERT INTO runs (id, task_id, attempt, status, session_id, prompt, started_at)
+         VALUES (?1, ?2, 1, ?3, ?4, ?5, ?6)",
         id,
         task_id,
         RunStatus::Running,
         "session-1",
         "implement the thing",
         started_at,
-        "/tmp/rimaia-runs/task/run-1.jsonl",
     )
     .execute(&pool)
     .await
@@ -544,7 +528,6 @@ async fn a_run_round_trips_while_still_in_flight() {
             error_message: None,
             num_turns: None,
             cost_usd: None,
-            log_path: "/tmp/rimaia-runs/task/run-1.jsonl".to_string(),
             pr_url: None,
             resume_after: None,
             base_ref: None,
@@ -567,17 +550,21 @@ async fn a_schedule_round_trips_every_field_exactly() {
     let id = new_id();
     let start_at: DateTime<Utc> = "2026-08-21T05:00:00Z".parse().expect("rfc3339");
 
-    sqlx::query!(
+    // Unchecked: the board's `schedules` is retired since task 041 and read by
+    // nothing but adoption, so no checked board query may name its columns
+    // (task 066's `no_board_query_reads_a_retired_column`). The schema still
+    // holds it until task 065 drops it.
+    sqlx::query(
         "INSERT INTO schedules (id, name, mode, cron, start_at, max_concurrency, enabled)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-        id,
-        "Weeknight run",
-        ScheduleMode::Parallel,
-        "0 22 * * 1-5",
-        start_at,
-        4_i64,
-        false,
     )
+    .bind(&id)
+    .bind("Weeknight run")
+    .bind(ScheduleMode::Parallel)
+    .bind("0 22 * * 1-5")
+    .bind(start_at)
+    .bind(4_i64)
+    .bind(false)
     .execute(&pool)
     .await
     .expect("insert a fully populated schedule");
@@ -719,8 +706,8 @@ async fn a_run_on_a_missing_task_is_rejected() {
     let id = new_id();
 
     let result = sqlx::query!(
-        "INSERT INTO runs (id, task_id, attempt, status, session_id, prompt, started_at, log_path)
-         VALUES (?1, 'no-such-task', 1, 'running', 'session', 'prompt', ?2, '/tmp/log.jsonl')",
+        "INSERT INTO runs (id, task_id, attempt, status, session_id, prompt, started_at)
+         VALUES (?1, 'no-such-task', 1, 'running', 'session', 'prompt', ?2)",
         id,
         NOW,
     )
@@ -956,8 +943,8 @@ async fn an_unrecognised_exit_class_is_refused() {
     let id = new_id();
 
     let result = sqlx::query!(
-        "INSERT INTO runs (id, task_id, attempt, status, session_id, prompt, started_at, exit_class, log_path)
-         VALUES (?1, ?2, 1, 'failed', 'session', 'prompt', ?3, 'timeout', '/tmp/log.jsonl')",
+        "INSERT INTO runs (id, task_id, attempt, status, session_id, prompt, started_at, exit_class)
+         VALUES (?1, ?2, 1, 'failed', 'session', 'prompt', ?3, 'timeout')",
         id,
         task_id,
         NOW,
@@ -979,8 +966,8 @@ async fn runs_recorded_before_kinds_existed_read_as_implementation() {
     let task_id = insert_task(&pool, &repository_id, BoardColumn::Ready, RunState::Idle).await;
     let id = new_id();
     sqlx::query!(
-        "INSERT INTO runs (id, task_id, attempt, status, session_id, prompt, started_at, log_path)
-         VALUES (?1, ?2, 1, 'running', 'session', 'prompt', ?3, '/tmp/log.jsonl')",
+        "INSERT INTO runs (id, task_id, attempt, status, session_id, prompt, started_at)
+         VALUES (?1, ?2, 1, 'running', 'session', 'prompt', ?3)",
         id,
         task_id,
         NOW,
@@ -1017,8 +1004,8 @@ async fn the_runs_table_refuses_a_strategy_kind() {
     let id = new_id();
 
     let result = sqlx::query!(
-        "INSERT INTO runs (id, task_id, attempt, kind, status, session_id, prompt, started_at, log_path)
-         VALUES (?1, ?2, 1, 'strategy', 'running', 'session', 'prompt', ?3, '/tmp/log.jsonl')",
+        "INSERT INTO runs (id, task_id, attempt, kind, status, session_id, prompt, started_at)
+         VALUES (?1, ?2, 1, 'strategy', 'running', 'session', 'prompt', ?3)",
         id,
         task_id,
         NOW,
@@ -1054,8 +1041,8 @@ async fn a_second_run_with_the_same_attempt_number_is_refused() {
 
     let second = new_id();
     let result = sqlx::query!(
-        "INSERT INTO runs (id, task_id, attempt, status, session_id, prompt, started_at, log_path)
-         VALUES (?1, ?2, 1, 'running', 'session-2', 'prompt', ?3, '/tmp/log-2.jsonl')",
+        "INSERT INTO runs (id, task_id, attempt, status, session_id, prompt, started_at)
+         VALUES (?1, ?2, 1, 'running', 'session-2', 'prompt', ?3)",
         second,
         task_id,
         NOW,
@@ -1432,16 +1419,10 @@ async fn schema_snapshot(pool: &SqlitePool) -> Vec<SchemaEntry> {
 }
 
 async fn fetch_repository(pool: &SqlitePool, id: &str) -> Repository {
-    // `path!` and `worktree_root!`, as `repo::list` reads them: every row here
-    // has both. Task 066 retires the readers they mirror.
     sqlx::query_as!(
         Repository,
-        r#"SELECT id, name, path AS "path!", default_branch, worktree_root AS "worktree_root!",
-            allow_unattended_runs,
-            max_concurrency, created_at AS "created_at: DateTime<Utc>",
-            credential_login, credential_label,
-            credential_added_at AS "credential_added_at: DateTime<Utc>",
-            on_archive AS "on_archive: rimaia_core::db::OnArchive", on_archive_script
+        r#"SELECT id, name, default_branch, allow_unattended_runs,
+            created_at AS "created_at: DateTime<Utc>"
            FROM repositories WHERE id = ?1"#,
         id,
     )
@@ -1466,7 +1447,7 @@ async fn fetch_task(pool: &SqlitePool, id: &str) -> Task {
         Task,
         r#"SELECT id, repository_id, title, plan, extra_instructions,
             board_column AS "column: BoardColumn", position, run_state AS "run_state: RunState",
-            branch, worktree_path, strategy_mode AS "strategy_mode: StrategyMode", model, effort,
+            branch, strategy_mode AS "strategy_mode: StrategyMode", model, effort,
             strategy_plan, strategy_source AS "strategy_source: StrategySource",
             strategy_updated_at AS "strategy_updated_at: DateTime<Utc>",
             created_at AS "created_at: DateTime<Utc>", updated_at AS "updated_at: DateTime<Utc>",
@@ -1509,15 +1490,13 @@ async fn fetch_task_dependency(
 }
 
 async fn fetch_run(pool: &SqlitePool, id: &str) -> Run {
-    // `log_path!`, as the run readers in `runner::outcome` take it: every row
-    // here has one. Task 066 retires the readers it mirrors.
     sqlx::query_as!(
         Run,
         r#"SELECT id, task_id, attempt, kind AS "kind: RunKind", status AS "status: RunStatus",
             session_id, prompt,
             started_at AS "started_at: DateTime<Utc>", ended_at AS "ended_at: DateTime<Utc>",
             exit_class AS "exit_class: ExitClass", error_message, num_turns, cost_usd,
-            log_path AS "log_path!", pr_url, resume_after AS "resume_after: DateTime<Utc>", base_ref,
+            pr_url, resume_after AS "resume_after: DateTime<Utc>", base_ref,
             model, effort, run_environment, input_tokens, output_tokens,
             cache_read_tokens, cache_creation_tokens, head_sha, base_sha
            FROM runs WHERE id = ?1"#,
@@ -1529,16 +1508,14 @@ async fn fetch_run(pool: &SqlitePool, id: &str) -> Run {
 }
 
 async fn fetch_schedule(pool: &SqlitePool, id: &str) -> Schedule {
-    sqlx::query_as!(
-        Schedule,
-        r#"SELECT id, name, mode AS "mode: ScheduleMode", cron,
-            start_at AS "start_at: DateTime<Utc>", max_concurrency,
-            enabled AS "enabled: bool", timezone, stop_at,
-            last_fired_at AS "last_fired_at: DateTime<Utc>",
-            armed_at AS "armed_at: DateTime<Utc>"
-           FROM schedules WHERE id = ?1"#,
-        id,
+    // Unchecked, for the reason `a_schedule_round_trips_every_field_exactly`
+    // gives.
+    sqlx::query_as::<_, Schedule>(
+        "SELECT id, name, mode, cron, start_at, max_concurrency, enabled, timezone, stop_at,
+                last_fired_at, armed_at
+           FROM schedules WHERE id = ?1",
     )
+    .bind(id)
     .fetch_one(pool)
     .await
     .expect("read back the schedule")
@@ -1551,8 +1528,8 @@ async fn insert_repository(pool: &SqlitePool) -> String {
     let team_id = solo_team(pool).await;
     sqlx::query!(
         "INSERT INTO repositories
-            (id, team_id, name, path, default_branch, worktree_root, allow_unattended_runs, created_at)
-         VALUES (?1, ?3, 'rimaia', '/tmp/rimaia', 'main', '/tmp/rimaia-worktrees', 0, ?2)",
+            (id, team_id, name, default_branch, allow_unattended_runs, created_at)
+         VALUES (?1, ?3, 'rimaia', 'main', 0, ?2)",
         id,
         NOW,
         team_id,
@@ -1641,8 +1618,8 @@ async fn insert_run(
 ) -> String {
     let id = new_id();
     sqlx::query!(
-        "INSERT INTO runs (id, task_id, attempt, status, session_id, prompt, started_at, exit_class, log_path)
-         VALUES (?1, ?2, ?3, ?4, ?5, 'do the thing', ?6, ?7, ?8)",
+        "INSERT INTO runs (id, task_id, attempt, status, session_id, prompt, started_at, exit_class)
+         VALUES (?1, ?2, ?3, ?4, ?5, 'do the thing', ?6, ?7)",
         id,
         task_id,
         attempt,
@@ -1650,7 +1627,6 @@ async fn insert_run(
         id,
         NOW,
         exit_class,
-        id,
     )
     .execute(pool)
     .await
@@ -1660,11 +1636,13 @@ async fn insert_run(
 
 async fn insert_schedule(pool: &SqlitePool, mode: ScheduleMode) -> String {
     let id = new_id();
-    sqlx::query!(
+    // Unchecked, for the reason `a_schedule_round_trips_every_field_exactly`
+    // gives.
+    sqlx::query(
         "INSERT INTO schedules (id, name, mode, max_concurrency, enabled) VALUES (?1, 'nightly', ?2, 2, 1)",
-        id,
-        mode,
     )
+    .bind(&id)
+    .bind(mode)
     .execute(pool)
     .await
     .expect("insert a schedule fixture");

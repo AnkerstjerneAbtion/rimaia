@@ -280,7 +280,7 @@ pub async fn context(
 
     let newest = rows.last();
     let change = match newest {
-        Some(row) => match runs::get_run(ctx, &row.id).await?.review {
+        Some(row) => match runs::review(ctx, &row.id).await? {
             RunReview::Recorded {
                 bundle: Some(bundle),
             } => Some(ChangeSummary {

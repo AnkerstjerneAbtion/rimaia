@@ -463,7 +463,10 @@ async fn a_reject_over_mcp_writes_what_the_service_writes() {
     assert_eq!(over_mcp.task.column, direct.task.column);
     assert_eq!(twin.position, direct.task.position);
     assert_eq!(twin.branch, direct.task.branch);
-    assert_eq!(twin.worktree_path, direct.task.worktree_path);
+    assert_eq!(
+        h.worktree_path(&twins[1]).await,
+        h.worktree_path(&direct.task.id).await
+    );
     assert_eq!(over_mcp.set_aside_branch, direct.set_aside_branch);
     assert!(over_mcp.dependents.is_empty());
 }

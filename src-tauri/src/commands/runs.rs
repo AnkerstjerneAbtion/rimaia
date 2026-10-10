@@ -18,8 +18,6 @@
 //! it (ADR-0013, task 033), for a history list that shows every attempt rather
 //! than only the last one.
 
-use std::path::Path;
-
 use chrono::{DateTime, Utc};
 use rimaia_core::db::{Run, RunKind, RunStatus};
 use rimaia_core::runner::events::RunTail;
@@ -239,6 +237,7 @@ pub async fn list_runs(
 ) -> Result<Vec<RunListEntry>> {
     runs::list_runs(
         &state.context,
+        &state.paths,
         RunFilter {
             repository_id: filter.repository_id,
             status: filter.status,
@@ -255,7 +254,7 @@ pub async fn list_runs(
 /// board read: it runs no git (seam-contract D32's appendix).
 #[tauri::command]
 pub async fn get_run(state: State<'_, AppState>, run_id: String) -> Result<RunDetail> {
-    runs::get_run(&state.context, &run_id).await
+    runs::get_run(&state.context, &state.paths, &run_id).await
 }
 
 /// One page of `run_id`'s transcript, oldest-shown-line first.
@@ -270,9 +269,9 @@ pub async fn read_run_transcript_page(
     offset: usize,
     limit: Option<usize>,
 ) -> Result<TranscriptPage> {
-    let run = runs::get_run_row(&state.context, &run_id).await?;
+    let log_path = runs::transcript_of(&state.context, &state.paths, &run_id).await?;
     transcript::read_page(
-        Path::new(&run.log_path),
+        &log_path,
         offset,
         limit.unwrap_or(transcript::DEFAULT_PAGE_SIZE),
     )
@@ -291,8 +290,8 @@ pub async fn summarize_run_transcript(
     state: State<'_, AppState>,
     run_id: String,
 ) -> Result<transcript::TranscriptSummary> {
-    let run = runs::get_run_row(&state.context, &run_id).await?;
-    transcript::summarize(Path::new(&run.log_path)).await
+    let log_path = runs::transcript_of(&state.context, &state.paths, &run_id).await?;
+    transcript::summarize(&log_path).await
 }
 
 /// Text search across `run_id`'s whole transcript — inside tool inputs as
@@ -304,14 +303,25 @@ pub async fn search_run_transcript(
     run_id: String,
     query: String,
 ) -> Result<Vec<SearchHit>> {
-    let run = runs::get_run_row(&state.context, &run_id).await?;
-    transcript::search(Path::new(&run.log_path), &query).await
+    let log_path = runs::transcript_of(&state.context, &state.paths, &run_id).await?;
+    transcript::search(&log_path, &query).await
+}
+
+/// Where one run's transcript is on this machine, derived from its ids
+/// (ADR-0013): what "copy log path" copies, now that `Run` carries no
+/// `logPath` (task 066). A local command (D32's appendix).
+#[tauri::command]
+pub async fn get_run_log_path(
+    state: State<'_, AppState>,
+    task_id: String,
+    run_id: String,
+) -> Result<String> {
+    let log_path = runs::log_path(&state.context, &state.paths, &task_id, &run_id).await?;
+    Ok(log_path.to_string_lossy().into_owned())
 }
 
 /// Reveals `run_id`'s raw JSONL transcript in the OS file manager — task
-/// 015's "reveals the JSONL file". "Copy log path" needs no command: every
-/// caller already has `Run.logPath` from [`get_run`] or
-/// [`list_runs_for_task`], and the system clipboard is a browser API away.
+/// 015's "reveals the JSONL file".
 ///
 /// # `reveal_item_in_dir`, not `open_path`
 ///
@@ -334,7 +344,7 @@ pub async fn reveal_run_log(
     state: State<'_, AppState>,
     run_id: String,
 ) -> Result<()> {
-    let log_path = runs::log_path_to_reveal(&state.context, &run_id).await?;
+    let log_path = runs::log_path_to_reveal(&state.context, &state.paths, &run_id).await?;
     app.opener()
         .reveal_item_in_dir(log_path)
         .map_err(|e| Error::internal(format!("could not reveal the log file: {e}")))

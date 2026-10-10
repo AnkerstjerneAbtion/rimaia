@@ -853,7 +853,6 @@ four independent parts, enabling efficient parallel execution."
             position: 1.0,
             run_state: RunState::Idle,
             branch: None,
-            worktree_path: None,
             strategy_mode: StrategyMode::Planned,
             model: None,
             effort: None,

@@ -325,8 +325,8 @@ async fn seed_repository(pool: &SqlitePool) -> String {
     let team_id = solo_team(pool).await;
     sqlx::query!(
         r#"
-        INSERT INTO repositories (id, team_id, name, path, default_branch, worktree_root, allow_unattended_runs, created_at)
-        VALUES (?1, ?3, 'rimaia', '/tmp/rimaia', 'main', '/tmp/rimaia-worktrees', 0, ?2)
+        INSERT INTO repositories (id, team_id, name, default_branch, allow_unattended_runs, created_at)
+        VALUES (?1, ?3, 'rimaia', 'main', 0, ?2)
         "#,
         id,
         T1,

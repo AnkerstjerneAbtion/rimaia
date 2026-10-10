@@ -26,14 +26,13 @@
 //! owns — spawn, argv, environment, cwd, stdin, pipes, exit status, signals,
 //! process groups.
 
-use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
 use pretty_assertions::assert_eq;
 use rimaia_core::db::{BoardColumn, ExitClass, RunState, StrategyMode};
 use rimaia_core::repo::{self, NewRepository};
-use rimaia_core::runner::events::RunTail;
+use rimaia_core::runner::events::{stderr_path, transcript_path, RunTail};
 use rimaia_core::runner::provider::{ClaudeProvider, ProviderId};
 use rimaia_core::runner::{
     run_task, AgentProvider, CancelSignal, RunRequest, RunTrigger, RunnerConfig,
@@ -99,7 +98,9 @@ async fn a_run_driven_by_the_second_provider_reaches_in_review() {
     // some other provider's shape.
     let recorded =
         std::fs::read_to_string(path_for(ProviderId::Ledger, "finished")).expect("the fixture");
-    let transcript = std::fs::read_to_string(&run.log_path).expect("a written transcript");
+    let transcript =
+        std::fs::read_to_string(transcript_path(&fixture.paths, &run.task_id, &run.id))
+            .expect("a written transcript");
     assert_eq!(transcript, recorded);
 
     // The prompt arrived whole, on stdin, and was closed — the mechanism
@@ -340,9 +341,8 @@ async fn a_manual_attempt_records_the_mitigations_its_provider_could_not_enforce
         .expect("the run finishes")
         .expect("the run succeeds");
 
-    let diagnostics =
-        std::fs::read_to_string(PathBuf::from(&run.log_path).with_extension("stderr.log"))
-            .expect("a run that could not be fully protected says so beside its transcript");
+    let diagnostics = std::fs::read_to_string(stderr_path(&fixture.paths, &run.task_id, &run.id))
+        .expect("a run that could not be fully protected says so beside its transcript");
 
     assert!(
         diagnostics.contains("rewriting history on a remote"),
@@ -401,7 +401,9 @@ async fn a_second_provider_run_that_is_cancelled_still_records_the_ending_its_st
     );
     // The ending the stream reported is on disk, which is what the grace period
     // buys — and it arrived after the signal, from a child that exits 137.
-    let transcript = std::fs::read_to_string(&run.log_path).expect("a written transcript");
+    let transcript =
+        std::fs::read_to_string(transcript_path(&fixture.paths, &run.task_id, &run.id))
+            .expect("a written transcript");
     assert!(
         transcript.contains("\"why\":\"stopped\""),
         "the ending its own stream reported: {transcript}",
@@ -485,6 +487,7 @@ impl Fixture {
 
         let registered = repo::register(
             &harness.context,
+            harness.machine(),
             &paths.worktrees_dir(),
             NewRepository {
                 path: repository.path().to_string_lossy().into_owned(),
@@ -494,7 +497,7 @@ impl Fixture {
         )
         .await
         .expect("register the test repository");
-        repo::set_allow_unattended_runs(&harness.context, &registered.id, true)
+        repo::set_allow_unattended_runs(&harness.context, harness.machine(), &registered.id, true)
             .await
             .expect("ADR-0012's per-repository opt-in");
 

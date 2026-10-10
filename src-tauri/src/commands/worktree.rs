@@ -30,7 +30,7 @@ use rimaia_core::worktree::{
     self, AutoCleanup, CleanupReport, DiffSummary, RemovalAuthorization, RemovedWorktree,
     WorktreeInventory, WorktreeStatus,
 };
-use rimaia_core::{tasks, Error, Result};
+use rimaia_core::{Error, Result};
 use serde::Deserialize;
 use tauri::State;
 use tauri_plugin_opener::OpenerExt;
@@ -45,7 +45,7 @@ pub async fn get_worktree_status(
     state: State<'_, AppState>,
     task_id: String,
 ) -> Result<WorktreeStatus> {
-    worktree::status(&state.context, &task_id).await
+    worktree::status(&state.context, &state.machine, &task_id).await
 }
 
 /// The diff and the commits a run detail view opens with (task 015,
@@ -53,8 +53,41 @@ pub async fn get_worktree_status(
 /// and the commit list — the branch's current state, not a snapshot of any
 /// one attempt, since every attempt of a task shares one branch (ADR-0005).
 #[tauri::command]
+///
+/// Found through this machine's worktree record (task 066); a repository with
+/// no checkout here is refused as not set up on this computer, which the run
+/// overlay's failed-fallback line shows.
 pub async fn get_diff_summary(state: State<'_, AppState>, task_id: String) -> Result<DiffSummary> {
-    worktree::diff_summary(&state.context, &task_id).await
+    worktree::diff_summary(&state.context, &state.machine, &task_id).await
+}
+
+/// One task's worktree on this machine, as `list_local_worktrees` reports it.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LocalWorktree {
+    pub task_id: String,
+    pub path: String,
+}
+
+/// Every worktree this machine records (task 066): what the board's task DTOs
+/// carried as `worktreePath` until no board DTO held a path.
+///
+/// A local command (D32's appendix), paired with the `list_worktrees` tool,
+/// which already serves this machine's worktree paths. It reads the machine
+/// store and nothing on the board.
+#[tauri::command]
+pub async fn list_local_worktrees(state: State<'_, AppState>) -> Result<Vec<LocalWorktree>> {
+    Ok(state
+        .machine
+        .store
+        .list_worktrees()
+        .await?
+        .into_iter()
+        .map(|record| LocalWorktree {
+            task_id: record.task_id,
+            path: record.path,
+        })
+        .collect())
 }
 
 /// Opens the task's worktree directory in the OS file manager.
@@ -69,10 +102,7 @@ pub async fn reveal_task_worktree(
     state: State<'_, AppState>,
     task_id: String,
 ) -> Result<()> {
-    let detail = tasks::get_task(&state.context, &task_id).await?;
-    let path = detail.task.worktree_path.ok_or_else(|| {
-        Error::invalid("this task has no worktree yet — start a run to create one")
-    })?;
+    let path = worktree::local_path(&state.context, &state.machine, &task_id).await?;
 
     // The path is passed as a value, not interpolated into a command line —
     // worktree paths are built from a repository path and a task id, and
@@ -114,6 +144,7 @@ pub async fn open_task_worktree_in(
 ) -> Result<()> {
     let launch = openers::launch_for_task(
         &state.context,
+        &state.machine,
         &Machine::host(),
         &SystemProbe,
         target,
@@ -189,7 +220,7 @@ impl From<RemovalAuthorizationInput> for RemovalAuthorization {
 /// plus the total task 016 shows alongside task 015's run-log usage.
 #[tauri::command]
 pub async fn get_worktree_inventory(state: State<'_, AppState>) -> Result<WorktreeInventory> {
-    worktree::inventory(&state.context).await
+    worktree::inventory(&state.context, &state.machine).await
 }
 
 /// Removes one task's worktree, subject to every guard in
@@ -200,7 +231,13 @@ pub async fn remove_task_worktree(
     task_id: String,
     authorization: RemovalAuthorizationInput,
 ) -> Result<RemovedWorktree> {
-    worktree::remove_worktree(&state.context, &task_id, authorization.into()).await
+    worktree::remove_worktree(
+        &state.context,
+        &state.machine,
+        &task_id,
+        authorization.into(),
+    )
+    .await
 }
 
 /// Removes the worktree of every task in `done`, with every force off and every
@@ -208,14 +245,14 @@ pub async fn remove_task_worktree(
 /// bulk action may not carry more authority than the individual one.
 #[tauri::command]
 pub async fn cleanup_done_worktrees(state: State<'_, AppState>) -> Result<CleanupReport> {
-    worktree::remove_done_worktrees(&state.context).await
+    worktree::remove_done_worktrees(&state.context, &state.machine).await
 }
 
 /// The same, for every worktree whose branch the default branch already
 /// contains.
 #[tauri::command]
 pub async fn cleanup_merged_worktrees(state: State<'_, AppState>) -> Result<CleanupReport> {
-    worktree::remove_merged_worktrees(&state.context).await
+    worktree::remove_merged_worktrees(&state.context, &state.machine).await
 }
 
 /// Whether a task reaching `done` takes its worktree with it. Off unless
