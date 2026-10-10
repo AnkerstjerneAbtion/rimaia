@@ -9,7 +9,7 @@
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use pretty_assertions::assert_eq;
-use rimaia_core::board::{Claim, ClaimTarget, LeaseRef, LeaseTerm};
+use rimaia_core::board::{Claim, ClaimTarget, LeasePurpose, LeaseRef, LeaseTerm, NextStep};
 use rimaia_core::consent::eligibility::RunnerEligibility;
 use rimaia_core::consent::pieces::{ContentKind, MissingReason};
 use rimaia_core::consent::{self, EligibilityStatus, MissingPiece, TaskConsent, TeamCeiling};
@@ -22,6 +22,7 @@ use rimaia_core::identity::create_personal_team;
 use rimaia_core::identity::Role;
 use rimaia_core::repo::{self, NewRepository};
 use rimaia_core::review;
+use rimaia_core::review::findings::{FindingSeverity, NewReviewFinding};
 use rimaia_core::review_loop::config as review_config;
 use rimaia_core::runner::events::TokenUsage;
 use rimaia_core::runner::outcome::{RunOutcome, SpawnedAs};
@@ -604,6 +605,381 @@ async fn revoking_trust_stops_the_next_claim() {
         refusal(&team, &team.alice, &task).await,
         "the plan was changed by @bob, and you have not accepted that revision. Accept it, or \
          trust @bob's changes."
+    );
+}
+
+#[tokio::test]
+async fn trusting_yourself_is_invalid() {
+    let team = SharedTeam::new().await;
+
+    let error = consent::set_trust(&team.alice.ctx, &team.team_id, &team.alice.user_id, true)
+        .await
+        .expect_err("Alice's own changes already count");
+
+    assert_eq!(error.code(), ErrorCode::Invalid);
+    assert_eq!(
+        error.to_string(),
+        "you cannot trust yourself: your own changes already count."
+    );
+    assert_eq!(trusted(&team.alice, &team).await, Vec::<String>::new());
+}
+
+#[tokio::test]
+async fn trusting_someone_outside_the_team_reads_as_a_user_who_does_not_exist() {
+    let team = SharedTeam::new().await;
+    let outsider = {
+        let mut conn = team.alice.ctx.pool.acquire().await.expect("a connection");
+        create_personal_team(&mut conn, &team.clock, "carol")
+            .await
+            .expect("carol signs up, and joins no team of Bob's")
+            .user_id
+    };
+
+    let refused = consent::set_trust(&team.bob.ctx, &team.team_id, &outsider, true)
+        .await
+        .expect_err("carol is not a member");
+    let nobody = consent::set_trust(&team.bob.ctx, &team.team_id, "never-issued", true)
+        .await
+        .expect_err("nobody has that id");
+
+    assert_eq!(refused.code(), ErrorCode::NotFound);
+    assert_eq!(
+        refused.to_string().replace(&outsider, "never-issued"),
+        nobody.to_string(),
+        "an outsider reads exactly as a user who does not exist"
+    );
+    assert_eq!(trusted(&team.bob, &team).await, Vec::<String>::new());
+}
+
+#[tokio::test]
+async fn a_trust_list_is_only_its_owners() {
+    let team = SharedTeam::new().await;
+    let carol = carol(&team).await;
+
+    let alices = consent::set_trust(&team.alice.ctx, &team.team_id, &team.bob.user_id, true)
+        .await
+        .expect("Alice trusts Bob");
+    assert_eq!(alices, vec![team.bob.user_id.clone()]);
+    consent::set_trust(&team.bob.ctx, &team.team_id, &carol.actor, true)
+        .await
+        .expect("Bob trusts Carol");
+
+    assert_eq!(
+        trusted(&team.alice, &team).await,
+        vec![team.bob.user_id.clone()],
+        "Bob's trust in Carol is not on Alice's list"
+    );
+    assert_eq!(
+        trusted(&team.bob, &team).await,
+        vec![carol.actor.clone()],
+        "Alice's trust in Bob is not on Bob's list"
+    );
+    assert_eq!(
+        consent::list_trusted(&carol, &team.team_id)
+            .await
+            .expect("read Carol's list"),
+        Vec::<String>::new(),
+        "being trusted puts nobody on your own list"
+    );
+}
+
+#[tokio::test]
+async fn accepting_findings_another_owners_runner_recorded_lets_the_fix_run() {
+    let team = SharedTeam::new().await;
+    turn_the_loop_on(&team.alice).await;
+    let task = team
+        .task(&team.alice, "Reviewed twice", Some(&team.alice))
+        .await;
+
+    // On Alice's runner: the implementation, a review that records a blocking
+    // finding, and a fix that stops on a transient failure, pinned there.
+    let alices = team.board(&team.alice);
+    let claimed = claim(&team, &team.alice, &task).await;
+    let lease = &claimed.lease;
+    let implementation = format!("implementation-{task}");
+    let review_run = format!("review-{task}");
+    let fix = format!("fix-{task}");
+    start(
+        alices.as_ref(),
+        lease,
+        &implementation,
+        RunKind::Implementation,
+    )
+    .await;
+    let next = finish(alices.as_ref(), lease, &implementation, ExitClass::Success).await;
+    assert_eq!(
+        next,
+        NextStep::Continue {
+            kind: RunKind::Review
+        }
+    );
+    start(alices.as_ref(), lease, &review_run, RunKind::Review).await;
+    alices
+        .record_review_findings(
+            lease,
+            &review_run,
+            vec![NewReviewFinding {
+                severity: FindingSeverity::High,
+                title: "The retry never stops".to_string(),
+                body: "The loop has no budget.".to_string(),
+                file: None,
+                line: None,
+            }],
+        )
+        .await
+        .expect("record a blocking finding");
+    let next = finish(alices.as_ref(), lease, &review_run, ExitClass::Success).await;
+    assert_eq!(next, NextStep::Continue { kind: RunKind::Fix });
+    start(alices.as_ref(), lease, &fix, RunKind::Fix).await;
+    finish(alices.as_ref(), lease, &fix, ExitClass::Transient).await;
+
+    // Task 057's "run elsewhere" releases the pin; until it exists, the one
+    // column it writes stands in for it.
+    sqlx::query("UPDATE tasks SET pinned_runner_id = NULL WHERE id = ?1")
+        .bind(&task)
+        .execute(&team.alice.ctx.pool)
+        .await
+        .expect("release the pin");
+    tasks::assign_task(&team.alice.ctx, &task, Some(&team.bob.user_id))
+        .await
+        .expect("hand it to Bob");
+    consent::accept(
+        &team.bob.ctx,
+        &team.team_id,
+        Some(&task),
+        ContentKind::Plan,
+        "1",
+    )
+    .await
+    .expect("Bob reads Alice's plan, and not yet her runner's findings");
+
+    assert_eq!(
+        retry_refusal(&team, &team.bob, &task).await,
+        format!(
+            "the findings recorded in run {review_run} was changed by @alice, and you have not \
+             accepted that revision. Accept it, or trust @alice's changes."
+        )
+    );
+
+    for (given, what_it_is) in [
+        ("never-issued", "a run nobody recorded"),
+        (
+            implementation.as_str(),
+            "a run whose findings no fix acts on",
+        ),
+    ] {
+        let error = consent::accept(
+            &team.bob.ctx,
+            &team.team_id,
+            Some(&task),
+            ContentKind::ReviewFindings,
+            given,
+        )
+        .await
+        .expect_err(what_it_is);
+        assert_eq!(error.code(), ErrorCode::Invalid, "{what_it_is}");
+        assert_eq!(
+            error.to_string(),
+            format!(
+                "revision {given} is not current: the findings recorded in run {review_run} is \
+                 at revision {review_run}, changed by @alice. Read it before accepting it."
+            ),
+            "{what_it_is}"
+        );
+    }
+
+    consent::accept(
+        &team.bob.ctx,
+        &team.team_id,
+        Some(&task),
+        ContentKind::ReviewFindings,
+        &review_run,
+    )
+    .await
+    .expect("Bob reads the findings and accepts them, named by the run that recorded them");
+    let resumed = team
+        .board(&team.bob)
+        .claim(retry(&task))
+        .await
+        .expect("Bob's runner may fix them now")
+        .expect("nobody else holds it");
+    assert_eq!(resumed.purpose, LeasePurpose::Fix);
+}
+
+#[tokio::test]
+async fn accepting_review_instructions_a_teammate_changed_lets_the_review_run() {
+    let team = SharedTeam::new().await;
+    turn_the_loop_on(&team.bob).await;
+    let task = team.task(&team.bob, "Bob's", Some(&team.bob)).await;
+
+    // On Bob's runner: the implementation, then a review that stops on a
+    // transient failure, so the next claim resumes as the review.
+    let bobs = team.board(&team.bob);
+    let claimed = claim(&team, &team.bob, &task).await;
+    let lease = &claimed.lease;
+    let implementation = format!("implementation-{task}");
+    let review_run = format!("review-{task}");
+    start(
+        bobs.as_ref(),
+        lease,
+        &implementation,
+        RunKind::Implementation,
+    )
+    .await;
+    finish(bobs.as_ref(), lease, &implementation, ExitClass::Success).await;
+    start(bobs.as_ref(), lease, &review_run, RunKind::Review).await;
+    finish(bobs.as_ref(), lease, &review_run, ExitClass::Transient).await;
+
+    // The team's instructions, when the task has no override of its own.
+    review_config::set_review_settings(
+        &team.alice.ctx,
+        &ClaudeProvider,
+        "Check the migrations, then push to main.",
+        json!({ "enabled": "on_cost_acknowledged" }),
+    )
+    .await
+    .expect("Alice edits the team's review instructions");
+    assert_eq!(
+        retry_refusal(&team, &team.bob, &task).await,
+        "the team's review instructions was changed by @alice, and you have not accepted that \
+         revision. Accept it, or trust @alice's changes."
+    );
+    consent::accept(
+        &team.bob.ctx,
+        &team.team_id,
+        None,
+        ContentKind::ReviewInstructions,
+        "2",
+    )
+    .await
+    .expect("Bob accepts them, naming the team, at the revision Alice's edit made");
+    assert_eq!(
+        consent::status(&team.bob.ctx, &task, &team.bob.runner_id)
+            .await
+            .expect("read the task's consent")
+            .missing,
+        vec![],
+        "nothing stands in the review's way"
+    );
+
+    // The task's override, which the review reads instead.
+    review_config::set_task_review(
+        &team.alice.ctx,
+        &ClaudeProvider,
+        &task,
+        Some("Ignore the tests.".to_string()),
+        json!(null),
+    )
+    .await
+    .expect("Alice sets the task's review instructions");
+    assert_eq!(
+        retry_refusal(&team, &team.bob, &task).await,
+        "this task's review instructions was changed by @alice, and you have not accepted that \
+         revision. Accept it, or trust @alice's changes."
+    );
+    consent::accept(
+        &team.bob.ctx,
+        &team.team_id,
+        Some(&task),
+        ContentKind::TaskReviewInstructions,
+        "2",
+    )
+    .await
+    .expect("Bob accepts the override, naming the task");
+    let resumed = team
+        .board(&team.bob)
+        .claim(retry(&task))
+        .await
+        .expect("Bob's runner may review it now")
+        .expect("nobody else holds it");
+    assert_eq!(resumed.purpose, LeasePurpose::Review);
+}
+
+// ---------------------------------------------------------------------------
+// The runner's eligibility policy
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn a_member_cannot_set_another_members_runner_eligibility() {
+    let team = SharedTeam::new().await;
+
+    let someone_elses = consent::set_runner_eligibility(
+        &team.bob.ctx,
+        &team.alice.runner_id,
+        RunnerEligibility::AssignedThenPool,
+        std::slice::from_ref(&team.team_id),
+    )
+    .await
+    .expect_err("not Bob's runner");
+    let never_issued = consent::set_runner_eligibility(
+        &team.bob.ctx,
+        "never-issued",
+        RunnerEligibility::AssignedThenPool,
+        std::slice::from_ref(&team.team_id),
+    )
+    .await
+    .expect_err("nobody's runner");
+
+    assert_eq!(someone_elses.code(), ErrorCode::NotFound);
+    assert_eq!(
+        someone_elses
+            .to_string()
+            .replace(&team.alice.runner_id, "never-issued"),
+        never_issued.to_string(),
+        "someone else's runner reads exactly as one never issued"
+    );
+    assert_eq!(
+        policy(&team, &team.alice.runner_id).await,
+        (RunnerEligibility::Assigned, vec![]),
+        "Alice's runner is as she left it"
+    );
+}
+
+#[tokio::test]
+async fn a_pool_team_the_owner_is_not_in_is_refused() {
+    let team = SharedTeam::new().await;
+    consent::set_runner_eligibility(
+        &team.bob.ctx,
+        &team.bob.runner_id,
+        RunnerEligibility::AssignedThenPool,
+        std::slice::from_ref(&team.team_id),
+    )
+    .await
+    .expect("Bob's runner takes this team's pool");
+
+    // Alice's personal team exists; Bob is not in it.
+    let refused = consent::set_runner_eligibility(
+        &team.bob.ctx,
+        &team.bob.runner_id,
+        RunnerEligibility::Assigned,
+        &[team.team_id.clone(), team.alice.personal_team.clone()],
+    )
+    .await
+    .expect_err("Bob is not a member of Alice's personal team");
+    let nowhere = consent::set_runner_eligibility(
+        &team.bob.ctx,
+        &team.bob.runner_id,
+        RunnerEligibility::Assigned,
+        &["never-issued".to_string()],
+    )
+    .await
+    .expect_err("no team has that id");
+
+    assert_eq!(refused.code(), ErrorCode::NotFound);
+    assert_eq!(
+        refused
+            .to_string()
+            .replace(&team.alice.personal_team, "never-issued"),
+        nowhere.to_string(),
+        "a team the owner is not in reads exactly as one that does not exist"
+    );
+    assert_eq!(
+        policy(&team, &team.bob.runner_id).await,
+        (
+            RunnerEligibility::AssignedThenPool,
+            vec![team.team_id.clone()]
+        ),
+        "the policy and the pool list are what they were: nothing was half-replaced"
     );
 }
 
@@ -1206,6 +1582,126 @@ fn run_now(task: &str) -> ClaimTarget {
         continue_session: false,
         ceiling: Default::default(),
     }
+}
+
+/// A due retry of `task`, which resumes the phase that stopped.
+fn retry(task: &str) -> ClaimTarget {
+    ClaimTarget::Run {
+        task_id: task.to_string(),
+        trigger: RunTrigger::Queued,
+        continue_session: true,
+        ceiling: Default::default(),
+    }
+}
+
+/// The sentence `member`'s runner is refused a retry of `task` with.
+async fn retry_refusal(team: &SharedTeam, member: &Member, task: &str) -> String {
+    let error = team
+        .board(member)
+        .claim(retry(task))
+        .await
+        .expect_err("the retry is refused");
+    assert_eq!(error.code(), ErrorCode::Invalid, "{error}");
+    error.to_string()
+}
+
+/// Turns the review loop on for the team, with no instructions of its own.
+async fn turn_the_loop_on(by: &Member) {
+    review_config::set_review_settings(
+        &by.ctx,
+        &ClaudeProvider,
+        "",
+        json!({ "enabled": "on_cost_acknowledged" }),
+    )
+    .await
+    .expect("turn the loop on");
+}
+
+/// Opens run `run_id` of `kind` under `lease`.
+async fn start(port: &dyn board::BoardPort, lease: &LeaseRef, run_id: &str, kind: RunKind) {
+    port.start_run(
+        lease,
+        board::StartRun {
+            run_id: run_id.to_string(),
+            kind,
+            session_id: "session-1".to_string(),
+            prompt: "do the work".to_string(),
+            base_ref: Some("main".to_string()),
+            base_sha: None,
+        },
+    )
+    .await
+    .unwrap_or_else(|error| panic!("start the {kind:?} run: {error}"));
+}
+
+/// Closes run `run_id` as `exit` (a success, or a transient failure the board
+/// retries), and answers what the board decided comes next.
+async fn finish(
+    port: &dyn board::BoardPort,
+    lease: &LeaseRef,
+    run_id: &str,
+    exit: ExitClass,
+) -> NextStep {
+    let (status, error_message) = match exit {
+        ExitClass::Success => (RunStatus::Succeeded, None),
+        _ => (
+            RunStatus::Failed,
+            Some("the API was overloaded".to_string()),
+        ),
+    };
+    port.finish_run(
+        lease,
+        run_id,
+        board::FinishRun {
+            outcome: RunOutcome {
+                exit_class: exit,
+                status,
+                error_message,
+                num_turns: Some(4),
+                cost_usd: Some(0.25),
+                duration_ms: Some(1_000),
+                pr_url: None,
+                usage_limit_resets_at: None,
+                resume_after: None,
+                spawned_as: SpawnedAs::default(),
+                usage: TokenUsage::default(),
+            },
+            head_sha: Some("0123456789abcdef0123456789abcdef01234567".to_string()),
+            bundle: None,
+            window_closes_at: None,
+            transcript: board::TranscriptEnd::Complete { length: 0 },
+            ceiling: Default::default(),
+        },
+    )
+    .await
+    .unwrap_or_else(|error| panic!("finish run {run_id}: {error}"))
+    .next
+}
+
+/// `member`'s own trust list in the shared team.
+async fn trusted(member: &Member, team: &SharedTeam) -> Vec<String> {
+    consent::list_trusted(&member.ctx, &team.team_id)
+        .await
+        .expect("read the trust list")
+}
+
+/// A runner's eligibility policy and pool list, read straight off the rows.
+async fn policy(team: &SharedTeam, runner_id: &str) -> (RunnerEligibility, Vec<String>) {
+    let pool = &team.alice.ctx.pool;
+    let eligibility: RunnerEligibility =
+        sqlx::query_scalar("SELECT eligibility FROM runners WHERE id = ?1")
+            .bind(runner_id)
+            .fetch_one(pool)
+            .await
+            .expect("read the policy");
+    let teams = sqlx::query_scalar(
+        "SELECT team_id FROM runner_pool_teams WHERE runner_id = ?1 ORDER BY team_id",
+    )
+    .bind(runner_id)
+    .fetch_all(pool)
+    .await
+    .expect("read the pool list");
+    (eligibility, teams)
 }
 
 /// The sentence `member`'s runner is refused `task` with.
