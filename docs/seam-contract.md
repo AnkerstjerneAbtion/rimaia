@@ -5264,6 +5264,100 @@ changes point 2's trait.
 
 **Binds.** 044, 045, 052, 053, 055, 056, 057, 058, 060, 061, 065, 067.
 
+### Amendment, 2026-10-10 — what task 067 decided
+
+Task 067 added the two claim rules from ADR-0031 that cannot fire while there is one runner and
+Claude is the only production provider: point 1's model rule and point 7's owner rule. In solo
+nothing a user can see changes. None of this changes point 2's trait.
+
+- **The model rule is defined narrowly.** ADR-0031 point 1 has a claim skip "a task whose
+  effective strategy names a model the runner's provider cannot run", and does not define the
+  phrase. A model `m` cannot run on a runner whose provider is `P` when `m` is **not** an id in
+  the catalogue the board resolves for `P`, **and** `m` **is** an id in the default catalogue of
+  some other provider this build knows. A model no provider lists (`tasks.model` is free text,
+  and Claude runs a full `claude-…` id no catalogue lists) still reaches the CLI. The rule is the
+  pure function `strategy::catalogue::runs_on(model, provider, resolved)`. It reads
+  `ProviderId::ALL` and `ProviderId::default_catalogue`, which delegates to each provider's own
+  `default_catalogue`; `ProviderId::display_name` delegates the same way, for the refusal.
+  Ledger's arm of each is `#[cfg(feature = "testing")]`, like the variant. The `AgentProvider`
+  trait does not change.
+- **Its phases.** `implementation` and `fix` spawn with `EffectiveStrategy::model`; `review`
+  with `RunContext::review`'s `review_model` when it names one, otherwise the effective
+  strategy's model, as 021 resolves it; `strategy` is exempt, for a `Plan` claim and for 043's
+  inline planner alike, because a planner chooses from the runner's own catalogue (D17).
+  `board::lease::PhaseModels` holds the two models and answers `for_purpose`.
+- **It lives in `eligible`, after the pin.** The signature is now
+  `eligible(conn, task_id, candidate: &Candidate, purpose)`, where `Candidate { runner_id,
+  provider: ProviderId, catalogue, models }` carries what is read before the asking transaction
+  opens, as the rest of a claim's context is. So it runs wherever 043 runs that function:
+  `selection::plan` (which reads each repository's catalogue for the view's `ProviderId` with
+  `catalogue::catalogue_for_provider`, and now asks about a fresh start that needs planning as a
+  `strategy` lease, which is how the claim leases it, so the two agree on the exemption), the claim transaction, and
+  `finish_run`'s `Continue` against the next phase's model. A named claim refuses as `Invalid`:
+  `this task asks for the model "opus", which Ledger cannot run. Change the task's model, or run
+  it on a runner whose provider offers it.`, with the provider's `display_name`. `Next` passes the
+  task over. A `Continue` the provider cannot run answers `Released` and lands the task in
+  `in_review`.
+- **`finish_run` knows the reporting runner's provider.** `board::service::finish_run` takes the
+  adapter's `Runner` (id, provider, term), not only its id, and reads the next phase's catalogue
+  and models over the pool before its second transaction, only when the decision is `Continue`.
+  `scheduler::reconcile_unrecorded` takes the runner's provider for the same reason, although an
+  interrupted run never continues. Over HTTP the provider is the `ProviderId` the runner sends
+  (point 10, 052).
+- **A known limitation, pinned.** `strategy_catalogue` is one stored document per team, not one
+  per provider, and `catalogue::resolve` fills it from the provider's defaults field by field.
+  Once a team edits `models` to list Claude's models, every provider's resolved catalogue lists
+  them, so `runs_on` is true for a Ledger runner and the rule stops firing: one Claude-oriented
+  edit turns the guard off for every other provider's runners. This is accepted while no second
+  production provider exists. The fix is a catalogue per provider, which needs an ADR-0028
+  amendment, because ADR-0028 places `strategy_catalogue` as one team setting.
+  `an_edited_catalogue_listing_claudes_models_lets_a_ledger_runner_take_them` pins today's
+  behaviour, so that change is made deliberately.
+- **`board::service::authorize_start(ctx, runner_id, presence: OwnerPresence) ->
+  Result<RunTrigger>`** is the owner rule, and every start door calls it before it claims. It
+  writes nothing. `ctx` is the caller's context, whose `actor` is the person asking, never the
+  in-process adapter's `System` one. In order:
+  1. the runner must exist and its `user_id` must be a member, in `team_memberships`, of a team
+     `ctx` reaches; otherwise `NotFound`, `no runner with id <id>` (ADR-0029 point 5);
+  2. a runner with `unpaired_at` set is `Invalid`: `this runner has been unpaired and can no
+     longer start runs`;
+  3. the caller must be `runners.user_id`, otherwise `Invalid`: `only the owner of this runner
+     can start a run on it; assign the task to them, or leave it ready for their queue`;
+  4. `OwnerPresence::AtRunner` answers `RunTrigger::Manual` (ADR-0012 point 6, `acceptEdits`);
+     `OwnerPresence::Remote` answers `RunTrigger::Queued`, an unattended run, held to ADR-0012's
+     per-repository opt-in and, from 045, to consent, exactly as a queued run is.
+
+  Capacity does not apply (D19 point 5): `claim(Run)` takes no `FreeCapacity`, and the board
+  applies none. The name is `OwnerPresence`, not `Presence`, because 058's
+  `rimaia_runner::host::Presence` is the runner's own view of its machine and never crosses to
+  the board.
+- **The doors pass a `Starter`.** `runner::start::Starter { ctx, runner_id, presence }` says who
+  asks, of which runner, and from where; `Starter::authorize` is `authorize_start` for it.
+  `claim_manual_start(starter, board, …)` authorizes first and negotiates and claims with the
+  trigger it answers, so `ManualStart` no longer carries a `trigger`. `claim_for_planning(starter,
+  …)` authorizes first and ignores the trigger, because the planner's own posture is unchanged;
+  `plan_all(starter, …)` reads its selection through `starter.ctx` and claims each card through
+  `claim_for_planning`. Presence is decided by the door, never by a request field: the four
+  desktop commands (`start_task_run`, `retry_task_now`, `plan_task_strategy`,
+  `plan_tasks_strategy`) and the two operator MCP tools of the same planning names all run on the
+  runner's own machine and build `Starter::at_runner`. 052's browser route passes `Remote`.
+  058's `Presence::Absent` never reaches `authorize_start`: a headless runner has no start door
+  of its own.
+- **The harness.** Point 13's `Harness` gains `runner_on(which, provider: ProviderId)`, runner
+  `A` or `B` whose claims carry that provider (the in-process harness builds the adapter with
+  it; 052's builds its `HttpBoard` with it), and `add_member_with_runner()`, which adds a second
+  user as a member of the team with a runner of their own and returns `(user_id, runner_id)`.
+  067's contract cases are the `…model…` cases, `run_now_is_not_bound_by_capacity` and
+  `only_a_runners_owner_is_authorized_to_start_it`; the doors' own cases are in
+  `crates/core/tests/start_authority.rs`.
+
+**Binds.** 045 (consent joins `eligible` after the model rule, and the `Remote` posture), 052
+(its route calls `authorize_start` with `Remote` and restates none of it; its relay's read-only
+`eligible` check refuses a pin or a model before relaying, with 043's and this amendment's
+sentences; it sends the `ProviderId` the model rule reads; its HTTP harness implements the two
+new members), 058, 061 (renders a skip and the runner picker), and the ADR-0028 amendment that
+gives each provider its own catalogue.
+
 ---
 
 ## D32 — One command registry: board and local commands, one dispatcher, one caller
