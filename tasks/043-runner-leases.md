@@ -6,6 +6,7 @@ status: ready
 depends_on: ["042"]
 adrs: ["0031", "0011", "0016"]
 size: L
+landed: "#34"
 ---
 
 # Runner leases, fencing and pinning
