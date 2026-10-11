@@ -29,6 +29,8 @@ use crate::error::{Error, Result};
 use crate::events::{RunnerId, TeamId, UserId};
 use crate::runner::provider::ProviderId;
 
+pub mod secret;
+
 /// The solo user's login. A placeholder: solo shows no sign-in (ADR-0030
 /// point 7), and task 038's adoption writes the same string.
 pub const SOLO_LOGIN: &str = "solo";

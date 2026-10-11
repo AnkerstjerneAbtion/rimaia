@@ -8,6 +8,12 @@ members = ["crates/core", "crates/runner", "crates/server", "src-tauri"]
 [workspace.dependencies]
 anyhow = "1"
 axum = "0.8"
+# Task 047's cookie jar in `rimaia-server`, feature `cookie` only (seam-contract
+# D34): `CookieJar` sets `HttpOnly`, `Secure` and `SameSite` from typed fields,
+# where a hand-formatted `Set-Cookie` would drop one unnoticed. No signed or
+# private jar, because the session store is the `sessions` table. The 0.12 line
+# builds on the `axum = "0.8"` above, so `cargo tree -d` shows one `axum`.
+axum-extra = { version = "0.12", default-features = false }
 chrono = { version = "0.4", features = ["serde"] }
 # Task 013's two, and both are confined to `schedule::cron` (seam-contract D24).
 #
@@ -87,6 +93,15 @@ keyring = { version = "3", features = [
 # transitively through `reqwest`, so promoting it to a direct dependency costs
 # no new tree — see seam-contract D25 for why an encoder was not hand-rolled.
 base64 = "0.22"
+# Task 047's three, confined to `rimaia-core`'s `identity` module (seam-contract
+# D34). `sha2` hashes every stored secret and is PKCE's S256; it was already in
+# the tree through sqlx's `migrate`. `rand` is the OS-seeded CSPRNG behind every
+# token, session secret, verifier, `state` and pairing code, on the line `rmcp`
+# already pulls in. `subtle` is the constant-time comparison ADR-0030's
+# Consequences require for a secret compared in memory.
+rand = "0.10"
+sha2 = "0.10"
+subtle = "2"
 tempfile = "3"
 thiserror = "2"
 tokio = { version = "1", features = ["full"] }
