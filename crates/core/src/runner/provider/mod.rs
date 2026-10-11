@@ -157,6 +157,23 @@ impl ProviderId {
         }
     }
 
+    /// The provider `value` names in [`as_str`](Self::as_str)'s spelling, or
+    /// `Invalid` for a name this build does not know. In a build without the
+    /// `testing` feature `ledger` is unknown, as the variant is. A pairing
+    /// runner names its provider this way (task 047), and so does a claim
+    /// (task 052).
+    pub fn parse(value: &str) -> Result<Self> {
+        Self::ALL
+            .iter()
+            .copied()
+            .find(|id| id.as_str() == value)
+            .ok_or_else(|| {
+                Error::invalid(format!(
+                    "`{value}` is not an agent provider this server knows."
+                ))
+            })
+    }
+
     /// The provider's own [`AgentProvider::default_catalogue`], for a caller
     /// that holds the identity and not the provider: the board, which over
     /// HTTP learns a runner's provider as this value (seam-contract D31 point
@@ -789,6 +806,17 @@ mod tests {
     use super::*;
     use pretty_assertions::assert_eq;
     use std::path::Path;
+
+    #[test]
+    fn a_provider_id_parses_from_its_own_spelling_and_nothing_else() {
+        for id in ProviderId::ALL {
+            assert_eq!(ProviderId::parse(id.as_str()).expect("its own name"), *id);
+        }
+        for unknown in ["", "claude", "Claude-Code", "codex"] {
+            let refused = ProviderId::parse(unknown).expect_err(unknown);
+            assert_eq!(refused.code(), crate::ErrorCode::Invalid, "{unknown:?}");
+        }
+    }
 
     #[test]
     fn a_profile_carries_the_providers_board_facts_and_nothing_else() {

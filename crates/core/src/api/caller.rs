@@ -123,16 +123,29 @@ impl fmt::Debug for Credential<'_> {
 /// Resolves a credential to a caller, or refuses it as `Unauthenticated`.
 ///
 /// One method, so a server's whole notion of who may ask is one value it can
-/// swap: [`RefuseAll`] until task 047, sessions and hashed tokens after.
+/// swap: [`RefuseAll`] in a test that wants nobody, sessions and hashed tokens
+/// (`identity::authenticate::SessionsAndTokens`) in production.
 pub trait Authenticate: Send + Sync {
     fn authenticate<'a>(&'a self, credential: Credential<'a>) -> BoxFuture<'a, Result<Caller>>;
+
+    /// [`authenticate`](Self::authenticate), from a request whose
+    /// `User-Agent` was `user_agent`: where an API token was last used
+    /// (ADR-0030 point 3, task 047). Provided, so an implementation that
+    /// records no use answers it as `authenticate`; a transport calls this one
+    /// whenever it has the header.
+    fn authenticate_from<'a>(
+        &'a self,
+        credential: Credential<'a>,
+        user_agent: Option<&'a str>,
+    ) -> BoxFuture<'a, Result<Caller>> {
+        let _ = user_agent;
+        self.authenticate(credential)
+    }
 }
 
-/// The only production [`Authenticate`] before task 047: nobody.
-///
-/// A server built in between therefore answers every board command
-/// `unauthenticated`, and fails closed rather than serving a board to anyone
-/// (D32 point 7).
+/// Nobody: the only production [`Authenticate`] between tasks 046 and 047,
+/// when a server failed closed rather than serving a board to anyone (D32
+/// point 7). Kept for a test that wants every credential refused.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct RefuseAll;
 
@@ -220,7 +233,7 @@ mod tests {
             let refused = RefuseAll
                 .authenticate(credential)
                 .await
-                .expect_err("nobody authenticates before task 047");
+                .expect_err("RefuseAll authenticates nobody");
             assert_eq!(refused.code(), ErrorCode::Unauthenticated, "{credential:?}");
         }
     }

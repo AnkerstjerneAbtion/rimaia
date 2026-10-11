@@ -773,7 +773,7 @@ async fn a_run_scoped_handle_lists_only_its_own_team() {
 /// A `ScopedTx` counts as a transaction here. It carries the context's scope,
 /// which is why the helpers below may take one, but each of them is still a
 /// door into someone else's transaction, so each is named.
-const STORE_HANDLE_EXCEPTIONS: [(&str, &str); 41] = [
+const STORE_HANDLE_EXCEPTIONS: [(&str, &str); 47] = [
     ("db::connect", "it makes the pool; no context can exist yet"),
     ("db::migrate", "it runs before the context is built"),
     (
@@ -960,6 +960,36 @@ const STORE_HANDLE_EXCEPTIONS: [(&str, &str); 41] = [
         "runs::commit_authors",
         "eligible credits a dependency's commit to its runners' owners inside the claim's \
          transaction (045); the dependency was resolved under the caller's scope",
+    ),
+    (
+        "identity::sign_in::upsert_user",
+        "signing in runs before there is a caller to scope anything to; it finds or creates \
+         the user a scope is then read for (047)",
+    ),
+    (
+        "identity::sessions::create",
+        "a session is made at the end of sign-in, before any caller exists, and belongs to a \
+         user, not a team (047)",
+    ),
+    (
+        "identity::tokens::create_desktop",
+        "the desktop's token is made at the end of its browser sign-in, before any caller \
+         exists, and belongs to a user, not a team (047)",
+    ),
+    (
+        "identity::tokens::create_runner",
+        "it writes inside the transaction that writes its runners row, for redeem and \
+         pair_own_runner (047)",
+    ),
+    (
+        "identity::tokens::unpair_runner",
+        "it writes inside the caller's transaction, so a token's revocation and its runner's \
+         unpairing are one act; revoke_api_token scopes it to the caller's own runner (047)",
+    ),
+    (
+        "identity::pairing::redeem",
+        "a headless runner redeems a code with no credential at all; the code names the user \
+         the runner is paired to (047)",
     ),
 ];
 

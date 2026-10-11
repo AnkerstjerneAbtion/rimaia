@@ -60,12 +60,17 @@ async fn a_fresh_database_gets_every_table_the_schema_declares() {
     // as seam-contract D28 part 6 declares it, and `review_findings` ADR-0017's, added
     // by task 035 the same way. The seven team-mode tables (`runners` through `users`)
     // are ADR-0029, ADR-0030 and ADR-0031's, added by task 038 the same way,
-    // `runner_leases` ADR-0031 point 1's, added by task 043, and `acceptances`,
-    // `trusted_authors` and `runner_pool_teams` ADR-0032's, added by task 045.
+    // `runner_leases` ADR-0031 point 1's, added by task 043, `acceptances`,
+    // `trusted_authors` and `runner_pool_teams` ADR-0032's, added by task 045, and
+    // `sessions`, `api_tokens`, `api_token_teams` and `pairing_codes` ADR-0030's,
+    // added by task 047.
     assert_eq!(
         tables,
         vec![
             "acceptances",
+            "api_token_teams",
+            "api_tokens",
+            "pairing_codes",
             "repositories",
             "review_bundles",
             "review_findings",
@@ -74,6 +79,7 @@ async fn a_fresh_database_gets_every_table_the_schema_declares() {
             "runners",
             "runs",
             "schedules",
+            "sessions",
             "settings",
             "solo_identity",
             "task_dependencies",

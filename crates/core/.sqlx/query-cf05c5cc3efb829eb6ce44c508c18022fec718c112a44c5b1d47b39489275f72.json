@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO api_token_teams (token_id, team_id) VALUES (?1, ?2)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "cf05c5cc3efb829eb6ce44c508c18022fec718c112a44c5b1d47b39489275f72"
+}

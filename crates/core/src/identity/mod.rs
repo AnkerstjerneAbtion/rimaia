@@ -29,7 +29,16 @@ use crate::error::{Error, Result};
 use crate::events::{RunnerId, TeamId, UserId};
 use crate::runner::provider::ProviderId;
 
+pub mod account;
+pub mod authenticate;
+pub mod pairing;
+pub mod pending;
+pub mod provider;
+pub mod rate_limit;
 pub mod secret;
+pub mod sessions;
+pub mod sign_in;
+pub mod tokens;
 
 /// The solo user's login. A placeholder: solo shows no sign-in (ADR-0030
 /// point 7), and task 038's adoption writes the same string.
@@ -53,7 +62,8 @@ pub struct SoloIdentity {
 
 /// What a person may do in a team (ADR-0029 point 3), in the spelling of
 /// `team_memberships.role`'s `CHECK`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Role {
     Owner,
     Member,

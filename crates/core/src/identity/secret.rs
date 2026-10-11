@@ -283,7 +283,10 @@ mod tests {
             assert!(is_token_of(kind, token.expose()), "{kind:?}");
             assert_eq!(TokenKind::of_token(token.expose()), Some(kind));
         }
-        assert_ne!(mint_token(TokenKind::Personal), mint_token(TokenKind::Personal));
+        assert_ne!(
+            mint_token(TokenKind::Personal),
+            mint_token(TokenKind::Personal)
+        );
         assert_eq!(mint_session_secret().expose().len(), 43);
     }
 
@@ -322,7 +325,10 @@ mod tests {
         assert_eq!(csrf, csrf_for(secret.expose()), "derived, not random");
         assert_ne!(csrf, secret.expose());
         assert_ne!(csrf, hash(secret.expose()));
-        assert_ne!(csrf, URL_SAFE_NO_PAD.encode(Sha256::digest(secret.expose())));
+        assert_ne!(
+            csrf,
+            URL_SAFE_NO_PAD.encode(Sha256::digest(secret.expose()))
+        );
         assert_ne!(csrf, csrf_for(mint_session_secret().expose()));
         assert!(csrf_matches(secret.expose(), &csrf));
         assert!(!csrf_matches(secret.expose(), "a-wrong-header"));
@@ -360,7 +366,13 @@ mod tests {
     #[test]
     fn a_label_is_trimmed_and_held_to_one_to_a_hundred_characters() {
         assert_eq!(label("  My laptop ").expect("valid"), "My laptop");
-        assert_eq!(label(&"é".repeat(100)).expect("100 characters").chars().count(), 100);
+        assert_eq!(
+            label(&"é".repeat(100))
+                .expect("100 characters")
+                .chars()
+                .count(),
+            100
+        );
         for refused in ["", "   ", &"x".repeat(101)] {
             let error = label(refused).expect_err("out of range");
             assert_eq!(error.to_string(), "A label is 1 to 100 characters.");

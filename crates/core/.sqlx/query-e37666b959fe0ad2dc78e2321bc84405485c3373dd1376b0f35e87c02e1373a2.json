@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE users\n                    SET identity_provider = ?1, provider_subject = ?2, avatar_url = ?3\n                  WHERE id = ?4",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 4
+    },
+    "nullable": []
+  },
+  "hash": "e37666b959fe0ad2dc78e2321bc84405485c3373dd1376b0f35e87c02e1373a2"
+}

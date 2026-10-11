@@ -28,17 +28,9 @@ impl FromRequestParts<ServerState> for Caller {
         let bearer = bearer(&parts.headers)?;
         let session = has_session_cookie(&parts.headers);
         let credential = match (bearer, session) {
-            (Some(_), true) => {
-                return Err(Error::unauthenticated()
-                .into())
-            }
-            (None, true) => {
-                return Err(Error::unauthenticated()
-                .into())
-            }
-            (None, false) => {
-                return Err(Error::unauthenticated().into())
-            }
+            (Some(_), true) => return Err(Error::unauthenticated().into()),
+            (None, true) => return Err(Error::unauthenticated().into()),
+            (None, false) => return Err(Error::unauthenticated().into()),
             (Some(token), false) => Credential::Bearer(token),
         };
         let caller = state.auth.authenticate(credential).await?;

@@ -1,0 +1,32 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT t.id, t.name, m.role\n           FROM team_memberships m JOIN teams t ON t.id = m.team_id\n          WHERE m.user_id = ?1\n          ORDER BY t.name, t.id",
+  "describe": {
+    "columns": [
+      {
+        "name": "id",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "name",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "role",
+        "ordinal": 2,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "2ad20a81c63bce338c9c2ce6ec8cd6205c9a19a7e8bb4e666516d81935234301"
+}

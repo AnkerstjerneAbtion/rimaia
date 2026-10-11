@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "DELETE FROM pairing_codes WHERE code_hash = ?1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": []
+  },
+  "hash": "219dfa53a4d6a0cff47afa8276fd01c820a64247668827272a2f447f7eb8d41c"
+}

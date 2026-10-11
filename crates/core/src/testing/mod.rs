@@ -39,6 +39,7 @@ pub mod credentials;
 pub mod db;
 pub mod doctor;
 pub mod fixtures;
+pub mod identity;
 pub mod machine;
 pub mod machine_contract;
 pub mod provider;

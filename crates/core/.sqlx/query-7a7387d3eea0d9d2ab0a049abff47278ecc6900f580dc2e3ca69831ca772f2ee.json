@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT code_hash, expires_at AS \"expires_at: DateTime<Utc>\"\n             FROM pairing_codes WHERE user_id = ?1",
+  "describe": {
+    "columns": [
+      {
+        "name": "code_hash",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "expires_at: DateTime<Utc>",
+        "ordinal": 1,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false
+    ]
+  },
+  "hash": "7a7387d3eea0d9d2ab0a049abff47278ecc6900f580dc2e3ca69831ca772f2ee"
+}

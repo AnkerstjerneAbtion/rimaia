@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE runners SET unpaired_at = ?1 WHERE id = ?2 AND unpaired_at IS NULL",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "f255c65d0270fc8560e6f97f10c0aa9b7bc175c1667e50bb2f448527b4509d16"
+}
