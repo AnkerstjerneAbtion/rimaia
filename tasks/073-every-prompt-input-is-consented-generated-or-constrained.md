@@ -3,6 +3,7 @@ id: "073"
 title: Every prompt input is consented, generated or constrained
 milestone: v0.5
 status: ready
+landed: "#34"
 depends_on: ["045", "072"]
 adrs: ["0032", "0009", "0012"]
 size: M
