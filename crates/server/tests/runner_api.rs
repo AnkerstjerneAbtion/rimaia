@@ -34,18 +34,25 @@ use common::{state_over, Answer, TestServer};
 struct Fixture {
     teams: TwoTeams,
     server: TestServer,
+    /// The server's tail relay, which `get_run_tail` answers from.
+    tails: TailRelay,
 }
 
 impl Fixture {
     async fn new() -> Self {
         let teams = TwoTeams::new().await;
         let (host, relayed) = testing_api::relayed_host(&teams).await;
+        let tails = host.tails.clone();
         let auth = SessionsAndTokens {
             pool: teams.a.pool.clone(),
             clock: Arc::new(teams.clock.clone()),
         };
         let server = TestServer::spawn(state_over(host, relayed, auth)).await;
-        Self { teams, server }
+        Self {
+            teams,
+            server,
+            tails,
+        }
     }
 
     /// Team A's paired runner's token.
@@ -84,6 +91,20 @@ impl Fixture {
             .await;
         assert_eq!(answer.status, 200, "{}", answer.body);
         answer.body["lease"].clone()
+    }
+
+    /// Opens `run_id` under `lease`, as a runner does before its first tail.
+    async fn start_run(&self, lease: &Value, run_id: &str) {
+        let answer = self
+            .call(
+                "start_run",
+                &json!({ "lease": lease, "run": {
+                    "runId": run_id, "kind": "implementation", "sessionId": "s",
+                    "prompt": "p", "baseRef": null, "baseSha": null,
+                } }),
+            )
+            .await;
+        assert_eq!(answer.status, 200, "{}", answer.body);
     }
 
     async fn last_seen(&self) -> Option<DateTime<Utc>> {
@@ -648,6 +669,7 @@ async fn a_runner_route_ignores_the_rimaia_team_header() {
 async fn a_tail_under_a_stale_generation_is_dropped_over_http() {
     let f = Fixture::new().await;
     let lease = f.claim().await;
+    f.start_run(&lease, "a-run").await;
     let mut tails = f.teams.a.subscribe_tail();
     let tail = json!({ "runId": "a-run", "elapsedMs": 1, "turns": 1,
                        "currentTool": null, "lastAssistantText": null });
@@ -670,6 +692,61 @@ async fn a_tail_under_a_stale_generation_is_dropped_over_http() {
         .await;
     assert_eq!(answer.status, 200);
     assert!(tails.try_recv().is_ok(), "the current lease's tail");
+}
+
+#[tokio::test]
+async fn a_tail_naming_a_run_its_lease_is_not_open_for_is_dropped_over_http() {
+    let f = Fixture::new().await;
+    let lease = f.claim().await;
+    f.start_run(&lease, "a-run").await;
+    let mut subscriber = f.teams.a.subscribe_tail();
+    let tail = |run_id: &str| {
+        json!({ "runId": run_id, "elapsedMs": 1, "turns": 1,
+                "currentTool": null, "lastAssistantText": "forged" })
+    };
+    // Another run in the runner's own team, and a run in a team its owner is
+    // not in, each with a cached catch-up tail from the fixture.
+    let others = [
+        f.teams.team_a.implementation_run.clone(),
+        f.teams.team_b.implementation_run.clone(),
+    ];
+    let cached: Vec<_> = others.iter().map(|run| f.tails.latest(run)).collect();
+    assert!(cached.iter().all(Option::is_some), "the fixture's tails");
+
+    for other in &others {
+        let answer = f
+            .call(
+                "publish_tail",
+                &json!({ "lease": lease, "tail": tail(other) }),
+            )
+            .await;
+        assert_eq!(
+            (answer.status, &answer.body),
+            (200, &Value::Null),
+            "{other}"
+        );
+        assert!(
+            subscriber.try_recv().is_err(),
+            "a tail for {other} reached the channel"
+        );
+    }
+
+    // The lease's own run's tail does reach it, so the drop was the run
+    // check's. The relay hears the channel in order, so once it holds this
+    // one it would hold anything published before it.
+    let answer = f
+        .call(
+            "publish_tail",
+            &json!({ "lease": lease, "tail": tail("a-run") }),
+        )
+        .await;
+    assert_eq!(answer.status, 200);
+    assert!(subscriber.try_recv().is_ok(), "the lease's own run's tail");
+    while f.tails.latest("a-run").is_none() {
+        tokio::task::yield_now().await;
+    }
+    let after: Vec<_> = others.iter().map(|run| f.tails.latest(run)).collect();
+    assert_eq!(after, cached, "the other runs' cached tails");
 }
 
 #[tokio::test]

@@ -585,6 +585,21 @@ async fn a_published_tail_reaches_a_subscriber_through_the_server() {
         .await
         .expect("claim")
         .expect("team A's ready task");
+    // The server admits only a tail for the run its lease is open for.
+    board
+        .start_run(
+            &claim.lease,
+            StartRun {
+                run_id: tail().run_id,
+                kind: RunKind::Implementation,
+                session_id: "session".to_string(),
+                prompt: "prompt".to_string(),
+                base_ref: None,
+                base_sha: None,
+            },
+        )
+        .await
+        .expect("start the run");
     let mut tails = teams.a.subscribe_tail();
 
     board.publish_tail(&claim.lease, tail());

@@ -982,16 +982,23 @@ pub mod cases {
         let task_id = arranged.task(harness.board(), "Watched").await;
         let runner = harness.runner(Which::A);
         let claim = claimed(runner.as_ref(), run_target(&task_id, false)).await;
+        // A tail follows the `start_run` that opened its run, which over HTTP
+        // is what admits it (task 052): the lease must be open for that run.
+        let run_id = new_id();
+        runner
+            .start_run(&claim.lease, starting(&run_id, RunKind::Implementation))
+            .await
+            .expect("start the run");
         let mut tails = harness.board().subscribe_tail();
 
-        runner.publish_tail(&claim.lease, tail("run-1"));
+        runner.publish_tail(&claim.lease, tail(&run_id));
 
         // With the lease's team, which a stream admits it by (task 048).
         assert_same(
             tails.recv().await.expect("a tail on the board's channel"),
             crate::events::TeamTail {
                 team_id: claim.lease.team_id.clone(),
-                tail: tail("run-1"),
+                tail: tail(&run_id),
             },
             "the tail",
         );

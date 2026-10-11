@@ -824,10 +824,18 @@ pub fn publish_tail(ctx: &ServiceContext, lease: &LeaseRef, tail: RunTail) {
 /// [`publish_tail`] for a runner on the other end of a network, which is
 /// fenced (task 052): the tail enters the live channel through
 /// [`ServiceContext::publish_tail`], 048's one entry, only while `lease` is
-/// the current one for `runner_id`. Otherwise it is dropped and logged at
-/// `debug`. In process a tail is unfenced (043), because the in-process call
-/// is synchronous and the fence is not; over HTTP the handler is async, so it
-/// can afford the read.
+/// the current one for `runner_id` **and** is open for the run the tail
+/// names. Otherwise it is dropped and logged at `debug`. In process a tail is
+/// unfenced (043), because the in-process call is synchronous and the fence
+/// is not; over HTTP the handler is async, so it can afford the read.
+///
+/// The run check is not redundant with the fence. The relay caches a tail by
+/// its run id alone, so a runner holding *any* current lease could otherwise
+/// publish another run's live state: another member's run in a shared team,
+/// or, given the id, a run in a team its owner is not in, whose cached
+/// catch-up tail it would replace. Every tail a runner sends follows the
+/// `start_run` that set the lease's run, so a lease open for no run, or for
+/// another, has no tail of its own to send.
 ///
 /// Infallible, as every tail is (D14): a tail that cannot be checked is a
 /// tail nobody misses.
@@ -840,11 +848,21 @@ pub async fn publish_remote_tail(
     let held = async {
         let ctx = lease_context(ctx, lease)?;
         let mut tx = ctx.begin().await?;
-        lease::current(&mut tx, lease, runner_id).await?;
-        tx.commit().await
+        let current = lease::current(&mut tx, lease, runner_id).await?;
+        tx.commit().await?;
+        Ok::<_, Error>(current)
     };
     match held.await {
-        Ok(()) => ctx.publish_tail(lease.team_id.clone(), tail),
+        Ok(current) if current.run_id.as_deref() == Some(tail.run_id.as_str()) => {
+            ctx.publish_tail(lease.team_id.clone(), tail)
+        }
+        Ok(current) => tracing::debug!(
+            task_id = %lease.task_id,
+            generation = lease.generation,
+            lease_run_id = current.run_id.as_deref().unwrap_or("-"),
+            tail_run_id = %tail.run_id,
+            "a tail naming a run its lease is not open for was dropped",
+        ),
         Err(error) => tracing::debug!(
             task_id = %lease.task_id,
             generation = lease.generation,
