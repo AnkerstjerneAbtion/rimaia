@@ -134,8 +134,8 @@ impl Fixture {
 }
 
 /// A user in both fixture teams: signed up the way the product signs anyone
-/// up, then given a membership in each team by hand, because creating shared
-/// teams and inviting is task 051's. Their own desktop token, made the way the
+/// up, then joined to each team through an invitation its owner made
+/// (`testing::shared::add_member`). Their own desktop token, made the way the
 /// desktop's sign-in makes one.
 async fn member_of_both(teams: &TwoTeams) -> (String, Secret) {
     let pool = &teams.a.pool;
@@ -232,6 +232,7 @@ fn parse(frame: &str) -> Option<WireEvent> {
         "repositories:changed" => "repositories:changed",
         "runs:changed" => "runs:changed",
         "settings:changed" => "settings:changed",
+        "teams:changed" => "teams:changed",
         "runs:tail" => "runs:tail",
         other => panic!("a stream carried `{other}`, which no board source maps to"),
     };
@@ -432,6 +433,18 @@ async fn a_closed_client_releases_its_subscriptions() {
 async fn a_new_stream_opens_with_one_wholesale_reread_of_each_board_entity() {
     // `open` reads and checks the burst; `Stream::next` fails on an `id:` line
     // and on any name no board source maps to, for every frame read here.
+    // The burst is five events, `teams:changed []` last (task 051).
+    let names: Vec<&str> = board_reread().iter().map(|event| event.name).collect();
+    assert_eq!(
+        names,
+        [
+            "tasks:changed",
+            "repositories:changed",
+            "runs:changed",
+            "settings:changed",
+            "teams:changed",
+        ]
+    );
     let f = Fixture::new().await;
     let mut stream = f.open(&f.a, "").await;
 
@@ -619,7 +632,7 @@ async fn a_narrowed_stream_survives_revalidation() {
     // Losing team A ends the stream at its next revalidation, and the header
     // that named it is refused when the client comes back.
     let mut conn = f.teams.a.pool.acquire().await.expect("a connection");
-    remove_member(&mut conn, &team_a, &f.both_user).await;
+    remove_member(&mut conn, &f.teams.clock, &team_a, &f.both_user).await;
     drop(conn);
     f.host.streams.revalidate(&f.both_user);
     f.publish(&ChangeEvent::tasks(f.team_a(), ["after".to_string()]));
@@ -628,4 +641,119 @@ async fn a_narrowed_stream_survives_revalidation() {
     let reopened = Answer::of(f.get_in(&f.both, "", Some(&team_a)).await).await;
     assert_eq!(reopened.status, 404);
     assert_eq!(reopened.code(), Some("not_found"));
+}
+
+// ---------------------------------------------------------------------------
+// A changed team set (task 051)
+// ---------------------------------------------------------------------------
+
+impl Fixture {
+    /// `name` as `token`, over the route, at this build's protocol.
+    async fn command(&self, token: &Secret, name: &str, args: Value) -> Answer {
+        let answer = self.server.command(name, token.expose(), &args).await;
+        assert_eq!(answer.status, 200, "{name}: {:?}", answer.body);
+        answer
+    }
+}
+
+/// Reads `stream` until the server ends it, and the events it delivered on
+/// the way: at most the `teams:changed` its own change published before the
+/// stream was told to resolve its caller again.
+async fn until_ended(stream: &mut Stream) -> Vec<WireEvent> {
+    let mut read = Vec::new();
+    while let Some(event) = stream.next().await {
+        read.push(event);
+    }
+    read
+}
+
+#[tokio::test]
+async fn creating_a_team_ends_the_creators_stream() {
+    let f = Fixture::new().await;
+    let mut stream = f.open(&f.a, "").await;
+
+    let created = f
+        .command(&f.a, "create_team", json!({ "name": "Guild" }))
+        .await;
+    let guild = created.body["id"].as_str().expect("an id").to_string();
+
+    // Its own `teams:changed` names a team the stream was not opened with, so
+    // nothing reaches it before it ends.
+    assert_eq!(until_ended(&mut stream).await, Vec::<WireEvent>::new());
+
+    let mut reopened = f.open(&f.a, "").await;
+    let in_guild = ChangeEvent::tasks(guild, ["a-task-of-the-new-team".to_string()]);
+    f.publish(&in_guild);
+    assert_eq!(reopened.next().await, Some(board_wire(&in_guild.change)));
+}
+
+#[tokio::test]
+async fn a_removed_member_stops_receiving_the_teams_events() {
+    let f = Fixture::new().await;
+    let mut stream = f.open(&f.both, "").await;
+
+    f.command(
+        &f.a,
+        "remove_member",
+        json!({ "teamId": f.team_a(), "userId": f.both_user }),
+    )
+    .await;
+
+    let delivered = until_ended(&mut stream).await;
+    let removal = board_wire(&ChangeEvent::teams(f.team_a()).change);
+    assert!(
+        delivered.iter().all(|event| *event == removal),
+        "{delivered:?}"
+    );
+
+    let mut reopened = f.open(&f.both, "").await;
+    let in_a = ChangeEvent::tasks(f.team_a(), [f.teams.team_a.ready.clone()]);
+    let in_b = sentinel(f.team_b(), "b");
+    f.publish(&in_a);
+    f.publish(&in_b);
+    assert_eq!(reopened.next().await, Some(board_wire(&in_b.change)));
+}
+
+#[tokio::test]
+async fn a_deleted_teams_members_stop_receiving_its_events() {
+    let f = Fixture::new().await;
+    let created = f
+        .command(&f.a, "create_team", json!({ "name": "Guild" }))
+        .await;
+    let guild = created.body["id"].as_str().expect("an id").to_string();
+    let invitation = f
+        .command(
+            &f.a,
+            "create_invitation",
+            json!({ "teamId": guild, "role": "member" }),
+        )
+        .await;
+    let token = invitation.body["token"].as_str().expect("a token");
+    f.command(&f.both, "accept_invitation", json!({ "token": token }))
+        .await;
+    let mut stream = f.open(&f.both, "").await;
+    let before = ChangeEvent::tasks(guild.clone(), ["a-task-of-the-guild".to_string()]);
+    f.publish(&before);
+    assert_eq!(stream.next().await, Some(board_wire(&before.change)));
+
+    f.command(
+        &f.a,
+        "delete_team",
+        json!({ "teamId": guild, "confirmName": "Guild" }),
+    )
+    .await;
+
+    let delivered = until_ended(&mut stream).await;
+    let deletion = board_wire(&ChangeEvent::teams(guild.clone()).change);
+    assert!(
+        delivered.iter().all(|event| *event == deletion),
+        "{delivered:?}"
+    );
+
+    let mut reopened = f.open(&f.both, "").await;
+    let in_guild = ChangeEvent::tasks(guild, ["after".to_string()]);
+    let in_b = sentinel(f.team_b(), "b");
+    f.publish(&in_guild);
+    f.publish(&in_b);
+    assert_eq!(reopened.next().await, Some(board_wire(&in_b.change)));
 }

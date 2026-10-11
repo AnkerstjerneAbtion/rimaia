@@ -13,8 +13,8 @@ use std::sync::Arc;
 use pretty_assertions::assert_eq;
 use rimaia_core::api::PROTOCOL_VERSION;
 use rimaia_core::identity::authenticate::SessionsAndTokens;
-use rimaia_core::identity::secret::Secret;
-use rimaia_core::identity::{create_personal_team, tokens, Role};
+use rimaia_core::identity::secret::{csrf_for, Secret};
+use rimaia_core::identity::{create_personal_team, sessions, tokens, Role};
 use rimaia_core::testing::api as testing_api;
 use rimaia_core::testing::shared::add_member;
 use rimaia_core::testing::teams::TwoTeams;
@@ -27,12 +27,13 @@ struct Fixture {
     teams: TwoTeams,
     /// The desktop token of a user in team A, team B and their own.
     both: Secret,
+    both_user: String,
 }
 
 impl Fixture {
     async fn new() -> Self {
         let teams = TwoTeams::new().await;
-        let (_, both) = member_of_both(&teams).await;
+        let (both_user, both) = member_of_both(&teams).await;
         let auth = SessionsAndTokens {
             pool: teams.a.pool.clone(),
             clock: Arc::new(teams.clock.clone()),
@@ -43,6 +44,7 @@ impl Fixture {
             server,
             teams,
             both,
+            both_user,
         }
     }
 
@@ -69,8 +71,8 @@ impl Fixture {
 }
 
 /// A user in both fixture teams, with their own personal team and a desktop
-/// token. Creating shared teams and inviting is task 051's, so the memberships
-/// are written by hand.
+/// token, who joined each team through an invitation its owner made
+/// (`testing::shared::add_member`).
 async fn member_of_both(teams: &TwoTeams) -> (String, Secret) {
     let pool = &teams.a.pool;
     let mut conn = pool.acquire().await.expect("a connection");
@@ -241,4 +243,67 @@ async fn person_scoped_commands_ignore_the_team_header() {
         assert_eq!(minted.status, 200, "{team:?}: {:?}", minted.body);
         assert_eq!(minted.body["summary"]["teamIds"], json!([b]));
     }
+}
+
+#[tokio::test]
+async fn a_task_is_copied_across_teams_whatever_team_the_request_names() {
+    // Task 051: `copy_task_to_team` ignores `Rimaia-Team`, because its target
+    // is a repository in another team than the one on screen.
+    let f = Fixture::new().await;
+    let (a, b) = (&f.teams.team_a, &f.teams.team_b);
+
+    let copied = f
+        .command(
+            "copy_task_to_team",
+            Some(&a.team_id),
+            &json!({ "taskId": a.ready, "repositoryId": b.repository.id }),
+        )
+        .await;
+
+    assert_eq!(copied.status, 200, "{:?}", copied.body);
+    assert_eq!(copied.body["repositoryId"], json!(b.repository.id));
+    assert_eq!(copied.body["column"], "not_ready");
+    assert_ne!(copied.body["id"], json!(a.ready));
+}
+
+#[tokio::test]
+async fn a_removed_member_is_refused_on_their_next_request() {
+    // A real session for the member, and the owner's real desktop token: the
+    // removal takes effect on the member's very next request, because
+    // `Authenticate` reads memberships on every request (ADR-0030 point 2).
+    let f = Fixture::new().await;
+    let a = &f.teams.team_a;
+    let (_, session) = sessions::create(&f.teams.a.pool, &f.teams.clock, &f.both_user, None)
+        .await
+        .expect("a session for the member");
+    let as_member = || {
+        f.server
+            .client()
+            .post(format!("{}/api/v1/list_tasks", f.server.base_url()))
+            .header("cookie", format!("rimaia_session={}", session.expose()))
+            .header("x-rimaia-csrf", csrf_for(session.expose()))
+            .header("rimaia-protocol", PROTOCOL_VERSION)
+            .header("rimaia-team", &a.team_id)
+            .body(json!({ "filter": {} }).to_string())
+    };
+
+    let before = Answer::of(as_member().send().await.expect("the request")).await;
+    assert_eq!(before.status, 200, "{:?}", before.body);
+
+    let removed = f
+        .server
+        .command(
+            "remove_member",
+            a.credentials.desktop_token.expose(),
+            &json!({ "teamId": a.team_id, "userId": f.both_user }),
+        )
+        .await;
+    assert_eq!(removed.status, 200, "{:?}", removed.body);
+
+    let after = Answer::of(as_member().send().await.expect("the request")).await;
+    assert_eq!(after.status, 404);
+    assert_eq!(
+        after.body,
+        json!({ "code": "not_found", "message": "There is no team with that id." })
+    );
 }

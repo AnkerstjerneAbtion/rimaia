@@ -174,6 +174,33 @@ async fn an_unknown_path_is_not_the_app() {
 }
 
 #[tokio::test]
+async fn the_invitation_page_is_the_app() {
+    // Task 051's one deep link: the token rides in the fragment, which no
+    // request carries, so the path alone is the page.
+    let root = bundle();
+    let (_teams, server) = serving(Some(root.path())).await;
+
+    let page = get(&server, "/invite").await;
+
+    assert_eq!(page.status, 200);
+    assert_eq!(page.body, INDEX);
+    assert!(page
+        .header("content-type")
+        .is_some_and(|value| value.starts_with("text/html")));
+    assert_eq!(page.header("cache-control"), Some("no-cache"));
+    assert_eq!(page.header("x-content-type-options"), Some("nosniff"));
+    assert_eq!(
+        page.header("content-security-policy"),
+        Some("frame-ancestors 'none'")
+    );
+    for path in ["/invite/anything", "/invite/", "/invites"] {
+        let other = get(&server, path).await;
+        assert_eq!(other.status, 404, "{path}");
+        assert_ne!(other.body, INDEX, "{path}");
+    }
+}
+
+#[tokio::test]
 async fn a_path_outside_the_web_root_is_never_served() {
     let outer = tempfile::Builder::new()
         .prefix("rimaia-web-outer-")

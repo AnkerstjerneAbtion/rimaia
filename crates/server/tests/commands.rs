@@ -81,61 +81,81 @@ async fn a_team_cannot_see_another_teams_ids() {
 
     let mut failures = Vec::new();
     for case in BOARD_CASES {
-        let args = case
-            .foreign
-            .args(&teams)
-            .unwrap_or_else(|| (case.own)(&teams));
-        let before = (
-            teams.snapshot(&teams.team_a).await,
-            teams.snapshot_b().await,
-        );
-        let answer = server.command(case.name, TEAM_A_TOKEN, &args).await;
-        let text = answer.body.to_string();
+        let arg_sets = match &case.foreign {
+            Foreign::EntityLess => vec![(case.own)(&teams)],
+            foreign => foreign.arg_sets(&teams),
+        };
+        for args in arg_sets {
+            let before = (
+                teams.snapshot(&teams.team_a).await,
+                teams.snapshot_b().await,
+            );
+            let answer = server.command(case.name, TEAM_A_TOKEN, &args).await;
+            let text = answer.body.to_string();
 
-        for leaked in testing_api::leaks(&teams.team_b, &args, &text) {
-            failures.push(format!(
-                "{}: the answer carries B's {leaked}: {text}",
-                case.name
-            ));
-        }
-        if teams.snapshot_b().await != before.1 {
-            failures.push(format!("{}: team B's rows changed", case.name));
-        }
-        match &case.foreign {
-            Foreign::Ids(_) => {
-                if (answer.status, answer.code()) != (404, Some("not_found")) {
-                    failures.push(format!(
-                        "{}: B's ids answer {} {text}",
-                        case.name, answer.status
-                    ));
-                }
+            for leaked in testing_api::leaks(&teams.team_b, &args, &text) {
+                failures.push(format!(
+                    "{}: the answer carries B's {leaked}: {text}",
+                    case.name
+                ));
             }
-            Foreign::Filter(_) => {
-                let (fresh_args, substitutions) =
-                    testing_api::with_never_issued_ids(&teams.team_b, &args);
-                let fresh = server.command(case.name, TEAM_A_TOKEN, &fresh_args).await;
-                let restored = testing_api::restore_ids(&fresh.body.to_string(), &substitutions);
-                if (fresh.status, restored.as_str()) != (answer.status, text.as_str()) {
-                    failures.push(format!(
-                        "{}: a foreign filter answers differently from a missing one\n\
-                         foreign: {} {text}\n missing: {} {restored}",
-                        case.name, answer.status, fresh.status
-                    ));
-                }
+            if teams.snapshot_b().await != before.1 {
+                failures.push(format!("{}: team B's rows changed", case.name));
             }
-            Foreign::EntityLess => {}
+            match &case.foreign {
+                Foreign::Ids(_) => {
+                    if (answer.status, answer.code()) != (404, Some("not_found")) {
+                        failures.push(format!(
+                            "{}: B's ids answer {} {text}",
+                            case.name, answer.status
+                        ));
+                    }
+                }
+                Foreign::Filter(_) => {
+                    let (fresh_args, substitutions) =
+                        testing_api::with_never_issued_ids(&teams.team_b, &args);
+                    let fresh = server.command(case.name, TEAM_A_TOKEN, &fresh_args).await;
+                    let restored =
+                        testing_api::restore_ids(&fresh.body.to_string(), &substitutions);
+                    if (fresh.status, restored.as_str()) != (answer.status, text.as_str()) {
+                        failures.push(format!(
+                            "{}: a foreign filter answers differently from a missing one\n\
+                             foreign: {} {text}\n missing: {} {restored}",
+                            case.name, answer.status, fresh.status
+                        ));
+                    }
+                }
+                // A spent token of B's answers as a never-issued one (task 051).
+                Foreign::Capability(_) => {
+                    let fresh = server
+                        .command(
+                            case.name,
+                            TEAM_A_TOKEN,
+                            &testing_api::with_never_issued_token(&args),
+                        )
+                        .await;
+                    if (fresh.status, fresh.body.to_string()) != (answer.status, text.clone()) {
+                        failures.push(format!(
+                            "{}: a spent token answers differently from a never-issued one\n\
+                             spent: {} {text}\n missing: {} {}",
+                            case.name, answer.status, fresh.status, fresh.body
+                        ));
+                    }
+                }
+                Foreign::EntityLess => {}
+            }
+            // A foreign-id call is refused before it writes anything of A's
+            // either.
+            if matches!(case.foreign, Foreign::Ids(_) | Foreign::Capability(_))
+                && teams.snapshot(&teams.team_a).await != before.0
+            {
+                failures.push(format!(
+                    "{}: a refused call changed team A's rows",
+                    case.name
+                ));
+            }
+            teams.drain_changes();
         }
-        // A foreign-id call is refused before it writes anything of A's
-        // either.
-        if matches!(case.foreign, Foreign::Ids(_))
-            && teams.snapshot(&teams.team_a).await != before.0
-        {
-            failures.push(format!(
-                "{}: a refused call changed team A's rows",
-                case.name
-            ));
-        }
-        teams.drain_changes();
     }
 
     assert!(failures.is_empty(), "{}", failures.join("\n\n"));

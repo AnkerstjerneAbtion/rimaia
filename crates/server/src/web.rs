@@ -5,8 +5,14 @@
 //! serves it and decides nothing else about it:
 //!
 //! - **An unknown path is `404`, not the app.** The app has route state and no
-//!   URLs, so there is no deep link to fall back for. A path under `/api/` never
-//!   reaches the bundle at all: [`router`] answers it in the error shape.
+//!   URLs, so there is no deep link to fall back for, with one exception. A
+//!   path under `/api/` never reaches the bundle at all: [`router`] answers it
+//!   in the error shape.
+//! - **`/invite` is the one deep link** (task 051). An invitation link is
+//!   `<origin>/invite#<token>`, so `GET /invite`, exactly, is `index.html`,
+//!   and the app routes on the path. The token rides in the fragment, which a
+//!   browser never sends, so no request line or access log carries it.
+//!   `/invite/<anything>` stays a `404`, like every other unknown path.
 //! - **`index.html` is `no-cache`; hashed assets are immutable.** Without the
 //!   first, the reload an `upgrade_required` asks for would fetch the stale
 //!   bundle it is trying to replace. Vite puts a content hash in every name
@@ -22,14 +28,17 @@ use std::path::Path;
 use axum::http::{header, HeaderValue, Uri};
 use axum::middleware;
 use axum::response::Response;
+use axum::routing::get_service;
 use axum::Router;
-use tower_http::services::ServeDir;
+use tower_http::services::{ServeDir, ServeFile};
 
 /// The page itself: always revalidated.
 const INDEX_CACHE: &str = "no-cache";
 /// A file under `assets/`, whose name carries its hash.
 const ASSET_CACHE: &str = "public, max-age=31536000, immutable";
 const FRAME_POLICY: &str = "frame-ancestors 'none'";
+/// The accept page's path: the app's one deep link.
+const INVITE_PATH: &str = "/invite";
 
 /// A router serving `root`, to be the fallback of the whole server.
 pub fn router<S>(root: &Path) -> Router<S>
@@ -37,6 +46,10 @@ where
     S: Clone + Send + Sync + 'static,
 {
     Router::new()
+        .route_service(
+            INVITE_PATH,
+            get_service(ServeFile::new(root.join("index.html"))),
+        )
         .fallback_service(ServeDir::new(root))
         .layer(middleware::map_response(headers))
 }
@@ -46,7 +59,7 @@ async fn headers(uri: Uri, mut response: Response) -> Response {
     let found = response.status().is_success();
     let cache = if !found {
         None
-    } else if path == "/" || path == "/index.html" {
+    } else if path == "/" || path == "/index.html" || path == INVITE_PATH {
         Some(INDEX_CACHE)
     } else if path.starts_with("/assets/") {
         Some(ASSET_CACHE)
