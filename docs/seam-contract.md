@@ -7438,7 +7438,8 @@ what the dialog and opener plugins turn into once a page can run without a shell
    <url>." }`. `boundary.test.ts` names `open.ts` as the one file that may import a plugin.
    *Declined:* an `open_url` local command, which the browser would still refuse, and which
    would cost the desktop a Rust command, a registry row and a fixture row for what the plugin
-   already does.
+   already does. *Amended by D40 point 7:* the scheme check moved into `openExternalUrl`, for every
+   mode, with the sentence `Only web links can be opened.`
 8. **`mockHttp()` in `src/test/http.ts` is the suite's HTTP mock**, `vi.stubGlobal("fetch")`
    beside the `invoke` mocks: `answer`, `refuse`, `refuseRaw`, `unreachable`, `requests`
    (`{ name, url, method, headers, credentials, body }`, header names lower-cased), and
@@ -7501,6 +7502,143 @@ Tauri plugin" made testable. (8) is how the transports are proved without a serv
 
 ---
 
+## D40 — Task 050's cross-cutting choices
+
+**Question.** ADR-0034 point 6 says the server serves the bundle and allows the Tauri origins
+cross-origin, and point 5 says the interface asks what its client can do. It does not say
+where the bundle is configured, what the server sends with it, how a request names the team on
+screen, which board rows are about the person and not the team, what a client does when its
+page is older than its server, how the panel and the review view know whose machine holds a
+worktree, or what a link is allowed to be. 051, 052, 059, 060 and 061 each build on the
+answers.
+
+**Decision.**
+
+1. **The bundle is `RIMAIA_WEB_ROOT`, served after the API with no `index.html` fallback.** An
+   absolute path to the directory `npm run build` writes. Unset, the server serves the API only
+   and `/` is `404`. Set to anything that is not a directory holding `index.html`, the server
+   refuses to start, naming the variable and the path (D11). `tower_http::services::ServeDir`
+   answers every path the `/api/v1` router and `/api/*` do not, so no path under `/api/` reaches
+   it, and an unknown path is `404`, not the app: the app has route state and no URLs, so there
+   is no deep link to fall back for (051's invitation link may want one, and decides then).
+   *Declined:* a fallback to `index.html`, which makes every mistyped URL a blank page.
+2. **Caching and framing.** `index.html` is `Cache-Control: no-cache`, so the reload that point
+   9 asks for fetches the new bundle. A file under `assets/`, whose name Vite hashes, is
+   `public, max-age=31536000, immutable`, on a success only. Every bundle response carries
+   `X-Content-Type-Options: nosniff` and `Content-Security-Policy: frame-ancestors 'none'`: the
+   account page has revoke buttons, and a page that can be framed can have them clicked for it.
+   Both are set with `axum::middleware::map_response`, because D34 approves `tower-http`'s
+   `trace`, `cors` and `fs` and not `set-header`. A full script and style policy is out of scope.
+3. **CORS: the Tauri origins, exactly, and only with a bearer token.** `allowed_origins(dev)` in
+   `crates/server` is `tauri://localhost`, `http://tauri.localhost` and
+   `https://tauri.localhost`, plus `http://localhost:1420` when `dev` is true (`devUrl`, for 059's
+   connected `tauri dev`). The router builder takes `dev`; the binary passes
+   `cfg!(debug_assertions)`, and a test passes what it means. Methods `GET`, `POST`, `OPTIONS`;
+   request headers `authorization`, `content-type`, `rimaia-protocol`, `rimaia-team`; preflight
+   cached ten minutes. **`allow_credentials` is never set**, so the `rimaia_session` cookie and
+   `X-Rimaia-CSRF` stay same-origin and a Tauri origin authenticates with a token alone; the
+   origins are a list, never a predicate or `Any`. The layer wraps `/api/v1/*`, the event stream
+   included. It does not wrap the bundle, and 052's `/api/v1/runner/*` is mounted outside it.
+4. **`Rimaia-Team` narrows the caller once, at the edge.** On every board route and on
+   `GET /api/v1/events`, `Rimaia-Team: <team id>` reduces `Caller.teams` to that one grant:
+   `Caller::narrow_to`, in core, run by the server's `Caller` extractor after `Authenticate` and
+   the door check. A team the caller has no grant for is `not_found` with the sentence a missing
+   team gets (`There is no team with that id.`), so a team that exists is not told apart from
+   one that does not. A header that is empty or not text is `invalid`. `ignores_team_header(name)`
+   in `api::registry` is true for the commands about the person: `list_teams`, `list_runners`,
+   `unpair_runner`, 047's eight account rows, `get_subscription_cost` and
+   `set_subscription_cost`; their `Caller.teams` is every membership as `Authenticate` read it.
+   The stream's revalidation closure re-runs the whole resolution, `narrow_to` included, with the
+   header the stream opened with, so a narrowed stream stays narrowed, and a person who loses the
+   team has it ended and its reconnect refused `not_found`. `/mcp` and the runner protocol never
+   read it (ADR-0035 point 2; a lease names its team). *Declined:* a `team` argument on every
+   entity-less command, which would change 24 test files' invoke payloads and break D32 point
+   1's identical wire shapes; and a current team stored per token, which ADR-0035 rejects. The
+   header is transport metadata, sent on every request and stored nowhere on the server.
+5. **Three board commands.** `list_teams` (the caller's memberships by `user_id`: `{ id, name,
+   role, personal }`, personal first), `list_runners` (the caller's own paired runners: `{ id,
+   label, provider, appVersion, eligibility, pairedAt, lastSeenAt }`) and `unpair_runner`
+   (`{ id }`, through 047's `identity::tokens::unpair_runner`). A runner works for exactly one
+   user (ADR-0030 point 5), so another user's runner, one already unpaired and a never-issued
+   id are all `not_found`. None publishes a `ChangeEvent`: the account page re-reads after its
+   own write. Each has a `BoardCase`. The registry now has 66 board rows, so the appendix's
+   count of 45 is out of date by 21 and by these three.
+6. **`TaskDetail.worktreeRunner` is the machine of the newest run of any kind.** `{ id, label,
+   unpaired }` or `null` for a task no run has touched, read by a query beside `fetch_last_run`
+   that picks that row first and joins `runners` to it, so a newest run with no runner is `null`
+   and does not fall back to an older run's machine (D29 point 4: implementation, review and fix
+   runs share the task's one worktree, ADR-0005). An unpaired runner is still named. `Run` does
+   not widen. MCP's `TaskView` declines the field: the solo endpoint has one machine, and whether
+   hosted agents see machine names is 060's parity decision. **`worktreeIsHere(task,
+   capabilities)` is the one rule** the panel's `WorktreeSection` and the review view share:
+   true in solo; otherwise true only when the capabilities name a local runner and it is the
+   task's. When false they render `WorktreeElsewhere`'s "Worktree on {label}" (with "(unpaired)"),
+   send no local command, and the review view's `w` is inert and its legend drops the row. The
+   card renders Open in only in solo, because `TaskSummary` names no runner (D12 does not change
+   here): a known limitation for 059, which amends D12 if it wants the card's menu back.
+7. **A link is `http:` or `https:`, in every mode** (amends D39 point 7). `openExternalUrl`
+   parses with `new URL`; anything else, or text that does not parse, opens nothing and rejects
+   with `Only web links can be opened.`, never echoing the value, because a `pr_url` is text an
+   agent wrote and a browser's `window.open("javascript:…")` would run it on the server's
+   origin, with the session cookie. The desktop gets the same check. 049's setter is
+   `setUrlOpener` and its browser opener is `browserUrlOpener`, which this task keeps; the check
+   moved out of the opener into `openExternalUrl`, so 049's own message and its duplicate went.
+   The opener is called before any `await`, because a browser lets a page open a tab only during
+   the keypress that asked.
+8. **The shell reads capabilities, never a platform.** `bootstrapClient()` resolves with the
+   answer it installed transports for; `main.tsx` hands it to `ClientCapabilitiesProvider`;
+   components read `useClientCapabilities()`, which is the solo answer when no provider is
+   mounted. A test fails on `isTauri`, `__TAURI` or `navigator.userAgent` in `components/`,
+   `views/`, `hooks/` and `App.tsx`. Outside solo, `App` first calls `get_account`; the only
+   requests before a team is chosen are it and `list_teams`. The chosen team is state in
+   `commands.ts` (`transportHeaders` adds the header, no component sets one), stored in
+   `localStorage` as `rimaia.team`, and a switch reopens the stream and remounts the content
+   keyed by team. A team that is gone falls back to the personal team, or the first, at startup
+   and when the stream is refused `not_found` and a fresh `list_teams` no longer has it.
+   `unauthenticated` from any board command or the stream returns to the sign-in screen through
+   `src/lib/auth.ts`, which nothing below `App` handles.
+9. **`upgrade_required` reloads the page once per bundle, in a browser** (D32 point 7). The
+   HTTP transport, and the stream's fatal `426`, compare `sessionStorage`'s
+   `rimaia.upgradeReload` with the `PROTOCOL_VERSION` literal. Nothing stored, or a different
+   value: store this bundle's literal and reload. Equal: this bundle was already reloaded into
+   and is still too old, so `App` shows one banner and nothing reloads again. Nothing clears
+   the value: a read answered under skew says nothing about the bundle, and a bundle that fixes
+   the skew carries a different literal. Desktop modes are left to 063's updater.
+10. **Gates for local commands that no table row names, found by 050's no-local-command test.**
+    `list_checkouts` (`useCheckouts`) and `list_local_worktrees` (`useLocalWorktrees`) are read
+    only where there is a machine, `get_run_log_path` (`RunOutcomeSection`) and `prune_run_logs`
+    (`RunHistorySection`) have no browser control, and `get_mcp_status` is only on screens a
+    browser does not show. Each is a capability check beside the command, and stays with it.
+11. **`RunnersSection` shows no runner setting's value.** It is ADR-0034's 2026-10-04
+    amendment: the board holds none (D28 part 4), so each runner is the board's own facts about
+    it and a sentence saying its settings are changed on that machine, naming neither the
+    desktop app nor a command line (058). 069 replaces the doctor sentence with 054's report.
+    ADR-0034's amendment is where the rule lives; this entry does not restate it.
+
+**Why.** (1) to (3) are what makes one origin carry both the page and its API without letting
+any other page call it. (4) gives the switcher a wire without 24 files' payloads changing, and
+puts the one narrowing rule where a stream and a command meet it alike. (5) and (6) are what the
+switcher, the account page and the browser states read. (7) is the difference between a broken
+button and a script-injection hole. (8) and (9) keep a decision about the client in one place
+and keep an upgrade from becoming a reload loop.
+
+**What the next tasks expect.**
+
+- **051:** adds its rows to `ignores_team_header`, a switcher and an account page to extend.
+- **052 and 060:** each carries a test that its surface ignores `Rimaia-Team`; 052 deletes the
+  `cancel_task_run` gate and flips the others while keeping Run now's.
+- **056:** deletes the transcript gates in `RunDetailOverlay` and `TranscriptViewer`.
+- **059:** runs this shell in connected mode, supplies its own sign-in, and amends D12 if it
+  wants the card's Open in back.
+- **061:** extends the runner rows with assignment and eligibility.
+- **063:** adds `currency` to `list_runners`.
+- **069:** renders each runner's doctor report in `RunnersSection`, and deletes the Run now and
+  Retry gates with its runner picker.
+
+**Binds.** 051, 052, 054, 056, 059, 060, 061, 063, 069.
+
+---
+
 ## How to use this
 
 An implementation task reads the entries its number appears in, before writing code:
@@ -7555,7 +7693,7 @@ An implementation task reads the entries its number appears in, before writing c
 | [047](../tasks/047-identity.md) | D4 · D6 · D8 · D10 · D11 · D28 · D31 · D32 · D33 · D34 |
 | [048](../tasks/048-events-over-sse.md) | D2 · D4 · D6 · D7 · D8 · D10 · D14 · D24 · D28 · D31 · D32 · D33 · D34, and writes D38 |
 | [049](../tasks/049-frontend-transport.md) | D4 · D6 · D7 · D8 · D14 · D20 · D28 · D32 · D33 · D34 · D38, and writes D39 |
-| [050](../tasks/050-the-web-shell.md) | D4 · D6 · D7 · D8 · D10 · D11 · D12 · D14 · D22 · D28 · D29 · D32 · D33 · D34 · D38 |
+| [050](../tasks/050-the-web-shell.md) | D4 · D6 · D7 · D8 · D10 · D11 · D12 · D14 · D22 · D28 · D29 · D32 · D33 · D34 · D38, and writes D40 |
 | [051](../tasks/051-teams-invitations-and-roles.md) | D2 · D3 · D4 · D6 · D7 · D8 · D10 · D16 · D28 · D32 · D33 · D34, and the entries 045, 048, 050 and 073 add |
 | [052](../tasks/052-the-runner-protocol-and-an-http-board-adapter.md) | D4 · D6 · D8 · D10 · D14 · D19 · D28 · D29 · D31 · D32 · D33 · D34 · D37 · D38 |
 | [053](../tasks/053-leases-across-the-network.md) | D4 · D6 · D8 · D9 · D11 · D12 · D14 · D17 · D19 · D21 · D28 · D29 · D31 · D32 · D33 · D37 |

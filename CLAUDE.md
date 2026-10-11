@@ -249,6 +249,14 @@ Rules:
   URL must be exactly `<origin>/auth/github/callback`; the client id and secret are that app's.
   Each missing variable is named at startup, and the secret never is. Sign in from Chrome or
   Firefox when the origin is `http://localhost`: Safari refuses `Secure` cookies there.
+- **Run the web shell locally with `npm run build`, then the server with `RIMAIA_WEB_ROOT` set
+  to the absolute path of `dist/`.** The server then serves the bundle at `/` and the API at
+  `/api/v1` on one origin; unset, it serves the API only, and a path that is not a directory
+  holding `index.html` stops it at startup, naming the variable. **There is no Vite dev proxy:**
+  the sign-in callback returns to `RIMAIA_PUBLIC_URL`, so a sign-in started on Vite's origin
+  would end on the server's, and making that work would rest on browsers not separating cookies
+  by port. Fixture mode (`npm run screenshot`, `?scenario=browser`) and vitest are the fast loop
+  for these screens.
 - **No secret goes into a log line, a `Debug` output, an error message or a URL the server
   records.** Tokens, session secrets, pairing codes, OAuth codes and `state` are minted,
   hashed and compared only through `rimaia_core::identity::secret`, and stored only as its
