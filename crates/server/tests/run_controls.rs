@@ -15,8 +15,6 @@ use chrono::Duration;
 use pretty_assertions::assert_eq;
 use rimaia_core::api::tail::SOLO_TAIL_RELAY_CAPACITY;
 use rimaia_core::api::{BoardHost, StreamControl, TailRelay, PROTOCOL_VERSION};
-use rimaia_core::board::relay::{NAME_THE_RUNNER, RUNNER_OFFLINE};
-use rimaia_core::board::service::CANCEL_REFUSAL;
 use rimaia_core::board::{
     authorize_start, lease, runners as board_runners, ClaimTarget, OwnerPresence, RelayedRequests,
 };
@@ -243,7 +241,7 @@ async fn a_runner_is_online_for_one_lease_lifetime_after_its_last_request() {
     f.teams.clock.advance(Duration::seconds(61));
     let refused = f.press(ready, &f.a_id).await;
     assert_eq!((refused.status, refused.code()), (400, Some("invalid")));
-    assert_eq!(refused.body["message"], json!(RUNNER_OFFLINE));
+    assert_eq!(refused.body["message"], json!("this runner has not been in touch for more than three minutes, so it cannot start a run now"));
 }
 
 #[tokio::test]
@@ -381,7 +379,10 @@ async fn retry_without_a_runner_goes_to_the_pinned_runner() {
         )
         .await;
     assert_eq!((unpinned.status, unpinned.code()), (400, Some("invalid")));
-    assert_eq!(unpinned.body["message"], json!(NAME_THE_RUNNER));
+    assert_eq!(
+        unpinned.body["message"],
+        json!("name the runner to start this task on")
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -402,7 +403,10 @@ async fn a_run_now_that_names_no_runner_is_refused_over_http() {
         .await;
 
     assert_eq!((refused.status, refused.code()), (400, Some("invalid")));
-    assert_eq!(refused.body["message"], json!(NAME_THE_RUNNER));
+    assert_eq!(
+        refused.body["message"],
+        json!("name the runner to start this task on")
+    );
     assert_eq!(f.doors.relayed.held(), vec![]);
 }
 
@@ -414,7 +418,7 @@ async fn a_run_now_for_a_runner_not_heard_from_is_refused_as_offline() {
     let refused = f.press(&f.teams.team_a.ready, &f.a_id).await;
 
     assert_eq!((refused.status, refused.code()), (400, Some("invalid")));
-    assert_eq!(refused.body["message"], json!(RUNNER_OFFLINE));
+    assert_eq!(refused.body["message"], json!("this runner has not been in touch for more than three minutes, so it cannot start a run now"));
     assert_eq!(f.doors.relayed.held(), vec![]);
 }
 
@@ -686,7 +690,7 @@ async fn a_member_who_owns_neither_the_runner_nor_the_team_cannot_stop_its_run()
         .await;
 
     assert_eq!((refused.status, refused.code()), (400, Some("invalid")));
-    assert_eq!(refused.body["message"], json!(CANCEL_REFUSAL));
+    assert_eq!(refused.body["message"], json!("only the owner of the runner holding this task, or an owner of its team, can stop its run"));
     let heartbeat = s.doors.heartbeat(&s.alice_runner, &[&lease]).await;
     assert_eq!(
         heartbeat["cancel"],
