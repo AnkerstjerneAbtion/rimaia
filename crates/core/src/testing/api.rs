@@ -34,6 +34,7 @@ use crate::api::{
     Authenticate, BoardHost, BoxFuture, Caller, Credential, Door, StreamControl, TailRelay,
     TeamGrant,
 };
+use crate::board::RelayedRequests;
 use crate::context::{ServiceContext, TeamScope};
 use crate::db::MutationSource;
 use crate::error::{Error, Result};
@@ -129,6 +130,17 @@ pub fn desktop(token_id: &str) -> Door {
 /// ([`fixture_tail`]), published through the channel like any other, so
 /// `get_run_tail`'s case has something to answer.
 pub async fn host_over(teams: &TwoTeams, ctx: &ServiceContext) -> BoardHost {
+    relayed_host_over(teams, ctx).await.0
+}
+
+/// [`host_over`], and the [`RelayedRequests`] its `relay` is: a real one,
+/// never a fake, so a case exercises the real refusals (task 052). A server
+/// state is built from both, because `ServerState.relayed` and the host's
+/// relay are one `Arc`.
+pub async fn relayed_host_over(
+    teams: &TwoTeams,
+    ctx: &ServiceContext,
+) -> (BoardHost, Arc<RelayedRequests>) {
     let tails = TailRelay::new(SERVER_TAIL_RELAY_CAPACITY);
     tokio::spawn(tails.follow(ctx.subscribe_tail()));
     for team in [&teams.team_a, &teams.team_b] {
@@ -139,14 +151,17 @@ pub async fn host_over(teams: &TwoTeams, ctx: &ServiceContext) -> BoardHost {
             tokio::task::yield_now().await;
         }
     }
-    BoardHost {
+    let relayed = Arc::new(RelayedRequests::new());
+    let host = BoardHost {
         context: ctx.clone(),
         provider: ProviderProfile::of(teams.runner.provider.as_ref()),
         paths: teams.paths.clone(),
         rate_limits: Arc::new(RateLimiter::new(Arc::new(teams.clock.clone()))),
         tails,
         streams: StreamControl::new(),
-    }
+        relay: relayed.clone(),
+    };
+    (host, relayed)
 }
 
 /// A host over the fixture's own board. Its base context is team A's, which
@@ -154,6 +169,11 @@ pub async fn host_over(teams: &TwoTeams, ctx: &ServiceContext) -> BoardHost {
 /// handler runs.
 pub async fn host(teams: &TwoTeams) -> BoardHost {
     host_over(teams, &teams.a).await
+}
+
+/// [`host`], and its relay, for a server state.
+pub async fn relayed_host(teams: &TwoTeams) -> (BoardHost, Arc<RelayedRequests>) {
+    relayed_host_over(teams, &teams.a).await
 }
 
 /// The snapshot [`host_over`]'s relay holds for `team`'s implementation run.

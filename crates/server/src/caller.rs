@@ -159,6 +159,71 @@ fn accepts(credential: &Credential<'_>, door: &Door) -> Result<(), Error> {
     }
 }
 
+/// A paired runner, from its `rmr_` token and nothing else (seam-contract D32
+/// point 7's table, task 052).
+///
+/// Every runner route takes it as its first extractor, so no runner route can
+/// be mounted without one. It accepts only `Authorization: Bearer`, resolved
+/// through the server's [`Authenticate`], and only when the answer is
+/// [`Door::Runner`]. Anything else is `unauthenticated` in the one sentence:
+/// a desktop or personal token, a session cookie with or without its CSRF
+/// header, a cookie beside a bearer, or nothing. A revoked token and an
+/// unpaired runner's are refused by `Authenticate` itself.
+///
+/// The runner's identity comes from here and from nowhere else (D31 point 3):
+/// no body carries a runner id. It reads no `Rimaia-Team`: a lease names its
+/// team (D40 point 4).
+///
+/// The field is private, so the extractor is the only way to build one, and
+/// its door is always a runner's.
+#[derive(Debug, Clone)]
+pub struct RunnerCaller(Caller);
+
+impl RunnerCaller {
+    /// Who the runner works for, with every team they belong to, read on this
+    /// request (ADR-0030 point 2).
+    pub fn caller(&self) -> &Caller {
+        &self.0
+    }
+
+    /// The runner the token was issued to.
+    pub fn runner_id(&self) -> &str {
+        match &self.0.door {
+            Door::Runner { runner_id } => runner_id,
+            door => unreachable!("a RunnerCaller is built only for a runner, not {door:?}"),
+        }
+    }
+}
+
+impl FromRequestParts<ServerState> for RunnerCaller {
+    type Rejection = ApiError;
+
+    async fn from_request_parts(
+        parts: &mut Parts,
+        state: &ServerState,
+    ) -> Result<Self, Self::Rejection> {
+        let headers = &parts.headers;
+        if CookieJar::from_headers(headers)
+            .get(SESSION_COOKIE)
+            .is_some()
+        {
+            return Err(Error::unauthenticated().into());
+        }
+        let token = bearer(headers)?.ok_or_else(Error::unauthenticated)?;
+        let caller = state
+            .auth
+            .authenticate_from(
+                Credential::Bearer(token),
+                text(headers, header::USER_AGENT.as_str()),
+            )
+            .await?;
+        match caller.door {
+            Door::Runner { .. } => Ok(Self(caller)),
+            _ => Err(Error::unauthenticated().into()),
+        }
+    }
+}
+
 /// The token of an `Authorization: Bearer <token>` header, `None` with no
 /// header, and `unauthenticated` for any other `Authorization`.
 fn bearer(headers: &HeaderMap) -> Result<Option<&str>, Error> {

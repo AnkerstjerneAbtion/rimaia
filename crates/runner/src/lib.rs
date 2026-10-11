@@ -7,6 +7,8 @@
 //! implementation on that store, which the host injects into `rimaia-core` as
 //! a `MachineContext` (task 041); and the loop, [`queue`] (task 042), which
 //! asks the board for work through the port and obeys this machine's rules.
+//! [`relay::ShellRelay`] answers solo's Run now and Cancel on this machine
+//! (task 052).
 //!
 //! "Runner" also names `rimaia_core::runner`, the agent-process layer that
 //! spawns, streams and classifies one run. ADR-0027 point 6 accepts the
@@ -20,6 +22,7 @@ pub mod adopt;
 pub mod identity;
 pub mod machine;
 pub mod queue;
+pub mod relay;
 pub mod store;
 
 pub use store::RunnerStore;

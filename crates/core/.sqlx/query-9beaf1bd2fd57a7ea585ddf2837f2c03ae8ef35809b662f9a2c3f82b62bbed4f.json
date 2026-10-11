@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT last_seen_at AS \"last_seen_at: DateTime<Utc>\" FROM runners WHERE id = ?1",
+  "describe": {
+    "columns": [
+      {
+        "name": "last_seen_at: DateTime<Utc>",
+        "ordinal": 0,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      true
+    ]
+  },
+  "hash": "9beaf1bd2fd57a7ea585ddf2837f2c03ae8ef35809b662f9a2c3f82b62bbed4f"
+}

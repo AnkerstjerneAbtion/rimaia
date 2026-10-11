@@ -572,6 +572,7 @@ impl Solo {
                 rimaia_core::api::tail::SOLO_TAIL_RELAY_CAPACITY,
             ),
             streams: rimaia_core::api::StreamControl::new(),
+            relay: Arc::new(rimaia_core::board::RelayedRequests::new()),
         };
         let caller = Caller::solo(&harness.solo);
         assert_eq!(

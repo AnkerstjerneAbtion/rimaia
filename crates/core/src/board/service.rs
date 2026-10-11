@@ -38,6 +38,7 @@ use crate::runner::limits::{self, DEFAULT_MAX_TURNS, DISALLOWED_TOOLS, MAX_TURNS
 use crate::runner::outcome::{self, NewRun, RunOutcome};
 use crate::runner::process::DEFAULT_DISALLOWED_TOOLS;
 use crate::runner::provider::ProviderProfile;
+use crate::runner::start::lost_start;
 use crate::runner::RunTrigger;
 use crate::runs::bundle::{
     encoded_len, ReviewBundle, RunCapture, BUNDLE_CAP_BYTES, PATCH_CAP_BYTES,
@@ -51,7 +52,11 @@ use crate::tasks::strategy::{prepare_strategy, write_strategy, StrategyPlan};
 use crate::worktree::base_ref;
 use crate::worktree::naming::{self, COMMIT_RULE, TASK_BRANCH_RULE};
 
-use super::lease::{self, Candidate, ClaimRequest, Door, Edges, LeaseTerm, PhaseModels};
+use super::cancel::CancelRequests;
+use super::lease::{
+    self, Admission, Candidate, ClaimRequest, Door, Edges, LeaseTerm, PhaseModels, CLAIM_WAIT_MAX,
+};
+use super::runners;
 use super::types::{
     Claim, ClaimTarget, FinishReceipt, FinishRun, FreeCapacity, Heartbeat, LeasePurpose, LeaseRef,
     NextStep, PreviewOf, RunAuthorship, RunContext, StartRun, TeamLimits, TranscriptAck,
@@ -203,6 +208,10 @@ pub struct Runner<'a> {
 /// 042): task 045 adds its eligibility predicates to `lease::eligible`, which
 /// both `selection::plan` and the claim transaction ask. Every form takes its
 /// edges and its lease in one transaction (`board::lease`, task 043).
+///
+/// A `Next`'s `wait` is clamped to [`CLAIM_WAIT_MAX`] here, so both adapters
+/// clamp it: a wait honoured by one and cut short by the other is the
+/// difference the contract suite exists to find (task 052).
 pub async fn claim(
     ctx: &ServiceContext,
     runner: Runner<'_>,
@@ -214,7 +223,10 @@ pub async fn claim(
             repositories,
             wait,
             ceiling,
-        } => claim_next(ctx, runner, &capacity, &repositories, wait, &ceiling).await,
+        } => {
+            let wait = wait.min(CLAIM_WAIT_MAX);
+            claim_next(ctx, runner, &capacity, &repositories, wait, &ceiling).await
+        }
         ClaimTarget::Run {
             task_id,
             trigger,
@@ -463,15 +475,122 @@ async fn claim_task(
 }
 
 /// Renews the leases this runner still holds and fences the rest, in one
-/// transaction (D31 point 4). `cancel` is empty in process: a solo Cancel
-/// reaches `InFlight::cancel` directly rather than through here.
+/// transaction (D31 point 4), and lists in `cancel` each renewed lease that
+/// `cancels` holds a request for (task 052). In process the registry is
+/// always empty: a solo Cancel reaches `InFlight::cancel` directly rather than
+/// through here.
 pub async fn heartbeat(
     ctx: &ServiceContext,
     runner: Runner<'_>,
     held: &[LeaseRef],
+    cancels: &CancelRequests,
 ) -> Result<Heartbeat> {
-    lease::heartbeat(ctx, runner.id, runner.term, held).await
+    lease::heartbeat(ctx, runner.id, runner.term, held, cancels).await
 }
+
+/// Whether a claim of `task_id` by `runner_id` would be granted now, refused
+/// in the claim's own sentence when it would not (task 052): what a relayed
+/// Run now checks before it is held for the runner, so a press that can never
+/// be collected is not answered `Ok` to do nothing.
+///
+/// The claim's checks, read-only and through the one function the claim
+/// transaction asks ([`lease::admits`]), for the purpose the claim would
+/// take: 043's pin, 045's eligibility and consent, 067's model rule against
+/// the runner's paired provider. A task with no edge for it is refused with
+/// the starter's lost-start sentence. The runner's own strategy ceiling is
+/// not the board's to know, so it is judged at the claim that collects the
+/// request.
+pub async fn check_run_now(
+    ctx: &ServiceContext,
+    runner_id: &str,
+    task_id: &str,
+    continue_session: bool,
+) -> Result<()> {
+    let provider = ProviderProfile::for_id(runners::paired_provider(ctx, runner_id, None).await?);
+    let runner = Runner {
+        id: runner_id,
+        provider: &provider,
+        term: LeaseTerm::Never,
+    };
+    let context = read_context(ctx, runner, task_id).await?;
+    let edges = if continue_session {
+        let point = attempts::resume_point(ctx, task_id).await?;
+        Edges::Resume {
+            kind: point.map(|point| point.kind),
+        }
+    } else {
+        Edges::Fresh
+    };
+    let models = PhaseModels::of(&context);
+    let composition = Composition::of(&context);
+    let ceiling = StrategyCeiling::default();
+    let request = ClaimRequest {
+        task_id,
+        candidate: Candidate {
+            runner_id,
+            provider: provider.id,
+            catalogue: &context.catalogue,
+            models: &models,
+            ceiling: &ceiling,
+            composition: &composition,
+        },
+        term: runner.term,
+        edges,
+        door: Door::Named,
+        mode: context.strategy.mode,
+    };
+    match lease::admits(ctx, &request).await? {
+        Admission::Admitted { .. } => Ok(()),
+        Admission::Refused(refusal) => Err(Error::invalid(refusal)),
+        Admission::Lost => Err(Error::invalid(lost_start(continue_session))),
+    }
+}
+
+/// Whether the caller may stop `task_id`'s run, and the lease that run holds,
+/// if any (task 052).
+///
+/// A task outside the context's scope is `NotFound`, and a task with no lease
+/// is `None`: nothing is running to stop, which is the Cancel button's
+/// idempotence. Otherwise the caller may ask when they own the runner holding
+/// the lease, or are an owner of the task's team (task 051). Stopping a run is
+/// a board action on the team's work, like deleting the task, and costs the
+/// runner's owner nothing they did not already share by taking it; starting
+/// one spends a machine and a subscription, which is why ADR-0031 point 7's
+/// refusal is about starting. A member who is neither is refused in a
+/// sentence naming who may (D32 point 3).
+pub async fn authorize_cancel(ctx: &ServiceContext, task_id: &str) -> Result<Option<LeaseRef>> {
+    let scope = ctx.scope.json();
+    let actor = &ctx.actor;
+    let row = sqlx::query!(
+        r#"SELECT t.team_id, l.generation AS "generation?", r.user_id AS "holder_owner?",
+                  EXISTS (SELECT 1 FROM team_memberships m
+                           WHERE m.team_id = t.team_id AND m.user_id = ?3
+                             AND m.role = 'owner') AS "team_owner!: bool"
+             FROM tasks t
+             LEFT JOIN runner_leases l ON l.task_id = t.id
+             LEFT JOIN runners r ON r.id = l.runner_id
+            WHERE t.id = ?1 AND t.team_id IN (SELECT value FROM json_each(?2))"#,
+        task_id,
+        scope,
+        actor,
+    )
+    .fetch_optional(&ctx.pool)
+    .await?
+    .ok_or_else(|| Error::not_found(format!("no task with id {task_id}")))?;
+
+    let Some(generation) = row.generation else {
+        return Ok(None);
+    };
+    if row.holder_owner.as_deref() != Some(actor.as_str()) && !row.team_owner {
+        return Err(Error::invalid(CANCEL_REFUSAL));
+    }
+    Ok(Some(LeaseRef::new(task_id, generation, row.team_id)))
+}
+
+/// The refusal [`authorize_cancel`] answers a member who neither owns the
+/// holding runner nor owns the task's team.
+pub const CANCEL_REFUSAL: &str =
+    "only the owner of the runner holding this task, or an owner of its team, can stop its run";
 
 /// The context re-read under a lease.
 ///
@@ -699,6 +818,39 @@ pub async fn append_transcript(
 pub fn publish_tail(ctx: &ServiceContext, lease: &LeaseRef, tail: RunTail) {
     if ctx.scope.contains(&lease.team_id) {
         ctx.publish_tail(lease.team_id.clone(), tail);
+    }
+}
+
+/// [`publish_tail`] for a runner on the other end of a network, which is
+/// fenced (task 052): the tail enters the live channel through
+/// [`ServiceContext::publish_tail`], 048's one entry, only while `lease` is
+/// the current one for `runner_id`. Otherwise it is dropped and logged at
+/// `debug`. In process a tail is unfenced (043), because the in-process call
+/// is synchronous and the fence is not; over HTTP the handler is async, so it
+/// can afford the read.
+///
+/// Infallible, as every tail is (D14): a tail that cannot be checked is a
+/// tail nobody misses.
+pub async fn publish_remote_tail(
+    ctx: &ServiceContext,
+    runner_id: &str,
+    lease: &LeaseRef,
+    tail: RunTail,
+) {
+    let held = async {
+        let ctx = lease_context(ctx, lease)?;
+        let mut tx = ctx.begin().await?;
+        lease::current(&mut tx, lease, runner_id).await?;
+        tx.commit().await
+    };
+    match held.await {
+        Ok(()) => ctx.publish_tail(lease.team_id.clone(), tail),
+        Err(error) => tracing::debug!(
+            task_id = %lease.task_id,
+            generation = lease.generation,
+            %error,
+            "a tail under a lease that is not this runner's current one was dropped",
+        ),
     }
 }
 

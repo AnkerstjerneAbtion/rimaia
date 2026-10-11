@@ -172,6 +172,7 @@ fn host(team: &SharedTeam) -> BoardHost {
         rate_limits: Arc::new(RateLimiter::new(Arc::new(team.clock.clone()))),
         tails: TailRelay::new(SERVER_TAIL_RELAY_CAPACITY),
         streams: StreamControl::new(),
+        relay: Arc::new(rimaia_core::board::RelayedRequests::new()),
     }
 }
 

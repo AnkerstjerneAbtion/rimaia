@@ -52,13 +52,13 @@ struct Fixture {
 impl Fixture {
     async fn new() -> Self {
         let teams = TwoTeams::new().await;
-        let host = testing_api::host(&teams).await;
+        let (host, relayed) = testing_api::relayed_host(&teams).await;
         let (both_user, both) = member_of_both(&teams).await;
         let auth = SessionsAndTokens {
             pool: teams.a.pool.clone(),
             clock: Arc::new(teams.clock.clone()),
         };
-        let server = TestServer::spawn(state_over(host.clone(), auth)).await;
+        let server = TestServer::spawn(state_over(host.clone(), relayed, auth)).await;
         Self {
             server,
             host,

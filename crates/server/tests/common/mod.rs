@@ -10,6 +10,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use rimaia_core::api::{Authenticate, PROTOCOL_VERSION};
+use rimaia_core::board::RelayedRequests;
 use rimaia_core::testing::api::{self as testing_api, FixedCaller};
 use rimaia_core::testing::identity::FakeIdentityProvider;
 use rimaia_core::testing::teams::TwoTeams;
@@ -150,20 +151,20 @@ impl Answer {
 /// A server state over the fixture's own board and clock, authenticated by
 /// `FixedCaller::two_teams`.
 pub async fn two_teams_state(teams: &TwoTeams) -> ServerState {
-    state_over(
-        testing_api::host(teams).await,
-        FixedCaller::two_teams(teams),
-    )
+    let (host, relayed) = testing_api::relayed_host(teams).await;
+    state_over(host, relayed, FixedCaller::two_teams(teams))
 }
 
-/// A server state over `host`, authenticated by `auth`, signing in with a
-/// fake provider nobody here uses.
+/// A server state over `host` and the relay it holds, authenticated by
+/// `auth`, signing in with a fake provider nobody here uses.
 pub fn state_over(
     host: rimaia_core::api::BoardHost,
+    relayed: Arc<RelayedRequests>,
     auth: impl Authenticate + 'static,
 ) -> ServerState {
     ServerState::new(
         host,
+        relayed,
         Arc::new(auth),
         Arc::new(FakeIdentityProvider::new()),
         "https://rimaia.test",

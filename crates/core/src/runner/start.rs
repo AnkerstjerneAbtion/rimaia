@@ -178,8 +178,9 @@ pub async fn record_claim(
     Ok(())
 }
 
-/// The sentence a person reads when another starter got there first.
-fn lost_start(continue_session: bool) -> &'static str {
+/// The sentence a person reads when another starter got there first, or, for
+/// a relayed Run now, when the task has no edge for the claim (task 052).
+pub(crate) fn lost_start(continue_session: bool) -> &'static str {
     if continue_session {
         "this task is not waiting to be retried; the queue may have already picked it up, \
          or its retries may have run out"

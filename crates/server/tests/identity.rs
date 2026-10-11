@@ -131,6 +131,7 @@ impl Signing {
             TeamScope::one(db::new_id()),
             db::new_id(),
         );
+        let relayed = Arc::new(rimaia_core::board::RelayedRequests::new());
         let host = BoardHost {
             rate_limits: Arc::new(RateLimiter::new(context.clock.clone())),
             context,
@@ -140,6 +141,7 @@ impl Signing {
                 rimaia_core::api::tail::SOLO_TAIL_RELAY_CAPACITY,
             ),
             streams: rimaia_core::api::StreamControl::new(),
+            relay: relayed.clone(),
         };
         let auth = SessionsAndTokens {
             pool: pool.clone(),
@@ -148,6 +150,7 @@ impl Signing {
         let fake = FakeIdentityProvider::new();
         let state = ServerState::new(
             host,
+            relayed,
             Arc::new(auth.clone()),
             Arc::new(fake.clone()),
             "https://rimaia.test",

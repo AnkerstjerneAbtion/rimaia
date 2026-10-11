@@ -571,6 +571,10 @@ async fn arrange(
         crate::testing::db::insert_runner(&mut conn, clock, &owner_id, &marking.text("runner"))
             .await
     };
+    // Heard from as it pairs, so a case can start a run on it (task 052).
+    crate::board::runners::mark_seen(ctx, &runner_id)
+        .await
+        .expect("mark the team's runner seen");
 
     let source = TempRepo::init_with_prefix(match marking {
         Marking::Plain => "rimaia-team-a-",
@@ -794,6 +798,9 @@ async fn owner_credentials(
     let paired = pairing::pair_own_runner(ctx, &marking.text("paired runner"), "claude-code")
         .await
         .expect("a paired runner");
+    crate::board::runners::mark_seen(ctx, &paired.runner_id)
+        .await
+        .expect("mark the paired runner seen");
     let runner_token_id = tokens::list(ctx, None)
         .await
         .expect("the owner's tokens")

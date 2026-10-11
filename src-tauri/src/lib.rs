@@ -28,6 +28,7 @@ use rimaia_core::{
     db, identity, startup, worktree, AppPaths, Error, LocalChange, LocalEvents, ServiceContext,
     SystemClock, TeamScope,
 };
+use rimaia_runner::relay::ShellRelay;
 use rimaia_runner::{adopt, RunnerStore};
 use tauri::{Emitter, Manager, RunEvent};
 use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
@@ -277,11 +278,42 @@ pub fn run() {
             // command host, so none of them reads another provider's catalogue.
             let provider = ProviderProfile::of(runner.provider.as_ref());
 
+            // The one board port every door that starts a process reaches the
+            // board through (seam-contract D31 point 8): the queue, the MCP
+            // server's planner and the commands, through `AppState`. Built from
+            // the `runner` value above and nothing else, because the board's
+            // provider must be the runner's — a board built for another one
+            // would hand the planner the wrong catalogue, silently.
+            // It serves the solo runner, the one machine a solo board runs on,
+            // and records it on every run it opens (D31 point 9). Its leases
+            // never expire: the board and its one runner are this process
+            // (ADR-0031 point 5). Built before the reconcile below, which
+            // settles this runner's held leases through it.
+            let board_port: Arc<dyn BoardPort> = Arc::new(InProcessBoard::new(
+                context.clone(),
+                paths.clone(),
+                provider.clone(),
+                solo.runner_id.clone(),
+                LeaseTerm::Never,
+            ));
+
+            // `in_flight` is built here and handed to the queue, the relay
+            // below and `AppState`, which is what lets a manual "Run now", a
+            // "Plan now" and the queue's own claim refuse to double-spawn a
+            // process for the same task. It used to be an `attach_queue`
+            // back-reference from a shell-side map onto the queue's private
+            // one; one registry every door reads needs no wiring between
+            // them, and is reachable from `rimaia-core` — which is what
+            // ADR-0021's known gap was waiting on.
+            let in_flight = InFlight::new();
+
             // The solo command host (D32 point 3): board commands reach
             // `api::dispatch_with_machine` through it, as the solo user owning
             // the solo team through the window, and the board forwarder below
             // follows its channels. Its tail relay follows the live channel
-            // from here, before anything can publish to it (task 048).
+            // from here, before anything can publish to it (task 048). Run
+            // now, Retry now and Cancel reach this machine's runner through
+            // its relay, the shell's own starter (task 052).
             let host = BoardHost {
                 context: context.clone(),
                 provider: provider.clone(),
@@ -291,6 +323,13 @@ pub fn run() {
                 rate_limits: Arc::new(RateLimiter::new(context.clock.clone())),
                 tails: TailRelay::new(SOLO_TAIL_RELAY_CAPACITY),
                 streams: StreamControl::new(),
+                relay: Arc::new(ShellRelay {
+                    board: Arc::clone(&board_port),
+                    machine: machine.clone(),
+                    paths: paths.clone(),
+                    config: runner.clone(),
+                    in_flight: in_flight.clone(),
+                }),
             };
             tauri::async_runtime::spawn(host.tails.follow(context.subscribe_tail()));
             let caller = Caller::solo(&solo);
@@ -311,24 +350,6 @@ pub fn run() {
                 machine.local.subscribe(),
             ));
 
-            // The one board port every door that starts a process reaches the
-            // board through (seam-contract D31 point 8): the queue, the MCP
-            // server's planner and the commands, through `AppState`. Built from
-            // the `runner` value above and nothing else, because the board's
-            // provider must be the runner's — a board built for another one
-            // would hand the planner the wrong catalogue, silently.
-            // It serves the solo runner, the one machine a solo board runs on,
-            // and records it on every run it opens (D31 point 9). Its leases
-            // never expire: the board and its one runner are this process
-            // (ADR-0031 point 5). Built before the reconcile below, which
-            // settles this runner's held leases through it.
-            let board_port: Arc<dyn BoardPort> = Arc::new(InProcessBoard::new(
-                context.clone(),
-                paths.clone(),
-                provider.clone(),
-                solo.runner_id.clone(),
-                LeaseTerm::Never,
-            ));
             // ADR-0031 point 5: this runner reconciles the leases it held, and
             // nothing else, before the queue below ever reads the board. A task
             // still `running` is not a live condition (nothing was running when
@@ -415,16 +436,6 @@ pub fn run() {
             // for the reason every other background task in this hook uses
             // it: Tauri's async runtime *is* Tokio, so this rides the runtime
             // already here instead of starting a second.
-            //
-            // `in_flight` is built here and handed to both the queue and
-            // `AppState`, which is what lets a manual "Run now", a "Plan now"
-            // and the queue's own claim refuse to double-spawn a process for
-            // the same task. It used to be an `attach_queue` back-reference
-            // from a shell-side map onto the queue's private one; one registry
-            // both doors read needs no wiring between them, and is reachable
-            // from `rimaia-core` — which is what ADR-0021's known gap was
-            // waiting on.
-            let in_flight = InFlight::new();
 
             // The loop is the runner crate's (task 042). It claims through the
             // port, wakes on the board's channel, and reads the board only

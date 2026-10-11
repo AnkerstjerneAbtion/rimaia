@@ -14,6 +14,7 @@ use std::sync::Arc;
 
 use rimaia_core::api::tail::SERVER_TAIL_RELAY_CAPACITY;
 use rimaia_core::api::{BoardHost, StreamControl, TailRelay};
+use rimaia_core::board::RelayedRequests;
 use rimaia_core::db::{self, MutationSource};
 use rimaia_core::identity::authenticate::SessionsAndTokens;
 use rimaia_core::identity::rate_limit::RateLimiter;
@@ -87,6 +88,9 @@ async fn serve() -> Result<(), String> {
     // publish to it (task 048).
     let tails = TailRelay::new(SERVER_TAIL_RELAY_CAPACITY);
     tokio::spawn(tails.follow(context.subscribe_tail()));
+    // The Run nows and Cancels held for runners (task 052): one value, which
+    // the board commands record into and the runner routes collect from.
+    let relayed = Arc::new(RelayedRequests::new());
     let host = BoardHost {
         context,
         provider: ProviderProfile::of(&ClaudeProvider),
@@ -94,8 +98,11 @@ async fn serve() -> Result<(), String> {
         rate_limits,
         tails,
         streams: StreamControl::new(),
+        relay: relayed.clone(),
     };
-    let state = ServerState::new(host, Arc::new(auth), Arc::new(github), public_url);
+    // Leases granted over HTTP expire unless renewed: `ServerState::new`'s
+    // `LeaseTerm::Renewable(LEASE_LIFETIME)`.
+    let state = ServerState::new(host, relayed, Arc::new(auth), Arc::new(github), public_url);
 
     let listener = tokio::net::TcpListener::bind(listen)
         .await

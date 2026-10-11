@@ -18,6 +18,7 @@ use std::sync::Arc;
 use serde_json::Value;
 use tracing::Instrument;
 
+use crate::board::RunnerRelay;
 use crate::context::ServiceContext;
 use crate::error::{Error, Result};
 use crate::identity::rate_limit::RateLimiter;
@@ -71,6 +72,11 @@ pub struct BoardHost {
     pub tails: TailRelay,
     /// Tells a user's open streams to resolve their caller again (task 048).
     pub streams: StreamControl,
+    /// How Run now, Retry now and Cancel reach a runner (task 052): the
+    /// shell's own starter in solo, and on a server the requests it holds for
+    /// each runner's next claim and heartbeat, the same `Arc` as
+    /// `ServerState.relayed`.
+    pub relay: Arc<dyn RunnerRelay>,
 }
 
 /// Everything a board handler may read.

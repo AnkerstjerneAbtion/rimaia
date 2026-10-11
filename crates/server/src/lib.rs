@@ -16,7 +16,9 @@
 //! same callers (task 048), and [`serve`] is the one way any of it is
 //! served. The same router serves the built web bundle at `/` when it is given
 //! one ([`web`], task 050), and allows cross-origin calls from the Tauri
-//! origins to `/api/v1` ([`cors`]).
+//! origins to `/api/v1` ([`cors`]). Paired runners reach the board through
+//! the runner protocol, `/api/v1/runner/<method>` ([`runner_api`], task 052),
+//! with their `rmr_` token and nothing else.
 
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -31,6 +33,7 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{any, get, post};
 use axum::{Json, Router};
 use rimaia_core::api::{self, protocol, Authenticate, BoardHost, Caller, Effect, COMMANDS};
+use rimaia_core::board::{LeaseTerm, RelayedRequests, LEASE_LIFETIME};
 use rimaia_core::identity::pending::{DesktopCodes, PendingSignIns};
 use rimaia_core::identity::provider::IdentityProvider;
 use rimaia_core::identity::rate_limit::RateLimiter;
@@ -44,9 +47,10 @@ pub mod config;
 pub mod cors;
 mod events;
 pub mod github;
+pub mod runner_api;
 pub mod web;
 
-pub use caller::TEAM_HEADER;
+pub use caller::{RunnerCaller, TEAM_HEADER};
 
 /// What every request reaches: the board host `dispatch` runs against,
 /// whatever decides who a credential is, and what signing in needs.
@@ -65,16 +69,32 @@ pub struct ServerState {
     pub rate_limits: Arc<RateLimiter>,
     /// The origin people reach the server at, with no trailing slash.
     pub public_url: String,
+    /// Whether the leases the runner routes grant expire (task 052):
+    /// `LeaseTerm::Renewable(LEASE_LIFETIME)`, so a claim over HTTP writes
+    /// `expires_at` and a heartbeat renews it. Nothing acts on an expired
+    /// lease until task 053's sweep.
+    pub lease_term: LeaseTerm,
+    /// The Run nows and Cancels the server holds for its runners: the same
+    /// `Arc` as `host.relay`, so a board command records what a runner route
+    /// collects (task 052).
+    pub relayed: Arc<RelayedRequests>,
 }
 
 impl ServerState {
     /// A state over `host`, sharing its limiter and reading its clock.
+    /// `relayed` must be the relay `host` was built with: one value, built
+    /// once, that the board commands write and the runner routes read.
     pub fn new(
         host: BoardHost,
+        relayed: Arc<RelayedRequests>,
         auth: Arc<dyn Authenticate>,
         identity: Arc<dyn IdentityProvider>,
         public_url: impl Into<String>,
     ) -> Self {
+        debug_assert!(
+            std::ptr::addr_eq(Arc::as_ptr(&host.relay), Arc::as_ptr(&relayed)),
+            "a server's board host relays through the requests its runner routes collect",
+        );
         let clock = host.context.clock.clone();
         Self {
             rate_limits: host.rate_limits.clone(),
@@ -84,6 +104,8 @@ impl ServerState {
             auth,
             identity,
             public_url: public_url.into(),
+            lease_term: LeaseTerm::Renewable(LEASE_LIFETIME),
+            relayed,
         }
     }
 }
@@ -164,12 +186,13 @@ pub fn router_with(state: ServerState, options: &RouterOptions) -> Router {
             ApiError(Error::invalid("a board command is sent with POST"))
         })
         // Outside the commands' tracing, so a preflight is answered before any
-        // route is looked for. Task 052's `/api/v1/runner/*` is mounted
-        // outside this layer: its callers are not browsers.
+        // route is looked for. The runner protocol below is mounted outside
+        // this layer: its callers are not browsers.
         .layer(cors::layer(options.dev));
     let sign_in = auth::routes()
         .route_layer(TraceLayer::new_for_http().make_span_with(http_span::<axum::body::Body>));
     let api = Router::new()
+        .nest("/api/v1/runner", runner_api::routes())
         .nest("/api/v1", commands)
         // Any other path under `/api/` is a missing command, not a page.
         .route(

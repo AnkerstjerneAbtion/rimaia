@@ -329,6 +329,13 @@ async fn insert_runner(
     Ok(runner_id)
 }
 
+/// The installation's solo team, user and runner, or `None` on a server's
+/// board: what a solo window's Run now starts on (task 052).
+pub async fn solo_identity(ctx: &crate::ServiceContext) -> Result<Option<SoloIdentity>> {
+    let mut conn = ctx.pool.acquire().await?;
+    read_solo_identity(&mut conn).await
+}
+
 async fn read_solo_identity(conn: &mut SqliteConnection) -> Result<Option<SoloIdentity>> {
     let recorded = sqlx::query_as!(
         SoloIdentity,

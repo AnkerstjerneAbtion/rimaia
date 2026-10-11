@@ -1076,6 +1076,7 @@ async fn account_commands_refuse_the_solo_shell() {
         rate_limits: Arc::new(RateLimiter::new(Arc::new(harness.clock.clone()))),
         tails: rimaia_core::api::TailRelay::new(rimaia_core::api::tail::SOLO_TAIL_RELAY_CAPACITY),
         streams: rimaia_core::api::StreamControl::new(),
+        relay: Arc::new(rimaia_core::board::RelayedRequests::new()),
     };
     let caller = Caller::solo(&harness.solo);
 
@@ -1107,6 +1108,7 @@ async fn only_a_desktop_pairs_its_own_runner() {
         rate_limits: Arc::new(RateLimiter::new(Arc::new(board.clock.clone()))),
         tails: rimaia_core::api::TailRelay::new(rimaia_core::api::tail::SOLO_TAIL_RELAY_CAPACITY),
         streams: rimaia_core::api::StreamControl::new(),
+        relay: Arc::new(rimaia_core::board::RelayedRequests::new()),
     };
 
     let refused = api::dispatch(
@@ -1134,6 +1136,7 @@ async fn minting_is_rate_limited_per_user() {
         rate_limits: Arc::new(RateLimiter::new(Arc::new(board.clock.clone()))),
         tails: rimaia_core::api::TailRelay::new(rimaia_core::api::tail::SOLO_TAIL_RELAY_CAPACITY),
         streams: rimaia_core::api::StreamControl::new(),
+        relay: Arc::new(rimaia_core::board::RelayedRequests::new()),
     };
     let mut callers = Vec::new();
     for user in [&ada, &grace] {
@@ -1189,6 +1192,7 @@ fn host_of(board: &Board) -> BoardHost {
         rate_limits: Arc::new(RateLimiter::new(Arc::new(board.clock.clone()))),
         tails: rimaia_core::api::TailRelay::new(rimaia_core::api::tail::SOLO_TAIL_RELAY_CAPACITY),
         streams: rimaia_core::api::StreamControl::new(),
+        relay: Arc::new(rimaia_core::board::RelayedRequests::new()),
     }
 }
 

@@ -143,8 +143,10 @@ async fn serving_a_door(token: &str, door: Door) -> (TwoTeams, TestServer) {
         door,
         ..testing_api::owner(&teams.team_a, testing_api::desktop("unused"))
     };
+    let (host, relayed) = testing_api::relayed_host(&teams).await;
     let server = TestServer::spawn(state_over(
-        testing_api::host(&teams).await,
+        host,
+        relayed,
         FixedCaller::two_teams(&teams).with(token, caller),
     ))
     .await;

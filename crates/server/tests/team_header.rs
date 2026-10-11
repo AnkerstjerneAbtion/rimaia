@@ -38,8 +38,8 @@ impl Fixture {
             pool: teams.a.pool.clone(),
             clock: Arc::new(teams.clock.clone()),
         };
-        let host = testing_api::host(&teams).await;
-        let server = TestServer::spawn(state_over(host, auth)).await;
+        let (host, relayed) = testing_api::relayed_host(&teams).await;
+        let server = TestServer::spawn(state_over(host, relayed, auth)).await;
         Self {
             server,
             teams,

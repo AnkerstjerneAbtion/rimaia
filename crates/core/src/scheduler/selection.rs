@@ -64,7 +64,7 @@ use crate::board::{FreeCapacity, LeasePurpose};
 use crate::consent::ceiling::StrategyCeiling;
 use crate::consent::pieces::Composes;
 use crate::consent::{self, Composition};
-use crate::context::ServiceContext;
+use crate::context::{ServiceContext, TeamScope};
 use crate::db::{BoardColumn, RunState};
 use crate::error::Result;
 use crate::events::RunnerId;
@@ -257,15 +257,25 @@ impl RunnerView {
 /// A task [`lease::eligible`] refuses `runner` (pinned to another runner, or
 /// set to another provider's model) is left out before positions are numbered, so the plan a card shows and the
 /// task `claim(Next)` takes agree. The claim transaction asks again.
+///
+/// It plans over every team in `ctx`'s scope: a solo context reaches one, and
+/// a runner over HTTP reaches every team its owner belongs to (task 052), so
+/// one claim can take work from any of them. Each team's `ready` column is
+/// listed on its own, as a board read is, and the lists are merged in that
+/// read's own order: by repository, and within a repository in board order.
+/// A repository belongs to one team, so the merge is that order exactly.
 pub async fn plan(ctx: &ServiceContext, runner: &RunnerView) -> Result<Vec<QueueEntry>> {
-    let ready = tasks::list_tasks(
-        ctx,
-        TaskFilter {
+    let mut ready = Vec::new();
+    for team_id in ctx.scope.teams() {
+        let team = ctx.with_scope(TeamScope::one(team_id.clone()));
+        let filter = TaskFilter {
             column: Some(BoardColumn::Ready),
             ..TaskFilter::default()
-        },
-    )
-    .await?;
+        };
+        ready.extend(tasks::list_tasks(&team, filter).await?);
+    }
+    // Stable, so each repository keeps the board order its list came in.
+    ready.sort_by(|a, b| a.task.repository_id.cmp(&b.task.repository_id));
 
     // One instant for the whole pass, not one per entry: two tasks whose
     // deadlines straddle the microsecond between two `now()` calls would
@@ -626,6 +636,47 @@ mod tests {
 
     /// The instant every test below judges a deadline against.
     const NOW: &str = "2026-08-20T02:00:00Z";
+
+    #[tokio::test]
+    async fn a_plan_over_two_teams_lists_each_teams_ready_tasks_in_board_order() {
+        // A runner over HTTP reaches every team its owner belongs to (task
+        // 052), and its `Next` plans across them.
+        let teams = crate::testing::teams::TwoTeams::new().await;
+        let view = RunnerView::new(
+            "a-plan-view",
+            ProviderId::ClaudeCode,
+            [
+                teams.team_a.repository.id.clone(),
+                teams.team_b.repository.id.clone(),
+            ],
+        );
+
+        let planned: Vec<String> = plan(&teams.both, &view)
+            .await
+            .expect("a plan over both teams")
+            .into_iter()
+            .map(|entry| entry.task_id)
+            .collect();
+
+        let mut expected = vec![
+            (
+                teams.team_a.repository.id.clone(),
+                teams.team_a.ready.clone(),
+            ),
+            (
+                teams.team_b.repository.id.clone(),
+                teams.team_b.ready.clone(),
+            ),
+        ];
+        expected.sort();
+        assert_eq!(
+            planned,
+            expected
+                .into_iter()
+                .map(|(_, task)| task)
+                .collect::<Vec<_>>()
+        );
+    }
 
     fn now() -> DateTime<Utc> {
         at(NOW)

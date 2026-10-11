@@ -14,6 +14,7 @@ use crate::runner::events::RunTail;
 use crate::runner::provider::ProviderProfile;
 use crate::tasks::strategy::StrategyPlan;
 
+use super::cancel::CancelRequests;
 use super::lease::LeaseTerm;
 use super::port::{BoardFuture, BoardPort};
 use super::service::{self, Runner};
@@ -43,6 +44,9 @@ pub struct InProcessBoard {
     /// D31 point 9). The contract harness passes a renewable term to prove
     /// the heartbeat.
     term: LeaseTerm,
+    /// Always empty: a solo Cancel reaches `InFlight::cancel` directly, so
+    /// nothing ever asks the heartbeat to carry one (D31 point 4).
+    cancels: CancelRequests,
 }
 
 impl InProcessBoard {
@@ -62,6 +66,7 @@ impl InProcessBoard {
             provider,
             runner_id,
             term,
+            cancels: CancelRequests::new(),
         }
     }
 
@@ -84,7 +89,12 @@ impl BoardPort for InProcessBoard {
     }
 
     fn heartbeat<'a>(&'a self, held: &'a [LeaseRef]) -> BoardFuture<'a, Heartbeat> {
-        Box::pin(service::heartbeat(&self.ctx, self.runner(), held))
+        Box::pin(service::heartbeat(
+            &self.ctx,
+            self.runner(),
+            held,
+            &self.cancels,
+        ))
     }
 
     fn run_context<'a>(&'a self, lease: &'a LeaseRef) -> BoardFuture<'a, RunContext> {

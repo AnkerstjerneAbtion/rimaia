@@ -93,8 +93,10 @@ impl TeamScope {
     /// The one team in scope, or `Invalid` when there are several.
     ///
     /// For a call that names no entity and acts on one team (ADR-0035 point
-    /// 2): listing a board, registering a repository, a team setting, the
-    /// queue's selection. Anything that names an entity takes the entity's
+    /// 2): listing a board, registering a repository, a team setting. The
+    /// queue's selection lists each team's board this way and merges them
+    /// (task 052), because a runner's claim reaches every team its owner is
+    /// in. Anything that names an entity takes the entity's
     /// team instead, because a scope of several teams cannot say which.
     ///
     /// The refusal lists the reachable teams by id, in the scope's order. Ids

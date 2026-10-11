@@ -99,6 +99,7 @@ use crate::runner::provider::ProviderId;
 use crate::strategy::catalogue::{runs_on, Catalogue};
 use crate::strategy::StrategyOrigin;
 
+use super::cancel::CancelRequests;
 use super::types::{Heartbeat, LeasePurpose, LeaseRef, NextStep, RunContext};
 
 /// How long a renewable lease lives without a heartbeat (ADR-0031 point 3).
@@ -106,6 +107,19 @@ use super::types::{Heartbeat, LeasePurpose, LeaseRef, NextStep, RunContext};
 /// Defined here and nowhere else: task 052's server and task 053's expiry use
 /// `LeaseTerm::Renewable(LEASE_LIFETIME)`.
 pub const LEASE_LIFETIME: Duration = Duration::from_secs(3 * 60);
+
+/// The longest a `ClaimTarget::Next` may wait for work (ADR-0031 point 2).
+///
+/// `board::service::claim` clamps every `wait` to it, so both adapters clamp
+/// and the contract suite compares like with like. Task 053 gives the HTTP
+/// adapter its client timeout from it.
+pub const CLAIM_WAIT_MAX: Duration = Duration::from_secs(30);
+
+/// How often a runner that holds anything heartbeats (ADR-0031 point 3).
+///
+/// `board::runners::mark_seen` writes `runners.last_seen_at` at most once per
+/// interval; task 053's heartbeat loop runs at it.
+pub const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(30);
 
 /// Whether a board's leases expire, which is a property of the board and not
 /// of a lease: `InProcessBoard::new` takes it, and the solo host passes
@@ -574,29 +588,42 @@ pub(crate) struct Granted {
     pub purpose: LeasePurpose,
 }
 
-/// The claim transaction: eligibility, the edges, the generation and the
-/// lease, in one commit, then one change event. `None` is a claim lost to
-/// another starter, or a task that is gone; nothing was written.
-pub(crate) async fn claim(
-    ctx: &ServiceContext,
-    request: ClaimRequest<'_>,
-) -> Result<Option<Granted>> {
+/// What a claim's own checks say of one task, before it writes anything.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Admission {
+    /// The claim may take its edges, and leases the task for `purpose`.
+    Admitted { purpose: LeasePurpose },
+    /// A rule refuses this runner the task: the sentence a named claim
+    /// answers with (D31 point 4).
+    Refused(String),
+    /// Another starter holds the task, or its run state has no edge for this
+    /// claim: a lost claim, never an error.
+    Lost,
+}
+
+/// The claim's checks, in the claim's order, and nothing it writes: whether
+/// `task` may be leased to the request's runner, for what purpose.
+///
+/// 1. [`eligible`], for what the claim would compose;
+/// 2. no lease row on the task already;
+/// 3. an edge from the task's run state for the claim's [`Edges`].
+///
+/// The claim transaction asks it before taking the edges, and task 052's Run
+/// now asks it read-only before relaying a request ([`admits`]), so a press
+/// the claim would refuse is refused in the claim's own words and never
+/// answered `Ok` to do nothing.
+async fn admit(
+    conn: &mut SqliteConnection,
+    task: &crate::db::Task,
+    request: &ClaimRequest<'_>,
+) -> Result<Admission> {
     let ClaimRequest {
         task_id,
         candidate,
-        term,
         edges,
-        door,
         mode,
-    } = request;
-    let clock = ctx.clock.as_ref();
-
-    let mut tx = ctx.begin_immediate().await?;
-    let task = match fetch_task_row(&mut tx, task_id).await {
-        Ok(task) => task,
-        Err(error) if error.code() == ErrorCode::NotFound => return Ok(None),
-        Err(error) => return Err(error),
-    };
+        ..
+    } = *request;
 
     let composes = match edges {
         Edges::Plan => Composes::Phase(LeasePurpose::Strategy),
@@ -606,31 +633,95 @@ pub(crate) async fn claim(
         // ADR-0016's inline planner, which ADR-0031 point 1 leases as
         // `strategy`; `start_run` moves it to the implementation's kind, after
         // the implementation was composed under this claim.
-        Edges::Fresh if needs_planning(&task, mode) => Composes::PlannerThenImplementation,
+        Edges::Fresh if needs_planning(task, mode) => Composes::PlannerThenImplementation,
         Edges::Fresh => Composes::Phase(LeasePurpose::Implementation),
     };
-    let purpose = composes.purpose();
 
-    let runner_id = candidate.runner_id;
-    if let Some(refusal) = eligible(&mut tx, task_id, &candidate, composes)
+    if let Some(refusal) = eligible(conn, task_id, &candidate, composes)
         .await?
         .refusal()
     {
-        return match door {
-            Door::Named => Err(Error::invalid(refusal)),
-            Door::Next => Ok(None),
-        };
+        return Ok(Admission::Refused(refusal));
     }
 
     let leased = sqlx::query_scalar!(
         "SELECT generation FROM runner_leases WHERE task_id = ?1",
         task_id
     )
-    .fetch_optional(&mut *tx)
+    .fetch_optional(&mut *conn)
     .await?;
     if leased.is_some() {
-        return Ok(None);
+        return Ok(Admission::Lost);
     }
+
+    let has_edge = matches!(
+        (edges, task.run_state),
+        (
+            Edges::Fresh,
+            RunState::Idle | RunState::Failed | RunState::Cancelled | RunState::Queued
+        ) | (Edges::Resume { .. }, RunState::WaitingRetry)
+            | (Edges::Plan, _)
+    );
+    if !has_edge {
+        return Ok(Admission::Lost);
+    }
+
+    Ok(Admission::Admitted {
+        purpose: composes.purpose(),
+    })
+}
+
+/// [`admit`], read-only, outside any claim: what a claim of `request` made now
+/// would answer, without taking it. A task the context cannot see is
+/// [`Admission::Lost`], as the claim reads it.
+pub(crate) async fn admits(ctx: &ServiceContext, request: &ClaimRequest<'_>) -> Result<Admission> {
+    let mut tx = ctx.begin().await?;
+    let task = match fetch_task_row(&mut tx, request.task_id).await {
+        Ok(task) => task,
+        Err(error) if error.code() == ErrorCode::NotFound => return Ok(Admission::Lost),
+        Err(error) => return Err(error),
+    };
+    let admission = admit(&mut tx, &task, request).await?;
+    // Nothing was written; ending the read transaction is all a commit does.
+    tx.commit().await?;
+    Ok(admission)
+}
+
+/// The claim transaction: eligibility, the edges, the generation and the
+/// lease, in one commit, then one change event. `None` is a claim lost to
+/// another starter, or a task that is gone; nothing was written.
+pub(crate) async fn claim(
+    ctx: &ServiceContext,
+    request: ClaimRequest<'_>,
+) -> Result<Option<Granted>> {
+    let clock = ctx.clock.as_ref();
+    let ClaimRequest {
+        task_id,
+        candidate,
+        term,
+        edges,
+        door,
+        ..
+    } = request;
+
+    let mut tx = ctx.begin_immediate().await?;
+    let task = match fetch_task_row(&mut tx, task_id).await {
+        Ok(task) => task,
+        Err(error) if error.code() == ErrorCode::NotFound => return Ok(None),
+        Err(error) => return Err(error),
+    };
+
+    let runner_id = candidate.runner_id;
+    let purpose = match admit(&mut tx, &task, &request).await? {
+        Admission::Admitted { purpose } => purpose,
+        Admission::Refused(refusal) => {
+            return match door {
+                Door::Named => Err(Error::invalid(refusal)),
+                Door::Next => Ok(None),
+            };
+        }
+        Admission::Lost => return Ok(None),
+    };
 
     let moved = match (edges, task.run_state) {
         (Edges::Fresh, from @ (RunState::Idle | RunState::Failed | RunState::Cancelled)) => {
@@ -744,15 +835,23 @@ pub(crate) async fn current(tx: &mut ScopedTx, lease: &LeaseRef, runner_id: &str
 /// Renews every lease in `held` that is current for `runner_id`, in one
 /// transaction, and answers the others in `fenced` (D31 point 4): one stale
 /// lease does not cost the rest their renewal. A lease that never expires
-/// stays that way. `cancel` is always empty in process.
+/// stays that way.
+///
+/// `cancel` lists each renewed lease that someone asked to stop (task 052):
+/// listed on every heartbeat until the lease ends, so a lost reply costs one
+/// more heartbeat and not the cancel. An entry whose lease has ended is
+/// dropped here. In process the registry is always empty, because a solo
+/// Cancel reaches `InFlight::cancel` directly.
 pub(crate) async fn heartbeat(
     ctx: &ServiceContext,
     runner_id: &str,
     term: LeaseTerm,
     held: &[LeaseRef],
+    cancels: &CancelRequests,
 ) -> Result<Heartbeat> {
     let expires_at = term.expires_at(ctx.clock.now());
     let mut fenced = Vec::new();
+    let mut cancel = Vec::new();
 
     let mut tx = ctx.begin_immediate().await?;
     for lease in held {
@@ -769,6 +868,9 @@ pub(crate) async fn heartbeat(
                     .execute(&mut *tx)
                     .await?;
                 }
+                if cancels.is_requested(&lease.task_id, lease.generation) {
+                    cancel.push(lease.task_id.clone());
+                }
             }
             Err(error) if matches!(error.code(), ErrorCode::Conflict | ErrorCode::NotFound) => {
                 fenced.push(lease.clone());
@@ -776,12 +878,22 @@ pub(crate) async fn heartbeat(
             Err(error) => return Err(error),
         }
     }
+    for (task_id, generation) in cancels.pending() {
+        let live = sqlx::query_scalar!(
+            r#"SELECT EXISTS (SELECT 1 FROM runner_leases WHERE task_id = ?1 AND generation = ?2)
+               AS "live!: bool""#,
+            task_id,
+            generation,
+        )
+        .fetch_one(&mut *tx)
+        .await?;
+        if !live {
+            cancels.forget(&task_id, generation);
+        }
+    }
     tx.commit().await?;
 
-    Ok(Heartbeat {
-        fenced,
-        cancel: Vec::new(),
-    })
+    Ok(Heartbeat { fenced, cancel })
 }
 
 // ---------------------------------------------------------------------------

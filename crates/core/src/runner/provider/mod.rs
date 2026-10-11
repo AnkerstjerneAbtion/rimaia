@@ -203,6 +203,40 @@ impl std::fmt::Display for ProviderId {
     }
 }
 
+/// On the wire as [`as_str`](ProviderId::as_str)'s spelling: a runner names
+/// its provider in the bodies of `preview`, `claim` and `run_context` (task
+/// 052, seam-contract D31 point 10).
+impl serde::Serialize for ProviderId {
+    fn serialize<S: serde::Serializer>(
+        &self,
+        serializer: S,
+    ) -> std::result::Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for ProviderId {
+    fn deserialize<D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> std::result::Result<Self, D::Error> {
+        let value = String::deserialize(deserializer)?;
+        Self::parse(&value).map_err(serde::de::Error::custom)
+    }
+}
+
+impl ProviderProfile {
+    /// The profile of the provider `id` names: what the board resolves a
+    /// claim's catalogue from when it holds the identity a runner sent rather
+    /// than a provider (task 052).
+    pub fn for_id(id: ProviderId) -> Self {
+        match id {
+            ProviderId::ClaudeCode => Self::of(&ClaudeProvider),
+            #[cfg(feature = "testing")]
+            ProviderId::Ledger => Self::of(&crate::testing::provider::Ledger),
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // The board's view of a provider (seam-contract D32 point 2)
 // ---------------------------------------------------------------------------

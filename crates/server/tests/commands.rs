@@ -193,11 +193,9 @@ async fn both_transports_answer_every_case_identically() {
         };
 
         let (over_http, _over_http_dir) = testing_api::twin(&teams).await;
-        let server = TestServer::spawn(state_over(
-            testing_api::host_over(&teams, &over_http).await,
-            FixedCaller::two_teams(&teams),
-        ))
-        .await;
+        let (host, relayed) = testing_api::relayed_host_over(&teams, &over_http).await;
+        let server =
+            TestServer::spawn(state_over(host, relayed, FixedCaller::two_teams(&teams))).await;
         let routed = server.command(case.name, TEAM_A_TOKEN, &args).await;
 
         // Two refusals compare equal too, so a case that quietly stopped
