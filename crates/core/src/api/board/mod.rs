@@ -20,6 +20,7 @@
 
 use serde::Deserialize;
 
+pub mod account;
 pub mod analytics;
 pub mod consent;
 pub mod repositories;

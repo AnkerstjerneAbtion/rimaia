@@ -13,10 +13,13 @@
 //!
 //! # Callers
 //!
-//! [`FixedCaller`] is the only credential that authenticates before task 047,
-//! and it compiles only under `testing`. It maps any token to any [`Caller`],
-//! any door included, which is how the runner-door and browser-door refusals
-//! are written and how 047's tests stand in for a session before theirs exists.
+//! [`FixedCaller`] compiles only under `testing`. It maps any token to any
+//! [`Caller`], any door included, which is how the runner-door and
+//! browser-door refusals are written. The contract suite runs every case as
+//! the owner's fixture desktop token ([`as_desktop`]), so the account
+//! commands' `current` names a real row; the real sessions and tokens are
+//! task 047's `identity::authenticate::SessionsAndTokens`, which its own tests
+//! drive.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Arc;
@@ -30,6 +33,8 @@ use crate::api::{Authenticate, BoardHost, BoxFuture, Caller, Credential, Door, T
 use crate::context::{ServiceContext, TeamScope};
 use crate::db::MutationSource;
 use crate::error::{Error, Result};
+use crate::identity::rate_limit::RateLimiter;
+use crate::identity::secret::{self, TokenKind};
 use crate::identity::Role;
 use crate::runner::provider::ProviderProfile;
 use crate::testing::teams::{TeamBoard, TwoTeams};
@@ -55,11 +60,13 @@ impl FixedCaller {
     }
 
     /// [`TEAM_A_TOKEN`] and [`TEAM_B_TOKEN`], each its team's owner through
-    /// [`Door::Desktop`], the door a bearer may drive the board through.
+    /// [`Door::Desktop`], the door a bearer may drive the board through, over
+    /// the owner's fixture desktop token (task 047), so an account command's
+    /// `current` names a real row.
     pub fn two_teams(teams: &TwoTeams) -> Self {
         Self::new()
-            .with(TEAM_A_TOKEN, owner(&teams.team_a, desktop("team-a-token")))
-            .with(TEAM_B_TOKEN, owner(&teams.team_b, desktop("team-b-token")))
+            .with(TEAM_A_TOKEN, as_desktop(&teams.team_a))
+            .with(TEAM_B_TOKEN, as_desktop(&teams.team_b))
     }
 
     /// The same table, with `token` answering as `caller`.
@@ -96,7 +103,13 @@ pub fn owner(team: &TeamBoard, door: Door) -> Caller {
     }
 }
 
-/// A connected desktop's door, over a token row id that names nothing.
+/// `team`'s owner through their fixture desktop token: the caller both
+/// invokers run every case as.
+pub fn as_desktop(team: &TeamBoard) -> Caller {
+    owner(team, desktop(&team.credentials.desktop_token_id))
+}
+
+/// A connected desktop's door, over the token row id `token_id`.
 pub fn desktop(token_id: &str) -> Door {
     Door::Desktop {
         token_id: token_id.to_string(),
@@ -110,6 +123,7 @@ pub fn host_over(teams: &TwoTeams, ctx: &ServiceContext) -> BoardHost {
         context: ctx.clone(),
         provider: ProviderProfile::of(teams.runner.provider.as_ref()),
         paths: teams.paths.clone(),
+        rate_limits: Arc::new(RateLimiter::new(Arc::new(teams.clock.clone()))),
     }
 }
 
@@ -631,6 +645,55 @@ pub static BOARD_CASES: &[BoardCase] = &[
         own: |_| json!({ "value": 25.0 }),
         foreign: Foreign::EntityLess,
     },
+    // account (task 047): "B's ids" are the other user's.
+    BoardCase {
+        name: "get_account",
+        effect: Effect::Read,
+        own: |_| json!({}),
+        foreign: Foreign::EntityLess,
+    },
+    BoardCase {
+        name: "list_sessions",
+        effect: Effect::Read,
+        own: |_| json!({}),
+        foreign: Foreign::EntityLess,
+    },
+    BoardCase {
+        name: "revoke_session",
+        effect: Effect::Write,
+        own: |t| json!({ "id": t.team_a.credentials.session_id }),
+        foreign: Foreign::Ids(|t| json!({ "id": t.team_b.credentials.session_id })),
+    },
+    BoardCase {
+        name: "list_api_tokens",
+        effect: Effect::Read,
+        own: |_| json!({}),
+        foreign: Foreign::EntityLess,
+    },
+    BoardCase {
+        name: "create_personal_access_token",
+        effect: Effect::Write,
+        own: |t| json!({ "label": "Claude Code", "teamIds": [t.team_a.team_id] }),
+        foreign: Foreign::Ids(|t| json!({ "label": "Claude Code", "teamIds": [t.team_b.team_id] })),
+    },
+    BoardCase {
+        name: "revoke_api_token",
+        effect: Effect::Write,
+        own: |t| json!({ "id": t.team_a.credentials.personal_token_id }),
+        foreign: Foreign::Ids(|t| json!({ "id": t.team_b.credentials.personal_token_id })),
+    },
+    BoardCase {
+        name: "create_pairing_code",
+        effect: Effect::Write,
+        own: |_| json!({}),
+        foreign: Foreign::EntityLess,
+    },
+    BoardCase {
+        name: "pair_own_runner",
+        effect: Effect::Write,
+        own: |_| json!({ "label": "laptop", "provider": "claude-code" }),
+        foreign: Foreign::EntityLess,
+    },
 ];
 
 // ---------------------------------------------------------------------------
@@ -733,6 +796,45 @@ pub fn normalize_minted(answer: &Value, known: &BTreeSet<String>) -> Value {
     serde_json::from_str(&text).expect("ids normalize inside strings")
 }
 
+/// The three rows that answer a secret minted by the call, and where the
+/// secret sits in the answer: two transports can never agree on one.
+const MINTED_SECRETS: [(&str, &str); 3] = [
+    ("create_personal_access_token", "token"),
+    ("pair_own_runner", "token"),
+    ("create_pairing_code", "code"),
+];
+
+/// `answer` with the secret `case` minted replaced by `<minted secret>`, after
+/// checking it has its shape: an `rmp_` or `rmr_` token, or a pairing code.
+/// Any other case's answer is returned unchanged, and so is a refusal, which
+/// carries no secret. Checking first means normalizing cannot hide a missing
+/// secret (task 047 Scope 12).
+pub fn normalize_minted_secret(case: &str, answer: &Value) -> std::result::Result<Value, String> {
+    let Some((_, field)) = MINTED_SECRETS.iter().find(|(name, _)| *name == case) else {
+        return Ok(answer.clone());
+    };
+    if answer.get("code").is_some() && answer.get("message").is_some() {
+        return Ok(answer.clone());
+    }
+    let minted = answer
+        .get(*field)
+        .and_then(Value::as_str)
+        .ok_or_else(|| format!("{case}: the answer has no `{field}`: {answer}"))?;
+    let shaped = match case {
+        "create_personal_access_token" => secret::is_token_of(TokenKind::Personal, minted),
+        "pair_own_runner" => secret::is_token_of(TokenKind::Runner, minted),
+        _ => secret::is_pairing_code(minted),
+    };
+    if !shaped {
+        return Err(format!(
+            "{case}: `{field}` does not have a minted secret's shape"
+        ));
+    }
+    let mut normalized = answer.clone();
+    normalized[*field] = Value::String("<minted secret>".to_string());
+    Ok(normalized)
+}
+
 /// Every UUID-shaped run of `text`, in order: `8-4-4-4-12` hex digits, the
 /// shape `db::new_id` mints.
 fn id_shaped(text: &str) -> Vec<String> {
@@ -791,7 +893,7 @@ mod tests {
             .authenticate(Credential::Bearer(TEAM_A_TOKEN))
             .await
             .expect("team A's token");
-        assert_eq!(a, owner(&teams.team_a, desktop("team-a-token")));
+        assert_eq!(a, as_desktop(&teams.team_a));
 
         let refused = auth
             .authenticate(Credential::Bearer("rmd_nobody"))

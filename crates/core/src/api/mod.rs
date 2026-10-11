@@ -13,12 +13,14 @@
 
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::Arc;
 
 use serde_json::Value;
 use tracing::Instrument;
 
 use crate::context::ServiceContext;
 use crate::error::{Error, Result};
+use crate::identity::rate_limit::RateLimiter;
 use crate::machine::MachineContext;
 use crate::paths::AppPaths;
 use crate::runner::provider::ProviderProfile;
@@ -54,6 +56,10 @@ pub struct BoardHost {
     /// its data directory, where `runs/` stays empty until task 056 replaces
     /// this field with its transcript hold.
     pub paths: AppPaths,
+    /// The server's one limiter, which its auth routes share, for the three
+    /// commands that mint a credential (task 047). Solo builds one that
+    /// nothing reaches, because the account commands refuse the shell.
+    pub rate_limits: Arc<RateLimiter>,
 }
 
 /// Everything a board handler may read.

@@ -63,6 +63,9 @@ export function refuse(code: ErrorCode, message: string): never {
 
 const unsupported = (reason: string): Answer => () => refuse("internal", reason);
 
+/** What the solo shell answers every account command (task 047). */
+const noAccounts: Answer = () => refuse("invalid", "Accounts exist only on a Rimaia server.");
+
 function findTask(scenario: Scenario, id: unknown): TaskSummary {
   const found = scenario.tasks.find((candidate) => candidate.id === id);
   if (!found) refuse("not_found", `fixture mode has no task \`${String(id)}\``);
@@ -487,6 +490,18 @@ export const ANSWERS: Record<string, Answer> = {
   get_analytics: (_args, s) => s.analytics,
   get_subscription_cost: (_args, s) => s.analytics.subscriptionMonthlyUsd,
   set_subscription_cost: done,
+
+  // --- accounts (task 047) --------------------------------------------
+  // Fixture mode is a solo board, and solo has no accounts: each row answers
+  // with the solo shell's own refusal.
+  get_account: noAccounts,
+  list_sessions: noAccounts,
+  revoke_session: noAccounts,
+  list_api_tokens: noAccounts,
+  create_personal_access_token: noAccounts,
+  revoke_api_token: noAccounts,
+  create_pairing_code: noAccounts,
+  pair_own_runner: noAccounts,
 
   // --- doctor and onboarding -------------------------------------------
   run_doctor: (_args, s) => s.doctor,

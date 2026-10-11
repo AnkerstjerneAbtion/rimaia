@@ -40,7 +40,8 @@ use crate::db::settings::{self, placement, Placement, ALL_KEYS};
 use crate::db::{BoardColumn, MutationSource, Repository, RunKind};
 use crate::doctor;
 use crate::events::{ChangeEvent, RunId, RunnerId, TaskId, TeamId, UserId};
-use crate::identity::create_personal_team;
+use crate::identity::secret::{Secret, TokenKind};
+use crate::identity::{create_personal_team, pairing, sessions, tokens};
 use crate::machine::MachineContext;
 use crate::mcp::{LocalTools, RunHandles};
 use crate::paths::AppPaths;
@@ -93,8 +94,41 @@ pub struct TeamBoard {
     pub subscription_monthly_usd: f64,
     /// Every run's `cost_usd`, in the order the runs were written.
     pub run_costs: [f64; 3],
+    /// One session and one token of each kind, the owner's (task 047).
+    pub credentials: Credentials,
     _source: TempRepo,
     _worktrees: TempDir,
+}
+
+/// The owner's session and tokens, each made through the identity services
+/// the way sign-in, the desktop and pairing make them, never by hand-written
+/// `INSERT`s (task 047 Scope 12).
+pub struct Credentials {
+    pub session_id: String,
+    pub session_secret: Secret,
+    /// The desktop token both test doors present as this team's owner.
+    pub desktop_token_id: String,
+    pub desktop_token: Secret,
+    pub personal_token_id: String,
+    pub personal_token: Secret,
+    /// The token of [`paired_runner_id`](Self::paired_runner_id), which has a
+    /// `runners` row of its own beside [`TeamBoard::runner_id`].
+    pub runner_token_id: String,
+    pub runner_token: Secret,
+    pub paired_runner_id: RunnerId,
+}
+
+impl Credentials {
+    /// Every row id among them.
+    fn ids(&self) -> [String; 5] {
+        [
+            self.session_id.clone(),
+            self.desktop_token_id.clone(),
+            self.personal_token_id.clone(),
+            self.runner_token_id.clone(),
+            self.paired_runner_id.clone(),
+        ]
+    }
 }
 
 impl TeamBoard {
@@ -116,6 +150,7 @@ impl TeamBoard {
             self.fix_run.clone(),
         ];
         ids.extend(self.findings.iter().cloned());
+        ids.extend(self.credentials.ids());
         ids
     }
 
@@ -298,8 +333,9 @@ impl TwoTeams {
     /// nothing of B's.
     ///
     /// `tasks`, `repositories`, `runs`, `task_links`, `task_dependencies`,
-    /// `review_bundles`, `review_findings`, B's `team_settings` and B's
-    /// owner's `user_settings`.
+    /// `review_bundles`, `review_findings`, B's `team_settings`, and B's
+    /// owner's `user_settings`, `sessions`, `api_tokens`, `api_token_teams`
+    /// and `runners`.
     pub async fn snapshot_b(&self) -> String {
         self.snapshot(&self.team_b).await
     }
@@ -308,7 +344,7 @@ impl TwoTeams {
     pub async fn snapshot(&self, team: &TeamBoard) -> String {
         let owner = &team.owner_id;
         let team = &team.team_id;
-        let tables: [(&str, &str, &str); 9] = [
+        let tables: [(&str, &str, &str); 13] = [
             ("tasks", "t", "t.team_id = ?1"),
             ("repositories", "t", "t.team_id = ?1"),
             (
@@ -340,6 +376,14 @@ impl TwoTeams {
             ),
             ("team_settings", "t", "t.team_id = ?1"),
             ("user_settings", "t", "t.user_id = ?2"),
+            ("sessions", "t", "t.user_id = ?2"),
+            ("api_tokens", "t", "t.user_id = ?2"),
+            (
+                "api_token_teams",
+                "t",
+                "t.token_id IN (SELECT id FROM api_tokens WHERE user_id = ?2)",
+            ),
+            ("runners", "t", "t.user_id = ?2"),
         ];
 
         let mut snapshot = String::new();
@@ -638,6 +682,8 @@ async fn arrange(
     .await
     .expect("store the owner's subscription");
 
+    let credentials = owner_credentials(ctx, clock, marking).await;
+
     TeamBoard {
         team_id,
         owner_id,
@@ -656,8 +702,50 @@ async fn arrange(
         settings,
         subscription_monthly_usd,
         run_costs,
+        credentials,
         _source: source,
         _worktrees: worktrees,
+    }
+}
+
+/// The owner's session and one token of each kind, through the services that
+/// make them.
+async fn owner_credentials(
+    ctx: &ServiceContext,
+    clock: &TestClock,
+    marking: Marking,
+) -> Credentials {
+    let owner = &ctx.actor;
+    let (session_id, session_secret) =
+        sessions::create(&ctx.pool, clock, owner, Some(&marking.text("browser")))
+            .await
+            .expect("a session");
+    let desktop = tokens::create_desktop(&ctx.pool, clock, owner, &marking.text("desktop"))
+        .await
+        .expect("a desktop token");
+    let personal = tokens::create_personal(ctx, &marking.text("personal token"), &[], None)
+        .await
+        .expect("a personal access token");
+    let paired = pairing::pair_own_runner(ctx, &marking.text("paired runner"), "claude-code")
+        .await
+        .expect("a paired runner");
+    let runner_token_id = tokens::list(ctx, None)
+        .await
+        .expect("the owner's tokens")
+        .into_iter()
+        .find(|token| token.kind == TokenKind::Runner)
+        .expect("the runner token")
+        .id;
+    Credentials {
+        session_id,
+        session_secret,
+        desktop_token_id: desktop.summary.id,
+        desktop_token: desktop.token,
+        personal_token_id: personal.summary.id,
+        personal_token: personal.token,
+        runner_token_id,
+        runner_token: paired.token,
+        paired_runner_id: paired.runner_id,
     }
 }
 

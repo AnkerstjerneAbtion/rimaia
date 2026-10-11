@@ -2015,3 +2015,86 @@ export interface TaskConsent {
   teamCeiling: TeamCeiling;
   missing: MissingPiece[];
 }
+
+// ---------------------------------------------------------------------------
+// Accounts (task 047, ADR-0030). Only a Rimaia server has them: the solo shell
+// refuses every account command with `invalid`. No component renders them yet
+// (task 050 does).
+// ---------------------------------------------------------------------------
+
+/** Mirrors `rimaia_core::identity::Role`. */
+export type TeamRole = "owner" | "member";
+
+/** Mirrors `rimaia_core::identity::account::AccountTeam`. */
+export interface AccountTeam {
+  id: string;
+  name: string;
+  role: TeamRole;
+}
+
+/** Mirrors `rimaia_core::identity::account::CurrentCredential`: the session or
+ *  desktop token a request came through. Signing out is `revokeSession` with
+ *  its `id` when its `kind` is `"session"`. */
+export interface CurrentCredential {
+  kind: "session" | "desktop";
+  id: string;
+}
+
+/** Mirrors `rimaia_core::identity::account::Account`, from `get_account`. */
+export interface Account {
+  id: string;
+  login: string;
+  avatarUrl: string | null;
+  teams: AccountTeam[];
+  current: CurrentCredential;
+}
+
+/** Mirrors `rimaia_core::identity::sessions::SessionSummary`: one live
+ *  browser session. */
+export interface SessionSummary {
+  id: string;
+  userAgent: string | null;
+  createdAt: string;
+  lastUsedAt: string;
+  current: boolean;
+}
+
+/** Mirrors `rimaia_core::identity::secret::TokenKind`: `rmd_`, `rmr_` and
+ *  `rmp_` tokens. */
+export type ApiTokenKind = "desktop" | "runner" | "personal";
+
+/** Mirrors `rimaia_core::identity::tokens::ApiTokenSummary`. Never a hash. */
+export interface ApiTokenSummary {
+  id: string;
+  kind: ApiTokenKind;
+  label: string;
+  runnerId: string | null;
+  /** Empty: every team the user belongs to, now and later. */
+  teamIds: string[];
+  createdAt: string;
+  lastUsedAt: string | null;
+  /** The `User-Agent` of the request that last used it. */
+  lastUsedFrom: string | null;
+  expiresAt: string | null;
+  current: boolean;
+}
+
+/** Mirrors `rimaia_core::identity::tokens::NewApiToken`: the one answer that
+ *  carries the secret. */
+export interface NewApiToken {
+  token: string;
+  summary: ApiTokenSummary;
+}
+
+/** Mirrors `rimaia_core::identity::pairing::PairingCode`: `XXXX-XXXX`, valid
+ *  once, for ten minutes. */
+export interface PairingCode {
+  code: string;
+  expiresAt: string;
+}
+
+/** Mirrors `rimaia_core::identity::pairing::PairedRunner`. */
+export interface PairedRunner {
+  runnerId: string;
+  token: string;
+}

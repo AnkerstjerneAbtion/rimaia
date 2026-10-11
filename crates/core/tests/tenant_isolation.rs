@@ -469,7 +469,7 @@ async fn a_team_cannot_see_another_teams_ids_through_any_board_command() {
     let mut teams = TwoTeams::new().await;
     let host = testing_api::host(&teams);
     let team_a = teams.team_a.team_id.clone();
-    let caller = testing_api::owner(&teams.team_a, testing_api::desktop("team-a"));
+    let caller = testing_api::as_desktop(&teams.team_a);
 
     let mut failures: Vec<String> = Vec::new();
     for case in BOARD_CASES {

@@ -1,7 +1,9 @@
 import { invoke } from "@tauri-apps/api/core";
 
 import type {
+  Account,
   Analytics,
+  ApiTokenSummary,
   AppInfo,
   ArchivedTask,
   ArchiveReport,
@@ -19,10 +21,13 @@ import type {
   LocalWorktree,
   McpProbe,
   McpStatus,
+  NewApiToken,
   NewTaskInput,
   NewTaskLinkInput,
   OnArchive,
   OpenInTarget,
+  PairedRunner,
+  PairingCode,
   PlanPass,
   PlanSelectionInput,
   PreflightSummary,
@@ -57,6 +62,7 @@ import type {
   ScheduleMode,
   ScheduleView,
   SearchHit,
+  SessionSummary,
   StrategyApproval,
   StrategyCatalogueView,
   StrategyCeiling,
@@ -1211,6 +1217,63 @@ export function getSubscriptionCost(): Promise<number | null> {
 /** Stores it, or clears it with `null`. A negative figure is refused. */
 export function setSubscriptionCost(value: number | null): Promise<void> {
   return board<void>("set_subscription_cost", { value });
+}
+
+// ---------------------------------------------------------------------------
+// Accounts (task 047) — see `crates/core/src/api/board/account.rs`. Only a
+// Rimaia server has accounts; the solo shell refuses each of these.
+// ---------------------------------------------------------------------------
+
+/** The signed-in user, their teams, and the credential this request used. */
+export function getAccount(): Promise<Account> {
+  return board<Account>("get_account");
+}
+
+/** The user's live browser sessions. */
+export function listSessions(): Promise<SessionSummary[]> {
+  return board<SessionSummary[]>("list_sessions");
+}
+
+/**
+ * Deletes one of the user's sessions. With {@link getAccount}'s `current.id`
+ * this is signing out: the next request on the old cookie is
+ * `unauthenticated`.
+ */
+export function revokeSession(id: string): Promise<void> {
+  return board<void>("revoke_session", { id });
+}
+
+/** The user's desktop, runner and personal access tokens. Never a secret. */
+export function listApiTokens(): Promise<ApiTokenSummary[]> {
+  return board<ApiTokenSummary[]>("list_api_tokens");
+}
+
+/**
+ * A personal access token for an MCP client, the one time its secret is
+ * shown. No `teamIds` means every team the user belongs to, now and later;
+ * no `expiresInDays` means it never expires.
+ */
+export function createPersonalAccessToken(
+  label: string,
+  teamIds?: string[],
+  expiresInDays?: number,
+): Promise<NewApiToken> {
+  return board<NewApiToken>("create_personal_access_token", { label, teamIds, expiresInDays });
+}
+
+/** Revokes a token. Revoking a runner's token unpairs the runner. */
+export function revokeApiToken(id: string): Promise<void> {
+  return board<void>("revoke_api_token", { id });
+}
+
+/** A ten-minute, single-use code for `rimaia-runner pair` on a headless machine. */
+export function createPairingCode(): Promise<PairingCode> {
+  return board<PairingCode>("create_pairing_code");
+}
+
+/** The connected desktop's own runner, paired with no code. Desktop only. */
+export function pairOwnRunner(label: string, provider: string): Promise<PairedRunner> {
+  return board<PairedRunner>("pair_own_runner", { label, provider });
 }
 
 // ---------------------------------------------------------------------------

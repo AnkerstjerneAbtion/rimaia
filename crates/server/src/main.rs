@@ -13,6 +13,7 @@ use std::sync::Arc;
 
 use rimaia_core::api::{BoardHost, RefuseAll};
 use rimaia_core::db::{self, MutationSource};
+use rimaia_core::identity::rate_limit::RateLimiter;
 use rimaia_core::runner::provider::{ClaudeProvider, ProviderProfile};
 use rimaia_core::{ServiceContext, SystemClock, TeamScope};
 use rimaia_server::config::{config_from_env, Config};
@@ -59,11 +60,13 @@ async fn serve() -> Result<(), String> {
         TeamScope::one(db::new_id()),
         db::new_id(),
     );
+    let rate_limits = Arc::new(RateLimiter::new(context.clock.clone()));
     let state = ServerState {
         host: BoardHost {
             context,
             provider: ProviderProfile::of(&ClaudeProvider),
             paths,
+            rate_limits,
         },
         auth: Arc::new(RefuseAll),
     };

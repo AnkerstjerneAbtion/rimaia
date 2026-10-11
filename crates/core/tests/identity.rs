@@ -9,18 +9,20 @@ use std::sync::Arc;
 
 use chrono::Duration;
 use pretty_assertions::assert_eq;
-use rimaia_core::api::{Authenticate, Caller, Credential, Door, TeamGrant};
+use rimaia_core::api::{self, Authenticate, BoardHost, Caller, Credential, Door, TeamGrant};
 use rimaia_core::db::{self, MutationSource};
 use rimaia_core::identity::authenticate::SessionsAndTokens;
 use rimaia_core::identity::pairing::{self, PairedRunner, PairingCode, INVALID_CODE};
 use rimaia_core::identity::pending::{DesktopCode, PendingSignIn, SignInFlow};
 use rimaia_core::identity::provider::ProviderIdentity;
+use rimaia_core::identity::rate_limit::RateLimiter;
 use rimaia_core::identity::secret::{self, Secret, TokenKind};
 use rimaia_core::identity::tokens::{self, NewApiToken};
 use rimaia_core::identity::{sessions, sign_in, Role};
+use rimaia_core::runner::provider::{ClaudeProvider, ProviderProfile};
 use rimaia_core::testing::{test_epoch, test_pool, TestClock};
-use rimaia_core::{Clock, ErrorCode, ServiceContext, TeamScope};
-use serde_json::json;
+use rimaia_core::{AppPaths, Clock, Error, ErrorCode, ServiceContext, TeamScope};
+use serde_json::{json, Value};
 use sqlx::SqlitePool;
 
 /// A server's board: people sign up on it, and nothing else is on it.
@@ -1032,4 +1034,131 @@ async fn no_secret_type_prints_its_value_in_debug() {
         assert!(!printed.contains(value), "{value} in:\n{printed}");
     }
     assert!(printed.contains("Secret(…)"), "{printed}");
+}
+
+// ---------------------------------------------------------------------------
+// The account commands
+// ---------------------------------------------------------------------------
+
+const ACCOUNT_COMMANDS: [(&str, fn() -> Value); 8] = [
+    ("get_account", || json!({})),
+    ("list_sessions", || json!({})),
+    ("revoke_session", || json!({ "id": "a-session" })),
+    ("list_api_tokens", || json!({})),
+    (
+        "create_personal_access_token",
+        || json!({ "label": "Claude Code" }),
+    ),
+    ("revoke_api_token", || json!({ "id": "a-token" })),
+    ("create_pairing_code", || json!({})),
+    (
+        "pair_own_runner",
+        || json!({ "label": "laptop", "provider": "claude-code" }),
+    ),
+];
+
+#[tokio::test]
+async fn account_commands_refuse_the_solo_shell() {
+    let harness = rimaia_core::testing::TestContext::new().await;
+    let data = tempfile::Builder::new()
+        .prefix("rimaia-data-")
+        .tempdir()
+        .expect("a data directory");
+    let host = BoardHost {
+        context: harness.context.clone(),
+        provider: ProviderProfile::of(&ClaudeProvider),
+        paths: AppPaths::new(data.path()),
+        rate_limits: Arc::new(RateLimiter::new(Arc::new(harness.clock.clone()))),
+    };
+    let caller = Caller::solo(&harness.solo);
+
+    for (name, args) in ACCOUNT_COMMANDS {
+        let refused = api::dispatch(&host, caller.clone(), name, args())
+            .await
+            .expect_err(name);
+        assert_eq!(
+            serde_json::to_value(&refused).expect("serialize"),
+            json!({ "code": "invalid", "message": "Accounts exist only on a Rimaia server." }),
+            "{name}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn only_a_desktop_pairs_its_own_runner() {
+    let board = Board::new().await;
+    let ada = board.sign_up("ada", "1").await;
+    let (session_id, secret) = board.session(&ada).await;
+    let browser = board.present(&secret).await.expect("a browser");
+    assert_eq!(browser.door, Door::Browser { session_id });
+    let host = BoardHost {
+        context: board.base.clone(),
+        provider: ProviderProfile::of(&ClaudeProvider),
+        paths: AppPaths::new(std::env::temp_dir()),
+        rate_limits: Arc::new(RateLimiter::new(Arc::new(board.clock.clone()))),
+    };
+
+    let refused = api::dispatch(
+        &host,
+        browser,
+        "pair_own_runner",
+        json!({ "label": "laptop", "provider": "claude-code" }),
+    )
+    .await
+    .expect_err("a browser cannot");
+    assert_eq!(refused.code(), ErrorCode::Invalid);
+    assert!(refused.to_string().contains("desktop app"), "{refused}");
+    assert_eq!(board.count("SELECT count(*) FROM runners").await, 0);
+}
+
+#[tokio::test]
+async fn minting_is_rate_limited_per_user() {
+    let board = Board::new().await;
+    let ada = board.sign_up("ada", "1").await;
+    let grace = board.sign_up("grace", "2").await;
+    let host = BoardHost {
+        context: board.base.clone(),
+        provider: ProviderProfile::of(&ClaudeProvider),
+        paths: AppPaths::new(std::env::temp_dir()),
+        rate_limits: Arc::new(RateLimiter::new(Arc::new(board.clock.clone()))),
+    };
+    let mut callers = Vec::new();
+    for user in [&ada, &grace] {
+        let token = board.desktop(user).await;
+        callers.push(board.bearer(token.token.expose()).await.expect("a desktop"));
+    }
+    let [adas, graces]: [Caller; 2] = callers.try_into().expect("two callers");
+
+    let mints = [
+        ("create_personal_access_token", json!({ "label": "t" })),
+        ("create_pairing_code", json!({})),
+        (
+            "pair_own_runner",
+            json!({ "label": "l", "provider": "claude-code" }),
+        ),
+    ];
+    for n in 0..20 {
+        let (name, args) = &mints[n % 3];
+        api::dispatch(&host, adas.clone(), name, args.clone())
+            .await
+            .unwrap_or_else(|error| panic!("mint {n}: {error}"));
+    }
+    for (name, args) in &mints {
+        let refused: Error = api::dispatch(&host, adas.clone(), name, args.clone())
+            .await
+            .expect_err(name);
+        assert_eq!(
+            refused.to_string(),
+            "Too many attempts. Try again in 3600 seconds.",
+            "{name}"
+        );
+    }
+    api::dispatch(&host, graces, "create_pairing_code", json!({}))
+        .await
+        .expect("another user's window");
+
+    board.clock.advance(Duration::hours(1));
+    api::dispatch(&host, adas, "create_pairing_code", json!({}))
+        .await
+        .expect("a new window");
 }

@@ -4,6 +4,14 @@ import { invoke } from "@tauri-apps/api/core";
 
 import {
   acceptTaskStrategy,
+  createPairingCode,
+  createPersonalAccessToken,
+  getAccount,
+  listApiTokens,
+  listSessions,
+  pairOwnRunner,
+  revokeApiToken,
+  revokeSession,
   approveTask,
   getReviewDigest,
   getAppInfo,
@@ -317,5 +325,60 @@ describe("board and local (seam-contract D32 point 6)", () => {
 
   it("carries the protocol version the server speaks", () => {
     expect(PROTOCOL_VERSION).toBe("1.0");
+  });
+});
+
+describe("the account wrappers (task 047)", () => {
+  beforeEach(() => {
+    mockInvoke.mockReset();
+    mockInvoke.mockResolvedValue(undefined);
+  });
+
+  it("sends the three reads with no arguments at all", async () => {
+    await getAccount();
+    await listSessions();
+    await listApiTokens();
+
+    expect(mockInvoke.mock.calls).toEqual([
+      ["get_account", undefined],
+      ["list_sessions", undefined],
+      ["list_api_tokens", undefined],
+    ]);
+  });
+
+  it("revokes a session and a token by id", async () => {
+    await revokeSession("session-1");
+    await revokeApiToken("token-1");
+
+    expect(mockInvoke.mock.calls).toEqual([
+      ["revoke_session", { id: "session-1" }],
+      ["revoke_api_token", { id: "token-1" }],
+    ]);
+  });
+
+  it("sends a personal access token's label, teams and expiry under the Rust names", async () => {
+    await createPersonalAccessToken("Claude Code", ["team-1"], 30);
+    await createPersonalAccessToken("Everything");
+
+    expect(mockInvoke.mock.calls).toEqual([
+      [
+        "create_personal_access_token",
+        { label: "Claude Code", teamIds: ["team-1"], expiresInDays: 30 },
+      ],
+      [
+        "create_personal_access_token",
+        { label: "Everything", teamIds: undefined, expiresInDays: undefined },
+      ],
+    ]);
+  });
+
+  it("asks for a pairing code and pairs the desktop's own runner", async () => {
+    await createPairingCode();
+    await pairOwnRunner("This Mac", "claude-code");
+
+    expect(mockInvoke.mock.calls).toEqual([
+      ["create_pairing_code", undefined],
+      ["pair_own_runner", { label: "This Mac", provider: "claude-code" }],
+    ]);
   });
 });

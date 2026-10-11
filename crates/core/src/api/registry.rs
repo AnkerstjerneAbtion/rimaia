@@ -26,7 +26,9 @@ use serde::de::DeserializeOwned;
 use serde::Serialize;
 use serde_json::Value;
 
-use super::board::{analytics, consent, repositories, review, runs, settings, strategy, tasks};
+use super::board::{
+    account, analytics, consent, repositories, review, runs, settings, strategy, tasks,
+};
 use super::{BoardRequest, BoxFuture};
 use crate::error::{Error, Result};
 
@@ -271,6 +273,19 @@ pub static COMMANDS: LazyLock<Vec<Command>> = LazyLock::new(|| {
             Write,
             analytics::set_subscription_cost,
         ),
+        // account (task 047): the caller's own user, sessions and tokens
+        board("get_account", Read, account::get_account),
+        board("list_sessions", Read, account::list_sessions),
+        board("revoke_session", Write, account::revoke_session),
+        board("list_api_tokens", Read, account::list_api_tokens),
+        board(
+            "create_personal_access_token",
+            Write,
+            account::create_personal_access_token,
+        ),
+        board("revoke_api_token", Write, account::revoke_api_token),
+        board("create_pairing_code", Write, account::create_pairing_code),
+        board("pair_own_runner", Write, account::pair_own_runner),
         // doctor
         local("run_doctor"),
         local("dismiss_onboarding"),

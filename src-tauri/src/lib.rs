@@ -13,6 +13,7 @@ use std::time::Duration;
 use rimaia_core::api::{BoardHost, Caller};
 use rimaia_core::board::{BoardPort, InProcessBoard, LeaseTerm};
 use rimaia_core::db::MutationSource;
+use rimaia_core::identity::rate_limit::RateLimiter;
 use rimaia_core::machine::{self, MachineContext};
 use rimaia_core::mcp::{self, McpState, RunHandles};
 use rimaia_core::runner::events::RunTail;
@@ -508,6 +509,9 @@ pub fn run() {
                     context: context.clone(),
                     provider,
                     paths: paths.clone(),
+                    // Nothing in solo reaches it: the account commands that
+                    // mint refuse the shell (task 047).
+                    rate_limits: Arc::new(RateLimiter::new(context.clock.clone())),
                 },
                 caller: Caller::solo(&solo),
                 machine: machine.clone(),

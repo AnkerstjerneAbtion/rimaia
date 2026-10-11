@@ -11,11 +11,13 @@
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::Arc;
 
 use pretty_assertions::assert_eq;
 use rimaia_core::api::{self, BoardHost, Caller, Door, TeamGrant};
 use rimaia_core::archive::{self, OnArchiveOutcome};
 use rimaia_core::db::{BoardColumn, OnArchive, Repository, RunState, Task};
+use rimaia_core::identity::rate_limit::RateLimiter;
 use rimaia_core::identity::Role;
 use rimaia_core::repo::{self, NewRepository};
 use rimaia_core::runner::provider::{ClaudeProvider, ProviderProfile};
@@ -565,6 +567,7 @@ impl Solo {
             context: harness.context.clone(),
             provider: ProviderProfile::of(&ClaudeProvider),
             paths: AppPaths::new(data.path()),
+            rate_limits: Arc::new(RateLimiter::new(Arc::new(harness.clock.clone()))),
         };
         let caller = Caller::solo(&harness.solo);
         assert_eq!(

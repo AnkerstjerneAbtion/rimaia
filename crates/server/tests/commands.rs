@@ -145,13 +145,14 @@ async fn a_team_cannot_see_another_teams_ids() {
 
 /// Each case's `own` arguments through `dispatch`, as the server calls it with
 /// no machine, and over the route, each against its own copy of the same
-/// fixture state. Only ids the call itself minted are normalized; timestamps
-/// are not, because both copies read the fixture's one test clock.
+/// fixture state, both as team A's owner through their fixture desktop token.
+/// Only ids and the three secrets the call itself minted are normalized;
+/// timestamps are not, because both copies read the fixture's one test clock.
 #[tokio::test]
 async fn both_transports_answer_every_case_identically() {
     let teams = TwoTeams::new().await;
     let known = testing_api::ids_on_the_board(&teams.a).await;
-    let caller = testing_api::owner(&teams.team_a, testing_api::desktop("team-a-token"));
+    let caller = testing_api::as_desktop(&teams.team_a);
 
     let mut failures = Vec::new();
     for case in BOARD_CASES {
@@ -192,10 +193,28 @@ async fn both_transports_answer_every_case_identically() {
                 case.name, direct.0, direct.1
             ));
         }
-        let direct = (direct.0, testing_api::normalize_minted(&direct.1, &known));
+        // Three rows answer a secret the call minted (task 047), which no two
+        // calls share: each is shape-checked, then normalized like a minted id.
+        let secrets = (
+            testing_api::normalize_minted_secret(case.name, &direct.1),
+            testing_api::normalize_minted_secret(case.name, &routed.body),
+        );
+        let (direct_body, routed_body) = match secrets {
+            (Ok(direct), Ok(routed)) => (direct, routed),
+            (direct, routed) => {
+                for failure in [direct.err(), routed.err()].into_iter().flatten() {
+                    failures.push(failure);
+                }
+                continue;
+            }
+        };
+        let direct = (
+            direct.0,
+            testing_api::normalize_minted(&direct_body, &known),
+        );
         let routed = (
             routed.status,
-            testing_api::normalize_minted(&routed.body, &known),
+            testing_api::normalize_minted(&routed_body, &known),
         );
         if direct != routed {
             failures.push(format!(
