@@ -849,6 +849,39 @@ describe("TaskCard", () => {
       ).toHaveLength(1);
     });
 
+    // The queue status has a runner half (`runner:changed`) and a board half
+    // whose skip reasons read team settings (`settings:changed`), so each of
+    // the two re-reads it (task 048).
+    it.each(["settings:changed", "runner:changed"])(
+      "re-reads the queue status on %s",
+      async (eventName) => {
+        const fired: Array<(event: { payload: unknown }) => void> = [];
+        mockListen.mockImplementation(async (name, callback) => {
+          if (name === eventName) fired.push(callback as (event: { payload: unknown }) => void);
+          return vi.fn();
+        });
+        mockInvoke.mockImplementation(async (command) => {
+          if (command === "list_repositories") return [repository()];
+          if (command === "list_checkouts") return CONSENTED;
+          if (command === "list_local_worktrees") return [];
+          if (command === "get_queue_status") {
+            return { state: "paused", runningTaskIds: [], plan: [] };
+          }
+          throw new Error(`unexpected command: ${command}`);
+        });
+        const queueReads = () =>
+          mockInvoke.mock.calls.filter(([command]) => command === "get_queue_status").length;
+
+        renderCard();
+        await waitFor(() => expect(fired.length).toBeGreaterThan(0));
+        await waitFor(() => expect(queueReads()).toBe(1));
+
+        for (const listener of fired) listener({ payload: null });
+
+        await waitFor(() => expect(queueReads()).toBe(2));
+      },
+    );
+
     it("does not strand a card on a stale queue position when a change event lands mid fetch", async () => {
       // Task 009's own verification report, finding 7: `loadQueueStatus`'s
       // early-return guard treated an invalidation that landed while a fetch

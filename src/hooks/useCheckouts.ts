@@ -24,8 +24,8 @@ const useCheckoutList = createSharedRead(listCheckouts, subscribeToRepositoriesC
  * root, the cap, the consent and the archive policy the board's `Repository`
  * no longer carries. Components join it to a repository by id.
  *
- * Re-read on `repositories:changed`, which every checkout write publishes
- * until task 048 turns it into `LocalChange::Checkouts` on the same wire name.
+ * Re-read on `repositories:changed`, which every checkout write publishes as
+ * `LocalChange::Checkouts`, on the same wire name as the board's (task 048).
  * Every payload means "re-read", including the lagged forwarder's empty array
  * (seam-contract D7). One read is shared by every component mounted at once.
  */

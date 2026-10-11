@@ -22,8 +22,8 @@ const useWorktreeList = createSharedRead(listLocalWorktrees, subscribeToTasksCha
  * `worktreePath` until no board DTO held a path. Components join it to a task
  * by id.
  *
- * Re-read on `tasks:changed`, which every worktree-record write publishes
- * until task 048 turns it into `LocalChange::Worktrees` on the same wire name.
+ * Re-read on `tasks:changed`, which every worktree-record write publishes as
+ * `LocalChange::Worktrees`, on the same wire name as the board's (task 048).
  * Every payload means "re-read", including the lagged forwarder's empty array
  * (seam-contract D7). One read is shared by every component mounted at once.
  */

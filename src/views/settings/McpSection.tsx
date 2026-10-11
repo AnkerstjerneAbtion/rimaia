@@ -9,7 +9,7 @@ import {
   testMcpConnection,
   toRimaiaError,
 } from "../../lib/commands";
-import { subscribeToSettingsChanged } from "../../lib/events";
+import { subscribeToRunnerChanged } from "../../lib/events";
 import type { McpProbe, McpStatus, RimaiaError } from "../../types";
 
 /** The range `set_mcp_port`'s `u16` can hold, minus the privileged ports core
@@ -69,7 +69,8 @@ export function McpSection() {
   }, [read]);
 
   useEffect(() => {
-    const subscription = subscribeToSettingsChanged(() => {
+    // `mcp_port` is this machine's runner key, announced on `runner:changed`.
+    const subscription = subscribeToRunnerChanged(() => {
       void read();
     });
     return () => {

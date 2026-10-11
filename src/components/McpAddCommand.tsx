@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 
 import { getMcpStatus, toRimaiaError } from "../lib/commands";
-import { subscribeToSettingsChanged } from "../lib/events";
+import { subscribeToRunnerChanged } from "../lib/events";
 import type { McpStatus, RimaiaError } from "../types";
 
 /**
@@ -49,7 +49,8 @@ export function McpAddCommand() {
   }, [read]);
 
   useEffect(() => {
-    const subscription = subscribeToSettingsChanged(() => {
+    // `mcp_port` is this machine's runner key, announced on `runner:changed`.
+    const subscription = subscribeToRunnerChanged(() => {
       void read();
     });
     return () => {

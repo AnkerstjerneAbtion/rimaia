@@ -13,6 +13,7 @@ import { PING_PONG_TEXT, finishedLoop, reviewLoopText } from "../../lib/review";
 import { getQueueStatus, listRepositories, startRun, toRimaiaError } from "../../lib/commands";
 import {
   subscribeToRepositoriesChanged,
+  subscribeToRunnerChanged,
   subscribeToRunsChanged,
   subscribeToSettingsChanged,
   subscribeToTasksChanged,
@@ -154,6 +155,7 @@ let queueDirty = false;
 let queueUnlistenTasks: (() => void) | null = null;
 let queueUnlistenRuns: (() => void) | null = null;
 let queueUnlistenSettings: (() => void) | null = null;
+let queueUnlistenRunner: (() => void) | null = null;
 const queueSubscribers = new Set<(cache: ReadonlyMap<string, QueueEntry> | null) => void>();
 
 function notifyQueueSubscribers() {
@@ -233,10 +235,21 @@ function useQueueLookup(): ReadonlyMap<string, QueueEntry> | null {
         () => {},
       );
     }
+    // The queue status has a runner half (the switch, capacity, the window,
+    // the schedule error: `runner:changed`) and a board half (the plan, whose
+    // skip reasons read team settings: `settings:changed`), so both re-read.
     if (!queueUnlistenSettings) {
       subscribeToSettingsChanged(invalidate).then(
         (unlisten) => {
           queueUnlistenSettings = unlisten;
+        },
+        () => {},
+      );
+    }
+    if (!queueUnlistenRunner) {
+      subscribeToRunnerChanged(invalidate).then(
+        (unlisten) => {
+          queueUnlistenRunner = unlisten;
         },
         () => {},
       );
@@ -254,6 +267,8 @@ function useQueueLookup(): ReadonlyMap<string, QueueEntry> | null {
         queueUnlistenRuns = null;
         queueUnlistenSettings?.();
         queueUnlistenSettings = null;
+        queueUnlistenRunner?.();
+        queueUnlistenRunner = null;
       }
     };
   }, []);

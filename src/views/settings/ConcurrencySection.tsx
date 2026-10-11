@@ -8,7 +8,7 @@ import {
   setScheduleMode,
   toRimaiaError,
 } from "../../lib/commands";
-import { subscribeToSettingsChanged } from "../../lib/events";
+import { subscribeToRunnerChanged } from "../../lib/events";
 import type { RimaiaError, RunCapacity, ScheduleMode } from "../../types";
 
 const MODE_OPTIONS: ReadonlyArray<{
@@ -76,9 +76,9 @@ export function ConcurrencySection() {
   }, [read]);
 
   useEffect(() => {
-    // Both keys live in `settings`, so any other writer — the MCP tool, or a
-    // second window — announces itself on this channel.
-    const subscription = subscribeToSettingsChanged(() => {
+    // Both keys are this machine's runner keys, so any other writer — the MCP
+    // tool, or a second window — announces itself on `runner:changed`.
+    const subscription = subscribeToRunnerChanged(() => {
       void read();
     });
     return () => {

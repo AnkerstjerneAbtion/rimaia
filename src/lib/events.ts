@@ -45,17 +45,25 @@ function subscribe<P>(event: string, onPayload: (payload: P) => void): Promise<U
  * left for the tasks that first have something to publish on them, the same
  * incremental-extension pattern D7 already describes for 008 and 009.
  *
- * Task 009 adds no new event of its own: `queue_state` lives in `settings`
- * (`rimaia_core::scheduler::state`), so a queue Start/Pause/Resume/Stop
- * already announces itself on `settings:changed` below, and a task the queue
- * claims or finishes already announces itself on `tasks:changed` /
- * `runs:changed`. The Runs view re-fetches `getQueueStatus` from `./commands`
- * on any of the three rather than waiting on a fourth, dedicated channel.
+ * Task 009 adds no new event of its own: a queue Start/Pause/Resume/Stop
+ * writes `queue_state`, a runner key, which announces itself on
+ * `runner:changed` below (task 048), and a task the queue claims or finishes
+ * already announces itself on `tasks:changed` / `runs:changed`. The Runs view
+ * re-fetches `getQueueStatus` from `./commands` on those rather than waiting
+ * on a dedicated channel.
+ *
+ * **Board events and local events** (task 048, ADR-0034 point 4). Most events
+ * here are about the board, which a server streams to every member of a team.
+ * `runner:changed` and `schedules:changed` are about this machine only, and
+ * `tasks:changed` and `repositories:changed` have a source on each side: a
+ * board row, or this machine's worktree record or checkout. Every name and
+ * payload is `rimaia_core::api::events`'s, so the two forwarders cannot
+ * disagree.
  *
  * **An empty id array means "re-read this entity wholesale," never "nothing
- * changed."** ADR-0018's shell forwarder is the only thing entitled to send
- * one: when its subscription falls behind the change-event broadcast
- * channel's buffer, it hears `RecvError::Lagged` and answers by emitting
+ * changed."** Only a subscription's own recovery sends one: every board
+ * stream opens with one per board entity, and a forwarder that falls behind
+ * its channel's buffer hears `RecvError::Lagged` and answers by emitting
  * every entity's event once with an empty array rather than trying to
  * replay what it missed. A listener that ignores an empty array because it
  * looks like "no ids" silently stops refreshing the moment a lag happens —
@@ -76,14 +84,33 @@ export function subscribeToRepositoriesChanged(
 }
 
 /**
- * `settings:changed` carries no ids — the whole `settings` table is a
- * handful of rows, so every write (base instructions, run environment,
- * task 009's `queue_state`) announces the same signal and every consumer
- * just re-reads all of it, mirroring `rimaia_core::db::settings`'s own doc
- * comment on why the event it publishes is untyped.
+ * `settings:changed` carries no ids — a team's settings, or your own, are a
+ * handful of rows, so every write (base instructions, the strategy catalogue,
+ * the review loop, your subscription cost) announces the same signal and
+ * every consumer just re-reads all of it, mirroring `rimaia_core::db::settings`'s
+ * own doc comment on why the event it publishes is untyped. This machine's
+ * own keys are not here: see {@link subscribeToRunnerChanged}.
  */
 export function subscribeToSettingsChanged(onChanged: () => void): Promise<UnlistenFn> {
   return subscribe<null>("settings:changed", () => onChanged());
+}
+
+/**
+ * `runner:changed` (task 048) — one of this machine's runner keys changed:
+ * the queue switch (`queue_state`), its capacity and mode, the run window,
+ * the usage-limit pause, the MCP port, the run environment and the rest of
+ * seam-contract D28 part 4's *Runner* row. Also sent when the queue records a
+ * refused scheduled start. Carries no ids, for `settings:changed`'s reason.
+ *
+ * **Moved off `settings:changed`, and why.** These keys belong to the machine
+ * a runner runs on, not to a team (ADR-0031 point 6), and a server has no
+ * machine to announce: they are a local event the desktop shell forwards,
+ * which a server's stream never carries. A component that reads a runner key
+ * subscribes here; one that reads both halves, such as the queue status,
+ * subscribes to both.
+ */
+export function subscribeToRunnerChanged(onChanged: () => void): Promise<UnlistenFn> {
+  return subscribe<null>("runner:changed", () => onChanged());
 }
 
 /** See {@link subscribeToTasksChanged} for the empty-array contract; the
@@ -122,10 +149,11 @@ export function subscribeToRunsTail(onTail: (tail: RunTail) => void): Promise<Un
  * is not obliged to re-read them because a base-instructions textarea was
  * saved. Seam-contract D24.
  *
- * The *window* a schedule opens is a settings key and announces itself on
- * `settings:changed`, not here. That is not an inconsistency: a window is one
+ * The *window* a schedule opens is a runner key and announces itself on
+ * `runner:changed`, not here. That is not an inconsistency: a window is one
  * singleton fact about the installation, and the Runs view reading it re-reads
- * the whole queue status anyway.
+ * the whole queue status anyway. Like `runner:changed`, this is a local event
+ * (task 048): a schedule is this machine's.
  *
  * See {@link subscribeToTasksChanged} for the empty-array contract; the same
  * rule applies here.

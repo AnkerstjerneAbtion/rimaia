@@ -147,16 +147,16 @@ describe("ConcurrencySection", () => {
     );
   });
 
-  it("re-reads when settings:changed fires, since both keys live in settings", async () => {
+  it("re-reads when runner:changed fires, since both keys are this machine's", async () => {
     mockBackend({});
 
     render(<ConcurrencySection />);
     await screen.findByLabelText("Runs at once");
     const before = mockInvoke.mock.calls.filter(([c]) => c === "get_run_capacity").length;
 
-    const handler = mockListen.mock.calls.find(([event]) => event === "settings:changed")?.[1];
+    const handler = mockListen.mock.calls.find(([event]) => event === "runner:changed")?.[1];
     expect(handler).toBeDefined();
-    handler?.({ event: "settings:changed", id: 1, payload: undefined });
+    handler?.({ event: "runner:changed", id: 1, payload: undefined });
 
     await waitFor(() =>
       expect(

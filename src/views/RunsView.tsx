@@ -22,6 +22,7 @@ import {
   toRimaiaError,
 } from "../lib/commands";
 import {
+  subscribeToRunnerChanged,
   subscribeToRunsChanged,
   subscribeToSettingsChanged,
   subscribeToTasksChanged,
@@ -278,10 +279,12 @@ export function RunsView() {
 
     refresh();
 
-    // Three sources can each change what the queue would report — a task
-    // moving, a run ending, or the switch itself — and all three just mean
-    // "read it again", so every subscription below shares one `settle`
-    // rather than each keeping its own `unlisten` slot.
+    // Four sources can each change what the queue would report — a task
+    // moving, a run ending, the switch, the window or the schedule error on
+    // this machine (`runner:changed`), or a team setting the plan reads
+    // (`settings:changed`) — and all of them just mean "read it again", so
+    // every subscription below shares one `settle` rather than each keeping
+    // its own `unlisten` slot.
     const unlistens: Array<() => void> = [];
     function settle(subscription: Promise<() => void>) {
       subscription.then(
@@ -301,6 +304,7 @@ export function RunsView() {
     settle(subscribeToTasksChanged(() => active && refresh()));
     settle(subscribeToRunsChanged(() => active && refresh()));
     settle(subscribeToSettingsChanged(() => active && refresh()));
+    settle(subscribeToRunnerChanged(() => active && refresh()));
 
     return () => {
       active = false;

@@ -673,27 +673,30 @@ describe("RunsView", () => {
       expect(await screen.findByText("Running")).toBeInTheDocument();
     });
 
-    it("re-reads the queue status on settings:changed", async () => {
-      let call = 0;
-      const { fire } = mockBackend({});
-      mockInvoke.mockImplementation(async (command) => {
-        if (command === "list_tasks") return [];
-        if (command === "list_repositories") return [repository()];
-        if (command === "get_run_environment") return "inherit";
-        if (command === "get_queue_status") {
-          call += 1;
-          return queueStatus({ state: call === 1 ? "paused" : "running" });
-        }
-        throw new Error(`unexpected command: ${command}`);
-      });
+    it.each(["settings:changed", "runner:changed"])(
+      "re-reads the queue status on %s",
+      async (eventName) => {
+        let call = 0;
+        const { fire } = mockBackend({});
+        mockInvoke.mockImplementation(async (command) => {
+          if (command === "list_tasks") return [];
+          if (command === "list_repositories") return [repository()];
+          if (command === "get_run_environment") return "inherit";
+          if (command === "get_queue_status") {
+            call += 1;
+            return queueStatus({ state: call === 1 ? "paused" : "running" });
+          }
+          throw new Error(`unexpected command: ${command}`);
+        });
 
-      render(<RunsView />);
-      await waitFor(() => expect(call).toBe(1));
+        render(<RunsView />);
+        await waitFor(() => expect(call).toBe(1));
 
-      act(() => fire("settings:changed", null));
+        act(() => fire(eventName, null));
 
-      expect(await screen.findByText("Running")).toBeInTheDocument();
-    });
+        expect(await screen.findByText("Running")).toBeInTheDocument();
+      },
+    );
 
     it("shows the placeholder for completed-this-session before anything has finished", async () => {
       mockBackend({});

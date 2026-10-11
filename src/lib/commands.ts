@@ -1129,10 +1129,11 @@ export function stopQueue(): Promise<void> {
  * tasks it holds processes for right now, and every `ready` task in board
  * order with the reason the queue will pass over each one it cannot start.
  * Re-read fresh on every call — subscribe to {@link subscribeToTasksChanged},
- * {@link subscribeToRunsChanged} and {@link subscribeToSettingsChanged} in
- * `./events` and re-fetch on any of them, since a task moving, a run ending,
- * or the queue's own switch (`queue_state` lives in `settings`) can each
- * change what this returns.
+ * {@link subscribeToRunsChanged}, {@link subscribeToRunnerChanged} and
+ * {@link subscribeToSettingsChanged} in `./events` and re-fetch on any of
+ * them, since a task moving, a run ending, the queue's own switch or window
+ * (runner keys, on `runner:changed`) or a team setting the plan reads can
+ * each change what this returns.
  */
 export function getQueueStatus(): Promise<QueueStatus> {
   return local<QueueStatus>("get_queue_status");
@@ -1169,7 +1170,8 @@ export function setMaxConcurrency(value: number): Promise<RunCapacity> {
  * A cached snapshot of the bind, which is the thing that fails; it is not a
  * live check that the server is still answering. That is
  * {@link testMcpConnection}. Re-read on mount and on
- * {@link subscribeToSettingsChanged}, since `mcp_port` is a settings key.
+ * {@link subscribeToRunnerChanged}, since `mcp_port` is this machine's runner
+ * key.
  */
 export function getMcpStatus(): Promise<McpStatus> {
   return local<McpStatus>("get_mcp_status");
