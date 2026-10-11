@@ -11,6 +11,7 @@
 //! stops business rules from drifting into a layer the MCP server cannot reach.
 
 pub mod analytics;
+pub mod api;
 pub mod archive;
 pub mod board;
 pub mod clock;

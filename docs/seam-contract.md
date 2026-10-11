@@ -6051,6 +6051,67 @@ instead (061).
 
 **Binds.** 046 and 050 (no planning flip, no planning gate deleted), 060, 061, 064.
 
+### Amendment, 2026-10-11 — what task 046 decided
+
+Task 046 built points 1 to 9. Six things it met are recorded here, and points 2 and 3 are
+amended by the first three.
+
+- **This machine rides on the request, and only the shell puts one there (points 2 and 3).**
+  `BoardRequest` gains `machine: Option<MachineContext>`, `rimaia_core::machine`'s type, so the
+  server holds it without linking `rimaia-runner`. `BoardHost` does not gain a machine: a
+  server never has one. `api::dispatch(host, caller, name, args)` keeps point 2's signature and
+  sets `machine: None`; the server, every contract test and 059's connected desktop call it.
+  `api::dispatch_with_machine(host, caller, machine, name, args)` is the one variant, and
+  `commands::board::route` is its only caller. Both go through one private function, so lookup,
+  argument defaulting, re-scoping and the span are shared. The shell's `SoloBoard` is
+  `{ host, caller, machine }`, `machine` being the same `MachineContext` `setup()` puts on
+  `AppState.machine`.
+
+  **Seven handlers read `request.machine`, each to pass it on:** `archive_task`,
+  `archive_tasks`, `move_task`, `approve_task`, `reject_task` and `remove_repository` hand it to
+  041's, 034's or 066's core function, as the MCP board tool does, so ADR-0006's one function
+  behind every door still holds; `get_review_digest` hands it to `review::digest`. With `None`
+  each behaves as those tasks' `None` paths do: no reaction, an archive report saying
+  `Nothing`, and a digest without the entries skipped for this machine's consent. 054 changes
+  the machine-less path inside the same core functions, not the handlers, so
+  `BoardRequest.machine` and `dispatch_with_machine` stay: solo keeps reacting in the same
+  call. The six rows' appendix notes are corrected to say so.
+
+  Why not react in `route`, after `dispatch`: reject's machine half comes first and can
+  refuse, and the archive report carries the reaction's outcome in the command's own answer.
+  Why not keep the six `local` until 054: no task flips them, 054 needs them as board rows,
+  and a `local` `move_task` is a browser that cannot drag a card.
+
+- **`BoardHost` gains `paths: AppPaths` (point 2).** Since 066, `runs::get_run` and
+  `runs::list_runs` take `&AppPaths` to compute `log_available`. Solo passes the app's paths;
+  the server passes `AppPaths` over its `RIMAIA_DATA_DIR`, where `runs/` stays empty until 056,
+  so `logAvailable` is false there. No core signature changed. 056 replaces the field with its
+  transcript hold.
+
+- **Five handlers read `request.host.provider`**, not two: `get_run_cost_summary`,
+  `get_strategy_catalogue` (and `set_strategy_catalogue`, which answers with the same view),
+  `set_review_settings`, `set_repository_review_config` and `set_task_review`, as their
+  appendix rows say. `review_loop::config`'s three setters and `catalogue_for` take
+  `&ProviderProfile` beside `catalogue` and `observed_run_cost`.
+
+- **The handler files follow the shell modules, all eight.** `api/board/` has `review.rs` and
+  `consent.rs` beside point 1's six, because 034, 035, 021, 037 and 045 put board rows in those
+  two shell modules.
+
+- **`Credential::Session { secret, csrf }` carries `csrf: Option<&str>`,** so a cookie request
+  without the header still reaches `Authenticate`, which refuses it in 047 under the same
+  constant-time comparison it uses for a wrong header.
+
+- **Three cases are `Foreign::Filter` though they name an entity**, because a foreign id does
+  not fail them at the top: `list_runs_for_task` and `list_review_findings` filter rows by
+  their task and answer an unknown one with an empty list, and `archive_tasks` reports a
+  refusal per id. Each is held to the stronger check, equality with a never-issued id's answer.
+  The local rows' half of 039's registry test is task 049's first commit (046's size cut);
+  until then `tenant_isolation.rs` requires a case for every board row only.
+
+**Binds.** 047 (the `Session`/`Browser` arm), 049 (the local half), 054 (the machine-less
+path, inside the core functions), 056 (`BoardHost.paths`), 059 (`AppState.board = None`).
+
 ### Appendix — today's 97 commands, classified
 
 The table follows the order of the handler list in `src-tauri/src/lib.rs` (lines 394–593 on
@@ -6075,7 +6136,7 @@ There are 45 board commands: 37 from 046, and 8 flipped later. There are 52 loca
 | `set_repository_unattended_runs` | repositories | local | — | 046 | The runner's consent (ADR-0032). 045 adds the team ceiling as a separate board command |
 | `set_repository_on_archive` | repositories | local | — | 046 | Runner configuration, per checkout (ADR-0033 §8) |
 | `set_repository_max_concurrency` | repositories | local | — | 046 | A per-runner cap (ADR-0031 §6) |
-| `remove_repository` | repositories | board | Write | 046 | Owner only (ADR-0029 §3) |
+| `remove_repository` | repositories | board | Write | 046 | Owner only (ADR-0029 §3). Forgetting the repository's worktree records and removing its checkout stays synchronous in solo, through `BoardRequest.machine` (046 point 3a). Without a machine the machine half is skipped: the checkout stays on whichever machine mapped it, and a runner still holding it gets the id back in `report_runner`'s `unknown_repositories` (054) |
 | `get_repository_remote_info` | repositories | local | — | 046 | Reads this machine's clone and `gh` |
 | `get_repository_credential_status` | repositories | local | — | 046 | Credentials stay on the runner (ADR-0033 §6) |
 | `set_repository_credential` | repositories | local | — | 046 | As above. No MCP tool (D25) |
@@ -6085,10 +6146,10 @@ There are 45 board commands: 37 from 046, and 8 flipped later. There are 52 loca
 | `list_tasks` | tasks | board | Read | 046 | |
 | `update_task` | tasks | board | Write | 046 | |
 | `delete_task` | tasks | board | Write | 046 | No MCP tool (ADR-0021 §5) |
-| `archive_task` | tasks | board | Write | 046 | The on-archive cleanup runs on the runner that holds the worktree, not in the handler (ADR-0033 §8) |
-| `archive_tasks` | tasks | board | Write | 046 | As `archive_task` |
+| `archive_task` | tasks | board | Write | 046 | The on-archive cleanup (ADR-0033 §8) stays synchronous in solo: the shell's dispatch puts this machine on `BoardRequest.machine`, and the report carries the outcome (046 point 3a). Without a machine, 054 records the cleanup in `tasks.cleanup_pending` for the holding runner's heartbeat, and the report says `Pending` where it said `Nothing` |
+| `archive_tasks` | tasks | board | Write | 046 | As `archive_task`, per task in the report |
 | `unarchive_task` | tasks | board | Write | 046 | |
-| `move_task` | tasks | board | Write | 046 | D20.3's auto-removal on `done` becomes the runner's reaction to the change event once `worktree_auto_cleanup` is a runner setting (ADR-0028 §2) |
+| `move_task` | tasks | board | Write | 046 | D20.3's auto-removal on entering `done`, under the runner setting `worktree_auto_cleanup` (ADR-0028 §2), stays synchronous in solo through `BoardRequest.machine` (046 point 3a). Without a machine, 054 records the cleanup in `tasks.cleanup_pending` for the holding runner's heartbeat |
 | `set_task_run_state` | tasks | board | Write | 046 | |
 | `add_task_link` | tasks | board | Write | 046 | |
 | `update_task_link` | tasks | board | Write | 046 | |
@@ -6173,11 +6234,11 @@ Six commands added before 046, as point 8 requires. The counts above describe `m
 
 | Command | Group | Kind | Effect | From | Note |
 | --- | --- | --- | --- | --- | --- |
-| `approve_task` | review | board | Write | 046 | As `move_task`: D20.3's auto-removal on `done` becomes the runner's reaction to the change event once `worktree_auto_cleanup` is a runner setting (ADR-0028 §2). ADR-0021 point 3, task 034 |
-| `reject_task` | review | board | Write | 046 | The board handler writes the note, `branch = NULL`, the move and the marker. The uncommitted-changes refusal and the worktree removal (`review::actions::set_aside_worktree`, with the worktree record's `forget_worktree` inside it since task 066) run on the runner that holds the worktree, not in the handler (ADR-0033 §7). In connected mode the refusal is a runner-side check, and a synchronous refusal to the caller is not guaranteed (task 034). ADR-0021 point 3 |
+| `approve_task` | review | board | Write | 046 | As `move_task`: D20.3's auto-removal after the commit stays synchronous in solo through `BoardRequest.machine` (046 point 3a), and without a machine 054 records the cleanup in `tasks.cleanup_pending` for the holding runner's heartbeat. ADR-0021 point 3, task 034 |
+| `reject_task` | review | board | Write | 046 | The board handler writes the note, `branch = NULL`, the move and the marker. In solo the uncommitted-changes refusal and the worktree removal (`review::actions::set_aside_worktree`, with the worktree record's `forget_worktree` inside it since task 066) stay synchronous, before the transaction, through `BoardRequest.machine` (046 point 3a). Without a machine that half is skipped, as 041 left it: a guard that runs before the write has nothing to defer, so on a server a synchronous refusal to the caller is not guaranteed (task 034). ADR-0021 point 3 |
 | `request_task_changes` | review | board | Write | 046 | Touches no disk. ADR-0021 point 3, task 034 |
 | `get_task_dependents` | review | board | Read | 046 | ADR-0021 point 3, task 034 |
-| `get_review_digest` | review | board | Read | 046 | Rows only, no git. ADR-0021 point 3, task 034 |
+| `get_review_digest` | review | board | Read | 046 | Rows only, no git. Reads this machine's unattended-run consent off its checkouts through `BoardRequest.machine` (066, 046). A server, which has no machine, leaves out the entries skipped for this machine's consent; solo's digest is unchanged. ADR-0021 point 3, task 034 |
 | `mark_review_digest_seen` | review | board | Write | 046 | A user setting (`review_digest_seen_through`, D28 part 4). ADR-0021 point 3, task 034 |
 | `list_review_findings` | review | board | Read | 046 | Rows only. The two findings writes have no command: only a run writes one (D30 point 5). ADR-0021 point 3, task 035 |
 | `get_review_settings` | review | board | Read | 046 | A team setting (D28 point 4, ADR-0028 §2). Refused to every grant (ADR-0021 §4). ADR-0021 points 3 and 4, task 021 |

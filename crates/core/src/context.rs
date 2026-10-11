@@ -32,6 +32,7 @@ use std::sync::Arc;
 use sqlx::{SqliteConnection, SqlitePool};
 use tokio::sync::broadcast;
 
+use crate::api::caller::Caller;
 use crate::clock::Clock;
 use crate::db::MutationSource;
 use crate::error::{Error, Result};
@@ -297,6 +298,21 @@ impl ServiceContext {
             scope,
             ..self.clone()
         }
+    }
+
+    /// The same context, as `caller` (seam-contract D32 point 7): the one
+    /// place a caller becomes a context.
+    ///
+    /// `source` from the caller's door, `scope` from its grants and `actor`
+    /// from its user, on the same senders. A caller with no team is `Invalid`,
+    /// because a scope of nobody is not "unfiltered".
+    pub fn for_caller(&self, caller: &Caller) -> Result<Self> {
+        Ok(Self {
+            source: caller.door.source(),
+            scope: TeamScope::of(caller.teams.iter().map(|grant| grant.team_id.clone()))?,
+            actor: caller.user_id.clone(),
+            ..self.clone()
+        })
     }
 
     /// Opens a deferred transaction scoped to this context's teams.
@@ -746,6 +762,59 @@ mod tests {
             two.json(),
             format!(r#"["3f2b1c00-0000-4000-8000-0000000000a1","{OTHER_TEAM}"]"#)
         );
+    }
+
+    fn caller(user_id: &str, teams: &[&str], door: crate::api::Door) -> Caller {
+        Caller {
+            user_id: user_id.to_string(),
+            teams: teams
+                .iter()
+                .map(|team| crate::api::TeamGrant {
+                    team_id: team.to_string(),
+                    role: crate::identity::Role::Member,
+                })
+                .collect(),
+            door,
+        }
+    }
+
+    #[tokio::test]
+    async fn for_caller_sets_source_scope_and_actor() {
+        let ctx = context().await;
+        let team_a = "3f2b1c00-0000-4000-8000-0000000000a1";
+        let as_runner = caller(
+            "a-runner-owner",
+            &[OTHER_TEAM, team_a],
+            crate::api::Door::Runner {
+                runner_id: "runner".to_string(),
+            },
+        );
+
+        let scoped = ctx.for_caller(&as_runner).expect("a caller in two teams");
+
+        assert_eq!(scoped.source, MutationSource::System);
+        assert_eq!(
+            scoped.scope,
+            TeamScope::of([team_a.to_string(), OTHER_TEAM.to_string()]).expect("two teams")
+        );
+        assert_eq!(scoped.actor, "a-runner-owner");
+        assert!(
+            scoped.changes.same_channel(&ctx.changes),
+            "a caller's context publishes where the board listens"
+        );
+        assert!(scoped.tail.same_channel(&ctx.tail));
+        assert_eq!(ctx.source, MutationSource::Ui, "the original is untouched");
+    }
+
+    #[tokio::test]
+    async fn a_caller_with_no_team_is_refused() {
+        let ctx = context().await;
+
+        let refused = ctx
+            .for_caller(&caller("a-user", &[], crate::api::Door::Shell))
+            .expect_err("a scope of nobody");
+
+        assert_eq!(refused.code(), crate::ErrorCode::Invalid);
     }
 
     #[tokio::test]
