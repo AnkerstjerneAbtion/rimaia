@@ -788,6 +788,16 @@ post-claim refusals behave today. Surfacing the runner's reason is 061's, most l
 through the runner's doctor report (054). Do not add a run row, a column or a message field
 here to fix it.
 
+**Built, 2026-10-11: one existing case corrected.** The acceptance criterion that
+`git diff` shows no change to an existing case in `board_contract.rs` is knowingly waived
+for one case, as Scope 9's "if the case itself is wrong, stop and say so" asks.
+`a_published_tail_reaches_a_tail_subscriber` published a tail for `"run-1"` under a lease
+that had started no run. Over HTTP `publish_remote_tail` admits a tail only while the lease
+is current **and** open for the run the tail names, because `TailRelay` caches tails by run
+id alone and a forged id would replace another run's catch-up tail. The case now starts a
+run on its lease and publishes that run's tail; its assertion is unchanged. D31's 052
+amendment records the rule and the correction.
+
 **A second known cost.** A run past `BUNDLE_CAP_BYTES` shows no in-app patch, and one
 whose lists alone pass it shows no bundle at all, only `NotRecorded`. Both are runs that
 touched thousands of files, which nobody reviews line by line in an overlay, and the forge

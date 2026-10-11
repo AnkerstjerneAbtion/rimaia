@@ -5568,9 +5568,24 @@ both (`crates/runner/tests/board_port_http.rs`). Point 2's trait gains no method
   053 uses both and restates neither.
 - **The tail is fenced over HTTP only** (043's hand-off). The route calls
   `service::publish_remote_tail`, which reads `lease::current` and publishes through
-  `ServiceContext::publish_tail` only when the lease holds, otherwise dropping at `debug`;
-  it answers `null` either way. In process a tail stays unfenced. `HttpBoard` queues tails
-  in a channel of 64 (`TAIL_BUFFER`) drained one post at a time; a full queue drops.
+  `ServiceContext::publish_tail` only when **the lease is current for the token's runner
+  and open for the run the tail names** (the `Lease` that `current` returns has that
+  `run_id`). Otherwise the tail is dropped at `debug`: a stale or foreign lease, and a
+  current lease open for no run or for another. It answers `null` either way. The run check
+  is not redundant with the fence: `TailRelay` caches the latest tail by run id alone, so
+  a runner holding any current lease could otherwise publish a forged live tail for another
+  member's run, or, given the id, replace the catch-up tail of a run in a team its owner is
+  not in. Every real tail follows the `start_run` that set its lease's run (point 7's
+  `execute` → `EventStream::create` → `publish_tail` row), so nothing legitimate is lost.
+  In process a tail stays unfenced. `HttpBoard` queues tails in a channel of 64
+  (`TAIL_BUFFER`) drained one post at a time; a full queue drops.
+- **One contract case was corrected, not left as it was** (task 052's Scope 9 forbids
+  editing a case, and says to say so when the case itself is wrong).
+  `a_published_tail_reaches_a_tail_subscriber` published a tail for `"run-1"` under a
+  lease that had started no run, which no real runner does, and which the run check above
+  rightly drops over HTTP. The case now calls `start_run` on its lease and publishes a tail
+  for that run's id; its assertion is unchanged. This is the only edit to an existing case,
+  and it knowingly waives the acceptance criterion that `board_contract.rs` shows none.
 - **The adapter.** `HttpBoard::new(origin, token, provider)` spawns its tail drain, refuses
   plain HTTP to any host but loopback (`is_loopback` or `localhost`), sets no timeout and
   never retries. It rebuilds an error from a body that has D8's shape **whatever the
