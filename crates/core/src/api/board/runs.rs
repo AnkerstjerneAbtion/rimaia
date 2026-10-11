@@ -2,9 +2,10 @@
 //! ADR-0013; seam-contract D29), and asking a runner to start a run (task
 //! 052).
 //!
-//! A start is a request to the board, which reaches the runner through the
-//! host's relay (`board::relay`): the shell's own starter in solo, and the
-//! runner's next claim on a server. The transcript reads read on this machine
+//! A start or a cancel is a request to the board, which reaches the runner
+//! through the host's relay (`board::relay`): the shell's own starter and
+//! in-flight registry in solo, and the runner's next claim or heartbeat on a
+//! server. The transcript reads read on this machine
 //! and stay local commands until task 056 flips them. The tail is the host's
 //! tail relay's (task 048).
 
@@ -14,6 +15,7 @@ use serde::Deserialize;
 use super::{ByRunId, ByTaskId};
 use crate::api::BoardRequest;
 use crate::board::relay::{self, StartRequest};
+use crate::board::service;
 use crate::db::{Run, RunKind, RunStatus};
 use crate::runner::events::RunTail;
 use crate::runs::{self, RunDetail, RunFilter, RunListEntry};
@@ -68,6 +70,23 @@ pub async fn retry_task_now(request: BoardRequest, args: StartTask) -> Result<()
         },
     )
     .await
+}
+
+/// Cancel: asks whichever runner holds the task to stop its run.
+///
+/// Who may ask is `board::service::authorize_cancel`'s: the holding runner's
+/// owner or an owner of the task's team. The request then goes through the
+/// host's relay: in solo straight to this machine's in-flight run, a start
+/// still in its preflight included; on a server onto the holding runner's
+/// heartbeats. With nothing running it does nothing, as the button always
+/// has.
+pub async fn cancel_task_run(request: BoardRequest, args: ByTaskId) -> Result<()> {
+    let lease = service::authorize_cancel(&request.ctx, &args.task_id).await?;
+    request
+        .host
+        .relay
+        .cancel(&request.ctx, &args.task_id, lease)
+        .await
 }
 
 /// Ends a task's retry loop: `waiting_retry -> failed`.

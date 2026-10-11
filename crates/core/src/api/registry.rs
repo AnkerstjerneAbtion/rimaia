@@ -11,9 +11,9 @@
 //! board row is not done until it has a case in `testing/api.rs`.
 //!
 //! A row's kind says where the command is served **today** (D32 point 8). The
-//! eight commands that still spawn, cancel or read on this machine are `local`
-//! rows with a comment naming the task that flips them, and a flip is one
-//! commit across this file, the handler list and `commands.ts`. The three
+//! commands that still read on this machine are `local` rows with a comment
+//! naming the task that flips them, and a flip is one commit across this file,
+//! the handler list and `commands.ts`. The three
 //! planning commands are local for good (D32's amendment on them).
 //!
 //! [`dispatch`]: super::dispatch
@@ -229,7 +229,7 @@ pub static COMMANDS: LazyLock<Vec<Command>> = LazyLock::new(|| {
         local("list_local_worktrees"),
         // runs
         board("start_task_run", Write, runs::start_task_run),
-        local("cancel_task_run"), // local until task 052 flips it to board
+        board("cancel_task_run", Write, runs::cancel_task_run),
         board("retry_task_now", Write, runs::retry_task_now),
         board("give_up_on_task", Write, runs::give_up_on_task),
         board("get_run_tail", Read, runs::get_run_tail),

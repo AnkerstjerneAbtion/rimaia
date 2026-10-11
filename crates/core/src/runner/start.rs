@@ -139,6 +139,13 @@ pub async fn claim_manual_start(
 
     probe_cli(config.provider.as_ref(), &config.program).await?;
 
+    // A Cancel pressed while the probe ran reached this start's slot and has
+    // nothing else to stop yet (task 052's `ShellRelay::cancel`): the start
+    // ends here, before the claim writes anything.
+    if slot.cancel_signal().is_cancelled() {
+        return Err(Error::invalid(CANCELLED_BEFORE_THE_CLAIM));
+    }
+
     let claim = board
         .claim(ClaimTarget::Run {
             task_id: start.task_id.clone(),
@@ -177,6 +184,9 @@ pub async fn record_claim(
     }
     Ok(())
 }
+
+/// The sentence a start answers when a Cancel reached it before its claim.
+pub const CANCELLED_BEFORE_THE_CLAIM: &str = "this start was cancelled before its run began";
 
 /// The sentence a person reads when another starter got there first, or, for
 /// a relayed Run now, when the task has no edge for the claim (task 052).

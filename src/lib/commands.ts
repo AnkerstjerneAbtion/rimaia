@@ -1129,7 +1129,7 @@ function withRunner(taskId: string, runnerId?: string): Record<string, unknown> 
  * already finished.
  */
 export function cancelRun(taskId: string): Promise<void> {
-  return local<void>("cancel_task_run", { taskId });
+  return board<void>("cancel_task_run", { taskId });
 }
 
 /**

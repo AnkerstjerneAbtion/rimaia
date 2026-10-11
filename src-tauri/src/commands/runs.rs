@@ -1,23 +1,14 @@
-//! Starting and cancelling a run (task 008; ADR-0004, ADR-0011, ADR-0012,
-//! ADR-0013).
+//! The run reads that read this machine (task 015, ADR-0013): a transcript's
+//! pages, its summary and a search, where its file is, revealing it, and the
+//! storage report and pruning.
 //!
-//! Every decision that matters — whether the repository has opted in,
-//! whether the CLI is installed, how the process is supervised, how the
-//! ending is classified, where the outcome is stored — lives in
-//! `rimaia_core::runner`. What a desktop shell has to add on top of a single
-//! `run_task` call is two things a library function cannot be: a button that
-//! returns before the work it started is done, and something for a second
-//! click on the same task to fail against instead of a second child process.
-//!
-//! "Read the *most recent* run's outcome" needs no command of its own: that is
-//! `TaskDetail.lastRun`, which the board command `get_task` already returns —
-//! the run this crate just started **is** the task's most recent attempt for
-//! as long as the in-flight registry refuses a second concurrent one. The run
-//! reads every client sees, `get_run` and the history lists among them, are
-//! board commands in `rimaia_core::api::board::runs` (seam-contract D32); what
-//! stays here starts, cancels or reads on this machine. The live tail's
-//! catch-up read, `get_run_tail`, is a board command answered from the host's
-//! tail relay (task 048).
+//! Starting, retrying and cancelling a run are board commands (task 052),
+//! answered in `rimaia_core::api::board::runs` and relayed to this machine's
+//! runner by `rimaia_runner::relay::ShellRelay`. The run reads every client
+//! sees, `get_run` and the history lists among them, are board commands too
+//! (seam-contract D32), and so is the live tail's catch-up read,
+//! `get_run_tail`, answered from the host's tail relay (task 048). The
+//! transcript reads here stay local until task 056 flips them.
 
 use rimaia_core::runs::transcript::{self, SearchHit, TranscriptPage};
 use rimaia_core::runs::{self, PruneCriterion, PruneResult};
@@ -27,18 +18,6 @@ use tauri::State;
 use tauri_plugin_opener::OpenerExt;
 
 use crate::state::AppState;
-
-/// Asks `task_id`'s in-flight run to stop.
-///
-/// A no-op, not an error, when nothing is running for a task the caller can
-/// see — matching `CancelSignal::cancel`'s own idempotence. A task outside the
-/// caller's scope is answered as a missing one (`runs::cancel_in_flight`). The
-/// run itself terminates on ADR-0004's schedule (SIGTERM, a grace period, then
-/// SIGKILL) inside `runner::process::execute`; this only delivers the request.
-#[tauri::command]
-pub async fn cancel_task_run(state: State<'_, AppState>, task_id: String) -> Result<()> {
-    runs::cancel_in_flight(&state.context, &state.in_flight, &task_id).await
-}
 
 // ---------------------------------------------------------------------------
 // Run history, run detail and the transcript viewer (task 015, ADR-0013)

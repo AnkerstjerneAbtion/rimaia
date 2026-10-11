@@ -802,7 +802,6 @@ static LOCAL_CASES: &[LocalCase] = &[
     local_case("set_worktree_auto_cleanup", Local::EntityLess),
     local_case("list_local_worktrees", Local::EntityLess),
     // runs
-    local_case("cancel_task_run", Local::Ids(Take::Task)),
     local_case("read_run_transcript_page", Local::Ids(Take::Run)),
     local_case("search_run_transcript", Local::Ids(Take::Run)),
     local_case("summarize_run_transcript", Local::Ids(Take::Run)),
@@ -1123,21 +1122,6 @@ async fn run_local(name: &str, teams: &TwoTeams, subject: &Subject) -> rimaia_co
         "get_worktree_auto_cleanup" => value(worktree::auto_cleanup(machine).await),
         "set_worktree_auto_cleanup" => {
             value(worktree::set_auto_cleanup(machine, worktree::AutoCleanup::Off).await)
-        }
-        // B's task is really running, so a handler that cancels by bare id
-        // is caught by the run it stops and not only by the answer it gives.
-        "cancel_task_run" => {
-            let held = teams
-                .in_flight
-                .acquire_unbounded(task_id, &teams.team_b.repository.id, SlotOwner::Manual)
-                .expect("B's task is not yet running");
-            let answer = runs::cancel_in_flight(ctx, &teams.in_flight, task_id).await;
-            if held.cancel_signal().is_cancelled() {
-                return Err(rimaia_core::Error::internal(
-                    "team B's run was cancelled by team A",
-                ));
-            }
-            answer.map(|()| Value::Null)
         }
         "read_run_transcript_page" => {
             let path = runs::transcript_of(ctx, &teams.paths, run_id).await?;

@@ -712,6 +712,14 @@ pub static BOARD_CASES: &[BoardCase] = &[
             |t| json!({ "taskId": t.team_b.ready, "runnerId": t.team_a.credentials.paired_runner_id }),
         ),
     },
+    // Nothing of team A's is running, so there is nothing to stop: the
+    // button's idempotence.
+    BoardCase {
+        name: "cancel_task_run",
+        effect: Effect::Write,
+        own: |t| json!({ "taskId": t.team_a.ready }),
+        foreign: Foreign::Ids(|t| json!({ "taskId": t.team_b.ready })),
+    },
     BoardCase {
         name: "give_up_on_task",
         effect: Effect::Write,
