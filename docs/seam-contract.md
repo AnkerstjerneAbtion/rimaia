@@ -7639,6 +7639,144 @@ and keep an upgrade from becoming a reload loop.
 
 ---
 
+## D41 — Task 051's cross-cutting choices
+
+**Question.** ADR-0029 points 3, 4 and 6 say teams have two roles, a last owner, invitation
+links and a deletion path. They do not say what an invitation token looks like on the wire or in a
+log, which URL carries it, how the five ways a token can be unusable are told apart, how the
+last-owner rule survives two concurrent demotions, what a personal team may never lose, what
+leaving a team takes with it, which commands the team header narrows, what deleting does to a
+restricted token, what a solo board answers, what a client hears when a team changes, or what a
+copy carries. 053, 054, 056, 060 and 061 each build on the answers.
+
+**Decision.**
+
+1. **An invitation token is `rmi_` and 256 bits, outside `TokenKind`, and its link is a
+   fragment.** `identity::secret::mint_invitation_token` builds `rmi_` + `BASE64URL_NOPAD` of 32
+   CSPRNG bytes, stored as `secret::hash` of the whole string in `invitations.token_hash` and
+   returned once, in `create_invitation`'s answer. `TokenKind` does not gain a variant: it spells
+   `api_tokens.kind`'s `CHECK` and `Authenticate` maps each of its prefixes to a door, so an
+   `rmi_` token presented as a bearer is refused as an unknown prefix before any table is read.
+   Core returns the token, never a URL; the client builds `<origin>/invite#<token>`, and the MCP
+   tool returns the token beside the path `/invite#<token>`. The fragment never reaches a request
+   line, a `Referer` or an access log, and the accept page posts the token in a command's body,
+   which `dispatch` never records (D32 point 2).
+2. **`/invite` is the one deep link, and the token waits in `sessionStorage`.** `rimaia-server`
+   serves `index.html` for `GET /invite` exactly, with D40 point 2's three headers; `/invite/<x>`
+   and every other unknown path stay `404` (amends D40 point 1). `App.tsx` routes on
+   `location.pathname === '/invite'`: before any request it moves the fragment into
+   `sessionStorage` under `rimaia.invitation` and replaces the address with `/invite`. A signed-out
+   visitor signs in, lands on `/` (047's callback), and the kept token reopens the accept page. It
+   is removed the moment it is used, refused, or declined.
+3. **Every unusable token gets one answer.** Unknown, expired (at or after `expires_at`), revoked
+   and accepted tokens are all `not_found`, `this invitation link is not valid any more: ask a team
+   owner for a new one`, from `preview_invitation` and `accept_invitation` alike. Acceptance is one
+   conditional `UPDATE … WHERE accepted_at IS NULL AND revoked_at IS NULL AND expires_at > now
+   RETURNING team_id, role`, then the membership insert, so single use takes no lock of its own. A
+   caller already in the team is refused `invalid` (`you are already a member of <name>`) and the
+   transaction rolls back, leaving the invitation unused and their role unchanged.
+4. **Roles are read in the write's own `BEGIN IMMEDIATE` transaction, and the last-owner rule
+   writes first and counts after.** `teams::require_owner(&mut conn, ctx, team_id, action)` checks
+   the scope (a team outside it, or one the actor has left, is `not_found`, `There is no team with
+   that id.`), then the actor's row in `team_memberships` (a member is `invalid`, `only an owner of
+   this team can <action>`). It never reads `Caller.teams`. `set_team_in` calls it for every team
+   key with one phrase, `change the team's settings`, so `set_team` and every caller of
+   `set_team_in` now open `BEGIN IMMEDIATE`. The repository writes (`repo::register` after the
+   clone's checks, so no write lock is held while `git` runs; `update`, `remove`, the ceiling and
+   `set_repository_review_config`) each name their own phrase. The ceiling checks the role before
+   the personal-team refusal. `set_member_role`, `remove_member`, `leave_team` and account
+   deletion apply their change, then count the team's owners in the same transaction and refuse
+   `<name> needs at least one owner: make someone else an owner first` at zero. `list_invitations`
+   is a read that calls `require_owner`, inside an immediate transaction too.
+5. **A personal team always keeps its person, and goes only with its account.** Removing,
+   demoting or the leaving of `teams.personal_user_id` is `invalid`, `a personal team always keeps
+   the person it belongs to as an owner`; `delete_team` on it is `invalid`, `a personal team is
+   deleted with its account, not on its own`. Others may be invited into it, as owners or members.
+6. **Removal withdraws, in the same transaction** (`teams::members::remove_member_in`, which
+   `leave_team` shares): the person's assignments in the team are cleared (`assignee_id` and
+   `assigned_by`), pins on the team's tasks naming their runners are cleared, their runners leave
+   the team's pool, every **unexpired** lease their runners hold on the team's tasks gets
+   `expires_at = now` (an already-expired one is left as it is), their trust rows in the team go
+   in both directions, a token restricted to the team alone is deleted and one restricted to it
+   and others loses only this team's row. Every `UPDATE` of `tasks` returns its ids, the leases'
+   task ids join them, and after commit the service publishes `Teams` and one `tasks` event (never
+   empty). Re-joining starts from nothing: both were decisions about a member.
+7. **053's expiry sweep must not pin a task to a runner whose owner is no longer a member of the
+   task's team.** A lease expired by a removal is closed by that sweep as `interrupted`; pinning
+   its task to the departed person's runner would leave it pinned to a machine that can no longer
+   reach it, and never claimed again. 053 carries a test for it.
+8. **The fourteen team rows ignore `Rimaia-Team`, and that never widens a credential.**
+   `api::registry::ignores_team_header` gains `create_team`, `list_team_members`,
+   `set_member_role`, `remove_member`, `leave_team`, `create_invitation`, `list_invitations`,
+   `revoke_invitation`, `preview_invitation`, `accept_invitation`, `list_copy_targets`,
+   `copy_task_to_team`, `delete_team` and `delete_account`, beside D40 point 4's thirteen. Each
+   names its team by id, acts on the person, or carries a token, and narrowing would break the
+   copy's target, the picker's other teams and the account page's read of the personal team. Their
+   scope is `Caller.teams` as `Authenticate` read it: every membership on a board route, a
+   restricted token's intersection on `/mcp` (060).
+9. **`purge` refuses running work, and expired leases block an account's deletion.**
+   `teams::delete::purge` is the one place a team's rows go, shared by `delete_team` and
+   `delete_account`: it refuses any unexpired lease on the team's tasks, whoever's runner holds it
+   (`<n> of <name>'s tasks are running: wait for them or cancel them first`), deletes the tokens
+   restricted to the team alone, then edges, tasks, repositories and the team, in D28's order. An
+   expired lease there does not block, because its task goes too. Account deletion refuses a lease
+   its runners hold on another team's task **expired or not** (`your runner <label> is still
+   holding work: wait for it to be released`): `runner_leases.runner_id` is `RESTRICT`, and the
+   task survives with a run 053's sweep must close first. It also refuses a person who is the only
+   owner of a shared team, naming the teams.
+10. **Deleting a team never widens a token.** D28 reads "no `api_token_teams` rows" as every
+    team, so step 2 of `purge` deletes a token whose only restriction is the team before the
+    team's cascade could empty it.
+11. **A solo board refuses team management.** Every write of the team service and
+    `preview_invitation` answer `invalid`, `a solo board has one team: teams need a Rimaia server`,
+    when a `solo_identity` row exists (D28's discriminator). `list_team_members` and
+    `list_copy_targets` answer with solo's one member and one team.
+12. **`Change::Teams`, `teams:changed`, and who is told to resolve again.** `Change::Teams(ids)`,
+    built by `ChangeEvent::teams(team_id)` with `Audience::Team`, is published after creating a
+    team, a role change, a removal or departure, an accepted or revoked invitation and a deletion
+    (with the deleted task and repository ids under the deleted team), and by account deletion for
+    each other team the person was in. Creating an invitation publishes nothing. Core's
+    `board_wire` maps it to `teams:changed` with the ids, and `board_reread()` ends with
+    `teams:changed []`, so the burst after a stream reopens makes the switcher re-read.
+    `EVENT_SOURCES` maps `teams:changed` to `board`; the shell gains no code. After commit the
+    handler calls `StreamControl::revalidate` for the affected user on `set_member_role`,
+    `remove_member`, `leave_team` and `accept_invitation`, for the creator on `create_team`, for
+    every former member on `delete_team`, and for the deleted user and the personal team's other
+    members on `delete_account`. The frontend re-reads `list_teams` on every `teams:changed`, and
+    a team that is gone falls back to the personal team.
+13. **A copy carries the title, the plan and the extra instructions, and nothing else.**
+    `copy_task_to_team(task, repository)` reads the source in scope and creates the copy through
+    `tasks::create_task` in `not_ready`, so the copier is its author, its plan revision is 1 and
+    its source is the door's. Runs, links, dependencies, branch, strategy, model, effort, review
+    settings, assignee and archive state stay behind.
+
+**Why.** (1) to (3) keep a capability out of every log and give a holder nothing to probe with.
+(4) and (5) make the two roles and the one owner a property of the store's own transaction, not of
+whatever a request remembered. (6), (7), (9) and (10) are what keeps a departed person's machine,
+trust and tokens from reaching a team that let them go, and keeps a deletion from silently widening
+a credential or leaving a run nobody closes. (8) and (11) keep the switcher's scope the one
+`Authenticate` read, and solo a board of one team. (12) is what keeps every open stream and the
+switcher honest about a person's team set.
+
+A consequence the fixture made visible: a shared team's seeded base instructions are its creator's
+first revision (ADR-0032 point 3), so a member's runner must accept or trust them, and a member's
+write during any run in that team is marked (point 6). `testing::shared::SharedTeam` has Bob accept
+revision 1, so its tests start owing nothing. 061's interface shows what is owed.
+
+**What the next tasks expect.**
+
+- **053:** the pin condition in point 7, with a test.
+- **054:** `repo::register`'s owner check, kept in the board half.
+- **056:** extends `purge` to delete transcript files and stored patches.
+- **060:** the `team` argument and `list_teams`; leaves `create_invitation`, `accept_invitation`
+  and `set_member_role` off the hosted endpoint, while they keep their tools on the embedded one.
+- **061:** shows unassigned tasks after a removal, from point 6's `tasks` event, and what a
+  member owes for the seeded instructions.
+
+**Binds.** 053, 054, 056, 060, 061.
+
+---
+
 ## How to use this
 
 An implementation task reads the entries its number appears in, before writing code:
@@ -7694,16 +7832,16 @@ An implementation task reads the entries its number appears in, before writing c
 | [048](../tasks/048-events-over-sse.md) | D2 · D4 · D6 · D7 · D8 · D10 · D14 · D24 · D28 · D31 · D32 · D33 · D34, and writes D38 |
 | [049](../tasks/049-frontend-transport.md) | D4 · D6 · D7 · D8 · D14 · D20 · D28 · D32 · D33 · D34 · D38, and writes D39 |
 | [050](../tasks/050-the-web-shell.md) | D4 · D6 · D7 · D8 · D10 · D11 · D12 · D14 · D22 · D28 · D29 · D32 · D33 · D34 · D38, and writes D40 |
-| [051](../tasks/051-teams-invitations-and-roles.md) | D2 · D3 · D4 · D6 · D7 · D8 · D10 · D16 · D28 · D32 · D33 · D34, and the entries 045, 048, 050 and 073 add |
+| [051](../tasks/051-teams-invitations-and-roles.md) | D3 · D4 · D6 · D7 · D8 · D10 · D16 · D28 · D32 · D33 · D34, the entries 045, 047, 048 and 050 appended (D36, D32's 047 amendment, D38, D40), and writes D41 |
 | [052](../tasks/052-the-runner-protocol-and-an-http-board-adapter.md) | D4 · D6 · D8 · D10 · D14 · D19 · D28 · D29 · D31 · D32 · D33 · D34 · D37 · D38 |
-| [053](../tasks/053-leases-across-the-network.md) | D4 · D6 · D8 · D9 · D11 · D12 · D14 · D17 · D19 · D21 · D28 · D29 · D31 · D32 · D33 · D37 |
+| [053](../tasks/053-leases-across-the-network.md) | D4 · D6 · D8 · D9 · D11 · D12 · D14 · D17 · D19 · D21 · D28 · D29 · D31 · D32 · D33 · D37 · D41 |
 | [054](../tasks/054-repositories-by-remote.md) | D2 · D4 · D6 · D7 · D8 · D10 · D11 · D20 · D22 · D25 · D26 · D28 · D30 · D31 · D32 · D33 · D34 |
 | [055](../tasks/055-the-run-scoped-proxy-and-consent-laundering.md) | D4 · D6 · D8 · D17 · D27 · D28 · D29 · D30 · D31 · D32 · D33 · D34 |
 | [056](../tasks/056-transcripts-leave-the-machine.md) | D3 · D4 · D5 · D6 · D8 · D9 · D10 · D14 · D17 · D18 · D19 · D20 · D23 · D25 · D28 · D29 · D31 · D32 · D33 · D34 · D38 |
 | [057](../tasks/057-push-postcondition-and-run-elsewhere.md) | D4 · D6 · D8 · D9 · D12 · D17 · D20 · D23 · D25 · D28 · D29 · D30 · D31 · D32 · D33 · D34 · D37 |
 | [058](../tasks/058-the-headless-runner.md) | D3 · D4 · D6 · D8 · D9 · D10 · D11 · D15 · D19 · D20 · D22 · D25 · D28 · D30 · D31 · D32 · D33 · D34 |
 | [059](../tasks/059-desktop-connected-mode.md) | D3 · D4 · D6 · D7 · D8 · D10 · D11 · D15 · D16 · D19 · D20 · D25 · D27 · D28 · D29 · D30 · D31 · D32 · D33 · D34 · D35 · D38 |
-| [060](../tasks/060-hosted-mcp.md) | D4 · D6 · D8 · D16 · D17 · D19 · D20 · D23 · D25 · D28 · D30 · D31 · D32 · D33 · D34 · D35, and the entries 045, 048, 050, 051 and 073 add |
+| [060](../tasks/060-hosted-mcp.md) | D4 · D6 · D8 · D16 · D17 · D19 · D20 · D23 · D25 · D28 · D30 · D31 · D32 · D33 · D34 · D35 · D41, and the entries 045, 048, 050 and 073 add |
 | [061](../tasks/061-assignment-consent-and-runners-in-the-interface.md) | D3 · D4 · D6 · D7 · D8 · D9 · D10 · D12 · D16 · D17 · D28 · D29 · D30 · D31 · D32 · D33 · D34 · D35, and the entries 045, 050, 051, 054, 058, 060 and 073 add |
 | [062](../tasks/062-hosting.md) | D4 · D5 · D6 · D8 · D11 · D19 · D28 · D29 · D31 · D32 · D33 · D34 |
 | [063](../tasks/063-a-signed-desktop-updater.md) | D4 · D6 · D7 · D8 · D9 · D11 · D15 · D20 · D28 · D32 · D33 · D34 |
