@@ -39,6 +39,7 @@ import {
   setStrategyApproval,
   setStrategyCatalogue,
   setStrategyDefaults,
+  startRun,
   toRimaiaError,
 } from "./commands";
 import { installTransports } from "./client";
@@ -220,6 +221,26 @@ describe("the execution-strategy wrappers (task 020)", () => {
     await expect(setStrategyCatalogue("{ models: [] }")).rejects.toEqual({
       code: "invalid",
       message: "the catalogue is not valid JSON: key must be a string at line 1 column 3",
+    });
+  });
+});
+
+describe("Run now names its runner only when given one (task 052)", () => {
+  beforeEach(() => {
+    mockInvoke.mockReset();
+    mockInvoke.mockResolvedValue(undefined);
+  });
+
+  it("sends the task alone when no runner is named", async () => {
+    await startRun("task-1");
+    expect(mockInvoke).toHaveBeenCalledWith("start_task_run", { taskId: "task-1" });
+  });
+
+  it("sends the runner when one is named", async () => {
+    await startRun("task-1", "runner-1");
+    expect(mockInvoke).toHaveBeenCalledWith("start_task_run", {
+      taskId: "task-1",
+      runnerId: "runner-1",
     });
   });
 });

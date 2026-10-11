@@ -1109,9 +1109,18 @@ export function setWorktreeAutoCleanup(setting: AutoCleanup): Promise<void> {
  * A repository that has not opted in to unattended runs (ADR-0012), a
  * missing `claude` CLI, or a task already running rejects with a
  * {@link RimaiaError} describing which.
+ *
+ * `runnerId` names the runner to start it on (task 052), and is sent only
+ * when given: the desktop's own window starts on this machine's runner and
+ * sends `{ taskId }` alone, as it always has.
  */
-export function startRun(taskId: string): Promise<void> {
-  return local<void>("start_task_run", { taskId });
+export function startRun(taskId: string, runnerId?: string): Promise<void> {
+  return board<void>("start_task_run", withRunner(taskId, runnerId));
+}
+
+/** `{ taskId }`, with `runnerId` only when a runner was named. */
+function withRunner(taskId: string, runnerId?: string): Record<string, unknown> {
+  return runnerId === undefined ? { taskId } : { taskId, runnerId };
 }
 
 /**

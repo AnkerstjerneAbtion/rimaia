@@ -38,7 +38,7 @@ async fn dispatch_refuses_a_local_or_unknown_name_as_not_found() {
     let teams = TwoTeams::new().await;
     let host = testing_api::host(&teams).await;
 
-    for name in ["get_app_info", "start_task_run", "no_such_command"] {
+    for name in ["get_app_info", "get_run_log_path", "no_such_command"] {
         let refused = api::dispatch(&host, team_a(&teams), name, json!({}))
             .await
             .expect_err(name);

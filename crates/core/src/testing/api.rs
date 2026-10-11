@@ -690,6 +690,16 @@ pub static BOARD_CASES: &[BoardCase] = &[
         foreign: Foreign::Ids(|t| json!({ "taskId": t.team_b.ready })),
     },
     // runs
+    // On team A's own paired runner, which the fixture marked seen: the relay
+    // holds the request for its next claim (task 052).
+    BoardCase {
+        name: "start_task_run",
+        effect: Effect::Write,
+        own: |t| json!({ "taskId": t.team_a.ready, "runnerId": t.team_a.credentials.paired_runner_id }),
+        foreign: Foreign::Ids(
+            |t| json!({ "taskId": t.team_b.ready, "runnerId": t.team_a.credentials.paired_runner_id }),
+        ),
+    },
     BoardCase {
         name: "give_up_on_task",
         effect: Effect::Write,

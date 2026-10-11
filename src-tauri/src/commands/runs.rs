@@ -31,47 +31,6 @@ use tauri_plugin_opener::OpenerExt;
 
 use crate::state::AppState;
 
-/// Starts a manual run of `task_id` and returns as soon as it is under way —
-/// **not once it finishes.**
-///
-/// `run_task` supervises a real `claude` process for however long the agent
-/// takes; a command that awaited it would hold the "Run now" button's promise
-/// open for the run's entire duration. The spawned task below is what
-/// actually drives the long half — worktree preparation, the strategy run, the
-/// process itself — and the caller learns how that goes the same way every
-/// other view does: `tasks:changed` / `runs:changed` (ADR-0018) once the row
-/// changes, and `runs:tail` (seam-contract D14) while it is in flight.
-///
-/// Everything a click can be refused for is settled by
-/// [`claim_manual_start`] before this returns — the in-flight slot, ADR-0012's
-/// opt-in, whether the provider can honour the run, the `claude`
-/// prerequisite and the claim itself — so the "Run now" button renders the
-/// refusal (`TaskCard`'s `runError`) rather than it only ever reaching
-/// `tracing::error!` inside a detached task nobody is still watching. That
-/// preflight is a rule, and it lives in `rimaia-core` (ADR-0006).
-///
-/// The posture is the board's answer, not this command's: the button is on the
-/// runner's own machine, so it asks as an owner at the runner
-/// ([`Starter::at_runner`]), which `authorize_start` answers with ADR-0012's
-/// conservative `acceptEdits` posture (ADR-0031 point 7). The unattended,
-/// `bypassPermissions` path is the queue's, or a remote Run now's (task 052).
-#[tauri::command]
-pub async fn start_task_run(state: State<'_, AppState>, task_id: String) -> Result<()> {
-    start_by_hand(
-        &state,
-        ManualStart {
-            task_id,
-            // "Run now" starts, it does not continue. Resuming a session is
-            // `retry_task_now`'s job, and the two are separate buttons because
-            // they mean different things to a human looking at a card: one
-            // says "do this work", the other says "carry on with the work you
-            // were doing".
-            continue_session: false,
-        },
-    )
-    .await
-}
-
 /// Resumes a task that is waiting out a retry, **now**, without waiting for its
 /// deadline.
 ///

@@ -1,20 +1,56 @@
-//! The run reads every client sees, and giving up on a retry loop (task 015,
-//! ADR-0013; seam-contract D29).
+//! The run reads every client sees, giving up on a retry loop (task 015,
+//! ADR-0013; seam-contract D29), and asking a runner to start a run (task
+//! 052).
 //!
-//! Starting, cancelling, retrying and the transcript reads spawn, signal or
-//! read on this machine, and stay local commands in the shell until the tasks
-//! D32's appendix names flip them. The tail is the host's relay's (task 048).
+//! A start is a request to the board, which reaches the runner through the
+//! host's relay (`board::relay`): the shell's own starter in solo, and the
+//! runner's next claim on a server. The transcript reads read on this machine
+//! and stay local commands until task 056 flips them. The tail is the host's
+//! tail relay's (task 048).
 
 use chrono::{DateTime, Utc};
 use serde::Deserialize;
 
 use super::{ByRunId, ByTaskId};
 use crate::api::BoardRequest;
+use crate::board::relay::{self, StartRequest};
 use crate::db::{Run, RunKind, RunStatus};
 use crate::runner::events::RunTail;
 use crate::runs::{self, RunDetail, RunFilter, RunListEntry};
 use crate::scheduler;
 use crate::Result;
+
+/// What the frontend sends [`start_task_run`]: the task, and the runner to
+/// start it on. A solo window sends `{ taskId }` alone, as it always has; a
+/// browser names the runner (task 069 gives it the picker).
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StartTask {
+    pub task_id: String,
+    #[serde(default)]
+    pub runner_id: Option<String>,
+}
+
+/// Run now: asks one runner to start the task (ADR-0031 point 7). Answers
+/// once the start is relayed, never once the run finishes; the run's
+/// progress arrives as `tasks:changed`, `runs:changed` and `runs:tail`.
+///
+/// Who may ask, and which runner it reaches, are `board::relay::request_start`'s:
+/// only the runner's owner, and in solo the installation's own runner, whose
+/// starter answers every refusal before this returns.
+pub async fn start_task_run(request: BoardRequest, args: StartTask) -> Result<()> {
+    relay::request_start(
+        &request.ctx,
+        &request.caller.door,
+        request.host.relay.as_ref(),
+        StartRequest {
+            task_id: args.task_id,
+            runner_id: args.runner_id,
+            continue_session: false,
+        },
+    )
+    .await
+}
 
 /// Ends a task's retry loop: `waiting_retry -> failed`.
 ///

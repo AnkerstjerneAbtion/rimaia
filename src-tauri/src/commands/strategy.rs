@@ -25,8 +25,9 @@ use crate::state::AppState;
 /// way — **not once it finishes.**
 ///
 /// The panel's "Plan now", for a task whose planner failed or whose proposal was
-/// cleared. Shaped exactly like [`start_task_run`](super::runs::start_task_run)
-/// and for the same reasons, which that function's doc gives in full: a real
+/// cleared. Shaped exactly like Run now's start
+/// ([`ShellRelay`](rimaia_runner::relay::ShellRelay)) and for the same
+/// reasons: a real
 /// `claude` process runs for however long it takes, so awaiting it here would
 /// hold the button's promise open for the whole planner run, and the caller
 /// learns how it went the way every other view does — `tasks:changed` once

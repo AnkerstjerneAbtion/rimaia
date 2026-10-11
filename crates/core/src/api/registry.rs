@@ -228,7 +228,7 @@ pub static COMMANDS: LazyLock<Vec<Command>> = LazyLock::new(|| {
         local("set_worktree_auto_cleanup"),
         local("list_local_worktrees"),
         // runs
-        local("start_task_run"),  // local until task 052 flips it to board
+        board("start_task_run", Write, runs::start_task_run),
         local("cancel_task_run"), // local until task 052 flips it to board
         local("retry_task_now"),  // local until task 052 flips it to board
         board("give_up_on_task", Write, runs::give_up_on_task),

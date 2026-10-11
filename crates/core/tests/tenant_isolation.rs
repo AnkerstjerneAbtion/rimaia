@@ -802,7 +802,6 @@ static LOCAL_CASES: &[LocalCase] = &[
     local_case("set_worktree_auto_cleanup", Local::EntityLess),
     local_case("list_local_worktrees", Local::EntityLess),
     // runs
-    local_case("start_task_run", Local::Ids(Take::Task)),
     local_case("cancel_task_run", Local::Ids(Take::Task)),
     local_case("retry_task_now", Local::Ids(Take::Task)),
     local_case("read_run_transcript_page", Local::Ids(Take::Run)),
@@ -1127,7 +1126,7 @@ async fn run_local(name: &str, teams: &TwoTeams, subject: &Subject) -> rimaia_co
             value(worktree::set_auto_cleanup(machine, worktree::AutoCleanup::Off).await)
         }
         // Up to the claim: the run after it is the shell's.
-        "start_task_run" | "retry_task_now" => {
+        "retry_task_now" => {
             let started = claim_manual_start(
                 Starter::at_runner(ctx, runner_id),
                 board.as_ref(),
@@ -1137,7 +1136,7 @@ async fn run_local(name: &str, teams: &TwoTeams, subject: &Subject) -> rimaia_co
                 &teams.in_flight,
                 ManualStart {
                     task_id: task_id.to_string(),
-                    continue_session: name == "retry_task_now",
+                    continue_session: true,
                 },
             )
             .await?;
