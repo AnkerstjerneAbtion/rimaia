@@ -1,7 +1,17 @@
 //! One team cannot see another's board through any door (task 039, ADR-0029
 //! point 5).
 //!
-//! # The registry
+//! # The command registry
+//!
+//! Task 046 keys the commands' half on `api::registry::COMMANDS`, and parses no
+//! Rust source to find them. Every board row has one case in
+//! `testing::api::BOARD_CASES`, the table `crates/server/tests/commands.rs`
+//! runs over HTTP too, and here each runs through `api::dispatch` with team A's
+//! owner as the caller: nothing of team B's in the answer, B's rows unchanged,
+//! every event naming team A, a foreign id answered `not_found`, and a foreign
+//! filter answered exactly as a never-issued id is.
+//!
+//! # The MCP tools
 //!
 //! One case per MCP tool, keyed by tool name, each written as data: a name,
 //! whether it writes, and a function that builds the argument object, naming
@@ -42,11 +52,13 @@ use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 use pretty_assertions::assert_eq;
+use rimaia_core::api::{self, Effect as ApiEffect, COMMANDS};
 use rimaia_core::mcp::{self, Grant, GrantKind, McpHandle, RunAccess, Tool};
 use rimaia_core::runner::provider::ProviderProfile;
 use rimaia_core::schedule::{self, ScheduleInput};
+use rimaia_core::testing::api::{self as testing_api, Foreign, BOARD_CASES};
 use rimaia_core::testing::teams::{TwoTeams, SENTINEL};
-use rimaia_core::{db::ScheduleMode, ServiceContext};
+use rimaia_core::{db::ScheduleMode, ErrorCode, ServiceContext};
 use rmcp::model::CallToolRequestParams;
 use rmcp::service::RunningService;
 use rmcp::transport::streamable_http_client::StreamableHttpClientTransportConfig;
@@ -411,6 +423,131 @@ fn every_mcp_tool_has_a_cross_team_case() {
         "a case for a tool that does not exist"
     );
     assert_eq!(cased.len(), unique.len(), "a tool with two cases");
+}
+
+// ---------------------------------------------------------------------------
+// The command registry (task 046)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn every_board_command_has_a_cross_team_case() {
+    // `(name, writes)`, so a case whose effect differs from its row's is a
+    // row with no case and a case with no row.
+    let board_rows: BTreeSet<(&str, bool)> = COMMANDS
+        .iter()
+        .filter_map(|command| {
+            command
+                .effect()
+                .map(|effect| (command.name, effect == ApiEffect::Write))
+        })
+        .collect();
+    let cased: BTreeSet<(&str, bool)> = BOARD_CASES
+        .iter()
+        .map(|case| (case.name, case.effect == ApiEffect::Write))
+        .collect();
+
+    assert_eq!(
+        board_rows.difference(&cased).collect::<Vec<_>>(),
+        Vec::<&(&str, bool)>::new(),
+        "a board row with no case, or with a case of another effect: add or fix it in \
+         crates/core/src/testing/api.rs's BOARD_CASES"
+    );
+    assert_eq!(
+        cased.difference(&board_rows).collect::<Vec<_>>(),
+        Vec::<&(&str, bool)>::new(),
+        "a case for no board row"
+    );
+    assert_eq!(BOARD_CASES.len(), cased.len(), "a board row with two cases");
+
+    // Only the board rows are required to have a case here. The local rows'
+    // half, run through the shell, is task 049's first commit (task 046's
+    // size cut), which removes this exemption.
+}
+
+#[tokio::test]
+async fn a_team_cannot_see_another_teams_ids_through_any_board_command() {
+    let mut teams = TwoTeams::new().await;
+    let host = testing_api::host(&teams);
+    let team_a = teams.team_a.team_id.clone();
+    let caller = testing_api::owner(&teams.team_a, testing_api::desktop("team-a"));
+
+    let mut failures: Vec<String> = Vec::new();
+    for case in BOARD_CASES {
+        let args = case
+            .foreign
+            .args(&teams)
+            .unwrap_or_else(|| (case.own)(&teams));
+        let before = teams.snapshot_b().await;
+        teams.drain_changes();
+        let answer = api::dispatch(&host, caller.clone(), case.name, args.clone()).await;
+        let events = teams.drain_changes();
+        let text = answer_text(&answer);
+
+        // 1. Nothing of B's leaks.
+        for leaked in testing_api::leaks(&teams.team_b, &args, &text) {
+            failures.push(format!(
+                "{}: the answer carries B's {leaked}: {text}",
+                case.name
+            ));
+        }
+        // 3. B's rows are unchanged.
+        let after = teams.snapshot_b().await;
+        if after != before {
+            failures.push(format!(
+                "{}: team B's rows changed\nbefore:\n{before}\nafter:\n{after}",
+                case.name
+            ));
+        }
+        // 4. Every event names team A.
+        for event in events.iter().filter(|event| event.team_id != team_a) {
+            failures.push(format!(
+                "{}: an event names another team: {event:?}",
+                case.name
+            ));
+        }
+        // 2. A foreign id reads as a missing one.
+        match &case.foreign {
+            Foreign::Ids(_) => {
+                if answer.as_ref().err().map(|error| error.code()) != Some(ErrorCode::NotFound) {
+                    failures.push(format!("{}: B's ids are not not_found: {text}", case.name));
+                }
+            }
+            Foreign::Filter(_) => {
+                let (fresh_args, substitutions) =
+                    testing_api::with_never_issued_ids(&teams.team_b, &args);
+                let fresh = api::dispatch(&host, caller.clone(), case.name, fresh_args).await;
+                let restored = testing_api::restore_ids(&answer_text(&fresh), &substitutions);
+                if restored != text {
+                    failures.push(format!(
+                        "{}: a foreign filter is answered differently from a missing one\n\
+                         foreign: {text}\n missing: {restored}",
+                        case.name
+                    ));
+                }
+            }
+            Foreign::EntityLess => {}
+        }
+    }
+
+    assert!(
+        failures.is_empty(),
+        "{} failure(s):\n{}",
+        failures.len(),
+        failures.join("\n\n")
+    );
+    assert_eq!(
+        teams.cli.started(),
+        Vec::<String>::new(),
+        "no case spawned anything"
+    );
+}
+
+/// An answer as the text a check scans: the value, or the error's payload.
+fn answer_text(answer: &rimaia_core::Result<Value>) -> String {
+    match answer {
+        Ok(value) => value.to_string(),
+        Err(error) => serde_json::to_string(error).expect("an error serializes"),
+    }
 }
 
 // ---------------------------------------------------------------------------

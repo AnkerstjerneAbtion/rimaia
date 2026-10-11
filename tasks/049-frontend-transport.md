@@ -53,6 +53,18 @@ implementations to it rather than replacing it", and this task holds to that.
 
 ## Scope
 
+**0. First commit: the local rows' half of 039's registry test (task 046's size cut).** 046
+wrote a cross-team case for every board row (`testing::api::BOARD_CASES`) and, as its Size
+note allows, left the local rows here. In this task's first commit,
+`crates/core/tests/tenant_isolation.rs` gains a case for every `local` row of
+`api::registry::COMMANDS`, keyed on the registry and parsing no Rust source. A local handler
+lives in the shell, which core cannot call, so each case runs the core functions that row's
+shell handler calls, under team A's context and `TwoTeams::machine`, with 039's checks 1, 3
+and 4 (nothing of B's in the answer, B's rows unchanged, every event naming team A) and, for
+a row that takes an id, check 2. The comment and the exemption at
+`every_board_command_has_a_cross_team_case` go in the same commit, so that test then fails
+for any row, board or local, without a case. Like 046, this changes no behaviour.
+
 **1. Commands choose a transport by kind.** In `src/lib/commands.ts`:
 
 - The installed transport becomes a pair, `{ board: CommandTransport, local:
@@ -463,6 +475,10 @@ reaches for a plugin fails the test instead of slipping under an allowance.
 
 ## Acceptance criteria
 
+- **The local half of the registry test (Scope 0), in this task's first commit:** every
+  `local` row of `api::registry::COMMANDS` has a cross-team case in
+  `crates/core/tests/tenant_isolation.rs`, and the board-rows-only exemption 046 left there
+  is gone.
 - **Commands, in `src/lib/commands.test.ts`** (extended), with `mockHttp()` and the
   existing `invoke` mock:
   - `it("posts a board command to /api/v1/<name> with the invoke arguments as its body")`.
