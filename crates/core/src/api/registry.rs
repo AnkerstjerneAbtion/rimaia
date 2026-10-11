@@ -92,6 +92,8 @@ pub static COMMANDS: LazyLock<Vec<Command>> = LazyLock::new(|| {
         local("get_app_info"),
         local("reveal_app_data_dir"),
         local("debug_provoke_error"),
+        local("get_client_capabilities"),
+        local("choose_folder"),
         // repositories
         board("list_repositories", Read, repositories::list_repositories),
         local("list_checkouts"),

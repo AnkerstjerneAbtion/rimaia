@@ -574,6 +574,8 @@ pub fn run() {
         commands::app::reveal_app_data_dir,
         #[cfg(debug_assertions)]
         commands::app::debug_provoke_error,
+        commands::app::get_client_capabilities,
+        commands::app::choose_folder,
         commands::repositories::list_checkouts,
         commands::repositories::register_repository,
         commands::repositories::set_repository_worktree_root,

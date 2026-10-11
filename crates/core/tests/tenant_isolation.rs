@@ -654,6 +654,11 @@ static LOCAL_CASES: &[LocalCase] = &[
         "debug_provoke_error",
         Local::NoCoreCall("returns a fixed error"),
     ),
+    local_case("get_client_capabilities", Local::EntityLess),
+    local_case(
+        "choose_folder",
+        Local::NoCoreCall("opens a native folder picker"),
+    ),
     // repositories
     local_case("list_checkouts", Local::EntityLess),
     local_case("register_repository", Local::EntityLess),
@@ -856,6 +861,10 @@ async fn run_local(name: &str, teams: &TwoTeams, subject: &Subject) -> rimaia_co
 
     match name {
         "get_app_info" => value(settings::onboarding_dismissed(machine).await),
+        "get_client_capabilities" => Ok(serde_json::to_value(
+            rimaia_core::api::capabilities::ClientCapabilities::desktop(runner_id.clone(), None),
+        )
+        .expect("capabilities serialize")),
         "list_checkouts" => value(repo::checkouts(ctx, machine).await),
         "register_repository" => {
             let source = TempRepo::init();

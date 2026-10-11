@@ -27,6 +27,7 @@ use crate::runner::provider::ProviderProfile;
 
 pub mod board;
 pub mod caller;
+pub mod capabilities;
 pub mod events;
 pub mod protocol;
 pub mod registry;
