@@ -1,5 +1,7 @@
 import { invoke, isTauri } from "@tauri-apps/api/core";
 
+import { reportSignedOut } from "./auth";
+
 import type {
   Account,
   Analytics,
@@ -58,6 +60,7 @@ import type {
   RunListEntry,
   RunState,
   RunTail,
+  RunnerListing,
   Schedule,
   ScheduleInput,
   ScheduleMode,
@@ -78,6 +81,7 @@ import type {
   TaskPatchInput,
   TaskReview,
   TaskSummary,
+  TeamListing,
   TranscriptPage,
   TranscriptSummary,
   UpdateRepositoryInput,
@@ -150,17 +154,32 @@ export type Credential =
   | { kind: "session"; csrf: () => string | null }
   | { kind: "bearer"; token: string };
 
+// The team on screen (task 050 Scope 3): transport metadata, as
+// `Rimaia-Protocol` is, so no command's arguments change and both transports
+// keep the wire shapes identical. The server narrows the caller to it; it is
+// sent on every request and stored nowhere there.
+let currentTeamId: string | null = null;
+
+/**
+ * Names the team the next requests are about, or `null` before one is chosen.
+ * `src/lib/team.ts` is the only caller. A component never sets a header.
+ */
+export function setCurrentTeam(teamId: string | null): void {
+  currentTeamId = teamId;
+}
+
 /**
  * Every header a request to the server carries, built afresh per request so a
- * new sign-in is picked up without reinstalling anything. The one place
- * request headers are built: the event stream calls it too, so a header added
- * here reaches both.
+ * new sign-in or a new team is picked up without reinstalling anything. The
+ * one place request headers are built: the event stream calls it too, so a
+ * header added here reaches both.
  */
 export function transportHeaders(credential: Credential): Record<string, string> {
   const headers: Record<string, string> = {
     "Content-Type": "application/json",
     "Rimaia-Protocol": PROTOCOL_VERSION,
   };
+  if (currentTeamId !== null) headers["Rimaia-Team"] = currentTeamId;
   if (credential.kind === "bearer") {
     headers.Authorization = `Bearer ${credential.token}`;
   } else {
@@ -213,6 +232,10 @@ export async function errorFromResponse(response: Response): Promise<RimaiaError
 export function httpCommandTransport(connection: {
   baseUrl: string;
   credential: Credential;
+  /** Called when the server answers `upgrade_required`: the page is older than
+   *  it. A browser reloads (once per bundle, see `client.ts`); a desktop leaves
+   *  it to the updater (task 063). The error still reaches the caller. */
+  onUpgradeRequired?: () => void;
 }): CommandTransport {
   const baseUrl = connection.baseUrl.replace(/\/+$/, "");
   return async (command, args) => {
@@ -231,7 +254,11 @@ export function httpCommandTransport(connection: {
         message: `Could not reach the server at ${originOf(baseUrl)}: ${reason}.`,
       } satisfies RimaiaError;
     }
-    if (!response.ok) throw await errorFromResponse(response);
+    if (!response.ok) {
+      const error = await errorFromResponse(response);
+      if (error.code === "upgrade_required") connection.onUpgradeRequired?.();
+      throw error;
+    }
     try {
       // A unit answer is `null` (D32 point 3).
       return JSON.parse(await response.text()) as unknown;
@@ -294,7 +321,11 @@ async function send<T>(
     const transport = installedTransports?.[kind] ?? invokeCommandTransport;
     return (await transport(command, args)) as T;
   } catch (thrown) {
-    throw toRimaiaError(thrown);
+    const error = toRimaiaError(thrown);
+    // A board command is the only kind a server can refuse for a credential,
+    // and the one place that reacts is `App` (task 050 Scope 6).
+    if (kind === "board" && error.code === "unauthenticated") reportSignedOut();
+    throw error;
   }
 }
 
@@ -1449,6 +1480,24 @@ export function createPersonalAccessToken(
 /** Revokes a token. Revoking a runner's token unpairs the runner. */
 export function revokeApiToken(id: string): Promise<void> {
   return board<void>("revoke_api_token", { id });
+}
+
+/**
+ * Every team the user belongs to, personal team first (task 050). About the
+ * person, so it is answered whichever team a request names.
+ */
+export function listTeams(): Promise<TeamListing[]> {
+  return board<TeamListing[]>("list_teams");
+}
+
+/** The user's own paired runners, with what the board knows of each. */
+export function listRunners(): Promise<RunnerListing[]> {
+  return board<RunnerListing[]>("list_runners");
+}
+
+/** Unpairs one of the user's runners: its tokens are revoked and its row stays. */
+export function unpairRunner(id: string): Promise<void> {
+  return board<void>("unpair_runner", { id });
 }
 
 /** A ten-minute, single-use code for `rimaia-runner pair` on a headless machine. */

@@ -54,4 +54,24 @@ describe("the transport boundary", () => {
 
     expect(callers.sort()).toEqual(["dev/main.tsx", "main.tsx"]);
   });
+
+  it("decides nothing from the platform", () => {
+    // Every browser state comes from `get_client_capabilities` (task 050,
+    // ADR-0034 point 5): a component that asked the platform would be guessing
+    // at what the client already knows.
+    const scanned = FILES.filter(
+      ({ path }) =>
+        path.startsWith("components/") ||
+        path.startsWith("views/") ||
+        path.startsWith("hooks/") ||
+        path === "App.tsx",
+    );
+    expect(scanned.length).toBeGreaterThan(40);
+
+    const offenders = scanned
+      .filter(({ text }) => /\bisTauri\b|__TAURI|navigator\.userAgent/.test(text))
+      .map(({ path }) => path);
+
+    expect(offenders).toEqual([]);
+  });
 });

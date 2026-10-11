@@ -60,6 +60,27 @@ describe("bootstrapClient", () => {
     expect(mockInvoke).not.toHaveBeenCalled();
   });
 
+  it("resolves with the capabilities it installed transports for", async () => {
+    mockHttp();
+    mockIsTauri.mockReturnValue(false);
+
+    await expect(bootstrapClient()).resolves.toEqual({
+      mode: "browser",
+      localRunnerId: null,
+      canOpenInEditor: false,
+      canRevealFiles: false,
+      canChooseFolders: false,
+    });
+
+  });
+
+  it("resolves with the shell's answer on a desktop", async () => {
+    mockIsTauri.mockReturnValue(true);
+    mockInvoke.mockImplementation(async () => desktop("solo"));
+
+    await expect(bootstrapClient()).resolves.toEqual(desktop("solo"));
+  });
+
   it("leaves invoke and listen installed in solo", async () => {
     const http = mockHttp();
     mockIsTauri.mockReturnValue(true);
@@ -118,7 +139,7 @@ describe("opening a link", () => {
 
     await expect(openExternalUrl("javascript:alert(1)")).rejects.toEqual({
       code: "invalid",
-      message: "Only http and https links can be opened: javascript:alert(1).",
+      message: "Only web links can be opened.",
     });
 
     expect(open).not.toHaveBeenCalled();

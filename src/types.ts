@@ -60,7 +60,14 @@ export interface ClientCapabilities {
  * permanent nav item. Task 001's no-router decision still holds — five views,
  * no URLs, no nesting, nothing to deep-link.
  */
-export type View = "board" | "review" | "runs" | "analytics" | "settings" | "welcome";
+export type View =
+  | "board"
+  | "review"
+  | "runs"
+  | "analytics"
+  | "settings"
+  | "account"
+  | "welcome";
 
 // ---------------------------------------------------------------------------
 // The preflight doctor (task 018) — mirrors `rimaia_core::doctor`.
@@ -610,6 +617,17 @@ export interface TaskDetail extends Task, EffectiveStrategyFields {
   /** Where the task's review loop stands, or `null` when the loop never
    *  touched it. */
   reviewLoop: ReviewLoopSummary | null;
+  /** The machine that holds the task's worktree: the runner of its newest run
+   *  of any kind, or `null` for a task no run has touched (task 050). */
+  worktreeRunner: WorktreeRunner | null;
+}
+
+/** Mirrors `rimaia_core::tasks::WorktreeRunner`. */
+export interface WorktreeRunner {
+  id: string;
+  label: string;
+  /** The runner was unpaired since; its row stays because runs name it. */
+  unpaired: boolean;
 }
 
 /**
@@ -2035,8 +2053,8 @@ export interface TaskConsent {
 
 // ---------------------------------------------------------------------------
 // Accounts (task 047, ADR-0030). Only a Rimaia server has them: the solo shell
-// refuses every account command with `invalid`. No component renders them yet
-// (task 050 does).
+// refuses every account command with `invalid`. The account page renders them
+// (task 050).
 // ---------------------------------------------------------------------------
 
 /** Mirrors `rimaia_core::identity::Role`. */
@@ -2108,6 +2126,33 @@ export interface NewApiToken {
 export interface PairingCode {
   code: string;
   expiresAt: string;
+}
+
+/** Mirrors `rimaia_core::identity::teams::TeamListing`, from `list_teams`: one
+ *  membership of the caller's (task 050). */
+export interface TeamListing {
+  id: string;
+  name: string;
+  role: TeamRole;
+  /** The caller's own personal team, which the switcher falls back to. */
+  personal: boolean;
+}
+
+/** Mirrors `rimaia_core::consent::eligibility::RunnerEligibility`. */
+export type RunnerEligibility = "assigned" | "assigned_then_pool";
+
+/** Mirrors `rimaia_core::identity::runners::RunnerListing`, from
+ *  `list_runners`: what the board knows about one of the caller's runners.
+ *  No setting: those live on the runner's machine (ADR-0034's 2026-10-04
+ *  amendment). */
+export interface RunnerListing {
+  id: string;
+  label: string;
+  provider: string;
+  appVersion: string | null;
+  eligibility: RunnerEligibility;
+  pairedAt: string;
+  lastSeenAt: string | null;
 }
 
 /** Mirrors `rimaia_core::identity::pairing::PairedRunner`. */
