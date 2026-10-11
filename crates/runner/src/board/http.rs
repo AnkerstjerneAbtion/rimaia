@@ -79,9 +79,19 @@ impl HttpBoard {
     /// its host is loopback, an IP address for which `is_loopback` holds or
     /// the name `localhost`, which is how a test harness and a server on the
     /// same machine are reached.
+    ///
+    /// Proxies in the environment (`HTTP_PROXY`, `ALL_PROXY` and the rest) are
+    /// ignored for that loopback `http://` origin: a proxy would receive the
+    /// token in clear, and reqwest has no loopback bypass unless `NO_PROXY`
+    /// names it. An `https://` origin keeps them, because a proxy tunnels TLS
+    /// with `CONNECT` and the token stays encrypted end to end.
     pub fn new(origin: &str, token: Secret, provider: ProviderId) -> Result<Self> {
         let origin = parse_origin(origin)?;
-        let client = reqwest::Client::builder().build().map_err(|error| {
+        let mut client = reqwest::Client::builder();
+        if origin.scheme() == "http" {
+            client = client.no_proxy();
+        }
+        let client = client.build().map_err(|error| {
             Error::internal(format!(
                 "could not build an HTTP client for {origin}: {error}"
             ))
