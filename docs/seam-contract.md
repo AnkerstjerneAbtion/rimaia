@@ -901,6 +901,25 @@ task 015 too, and both should inherit the corrected version and the reason for i
 
 **Binds.** 008, 009, 015.
 
+### Amendment, 2026-10-11 — the channel carries its team, and every tail enters one way (task 048)
+
+- **The live channel is `broadcast::Sender<TeamTail>`**, `TeamTail { team_id, tail }`
+  (`rimaia_core::events`). The team is routing metadata, as a `ChangeEvent`'s audience is: a
+  stream admits a tail without a lookup, and the wire payload is the `RunTail` alone.
+- **Every tail enters through `ServiceContext::publish_tail(team_id, tail)`.** The in-process
+  board port passes `lease.team_id` (038's `LeaseRef`), `EventStream::create` takes the run's
+  team, and task 052's runner route passes the team from its lease. Nothing writes to the tail
+  relay directly.
+- **The catch-up snapshot is the host's, not the shell's.** The 2026-08-21 amendment's
+  shell-held cache is `rimaia_core::api::TailRelay` on `BoardHost.tails`, one follower of the
+  live channel, which the host spawns once with `TailRelay::follow(context.subscribe_tail())`.
+  `get_run_tail` is a board `Read` answered from it (D38).
+
+Rule 1 and rule 2 are unchanged: a lagged relay or stream drops and counts, and the transcript
+and the `runs` row stay the record.
+
+**Binds.** 048, 052, 056.
+
 ## D15 — What quitting does to the queue
 
 **Question.** Task 009 makes the queue's state durable — "derived from the database, so it
@@ -1908,6 +1927,19 @@ quitting and for a crashed run's resume, and ADR-0010's, which takes the three r
 large enough to be argued at product scale.
 
 **Binds.** 013, and 023 as the next task to read `PreflightSummary`.
+
+### Amendment, 2026-10-11 — point 7's variant is local (task 048)
+
+Point 7's argument stands: a schedule is an entity and carries ids. What changed is the channel.
+A schedule is a row of `runner.db` (ADR-0031 point 6), so it is announced by
+`LocalChange::Schedules(ids)` on the machine's `LocalEvents`, and `Change::Schedules` is gone:
+a board event a server could carry has no business naming a machine's row. The wire name and
+payload are unchanged, `schedules:changed` with an array of schedule ids, and the window it
+opens, a runner key, announces itself as `runner:changed` rather than `settings:changed`
+(D38).
+
+**Binds.** 048, 058.
+
 ---
 
 ## D25 — Task 022's cross-cutting choices
@@ -6146,6 +6178,33 @@ point 7's trait.
 **Binds.** 048, 052 and 060 (`authenticate_from`), 050 (`get_account`'s shape), 051 (logins
 written only through `upsert_user`), 073 (the class-2 claim it rests on).
 
+### Amendment, 2026-10-11 — what task 048 decided
+
+- **`get_run_tail` is flipped (point 8), in one commit:** the registry row is
+  `board("get_run_tail", Read, runs::get_run_tail)`, the handler is in `api/board/runs.rs`, and
+  `getRunTail` calls `board<T>`. The handler reads the run under the caller's scope first, so
+  another team's run is `not_found`, then answers from `BoardHost.tails`. The shell's
+  `commands::runs::get_run_tail` and `state::RunTails` are deleted.
+- **`BoardHost` gains two fields (point 2):** `tails: TailRelay` and `streams: StreamControl`.
+  Whoever builds a host spawns the relay's follower: the shell with `tauri::async_runtime`,
+  the server with `tokio::spawn`, and `testing::api::host_over`, which is now `async` and
+  seeds one snapshot per fixture team's implementation run through the live channel.
+- **`plan_tasks_strategy`'s row:** `plan-pass:progress`'s wire form is core's,
+  `api::events::plan_progress_wire(&PlanProgressView)`, and `PlanProgressView` and
+  `PlanResultView` live in `api/events.rs`. It is a local emission, straight into Tauri, and
+  its only producer is the desktop's local pass (060 Scope 5). The row's note is corrected to
+  say so.
+- **The account commands signal streams.** `revoke_session` and `revoke_api_token` call
+  `request.host.streams.revalidate(&request.caller.user_id)` after the revocation commits, in
+  core, so both doors do (ADR-0006).
+- **The server resolves a caller in one place.** `crates/server/src/caller.rs`'s `Presented`
+  holds what a request presented, owned and with a redacted `Debug`, and
+  `Presented::resolve(&dyn Authenticate)` is the extractor's whole resolution: Authenticate,
+  then the door check. `GET /api/v1/events` keeps the `Presented` to resolve again (D38).
+
+**Binds.** 049 (`getRunTail` is a board wrapper), 050 (the route's closure composes its
+narrowing), 052 (the relay is followed, never written), 056, 059, 060.
+
 ### Appendix — today's 97 commands, classified
 
 The table follows the order of the handler list in `src-tauri/src/lib.rs` (lines 394–593 on
@@ -6206,7 +6265,7 @@ There are 45 board commands: 37 from 046, and 8 flipped later. There are 52 loca
 | `accept_task_strategy` | strategy | board | Write | 046 | |
 | `clear_task_strategy` | strategy | board | Write | 046 | |
 | `plan_task_strategy` | strategy | local | — | 046 | Claims on this machine's runner and starts the planner. Stays local (amendment above, 060) |
-| `plan_tasks_strategy` | strategy | local | — | 046 | This machine's watched pass, with `plan-pass:progress`. Stays local (amendment above) |
+| `plan_tasks_strategy` | strategy | local | — | 046 | This machine's watched pass, with `plan-pass:progress`, whose wire form is core's and which only this local pass emits (048's amendment). Stays local (amendment above) |
 | `cancel_plan_pass` | strategy | local | — | 046 | Cancels this machine's pass. Stays local (amendment above) |
 | `request_task_strategy` | strategy | board | Write | 060 | Records a request that an eligible runner claims with purpose `strategy` (ADR-0035 §6). Not among today's 97 |
 | `request_tasks_strategy` | strategy | board | Write | 060 | As `request_task_strategy`, over a selection. Not among today's 97 |
@@ -6225,7 +6284,7 @@ There are 45 board commands: 37 from 046, and 8 flipped later. There are 52 loca
 | `cancel_task_run` | runs | board | Write | 052, local until then | Reaches the runner holding the task through its lease (ADR-0031 §3). 052 decides who may ask |
 | `retry_task_now` | runs | board | Write | 052, local until then | A claim through the task's pin (ADR-0031 §4). No MCP tool (D23) |
 | `give_up_on_task` | runs | board | Write | 046 | A run-state transition. The pinned runner learns of it from the change event |
-| `get_run_tail` | runs | board | Read | 048, local until then | The server relays tails (ADR-0036 §2) |
+| `get_run_tail` | runs | board | Read | 048, flipped | The server relays tails (ADR-0036 §2), from `BoardHost.tails` |
 | `list_runs_for_task` | runs | board | Read | 046 | `logPath` leaves the DTO (ADR-0028 §2) |
 | `list_runs` | runs | board | Read | 046 | As `list_runs_for_task` |
 | `get_run` | runs | board | Read | 046 | Carries the review bundle (033), which is the diff every other client sees (ADR-0033 §7) |
@@ -7167,6 +7226,133 @@ amendment.
 
 ---
 
+## D38 — Task 048's cross-cutting choices
+
+**Question.** ADR-0034 point 3 says the server streams the Tauri events, filtered per subscriber
+by team, with the tail opt-in and a re-read on reconnect. It does not say what routes a change
+that belongs to no team, what happens to the events that describe a machine a server does not
+have, where the event names live once there are two forwarders, what the opening of a stream
+carries, how a client asks for a tail, or what a revoked credential does to a stream that is
+already open. 049, 050, 051, 052, 056, 059, 060 and 066 each build on the answers.
+
+**Decision.**
+
+1. **A change event has an audience** (refines ADR-0034 point 3's "each `ChangeEvent` carries
+   the team it belongs to"): `ChangeEvent { audience: Audience, change }`, `Audience::Team(TeamId)`
+   or `Audience::User(UserId)`. Every 038 constructor keeps its signature and builds `Team`;
+   `ChangeEvent::user_settings(user_id)` is `Change::Settings` for one user, and every
+   `user_settings` write that publishes uses it for `ctx.actor` (`set_subscription_cost`,
+   `mark_review_digest_seen`, a verdict that advances the digest marker). Neither of the two
+   needs a sole team any more. The audience is routing metadata and no payload carries it.
+   *Declined:* routing a user setting by one of the user's teams, which tells that team's other
+   members about a write that is not theirs, or misses the user's other teams.
+2. **Machine state is announced locally.** `LocalChange { Runner, Schedules(ids),
+   Checkouts(ids), Worktrees(ids) }` on `LocalEvents` (capacity `LOCAL_EVENT_CAPACITY = 256`),
+   which enforces ADR-0018's two rules as `ServiceContext::publish` does. It is 041's
+   `MachineContext.changes` retyped, `MachineContext { store, clock, local }`, so no
+   machine-state writer gained a parameter and none can reach a `ChangeEvent` sender; 041's
+   `event_team` is deleted. A runner key is `Runner`, a schedule write and fire `Schedules`,
+   the queue's refused scheduled start `Runner`, and 066's checkout and worktree-record writes
+   `Checkouts` and `Worktrees`. `Change::Schedules` is gone (D24's amendment). The runner loop
+   subscribes `machine.local` in `build` and wakes on every local change; the shell's
+   run-window notification listens there for `Runner`. *Declined:* `LocalEvents` on
+   `ServiceContext`, which is what a server holds and what D32 point 8 forbids a local handler
+   to reach.
+3. **The wire mapping is core's**, in `crates/core/src/api/events.rs`, and the shell keeps no
+   event-name string (`check-command-wiring.sh` step 6):
+
+   | Wire event | Payload | Board source | Local source |
+   | --- | --- | --- | --- |
+   | `tasks:changed` | array of task ids | `Change::Tasks` | `LocalChange::Worktrees` |
+   | `repositories:changed` | array of repository ids | `Change::Repositories` | `LocalChange::Checkouts` |
+   | `runs:changed` | array of run ids | `Change::Runs` | none |
+   | `settings:changed` | `null` | `Change::Settings` (team and user settings) | none |
+   | `runs:tail` | `RunTail` | the live channel, opt-in per run | none |
+   | `plan-pass:progress` | `PlanProgressView` | none | the shell's local plan pass |
+   | `runner:changed` | `null` | none | `LocalChange::Runner` |
+   | `schedules:changed` | array of schedule ids | none | `LocalChange::Schedules` |
+
+   `runner:changed` is the only new name; the two two-sided names keep one payload meaning on
+   both sides. `board_wire` and `tail_wire` are the board half and `local_wire` and
+   `plan_progress_wire` the local half, over separate types, so no arm can put a local source
+   on a stream. Each produces `WireEvent { name: &'static str, data: serde_json::Value }`.
+   `data` is a `Value`, so an object's keys reach the client in `serde_json`'s order, not a
+   struct's; JSON consumers ignore key order, and `PlanProgressView`'s own serialization is
+   pinned byte for byte (`plan_progress_keeps_its_wire_form`). *Declined:*
+   `checkouts:changed` and `worktrees:changed`, one more subscription per consumer for a view
+   that re-reads the same ids either way.
+4. **Two re-reads, and no log.** `board_reread()` is `tasks:changed []`,
+   `repositories:changed []`, `runs:changed []`, `settings:changed null`, in that order: every
+   stream's first four events, and what a lagged change receiver sends again.
+   `local_reread()` is `runner:changed null`, `schedules:changed []`, `repositories:changed []`,
+   `tasks:changed []`, what the shell's local forwarder sends after a lag. A frame has no `id:`
+   line. *Declined:* a replay log and `Last-Event-ID` (ADR-0034 point 3 chose the re-read).
+5. **One subscriber's life is `api::events::Subscription`.** `Subscription::open(host, caller,
+   tails, revalidate)` subscribes to the change channel, the live channel and
+   `StreamControl` before it yields, so a client that has read the burst is subscribed. A
+   change is admitted when its `Team` is in `caller.teams` or its `User` is `caller.user_id`; a
+   tail when its team is the caller's and its run is asked for. Admission reads the event and
+   the caller only, so a deleted row's event routes. A lagged change receiver re-reads, a
+   lagged live receiver drops (D14 rule 1), a lagged control receiver revalidates, and none
+   ends the stream. The solo shell's board forwarder is one `Subscription` with
+   `Caller::solo`, `Tails::All` and no revalidation.
+6. **`?tail=<run id>` is asked at connect**, repeatable up to `MAX_TAILS_PER_STREAM = 8`. A
+   value that is not a UUID, or a ninth, is `invalid` (`400`) before the stream. A well-formed
+   id is not looked up, so an unknown run, a deleted one and another team's open the same
+   stream and that tail never arrives. Changing the set means reconnecting, with the burst.
+   *Declined:* looking the run up, which is a probe, and refusing the stream for a stale id,
+   which costs a client its board for a tail.
+7. **A stream resolves its caller again.** `Revalidate = Box<dyn Fn() -> BoxFuture<'static,
+   Result<Caller>> + Send + Sync>`, built by the route over the credential the stream opened
+   with, re-running the route's whole resolution (`Presented::resolve`: Authenticate, then the
+   door check, and 050's narrowing when it lands). It runs when `StreamControl::revalidate(user)`
+   names the stream's user (the loop selects control first, `biased`), when the control
+   receiver lags, and every `STREAM_REVALIDATE_INTERVAL = 60s` read from the injected `Clock`.
+   An error, or a caller whose team ids differ from the opening ones, ends the stream; a role
+   change alone does not (ADR-0029 point 3). 048 signals it from `revoke_session` (signing
+   out) and `revoke_api_token`. *Declined:* checking the team at connect only, which is the
+   cached-membership bug ADR-0030 point 2 rules out, and patching a stream's scope in place.
+8. **The route** is `GET /api/v1/events` in `crates/server/src/events.rs`: `Caller` first, as
+   on every board route (`Browser` with its CSRF header, or `Desktop`), the protocol header
+   checked as a `Read`, then `?tail=`; every refusal is D32 point 3's shape before the first
+   byte. One pump task per stream moves `Subscription::next()` into a bounded `mpsc`
+   (capacity 16) that `ReceiverStream` hands to `Sse`, with axum's `KeepAlive`; the pump also
+   waits on the channel's `closed()`, so a closed tab drops the subscription even when nothing
+   is published. Nothing logs the query or a body.
+9. **Plan progress stays a local emission.** The desktop's `plan_tasks_strategy` emits
+   `plan_progress_wire(&PlanProgressView::from(&progress))` into Tauri. *Declined:* a board
+   `LiveView::PlanProgress`, which nothing on a server would publish (060 gives it no pass).
+
+**Why.** (1) is the one board state with no team, routed without a lookup. (2) is what makes
+the server's stream honest: it carries only what a server has. (3) and (4) keep two forwarders
+from drifting, by giving them one list each to forward. (5) and (6) keep "works in solo" as
+evidence for "works connected", and keep a stream free of per-stream state another request
+could reach. (7) applies ADR-0030 point 2 to a request that lasts for hours.
+
+**What the next tasks expect.**
+
+- **049:** point 3's table, copied into `EVENT_SOURCES` with `board`, `local`, and `both` for
+  `tasks:changed` and `repositories:changed` (a `both` row subscribes once per distinct
+  installed transport); `plan-pass:progress` is `local`. The opening burst, no `id:` lines,
+  `401` and `400` before the stream (its `onopen` throws on them), `?tail=` and its cap, an
+  unknown or foreign id dropped rather than refused, and a stream that ends after revalidation,
+  which it reconnects. `getRunTail` is a board wrapper.
+- **050:** `/api/v1/events` filtered by `caller.teams`; its `Caller::narrow_to` goes inside
+  point 7's closure, through `Presented::resolve`'s caller, so a narrowed stream stays narrowed.
+- **051:** `StreamControl::revalidate` on removing a member. Its `teams:changed []` joins
+  `board_reread()`, riding the opening burst and the lag burst.
+- **052:** remote tails enter through `ServiceContext::publish_tail(team_id, tail)`, the team
+  from the lease, never through `TailRelay`.
+- **056:** nothing new; the transcript flip does not touch the stream.
+- **059:** the local forwarder runs on `machine.local` even when `AppState.board` is `None`,
+  and `plan-pass:progress` is emitted by the local pass, which reaches for no board context.
+- **060:** `plan-pass:progress`'s wire form, with the desktop's local pass its only producer.
+- **066** (landed before 048): its checkout and worktree-record writers publish `Checkouts` and
+  `Worktrees`, and are covered by `every_machine_state_write_announces_a_local_change_and_no_board_event`.
+  A later writer of either joins that test.
+
+---
+
 ## How to use this
 
 An implementation task reads the entries its number appears in, before writing code:
@@ -7219,18 +7405,18 @@ An implementation task reads the entries its number appears in, before writing c
 | [073](../tasks/073-every-prompt-input-is-consented-generated-or-constrained.md) | D3 · D8 · D10 · D22 · D28 · D31 · D37, and 045's entry |
 | [046](../tasks/046-the-server-crate-and-one-command-registry.md) | D2 · D4 · D6 · D7 · D8 · D10 · D11 · D16 · D20 · D26 · D28 · D29 · D31 · D32 · D33 · D34 |
 | [047](../tasks/047-identity.md) | D4 · D6 · D8 · D10 · D11 · D28 · D31 · D32 · D33 · D34 |
-| [048](../tasks/048-events-over-sse.md) | D2 · D4 · D6 · D7 · D8 · D10 · D14 · D24 · D28 · D31 · D32 · D33 · D34 |
-| [049](../tasks/049-frontend-transport.md) | D4 · D6 · D7 · D8 · D14 · D20 · D28 · D32 · D33 · D34 |
-| [050](../tasks/050-the-web-shell.md) | D4 · D6 · D7 · D8 · D10 · D11 · D12 · D14 · D22 · D28 · D29 · D32 · D33 · D34 |
+| [048](../tasks/048-events-over-sse.md) | D2 · D4 · D6 · D7 · D8 · D10 · D14 · D24 · D28 · D31 · D32 · D33 · D34, and writes D38 |
+| [049](../tasks/049-frontend-transport.md) | D4 · D6 · D7 · D8 · D14 · D20 · D28 · D32 · D33 · D34 · D38 |
+| [050](../tasks/050-the-web-shell.md) | D4 · D6 · D7 · D8 · D10 · D11 · D12 · D14 · D22 · D28 · D29 · D32 · D33 · D34 · D38 |
 | [051](../tasks/051-teams-invitations-and-roles.md) | D2 · D3 · D4 · D6 · D7 · D8 · D10 · D16 · D28 · D32 · D33 · D34, and the entries 045, 048, 050 and 073 add |
-| [052](../tasks/052-the-runner-protocol-and-an-http-board-adapter.md) | D4 · D6 · D8 · D10 · D14 · D19 · D28 · D29 · D31 · D32 · D33 · D34 · D37 |
+| [052](../tasks/052-the-runner-protocol-and-an-http-board-adapter.md) | D4 · D6 · D8 · D10 · D14 · D19 · D28 · D29 · D31 · D32 · D33 · D34 · D37 · D38 |
 | [053](../tasks/053-leases-across-the-network.md) | D4 · D6 · D8 · D9 · D11 · D12 · D14 · D17 · D19 · D21 · D28 · D29 · D31 · D32 · D33 · D37 |
 | [054](../tasks/054-repositories-by-remote.md) | D2 · D4 · D6 · D7 · D8 · D10 · D11 · D20 · D22 · D25 · D26 · D28 · D30 · D31 · D32 · D33 · D34 |
 | [055](../tasks/055-the-run-scoped-proxy-and-consent-laundering.md) | D4 · D6 · D8 · D17 · D27 · D28 · D29 · D30 · D31 · D32 · D33 · D34 |
-| [056](../tasks/056-transcripts-leave-the-machine.md) | D3 · D4 · D5 · D6 · D8 · D9 · D10 · D14 · D17 · D18 · D19 · D20 · D23 · D25 · D28 · D29 · D31 · D32 · D33 · D34 |
+| [056](../tasks/056-transcripts-leave-the-machine.md) | D3 · D4 · D5 · D6 · D8 · D9 · D10 · D14 · D17 · D18 · D19 · D20 · D23 · D25 · D28 · D29 · D31 · D32 · D33 · D34 · D38 |
 | [057](../tasks/057-push-postcondition-and-run-elsewhere.md) | D4 · D6 · D8 · D9 · D12 · D17 · D20 · D23 · D25 · D28 · D29 · D30 · D31 · D32 · D33 · D34 · D37 |
 | [058](../tasks/058-the-headless-runner.md) | D3 · D4 · D6 · D8 · D9 · D10 · D11 · D15 · D19 · D20 · D22 · D25 · D28 · D30 · D31 · D32 · D33 · D34 |
-| [059](../tasks/059-desktop-connected-mode.md) | D3 · D4 · D6 · D7 · D8 · D10 · D11 · D15 · D16 · D19 · D20 · D25 · D27 · D28 · D29 · D30 · D31 · D32 · D33 · D34 · D35 |
+| [059](../tasks/059-desktop-connected-mode.md) | D3 · D4 · D6 · D7 · D8 · D10 · D11 · D15 · D16 · D19 · D20 · D25 · D27 · D28 · D29 · D30 · D31 · D32 · D33 · D34 · D35 · D38 |
 | [060](../tasks/060-hosted-mcp.md) | D4 · D6 · D8 · D16 · D17 · D19 · D20 · D23 · D25 · D28 · D30 · D31 · D32 · D33 · D34 · D35, and the entries 045, 048, 050, 051 and 073 add |
 | [061](../tasks/061-assignment-consent-and-runners-in-the-interface.md) | D3 · D4 · D6 · D7 · D8 · D9 · D10 · D12 · D16 · D17 · D28 · D29 · D30 · D31 · D32 · D33 · D34 · D35, and the entries 045, 050, 051, 054, 058, 060 and 073 add |
 | [062](../tasks/062-hosting.md) | D4 · D5 · D6 · D8 · D11 · D19 · D28 · D29 · D31 · D32 · D33 · D34 |
