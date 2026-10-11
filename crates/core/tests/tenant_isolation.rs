@@ -11,6 +11,12 @@
 //! every event naming team A, a foreign id answered `not_found`, and a foreign
 //! filter answered exactly as a never-issued id is.
 //!
+//! The local rows (task 049) have no board handler in core: each is run by
+//! calling the core functions its shell handler calls, under team A's context
+//! and `TwoTeams::machine`, in `LOCAL_CASES`.
+//! `every_board_command_has_a_cross_team_case` holds both tables equal to the
+//! registry.
+//!
 //! # The MCP tools
 //!
 //! One case per MCP tool, keyed by tool name, each written as data: a name,
@@ -460,9 +466,42 @@ fn every_board_command_has_a_cross_team_case() {
     );
     assert_eq!(BOARD_CASES.len(), cased.len(), "a board row with two cases");
 
-    // Only the board rows are required to have a case here. The local rows'
-    // half, run through the shell, is task 049's first commit (task 046's
-    // size cut), which removes this exemption.
+    // The local rows' half (task 049's first commit, task 046's size cut): the
+    // same two-way comparison, so a row of either kind without a case fails
+    // here, and a case without a row does too.
+    let local_rows: BTreeSet<&str> = COMMANDS
+        .iter()
+        .filter(|command| !command.is_board())
+        .map(|command| command.name)
+        .collect();
+    let local_cased: Vec<&str> = LOCAL_CASES.iter().map(|case| case.name).collect();
+    let local_unique: BTreeSet<&str> = local_cased.iter().copied().collect();
+    assert_eq!(
+        local_rows.difference(&local_unique).collect::<Vec<_>>(),
+        Vec::<&&str>::new(),
+        "a local row with no case: add one to LOCAL_CASES in \
+         crates/core/tests/tenant_isolation.rs"
+    );
+    assert_eq!(
+        local_unique.difference(&local_rows).collect::<Vec<_>>(),
+        Vec::<&&str>::new(),
+        "a local case for no local row"
+    );
+    assert_eq!(
+        local_cased.len(),
+        local_unique.len(),
+        "a local row with two cases"
+    );
+    let unexplained: Vec<&str> = LOCAL_CASES
+        .iter()
+        .filter(|case| matches!(case.kind, Local::NoCoreCall("")))
+        .map(|case| case.name)
+        .collect();
+    assert_eq!(
+        unexplained,
+        Vec::<&str>::new(),
+        "a local case that calls no core function must say why"
+    );
 }
 
 #[tokio::test]
@@ -552,6 +591,640 @@ fn answer_text(answer: &rimaia_core::Result<Value>) -> String {
         Ok(value) => value.to_string(),
         Err(error) => serde_json::to_string(error).expect("an error serializes"),
     }
+}
+
+// ---------------------------------------------------------------------------
+// The local rows of the registry (task 049)
+// ---------------------------------------------------------------------------
+//
+// A local handler lives in the desktop shell, which core cannot call. Each case
+// below runs the core functions that row's handler calls, under team A's
+// context and the fixture's machine, and puts them through 039's checks:
+//
+// 1. nothing of team B's in the answer;
+// 2. a foreign id reads as a missing one, for a row that takes an id;
+// 3. B's rows are unchanged, on the board and on this machine;
+// 4. every event the call published names team A.
+//
+// The shell's own half of a handler, its state, its dialogs and its spawns,
+// is not run: none of it reads the board, and CI runs no tests in `src-tauri`.
+
+/// Which of a team's ids a case sends.
+#[derive(Debug, Clone, Copy)]
+enum Take {
+    Task,
+    Run,
+    TaskAndRun,
+    Repository,
+}
+
+enum Local {
+    /// Takes an id of team B's, and answers `not_found` for it.
+    Ids(Take),
+    /// Takes an id of team B's and reports a refusal inside its answer, so the
+    /// answer has to read exactly as a never-issued id's.
+    Filter(Take),
+    /// Names no entity: a machine setting, an aggregate of the caller's own.
+    EntityLess,
+    /// The handler calls nothing in `rimaia-core` that reads a team's board
+    /// or this machine's records for one: it opens a native window, reads the
+    /// shell's own state, or drives the queue, which `rimaia-runner` owns.
+    NoCoreCall(&'static str),
+}
+
+struct LocalCase {
+    name: &'static str,
+    kind: Local,
+}
+
+const fn local_case(name: &'static str, kind: Local) -> LocalCase {
+    LocalCase { name, kind }
+}
+
+/// One per `local` row of `api::registry::COMMANDS`.
+/// `every_board_command_has_a_cross_team_case` holds this equal to the rows.
+static LOCAL_CASES: &[LocalCase] = &[
+    // app
+    local_case("get_app_info", Local::EntityLess),
+    local_case(
+        "reveal_app_data_dir",
+        Local::NoCoreCall("opens the data directory with the opener plugin"),
+    ),
+    local_case(
+        "debug_provoke_error",
+        Local::NoCoreCall("returns a fixed error"),
+    ),
+    // repositories
+    local_case("list_checkouts", Local::EntityLess),
+    local_case("register_repository", Local::EntityLess),
+    local_case("set_repository_worktree_root", Local::Ids(Take::Repository)),
+    local_case(
+        "set_repository_unattended_runs",
+        Local::Ids(Take::Repository),
+    ),
+    local_case("set_repository_on_archive", Local::Ids(Take::Repository)),
+    local_case(
+        "set_repository_max_concurrency",
+        Local::Ids(Take::Repository),
+    ),
+    local_case("get_repository_remote_info", Local::Ids(Take::Repository)),
+    local_case(
+        "get_repository_credential_status",
+        Local::Ids(Take::Repository),
+    ),
+    local_case("set_repository_credential", Local::Ids(Take::Repository)),
+    local_case("remove_repository_credential", Local::Ids(Take::Repository)),
+    // settings
+    local_case("get_run_environment", Local::EntityLess),
+    local_case("set_run_environment", Local::EntityLess),
+    local_case("get_strategy_ceiling", Local::EntityLess),
+    local_case("set_strategy_ceiling", Local::EntityLess),
+    local_case("preview_composed_prompt", Local::Ids(Take::Task)),
+    // strategy
+    local_case("plan_task_strategy", Local::Ids(Take::Task)),
+    local_case("plan_tasks_strategy", Local::Filter(Take::Task)),
+    local_case(
+        "cancel_plan_pass",
+        Local::NoCoreCall("trips the shell's own cancel signal"),
+    ),
+    // worktree
+    local_case("get_worktree_status", Local::Ids(Take::Task)),
+    local_case("get_diff_summary", Local::Ids(Take::Task)),
+    local_case("reveal_task_worktree", Local::Ids(Take::Task)),
+    local_case("list_open_in_targets", Local::EntityLess),
+    local_case("open_task_worktree_in", Local::Ids(Take::Task)),
+    local_case("get_worktree_inventory", Local::EntityLess),
+    local_case("remove_task_worktree", Local::Ids(Take::Task)),
+    local_case("cleanup_done_worktrees", Local::EntityLess),
+    local_case("cleanup_merged_worktrees", Local::EntityLess),
+    local_case("get_worktree_auto_cleanup", Local::EntityLess),
+    local_case("set_worktree_auto_cleanup", Local::EntityLess),
+    local_case("list_local_worktrees", Local::EntityLess),
+    // runs
+    local_case("start_task_run", Local::Ids(Take::Task)),
+    local_case("cancel_task_run", Local::EntityLess),
+    local_case("retry_task_now", Local::Ids(Take::Task)),
+    local_case("read_run_transcript_page", Local::Ids(Take::Run)),
+    local_case("search_run_transcript", Local::Ids(Take::Run)),
+    local_case("summarize_run_transcript", Local::Ids(Take::Run)),
+    local_case("reveal_run_log", Local::Ids(Take::Run)),
+    local_case("get_run_log_path", Local::Ids(Take::TaskAndRun)),
+    local_case("get_run_log_size", Local::EntityLess),
+    local_case("prune_run_logs", Local::Filter(Take::Task)),
+    // queue
+    local_case(
+        "start_queue",
+        Local::NoCoreCall("drives the queue, which rimaia-runner owns"),
+    ),
+    local_case(
+        "pause_queue",
+        Local::NoCoreCall("drives the queue, which rimaia-runner owns"),
+    ),
+    local_case(
+        "resume_queue",
+        Local::NoCoreCall("drives the queue, which rimaia-runner owns"),
+    ),
+    local_case(
+        "stop_queue",
+        Local::NoCoreCall("drives the queue, which rimaia-runner owns"),
+    ),
+    local_case(
+        "get_queue_status",
+        Local::NoCoreCall("reads the queue, which rimaia-runner owns"),
+    ),
+    local_case("get_run_capacity", Local::EntityLess),
+    local_case("set_schedule_mode", Local::EntityLess),
+    local_case("set_max_concurrency", Local::EntityLess),
+    // schedules
+    local_case("list_schedules", Local::EntityLess),
+    local_case("create_schedule", Local::EntityLess),
+    local_case("update_schedule", Local::EntityLess),
+    local_case("set_schedule_enabled", Local::EntityLess),
+    local_case("delete_schedule", Local::EntityLess),
+    local_case("preview_schedule_preflight", Local::EntityLess),
+    local_case("list_timezones", Local::EntityLess),
+    // mcp
+    local_case(
+        "get_mcp_status",
+        Local::NoCoreCall("reads the shell's own MCP handle"),
+    ),
+    local_case("set_mcp_port", Local::EntityLess),
+    local_case(
+        "test_mcp_connection",
+        Local::NoCoreCall("probes a loopback address and reads no row"),
+    ),
+    // doctor
+    local_case("run_doctor", Local::EntityLess),
+    local_case("dismiss_onboarding", Local::EntityLess),
+    local_case("dismiss_doctor_warning", Local::EntityLess),
+    local_case("restore_doctor_warning", Local::EntityLess),
+];
+
+/// The ids a local case sends: one team's, or ones nothing issued.
+#[derive(Clone)]
+struct Subject {
+    task: String,
+    run: String,
+    repository: String,
+}
+
+impl Subject {
+    fn of(team: &rimaia_core::testing::teams::TeamBoard) -> Self {
+        Self {
+            task: team.in_review.clone(),
+            run: team.implementation_run.clone(),
+            repository: team.repository.id.clone(),
+        }
+    }
+
+    /// `self` with the ids `take` names replaced by fresh ones, and the
+    /// replacements, as `(foreign, fresh)`.
+    fn never_issued(&self, take: Take) -> (Self, Vec<(String, String)>) {
+        let mut fresh = self.clone();
+        let mut substitutions = Vec::new();
+        let mut replace = |slot: &mut String| {
+            let id = TwoTeams::never_issued();
+            substitutions.push((slot.clone(), id.clone()));
+            *slot = id;
+        };
+        match take {
+            Take::Task => replace(&mut fresh.task),
+            Take::Run => replace(&mut fresh.run),
+            Take::TaskAndRun => {
+                replace(&mut fresh.task);
+                replace(&mut fresh.run);
+            }
+            Take::Repository => replace(&mut fresh.repository),
+        }
+        (fresh, substitutions)
+    }
+
+    /// The arguments as a value, for the leak scan to skip what was sent.
+    fn sent(&self, take: Take) -> Value {
+        match take {
+            Take::Task => json!({ "task": self.task }),
+            Take::Run => json!({ "run": self.run }),
+            Take::TaskAndRun => json!({ "task": self.task, "run": self.run }),
+            Take::Repository => json!({ "repository": self.repository }),
+        }
+    }
+}
+
+fn value<T: serde::Serialize>(answer: rimaia_core::Result<T>) -> rimaia_core::Result<Value> {
+    answer.map(|answer| serde_json::to_value(answer).expect("an answer serializes"))
+}
+
+fn debug<T: std::fmt::Debug>(answer: rimaia_core::Result<T>) -> rimaia_core::Result<Value> {
+    answer.map(|answer| json!(format!("{answer:?}")))
+}
+
+fn schedule_input() -> schedule::ScheduleInput {
+    serde_json::from_value(json!({
+        "name": "Nightly",
+        "mode": "parallel",
+        "maxConcurrency": 2,
+        "timezone": "UTC",
+        "cron": "0 22 * * *",
+        "enabled": false,
+    }))
+    .expect("a schedule input")
+}
+
+fn a_warning() -> rimaia_core::db::settings::Dismissal {
+    serde_json::from_value(json!({ "check": "git", "repository": null, "detail": "a warning" }))
+        .expect("a dismissal")
+}
+
+/// What the row's shell handler calls, as team A, with `subject`'s ids.
+async fn run_local(name: &str, teams: &TwoTeams, subject: &Subject) -> rimaia_core::Result<Value> {
+    use rimaia_core::db::settings;
+    use rimaia_core::machine;
+    use rimaia_core::runner::{claim_manual_start, strategy as runner_strategy, ManualStart};
+    use rimaia_core::runner::{CancelSignal, Starter};
+    use rimaia_core::runs::{self, transcript};
+    use rimaia_core::scheduler::{capacity, SlotOwner};
+    use rimaia_core::testing::repo::TempRepo;
+    use rimaia_core::{archive, openers, repo, worktree};
+
+    let ctx = &teams.a;
+    let machine = &teams.machine;
+    let runner_id = &teams.team_a.runner_id;
+    let board = teams.board(ctx);
+    let id = subject.repository.as_str();
+    let task_id = subject.task.as_str();
+    let run_id = subject.run.as_str();
+
+    match name {
+        "get_app_info" => value(settings::onboarding_dismissed(machine).await),
+        "list_checkouts" => value(repo::checkouts(ctx, machine).await),
+        "register_repository" => {
+            let source = TempRepo::init();
+            value(
+                repo::register(
+                    ctx,
+                    machine,
+                    &teams.paths.worktrees_dir(),
+                    repo::NewRepository {
+                        path: source.path().to_string_lossy().into_owned(),
+                        name: None,
+                        worktree_root: None,
+                    },
+                )
+                .await,
+            )
+        }
+        "set_repository_worktree_root" => {
+            let root = teams.paths.worktrees_dir().join("moved");
+            value(
+                repo::set_worktree_root(ctx, machine, id, root.to_string_lossy().into_owned())
+                    .await,
+            )
+        }
+        "set_repository_unattended_runs" => {
+            value(repo::set_allow_unattended_runs(ctx, machine, id, true).await)
+        }
+        "set_repository_on_archive" => value(
+            archive::set_repository_on_archive(
+                ctx,
+                machine,
+                id,
+                rimaia_core::db::OnArchive::None,
+                None,
+            )
+            .await,
+        ),
+        "set_repository_max_concurrency" => {
+            value(repo::set_max_concurrency(ctx, machine, id, 2).await)
+        }
+        "get_repository_remote_info" => {
+            let repository = repo::get(ctx, id).await?;
+            value(repo::remote_info(&machine::checkout_of(machine, &repository).await?).await)
+        }
+        "get_repository_credential_status" => {
+            let repository = repo::get(ctx, id).await?;
+            let checkout = machine::checkout_of(machine, &repository).await?;
+            let remote = repo::remote_info(&checkout).await?;
+            Ok(json!({
+                "remote": remote,
+                "store": format!("{:?}", teams.runner.credentials.status(&repository.id).await),
+            }))
+        }
+        // The forge's verdict on a token, `provision::verify`, is a call to a
+        // forge and reads nothing of a board, so the case stops short of it.
+        "set_repository_credential" => {
+            let repository = repo::get(ctx, id).await?;
+            machine::checkout_of(machine, &repository).await?;
+            let secret = rimaia_core::credentials::Secret::new("a-token".to_string())?;
+            teams.runner.credentials.set(id, secret).await?;
+            value(repo::set_credential_metadata(ctx, machine, id, None, Some("a label")).await)
+        }
+        "remove_repository_credential" => {
+            repo::get(ctx, id).await?;
+            teams.runner.credentials.delete(id).await?;
+            value(repo::clear_credential_metadata(ctx, machine, id).await)
+        }
+        "get_run_environment" => value(settings::run_environment(machine).await),
+        "set_run_environment" => value(
+            settings::set_run_environment(machine, rimaia_core::db::RunEnvironment::Inherit).await,
+        ),
+        "get_strategy_ceiling" => {
+            value(rimaia_core::consent::ceiling::strategy_ceiling(machine).await)
+        }
+        "set_strategy_ceiling" => {
+            let ceiling =
+                serde_json::from_value(json!({ "models": ["sonnet"], "maxEffort": "medium" }))
+                    .expect("a ceiling");
+            value(rimaia_core::consent::ceiling::set_strategy_ceiling(machine, &ceiling).await)
+        }
+        "preview_composed_prompt" => {
+            use rimaia_core::runner::prompt;
+            let base = settings::base_instructions_for_task(ctx, task_id).await?;
+            let detail = rimaia_core::tasks::get_task(ctx, task_id).await?;
+            let repository = repo::get(ctx, &detail.task.repository_id).await?;
+            let guidance = prompt::StrategyGuidance::for_task(&detail);
+            let team_kind = rimaia_core::tasks::team_kind_of_task(ctx, task_id).await?;
+            Ok(json!(prompt::compose_prompt(
+                &base,
+                &detail,
+                &repository,
+                prompt::PromptTeam::from_kind(team_kind, None),
+                guidance.as_ref(),
+                teams.runner.provider.fanout_noun(),
+            )))
+        }
+        // Up to the claim: the spawn after it is the shell's.
+        "plan_task_strategy" => {
+            let claim = runner_strategy::claim_for_planning(
+                Starter::at_runner(ctx, runner_id),
+                board.as_ref(),
+                machine,
+                &teams.in_flight,
+                task_id,
+                SlotOwner::Manual,
+            )
+            .await?;
+            Ok(json!(claim.is_ok()))
+        }
+        "plan_tasks_strategy" => {
+            let selection = runner_strategy::PlanSelection {
+                column: None,
+                repository_id: None,
+                task_ids: vec![task_id.to_string()],
+            };
+            debug(
+                runner_strategy::plan_all(
+                    Starter::at_runner(ctx, runner_id),
+                    board.as_ref(),
+                    machine,
+                    &teams.paths,
+                    &teams.runner,
+                    &teams.in_flight,
+                    &selection,
+                    &CancelSignal::new(),
+                    &|_progress| {},
+                )
+                .await,
+            )
+        }
+        "get_worktree_status" => value(worktree::status(ctx, machine, task_id).await),
+        "get_diff_summary" => value(worktree::diff_summary(ctx, machine, task_id).await),
+        "list_local_worktrees" => value(worktree::local_records(ctx, machine).await),
+        "reveal_task_worktree" => value(worktree::local_path(ctx, machine, task_id).await),
+        "list_open_in_targets" => value(Ok(openers::detect(
+            &openers::Machine::host(),
+            &openers::SystemProbe,
+        ))),
+        "open_task_worktree_in" => debug(
+            openers::launch_for_task(
+                ctx,
+                machine,
+                &openers::Machine::host(),
+                &openers::SystemProbe,
+                openers::Target::VsCode,
+                task_id,
+            )
+            .await,
+        ),
+        "get_worktree_inventory" => value(worktree::inventory(ctx, machine).await),
+        "remove_task_worktree" => value(
+            worktree::remove_worktree(
+                ctx,
+                machine,
+                task_id,
+                worktree::RemovalAuthorization::default(),
+            )
+            .await,
+        ),
+        "cleanup_done_worktrees" => value(worktree::remove_done_worktrees(ctx, machine).await),
+        "cleanup_merged_worktrees" => value(worktree::remove_merged_worktrees(ctx, machine).await),
+        "get_worktree_auto_cleanup" => value(worktree::auto_cleanup(machine).await),
+        "set_worktree_auto_cleanup" => {
+            value(worktree::set_auto_cleanup(machine, worktree::AutoCleanup::Off).await)
+        }
+        // Up to the claim: the run after it is the shell's.
+        "start_task_run" | "retry_task_now" => {
+            let started = claim_manual_start(
+                Starter::at_runner(ctx, runner_id),
+                board.as_ref(),
+                machine,
+                &teams.paths,
+                &teams.runner,
+                &teams.in_flight,
+                ManualStart {
+                    task_id: task_id.to_string(),
+                    continue_session: name == "retry_task_now",
+                },
+            )
+            .await?;
+            drop(started);
+            Ok(Value::Null)
+        }
+        "cancel_task_run" => {
+            teams.in_flight.cancel(&teams.team_a.not_ready);
+            Ok(Value::Null)
+        }
+        "read_run_transcript_page" => {
+            let path = runs::transcript_of(ctx, &teams.paths, run_id).await?;
+            value(transcript::read_page(&path, 0, transcript::DEFAULT_PAGE_SIZE).await)
+        }
+        "summarize_run_transcript" => {
+            let path = runs::transcript_of(ctx, &teams.paths, run_id).await?;
+            value(transcript::summarize(&path).await)
+        }
+        "search_run_transcript" => {
+            let path = runs::transcript_of(ctx, &teams.paths, run_id).await?;
+            value(transcript::search(&path, "needle").await)
+        }
+        "reveal_run_log" => debug(runs::log_path_to_reveal(ctx, &teams.paths, run_id).await),
+        "get_run_log_path" => debug(runs::log_path(ctx, &teams.paths, task_id, run_id).await),
+        "get_run_log_size" => Ok(json!(runs::total_log_size(&teams.paths).await)),
+        "prune_run_logs" => value(
+            runs::prune_logs(
+                ctx,
+                &teams.paths,
+                runs::PruneCriterion::Task(task_id.to_string()),
+            )
+            .await,
+        ),
+        "get_run_capacity" => value(capacity::configured(machine).await),
+        "set_schedule_mode" => {
+            capacity::set_schedule_mode(machine, rimaia_core::db::ScheduleMode::Parallel).await?;
+            value(capacity::configured(machine).await)
+        }
+        "set_max_concurrency" => {
+            capacity::set_max_concurrency(machine, 2).await?;
+            value(capacity::configured(machine).await)
+        }
+        "list_schedules" => value(schedule::list(machine).await),
+        "create_schedule" => value(schedule::create(machine, schedule_input()).await),
+        "update_schedule" => {
+            let made = schedule::create(machine, schedule_input()).await?;
+            value(schedule::update(machine, &made.id, schedule_input()).await)
+        }
+        "set_schedule_enabled" => {
+            let made = schedule::create(machine, schedule_input()).await?;
+            value(schedule::set_enabled(machine, &made.id, true).await)
+        }
+        "delete_schedule" => {
+            let made = schedule::create(machine, schedule_input()).await?;
+            value(schedule::delete(machine, &made.id).await)
+        }
+        "preview_schedule_preflight" => {
+            let made = schedule::create(machine, schedule_input()).await?;
+            let (repositories, _) =
+                rimaia_core::scheduler::view::for_runner(machine, &teams.in_flight).await?;
+            let runner = rimaia_core::scheduler::RunnerView::new(
+                runner_id.clone(),
+                teams.runner.provider.id(),
+                repositories,
+            );
+            value(schedule::preview(machine, ctx, &made.id, &runner).await)
+        }
+        "list_timezones" => Ok(json!(schedule::timezones())),
+        "set_mcp_port" => value(mcp::set_configured_port(machine, 48_200).await),
+        "run_doctor" => value(rimaia_core::doctor::run(machine, ctx, &teams.doctor()).await),
+        "dismiss_onboarding" => value(settings::set_onboarding_dismissed(machine, true).await),
+        "dismiss_doctor_warning" => value(rimaia_core::doctor::dismiss(machine, a_warning()).await),
+        "restore_doctor_warning" => {
+            value(rimaia_core::doctor::restore(machine, &a_warning()).await)
+        }
+        other => panic!("`{other}` has a case and no call: add it to run_local"),
+    }
+}
+
+/// What this machine records for `team`: its checkout and its worktrees.
+async fn machine_rows(teams: &TwoTeams, team: &rimaia_core::testing::teams::TeamBoard) -> String {
+    let worktrees: Vec<_> = teams
+        .machine
+        .store
+        .list_worktrees()
+        .await
+        .expect("list the worktree records")
+        .into_iter()
+        .filter(|record| record.repository_id == team.repository.id)
+        .collect();
+    let checkout = teams
+        .machine
+        .store
+        .get_checkout(&team.repository.id)
+        .await
+        .expect("read the checkout");
+    format!(
+        "{}\n{}",
+        serde_json::to_string(&worktrees).expect("worktrees serialize"),
+        serde_json::to_string(&checkout).expect("a checkout serializes"),
+    )
+}
+
+#[tokio::test]
+async fn a_team_cannot_see_another_teams_ids_through_any_local_command() {
+    let mut teams = TwoTeams::new().await;
+    let team_a = teams.team_a.team_id.clone();
+    let foreign = Subject::of(&teams.team_b);
+    let own = Subject::of(&teams.team_a);
+
+    let mut failures: Vec<String> = Vec::new();
+    for case in LOCAL_CASES {
+        let (take, subject) = match &case.kind {
+            Local::NoCoreCall(_) => continue,
+            Local::Ids(take) | Local::Filter(take) => (Some(*take), &foreign),
+            Local::EntityLess => (None, &own),
+        };
+        let sent = take.map_or(Value::Null, |take| subject.sent(take));
+        let before = teams.snapshot_b().await;
+        let machine_before = machine_rows(&teams, &teams.team_b).await;
+        teams.drain_changes();
+
+        let answer = run_local(case.name, &teams, subject).await;
+        let events = teams.drain_changes();
+        let text = answer_text(&answer);
+
+        // 1. Nothing of B's leaks.
+        for leaked in testing_api::leaks(&teams.team_b, &sent, &text) {
+            failures.push(format!(
+                "{}: the answer carries B's {leaked}: {text}",
+                case.name
+            ));
+        }
+        // 3. B's rows are unchanged, on the board and on this machine.
+        let after = teams.snapshot_b().await;
+        if after != before {
+            failures.push(format!(
+                "{}: team B's rows changed\nbefore:\n{before}\nafter:\n{after}",
+                case.name
+            ));
+        }
+        let machine_after = machine_rows(&teams, &teams.team_b).await;
+        if machine_after != machine_before {
+            failures.push(format!(
+                "{}: team B's records on this machine changed\nbefore:\n{machine_before}\nafter:\n{machine_after}",
+                case.name
+            ));
+        }
+        // 4. Every event is for team A, or for the acting user alone.
+        for event in events
+            .iter()
+            .filter(|event| !for_team_or_actor(event, &team_a, &teams.team_a.owner_id))
+        {
+            failures.push(format!(
+                "{}: an event is for another team or user: {event:?}",
+                case.name
+            ));
+        }
+        // 2. A foreign id reads as a missing one.
+        match (&case.kind, take) {
+            (Local::Ids(_), _) => {
+                if answer.as_ref().err().map(|error| error.code()) != Some(ErrorCode::NotFound) {
+                    failures.push(format!("{}: B's ids are not not_found: {text}", case.name));
+                }
+            }
+            (Local::Filter(_), Some(take)) => {
+                let (fresh_subject, substitutions) = foreign.never_issued(take);
+                let fresh = run_local(case.name, &teams, &fresh_subject).await;
+                let restored = testing_api::restore_ids(&answer_text(&fresh), &substitutions);
+                if restored != text {
+                    failures.push(format!(
+                        "{}: a foreign id is answered differently from a missing one\n\
+                         foreign: {text}\n missing: {restored}",
+                        case.name
+                    ));
+                }
+            }
+            _ => {}
+        }
+    }
+
+    assert!(
+        failures.is_empty(),
+        "{} failure(s):\n{}",
+        failures.len(),
+        failures.join("\n\n")
+    );
+    assert_eq!(
+        teams.cli.started(),
+        Vec::<String>::new(),
+        "no case spawned anything"
+    );
 }
 
 // ---------------------------------------------------------------------------

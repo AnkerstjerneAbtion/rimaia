@@ -953,6 +953,34 @@ pub async fn local_path(
     ))
 }
 
+/// The worktrees this machine records for the tasks the context can see: what
+/// `list_local_worktrees` answers.
+///
+/// The records are the machine's, and one machine can hold clones for more
+/// than one team, so a record whose task is outside the context's scope is
+/// left out, exactly as [`crate::repo::checkouts`] leaves out a checkout
+/// (ADR-0029 point 5). In solo that is every record.
+pub async fn local_records(
+    ctx: &ServiceContext,
+    machine: &MachineContext,
+) -> Result<Vec<WorktreeRecord>> {
+    let visible: std::collections::HashSet<String> = sqlx::query_scalar(
+        "SELECT id FROM tasks WHERE team_id IN (SELECT value FROM json_each(?1))",
+    )
+    .bind(ctx.scope.json())
+    .fetch_all(&ctx.pool)
+    .await?
+    .into_iter()
+    .collect();
+    Ok(machine
+        .store
+        .list_worktrees()
+        .await?
+        .into_iter()
+        .filter(|record| visible.contains(&record.task_id))
+        .collect())
+}
+
 /// Clears `tasks.branch` where no lease covers the write: a removal that
 /// deleted the branch, and startup reconciliation finding it gone.
 ///

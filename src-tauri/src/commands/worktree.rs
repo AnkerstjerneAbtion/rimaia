@@ -69,18 +69,17 @@ pub struct LocalWorktree {
     pub path: String,
 }
 
-/// Every worktree this machine records (task 066): what the board's task DTOs
-/// carried as `worktreePath` until no board DTO held a path.
+/// Every worktree this machine records for a task the caller can see (task
+/// 066): what the board's task DTOs carried as `worktreePath` until no board
+/// DTO held a path.
 ///
 /// A local command (D32's appendix), paired with the `list_worktrees` tool,
-/// which already serves this machine's worktree paths. It reads the machine
-/// store and nothing on the board.
+/// which already serves this machine's worktree paths. The records are the
+/// machine's; `worktree::local_records` leaves out those of a team the caller
+/// is not in (task 049's tenant-isolation case found the unfiltered read).
 #[tauri::command]
 pub async fn list_local_worktrees(state: State<'_, AppState>) -> Result<Vec<LocalWorktree>> {
-    Ok(state
-        .machine
-        .store
-        .list_worktrees()
+    Ok(worktree::local_records(&state.context, &state.machine)
         .await?
         .into_iter()
         .map(|record| LocalWorktree {
