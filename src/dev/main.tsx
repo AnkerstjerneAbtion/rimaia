@@ -2,8 +2,13 @@ import React from "react";
 import ReactDOM from "react-dom/client";
 
 import App from "../App";
-import { setCommandTransport } from "../lib/commands";
-import { setEventTransport } from "../lib/events";
+import { ClientCapabilitiesProvider } from "../lib/capabilities";
+import {
+  browserLocalTransport,
+  setCommandTransport,
+  setCommandTransports,
+} from "../lib/commands";
+import { setEventTransport, setEventTransports } from "../lib/events";
 import { buildScenario, isScenarioName, SCENARIO_NAMES } from "./fixtures/seed";
 import { createFixtureTransports } from "./fixtures/transport";
 
@@ -19,12 +24,22 @@ const root = ReactDOM.createRoot(document.getElementById("root") as HTMLElement)
 const requested = new URLSearchParams(window.location.search).get("scenario") ?? "busy";
 
 if (isScenarioName(requested)) {
-  const transports = createFixtureTransports(buildScenario(requested));
-  setCommandTransport(transports.command);
-  setEventTransport(transports.event);
+  const scenario = buildScenario(requested);
+  const transports = createFixtureTransports(scenario);
+  if (scenario.capabilities.mode === "browser") {
+    // A browser scenario refuses what a browser refuses, so a local command
+    // the interface still sends shows in the picture as the banner it would be.
+    setCommandTransports({ board: transports.command, local: browserLocalTransport });
+    setEventTransports({ board: transports.event, local: null });
+  } else {
+    setCommandTransport(transports.command);
+    setEventTransport(transports.event);
+  }
   root.render(
     <React.StrictMode>
-      <App />
+      <ClientCapabilitiesProvider capabilities={scenario.capabilities}>
+        <App />
+      </ClientCapabilitiesProvider>
     </React.StrictMode>,
   );
 } else {

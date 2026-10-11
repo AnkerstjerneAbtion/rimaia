@@ -57,6 +57,7 @@ describe("fixture answers", () => {
       "credentialsMode",
       "errorFromResponse",
       "runningInDesktopShell",
+      "setCurrentTeam",
     ]);
     const wrappers = Object.entries(commands).filter(
       ([name, value]) => typeof value === "function" && !notWrappers.has(name),

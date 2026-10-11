@@ -67,6 +67,19 @@ const unsupported = (reason: string): Answer => () => refuse("internal", reason)
 /** What the solo shell answers every account command (task 047). */
 const noAccounts: Answer = () => refuse("invalid", "Accounts exist only on a Rimaia server.");
 
+/**
+ * An account command: the solo shell's own refusal in solo, `unauthenticated`
+ * for a scenario that is signed out, and `answer` for a signed-in browser
+ * (task 050). Writes change nothing, as everywhere in fixture mode.
+ */
+function account<T>(answer: (scenario: Scenario, args: Args) => T): Answer {
+  return (args, s) => {
+    if (s.capabilities.mode === "solo") return noAccounts(args, s);
+    if (s.account === null) refuse("unauthenticated", "Sign in to continue.");
+    return answer(s, args);
+  };
+}
+
 function findTask(scenario: Scenario, id: unknown): TaskSummary {
   const found = scenario.tasks.find((candidate) => candidate.id === id);
   if (!found) refuse("not_found", `fixture mode has no task \`${String(id)}\``);
@@ -136,6 +149,7 @@ function detailOf(scenario: Scenario, id: unknown): TaskDetail {
   return {
     ...summary,
     links: [],
+    worktreeRunner: scenario.worktreeRunners?.[summary.id] ?? null,
     dependsOn: scenario.dependencies[summary.id] ?? [],
     lastRun: run ? plainRun(run) : null,
     reviewInstructions: scenario.taskReviews[summary.id]?.instructions ?? null,
@@ -264,15 +278,6 @@ const SCHEDULE_VIEW: ScheduleView = {
 
 const done: Answer = () => undefined;
 
-/** The solo desktop's answer: everything local is available. */
-const SOLO_CAPABILITIES: ClientCapabilities = {
-  mode: "solo",
-  localRunnerId: "fixture-runner",
-  canOpenInEditor: true,
-  canRevealFiles: true,
-  canChooseFolders: true,
-};
-
 /** The seeded checkout a per-repository setter answers with: writes change
  *  nothing in fixture mode, so the answer is what was seeded. */
 function checkoutOf(scenario: Scenario, id: unknown) {
@@ -284,7 +289,7 @@ export const ANSWERS: Record<string, Answer> = {
   get_app_info: (_args, s) => s.appInfo,
   reveal_app_data_dir: done,
   debug_provoke_error: unsupported("debug_provoke_error has nothing to show"),
-  get_client_capabilities: () => SOLO_CAPABILITIES,
+  get_client_capabilities: (_args, s): ClientCapabilities => s.capabilities,
   choose_folder: unsupported("the folder picker needs a native window"),
 
   // --- repositories -----------------------------------------------------
@@ -506,14 +511,26 @@ export const ANSWERS: Record<string, Answer> = {
   // --- accounts (task 047) --------------------------------------------
   // Fixture mode is a solo board, and solo has no accounts: each row answers
   // with the solo shell's own refusal.
-  get_account: noAccounts,
-  list_sessions: noAccounts,
-  revoke_session: noAccounts,
-  list_api_tokens: noAccounts,
-  create_personal_access_token: noAccounts,
-  revoke_api_token: noAccounts,
-  create_pairing_code: noAccounts,
-  pair_own_runner: noAccounts,
+  get_account: account((s) => s.account),
+  list_sessions: account((s) => s.sessions),
+  revoke_session: account(() => undefined),
+  list_api_tokens: account((s) => s.apiTokens),
+  create_personal_access_token: account((s, args) => ({
+    token: "rmp_fixture-secret-shown-once",
+    summary: {
+      ...s.apiTokens[0],
+      id: "token-new",
+      label: String(args.label),
+      teamIds: Array.isArray(args.teamIds) ? args.teamIds : [],
+    },
+  })),
+  revoke_api_token: account(() => undefined),
+  create_pairing_code: account(() => ({ code: "ABCD-EFGH", expiresAt: "2026-10-04T12:10:00.000Z" })),
+  pair_own_runner: account(() => refuse("invalid", "Only the Rimaia desktop app pairs its own runner.")),
+  // The person's teams and runners (task 050). Solo has neither to switch.
+  list_teams: (_args, s) => s.teams,
+  list_runners: (_args, s) => s.runners,
+  unpair_runner: done,
 
   // --- doctor and onboarding -------------------------------------------
   run_doctor: (_args, s) => s.doctor,

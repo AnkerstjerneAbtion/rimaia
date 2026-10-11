@@ -1,7 +1,10 @@
 import type {
+  Account,
   Analytics,
+  ApiTokenSummary,
   AppInfo,
   BoardColumn,
+  ClientCapabilities,
   DiffSummary,
   DigestEntry,
   DoctorCheckResult,
@@ -26,10 +29,14 @@ import type {
   RunReview,
   RunStatus,
   RunTail,
+  RunnerListing,
+  SessionSummary,
   StoredBundle,
   TaskDependent,
   TaskReview,
   TaskSummary,
+  TeamListing,
+  WorktreeRunner,
 } from "../../types";
 import { FIXTURE_NOW, FIXTURE_SENTINEL } from "./constants";
 
@@ -68,6 +75,10 @@ export const SCENARIO_NAMES = [
   "review-loop-analytics",
   "review-loop-settings",
   "review-loop-repository",
+  // Task 050: a browser. Signed out, signed in to two teams, and to one.
+  "signed-out",
+  "browser",
+  "browser-one-team",
 ] as const;
 export type ScenarioName = (typeof SCENARIO_NAMES)[number];
 
@@ -119,6 +130,21 @@ export interface Scenario {
   /** What the local `get_diff_summary` answers, by task id: the branch as it is
    *  now, which the morning review must never show for a not-recorded run. */
   readonly liveDiffs: Record<string, DiffSummary>;
+  /** What `get_client_capabilities` answers, and what the fixture entry mounts
+   *  the capabilities provider with (task 050). Solo but for the browser
+   *  scenarios. */
+  readonly capabilities: ClientCapabilities;
+  /** What `get_account` answers, or `null` for `unauthenticated`: there is no
+   *  session. Ignored in solo, which has no accounts. */
+  readonly account: Account | null;
+  /** What `list_teams` answers, personal team first. */
+  readonly teams: TeamListing[];
+  /** What `list_runners` answers. */
+  readonly runners: RunnerListing[];
+  readonly sessions: SessionSummary[];
+  readonly apiTokens: ApiTokenSummary[];
+  /** `get_task`'s `worktreeRunner`, by task id. A task with no entry has none. */
+  readonly worktreeRunners: Record<string, WorktreeRunner>;
   readonly queueStatus: QueueStatus;
   readonly capacity: RunCapacity;
   readonly doctor: DoctorReport;
@@ -699,6 +725,7 @@ function populated(name: ScenarioName, runningCount: number, full: boolean): Sce
     tails,
     reviews,
     ...noReviewExtras(),
+    ...soloExtras(),
     reviewFindings: full ? reviewFindingsFor("t-review-1") : [],
     queueStatus: queueFor(tasks, "running", running),
     capacity: { mode: parallel ? "parallel" : "sequential", maxConcurrency, ceiling: 8 },
@@ -846,6 +873,35 @@ function noReviewExtras(): Pick<
     reviewSettings: { instructions: "", config: {} },
     reviewLevels: { global: reviewLevel({}), repositories: {}, tasks: {} },
     taskReviews: {},
+  };
+}
+
+/** Solo has no account, no team to switch and no other machine: the fields
+ *  task 050 added, as every scenario but the browser ones leaves them. */
+function soloExtras(): Pick<
+  Scenario,
+  | "capabilities"
+  | "account"
+  | "teams"
+  | "runners"
+  | "sessions"
+  | "apiTokens"
+  | "worktreeRunners"
+> {
+  return {
+    capabilities: {
+      mode: "solo",
+      localRunnerId: "fixture-runner",
+      canOpenInEditor: true,
+      canRevealFiles: true,
+      canChooseFolders: true,
+    },
+    account: null,
+    teams: [],
+    runners: [],
+    sessions: [],
+    apiTokens: [],
+    worktreeRunners: {},
   };
 }
 
@@ -1032,6 +1088,7 @@ function reviewBoard(
     tails: [],
     reviews,
     ...noReviewExtras(),
+    ...soloExtras(),
     dependents: options.dependents ?? {},
     dependencies: options.dependencies ?? {},
     liveDiffs: options.liveDiffs ?? {},
@@ -1626,6 +1683,7 @@ function reviewLoopScenario(name: ScenarioName): Scenario {
     tails,
     reviews,
     ...noReviewExtras(),
+    ...soloExtras(),
     reviewHistories: { [CIRCLES]: circlesHistory() },
     reviewSettings: {
       instructions:
@@ -1675,11 +1733,121 @@ function empty(name: ScenarioName, onboardingDismissed: boolean, withRepository:
     tails: [],
     reviews: {},
     ...noReviewExtras(),
+    ...soloExtras(),
     queueStatus: queueFor([], "paused", []),
     capacity: { mode: "sequential", maxConcurrency: 1, ceiling: 8 },
     doctor: healthyDoctor(),
     analytics: analytics(false),
     runsReadError: null,
+  };
+}
+
+/**
+ * The `busy` board seen from a browser (task 050): signed in, in a personal
+ * team and, for two teams, a shared one, with three runners, one never seen.
+ * The three cards waiting for review were worked on elsewhere, one on a runner
+ * since unpaired, so the panel and the review queue show whose machine holds
+ * each worktree.
+ */
+function browserScenario(name: ScenarioName, teamCount: 1 | 2): Scenario {
+  const board = populated(name, 3, true);
+  const studio: WorktreeRunner = { id: "runner-studio", label: "Studio Mac", unpaired: false };
+  const old: WorktreeRunner = { id: "runner-old", label: "Old laptop", unpaired: true };
+  const teams: TeamListing[] = [
+    { id: "team-personal", name: "Personal", role: "owner", personal: true },
+    { id: "team-acme", name: "Acme platform", role: "member", personal: false },
+  ].slice(0, teamCount) as TeamListing[];
+  return {
+    ...board,
+    capabilities: {
+      mode: "browser",
+      localRunnerId: null,
+      canOpenInEditor: false,
+      canRevealFiles: false,
+      canChooseFolders: false,
+    },
+    account: {
+      id: "user-ada",
+      login: "ada-lovelace",
+      avatarUrl: null,
+      teams: teams.map(({ id, name, role }) => ({ id, name, role })),
+      current: { kind: "session", id: "session-firefox" },
+    },
+    teams,
+    runners: [
+      {
+        id: studio.id,
+        label: studio.label,
+        provider: "claude-code",
+        appVersion: "0.5.2",
+        eligibility: "assigned",
+        pairedAt: ago(20 * DAY),
+        lastSeenAt: ago(4 * MINUTE),
+      },
+      {
+        id: "runner-ci",
+        label: "Build box (headless)",
+        provider: "claude-code",
+        appVersion: "0.5.1",
+        eligibility: "assigned_then_pool",
+        pairedAt: ago(9 * DAY),
+        lastSeenAt: ago(3 * HOUR),
+      },
+      {
+        id: "runner-new",
+        label: "Spare Mac mini",
+        provider: "claude-code",
+        appVersion: null,
+        eligibility: "assigned",
+        pairedAt: ago(2 * HOUR),
+        lastSeenAt: null,
+      },
+    ],
+    sessions: [
+      {
+        id: "session-firefox",
+        userAgent:
+          "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:134.0) Gecko/20100101 Firefox/134.0",
+        createdAt: ago(2 * DAY),
+        lastUsedAt: ago(MINUTE),
+        current: true,
+      },
+      {
+        id: "session-phone",
+        userAgent:
+          "Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Mobile/15E148 Safari/604.1",
+        createdAt: ago(12 * DAY),
+        lastUsedAt: ago(30 * HOUR),
+        current: false,
+      },
+    ],
+    apiTokens: [
+      {
+        id: "token-claude",
+        kind: "personal",
+        label: "Claude Code on my laptop",
+        runnerId: null,
+        teamIds: [],
+        createdAt: ago(6 * DAY),
+        lastUsedAt: ago(2 * HOUR),
+        lastUsedFrom: "claude-code/2.1.234",
+        expiresAt: null,
+        current: false,
+      },
+      {
+        id: "token-runner",
+        kind: "runner",
+        label: "Studio Mac",
+        runnerId: studio.id,
+        teamIds: [],
+        createdAt: ago(20 * DAY),
+        lastUsedAt: ago(4 * MINUTE),
+        lastUsedFrom: null,
+        expiresAt: null,
+        current: false,
+      },
+    ],
+    worktreeRunners: { "t-review-1": studio, "t-review-2": old, "t-review-3": studio },
   };
 }
 
@@ -1752,6 +1920,12 @@ export function buildScenario(name: ScenarioName): Scenario {
     case "review-loop-settings":
     case "review-loop-repository":
       return reviewLoopScenario(name);
+    case "signed-out":
+      return { ...browserScenario(name, 2), account: null };
+    case "browser":
+      return browserScenario(name, 2);
+    case "browser-one-team":
+      return browserScenario(name, 1);
     case "busy":
       return populated(name, 3, true);
     case "one-run":

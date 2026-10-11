@@ -15,6 +15,9 @@ interface Capture {
   view: string;
   /** The sidebar entry to click, or `null` when the scenario opens on the view. */
   sidebar: string | null;
+  /** What shows that the app has loaded, when it is not the sidebar: the
+   *  sign-in screen has none (task 050). */
+  ready?: string;
   /** Visible once the view has rendered. */
   landmark: string;
   /** A Runs-history row to open, by its task title, once the view is up — the
@@ -33,6 +36,10 @@ interface Capture {
   /** Brings the landmark into view, with some of what precedes it, before the shot, for a section deep inside
    *  a drawer's own scroll, which a full-page capture does not reach. */
   reveal?: boolean;
+  /** A window tall enough for the whole drawer, for a section at the foot of
+   *  one: a full-page capture does not scroll the drawer's own scrollbar, and
+   *  the drawer is as tall as the window (task 050). */
+  tall?: boolean;
 }
 
 interface Click {
@@ -59,6 +66,11 @@ const RUNS = { sidebar: "Runs", landmark: ".runs-view" };
 // newest row in the panel's run history.
 const LOOP_CARD: Click = { role: "button", name: /Rework the login redirect after sign-out/ };
 const LOOP_NEWEST_RUN: Click = { role: "button", name: /^Review · #7/ };
+
+// Task 050: the cards waiting for review in the browser scenarios, whose
+// worktrees are on other machines.
+const SWITCHER: Click = { role: "button", name: /^Team/ };
+const ELSEWHERE_CARD: Click = { role: "button", name: /Add the doctor banner to every view/ };
 
 const CAPTURES: Capture[] = [
   { scenario: "busy", view: "board", ...BOARD },
@@ -132,6 +144,38 @@ const CAPTURES: Capture[] = [
     landmark: ".repo-review",
     reveal: true,
   },
+  // Task 050: the web shell, as a person in a browser sees it.
+  {
+    scenario: "signed-out",
+    view: "sign-in",
+    sidebar: null,
+    ready: ".sign-in",
+    landmark: ".sign-in-link",
+  },
+  {
+    scenario: "browser",
+    view: "board-switcher",
+    ...BOARD,
+    clicks: [SWITCHER],
+    landmark: ".team-switcher-menu",
+  },
+  {
+    scenario: "browser",
+    view: "task-elsewhere",
+    ...BOARD,
+    clicks: [ELSEWHERE_CARD],
+    landmark: ".worktree-elsewhere",
+    tall: true,
+  },
+  { scenario: "browser", view: "review", ...REVIEW, keys: ["Enter"], landmark: ".worktree-elsewhere" },
+  {
+    scenario: "browser",
+    view: "settings-runners",
+    sidebar: "Settings",
+    landmark: "#settings-runners",
+  },
+  { scenario: "browser", view: "account", sidebar: "Account", landmark: ".account-view" },
+  { scenario: "browser-one-team", view: "board", ...BOARD },
 ];
 
 for (const capture of CAPTURES) {
@@ -145,6 +189,8 @@ for (const capture of CAPTURES) {
     const crashes: string[] = [];
     page.on("pageerror", (error) => crashes.push(error.message));
 
+    if (capture.tall && width) await page.setViewportSize({ width, height: 2800 });
+
     // Before navigation, so the page's first `Date.now()` is already fixed.
     await page.clock.setFixedTime(FIXTURE_NOW);
     await page.goto(`/fixtures.html?scenario=${capture.scenario}`);
@@ -154,7 +200,7 @@ for (const capture of CAPTURES) {
     // surfaces below naming the file.
     let waitFailure: unknown;
     try {
-      await expect(page.locator(".app .sidebar")).toBeVisible();
+      await expect(page.locator(capture.ready ?? ".app .sidebar")).toBeVisible();
       if (capture.sidebar) {
         await page.getByRole("button", { name: new RegExp(`^${capture.sidebar}`) }).click();
       }
