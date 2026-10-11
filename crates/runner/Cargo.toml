@@ -2,7 +2,7 @@
 name = "rimaia-runner"
 version = "0.1.0"
 edition = "2021"
-description = "The Rimaia runner: runner.db and what one machine keeps for itself (ADR-0027, ADR-0028)."
+description = "The Rimaia runner: runner.db, what one machine keeps for itself, and its HTTP board adapter (ADR-0027, ADR-0028)."
 
 # A library only; the headless binary is task 058's. Like `rimaia-core`, nothing
 # here may require a display server, WebKit or GTK: the headless runner links
@@ -18,6 +18,14 @@ testing = []
 [dependencies]
 rimaia-core = { path = "../core" }
 chrono = { workspace = true }
+# The HTTP board adapter (task 052): a runner's token goes to a server over
+# TLS, so this crate turns on reqwest's TLS here and never on the workspace
+# line, where `rimaia-core`'s probe stays plain HTTP to 127.0.0.1
+# (seam-contract D34). Bodies are built with `serde_json::to_vec`, so neither
+# `json` nor `form` is enabled, and a query string is built on the `Url`.
+reqwest = { workspace = true, features = ["rustls"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
 sqlx = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
@@ -29,9 +37,12 @@ tracing = { workspace = true }
 [dev-dependencies]
 rimaia-core = { path = "../core", features = ["testing"] }
 rimaia-runner = { path = ".", features = ["testing"] }
+# The real server router, which the board port's contract suite runs against
+# over HTTP (seam-contract D31 point 13). The direction ADR-0027 point 6
+# allows: the server never depends on this crate.
+rimaia-server = { path = "../server" }
+# Stub routers the adapter's own tests answer with, on the workspace line the
+# server already uses, so no crate enters the lock (seam-contract D34).
+axum = { workspace = true }
 pretty_assertions = "1"
-# `the_queue_status_payload_is_unchanged` pins `get_queue_status`'s JSON. The
-# workspace line `rimaia-core` and the shell already use, so no crate enters
-# the lock (seam-contract D6, D34), and only the tests reach it.
-serde_json = { workspace = true }
 tempfile = { workspace = true }

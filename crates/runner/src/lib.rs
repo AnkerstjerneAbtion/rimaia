@@ -7,6 +7,7 @@
 //! implementation on that store, which the host injects into `rimaia-core` as
 //! a `MachineContext` (task 041); and the loop, [`queue`] (task 042), which
 //! asks the board for work through the port and obeys this machine's rules.
+//! [`board::HttpBoard`] is the port's adapter for a board on a server, and
 //! [`relay::ShellRelay`] answers solo's Run now and Cancel on this machine
 //! (task 052).
 //!
@@ -19,6 +20,7 @@
 //! type across its boundary.
 
 pub mod adopt;
+pub mod board;
 pub mod identity;
 pub mod machine;
 pub mod queue;
