@@ -135,7 +135,9 @@ macro_rules! board_contract {
             start_run_records_the_run_id_the_runner_minted,
             record_branch_sets_the_branch,
             record_branch_refuses_a_branch_naming_could_not_build_for_the_task,
+            record_branch_accepts_a_recorded_branch_written_back_unchanged,
             start_run_refuses_a_base_that_is_neither_a_branch_rimaia_knows_nor_a_commit,
+            start_run_accepts_a_base_an_earlier_run_of_the_task_recorded,
             finish_run_refuses_a_head_that_is_not_a_commit,
             review_findings_recorded_through_the_port_land_on_their_review_run,
             a_finish_for_another_tasks_run_is_not_found,
@@ -1046,6 +1048,53 @@ pub mod cases {
         assert_same(task.branch, None, "nothing was recorded");
     }
 
+    /// A branch stored before the rule is never rewritten (D37 point 4), so a
+    /// runner that resumes the task writes it back. That adds nothing and is
+    /// accepted; any other name naming could not build is still refused.
+    pub async fn record_branch_accepts_a_recorded_branch_written_back_unchanged<H: Harness>() {
+        let harness = H::start().await;
+        let board = harness.board();
+        let arranged = Arranged::new(board).await;
+        let task_id = arranged.task(board, "Branched before the rule").await;
+        // No service stores a branch naming could not build any more, so the
+        // pre-rule value is written straight into the column.
+        let recorded = "feature/before the rule";
+        sqlx::query("UPDATE tasks SET branch = ?1 WHERE id = ?2")
+            .bind(recorded)
+            .bind(&task_id)
+            .execute(&board.pool)
+            .await
+            .expect("store a pre-rule branch");
+        let runner = harness.runner(Which::A);
+        let claim = claimed(runner.as_ref(), run_target(&task_id, false)).await;
+
+        let other = "feature/after the rule";
+        let error = runner
+            .record_branch(&claim.lease, other)
+            .await
+            .expect_err("a different branch naming could not build");
+        assert_same(error.code(), ErrorCode::Invalid, "the error code");
+        assert_same(
+            error.to_string(),
+            format!(
+                "the branch {other:?} is refused: a task's branch is rimaia/ and the task's \
+                 id, optionally followed by a hyphen and lowercase letters, digits and single \
+                 hyphens, of at most 200 bytes"
+            ),
+            "the refusal",
+        );
+
+        runner
+            .record_branch(&claim.lease, recorded)
+            .await
+            .expect("the recorded branch, written back unchanged");
+        let task = tasks::get_task(board, &task_id)
+            .await
+            .expect("read the task")
+            .task;
+        assert_same(task.branch, Some(recorded.to_string()), "the branch");
+    }
+
     pub async fn start_run_refuses_a_base_that_is_neither_a_branch_rimaia_knows_nor_a_commit<
         H: Harness,
     >() {
@@ -1108,6 +1157,111 @@ pub mod cases {
                 .await
                 .unwrap_or_else(|error| panic!("{base_ref} is a base: {error}"));
         }
+    }
+
+    /// A review and a fix record the implementation's base (D29 point 4),
+    /// which may predate a rename of the default branch, or a pre-rule commit
+    /// value D37 point 4 leaves stored. Either is accepted because a run of
+    /// this task recorded it; an unrelated label or commit is still refused.
+    pub async fn start_run_accepts_a_base_an_earlier_run_of_the_task_recorded<H: Harness>() {
+        let harness = H::start().await;
+        let board = harness.board();
+        let arranged = Arranged::new(board).await;
+        let task_id = arranged.task(board, "Based before a rename").await;
+        turn_the_loop_on(board).await;
+        let runner = harness.runner(Which::A);
+        let claim = claimed(runner.as_ref(), run_target(&task_id, false)).await;
+        let implementation = new_id();
+        runner
+            .start_run(
+                &claim.lease,
+                starting(&implementation, RunKind::Implementation),
+            )
+            .await
+            .expect("start the implementation on the default branch");
+        // No service stores a base commit that is not a sha any more, so the
+        // pre-rule value is written straight into the column.
+        let recorded_sha = "before the rule";
+        sqlx::query("UPDATE runs SET base_sha = ?1 WHERE id = ?2")
+            .bind(recorded_sha)
+            .bind(&implementation)
+            .execute(&board.pool)
+            .await
+            .expect("store a pre-rule base commit");
+        runner
+            .finish_run(
+                &claim.lease,
+                &implementation,
+                finishing_at(succeeded(), HEAD),
+            )
+            .await
+            .expect("finish it");
+        repo::update(
+            board,
+            &arranged.repository_id,
+            repo::RepositoryPatch {
+                name: None,
+                default_branch: Some("trunk".to_string()),
+            },
+        )
+        .await
+        .expect("rename the default branch");
+
+        let refusals = [
+            (
+                StartRun {
+                    base_ref: Some("release".to_string()),
+                    base_sha: Some(recorded_sha.to_string()),
+                    ..starting(&new_id(), RunKind::Review)
+                },
+                "the base ref \"release\" is refused: a run's base ref is the repository's \
+                 default branch, a task's branch, a full commit sha, or a base a run of this \
+                 task already recorded",
+            ),
+            (
+                StartRun {
+                    base_ref: Some("main".to_string()),
+                    base_sha: Some("after the rule".to_string()),
+                    ..starting(&new_id(), RunKind::Review)
+                },
+                "the base commit \"after the rule\" is refused: a commit is a full sha, 40 or \
+                 64 lowercase hexadecimal digits",
+            ),
+        ];
+        for (start, refusal) in refusals {
+            let run_id = start.run_id.clone();
+            let error = runner
+                .start_run(&claim.lease, start)
+                .await
+                .expect_err("a base no run of this task recorded");
+            assert_same(error.code(), ErrorCode::Invalid, "the error code");
+            assert_same(error.to_string(), refusal.to_string(), "the refusal");
+            assert_same(
+                runs::get_run_row(board, &run_id).await.is_err(),
+                true,
+                "no row was opened",
+            );
+        }
+
+        // `main` is no longer the default branch and the commit was never a
+        // sha; the implementation recorded both.
+        let review = new_id();
+        runner
+            .start_run(
+                &claim.lease,
+                StartRun {
+                    base_ref: Some("main".to_string()),
+                    base_sha: Some(recorded_sha.to_string()),
+                    ..starting(&review, RunKind::Review)
+                },
+            )
+            .await
+            .expect("the review starts on the implementation's base");
+        let run = runs::get_run_row(board, &review)
+            .await
+            .expect("a row for the review");
+        assert_same(run.base_ref, Some("main".to_string()), "the base ref");
+        assert_same(run.base_sha, Some(recorded_sha.to_string()), "the base sha");
     }
 
     pub async fn finish_run_refuses_a_head_that_is_not_a_commit<H: Harness>() {
