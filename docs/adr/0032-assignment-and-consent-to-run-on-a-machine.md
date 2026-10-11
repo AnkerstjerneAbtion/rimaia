@@ -276,3 +276,35 @@ can have a second member before task 051, and 073 is ordered before 051. Rejecte
 each channel a new consent piece (a new content kind and migration for text nobody needs to
 send to an agent), and leaving them as a residual (it would void the property this ADR exists
 for).
+
+## Amendment, 2026-10-11 — a personal team with other members is shared (task 051)
+
+ADR-0029 point 2 lets a personal team gain members with no data moving, and task 051 lets
+people be invited into one. This ADR's personal-team rules (the 2026-10-10 amendment above,
+point 7's facts, and the prompt-input classes), and seam-contract D36 and D37, assumed a
+personal team only ever holds its own person. They are restated over who the members are,
+as D36 point 1 already frames them:
+
+- **The personal-team rules apply while the team's only member is its own person**
+  (`teams.personal_user_id`). The moment anyone else is a member, the team is shared for every
+  rule that reads the kind: the team ceiling is consulted, `RunContext::authorship` is filled,
+  and the prompt-input classes apply. One predicate answers this, and every reader of the
+  kind goes through it.
+- **Unassigned tasks still run on the team's own person's runners.** Point 2's "in a personal
+  team every task is the owner's own" is about whose runner it is, not how many members there
+  are, so that branch reads "unassigned, in a team whose personal user is the runner's owner"
+  whether or not others have joined. Other members' runners need an assignment or a pool
+  opt-in, as in any shared team, and consent applies to every piece another member wrote.
+- **When a second member joins, every repository in the team starts with the ceiling
+  allowing unattended runs.** A personal team never consulted its ceiling column, so its
+  stored value means nothing as a team decision. Starting at "forbidden" would stop the
+  owner's runs the moment they invited someone. The ceiling only restricts, and each runner
+  still needs its owner's consent on that machine (point 4), so allowing grants nothing. An
+  owner can forbid it afterwards. `accept_invitation` writes this in the same transaction
+  that adds the member.
+- If the team returns to its own person alone, the personal-team rules apply again. The
+  ceiling values stay as they were, unread.
+
+Rejected: refusing invitations into a personal team. ADR-0029 point 2 says it can gain
+members, and a person who starts alone and then invites a colleague should not have to move
+their board.

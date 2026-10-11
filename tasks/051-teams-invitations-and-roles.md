@@ -785,3 +785,20 @@ header test add roughly 100 lines to the estimate, and do not move the task off 
 services are complete and reachable over HTTP and MCP without the screens. The screens
 cannot exist without the services. The `/invite` route stays in 051 either way: it is a
 server door.
+
+**Decision, 2026-10-11 (answer to the personal-team stop).** Invitations into a personal team
+stay allowed, as Scope 4 says. ADR-0032's amendment "a personal team with other members is
+shared" governs what that changes. In this task:
+
+- Add one predicate, true while a team's only member is its `personal_user_id`. Route every
+  reader of the team's kind through it: `team_kind_of_task`, `RunContext::team_kind`,
+  `authorship()`, `team_ceiling()`, the ceiling command's personal-team refusal, and 073's
+  shared-team rendering. Eligibility's personal branch stays keyed on the runner owner being
+  the team's personal user, whatever the member count.
+- `accept_invitation`, in the transaction that adds the member, sets every repository in a
+  team that was personal-and-alone to allow unattended runs (the ceiling).
+- Record both in D36 and D37 as dated amendments.
+- Tests: `a_personal_team_that_gains_a_member_is_shared_for_every_rule`,
+  `the_personal_users_unassigned_tasks_still_run_on_their_runners_after_someone_joins`,
+  `a_joined_personal_teams_ceiling_starts_allowed`, and
+  `a_personal_team_left_alone_again_is_personal_again`.
