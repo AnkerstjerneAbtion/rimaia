@@ -1040,22 +1040,25 @@ async fn no_secret_type_prints_its_value_in_debug() {
 // The account commands
 // ---------------------------------------------------------------------------
 
-const ACCOUNT_COMMANDS: [(&str, fn() -> Value); 8] = [
-    ("get_account", || json!({})),
-    ("list_sessions", || json!({})),
-    ("revoke_session", || json!({ "id": "a-session" })),
-    ("list_api_tokens", || json!({})),
-    (
-        "create_personal_access_token",
-        || json!({ "label": "Claude Code" }),
-    ),
-    ("revoke_api_token", || json!({ "id": "a-token" })),
-    ("create_pairing_code", || json!({})),
-    (
-        "pair_own_runner",
-        || json!({ "label": "laptop", "provider": "claude-code" }),
-    ),
-];
+/// Every account command, with arguments it would accept on a server.
+fn account_commands() -> Vec<(&'static str, Value)> {
+    vec![
+        ("get_account", json!({})),
+        ("list_sessions", json!({})),
+        ("revoke_session", json!({ "id": "a-session" })),
+        ("list_api_tokens", json!({})),
+        (
+            "create_personal_access_token",
+            json!({ "label": "Claude Code" }),
+        ),
+        ("revoke_api_token", json!({ "id": "a-token" })),
+        ("create_pairing_code", json!({})),
+        (
+            "pair_own_runner",
+            json!({ "label": "laptop", "provider": "claude-code" }),
+        ),
+    ]
+}
 
 #[tokio::test]
 async fn account_commands_refuse_the_solo_shell() {
@@ -1072,8 +1075,10 @@ async fn account_commands_refuse_the_solo_shell() {
     };
     let caller = Caller::solo(&harness.solo);
 
-    for (name, args) in ACCOUNT_COMMANDS {
-        let refused = api::dispatch(&host, caller.clone(), name, args())
+    let commands = account_commands();
+    assert_eq!(commands.len(), 8);
+    for (name, args) in commands {
+        let refused = api::dispatch(&host, caller.clone(), name, args)
             .await
             .expect_err(name);
         assert_eq!(
