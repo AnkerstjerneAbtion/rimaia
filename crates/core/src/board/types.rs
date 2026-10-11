@@ -11,8 +11,8 @@
 //! The core types carried inside (`TaskDetail`, `Repository`, `RunOutcome` and
 //! the rest) keep their own attributes. Their `Serialize` output is what
 //! `src/types.ts` already reads, so they gained `Deserialize` and nothing else.
-//! `Catalogue` is the one that still refuses unknown keys, deliberately; the
-//! D31 amendment of 2026-10-09 leaves that to task 052.
+//! `Catalogue` refused unknown keys until task 052, which moved that
+//! strictness into the stored setting's own parser (`strategy::catalogue`).
 
 use std::collections::BTreeMap;
 use std::time::Duration;
