@@ -53,8 +53,14 @@ const DEFAULT_PLANNER_MAX_TURNS: u32 = 6;
 /// configuration document whose serde shape is already what gets stored and what
 /// the operator edits. A projection here would be a second spelling of one
 /// document, free to drift from the thing it describes.
+///
+/// **Read tolerantly**, like every value the board produces (seam-contract
+/// D31 point 6, task 052): a runner reads it out of `RunContext::catalogue`,
+/// and a newer board's extra key must not make an older runner's reply
+/// unreadable. The strictness a hand-edited document wants lives in this
+/// module's private parser, [`RawCatalogueEntry`], and nowhere a reader of
+/// the board's answers can meet it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
-#[serde(deny_unknown_fields)]
 pub struct CatalogueEntry {
     pub id: String,
     pub label: String,
@@ -78,8 +84,10 @@ pub struct CatalogueEntry {
 /// configuration document whose serde shape is already what gets stored and what
 /// the operator edits. A projection here would be a second spelling of one
 /// document, free to drift from the thing it describes.
+///
+/// Read tolerantly for [`CatalogueEntry`]'s reason; [`RawPlannerBudget`] is its
+/// strict twin for the stored setting.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
-#[serde(deny_unknown_fields)]
 pub struct PlannerBudget {
     #[serde(default)]
     pub model: Option<String>,
@@ -115,18 +123,23 @@ impl Default for PlannerBudget {
 /// `#[serde(default)]` on this struct's own fields cannot see which happened
 /// once parsing has already collapsed the two.
 ///
-/// `deny_unknown_fields` on [`RawCatalogue`] is what catches a misspelled key
-/// in hand-edited JSON — the whole value falls back to the provider's default
-/// (see [`catalogue`]), so the choice is only between a warning that names the
-/// typo and a silence that does not.
+/// Refusing unknown keys in [`RawCatalogue`] and its two twins is what catches
+/// a misspelled key in hand-edited JSON — the whole value falls back to the
+/// provider's default (see [`catalogue`]), so the choice is only between a
+/// warning that names the typo and a silence that does not. This type itself
+/// is read tolerantly: it crosses the runner protocol inside
+/// `RunContext::catalogue` (task 052), where a newer board may add a key an
+/// older runner does not know (seam-contract D31 point 6).
 /// `JsonSchema` because ADR-0021 puts this on the tool surface, and because
 /// unlike a row type it *is* the wire shape: seam-contract D16.1 keeps row types
 /// out of `mcp::responses` by projecting them, but a catalogue is a
 /// configuration document whose serde shape is already what gets stored and what
 /// the operator edits. A projection here would be a second spelling of one
-/// document, free to drift from the thing it describes.
+/// document, free to drift from the thing it describes; the strict twins are a
+/// second spelling too, but private to the one parser of what a person types,
+/// which is the only place strictness is wanted.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
-#[serde(default, deny_unknown_fields)]
+#[serde(default)]
 pub struct Catalogue {
     pub models: Vec<CatalogueEntry>,
     pub efforts: Vec<CatalogueEntry>,
@@ -352,14 +365,55 @@ pub async fn stored_invalid_ids(ctx: &ServiceContext) -> Result<Vec<InvalidId>> 
 
 /// The catalogue as the operator wrote it — every field `Option`, so an absent
 /// one and an explicitly empty one stay told apart until [`resolve`] decides
-/// what each means. `deny_unknown_fields` for the reason [`Catalogue`]'s own
-/// doc gives.
+/// what each means. It refuses unknown keys for the reason [`Catalogue`]'s
+/// own doc gives, and so do the two twins below, so a misspelled key anywhere
+/// in the stored setting is refused on write and is a warning on read.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawCatalogue {
-    models: Option<Vec<CatalogueEntry>>,
-    efforts: Option<Vec<CatalogueEntry>>,
-    planner: Option<PlannerBudget>,
+    models: Option<Vec<RawCatalogueEntry>>,
+    efforts: Option<Vec<RawCatalogueEntry>>,
+    planner: Option<RawPlannerBudget>,
+}
+
+/// [`CatalogueEntry`]'s strict twin: the same fields and serde attributes, and
+/// unknown keys refused, for the stored setting alone (task 052).
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawCatalogueEntry {
+    id: String,
+    label: String,
+}
+
+/// [`PlannerBudget`]'s strict twin, for the reason [`RawCatalogueEntry`] gives.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawPlannerBudget {
+    #[serde(default)]
+    model: Option<String>,
+    #[serde(default)]
+    effort: Option<String>,
+    #[serde(default = "default_planner_max_turns")]
+    max_turns: u32,
+}
+
+impl From<RawCatalogueEntry> for CatalogueEntry {
+    fn from(raw: RawCatalogueEntry) -> Self {
+        Self {
+            id: raw.id,
+            label: raw.label,
+        }
+    }
+}
+
+impl From<RawPlannerBudget> for PlannerBudget {
+    fn from(raw: RawPlannerBudget) -> Self {
+        Self {
+            model: raw.model,
+            effort: raw.effort,
+            max_turns: raw.max_turns,
+        }
+    }
 }
 
 /// One parser, so the tolerant read and the refusing write cannot disagree
@@ -375,10 +429,11 @@ fn parse_raw(stored: &str) -> std::result::Result<RawCatalogue, String> {
 /// same defect [`crate::db::settings::base_instructions`] documents about a
 /// field a user cleared.
 fn resolve(raw: RawCatalogue, default: Catalogue) -> Catalogue {
+    let entries = |raw: Vec<RawCatalogueEntry>| raw.into_iter().map(Into::into).collect();
     Catalogue {
-        models: raw.models.unwrap_or(default.models),
-        efforts: raw.efforts.unwrap_or(default.efforts),
-        planner: raw.planner.unwrap_or(default.planner),
+        models: raw.models.map(entries).unwrap_or(default.models),
+        efforts: raw.efforts.map(entries).unwrap_or(default.efforts),
+        planner: raw.planner.map(Into::into).unwrap_or(default.planner),
     }
 }
 
@@ -562,6 +617,86 @@ mod tests {
                 .expect("read the key"),
             None,
             "a refused write stores nothing"
+        );
+    }
+
+    // Task 052: the stored setting stays strict, in the private twins, while
+    // the board's own answers are read tolerantly.
+
+    #[tokio::test]
+    async fn a_misspelled_key_in_a_stored_catalogue_entry_is_refused_on_write() {
+        let h = TestContext::new().await;
+
+        let error = set_catalogue(
+            &h.context,
+            r#"{"models": [{"id": "opus", "lable": "Opus"}]}"#,
+        )
+        .await
+        .expect_err("a misspelled entry key must be refused");
+
+        assert_eq!(
+            error.to_string(),
+            "the catalogue is not valid JSON: unknown field `lable`, expected `id` or `label` at \
+             line 1 column 34"
+        );
+        assert_eq!(stored_text(&h.context).await.expect("read the key"), None);
+    }
+
+    #[tokio::test]
+    async fn a_misspelled_key_in_a_stored_planner_budget_is_refused_on_write() {
+        let h = TestContext::new().await;
+
+        let error = set_catalogue(&h.context, r#"{"planner": {"max_turn": 3}}"#)
+            .await
+            .expect_err("a misspelled planner key must be refused");
+
+        assert_eq!(
+            error.to_string(),
+            "the catalogue is not valid JSON: unknown field `max_turn`, expected one of `model`, \
+             `effort`, `max_turns` at line 1 column 23"
+        );
+        assert_eq!(stored_text(&h.context).await.expect("read the key"), None);
+    }
+
+    #[tokio::test]
+    async fn a_stored_catalogue_with_a_misspelled_entry_key_falls_back_with_a_warning() {
+        let h = TestContext::new().await;
+        settings::set_team(
+            &h.context,
+            &h.solo.team_id,
+            STRATEGY_CATALOGUE,
+            Some(r#"{"models": [{"id": "opus", "label": "Opus", "lable": "Opus"}]}"#),
+        )
+        .await
+        .expect("a hand edit in the sqlite3 CLI");
+
+        assert_eq!(
+            catalogue(&h.context, &ProviderProfile::of(&ClaudeProvider))
+                .await
+                .expect("read it back"),
+            ClaudeProvider.default_catalogue(),
+        );
+    }
+
+    #[test]
+    fn the_catalogue_the_board_answers_with_reads_a_key_it_does_not_know() {
+        let read: Catalogue = serde_json::from_str(
+            r#"{"models": [{"id": "opus", "label": "Opus", "tier": "large"}],
+                "efforts": [], "planner": {"max_turns": 4, "budget_usd": 1}, "pricing": {}}"#,
+        )
+        .expect("a newer board's catalogue parses");
+
+        assert_eq!(
+            read,
+            Catalogue {
+                models: entries(&[("opus", "Opus")]),
+                efforts: Vec::new(),
+                planner: PlannerBudget {
+                    model: None,
+                    effort: None,
+                    max_turns: 4,
+                },
+            }
         );
     }
 
