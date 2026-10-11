@@ -193,7 +193,7 @@ mod tests {
     fn only_a_401_carries_www_authenticate() {
         for code in ErrorCode::ALL {
             let error = match code {
-                ErrorCode::Unauthenticated => Error::unauthenticated("no"),
+                ErrorCode::Unauthenticated => Error::unauthenticated(),
                 ErrorCode::UpgradeRequired => Error::upgrade_required("no"),
                 ErrorCode::NotFound => Error::not_found("no"),
                 ErrorCode::Conflict => Error::conflict("no"),

@@ -138,11 +138,7 @@ pub struct RefuseAll;
 
 impl Authenticate for RefuseAll {
     fn authenticate<'a>(&'a self, _credential: Credential<'a>) -> BoxFuture<'a, Result<Caller>> {
-        Box::pin(async {
-            Err(Error::unauthenticated(
-                "this server does not accept any credential yet",
-            ))
-        })
+        Box::pin(async { Err(Error::unauthenticated()) })
     }
 }
 

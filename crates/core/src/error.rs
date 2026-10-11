@@ -13,6 +13,9 @@ use serde::ser::{Serialize, SerializeStruct, Serializer};
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
 
+/// What every `unauthenticated` answer says (task 047).
+pub const UNAUTHENTICATED_MESSAGE: &str = "Sign in to continue.";
+
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
     #[error("database error: {0}")]
@@ -37,6 +40,8 @@ pub enum Error {
     /// The request carried no credential the server accepts, or one that
     /// cannot drive the surface it reached (seam-contract D32 point 7). Never
     /// "this exists, but not for you": that is `NotFound` (ADR-0029 point 5).
+    /// Always [`UNAUTHENTICATED_MESSAGE`], built only by
+    /// [`Error::unauthenticated`].
     #[error("{message}")]
     Unauthenticated { message: String },
 
@@ -114,9 +119,15 @@ impl Error {
         }
     }
 
-    pub fn unauthenticated(message: impl Into<String>) -> Self {
+    /// Every authentication failure, in its one sentence (task 047). Unknown,
+    /// expired, revoked, wrong kind, unpaired, no reachable team and a missing
+    /// or wrong CSRF header are indistinguishable to the caller, so the answer
+    /// is not an oracle for which credentials exist; the span records which it
+    /// was. There is no argument, so no call site can word a refusal
+    /// differently.
+    pub fn unauthenticated() -> Self {
         Error::Unauthenticated {
-            message: message.into(),
+            message: UNAUTHENTICATED_MESSAGE.to_string(),
         }
     }
 
@@ -177,8 +188,8 @@ mod tests {
     #[test]
     fn unauthenticated_serializes_to_code_and_message() {
         assert_eq!(
-            as_json(Error::unauthenticated("sign in to use this board")),
-            r#"{"code":"unauthenticated","message":"sign in to use this board"}"#
+            as_json(Error::unauthenticated()),
+            r#"{"code":"unauthenticated","message":"Sign in to continue."}"#
         );
     }
 
@@ -201,7 +212,7 @@ mod tests {
             Error::not_found("").code(),
             Error::invalid("").code(),
             Error::conflict("").code(),
-            Error::unauthenticated("").code(),
+            Error::unauthenticated().code(),
             Error::upgrade_required("").code(),
             Error::internal("").code(),
         ];

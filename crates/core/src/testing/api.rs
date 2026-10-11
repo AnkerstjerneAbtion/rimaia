@@ -79,7 +79,7 @@ impl Authenticate for FixedCaller {
             .callers
             .get(token)
             .cloned()
-            .ok_or_else(|| Error::unauthenticated("this token names nobody"));
+            .ok_or_else(Error::unauthenticated);
         Box::pin(async move { caller })
     }
 }

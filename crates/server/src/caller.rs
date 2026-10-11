@@ -29,19 +29,15 @@ impl FromRequestParts<ServerState> for Caller {
         let session = has_session_cookie(&parts.headers);
         let credential = match (bearer, session) {
             (Some(_), true) => {
-                return Err(Error::unauthenticated(
-                    "a request carries a session or a bearer token, not both",
-                )
+                return Err(Error::unauthenticated()
                 .into())
             }
             (None, true) => {
-                return Err(Error::unauthenticated(
-                    "this server does not accept a session yet; send a bearer token",
-                )
+                return Err(Error::unauthenticated()
                 .into())
             }
             (None, false) => {
-                return Err(Error::unauthenticated("this request carries no credential").into())
+                return Err(Error::unauthenticated().into())
             }
             (Some(token), false) => Credential::Bearer(token),
         };
@@ -62,9 +58,7 @@ fn accepts(credential: &Credential<'_>, door: &Door) -> Result<(), Error> {
         (Credential::Bearer(_), Door::Desktop { .. }) => Ok(()),
         // Reachable once task 047 hands a session to `Authenticate`.
         (Credential::Session { .. }, Door::Browser { .. }) => Ok(()),
-        _ => Err(Error::unauthenticated(
-            "this credential cannot drive board commands",
-        )),
+        _ => Err(Error::unauthenticated()),
     }
 }
 
@@ -81,7 +75,7 @@ fn bearer(headers: &HeaderMap) -> Result<Option<&str>, Error> {
         .map(str::trim)
         .filter(|token| !token.is_empty())
         .map(Some)
-        .ok_or_else(|| Error::unauthenticated("an Authorization header must be `Bearer <token>`"))
+        .ok_or_else(Error::unauthenticated)
 }
 
 /// Whether any `Cookie` header names the session cookie.
