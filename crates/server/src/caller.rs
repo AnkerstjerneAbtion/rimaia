@@ -7,13 +7,21 @@
 //! a caller, and the pair of credential shape and door must be one the board
 //! surface accepts: a browser's session, or a connected desktop's token. Any
 //! other request is `unauthenticated`, in the one sentence every refusal has.
+//!
+//! A request may also carry `Rimaia-Team: <team id>` (task 050 Scope 3). On
+//! every board route except the commands about the person
+//! ([`ignores_team_header`]) and on the event stream, it narrows the caller to
+//! that one team, once, after the credential and the door have been checked.
+//! The rule is [`Caller::narrow_to`]'s; this module only reads the header.
 
 use std::fmt;
 
 use axum::extract::FromRequestParts;
+use axum::extract::MatchedPath;
 use axum::http::request::Parts;
 use axum::http::{header, HeaderMap};
 use axum_extra::extract::cookie::CookieJar;
+use rimaia_core::api::registry::ignores_team_header;
 use rimaia_core::api::{Authenticate, Caller, Credential, Door};
 use rimaia_core::Error;
 
@@ -27,7 +35,7 @@ impl FromRequestParts<ServerState> for Caller {
         parts: &mut Parts,
         state: &ServerState,
     ) -> Result<Self, Self::Rejection> {
-        let presented = Presented::from_headers(&parts.headers)?;
+        let presented = Presented::from_parts(parts)?;
         Ok(presented.resolve(state.auth.as_ref()).await?)
     }
 }
@@ -42,6 +50,8 @@ impl FromRequestParts<ServerState> for Caller {
 pub struct Presented {
     credential: HeldCredential,
     user_agent: Option<String>,
+    /// The team the request named, kept only for a route it applies to.
+    team: Option<String>,
 }
 
 #[derive(Clone)]
@@ -54,9 +64,23 @@ enum HeldCredential {
 }
 
 impl Presented {
+    /// What the request to the route `parts` describes presented.
+    fn from_parts(parts: &Parts) -> Result<Self, Error> {
+        let command = parts
+            .extensions
+            .get::<MatchedPath>()
+            .map(MatchedPath::as_str)
+            .unwrap_or_else(|| parts.uri.path())
+            .rsplit('/')
+            .next()
+            .unwrap_or_default();
+        Self::from_headers(&parts.headers, command)
+    }
+
     /// The one credential `headers` carry: the session cookie with its CSRF
-    /// header, or a bearer, never both and never neither.
-    fn from_headers(headers: &HeaderMap) -> Result<Self, Error> {
+    /// header, or a bearer, never both and never neither, and the team they
+    /// name when `command` is one that header narrows.
+    fn from_headers(headers: &HeaderMap, command: &str) -> Result<Self, Error> {
         let bearer = bearer(headers)?;
         let jar = CookieJar::from_headers(headers);
         let session = jar.get(SESSION_COOKIE).map(|cookie| cookie.value());
@@ -73,19 +97,25 @@ impl Presented {
         Ok(Self {
             credential,
             user_agent: text(headers, header::USER_AGENT.as_str()).map(str::to_string),
+            team: team(headers, command)?,
         })
     }
 
-    /// The board surface's whole caller resolution: `Authenticate`, then the
-    /// door check. What a board route runs once, and what a stream runs again
-    /// each time it revalidates, so the two cannot drift.
+    /// The board surface's whole caller resolution: `Authenticate`, the door
+    /// check, then the narrowing to the named team. What a board route runs
+    /// once, and what a stream runs again each time it revalidates, so the two
+    /// cannot drift: a narrowed stream stays narrowed, and a caller who has
+    /// lost the team gets `not_found` and the stream ends.
     pub async fn resolve(&self, auth: &dyn Authenticate) -> Result<Caller, Error> {
         let credential = self.credential();
         let caller = auth
             .authenticate_from(credential, self.user_agent.as_deref())
             .await?;
         accepts(&credential, &caller.door)?;
-        Ok(caller)
+        match &self.team {
+            Some(team_id) => caller.narrow_to(team_id),
+            None => Ok(caller),
+        }
     }
 
     fn credential(&self) -> Credential<'_> {
@@ -103,7 +133,7 @@ impl<S: Send + Sync> FromRequestParts<S> for Presented {
     type Rejection = ApiError;
 
     async fn from_request_parts(parts: &mut Parts, _state: &S) -> Result<Self, Self::Rejection> {
-        Ok(Self::from_headers(&parts.headers)?)
+        Ok(Self::from_parts(parts)?)
     }
 }
 
@@ -143,6 +173,28 @@ fn bearer(headers: &HeaderMap) -> Result<Option<&str>, Error> {
         .filter(|token| !token.is_empty())
         .map(Some)
         .ok_or_else(Error::unauthenticated)
+}
+
+/// The header naming the team on screen.
+pub const TEAM_HEADER: &str = "rimaia-team";
+
+/// The team `headers` name, unless `command` is about the person and not the
+/// team ([`ignores_team_header`]). A header that is not text, or is empty, is
+/// `invalid`: a client with no team chosen sends none.
+fn team(headers: &HeaderMap, command: &str) -> Result<Option<String>, Error> {
+    if ignores_team_header(command) {
+        return Ok(None);
+    }
+    let Some(value) = headers.get(TEAM_HEADER) else {
+        return Ok(None);
+    };
+    value
+        .to_str()
+        .ok()
+        .map(str::trim)
+        .filter(|team_id| !team_id.is_empty())
+        .map(|team_id| Some(team_id.to_string()))
+        .ok_or_else(|| Error::invalid("Rimaia-Team must name a team id."))
 }
 
 /// A header's value, if it is text.

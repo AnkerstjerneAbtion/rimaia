@@ -14,9 +14,12 @@
 //! board routes. [`auth`] adds the sign-in routes, which are not board
 //! commands, `GET /api/v1/events` streams the board's change events to the
 //! same callers (task 048), and [`serve`] is the one way any of it is
-//! served.
+//! served. The same router serves the built web bundle at `/` when it is given
+//! one ([`web`], task 050), and allows cross-origin calls from the Tauri
+//! origins to `/api/v1` ([`cors`]).
 
 use std::net::SocketAddr;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use axum::body::Bytes;
@@ -25,7 +28,7 @@ use axum::extract::{FromRequestParts, MatchedPath, State};
 use axum::http::request::Parts;
 use axum::http::{header, HeaderValue, Request, StatusCode};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{get, post};
+use axum::routing::{any, get, post};
 use axum::{Json, Router};
 use rimaia_core::api::{self, protocol, Authenticate, BoardHost, Caller, Effect, COMMANDS};
 use rimaia_core::identity::pending::{DesktopCodes, PendingSignIns};
@@ -38,8 +41,12 @@ use tower_http::trace::TraceLayer;
 pub mod auth;
 mod caller;
 pub mod config;
+pub mod cors;
 mod events;
 pub mod github;
+pub mod web;
+
+pub use caller::TEAM_HEADER;
 
 /// What every request reaches: the board host `dispatch` runs against,
 /// whatever decides who a credential is, and what signing in needs.
@@ -105,12 +112,31 @@ fn http_span<B>(request: &Request<B>) -> tracing::Span {
     tracing::info_span!("http", method = %request.method(), route)
 }
 
+/// What a deployment decides about the router beyond its state.
+#[derive(Debug, Clone, Default)]
+pub struct RouterOptions {
+    /// Whether the Vite dev origin may call the API (task 050 Scope 2). The
+    /// binary passes `cfg!(debug_assertions)`, so a release build never allows
+    /// it; a test passes what it means, because that is always true under
+    /// `cargo test`.
+    pub dev: bool,
+    /// The directory holding the built web bundle, to serve at `/`. `None`
+    /// serves the API only.
+    pub web_root: Option<PathBuf>,
+}
+
+/// [`router_with`], serving the API only and allowing no dev origin.
+pub fn router(state: ServerState) -> Router {
+    router_with(state, &RouterOptions::default())
+}
+
 /// One route per board row, nested under `/api/v1` beside the two JSON auth
 /// routes and the event stream, whose fallbacks answer in the error shape: a name with no route is
 /// `404 not_found` and a method other than `POST` is `400 invalid`, never
 /// axum's plain text and never a page. The three sign-in navigations sit at
-/// the root.
-pub fn router(state: ServerState) -> Router {
+/// the root, and the web bundle, when there is one, answers everything else.
+/// No path under `/api/` reaches the bundle.
+pub fn router_with(state: ServerState, options: &RouterOptions) -> Router {
     let mut commands = Router::new();
     for command in COMMANDS.iter() {
         let Some(effect) = command.effect() else {
@@ -136,13 +162,26 @@ pub fn router(state: ServerState) -> Router {
         .fallback(|| async { ApiError(Error::not_found("there is no such board command")) })
         .method_not_allowed_fallback(|| async {
             ApiError(Error::invalid("a board command is sent with POST"))
-        });
+        })
+        // Outside the commands' tracing, so a preflight is answered before any
+        // route is looked for. Task 052's `/api/v1/runner/*` is mounted
+        // outside this layer: its callers are not browsers.
+        .layer(cors::layer(options.dev));
     let sign_in = auth::routes()
         .route_layer(TraceLayer::new_for_http().make_span_with(http_span::<axum::body::Body>));
-    Router::new()
+    let api = Router::new()
         .nest("/api/v1", commands)
-        .merge(sign_in)
-        .with_state(state)
+        // Any other path under `/api/` is a missing command, not a page.
+        .route(
+            "/api/{*rest}",
+            any(|| async { ApiError(Error::not_found("there is no such board command")) }),
+        )
+        .merge(sign_in);
+    match &options.web_root {
+        Some(root) => api.merge(web::router(root)),
+        None => api,
+    }
+    .with_state(state)
 }
 
 /// The route handler, after the caller is known.

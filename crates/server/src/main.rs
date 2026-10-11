@@ -21,7 +21,7 @@ use rimaia_core::runner::provider::{ClaudeProvider, ProviderProfile};
 use rimaia_core::{ServiceContext, SystemClock, TeamScope};
 use rimaia_server::config::{config_from_env, Config};
 use rimaia_server::github::{GitHub, GitHubEndpoints};
-use rimaia_server::{router, ServerState};
+use rimaia_server::{router_with, RouterOptions, ServerState};
 
 #[tokio::main]
 async fn main() -> ExitCode {
@@ -41,6 +41,7 @@ async fn serve() -> Result<(), String> {
         public_url,
         github_client_id,
         github_client_secret,
+        web_root,
     } = config_from_env(|name| std::env::var_os(name)).map_err(|error| error.to_string())?;
     let github = GitHub::new(
         github_client_id,
@@ -99,7 +100,11 @@ async fn serve() -> Result<(), String> {
     let listener = tokio::net::TcpListener::bind(listen)
         .await
         .map_err(|error| format!("could not listen on {listen}: {error}"))?;
-    rimaia_server::serve(listener, router(state))
+    let options = RouterOptions {
+        dev: cfg!(debug_assertions),
+        web_root,
+    };
+    rimaia_server::serve(listener, router_with(state, &options))
         .await
         .map_err(|error| format!("stopped serving on {listen}: {error}"))
 }

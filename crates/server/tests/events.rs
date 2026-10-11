@@ -18,6 +18,7 @@ mod common;
 use std::sync::Arc;
 
 use pretty_assertions::assert_eq;
+use rimaia_core::api::events::interval as revalidate_interval;
 use rimaia_core::api::events::{board_reread, board_wire, tail_wire, WireEvent};
 use rimaia_core::api::{BoardHost, PROTOCOL_VERSION};
 use rimaia_core::events::ChangeEvent;
@@ -28,7 +29,7 @@ use rimaia_core::runner::events::RunTail;
 use rimaia_core::scheduler::{state, QueueState};
 use rimaia_core::tasks;
 use rimaia_core::testing::api as testing_api;
-use rimaia_core::testing::shared::add_member;
+use rimaia_core::testing::shared::{add_member, remove_member};
 use rimaia_core::testing::teams::TwoTeams;
 use serde_json::{json, Value};
 
@@ -75,11 +76,21 @@ impl Fixture {
 
     /// `GET /api/v1/events<query>` as `token`, at this build's protocol.
     async fn get(&self, token: &Secret, query: &str) -> reqwest::Response {
-        self.server
+        self.get_in(token, query, None).await
+    }
+
+    /// [`get`](Self::get), with `Rimaia-Team: team` when given.
+    async fn get_in(&self, token: &Secret, query: &str, team: Option<&str>) -> reqwest::Response {
+        let mut request = self
+            .server
             .client()
             .get(self.url(query))
             .header("authorization", format!("Bearer {}", token.expose()))
-            .header("rimaia-protocol", PROTOCOL_VERSION)
+            .header("rimaia-protocol", PROTOCOL_VERSION);
+        if let Some(team) = team {
+            request = request.header("rimaia-team", team);
+        }
+        request
             .send()
             .await
             .expect("the request reaches the server")
@@ -88,7 +99,12 @@ impl Fixture {
     /// A stream as `token`, its opening burst read and checked: from here on
     /// it is subscribed, and everything it yields was published after.
     async fn open(&self, token: &Secret, query: &str) -> Stream {
-        let response = self.get(token, query).await;
+        self.open_in(token, query, None).await
+    }
+
+    /// [`open`](Self::open), narrowed to `team`.
+    async fn open_in(&self, token: &Secret, query: &str, team: Option<&str>) -> Stream {
+        let response = self.get_in(token, query, team).await;
         assert_eq!(response.status().as_u16(), 200);
         assert_eq!(
             response
@@ -553,4 +569,63 @@ async fn revoking_a_session_ends_its_stream_before_the_next_event() {
         None,
         "the stream ends without the event"
     );
+}
+
+// ---------------------------------------------------------------------------
+// The team header (task 050 Scope 3)
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn the_events_stream_carries_only_the_chosen_team() {
+    let f = Fixture::new().await;
+    let team_a = f.team_a();
+    let mut narrowed = f.open_in(&f.both, "", Some(&team_a)).await;
+    let mut unnarrowed = f.open(&f.both, "").await;
+
+    let (a, b) = (&f.teams.team_a, &f.teams.team_b);
+    let in_b = ChangeEvent::tasks(f.team_b(), [b.ready.clone()]);
+    let in_a = ChangeEvent::tasks(f.team_a(), [a.ready.clone()]);
+    let last = sentinel(f.team_a(), "a");
+    f.publish(&in_b);
+    f.publish(&in_a);
+    f.publish(&last);
+
+    assert_eq!(
+        narrowed.until(&board_wire(&last.change)).await,
+        wire(&[in_a.clone(), last.clone()])
+    );
+    assert_eq!(
+        unnarrowed.until(&board_wire(&last.change)).await,
+        wire(&[in_b, in_a, last]),
+        "the same person with no header still hears both teams"
+    );
+}
+
+#[tokio::test]
+async fn a_narrowed_stream_survives_revalidation() {
+    let f = Fixture::new().await;
+    let team_a = f.team_a();
+    let mut stream = f.open_in(&f.both, "", Some(&team_a)).await;
+
+    // Past the interval with nothing changed: resolved again, narrowed again,
+    // and still team A's alone.
+    f.teams.clock.advance(revalidate_interval());
+    let in_b = ChangeEvent::tasks(f.team_b(), [f.teams.team_b.ready.clone()]);
+    let in_a = ChangeEvent::tasks(f.team_a(), [f.teams.team_a.ready.clone()]);
+    f.publish(&in_b);
+    f.publish(&in_a);
+    assert_eq!(stream.next().await, Some(board_wire(&in_a.change)));
+
+    // Losing team A ends the stream at its next revalidation, and the header
+    // that named it is refused when the client comes back.
+    let mut conn = f.teams.a.pool.acquire().await.expect("a connection");
+    remove_member(&mut conn, &team_a, &f.both_user).await;
+    drop(conn);
+    f.host.streams.revalidate(&f.both_user);
+    f.publish(&ChangeEvent::tasks(f.team_a(), ["after".to_string()]));
+
+    assert_eq!(stream.next().await, None);
+    let reopened = Answer::of(f.get_in(&f.both, "", Some(&team_a)).await).await;
+    assert_eq!(reopened.status, 404);
+    assert_eq!(reopened.code(), Some("not_found"));
 }

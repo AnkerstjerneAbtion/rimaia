@@ -13,7 +13,7 @@ use rimaia_core::api::{Authenticate, PROTOCOL_VERSION};
 use rimaia_core::testing::api::{self as testing_api, FixedCaller};
 use rimaia_core::testing::identity::FakeIdentityProvider;
 use rimaia_core::testing::teams::TwoTeams;
-use rimaia_server::{router, ServerState};
+use rimaia_server::{router_with, RouterOptions, ServerState};
 use serde_json::Value;
 
 /// A server on `127.0.0.1:0`, serving until the test ends.
@@ -27,12 +27,18 @@ impl TestServer {
     /// Binds before spawning, so the port is taken and answering by the time
     /// this returns: no startup race to wait out.
     pub async fn spawn(state: ServerState) -> Self {
+        Self::spawn_with(state, &RouterOptions::default()).await
+    }
+
+    /// [`spawn`](Self::spawn), with the router built from `options`.
+    pub async fn spawn_with(state: ServerState, options: &RouterOptions) -> Self {
+        let router = router_with(state, options);
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
             .expect("bind an ephemeral port");
         let address = listener.local_addr().expect("the bound address");
         let task = tokio::spawn(async move {
-            rimaia_server::serve(listener, router(state))
+            rimaia_server::serve(listener, router)
                 .await
                 .expect("the test server serves");
         });

@@ -27,7 +27,9 @@ serde_json = { workspace = true }
 tokio = { workspace = true }
 # `ReceiverStream`, for the event stream (task 048, D34's amendment).
 tokio-stream = { workspace = true }
-tower-http = { workspace = true, features = ["trace"] }
+# `trace` (task 046), `cors` and `fs` (task 050): the Tauri origins, and the
+# built web bundle at `/` (seam-contract D34).
+tower-http = { workspace = true, features = ["trace", "cors", "fs"] }
 tracing = { workspace = true }
 
 # `rimaia-core` again, with `testing` on, for `TwoTeams`, `FixedCaller`,

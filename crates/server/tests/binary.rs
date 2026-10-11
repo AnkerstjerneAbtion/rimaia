@@ -80,3 +80,38 @@ fn the_binary_names_each_missing_sign_in_variable_and_never_the_secret() {
         assert!(!stderr.contains("a-github-client-secret"), "{stderr}");
     }
 }
+
+#[test]
+fn the_binary_refuses_a_web_root_without_an_index_and_names_it() {
+    let data = tempfile::Builder::new()
+        .prefix("rimaia-server-binary-")
+        .tempdir()
+        .expect("a data directory");
+    let empty = tempfile::Builder::new()
+        .prefix("rimaia-server-web-root-")
+        .tempdir()
+        .expect("an empty web root");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_rimaia-server"))
+        .env_clear()
+        .env("RIMAIA_DATA_DIR", data.path())
+        .env("RIMAIA_LISTEN", "127.0.0.1:0")
+        .env("RIMAIA_PUBLIC_URL", "http://localhost:8787")
+        .env("RIMAIA_GITHUB_CLIENT_ID", "Iv1.test")
+        .env("RIMAIA_GITHUB_CLIENT_SECRET", "a-github-client-secret")
+        .env("RIMAIA_WEB_ROOT", empty.path())
+        .output()
+        .expect("run the server binary");
+
+    assert!(!output.status.success(), "{output:?}");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("RIMAIA_WEB_ROOT"), "{stderr}");
+    assert!(
+        stderr.contains(&empty.path().display().to_string()),
+        "{stderr}"
+    );
+    assert!(
+        !data.path().join("rimaia.db").exists(),
+        "a misconfigured server opens nothing"
+    );
+}

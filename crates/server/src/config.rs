@@ -1,7 +1,8 @@
 //! What the binary reads from its environment, as a function over a lookup so
 //! it is tested without touching the process's.
 //!
-//! Five variables, each named in the refusal when it is missing (D11):
+//! Five variables, each named in the refusal when it is missing (D11), and one
+//! optional:
 //!
 //! - `RIMAIA_DATA_DIR` is required: a server has no platform default, and the
 //!   value follows the rules the desktop applies to its override (ADR-0023:
@@ -15,6 +16,12 @@
 //!   app's. The secret is held in a [`Secret`], so neither a refusal nor the
 //!   config's `Debug` can print it.
 //!
+//! - `RIMAIA_WEB_ROOT` is optional: the absolute path of the directory
+//!   `npm run build` writes (`dist/`). Unset, the server serves the API only.
+//!   Set to anything that is not a directory holding `index.html`, it refuses
+//!   to start, because a server that starts and serves a blank page is the
+//!   failure this prevents (task 050).
+//!
 //! The container and logging are task 062's.
 
 use std::ffi::OsString;
@@ -26,6 +33,8 @@ use rimaia_core::identity::secret::Secret;
 use rimaia_core::paths::DATA_DIR_ENV;
 use rimaia_core::{AppPaths, Error, Result};
 
+use crate::web;
+
 /// The variable naming the socket address to bind.
 pub const LISTEN_ENV: &str = "RIMAIA_LISTEN";
 /// The variable naming the origin the server is reached at.
@@ -34,6 +43,8 @@ pub const PUBLIC_URL_ENV: &str = "RIMAIA_PUBLIC_URL";
 pub const GITHUB_CLIENT_ID_ENV: &str = "RIMAIA_GITHUB_CLIENT_ID";
 /// The GitHub OAuth app's client secret.
 pub const GITHUB_CLIENT_SECRET_ENV: &str = "RIMAIA_GITHUB_CLIENT_SECRET";
+/// The directory holding the built web bundle.
+pub const WEB_ROOT_ENV: &str = "RIMAIA_WEB_ROOT";
 
 #[derive(Debug, Clone)]
 pub struct Config {
@@ -44,6 +55,8 @@ pub struct Config {
     pub public_url: String,
     pub github_client_id: String,
     pub github_client_secret: Secret,
+    /// Where the built bundle is, or `None` to serve the API only.
+    pub web_root: Option<PathBuf>,
 }
 
 /// The configuration `lookup` describes, or an `Invalid` naming the variable
@@ -110,12 +123,34 @@ pub fn config_from_env(lookup: impl Fn(&str) -> Option<OsString>) -> Result<Conf
             ))
         })?;
 
+    let web_root = present(WEB_ROOT_ENV)
+        .map(|value| {
+            let root = PathBuf::from(value);
+            if !root.is_absolute() {
+                return Err(Error::invalid(format!(
+                    "{WEB_ROOT_ENV} is {}, which is not an absolute path. Give the full path of \
+                     the directory `npm run build` writes.",
+                    root.display()
+                )));
+            }
+            match web::problem_with(&root) {
+                None => Ok(root),
+                Some(problem) => Err(Error::invalid(format!(
+                    "{WEB_ROOT_ENV} is {}, which {problem}. Give the directory `npm run build` \
+                     writes, or leave it unset to serve the API only.",
+                    root.display()
+                ))),
+            }
+        })
+        .transpose()?;
+
     Ok(Config {
         paths,
         listen,
         public_url,
         github_client_id,
         github_client_secret,
+        web_root,
     })
 }
 
