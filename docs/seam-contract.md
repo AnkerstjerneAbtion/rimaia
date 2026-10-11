@@ -7053,6 +7053,39 @@ See also [ADR-0032](adr/0032-assignment-and-consent-to-run-on-a-machine.md) and 
   eligibility.
 - **072** fills from the ceiling at spawn, by point 5.
 
+### Amendment, 2026-10-11 — a personal team someone joined is shared (task 051)
+
+Point 1 holds "a personal team's owner and its runners' owner are one person", which stopped
+being true when 051 let people be invited into a personal team. ADR-0032's 2026-10-11
+amendment restates it over who the members are; this is how the code reads it.
+
+1. **One predicate decides a team's kind.** `identity::team_kind_in(conn, team_id)` answers
+   `TeamKind::Personal` while `teams.personal_user_id` is set and nobody else holds a
+   `team_memberships` row in the team, and `Shared` otherwise. `TeamKind::of`, which read
+   the column alone, is gone. Every reader of the kind goes through the predicate:
+   `tasks::team_kind_of_task` (and so `RunContext::team_kind` and the Settings preview),
+   the run's authorship, `consent::TaskRow::team_ceiling` (the claim, the plan and the
+   card's `TaskConsent`), and `set_repository_unattended_ceiling`'s personal-team refusal.
+   Once someone has joined, the ceiling is consulted and its command answers,
+   `RunContext::authorship` is filled, and D37's shared-team treatment applies. When the team
+   is its person's alone again, every personal-team rule applies again.
+2. **Eligibility's owner's-own-task branch is not a kind.** It stays keyed on
+   `personal_user_id` being the runner's owner, whoever else has joined, so the person's
+   unassigned tasks still run on their runners. Another member's runner needs an assignment
+   or a pool opt-in, as in any shared team. `TaskRow` carries both: `personal_owner` for
+   eligibility and `kind` for the ceiling.
+3. **The join that makes a personal team shared allows its ceiling.** `accept_invitation_in`
+   reads the kind before it adds the membership; when it was `Personal`, it sets
+   `allow_unattended_runs = 1` on every repository of the team in the same transaction, and
+   `accept_invitation` publishes one `repositories` event naming them beside D41 point 12's
+   `Teams`. A later join into the already shared team, or into a team that was never
+   personal, writes no ceiling. A repository registered after the join starts at the
+   column's default, `0`, as in any shared team. Leaving the team alone again rewrites
+   nothing: the stored values stay, unread.
+
+Binds every later task that reads a team's kind to the predicate: no rule reads
+`personal_user_id` for the kind directly.
+
 ---
 
 ## D37 — Prompt inputs and their classes
@@ -7232,6 +7265,22 @@ amendment.
   wrote, which point 1 renders by the same rules.
 - Any task that adds a team-writable or runner-written field a composer renders: a row in
   point 1 and a canary in the test.
+
+### Amendment, 2026-10-11 — a personal team someone joined composes as shared (task 051)
+
+Point 2's `RunContext::team_kind` and `tasks::team_kind_of_task` no longer read
+`teams.personal_user_id` alone. They read D36's predicate (its 2026-10-11 amendment, point
+1): a personal team is `Personal` while its own person is its only member, and `Shared` from
+the moment anyone else joins, so its prompts get the shared-team treatment of point 1's table
+for as long as anyone else is in it. A personal team's prompts while it is its person's alone
+are still byte for byte what they were.
+
+Point 4's premise, that a shared team cannot hold a value stored before the write rules,
+still holds for a joined personal team: invitations exist only on a server board (D41 point
+11 refuses them where `solo_identity` exists), and a server board's personal teams are made
+at sign-up, after every rule in point 3 was in force. The doctor's remediation wording,
+"in this personal team", stays true for the same reason: the values it reports live on solo
+boards.
 
 ---
 
@@ -7745,7 +7794,9 @@ copy carries. 053, 054, 056, 060 and 061 each build on the answers.
     built by `ChangeEvent::teams(team_id)` with `Audience::Team`, is published after creating a
     team, a role change, a removal or departure, an accepted or revoked invitation and a deletion
     (with the deleted task and repository ids under the deleted team), and by account deletion for
-    each other team the person was in. Creating an invitation publishes nothing. Core's
+    each other team the person was in. Creating an invitation publishes nothing. An
+    acceptance that makes a personal team shared also publishes the `repositories` whose
+    ceiling it allowed (D36's 2026-10-11 amendment). Core's
     `board_wire` maps it to `teams:changed` with the ids, and `board_reread()` ends with
     `teams:changed []`, so the burst after a stream reopens makes the switcher re-read.
     `EVENT_SOURCES` maps `teams:changed` to `board`; the shell gains no code. After commit the
