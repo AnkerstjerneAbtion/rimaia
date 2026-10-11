@@ -15,18 +15,25 @@ description = "The Rimaia board over HTTP, and its binary (ADR-0027, ADR-0034)."
 [dependencies]
 rimaia-core = { path = "../core" }
 axum = { workspace = true }
+# The session, CSRF and sign-in cookies (task 047), set from typed fields.
+axum-extra = { workspace = true, features = ["cookie"] }
+# Sign-in with GitHub is two HTTPS requests (task 047), so this crate turns on
+# reqwest's TLS here and never on the workspace line, where `rimaia-core`'s
+# probe stays plain HTTP to 127.0.0.1 (seam-contract D34). Bodies are built with
+# `serde_json::to_vec`, so neither `json` nor `form` is enabled.
+reqwest = { workspace = true, features = ["rustls"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true }
 tower-http = { workspace = true, features = ["trace"] }
 tracing = { workspace = true }
 
-# `rimaia-core` again, with `testing` on, for `TwoTeams`, `FixedCaller` and the
-# board case table. `reqwest` is the workspace line, which already speaks plain
-# HTTP to 127.0.0.1, so the contract suite drives a real listener without a
-# crate entering the lock (seam-contract D6, D34).
+# `rimaia-core` again, with `testing` on, for `TwoTeams`, `FixedCaller`,
+# `FakeIdentityProvider` and the board case table. The tests drive a real
+# listener with the `reqwest` above, following no redirects and reading and
+# sending cookies by hand: its `cookies`, `json` and `form` features are not
+# approved (seam-contract D34).
 [dev-dependencies]
 rimaia-core = { path = "../core", features = ["testing"] }
 pretty_assertions = "1"
-reqwest = { workspace = true }
 tempfile = { workspace = true }

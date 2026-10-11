@@ -8,10 +8,13 @@
 //! two transports answer alike by construction. This crate is only the
 //! transport.
 //!
-//! Until task 047 the only production [`Authenticate`] is
-//! [`RefuseAll`](rimaia_core::api::RefuseAll), so a built server answers every
-//! board command `401 unauthenticated`: it fails closed.
+//! The production [`Authenticate`] is task 047's
+//! `identity::authenticate::SessionsAndTokens`: a browser session with its
+//! CSRF header, or a connected desktop's `rmd_` token, and nobody else, on the
+//! board routes. [`auth`] adds the sign-in routes, which are not board
+//! commands, and [`serve`] is the one way any of it is served.
 
+use std::net::SocketAddr;
 use std::sync::Arc;
 
 use axum::body::Bytes;
@@ -23,24 +26,87 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::post;
 use axum::{Json, Router};
 use rimaia_core::api::{self, protocol, Authenticate, BoardHost, Caller, Effect, COMMANDS};
+use rimaia_core::identity::pending::{DesktopCodes, PendingSignIns};
+use rimaia_core::identity::provider::IdentityProvider;
+use rimaia_core::identity::rate_limit::RateLimiter;
 use rimaia_core::{Error, ErrorCode};
 use serde_json::Value;
 use tower_http::trace::TraceLayer;
 
+pub mod auth;
 mod caller;
 pub mod config;
+pub mod github;
 
-/// What every request reaches: the board host `dispatch` runs against, and
-/// whatever decides who a credential is.
+/// What every request reaches: the board host `dispatch` runs against,
+/// whatever decides who a credential is, and what signing in needs.
 #[derive(Clone)]
 pub struct ServerState {
     pub host: BoardHost,
     pub auth: Arc<dyn Authenticate>,
+    /// Who people sign in with: GitHub in production (ADR-0030 point 1).
+    pub identity: Arc<dyn IdentityProvider>,
+    /// Sign-ins between the redirect and the callback, in memory (D28).
+    pub pending: Arc<PendingSignIns>,
+    /// Desktop sign-ins between the callback and the token exchange.
+    pub desktop_codes: Arc<DesktopCodes>,
+    /// The server's one limiter: the same `Arc` as `host.rate_limits`, so the
+    /// auth routes and the minting commands share it.
+    pub rate_limits: Arc<RateLimiter>,
+    /// The origin people reach the server at, with no trailing slash.
+    pub public_url: String,
 }
 
-/// One route per board row, nested under `/api/v1`, whose fallbacks answer in
-/// the error shape: a name with no route is `404 not_found` and a method other
-/// than `POST` is `400 invalid`, never axum's plain text and never a page.
+impl ServerState {
+    /// A state over `host`, sharing its limiter and reading its clock.
+    pub fn new(
+        host: BoardHost,
+        auth: Arc<dyn Authenticate>,
+        identity: Arc<dyn IdentityProvider>,
+        public_url: impl Into<String>,
+    ) -> Self {
+        let clock = host.context.clock.clone();
+        Self {
+            rate_limits: host.rate_limits.clone(),
+            pending: Arc::new(PendingSignIns::new(clock.clone())),
+            desktop_codes: Arc::new(DesktopCodes::new(clock)),
+            host,
+            auth,
+            identity,
+            public_url: public_url.into(),
+        }
+    }
+}
+
+/// Serves `router` on `listener` with each connection's peer address, which
+/// the sign-in routes' rate limits key on. The one serve call: the binary and
+/// every server test go through it, so no test runs a path production does
+/// not, and a route reading `ConnectInfo` never meets a server without it.
+pub async fn serve(listener: tokio::net::TcpListener, router: Router) -> std::io::Result<()> {
+    axum::serve(
+        listener,
+        router.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .await
+}
+
+/// The matched route, the method and the status, and never a body, a header
+/// value or a query string: bodies carry plans (ADR-0037 point 6), and the
+/// callback's query carries a code and a `state`.
+fn http_span<B>(request: &Request<B>) -> tracing::Span {
+    let route = request
+        .extensions()
+        .get::<MatchedPath>()
+        .map(|path| path.as_str().to_string())
+        .unwrap_or_default();
+    tracing::info_span!("http", method = %request.method(), route)
+}
+
+/// One route per board row, nested under `/api/v1` beside the two JSON auth
+/// routes, whose fallbacks answer in the error shape: a name with no route is
+/// `404 not_found` and a method other than `POST` is `400 invalid`, never
+/// axum's plain text and never a page. The three sign-in navigations sit at
+/// the root.
 pub fn router(state: ServerState) -> Router {
     let mut commands = Router::new();
     for command in COMMANDS.iter() {
@@ -61,23 +127,18 @@ pub fn router(state: ServerState) -> Router {
         );
     }
     let commands = commands
-        // The matched route, the method and the status, and never a body, a
-        // header value or a query string: bodies carry plans (ADR-0037 point 6).
-        .route_layer(
-            TraceLayer::new_for_http().make_span_with(|request: &Request<_>| {
-                let route = request
-                    .extensions()
-                    .get::<MatchedPath>()
-                    .map(|path| path.as_str().to_string())
-                    .unwrap_or_default();
-                tracing::info_span!("http", method = %request.method(), route)
-            }),
-        )
+        .merge(auth::api_routes())
+        .route_layer(TraceLayer::new_for_http().make_span_with(http_span::<axum::body::Body>))
         .fallback(|| async { ApiError(Error::not_found("there is no such board command")) })
         .method_not_allowed_fallback(|| async {
             ApiError(Error::invalid("a board command is sent with POST"))
         });
-    Router::new().nest("/api/v1", commands).with_state(state)
+    let sign_in = auth::routes()
+        .route_layer(TraceLayer::new_for_http().make_span_with(http_span::<axum::body::Body>));
+    Router::new()
+        .nest("/api/v1", commands)
+        .merge(sign_in)
+        .with_state(state)
 }
 
 /// The route handler, after the caller is known.

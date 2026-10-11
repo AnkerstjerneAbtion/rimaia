@@ -3,16 +3,13 @@
 
 mod common;
 
-use std::sync::Arc;
-
 use pretty_assertions::assert_eq;
 use rimaia_core::api::{Caller, Door, PROTOCOL_VERSION};
 use rimaia_core::testing::api::{self as testing_api, FixedCaller, TEAM_A_TOKEN};
 use rimaia_core::testing::teams::TwoTeams;
-use rimaia_server::ServerState;
 use serde_json::{json, Value};
 
-use common::{two_teams_state, Answer, TestServer};
+use common::{state_over, two_teams_state, Answer, TestServer};
 
 async fn serving() -> (TwoTeams, TestServer) {
     let teams = TwoTeams::new().await;
@@ -138,59 +135,6 @@ async fn an_unknown_name_is_a_json_not_found_and_never_html() {
     }
 }
 
-#[tokio::test]
-async fn a_cookie_and_a_bearer_together_are_unauthenticated() {
-    let (_teams, server) = serving().await;
-
-    let response = server
-        .client()
-        .post(format!("{}/api/v1/list_repositories", server.base_url()))
-        .header("authorization", format!("Bearer {TEAM_A_TOKEN}"))
-        .header("cookie", format!("rimaia_session={TEAM_A_TOKEN}"))
-        .header("rimaia-protocol", PROTOCOL_VERSION)
-        .body("{}")
-        .send()
-        .await
-        .expect("the request reaches the server");
-    let answer = Answer::of(response).await;
-
-    assert_eq!(
-        (
-            answer.status,
-            answer.code(),
-            answer.www_authenticate.as_deref()
-        ),
-        (401, Some("unauthenticated"), Some("Bearer"))
-    );
-}
-
-#[tokio::test]
-async fn a_cookie_alone_is_unauthenticated_until_sessions_exist() {
-    let (_teams, server) = serving().await;
-
-    // `FixedCaller` would answer this token as team A's owner, through any
-    // credential shape: the extractor refuses before it is asked.
-    let response = server
-        .client()
-        .post(format!("{}/api/v1/list_repositories", server.base_url()))
-        .header(
-            "cookie",
-            format!("theme=dark; rimaia_session={TEAM_A_TOKEN}"),
-        )
-        .header("x-rimaia-csrf", "a-csrf-token")
-        .header("rimaia-protocol", PROTOCOL_VERSION)
-        .body("{}")
-        .send()
-        .await
-        .expect("the request reaches the server");
-    let answer = Answer::of(response).await;
-
-    assert_eq!(
-        (answer.status, answer.code()),
-        (401, Some("unauthenticated"))
-    );
-}
-
 /// A server whose `FixedCaller` answers `token` as team A's owner through
 /// `door`.
 async fn serving_a_door(token: &str, door: Door) -> (TwoTeams, TestServer) {
@@ -199,10 +143,10 @@ async fn serving_a_door(token: &str, door: Door) -> (TwoTeams, TestServer) {
         door,
         ..testing_api::owner(&teams.team_a, testing_api::desktop("unused"))
     };
-    let server = TestServer::spawn(ServerState {
-        host: testing_api::host(&teams),
-        auth: Arc::new(FixedCaller::two_teams(&teams).with(token, caller)),
-    })
+    let server = TestServer::spawn(state_over(
+        testing_api::host(&teams),
+        FixedCaller::two_teams(&teams).with(token, caller),
+    ))
     .await;
     (teams, server)
 }

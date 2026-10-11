@@ -1,22 +1,25 @@
 //! `rimaia-server`: the board over HTTP (ADR-0027 point 6).
 //!
-//! Reads its two variables ([`config`](rimaia_server::config)), opens and
-//! migrates `<RIMAIA_DATA_DIR>/rimaia.db`, and serves the board routes with
-//! [`RefuseAll`] until task 047 lands sign-in. A missing or invalid variable, a
-//! failed migration or a failed bind exits non-zero with a line naming what
-//! failed. It never creates a solo identity: a server board is not solo. It
+//! Reads its five variables ([`config`](rimaia_server::config)), opens and
+//! migrates `<RIMAIA_DATA_DIR>/rimaia.db`, and serves the board and sign-in
+//! routes, authenticated by sessions and hashed tokens and signing people in
+//! with GitHub (task 047). A missing or invalid variable, a failed migration or
+//! a failed bind exits non-zero with a line naming what failed, and never the
+//! client secret. It never creates a solo identity: a server board is not solo. It
 //! installs no tracing subscriber, because no crate for one is approved yet
 //! (task 062's).
 
 use std::process::ExitCode;
 use std::sync::Arc;
 
-use rimaia_core::api::{BoardHost, RefuseAll};
+use rimaia_core::api::BoardHost;
 use rimaia_core::db::{self, MutationSource};
+use rimaia_core::identity::authenticate::SessionsAndTokens;
 use rimaia_core::identity::rate_limit::RateLimiter;
 use rimaia_core::runner::provider::{ClaudeProvider, ProviderProfile};
 use rimaia_core::{ServiceContext, SystemClock, TeamScope};
 use rimaia_server::config::{config_from_env, Config};
+use rimaia_server::github::{GitHub, GitHubEndpoints};
 use rimaia_server::{router, ServerState};
 
 #[tokio::main]
@@ -31,8 +34,19 @@ async fn main() -> ExitCode {
 }
 
 async fn serve() -> Result<(), String> {
-    let Config { paths, listen } =
-        config_from_env(|name| std::env::var_os(name)).map_err(|error| error.to_string())?;
+    let Config {
+        paths,
+        listen,
+        public_url,
+        github_client_id,
+        github_client_secret,
+    } = config_from_env(|name| std::env::var_os(name)).map_err(|error| error.to_string())?;
+    let github = GitHub::new(
+        github_client_id,
+        github_client_secret,
+        GitHubEndpoints::github(),
+    )
+    .map_err(|error| error.to_string())?;
 
     let db_file = paths.db_file();
     std::fs::create_dir_all(paths.data_dir()).map_err(|error| {
@@ -60,21 +74,25 @@ async fn serve() -> Result<(), String> {
         TeamScope::one(db::new_id()),
         db::new_id(),
     );
-    let rate_limits = Arc::new(RateLimiter::new(context.clock.clone()));
-    let state = ServerState {
-        host: BoardHost {
-            context,
-            provider: ProviderProfile::of(&ClaudeProvider),
-            paths,
-            rate_limits,
-        },
-        auth: Arc::new(RefuseAll),
+    let auth = SessionsAndTokens {
+        pool: context.pool.clone(),
+        clock: context.clock.clone(),
     };
+    // One limiter, which the board host hands the minting commands and the
+    // state hands the sign-in routes.
+    let rate_limits = Arc::new(RateLimiter::new(context.clock.clone()));
+    let host = BoardHost {
+        context,
+        provider: ProviderProfile::of(&ClaudeProvider),
+        paths,
+        rate_limits,
+    };
+    let state = ServerState::new(host, Arc::new(auth), Arc::new(github), public_url);
 
     let listener = tokio::net::TcpListener::bind(listen)
         .await
         .map_err(|error| format!("could not listen on {listen}: {error}"))?;
-    axum::serve(listener, router(state))
+    rimaia_server::serve(listener, router(state))
         .await
         .map_err(|error| format!("stopped serving on {listen}: {error}"))
 }

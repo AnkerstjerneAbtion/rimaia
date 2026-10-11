@@ -8,17 +8,15 @@
 mod common;
 
 use std::collections::BTreeSet;
-use std::sync::Arc;
 
 use pretty_assertions::assert_eq;
 use rimaia_core::api::{self, Effect, COMMANDS};
 use rimaia_core::testing::api::{self as testing_api, FixedCaller, Foreign, BOARD_CASES};
 use rimaia_core::testing::api::{TEAM_A_TOKEN, TEAM_B_TOKEN};
 use rimaia_core::testing::teams::TwoTeams;
-use rimaia_server::ServerState;
 use serde_json::{json, Value};
 
-use common::{two_teams_state, Answer, TestServer};
+use common::{state_over, two_teams_state, Answer, TestServer};
 
 #[test]
 fn every_board_command_has_a_case() {
@@ -175,10 +173,10 @@ async fn both_transports_answer_every_case_identically() {
         };
 
         let (over_http, _over_http_dir) = testing_api::twin(&teams).await;
-        let server = TestServer::spawn(ServerState {
-            host: testing_api::host_over(&teams, &over_http),
-            auth: Arc::new(FixedCaller::two_teams(&teams)),
-        })
+        let server = TestServer::spawn(state_over(
+            testing_api::host_over(&teams, &over_http),
+            FixedCaller::two_teams(&teams),
+        ))
         .await;
         let routed = server.command(case.name, TEAM_A_TOKEN, &args).await;
 

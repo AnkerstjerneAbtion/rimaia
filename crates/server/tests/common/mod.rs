@@ -9,8 +9,9 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
 
-use rimaia_core::api::PROTOCOL_VERSION;
+use rimaia_core::api::{Authenticate, PROTOCOL_VERSION};
 use rimaia_core::testing::api::{self as testing_api, FixedCaller};
+use rimaia_core::testing::identity::FakeIdentityProvider;
 use rimaia_core::testing::teams::TwoTeams;
 use rimaia_server::{router, ServerState};
 use serde_json::Value;
@@ -31,13 +32,19 @@ impl TestServer {
             .expect("bind an ephemeral port");
         let address = listener.local_addr().expect("the bound address");
         let task = tokio::spawn(async move {
-            axum::serve(listener, router(state))
+            rimaia_server::serve(listener, router(state))
                 .await
                 .expect("the test server serves");
         });
+        // A redirect is part of what the sign-in routes answer, so it is read,
+        // never followed.
+        let client = reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .expect("a client");
         Self {
             address,
-            client: reqwest::Client::new(),
+            client,
             task,
         }
     }
@@ -137,8 +144,19 @@ impl Answer {
 /// A server state over the fixture's own board and clock, authenticated by
 /// `FixedCaller::two_teams`.
 pub fn two_teams_state(teams: &TwoTeams) -> ServerState {
-    ServerState {
-        host: testing_api::host(teams),
-        auth: Arc::new(FixedCaller::two_teams(teams)),
-    }
+    state_over(testing_api::host(teams), FixedCaller::two_teams(teams))
+}
+
+/// A server state over `host`, authenticated by `auth`, signing in with a
+/// fake provider nobody here uses.
+pub fn state_over(
+    host: rimaia_core::api::BoardHost,
+    auth: impl Authenticate + 'static,
+) -> ServerState {
+    ServerState::new(
+        host,
+        Arc::new(auth),
+        Arc::new(FakeIdentityProvider::new()),
+        "https://rimaia.test",
+    )
 }
