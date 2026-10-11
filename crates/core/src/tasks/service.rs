@@ -70,6 +70,23 @@ pub struct TaskDetail {
     /// touched it (ADR-0017).
     #[serde(default)]
     pub review_loop: Option<ReviewLoopSummary>,
+    /// The machine that holds the task's worktree, or `None` for a task no run
+    /// has touched (task 050 Scope 5). A client that is not that machine shows
+    /// its name instead of an Open worktree it could not honour.
+    #[serde(default)]
+    pub worktree_runner: Option<WorktreeRunner>,
+}
+
+/// The runner whose newest run of any kind is the one that last worked in a
+/// task's worktree (ADR-0005, seam-contract D29 point 4). Kept off `Run`, whose
+/// `query_as!` every other run reader shares.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorktreeRunner {
+    pub id: String,
+    pub label: String,
+    /// The runner was unpaired since: its row stays, because runs name it.
+    pub unpaired: bool,
 }
 
 /// One card's worth of a task: every column of the row, plus the two counts
@@ -388,6 +405,7 @@ pub async fn get_task(ctx: &ServiceContext, id: &str) -> Result<TaskDetail> {
     .await?;
 
     let last_run = fetch_last_run(ctx, id).await?;
+    let worktree_runner = fetch_worktree_runner(ctx, id).await?;
 
     let defaults = defaults_for_repository(ctx, &task.repository_id).await?;
     let effective = effective_strategy(&task, &defaults.repository, &defaults.global);
@@ -407,6 +425,7 @@ pub async fn get_task(ctx: &ServiceContext, id: &str) -> Result<TaskDetail> {
         review_instructions: review.task.instructions,
         review_config: review.task.config,
         review_loop,
+        worktree_runner,
     })
 }
 
@@ -1662,6 +1681,34 @@ async fn fetch_last_run(ctx: &ServiceContext, task_id: &str) -> Result<Option<Ru
     .fetch_optional(&ctx.pool)
     .await?;
     Ok(run)
+}
+
+/// The runner of the row [`fetch_last_run`] picks, with its label. The row is
+/// picked first and the runner joined to it, so a newest run with no runner
+/// answers `None` and does not fall back to an older run's machine.
+async fn fetch_worktree_runner(
+    ctx: &ServiceContext,
+    task_id: &str,
+) -> Result<Option<WorktreeRunner>> {
+    let scope = ctx.scope.json();
+    let runner = sqlx::query!(
+        r#"SELECT ru.id, ru.label, ru.unpaired_at IS NOT NULL AS "unpaired!: bool"
+             FROM (SELECT r.runner_id
+                     FROM runs r
+                     JOIN tasks t ON t.id = r.task_id
+                    WHERE r.task_id = ?1 AND t.team_id IN (SELECT value FROM json_each(?2))
+                    ORDER BY r.attempt DESC LIMIT 1) newest
+             JOIN runners ru ON ru.id = newest.runner_id"#,
+        task_id,
+        scope,
+    )
+    .fetch_optional(&ctx.pool)
+    .await?;
+    Ok(runner.map(|runner| WorktreeRunner {
+        id: runner.id,
+        label: runner.label,
+        unpaired: runner.unpaired,
+    }))
 }
 
 // ---------------------------------------------------------------------------

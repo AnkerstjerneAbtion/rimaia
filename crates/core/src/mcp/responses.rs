@@ -247,6 +247,9 @@ impl From<TaskDetail> for TaskView {
             review_instructions,
             review_config,
             review_loop,
+            // Declined: the solo endpoint has one machine, and whether hosted
+            // agents see machine names is task 060's parity decision (050).
+            worktree_runner: _,
         } = detail;
 
         Self {
@@ -1774,6 +1777,7 @@ mod tests {
                 open_advisory: 0,
                 ping_pong: false,
             }),
+            worktree_runner: None,
         });
 
         let wire = serde_json::to_value(&view).expect("a DTO must always serialize");

@@ -2491,6 +2491,133 @@ async fn seed_finished_run(
     id
 }
 
+#[tokio::test]
+async fn the_worktree_runner_is_the_newest_runs_runner_of_any_kind() {
+    // D29 point 4: implementation, review and fix runs all work in the task's
+    // one worktree (ADR-0005), so the machine is the newest row's, whatever kind.
+    let h = TestContext::new().await;
+    let repository_id = seed_repository(&h.context.pool).await;
+    let task = create_ready(&h, &repository_id, "reviewed", "plan").await;
+    let never_run = create_ready(&h, &repository_id, "never run", "plan").await;
+    let (r1, r2) = {
+        let mut conn = h.context.pool.acquire().await.expect("a connection");
+        (
+            testing::db::insert_runner(&mut conn, &h.clock, &h.solo.user_id, "Studio Mac").await,
+            testing::db::insert_runner(&mut conn, &h.clock, &h.solo.user_id, "Old laptop").await,
+        )
+    };
+    for (kind, runner) in [(RunKind::Implementation, &r1), (RunKind::Review, &r2)] {
+        let run = testing::runs::seed_row(
+            &h.context,
+            &task.id,
+            SeededRow::succeeded(kind, "session-1", "abc123"),
+        )
+        .await;
+        sqlx::query("UPDATE runs SET runner_id = ?1 WHERE id = ?2")
+            .bind(runner)
+            .bind(&run)
+            .execute(&h.context.pool)
+            .await
+            .expect("name the runner");
+        if kind == RunKind::Implementation {
+            let only = tasks::get_task(&h.context, &task.id).await.expect("read");
+            assert_eq!(
+                only.worktree_runner,
+                Some(tasks::WorktreeRunner {
+                    id: r1.clone(),
+                    label: "Studio Mac".to_string(),
+                    unpaired: false,
+                })
+            );
+        }
+    }
+
+    let detail = tasks::get_task(&h.context, &task.id).await.expect("read");
+    let untouched = tasks::get_task(&h.context, &never_run.id)
+        .await
+        .expect("read");
+
+    assert_eq!(
+        detail.worktree_runner,
+        Some(tasks::WorktreeRunner {
+            id: r2,
+            label: "Old laptop".to_string(),
+            unpaired: false,
+        })
+    );
+    assert_eq!(untouched.worktree_runner, None);
+}
+
+#[tokio::test]
+async fn an_unpaired_runner_is_still_named_as_the_worktrees_machine() {
+    let h = TestContext::new().await;
+    let repository_id = seed_repository(&h.context.pool).await;
+    let task = create_ready(&h, &repository_id, "ran elsewhere", "plan").await;
+    let runner = {
+        let mut conn = h.context.pool.acquire().await.expect("a connection");
+        let runner =
+            testing::db::insert_runner(&mut conn, &h.clock, &h.solo.user_id, "Old laptop").await;
+        testing::db::unpair_runner(&mut conn, &h.clock, &runner).await;
+        runner
+    };
+    let run = testing::runs::seed_row(
+        &h.context,
+        &task.id,
+        SeededRow::succeeded(RunKind::Implementation, "session-1", "abc123"),
+    )
+    .await;
+    sqlx::query("UPDATE runs SET runner_id = ?1 WHERE id = ?2")
+        .bind(&runner)
+        .bind(&run)
+        .execute(&h.context.pool)
+        .await
+        .expect("name the runner");
+
+    let detail = tasks::get_task(&h.context, &task.id).await.expect("read");
+
+    assert_eq!(
+        detail.worktree_runner,
+        Some(tasks::WorktreeRunner {
+            id: runner,
+            label: "Old laptop".to_string(),
+            unpaired: true,
+        })
+    );
+}
+
+#[tokio::test]
+async fn a_newest_run_with_no_runner_does_not_fall_back_to_an_older_ones() {
+    let h = TestContext::new().await;
+    let repository_id = seed_repository(&h.context.pool).await;
+    let task = create_ready(&h, &repository_id, "recorded before 038", "plan").await;
+    let runner = {
+        let mut conn = h.context.pool.acquire().await.expect("a connection");
+        testing::db::insert_runner(&mut conn, &h.clock, &h.solo.user_id, "Studio Mac").await
+    };
+    let first = testing::runs::seed_row(
+        &h.context,
+        &task.id,
+        SeededRow::succeeded(RunKind::Implementation, "session-1", "abc123"),
+    )
+    .await;
+    sqlx::query("UPDATE runs SET runner_id = ?1 WHERE id = ?2")
+        .bind(&runner)
+        .bind(&first)
+        .execute(&h.context.pool)
+        .await
+        .expect("name the runner");
+    testing::runs::seed_row(
+        &h.context,
+        &task.id,
+        SeededRow::succeeded(RunKind::Review, "session-1", "abc123"),
+    )
+    .await;
+
+    let detail = tasks::get_task(&h.context, &task.id).await.expect("read");
+
+    assert_eq!(detail.worktree_runner, None);
+}
+
 /// How many attempts a task has on record. Only the ADR-0008 tests use it, and
 /// only to prove the negative their whole point rests on: that a dependency
 /// satisfied by its *column* was satisfied without any run at all.

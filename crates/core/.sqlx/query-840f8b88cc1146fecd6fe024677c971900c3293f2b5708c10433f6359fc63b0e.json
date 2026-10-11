@@ -1,0 +1,32 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT ru.id, ru.label, ru.unpaired_at IS NOT NULL AS \"unpaired!: bool\"\n             FROM (SELECT r.runner_id\n                     FROM runs r\n                     JOIN tasks t ON t.id = r.task_id\n                    WHERE r.task_id = ?1 AND t.team_id IN (SELECT value FROM json_each(?2))\n                    ORDER BY r.attempt DESC LIMIT 1) newest\n             JOIN runners ru ON ru.id = newest.runner_id",
+  "describe": {
+    "columns": [
+      {
+        "name": "id",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "label",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "unpaired!: bool",
+        "ordinal": 2,
+        "type_info": "Null"
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      false,
+      false,
+      null
+    ]
+  },
+  "hash": "840f8b88cc1146fecd6fe024677c971900c3293f2b5708c10433f6359fc63b0e"
+}

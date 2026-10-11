@@ -949,6 +949,7 @@ fn task() -> TaskDetail {
         review_instructions: None,
         review_config: ReviewConfig::default(),
         review_loop: None,
+        worktree_runner: None,
     }
 }
 

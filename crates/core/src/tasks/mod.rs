@@ -39,7 +39,7 @@ pub(crate) use service::team_of_task;
 pub use service::{
     archive_task, archive_tasks, assign_task, create_task, delete_task, get_task, list_tasks,
     move_task, move_task_to_bottom, team_kind_of_task, unarchive_task, update_task, ArchiveReport,
-    ArchivedTask, LastRunSummary, RefusedArchive, TaskDetail, TaskSummary,
+    ArchivedTask, LastRunSummary, RefusedArchive, TaskDetail, TaskSummary, WorktreeRunner,
 };
 pub use strategy::{
     accept_task_strategy, clear_task_strategy, needs_planning, set_task_strategy, StrategyPhase,
