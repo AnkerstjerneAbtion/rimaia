@@ -125,6 +125,11 @@ pub enum Change {
     /// keys: each table is a handful of rows, and every consumer re-reads all
     /// of it.
     Settings,
+    /// A team itself changed (task 051): it was created or deleted, someone
+    /// joined, left or was removed, a role changed, or an invitation was
+    /// accepted or revoked. The switcher, the member list and the invitation
+    /// list re-read on it.
+    Teams(Arc<[TeamId]>),
 }
 
 impl ChangeEvent {
@@ -143,6 +148,11 @@ impl ChangeEvent {
     /// A team setting changed.
     pub fn settings(team_id: TeamId) -> Self {
         Self::for_team(team_id, Change::Settings)
+    }
+
+    /// Something about `team_id` itself changed (task 051), for its members.
+    pub fn teams(team_id: TeamId) -> Self {
+        Self::for_team(team_id.clone(), Change::Teams(Arc::from([team_id])))
     }
 
     /// One user's own setting changed (`user_settings`): heard by that user's
@@ -183,6 +193,7 @@ impl Change {
             Self::Repositories(ids) => ids.is_empty(),
             Self::Runs(ids) => ids.is_empty(),
             Self::Settings => false,
+            Self::Teams(ids) => ids.is_empty(),
         }
     }
 }
@@ -345,6 +356,18 @@ mod tests {
         // suppressing it would mean a settings change nobody ever hears about.
         assert!(!ChangeEvent::settings(TEAM.to_string()).is_empty());
         assert!(!ChangeEvent::user_settings("a-user".to_string()).is_empty());
+    }
+
+    #[test]
+    fn a_team_change_is_for_that_team_and_names_it() {
+        assert_eq!(
+            ChangeEvent::teams(TEAM.to_string()),
+            ChangeEvent {
+                audience: Audience::Team(TEAM.to_string()),
+                change: Change::Teams(Arc::from([TEAM.to_string()])),
+            }
+        );
+        assert!(!ChangeEvent::teams(TEAM.to_string()).is_empty());
     }
 
     #[test]

@@ -14,6 +14,7 @@
 //! | `repositories:changed` | array of repository ids | `Change::Repositories` | `LocalChange::Checkouts` |
 //! | `runs:changed` | array of run ids | `Change::Runs` | none |
 //! | `settings:changed` | `null` | `Change::Settings` | none |
+//! | `teams:changed` | array of team ids | `Change::Teams` | none |
 //! | `runs:tail` | `RunTail` | the live channel, opt-in per run | none |
 //! | `plan-pass:progress` | `PlanProgressView` | none | the shell's local plan pass |
 //! | `runner:changed` | `null` | none | `LocalChange::Runner` |
@@ -51,6 +52,7 @@ pub const TASKS_CHANGED: &str = "tasks:changed";
 pub const REPOSITORIES_CHANGED: &str = "repositories:changed";
 pub const RUNS_CHANGED: &str = "runs:changed";
 pub const SETTINGS_CHANGED: &str = "settings:changed";
+pub const TEAMS_CHANGED: &str = "teams:changed";
 pub const RUNS_TAIL: &str = "runs:tail";
 pub const PLAN_PASS_PROGRESS: &str = "plan-pass:progress";
 pub const RUNNER_CHANGED: &str = "runner:changed";
@@ -91,6 +93,7 @@ pub fn board_wire(change: &Change) -> WireEvent {
         Change::Repositories(ids) => WireEvent::ids(REPOSITORIES_CHANGED, ids),
         Change::Runs(ids) => WireEvent::ids(RUNS_CHANGED, ids),
         Change::Settings => WireEvent::unit(SETTINGS_CHANGED),
+        Change::Teams(ids) => WireEvent::ids(TEAMS_CHANGED, ids),
     }
 }
 
@@ -130,12 +133,19 @@ pub fn plan_progress_wire(progress: &PlanProgressView) -> WireEvent {
 /// lags. The server does not know whether a connection is a first one or a
 /// reconnect, and does not need to: a re-read on first load is harmless, and a
 /// missed one after a reconnect is a stale board.
+///
+/// `teams:changed` matters here more than any other entity (task 051): a
+/// person whose team set changed has their stream ended by
+/// [`StreamControl::revalidate`], and the `Teams` event published just before
+/// may be lost with it. The reconnect's burst is what makes the switcher
+/// re-read.
 pub fn board_reread() -> Vec<WireEvent> {
     vec![
         WireEvent::ids(TASKS_CHANGED, &[]),
         WireEvent::ids(REPOSITORIES_CHANGED, &[]),
         WireEvent::ids(RUNS_CHANGED, &[]),
         WireEvent::unit(SETTINGS_CHANGED),
+        WireEvent::ids(TEAMS_CHANGED, &[]),
     ]
 }
 
@@ -308,7 +318,8 @@ pub type Revalidate = Box<dyn Fn() -> BoxFuture<'static, Result<Caller>> + Send 
 ///
 /// A broadcast of user ids on `BoardHost`. Task 048 signals it from 047's
 /// revocation paths (signing out, revoking a session, revoking a token), and
-/// task 051 from removing a member.
+/// task 051 from every change to a person's team set: creating, joining,
+/// leaving or deleting a team, being removed from one, or a role change.
 #[derive(Clone)]
 pub struct StreamControl {
     sender: broadcast::Sender<UserId>,
@@ -373,7 +384,7 @@ enum Woke {
 impl Subscription {
     /// Subscribes to the change channel, the live channel and the host's
     /// [`StreamControl`], **before** anything is yielded, and queues
-    /// [`board_reread`] as the first four events.
+    /// [`board_reread`] as the first five events.
     ///
     /// `revalidate` is `None` in solo, whose caller is the installation's own
     /// user and has no credential to lose; a server passes the route's
@@ -556,6 +567,7 @@ mod tests {
             ),
             (Change::Runs(ids(&["u"])), "runs:changed", json!(["u"])),
             (Change::Settings, "settings:changed", Value::Null),
+            (Change::Teams(ids(&["m"])), "teams:changed", json!(["m"])),
         ];
         for (change, name, data) in board {
             assert_eq!(board_wire(&change), WireEvent { name, data }, "{change:?}");
@@ -612,6 +624,7 @@ mod tests {
                 wire("repositories:changed", json!([])),
                 wire("runs:changed", json!([])),
                 wire("settings:changed", Value::Null),
+                wire("teams:changed", json!([])),
             ]
         );
         assert_eq!(
