@@ -62,7 +62,9 @@ use rimaia_core::api::{self, Effect as ApiEffect, COMMANDS};
 use rimaia_core::mcp::{self, Grant, GrantKind, McpHandle, RunAccess, Tool};
 use rimaia_core::runner::provider::ProviderProfile;
 use rimaia_core::schedule::{self, ScheduleInput};
-use rimaia_core::testing::api::{self as testing_api, Foreign, BOARD_CASES};
+use rimaia_core::testing::api::{
+    self as testing_api, with_never_issued_token, Foreign, BOARD_CASES,
+};
 use rimaia_core::testing::teams::{TwoTeams, SENTINEL};
 
 use rimaia_core::{db::ScheduleMode, Audience, ChangeEvent, ErrorCode, ServiceContext};
@@ -407,6 +409,61 @@ fn cases() -> Vec<Case> {
             Reads,
             |b| json!({ "task_id": b.teams.team_b.ready, "runner_id": b.teams.team_a.runner_id }),
         ),
+        // Task 051. Each team's guest is the member an owner acts on; the
+        // token tools present B's expired token, and the loop tries the
+        // revoked and accepted ones too.
+        case("create_team", Writes, |_| json!({ "name": "Acme" })),
+        case(
+            "list_team_members",
+            Reads,
+            |b| json!({ "team_id": b.teams.team_b.team_id }),
+        ),
+        case(
+            "set_member_role",
+            Writes,
+            |b| json!({ "team_id": b.teams.team_b.team_id, "user_id": b.teams.team_b.guest_id, "role": "owner" }),
+        ),
+        case(
+            "remove_member",
+            Writes,
+            |b| json!({ "team_id": b.teams.team_b.team_id, "user_id": b.teams.team_b.guest_id }),
+        ),
+        case(
+            "leave_team",
+            Writes,
+            |b| json!({ "team_id": b.teams.team_b.team_id }),
+        ),
+        case(
+            "create_invitation",
+            Writes,
+            |b| json!({ "team_id": b.teams.team_b.team_id, "role": "owner" }),
+        ),
+        case(
+            "list_invitations",
+            Reads,
+            |b| json!({ "team_id": b.teams.team_b.team_id }),
+        ),
+        case(
+            "revoke_invitation",
+            Writes,
+            |b| json!({ "invitation_id": b.teams.team_b.invitations.pending_id }),
+        ),
+        case(
+            "preview_invitation",
+            Reads,
+            |b| json!({ "token": b.teams.team_b.invitations.expired.expose() }),
+        ),
+        case(
+            "accept_invitation",
+            Writes,
+            |b| json!({ "token": b.teams.team_b.invitations.expired.expose() }),
+        ),
+        case("list_copy_targets", Reads, |_| Value::Null),
+        case(
+            "copy_task_to_team",
+            Writes,
+            |b| json!({ "task_id": b.teams.team_b.ready, "repository_id": b.teams.team_a.repository.id }),
+        ),
     ]
 }
 
@@ -513,62 +570,85 @@ async fn a_team_cannot_see_another_teams_ids_through_any_board_command() {
 
     let mut failures: Vec<String> = Vec::new();
     for case in BOARD_CASES {
-        let args = case
-            .foreign
-            .args(&teams)
-            .unwrap_or_else(|| (case.own)(&teams));
-        let before = teams.snapshot_b().await;
-        teams.drain_changes();
-        let answer = api::dispatch(&host, caller.clone(), case.name, args.clone()).await;
-        let events = teams.drain_changes();
-        let text = answer_text(&answer);
+        let arg_sets = match &case.foreign {
+            Foreign::EntityLess => vec![(case.own)(&teams)],
+            foreign => foreign.arg_sets(&teams),
+        };
+        for args in arg_sets {
+            let before = teams.snapshot_b().await;
+            let teams_before = team_ids(&teams.a).await;
+            teams.drain_changes();
+            let answer = api::dispatch(&host, caller.clone(), case.name, args.clone()).await;
+            let events = teams.drain_changes();
+            let text = answer_text(&answer);
 
-        // 1. Nothing of B's leaks.
-        for leaked in testing_api::leaks(&teams.team_b, &args, &text) {
-            failures.push(format!(
-                "{}: the answer carries B's {leaked}: {text}",
-                case.name
-            ));
-        }
-        // 3. B's rows are unchanged.
-        let after = teams.snapshot_b().await;
-        if after != before {
-            failures.push(format!(
-                "{}: team B's rows changed\nbefore:\n{before}\nafter:\n{after}",
-                case.name
-            ));
-        }
-        // 4. Every event is for team A, or for the acting user alone.
-        for event in events
-            .iter()
-            .filter(|event| !for_team_or_actor(event, &team_a, &teams.team_a.owner_id))
-        {
-            failures.push(format!(
-                "{}: an event is for another team or user: {event:?}",
-                case.name
-            ));
-        }
-        // 2. A foreign id reads as a missing one.
-        match &case.foreign {
-            Foreign::Ids(_) => {
-                if answer.as_ref().err().map(|error| error.code()) != Some(ErrorCode::NotFound) {
-                    failures.push(format!("{}: B's ids are not not_found: {text}", case.name));
-                }
+            // 1. Nothing of B's leaks.
+            for leaked in testing_api::leaks(&teams.team_b, &args, &text) {
+                failures.push(format!(
+                    "{}: the answer carries B's {leaked}: {text}",
+                    case.name
+                ));
             }
-            Foreign::Filter(_) => {
-                let (fresh_args, substitutions) =
-                    testing_api::with_never_issued_ids(&teams.team_b, &args);
-                let fresh = api::dispatch(&host, caller.clone(), case.name, fresh_args).await;
-                let restored = testing_api::restore_ids(&answer_text(&fresh), &substitutions);
-                if restored != text {
-                    failures.push(format!(
-                        "{}: a foreign filter is answered differently from a missing one\n\
-                         foreign: {text}\n missing: {restored}",
-                        case.name
-                    ));
-                }
+            // 3. B's rows are unchanged.
+            let after = teams.snapshot_b().await;
+            if after != before {
+                failures.push(format!(
+                    "{}: team B's rows changed\nbefore:\n{before}\nafter:\n{after}",
+                    case.name
+                ));
             }
-            Foreign::EntityLess => {}
+            // 4. Every event is for team A, for the acting user alone, or for
+            //    a team the call itself created.
+            for event in events.iter().filter(|event| {
+                !for_team_or_actor(event, &team_a, &teams.team_a.owner_id)
+                    && !for_a_new_team(event, &teams_before)
+            }) {
+                failures.push(format!(
+                    "{}: an event is for another team or user: {event:?}",
+                    case.name
+                ));
+            }
+            // 2. A foreign id reads as a missing one.
+            match &case.foreign {
+                Foreign::Ids(_) => {
+                    if answer.as_ref().err().map(|error| error.code()) != Some(ErrorCode::NotFound)
+                    {
+                        failures.push(format!("{}: B's ids are not not_found: {text}", case.name));
+                    }
+                }
+                Foreign::Filter(_) => {
+                    let (fresh_args, substitutions) =
+                        testing_api::with_never_issued_ids(&teams.team_b, &args);
+                    let fresh = api::dispatch(&host, caller.clone(), case.name, fresh_args).await;
+                    let restored = testing_api::restore_ids(&answer_text(&fresh), &substitutions);
+                    if restored != text {
+                        failures.push(format!(
+                            "{}: a foreign filter is answered differently from a missing one\n\
+                             foreign: {text}\n missing: {restored}",
+                            case.name
+                        ));
+                    }
+                }
+                // A token of B's nobody can use reads as one never issued.
+                Foreign::Capability(_) => {
+                    let fresh = api::dispatch(
+                        &host,
+                        caller.clone(),
+                        case.name,
+                        testing_api::with_never_issued_token(&args),
+                    )
+                    .await;
+                    if answer_text(&fresh) != text {
+                        failures.push(format!(
+                            "{}: a spent token of B's is answered differently from a never-issued \
+                             one\n   spent: {text}\n missing: {}",
+                            case.name,
+                            answer_text(&fresh)
+                        ));
+                    }
+                }
+                Foreign::EntityLess => {}
+            }
         }
     }
 
@@ -583,6 +663,22 @@ async fn a_team_cannot_see_another_teams_ids_through_any_board_command() {
         Vec::<String>::new(),
         "no case spawned anything"
     );
+}
+
+/// Every team on the board, before a call: an event for a team outside it
+/// is for a team the call created (`create_team`).
+async fn team_ids(ctx: &ServiceContext) -> BTreeSet<String> {
+    sqlx::query_scalar("SELECT id FROM teams")
+        .fetch_all(&ctx.pool)
+        .await
+        .expect("list the teams")
+        .into_iter()
+        .collect()
+}
+
+/// Whether `event` is for a team that did not exist before the call.
+fn for_a_new_team(event: &ChangeEvent, before: &BTreeSet<String>) -> bool {
+    matches!(&event.audience, Audience::Team(team_id) if !before.contains(team_id))
 }
 
 /// An answer as the text a check scans: the value, or the error's payload.
@@ -1272,6 +1368,7 @@ async fn a_team_cannot_see_another_teams_ids_through_any_tool() {
             Effect::Writes => Some(board.teams.snapshot_b().await),
             Effect::Reads => None,
         };
+        let teams_before = team_ids(&board.teams.a).await;
         board.teams.drain_changes();
         let answer = invoke(&client, case.tool, &args).await;
         let events = board.teams.drain_changes();
@@ -1294,9 +1391,9 @@ async fn a_team_cannot_see_another_teams_ids_through_any_tool() {
         }
 
         // 3. A write changed none of B's rows.
-        if let Some(before) = before {
+        if let Some(before) = &before {
             let after = board.teams.snapshot_b().await;
-            if after != before {
+            if after != *before {
                 failures.push(format!(
                     "{}: point 3, team B's rows changed\nbefore:\n{before}\nafter:\n{after}",
                     case.tool
@@ -1304,15 +1401,40 @@ async fn a_team_cannot_see_another_teams_ids_through_any_tool() {
             }
         }
 
-        // 4. Every event is for team A, or for the acting user alone.
-        for event in events
-            .iter()
-            .filter(|event| !for_team_or_actor(event, &team_a, &board.teams.team_a.owner_id))
-        {
+        // 4. Every event is for team A, for the acting user alone, or for a
+        //    team the call itself created.
+        for event in events.iter().filter(|event| {
+            !for_team_or_actor(event, &team_a, &board.teams.team_a.owner_id)
+                && !for_a_new_team(event, &teams_before)
+        }) {
             failures.push(format!(
                 "{}: point 4, an event is for another team or user: {event:?}",
                 case.tool
             ));
+        }
+
+        // 2, for a token: every spent token of B's reads as one never issued,
+        //    and none changes B's rows.
+        if args.get("token").is_some() {
+            let missing = invoke(&client, case.tool, &with_never_issued_token(&args)).await;
+            for token in board.teams.team_b.invitations.unusable() {
+                let spent = invoke(&client, case.tool, &json!({ "token": token.expose() })).await;
+                if spent != missing {
+                    failures.push(format!(
+                        "{}: point 2, a spent token of B's is answered differently from a \
+                         never-issued one\n   spent: {spent}\n missing: {missing}",
+                        case.tool
+                    ));
+                }
+            }
+            if let Some(before) = &before {
+                if board.teams.snapshot_b().await != *before {
+                    failures.push(format!(
+                        "{}: point 3, a spent token changed B's rows",
+                        case.tool
+                    ));
+                }
+            }
         }
 
         // 2. A foreign id reads as a missing one.
@@ -1473,7 +1595,7 @@ async fn a_run_scoped_handle_lists_only_its_own_team() {
 /// A `ScopedTx` counts as a transaction here. It carries the context's scope,
 /// which is why the helpers below may take one, but each of them is still a
 /// door into someone else's transaction, so each is named.
-const STORE_HANDLE_EXCEPTIONS: [(&str, &str); 47] = [
+const STORE_HANDLE_EXCEPTIONS: [(&str, &str); 54] = [
     ("db::connect", "it makes the pool; no context can exist yet"),
     ("db::migrate", "it runs before the context is built"),
     (
@@ -1691,6 +1813,43 @@ const STORE_HANDLE_EXCEPTIONS: [(&str, &str); 47] = [
         "a headless runner redeems a code with no credential at all; the code names the user \
          the runner is paired to (047)",
     ),
+    (
+        "identity::insert_team",
+        "a team comes into being inside its creator's transaction: create_personal_team's for a \
+         sign-up, create_team's for a shared team (051); it writes only the new team's rows",
+    ),
+    (
+        "identity::teams::listing_of",
+        "create_team and accept_invitation answer the caller's listing of the team they just \
+         wrote, inside that transaction (051); it reads the caller's own membership",
+    ),
+    (
+        "teams::require_owner",
+        "the one role check reads the actor's membership inside the BEGIN IMMEDIATE transaction \
+         that then writes, so a demotion committed since the request began wins (051); it checks \
+         the context's scope first",
+    ),
+    (
+        "teams::members::remove_member_in",
+        "remove_member and leave_team withdraw a member inside the transaction that checked who \
+         asked (051), and the testing member helper's removal calls it on its own connection; \
+         it writes one team's rows",
+    ),
+    (
+        "teams::invitations::create_invitation_in",
+        "create_invitation inserts inside the transaction its owner check read (051), and the \
+         testing member helper calls it on the caller's transaction; it writes one team's row",
+    ),
+    (
+        "teams::invitations::accept_invitation_in",
+        "accept_invitation redeems inside its own transaction (051), and the testing member \
+         helper calls it on the caller's transaction; the token names the team",
+    ),
+    (
+        "teams::delete::purge",
+        "delete_team and delete_account delete a team's rows in D28's order inside the \
+         transaction that checked who asked (051)",
+    ),
 ];
 
 #[test]
@@ -1781,9 +1940,9 @@ const SETTINGS_WRITERS: [(&str, &str, &str); 3] = [
     ),
     (
         "team_settings",
-        "identity::create_personal_team",
-        "the seed row that comes into being with its team (D28 part 3); no set_team can run \
-         before the team exists",
+        "identity::insert_team",
+        "the seed row that comes into being with its team (D28 part 3), personal or shared \
+         (051); no set_team can run before the team exists",
     ),
     (
         "user_settings",

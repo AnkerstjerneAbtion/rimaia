@@ -41,7 +41,7 @@ use crate::db::{BoardColumn, MutationSource, Repository, RunKind};
 use crate::doctor;
 use crate::events::{ChangeEvent, LocalEvents, RunId, RunnerId, TaskId, TeamId, UserId};
 use crate::identity::secret::{Secret, TokenKind};
-use crate::identity::{create_personal_team, pairing, sessions, tokens};
+use crate::identity::{create_personal_team, pairing, sessions, tokens, Role};
 use crate::machine::MachineContext;
 use crate::mcp::{LocalTools, RunHandles};
 use crate::paths::AppPaths;
@@ -53,6 +53,7 @@ use crate::runner::RunnerConfig;
 use crate::scheduler::InFlight;
 use crate::strategy::settings::repository_default_key;
 use crate::tasks::{self, NewTask, NewTaskLink};
+use crate::teams::invitations;
 use crate::testing::credentials::MemoryStore;
 use crate::testing::machine::MemoryMachine;
 use crate::testing::runs::{seed_finding, SeededFinding};
@@ -96,6 +97,13 @@ pub struct TeamBoard {
     pub run_costs: [f64; 3],
     /// One session and one token of each kind, the owner's (task 047).
     pub credentials: Credentials,
+    /// A second member, who joined by accepting one of
+    /// [`invitations`](Self::invitations): no owner (task 051).
+    pub guest_id: UserId,
+    /// The guest's own personal team, which this team's owner is not in.
+    pub guest_personal_team: TeamId,
+    /// The owner's invitations into this team, one in each state (task 051).
+    pub invitations: Invitations,
     _source: TempRepo,
     _worktrees: TempDir,
 }
@@ -131,6 +139,39 @@ impl Credentials {
     }
 }
 
+/// One invitation into a team in each state an invitation can be in, each
+/// made by the team's owner through `create_invitation` (task 051). The
+/// tokens are what the token-bearing commands' cross-team cases present.
+pub struct Invitations {
+    /// Usable: made now, never used or revoked.
+    pub pending_id: String,
+    pub pending: Secret,
+    /// Made eight days before the fixture's clock, so past its seven.
+    pub expired_id: String,
+    pub expired: Secret,
+    pub revoked_id: String,
+    pub revoked: Secret,
+    /// Used by the team's guest.
+    pub accepted_id: String,
+    pub accepted: Secret,
+}
+
+impl Invitations {
+    /// The three tokens no one can use any more.
+    pub fn unusable(&self) -> [&Secret; 3] {
+        [&self.expired, &self.revoked, &self.accepted]
+    }
+
+    fn ids(&self) -> [String; 4] {
+        [
+            self.pending_id.clone(),
+            self.expired_id.clone(),
+            self.revoked_id.clone(),
+            self.accepted_id.clone(),
+        ]
+    }
+}
+
 impl TeamBoard {
     /// Every id that names a row of this team, for a scan of an answer.
     pub fn ids(&self) -> Vec<String> {
@@ -151,6 +192,9 @@ impl TeamBoard {
         ];
         ids.extend(self.findings.iter().cloned());
         ids.extend(self.credentials.ids());
+        ids.push(self.guest_id.clone());
+        ids.push(self.guest_personal_team.clone());
+        ids.extend(self.invitations.ids());
         ids
     }
 
@@ -332,9 +376,10 @@ impl TwoTeams {
     /// nothing of B's.
     ///
     /// `tasks`, `repositories`, `runs`, `task_links`, `task_dependencies`,
-    /// `review_bundles`, `review_findings`, B's `team_settings`, and B's
-    /// owner's `user_settings`, `sessions`, `api_tokens`, `api_token_teams`
-    /// and `runners`.
+    /// `review_bundles`, `review_findings`, B's `team_settings`, B's `teams`
+    /// row, its `team_memberships` and `invitations` (task 051), the
+    /// `api_token_teams` rows naming it, and B's owner's `user_settings`,
+    /// `sessions`, `api_tokens`, `api_token_teams` and `runners`.
     pub async fn snapshot_b(&self) -> String {
         self.snapshot(&self.team_b).await
     }
@@ -343,7 +388,7 @@ impl TwoTeams {
     pub async fn snapshot(&self, team: &TeamBoard) -> String {
         let owner = &team.owner_id;
         let team = &team.team_id;
-        let tables: [(&str, &str, &str); 13] = [
+        let tables: [(&str, &str, &str); 16] = [
             ("tasks", "t", "t.team_id = ?1"),
             ("repositories", "t", "t.team_id = ?1"),
             (
@@ -374,13 +419,16 @@ impl TwoTeams {
                 "t.task_id IN (SELECT id FROM tasks WHERE team_id = ?1)",
             ),
             ("team_settings", "t", "t.team_id = ?1"),
+            ("teams", "t", "t.id = ?1"),
+            ("team_memberships", "t", "t.team_id = ?1"),
+            ("invitations", "t", "t.team_id = ?1"),
             ("user_settings", "t", "t.user_id = ?2"),
             ("sessions", "t", "t.user_id = ?2"),
             ("api_tokens", "t", "t.user_id = ?2"),
             (
                 "api_token_teams",
                 "t",
-                "t.token_id IN (SELECT id FROM api_tokens WHERE user_id = ?2)",
+                "t.team_id = ?1 OR t.token_id IN (SELECT id FROM api_tokens WHERE user_id = ?2)",
             ),
             ("runners", "t", "t.user_id = ?2"),
         ];
@@ -466,6 +514,20 @@ impl TwoTeams {
         }
         events
     }
+}
+
+/// Fills `ctx`'s one team the way [`TwoTeams`] fills each of its own: a
+/// repository, tasks in every column, a dependency edge, a link, runs of
+/// every kind with a bundle and findings, every team setting, the owner's
+/// credentials, a guest and invitations in every state (task 051's deletion
+/// test fills a shared team with it). `ctx` acts as the team's owner.
+pub async fn fill_team(
+    ctx: &ServiceContext,
+    machine: &MachineContext,
+    clock: &TestClock,
+    paths: &AppPaths,
+) -> TeamBoard {
+    arrange(ctx, machine, clock, paths, Marking::Plain).await
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -682,6 +744,7 @@ async fn arrange(
     .expect("store the owner's subscription");
 
     let credentials = owner_credentials(ctx, clock, marking).await;
+    let (guest, invitations) = invite_a_guest(ctx, clock, marking).await;
 
     TeamBoard {
         team_id,
@@ -702,6 +765,9 @@ async fn arrange(
         subscription_monthly_usd,
         run_costs,
         credentials,
+        guest_id: guest.user_id,
+        guest_personal_team: guest.team_id,
+        invitations,
         _source: source,
         _worktrees: worktrees,
     }
@@ -746,6 +812,64 @@ async fn owner_credentials(
         runner_token: paired.token,
         paired_runner_id: paired.runner_id,
     }
+}
+
+/// A guest who signs up and joins the team through an invitation, and one
+/// invitation in each other state, through the services (task 051): the
+/// owner makes every link, an expired one with the clock set back eight days
+/// and then restored.
+async fn invite_a_guest(
+    ctx: &ServiceContext,
+    clock: &TestClock,
+    marking: Marking,
+) -> (crate::identity::PersonalTeam, Invitations) {
+    let team_id = ctx.scope.sole().expect("one team").clone();
+    let guest = {
+        let mut conn = ctx.pool.acquire().await.expect("a connection");
+        create_personal_team(&mut conn, clock, &marking.text("guest"))
+            .await
+            .expect("the guest signs up")
+    };
+    let invite = || async {
+        invitations::create_invitation(ctx, &team_id, Role::Member)
+            .await
+            .expect("the owner invites")
+    };
+
+    let now = clock.now();
+    clock.set(now - Duration::days(8));
+    let expired = invite().await;
+    clock.set(now);
+
+    let revoked = invite().await;
+    invitations::revoke_invitation(ctx, &revoked.invitation.id)
+        .await
+        .expect("the owner revokes");
+
+    let accepted = invite().await;
+    let as_guest = ServiceContext {
+        actor: guest.user_id.clone(),
+        scope: TeamScope::one(guest.team_id.clone()),
+        ..ctx.clone()
+    };
+    invitations::accept_invitation(&as_guest, accepted.token.expose())
+        .await
+        .expect("the guest joins");
+
+    let pending = invite().await;
+    (
+        guest,
+        Invitations {
+            pending_id: pending.invitation.id,
+            pending: pending.token,
+            expired_id: expired.invitation.id,
+            expired: expired.token,
+            revoked_id: revoked.invitation.id,
+            revoked: revoked.token,
+            accepted_id: accepted.invitation.id,
+            accepted: accepted.token,
+        },
+    )
 }
 
 /// Every team key, with this team's value. A team key added later and not

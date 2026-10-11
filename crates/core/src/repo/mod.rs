@@ -252,6 +252,13 @@ pub async fn register(
     let id = crate::db::new_id();
     let created_at = ctx.clock.now();
 
+    // Owner only (ADR-0029 point 3), read in the insert's own transaction so
+    // a demotion committed since the request began wins (task 051). The
+    // check is here, which every door calls, rather than in a handler, and
+    // task 054's board half keeps it. It follows the clone's checks rather
+    // than preceding them, so no write lock is held while `git` runs.
+    let mut tx = ctx.begin_immediate().await?;
+    crate::teams::require_owner(&mut tx, ctx, &team_id, "register a repository").await?;
     sqlx::query!(
         r#"
         INSERT INTO repositories (id, team_id, name, default_branch, created_at)
@@ -263,12 +270,13 @@ pub async fn register(
         default_branch,
         created_at,
     )
-    .execute(&ctx.pool)
+    .execute(&mut *tx)
     .await?;
+    tx.commit().await?;
 
-    // Publish before the checkout: the row is already committed (this insert
-    // runs in autocommit), so a failure below must not cost the notification
-    // for a mutation that already happened (ADR-0018).
+    // Publish before the checkout: the row is already committed, so a failure
+    // below must not cost the notification for a mutation that already
+    // happened (ADR-0018).
     ctx.publish(ChangeEvent::repositories(team_id, [id.clone()]));
 
     let checkout = Checkout {
@@ -324,7 +332,9 @@ async fn ensure_not_already_registered(machine: &MachineContext, path: &str) -> 
 /// server and the scheduler as writers that can all touch a repository "at
 /// the same moment").
 pub async fn update(ctx: &ServiceContext, id: &str, patch: RepositoryPatch) -> Result<Repository> {
-    let mut tx = ctx.begin().await?;
+    let mut tx = ctx.begin_immediate().await?;
+    let team_id = team_of_repository(&mut tx, id).await?;
+    crate::teams::require_owner(&mut tx, ctx, &team_id, "change a repository").await?;
     let scope = tx.scope().json();
     let mut repository = fetch_repository_row(&mut *tx, &scope, id).await?;
 
@@ -506,9 +516,9 @@ pub async fn ensure_unattended_runs_allowed(
 /// consent, and stays local.
 ///
 /// It requires the `Owner` role in the repository's team (ADR-0029's roles
-/// table), the first role check, which task 051 generalises: a member is
-/// refused as `Invalid`. A personal team has no ceiling, because its owner and
-/// the machine's owner are one person, so it is refused there too.
+/// table), through task 051's `teams::require_owner`: a member is refused as
+/// `Invalid`. A personal team has no ceiling, because its owner and the
+/// machine's owner are one person, so it is refused there too.
 #[tracing::instrument(
     skip_all,
     fields(user_id = ctx.actor.as_str(), repository_id = %repository_id)
@@ -520,23 +530,23 @@ pub async fn set_repository_unattended_ceiling(
 ) -> Result<Repository> {
     let mut tx = ctx.begin_immediate().await?;
     let team_id = team_of_repository(&mut tx, repository_id).await?;
-    let team = sqlx::query!(
-        r#"SELECT t.personal_user_id, m.role AS "role?"
-             FROM teams t
-             LEFT JOIN team_memberships m ON m.team_id = t.id AND m.user_id = ?2
-            WHERE t.id = ?1"#,
+    crate::teams::require_owner(
+        &mut tx,
+        ctx,
+        &team_id,
+        "change whether a repository allows unattended runs",
+    )
+    .await?;
+    let personal = sqlx::query_scalar!(
+        r#"SELECT personal_user_id IS NOT NULL AS "personal!: bool" FROM teams WHERE id = ?1"#,
         team_id,
-        ctx.actor,
     )
     .fetch_one(&mut *tx)
     .await?;
-    if team.personal_user_id.is_some() {
+    if personal {
         return Err(Error::invalid(
             crate::consent::personal_team_has_no_ceiling(),
         ));
-    }
-    if team.role.as_deref() != Some(crate::identity::Role::Owner.as_str()) {
-        return Err(Error::invalid(crate::consent::ceiling_needs_an_owner()));
     }
     sqlx::query!(
         "UPDATE repositories SET allow_unattended_runs = ?1 WHERE id = ?2",
@@ -580,12 +590,13 @@ pub async fn remove(
     machine: Option<&MachineContext>,
     id: &str,
 ) -> Result<()> {
-    let mut tx = ctx.begin().await?;
+    let mut tx = ctx.begin_immediate().await?;
 
     // Looked up first, in the scope, so another team's repository is refused
     // as a missing one rather than with a count of tasks it has no business
-    // hearing about.
+    // hearing about. Then the role, read in this transaction (task 051).
     let team_id = team_of_repository(&mut tx, id).await?;
+    crate::teams::require_owner(&mut tx, ctx, &team_id, "remove a repository").await?;
 
     let task_count = sqlx::query_scalar!(
         r#"SELECT count(*) AS "count!: i64" FROM tasks WHERE repository_id = ?1"#,

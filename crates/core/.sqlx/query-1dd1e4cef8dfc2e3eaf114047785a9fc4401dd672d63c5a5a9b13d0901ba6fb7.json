@@ -1,0 +1,80 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT i.id, i.team_id, i.role,\n                  i.created_by, c.login AS \"created_by_login?\",\n                  i.created_at AS \"created_at: DateTime<Utc>\",\n                  i.expires_at AS \"expires_at: DateTime<Utc>\",\n                  i.accepted_by, a.login AS \"accepted_by_login?\",\n                  i.accepted_at AS \"accepted_at: DateTime<Utc>\",\n                  i.revoked_at AS \"revoked_at: DateTime<Utc>\"\n             FROM invitations i\n             LEFT JOIN users c ON c.id = i.created_by\n             LEFT JOIN users a ON a.id = i.accepted_by\n            WHERE i.id = ?1",
+  "describe": {
+    "columns": [
+      {
+        "name": "id",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "team_id",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "role",
+        "ordinal": 2,
+        "type_info": "Text"
+      },
+      {
+        "name": "created_by",
+        "ordinal": 3,
+        "type_info": "Text"
+      },
+      {
+        "name": "created_by_login?",
+        "ordinal": 4,
+        "type_info": "Text"
+      },
+      {
+        "name": "created_at: DateTime<Utc>",
+        "ordinal": 5,
+        "type_info": "Text"
+      },
+      {
+        "name": "expires_at: DateTime<Utc>",
+        "ordinal": 6,
+        "type_info": "Text"
+      },
+      {
+        "name": "accepted_by",
+        "ordinal": 7,
+        "type_info": "Text"
+      },
+      {
+        "name": "accepted_by_login?",
+        "ordinal": 8,
+        "type_info": "Text"
+      },
+      {
+        "name": "accepted_at: DateTime<Utc>",
+        "ordinal": 9,
+        "type_info": "Text"
+      },
+      {
+        "name": "revoked_at: DateTime<Utc>",
+        "ordinal": 10,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      true,
+      false,
+      false,
+      false,
+      true,
+      false,
+      true,
+      true
+    ]
+  },
+  "hash": "1dd1e4cef8dfc2e3eaf114047785a9fc4401dd672d63c5a5a9b13d0901ba6fb7"
+}

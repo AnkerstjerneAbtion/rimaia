@@ -280,6 +280,23 @@ pub enum Tool {
     // point 3). Both are refused to a run — see `run_access`.
     GetStrategyCeiling,
     SetStrategyCeiling,
+
+    // Task 051. Teams, invitations, roles and the copy to another team
+    // (ADR-0029). All twelve are refused to a run — see `run_access`.
+    // Deleting a team and deleting an account have no tool at all, for
+    // ADR-0021 point 5's `delete_task` reasoning.
+    CreateTeam,
+    ListTeamMembers,
+    SetMemberRole,
+    RemoveMember,
+    LeaveTeam,
+    CreateInvitation,
+    ListInvitations,
+    RevokeInvitation,
+    PreviewInvitation,
+    AcceptInvitation,
+    ListCopyTargets,
+    CopyTaskToTeam,
 }
 
 /// What a [`RunScope::Run`] may do with one tool — ADR-0006's amendment table,
@@ -296,7 +313,7 @@ pub enum RunAccess {
 
 impl Tool {
     /// Every tool with a recorded decision, so a test can walk the table.
-    pub const ALL: [Tool; 70] = [
+    pub const ALL: [Tool; 82] = [
         Tool::AddTaskLink,
         Tool::CreateTask,
         Tool::GetBaseInstructions,
@@ -367,6 +384,18 @@ impl Tool {
         Tool::GetTaskConsent,
         Tool::GetStrategyCeiling,
         Tool::SetStrategyCeiling,
+        Tool::CreateTeam,
+        Tool::ListTeamMembers,
+        Tool::SetMemberRole,
+        Tool::RemoveMember,
+        Tool::LeaveTeam,
+        Tool::CreateInvitation,
+        Tool::ListInvitations,
+        Tool::RevokeInvitation,
+        Tool::PreviewInvitation,
+        Tool::AcceptInvitation,
+        Tool::ListCopyTargets,
+        Tool::CopyTaskToTeam,
     ];
 
     /// The wired name — what `tools/list` advertises and what the ADR table
@@ -443,6 +472,18 @@ impl Tool {
             Tool::GetTaskConsent => "get_task_consent",
             Tool::GetStrategyCeiling => "get_strategy_ceiling",
             Tool::SetStrategyCeiling => "set_strategy_ceiling",
+            Tool::CreateTeam => "create_team",
+            Tool::ListTeamMembers => "list_team_members",
+            Tool::SetMemberRole => "set_member_role",
+            Tool::RemoveMember => "remove_member",
+            Tool::LeaveTeam => "leave_team",
+            Tool::CreateInvitation => "create_invitation",
+            Tool::ListInvitations => "list_invitations",
+            Tool::RevokeInvitation => "revoke_invitation",
+            Tool::PreviewInvitation => "preview_invitation",
+            Tool::AcceptInvitation => "accept_invitation",
+            Tool::ListCopyTargets => "list_copy_targets",
+            Tool::CopyTaskToTeam => "copy_task_to_team",
         }
     }
 
@@ -710,6 +751,24 @@ impl Tool {
             // later run on the machine. The read is refused with the write, as
             // `get_run_capacity` is: a run cannot act on the answer.
             Tool::GetStrategyCeiling | Tool::SetStrategyCeiling => RunAccess::Refused,
+
+            // Task 051 (ADR-0029, ADR-0012). A run must never invite, admit,
+            // remove or copy people or work: each speaks for a person about
+            // who may see a team's plans and transcripts, and a run that could
+            // invite would be choosing its own audience. The reads go with the
+            // writes, because a run can act on none of the answers.
+            Tool::CreateTeam
+            | Tool::ListTeamMembers
+            | Tool::SetMemberRole
+            | Tool::RemoveMember
+            | Tool::LeaveTeam
+            | Tool::CreateInvitation
+            | Tool::ListInvitations
+            | Tool::RevokeInvitation
+            | Tool::PreviewInvitation
+            | Tool::AcceptInvitation
+            | Tool::ListCopyTargets
+            | Tool::CopyTaskToTeam => RunAccess::Refused,
         }
     }
 }

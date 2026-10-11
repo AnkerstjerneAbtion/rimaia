@@ -37,6 +37,7 @@ pub mod scheduler;
 pub mod startup;
 pub mod strategy;
 pub mod tasks;
+pub mod teams;
 pub mod worktree;
 
 /// Test scaffolding shared by this crate's unit tests, its `tests/` integration

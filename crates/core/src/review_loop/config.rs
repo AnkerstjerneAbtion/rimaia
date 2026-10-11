@@ -593,7 +593,7 @@ pub async fn set_review_settings(
     // and announced once: the instructions and the configuration are one save,
     // and neither commits without the other.
     let during_run = crate::consent::written_during_run(ctx, &ctx.actor).await?;
-    let mut tx = ctx.begin().await?;
+    let mut tx = ctx.begin_immediate().await?;
     settings::set_team_in(
         ctx,
         &mut tx,
@@ -646,14 +646,23 @@ pub async fn set_repository_review_config(
     )?;
     let stored = config.to_stored()?;
 
+    let mut tx = ctx.begin_immediate().await?;
+    crate::teams::require_owner(
+        &mut tx,
+        ctx,
+        &team_id,
+        "change a repository's review settings",
+    )
+    .await?;
     sqlx::query!(
         "UPDATE repositories SET review_config = ?1 WHERE id = ?2 AND team_id = ?3",
         stored,
         repository_id,
         team_id,
     )
-    .execute(&ctx.pool)
+    .execute(&mut *tx)
     .await?;
+    tx.commit().await?;
 
     ctx.publish(ChangeEvent::repositories(
         team_id,

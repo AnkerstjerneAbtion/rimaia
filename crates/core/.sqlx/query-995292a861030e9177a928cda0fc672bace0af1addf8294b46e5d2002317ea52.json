@@ -1,0 +1,50 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT t.id, t.name, m.role,\n                  COALESCE(t.personal_user_id = ?1, 0) AS \"personal!: bool\",\n                  (SELECT count(*) FROM team_memberships c\n                    WHERE c.team_id = t.id) AS \"member_count!: i64\",\n                  (SELECT count(*) FROM team_memberships c\n                    WHERE c.team_id = t.id AND c.role = 'owner') AS \"owner_count!: i64\"\n             FROM team_memberships m JOIN teams t ON t.id = m.team_id\n            WHERE m.user_id = ?1 AND (?2 IS NULL OR t.id = ?2)\n            ORDER BY 4 DESC, t.name, t.id",
+  "describe": {
+    "columns": [
+      {
+        "name": "id",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "name",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "role",
+        "ordinal": 2,
+        "type_info": "Text"
+      },
+      {
+        "name": "personal!: bool",
+        "ordinal": 3,
+        "type_info": "Null"
+      },
+      {
+        "name": "member_count!: i64",
+        "ordinal": 4,
+        "type_info": "Null"
+      },
+      {
+        "name": "owner_count!: i64",
+        "ordinal": 5,
+        "type_info": "Null"
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      null,
+      null,
+      null
+    ]
+  },
+  "hash": "995292a861030e9177a928cda0fc672bace0af1addf8294b46e5d2002317ea52"
+}

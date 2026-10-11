@@ -1009,3 +1009,74 @@ pub struct GetTaskConsentRequest {
     /// theirs to read.
     pub runner_id: String,
 }
+
+// ---------------------------------------------------------------------------
+// Teams, invitations and roles (ADR-0029, task 051)
+// ---------------------------------------------------------------------------
+
+/// `create_team`.
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct CreateTeamRequest {
+    /// 1 to 100 characters after trimming. Need not be unique.
+    pub name: String,
+}
+
+/// `list_team_members`, `leave_team` and `list_invitations`: one team, by id.
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct TeamRequest {
+    pub team_id: String,
+}
+
+/// `set_member_role`.
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct SetMemberRoleRequest {
+    pub team_id: String,
+    pub user_id: String,
+    /// `owner` or `member`.
+    pub role: crate::identity::Role,
+}
+
+/// `remove_member`.
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct RemoveMemberRequest {
+    pub team_id: String,
+    pub user_id: String,
+}
+
+/// `create_invitation`.
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct CreateInvitationRequest {
+    pub team_id: String,
+    /// The role whoever uses the link joins with: `owner` or `member`.
+    pub role: crate::identity::Role,
+}
+
+/// `revoke_invitation`.
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct RevokeInvitationRequest {
+    pub invitation_id: String,
+}
+
+/// `preview_invitation` and `accept_invitation`: the token from an
+/// invitation link, the part after `#`.
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct InvitationTokenRequest {
+    pub token: String,
+}
+
+/// `copy_task_to_team`.
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct CopyTaskToTeamRequest {
+    pub task_id: String,
+    /// A repository in the team the copy goes to; the copy belongs to that
+    /// repository's team.
+    pub repository_id: String,
+}

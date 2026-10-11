@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE invitations SET accepted_by = ?1, accepted_at = ?2\n          WHERE token_hash = ?3 AND accepted_at IS NULL AND revoked_at IS NULL\n            AND expires_at > ?2\n         RETURNING team_id, role",
+  "describe": {
+    "columns": [
+      {
+        "name": "team_id",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "role",
+        "ordinal": 1,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": [
+      false,
+      false
+    ]
+  },
+  "hash": "7d04b7d33206d77f3b14ea48f542a4b4f6ce4cb2dfd91d0804d27e199389dd9a"
+}

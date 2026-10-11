@@ -1268,11 +1268,6 @@ pub fn trusting_oneself() -> &'static str {
     "you cannot trust yourself: your own changes already count."
 }
 
-/// Scope 11's sentence for a member changing the team ceiling.
-pub fn ceiling_needs_an_owner() -> &'static str {
-    "only an owner of this team can change whether it allows unattended runs."
-}
-
 /// Scope 11's sentence for the ceiling command on a personal team.
 pub fn personal_team_has_no_ceiling() -> &'static str {
     "a personal team has no ceiling: this machine's own consent decides."
@@ -1356,10 +1351,6 @@ mod tests {
             (
                 trusting_oneself().to_string(),
                 "you cannot trust yourself: your own changes already count.",
-            ),
-            (
-                ceiling_needs_an_owner().to_string(),
-                "only an owner of this team can change whether it allows unattended runs.",
             ),
             (
                 personal_team_has_no_ceiling().to_string(),

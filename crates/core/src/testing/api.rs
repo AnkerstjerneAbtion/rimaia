@@ -9,7 +9,7 @@
 //! runs **the same table** over HTTP. Two tables could each be complete and
 //! still disagree; one table run through two doors is D32's argument for
 //! `dispatch` itself. A new board row is not done until it has a case here, and
-//! 047, 050 and 060 append theirs to this table.
+//! 047, 050, 051 and 060 append theirs to this table.
 //!
 //! # Callers
 //!
@@ -227,16 +227,51 @@ pub enum Foreign {
     Filter(fn(&TwoTeams) -> Value),
     /// The command can name no entity: a team setting, an aggregate.
     EntityLess,
+    /// The command carries a token, which is its own capability, and no team
+    /// id to substitute: a valid team B token rightly reaches team B (task
+    /// 051). Each argument object carries one of team B's tokens nobody can
+    /// use any more, expired, revoked and accepted. Run as team A, each answer
+    /// carries nothing of B's and equals the answer for a never-issued token
+    /// ([`with_never_issued_token`]), and B's rows are unchanged.
+    Capability(fn(&TwoTeams) -> Vec<Value>),
 }
 
 impl Foreign {
     /// The arguments naming team B, or `None` for an entity-less command.
+    /// A token-bearing command's first argument object, of several.
     pub fn args(&self, teams: &TwoTeams) -> Option<Value> {
+        self.arg_sets(teams).into_iter().next()
+    }
+
+    /// Every argument object a cross-team check runs: one naming team B's
+    /// ids, one per unusable token of B's, or none for an entity-less
+    /// command, which runs its own arguments instead.
+    pub fn arg_sets(&self, teams: &TwoTeams) -> Vec<Value> {
         match self {
-            Foreign::Ids(args) | Foreign::Filter(args) => Some(args(teams)),
-            Foreign::EntityLess => None,
+            Foreign::Ids(args) | Foreign::Filter(args) => vec![args(teams)],
+            Foreign::Capability(args) => args(teams),
+            Foreign::EntityLess => Vec::new(),
         }
     }
+}
+
+/// `args` with its `token` replaced by a freshly minted invitation token that
+/// was never issued: what a capability's foreign answer must equal.
+pub fn with_never_issued_token(args: &Value) -> Value {
+    let mut args = args.clone();
+    args["token"] = Value::String(secret::mint_invitation_token().expose().to_string());
+    args
+}
+
+/// Team B's three unusable invitation tokens, each as `{ token }`.
+fn unusable_tokens(teams: &TwoTeams) -> Vec<Value> {
+    teams
+        .team_b
+        .invitations
+        .unusable()
+        .into_iter()
+        .map(|token| json!({ "token": token.expose() }))
+        .collect()
 }
 
 /// The case named `name`, if there is one.
@@ -264,6 +299,14 @@ pub const REFUSED_FOR_TEAM_A: &[(&str, &str)] = &[
     (
         "give_up_on_task",
         "no task of team A's is waiting out a retry",
+    ),
+    (
+        "leave_team",
+        "team A's owner is in only team A, a personal team, which always keeps its person",
+    ),
+    (
+        "delete_team",
+        "team A is a personal team, which is deleted with its account, not on its own",
     ),
 ];
 
@@ -753,6 +796,104 @@ pub static BOARD_CASES: &[BoardCase] = &[
         own: |t| json!({ "id": t.team_a.credentials.paired_runner_id }),
         foreign: Foreign::Ids(|t| json!({ "id": t.team_b.credentials.paired_runner_id })),
     },
+    // teams, invitations and roles (task 051): each team's guest is the member
+    // an owner acts on, and a token is its own capability
+    BoardCase {
+        name: "create_team",
+        effect: Effect::Write,
+        own: |_| json!({ "name": "Acme" }),
+        foreign: Foreign::EntityLess,
+    },
+    BoardCase {
+        name: "list_team_members",
+        effect: Effect::Read,
+        own: |t| json!({ "teamId": t.team_a.team_id }),
+        foreign: Foreign::Ids(|t| json!({ "teamId": t.team_b.team_id })),
+    },
+    BoardCase {
+        name: "set_member_role",
+        effect: Effect::Write,
+        own: |t| json!({ "teamId": t.team_a.team_id, "userId": t.team_a.guest_id, "role": "owner" }),
+        foreign: Foreign::Ids(
+            |t| json!({ "teamId": t.team_b.team_id, "userId": t.team_b.guest_id, "role": "owner" }),
+        ),
+    },
+    BoardCase {
+        name: "remove_member",
+        effect: Effect::Write,
+        own: |t| json!({ "teamId": t.team_a.team_id, "userId": t.team_a.guest_id }),
+        foreign: Foreign::Ids(
+            |t| json!({ "teamId": t.team_b.team_id, "userId": t.team_b.guest_id }),
+        ),
+    },
+    BoardCase {
+        name: "leave_team",
+        effect: Effect::Write,
+        own: |t| json!({ "teamId": t.team_a.team_id }),
+        foreign: Foreign::Ids(|t| json!({ "teamId": t.team_b.team_id })),
+    },
+    BoardCase {
+        name: "create_invitation",
+        effect: Effect::Write,
+        own: |t| json!({ "teamId": t.team_a.team_id, "role": "member" }),
+        foreign: Foreign::Ids(|t| json!({ "teamId": t.team_b.team_id, "role": "member" })),
+    },
+    BoardCase {
+        name: "list_invitations",
+        effect: Effect::Read,
+        own: |t| json!({ "teamId": t.team_a.team_id }),
+        foreign: Foreign::Ids(|t| json!({ "teamId": t.team_b.team_id })),
+    },
+    BoardCase {
+        name: "revoke_invitation",
+        effect: Effect::Write,
+        own: |t| json!({ "id": t.team_a.invitations.pending_id }),
+        foreign: Foreign::Ids(|t| json!({ "id": t.team_b.invitations.pending_id })),
+    },
+    // Team B's pending link: the one usable token a team A owner can be
+    // handed, and the preview is the one read that names a team outside the
+    // scope, because the token is the capability.
+    BoardCase {
+        name: "preview_invitation",
+        effect: Effect::Read,
+        own: |t| json!({ "token": t.team_b.invitations.pending.expose() }),
+        foreign: Foreign::Capability(unusable_tokens),
+    },
+    BoardCase {
+        name: "accept_invitation",
+        effect: Effect::Write,
+        own: |t| json!({ "token": t.team_b.invitations.pending.expose() }),
+        foreign: Foreign::Capability(unusable_tokens),
+    },
+    BoardCase {
+        name: "list_copy_targets",
+        effect: Effect::Read,
+        own: |_| json!({}),
+        foreign: Foreign::EntityLess,
+    },
+    // B's plan copied into A's repository: the direction that would leak.
+    BoardCase {
+        name: "copy_task_to_team",
+        effect: Effect::Write,
+        own: |t| json!({ "taskId": t.team_a.ready, "repositoryId": t.team_a.repository.id }),
+        foreign: Foreign::Ids(
+            |t| json!({ "taskId": t.team_b.ready, "repositoryId": t.team_a.repository.id }),
+        ),
+    },
+    BoardCase {
+        name: "delete_team",
+        effect: Effect::Write,
+        own: |t| json!({ "teamId": t.team_a.team_id, "confirmName": "Personal" }),
+        foreign: Foreign::Ids(|t| json!({ "teamId": t.team_b.team_id, "confirmName": "Personal" })),
+    },
+    // Last, on purpose: the cross-team loops run every case on one board, and
+    // this one deletes team A's owner when nothing refuses it.
+    BoardCase {
+        name: "delete_account",
+        effect: Effect::Write,
+        own: |_| json!({ "confirmLogin": "ada" }),
+        foreign: Foreign::EntityLess,
+    },
 ];
 
 // ---------------------------------------------------------------------------
@@ -855,16 +996,18 @@ pub fn normalize_minted(answer: &Value, known: &BTreeSet<String>) -> Value {
     serde_json::from_str(&text).expect("ids normalize inside strings")
 }
 
-/// The three rows that answer a secret minted by the call, and where the
+/// The four rows that answer a secret minted by the call, and where the
 /// secret sits in the answer: two transports can never agree on one.
-const MINTED_SECRETS: [(&str, &str); 3] = [
+const MINTED_SECRETS: [(&str, &str); 4] = [
     ("create_personal_access_token", "token"),
     ("pair_own_runner", "token"),
     ("create_pairing_code", "code"),
+    ("create_invitation", "token"),
 ];
 
 /// `answer` with the secret `case` minted replaced by `<minted secret>`, after
-/// checking it has its shape: an `rmp_` or `rmr_` token, or a pairing code.
+/// checking it has its shape: an `rmp_`, `rmr_` or `rmi_` token, or a pairing
+/// code.
 /// Any other case's answer is returned unchanged, and so is a refusal, which
 /// carries no secret. Checking first means normalizing cannot hide a missing
 /// secret (task 047 Scope 12).
@@ -882,6 +1025,7 @@ pub fn normalize_minted_secret(case: &str, answer: &Value) -> std::result::Resul
     let shaped = match case {
         "create_personal_access_token" => secret::is_token_of(TokenKind::Personal, minted),
         "pair_own_runner" => secret::is_token_of(TokenKind::Runner, minted),
+        "create_invitation" => secret::is_invitation_token(minted),
         _ => secret::is_pairing_code(minted),
     };
     if !shaped {

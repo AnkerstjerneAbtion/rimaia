@@ -119,8 +119,9 @@ impl Board {
             .expect("the personal team")
     }
 
-    /// A shared team with `members`, each a `member`. Teams other than
-    /// personal ones are task 051's to create, so this is a fixture.
+    /// A shared team with `members`, each a `member` and none an owner: a
+    /// state no service makes (task 051 always leaves a team an owner), so
+    /// it is written here by hand.
     async fn shared_team(&self, members: &[&str]) -> String {
         let team_id = db::new_id();
         sqlx::query("INSERT INTO teams (id, name, created_at) VALUES (?1, 'Acme', ?2)")
@@ -1212,8 +1213,14 @@ async fn list_teams_lists_every_membership_whatever_the_header_says() {
         assert_eq!(
             listed,
             json!([
-                { "id": personal, "name": "Personal", "role": "owner", "personal": true },
-                { "id": acme, "name": "Acme", "role": "member", "personal": false },
+                {
+                    "id": personal, "name": "Personal", "role": "owner", "personal": true,
+                    "memberCount": 1, "ownerCount": 1,
+                },
+                {
+                    "id": acme, "name": "Acme", "role": "member", "personal": false,
+                    "memberCount": 1, "ownerCount": 0,
+                },
             ])
         );
     }

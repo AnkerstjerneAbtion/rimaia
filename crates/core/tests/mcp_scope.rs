@@ -14,17 +14,19 @@
 
 use rimaia_core::db::{BoardColumn, MutationSource, RunKind, ScheduleMode};
 use rimaia_core::mcp::requests::{
-    AcceptContentRequest, ArchiveTaskRequest, AssignTaskRequest, CreateTaskRequest,
-    DoctorDismissalRequest, GetReviewHistoryRequest, GetReviewLevelRequest,
-    GetStrategyDefaultsRequest, GetTaskConsentRequest, GetTaskRequest, ListReviewFindingsRequest,
+    AcceptContentRequest, ArchiveTaskRequest, AssignTaskRequest, CopyTaskToTeamRequest,
+    CreateInvitationRequest, CreateTaskRequest, CreateTeamRequest, DoctorDismissalRequest,
+    GetReviewHistoryRequest, GetReviewLevelRequest, GetStrategyDefaultsRequest,
+    GetTaskConsentRequest, GetTaskRequest, InvitationTokenRequest, ListReviewFindingsRequest,
     ListTasksRequest, MarkReviewDigestSeenRequest, MoveTaskRequest, PlanSelectionRequest,
-    RecordReviewFindingsRequest, ResolveReviewFindingRequest, ReviewNoteRequest,
-    ScheduleConfigRequest, ScheduleRequest, SetMaxConcurrencyRequest,
-    SetRepositoryMaxConcurrencyRequest, SetRepositoryReviewConfigRequest,
-    SetRepositoryUnattendedCeilingRequest, SetReviewSettingsRequest, SetScheduleEnabledRequest,
-    SetScheduleModeRequest, SetStrategyApprovalRequest, SetStrategyCatalogueRequest,
-    SetStrategyDefaultsRequest, SetTaskDependenciesRequest, SetTaskReviewRequest,
-    SetTaskStrategyRequest, TaskStrategyRequest, UpdateScheduleRequest, UpdateTaskRequest,
+    RecordReviewFindingsRequest, RemoveMemberRequest, ResolveReviewFindingRequest,
+    ReviewNoteRequest, RevokeInvitationRequest, ScheduleConfigRequest, ScheduleRequest,
+    SetMaxConcurrencyRequest, SetMemberRoleRequest, SetRepositoryMaxConcurrencyRequest,
+    SetRepositoryReviewConfigRequest, SetRepositoryUnattendedCeilingRequest,
+    SetReviewSettingsRequest, SetScheduleEnabledRequest, SetScheduleModeRequest,
+    SetStrategyApprovalRequest, SetStrategyCatalogueRequest, SetStrategyDefaultsRequest,
+    SetTaskDependenciesRequest, SetTaskReviewRequest, SetTaskStrategyRequest, TaskStrategyRequest,
+    TeamRequest, UpdateScheduleRequest, UpdateTaskRequest,
 };
 use rimaia_core::mcp::responses::{
     DoctorDismissalsView, DoctorReportView, PreflightView, ScheduleDeletedView, ScheduleListView,
@@ -269,6 +271,20 @@ fn expected_access(tool: Tool, kind: GrantKind) -> RunAccess {
             // Task 072. This machine's strategy ceiling is run configuration
             // (ADR-0021 point 4); see `a_run_cannot_read_or_change_the_strategy_ceiling`.
             Tool::GetStrategyCeiling | Tool::SetStrategyCeiling => RunAccess::Refused,
+            // Task 051. A run never invites, admits, removes or copies people
+            // or work (ADR-0012); see `team_management_is_refused_to_a_run`.
+            Tool::CreateTeam
+            | Tool::ListTeamMembers
+            | Tool::SetMemberRole
+            | Tool::RemoveMember
+            | Tool::LeaveTeam
+            | Tool::CreateInvitation
+            | Tool::ListInvitations
+            | Tool::RevokeInvitation
+            | Tool::PreviewInvitation
+            | Tool::AcceptInvitation
+            | Tool::ListCopyTargets
+            | Tool::CopyTaskToTeam => RunAccess::Refused,
     }
 }
 
@@ -2560,4 +2576,160 @@ async fn a_run_cannot_accept_through_its_handle() {
         .await
         .expect("count the acceptances");
     assert_eq!(recorded, 1, "the operator's own door accepts");
+}
+
+#[tokio::test]
+async fn team_management_is_refused_to_a_run() {
+    // Task 051 (ADR-0012): a run never invites, admits, removes or copies
+    // people or work. Every one of the twelve tools is refused for every
+    // grant, on the run's own task, before anything is read or written.
+    let h = TestContext::new().await;
+    let repository_id = seed_repository(&h.context.pool, "rimaia", "/tmp/rimaia").await;
+    let task = create_task(&h, &repository_id, "Mine").await;
+    let team = &h.solo.team_id;
+    let user = &h.solo.user_id;
+    let before: (i64, i64, i64) = sqlx::query_as(
+        "SELECT (SELECT count(*) FROM teams), (SELECT count(*) FROM team_memberships),
+                (SELECT count(*) FROM tasks)",
+    )
+    .fetch_one(&h.context.pool)
+    .await
+    .expect("count the rows");
+
+    for grant in every_grant() {
+        let server = scoped_as(&h, &task.id, grant);
+        let refused = |name: &str| not_available(name, &task.id);
+
+        assert_refusal(
+            &as_result(
+                server
+                    .create_team(Parameters(request::<CreateTeamRequest>(
+                        json!({ "name": "Acme" }),
+                    )))
+                    .await,
+            ),
+            &refused("create_team"),
+        );
+        assert_refusal(
+            &as_result(
+                server
+                    .list_team_members(Parameters(request::<TeamRequest>(
+                        json!({ "team_id": team }),
+                    )))
+                    .await,
+            ),
+            &refused("list_team_members"),
+        );
+        assert_refusal(
+            &as_result(
+                server
+                    .set_member_role(Parameters(request::<SetMemberRoleRequest>(
+                        json!({ "team_id": team, "user_id": user, "role": "member" }),
+                    )))
+                    .await,
+            ),
+            &refused("set_member_role"),
+        );
+        assert_refusal(
+            &as_result(
+                server
+                    .remove_member(Parameters(request::<RemoveMemberRequest>(
+                        json!({ "team_id": team, "user_id": user }),
+                    )))
+                    .await,
+            ),
+            &refused("remove_member"),
+        );
+        assert_refusal(
+            &as_result(
+                server
+                    .leave_team(Parameters(request::<TeamRequest>(
+                        json!({ "team_id": team }),
+                    )))
+                    .await,
+            ),
+            &refused("leave_team"),
+        );
+        assert_refusal(
+            &as_result(
+                server
+                    .create_invitation(Parameters(request::<CreateInvitationRequest>(
+                        json!({ "team_id": team, "role": "owner" }),
+                    )))
+                    .await,
+            ),
+            &refused("create_invitation"),
+        );
+        assert_refusal(
+            &as_result(
+                server
+                    .list_invitations(Parameters(request::<TeamRequest>(
+                        json!({ "team_id": team }),
+                    )))
+                    .await,
+            ),
+            &refused("list_invitations"),
+        );
+        assert_refusal(
+            &as_result(
+                server
+                    .revoke_invitation(Parameters(request::<RevokeInvitationRequest>(
+                        json!({ "invitation_id": task.id }),
+                    )))
+                    .await,
+            ),
+            &refused("revoke_invitation"),
+        );
+        assert_refusal(
+            &as_result(
+                server
+                    .preview_invitation(Parameters(request::<InvitationTokenRequest>(
+                        json!({ "token": "rmi_anything" }),
+                    )))
+                    .await,
+            ),
+            &refused("preview_invitation"),
+        );
+        assert_refusal(
+            &as_result(
+                server
+                    .accept_invitation(Parameters(request::<InvitationTokenRequest>(
+                        json!({ "token": "rmi_anything" }),
+                    )))
+                    .await,
+            ),
+            &refused("accept_invitation"),
+        );
+        assert_refusal(
+            &as_result(server.list_copy_targets().await),
+            &refused("list_copy_targets"),
+        );
+        assert_refusal(
+            &as_result(
+                server
+                    .copy_task_to_team(Parameters(request::<CopyTaskToTeamRequest>(
+                        json!({ "task_id": task.id, "repository_id": repository_id }),
+                    )))
+                    .await,
+            ),
+            &refused("copy_task_to_team"),
+        );
+    }
+
+    let after: (i64, i64, i64) = sqlx::query_as(
+        "SELECT (SELECT count(*) FROM teams), (SELECT count(*) FROM team_memberships),
+                (SELECT count(*) FROM tasks)",
+    )
+    .fetch_one(&h.context.pool)
+    .await
+    .expect("count the rows");
+    assert_eq!(after, before, "no refused call wrote anything");
+}
+
+#[test]
+fn deleting_a_team_or_an_account_has_no_tool() {
+    // ADR-0021 point 5's `delete_task` reasoning: each is irreversible and an
+    // agent could do it by mistake.
+    assert_eq!(Tool::from_name("delete_team"), None);
+    assert_eq!(Tool::from_name("delete_account"), None);
 }

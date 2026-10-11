@@ -36,30 +36,34 @@ use crate::machine::{self, MachineContext};
 use crate::mcp::error::ToolError;
 use crate::mcp::requests::{
     AcceptContentRequest, AddTaskLinkRequest, AnalyticsRequest, ArchiveTaskRequest,
-    ArchiveTasksRequest, AssignTaskRequest, ClearableField, CreateTaskRequest,
-    DoctorDismissalRequest, GetReviewHistoryRequest, GetReviewLevelRequest,
-    GetStrategyDefaultsRequest, GetTaskConsentRequest, GetTaskRequest, ListReviewFindingsRequest,
+    ArchiveTasksRequest, AssignTaskRequest, ClearableField, CopyTaskToTeamRequest,
+    CreateInvitationRequest, CreateTaskRequest, CreateTeamRequest, DoctorDismissalRequest,
+    GetReviewHistoryRequest, GetReviewLevelRequest, GetStrategyDefaultsRequest,
+    GetTaskConsentRequest, GetTaskRequest, InvitationTokenRequest, ListReviewFindingsRequest,
     ListTasksRequest, MarkReviewDigestSeenRequest, MoveTaskRequest, PlanSelectionRequest,
-    RecordReviewFindingsRequest, RemoveTaskLinkRequest, RepositoryRequest,
-    ResolveReviewFindingRequest, ReviewNoteRequest, ScheduleConfigRequest, ScheduleRequest,
-    SetMaxConcurrencyRequest, SetRepositoryMaxConcurrencyRequest, SetRepositoryOnArchiveRequest,
+    RecordReviewFindingsRequest, RemoveMemberRequest, RemoveTaskLinkRequest, RepositoryRequest,
+    ResolveReviewFindingRequest, ReviewNoteRequest, RevokeInvitationRequest, ScheduleConfigRequest,
+    ScheduleRequest, SetMaxConcurrencyRequest, SetMemberRoleRequest,
+    SetRepositoryMaxConcurrencyRequest, SetRepositoryOnArchiveRequest,
     SetRepositoryReviewConfigRequest, SetRepositoryUnattendedCeilingRequest,
     SetReviewSettingsRequest, SetScheduleEnabledRequest, SetScheduleModeRequest,
     SetStrategyApprovalRequest, SetStrategyCatalogueRequest, SetStrategyCeilingRequest,
     SetStrategyDefaultsRequest, SetTaskDependenciesRequest, SetTaskReviewRequest,
     SetTaskStrategyRequest, SetWorktreeAutoCleanupRequest, SubscriptionCostRequest,
-    TaskStrategyRequest, UpdateScheduleRequest, UpdateTaskRequest,
+    TaskStrategyRequest, TeamRequest, UpdateScheduleRequest, UpdateTaskRequest,
 };
 use crate::mcp::responses::{
     AcceptedView, AnalyticsView, ArchiveReportView, ArchivedTaskView, BaseInstructionsView,
-    CheckoutListView, CheckoutView, CredentialStatusView, DigestMarkerView, DismissalView,
-    DoctorDismissalsView, DoctorReportView, OnboardingView, PlanPassView, PlanResultView,
-    PreflightView, RepositoryListView, RepositoryOnArchiveView, RepositoryView, ReviewDigestView,
-    ReviewFindingView, ReviewFindingsView, ReviewHistoryView, ReviewOutcomeView, ReviewedTaskView,
-    RunCapacityView, ScheduleDeletedView, ScheduleListView, ScheduleView, StrategyApprovalView,
-    StrategyCeilingView, SubscriptionCostView, TaskConsentView, TaskDependentsView, TaskListItem,
-    TaskListView, TaskView, TimezoneListView, UnattendedCeilingView, WorktreeAutoCleanupView,
-    WorktreeListView, WorktreeView,
+    CheckoutListView, CheckoutView, CopyTargetsView, CreatedInvitationView, CredentialStatusView,
+    DigestMarkerView, DismissalView, DoctorDismissalsView, DoctorReportView, InvitationListView,
+    InvitationPreviewView, InvitationRevokedView, InvitationView, MemberLeftView, MemberRoleView,
+    OnboardingView, PlanPassView, PlanResultView, PreflightView, RepositoryListView,
+    RepositoryOnArchiveView, RepositoryView, ReviewDigestView, ReviewFindingView,
+    ReviewFindingsView, ReviewHistoryView, ReviewOutcomeView, ReviewedTaskView, RunCapacityView,
+    ScheduleDeletedView, ScheduleListView, ScheduleView, StrategyApprovalView, StrategyCeilingView,
+    SubscriptionCostView, TaskConsentView, TaskDependentsView, TaskListItem, TaskListView,
+    TaskView, TeamMembersView, TeamView, TimezoneListView, UnattendedCeilingView,
+    WorktreeAutoCleanupView, WorktreeListView, WorktreeView,
 };
 use crate::mcp::scope::{RunScope, Tool};
 use crate::review;
@@ -1161,6 +1165,216 @@ enough that the old proposal no longer describes the work."
         let task = tasks::strategy::clear_task_strategy(&self.ctx, &request.task_id).await?;
         self.task_view(&task.id).await
     }
+
+    // Task 051: teams, invitations, roles and the copy (ADR-0029). Deleting a
+    // team and deleting an account are not tools: each is irreversible and
+    // could be done by an agent by mistake (ADR-0021 point 5).
+
+    #[tool(
+        description = "Create a new team on this Rimaia server, with the user as its only owner. \
+Call this when the user wants to share a board with other people; they then invite them with \
+`create_invitation`. The name is 1 to 100 characters and need not be unique. A solo board has \
+one team and refuses this."
+    )]
+    pub async fn create_team(
+        &self,
+        Parameters(request): Parameters<CreateTeamRequest>,
+    ) -> Result<Json<TeamView>, ToolError> {
+        self.scope.authorize(Tool::CreateTeam, None)?;
+        let team = crate::teams::create_team(&self.ctx, &request.name).await?;
+        Ok(Json(TeamView::from(team)))
+    }
+
+    #[tool(
+        description = "List the members of one of the user's teams, with each one's role. Call \
+this before changing a role or removing someone, to find their `user_id`."
+    )]
+    pub async fn list_team_members(
+        &self,
+        Parameters(request): Parameters<TeamRequest>,
+    ) -> Result<Json<TeamMembersView>, ToolError> {
+        self.scope.authorize(Tool::ListTeamMembers, None)?;
+        let members = crate::teams::members::list_team_members(&self.ctx, &request.team_id).await?;
+        Ok(Json(TeamMembersView::new(&request.team_id, members)))
+    }
+
+    #[tool(
+        description = "Make a member of a team an owner, or an owner a member. Call this when the \
+user asks to change someone's role. Only an owner may do this. A team always keeps at least one owner, and a personal team always keeps its own person \
+as an owner, so a change that would break either is refused with the reason."
+    )]
+    pub async fn set_member_role(
+        &self,
+        Parameters(request): Parameters<SetMemberRoleRequest>,
+    ) -> Result<Json<MemberRoleView>, ToolError> {
+        self.scope.authorize(Tool::SetMemberRole, None)?;
+        crate::teams::members::set_member_role(
+            &self.ctx,
+            &request.team_id,
+            &request.user_id,
+            request.role,
+        )
+        .await?;
+        Ok(Json(MemberRoleView {
+            team_id: request.team_id,
+            user_id: request.user_id,
+            role: request.role,
+        }))
+    }
+
+    #[tool(
+        description = "Remove someone from a team. Call this only when an owner of the team asks \
+to; only an owner may do this. Their tasks in the \
+team are unassigned, their runners stop taking its work, and their trust and any token restricted \
+to the team are withdrawn. Inviting them back starts from nothing."
+    )]
+    pub async fn remove_member(
+        &self,
+        Parameters(request): Parameters<RemoveMemberRequest>,
+    ) -> Result<Json<MemberLeftView>, ToolError> {
+        self.scope.authorize(Tool::RemoveMember, None)?;
+        crate::teams::members::remove_member(&self.ctx, &request.team_id, &request.user_id).await?;
+        Ok(Json(MemberLeftView {
+            team_id: request.team_id,
+            user_id: request.user_id,
+            removed: true,
+        }))
+    }
+
+    #[tool(
+        description = "Take the user out of one of their teams. Call this only when the user asks \
+to leave. The last owner cannot leave, and nobody leaves their own personal team."
+    )]
+    pub async fn leave_team(
+        &self,
+        Parameters(request): Parameters<TeamRequest>,
+    ) -> Result<Json<MemberLeftView>, ToolError> {
+        self.scope.authorize(Tool::LeaveTeam, None)?;
+        crate::teams::members::leave_team(&self.ctx, &request.team_id).await?;
+        Ok(Json(MemberLeftView {
+            team_id: request.team_id,
+            user_id: self.ctx.actor.clone(),
+            removed: true,
+        }))
+    }
+
+    #[tool(
+        description = "Make an invitation link into a team, granting `owner` or `member` to \
+whoever uses it. Call this when an owner wants to bring someone into the team. Only an owner may \
+do this. The link works once, for seven days, for any \
+signed-in account. The token is returned this once and never again: give the user `path` to put \
+after their Rimaia server's address, and do not store or repeat the token anywhere else."
+    )]
+    pub async fn create_invitation(
+        &self,
+        Parameters(request): Parameters<CreateInvitationRequest>,
+    ) -> Result<Json<CreatedInvitationView>, ToolError> {
+        self.scope.authorize(Tool::CreateInvitation, None)?;
+        let created =
+            crate::teams::invitations::create_invitation(&self.ctx, &request.team_id, request.role)
+                .await?;
+        Ok(Json(CreatedInvitationView {
+            path: crate::teams::invitations::invitation_path(&created.token),
+            token: created.token.expose().to_string(),
+            invitation: InvitationView::from(created.invitation),
+        }))
+    }
+
+    #[tool(
+        description = "List a team's invitations, newest first: pending, accepted (naming who \
+used each), expired and revoked. Call this before revoking one, or to answer who let whom in. Only an owner may read them. Tokens are never listed."
+    )]
+    pub async fn list_invitations(
+        &self,
+        Parameters(request): Parameters<TeamRequest>,
+    ) -> Result<Json<InvitationListView>, ToolError> {
+        self.scope.authorize(Tool::ListInvitations, None)?;
+        let invitations =
+            crate::teams::invitations::list_invitations(&self.ctx, &request.team_id).await?;
+        Ok(Json(InvitationListView {
+            team_id: request.team_id,
+            invitations: invitations.into_iter().map(InvitationView::from).collect(),
+        }))
+    }
+
+    #[tool(
+        description = "Revoke an invitation link so nobody can use it. Call this when an owner \
+says a link went to the wrong person or is no longer wanted. Only an owner may do this. \
+A link that was already used cannot be revoked: remove the member instead."
+    )]
+    pub async fn revoke_invitation(
+        &self,
+        Parameters(request): Parameters<RevokeInvitationRequest>,
+    ) -> Result<Json<InvitationRevokedView>, ToolError> {
+        self.scope.authorize(Tool::RevokeInvitation, None)?;
+        crate::teams::invitations::revoke_invitation(&self.ctx, &request.invitation_id).await?;
+        Ok(Json(InvitationRevokedView {
+            invitation_id: request.invitation_id,
+            revoked: true,
+        }))
+    }
+
+    #[tool(
+        description = "Say what an invitation link would admit the user to, before they join: the \
+team, the role, who invited them and when the link expires. Call this when the user hands you an \
+invitation link, before `accept_invitation`. Pass the token, the part of the link \
+after `#`. An unusable link of any kind gets one answer."
+    )]
+    pub async fn preview_invitation(
+        &self,
+        Parameters(request): Parameters<InvitationTokenRequest>,
+    ) -> Result<Json<InvitationPreviewView>, ToolError> {
+        self.scope.authorize(Tool::PreviewInvitation, None)?;
+        let preview =
+            crate::teams::invitations::preview_invitation(&self.ctx, &request.token).await?;
+        Ok(Json(InvitationPreviewView::from(preview)))
+    }
+
+    #[tool(
+        description = "Join the team an invitation link names, with the role it grants, and use \
+the link up. Call this only after the user has seen `preview_invitation`'s answer and said yes. \
+Someone already in the team is refused, and the link stays unused for the person it was meant \
+for."
+    )]
+    pub async fn accept_invitation(
+        &self,
+        Parameters(request): Parameters<InvitationTokenRequest>,
+    ) -> Result<Json<TeamView>, ToolError> {
+        self.scope.authorize(Tool::AcceptInvitation, None)?;
+        let team = crate::teams::invitations::accept_invitation(&self.ctx, &request.token).await?;
+        Ok(Json(TeamView::from(team)))
+    }
+
+    #[tool(
+        description = "List every team the user is in, with its repositories: where a task can \
+be copied to. Call this before `copy_task_to_team` to find the target `repository_id`."
+    )]
+    pub async fn list_copy_targets(&self) -> Result<Json<CopyTargetsView>, ToolError> {
+        self.scope.authorize(Tool::ListCopyTargets, None)?;
+        let targets = crate::teams::copy::list_copy_targets(&self.ctx).await?;
+        Ok(Json(CopyTargetsView::from(targets)))
+    }
+
+    #[tool(
+        description = "Copy a task into a repository of another team (or the same one, as a \
+duplicate). Call this when the user wants a plan from one team's board on another's. The copy carries the title, the plan and the extra instructions, and nothing else: \
+no runs, links, dependencies, strategy or assignee. It lands in `not_ready`, because nobody in \
+the new team has accepted the plan yet. A task never moves between teams; this is the only way \
+across."
+    )]
+    pub async fn copy_task_to_team(
+        &self,
+        Parameters(request): Parameters<CopyTaskToTeamRequest>,
+    ) -> Result<Json<TaskView>, ToolError> {
+        self.scope.authorize(Tool::CopyTaskToTeam, None)?;
+        let task = crate::teams::copy::copy_task_to_team(
+            &self.ctx,
+            &request.task_id,
+            &request.repository_id,
+        )
+        .await?;
+        self.task_view(&task.id).await
+    }
 }
 
 /// The tools that inspect, reconfigure or spawn on this machine (ADR-0035
@@ -1894,8 +2108,9 @@ mod tests {
     /// capability parity a rule. What replaces a count is the property that
     /// actually matters — a registered tool with no run-scope decision cannot
     /// reach the wire.
-    const REGISTERED_TOOLS: [&str; 70] = [
+    const REGISTERED_TOOLS: [&str; 82] = [
         "accept_content",
+        "accept_invitation",
         "accept_task_strategy",
         "add_task_link",
         "approve_task",
@@ -1903,8 +2118,11 @@ mod tests {
         "archive_tasks",
         "assign_task",
         "clear_task_strategy",
+        "copy_task_to_team",
+        "create_invitation",
         "create_schedule",
         "create_task",
+        "create_team",
         "delete_schedule",
         "dismiss_doctor_warning",
         "dismiss_onboarding",
@@ -1926,26 +2144,34 @@ mod tests {
         "get_task_dependents",
         "get_worktree_auto_cleanup",
         "give_up_on_task",
+        "leave_team",
         "list_checkouts",
+        "list_copy_targets",
+        "list_invitations",
         "list_repositories",
         "list_review_findings",
         "list_schedules",
         "list_tasks",
+        "list_team_members",
         "list_timezones",
         "list_worktrees",
         "mark_review_digest_seen",
         "move_task",
         "plan_task_strategy",
         "plan_tasks_strategy",
+        "preview_invitation",
         "preview_schedule_preflight",
         "record_review_findings",
         "reject_task",
+        "remove_member",
         "remove_task_link",
         "request_task_changes",
         "resolve_review_finding",
         "restore_doctor_warning",
+        "revoke_invitation",
         "run_doctor",
         "set_max_concurrency",
+        "set_member_role",
         "set_repository_max_concurrency",
         "set_repository_on_archive",
         "set_repository_review_config",

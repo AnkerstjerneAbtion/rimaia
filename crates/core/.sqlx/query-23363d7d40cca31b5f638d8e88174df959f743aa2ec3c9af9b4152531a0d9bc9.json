@@ -1,0 +1,32 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT t.id, t.name, COALESCE(t.personal_user_id = ?2, 0) AS \"personal!: bool\"\n             FROM teams t\n            WHERE t.id IN (SELECT value FROM json_each(?1))\n            ORDER BY 3 DESC, t.name, t.id",
+  "describe": {
+    "columns": [
+      {
+        "name": "id",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "name",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "personal!: bool",
+        "ordinal": 2,
+        "type_info": "Null"
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      false,
+      false,
+      null
+    ]
+  },
+  "hash": "23363d7d40cca31b5f638d8e88174df959f743aa2ec3c9af9b4152531a0d9bc9"
+}

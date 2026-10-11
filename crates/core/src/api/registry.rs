@@ -293,6 +293,21 @@ pub static COMMANDS: LazyLock<Vec<Command>> = LazyLock::new(|| {
         board("list_teams", Read, teams::list_teams),
         board("list_runners", Read, runners::list_runners),
         board("unpair_runner", Write, runners::unpair_runner),
+        // teams, invitations and roles (task 051)
+        board("create_team", Write, teams::create_team),
+        board("list_team_members", Read, teams::list_team_members),
+        board("set_member_role", Write, teams::set_member_role),
+        board("remove_member", Write, teams::remove_member),
+        board("leave_team", Write, teams::leave_team),
+        board("create_invitation", Write, teams::create_invitation),
+        board("list_invitations", Read, teams::list_invitations),
+        board("revoke_invitation", Write, teams::revoke_invitation),
+        board("preview_invitation", Read, teams::preview_invitation),
+        board("accept_invitation", Write, teams::accept_invitation),
+        board("list_copy_targets", Read, teams::list_copy_targets),
+        board("copy_task_to_team", Write, teams::copy_task_to_team),
+        board("delete_team", Write, teams::delete_team),
+        board("delete_account", Write, teams::delete_account),
         // doctor
         local("run_doctor"),
         local("dismiss_onboarding"),
@@ -304,7 +319,15 @@ pub static COMMANDS: LazyLock<Vec<Command>> = LazyLock::new(|| {
 /// The board commands that are about the person and not the team on screen,
 /// which the server never narrows with `Rimaia-Team` (task 050 Scope 3): the
 /// three of task 050's own, task 047's eight account rows and the user setting
-/// the analytics view reads. Task 051 adds its rows here.
+/// the analytics view reads, then task 051's fourteen.
+///
+/// Task 051's rows each name their team by id, act on the person, or carry a
+/// token, so the header has nothing to narrow, and narrowing would break
+/// three of them: a copy's target repository, the picker's other teams and
+/// the account page's read of the personal team's members are all outside the
+/// team on screen. Ignoring the header never widens a credential: their scope
+/// is `Caller.teams` as `Authenticate` read it, every membership on a board
+/// route and a restricted token's intersection on `/mcp`.
 const IGNORES_TEAM_HEADER: &[&str] = &[
     "list_teams",
     "list_runners",
@@ -319,6 +342,20 @@ const IGNORES_TEAM_HEADER: &[&str] = &[
     "pair_own_runner",
     "get_subscription_cost",
     "set_subscription_cost",
+    "create_team",
+    "list_team_members",
+    "set_member_role",
+    "remove_member",
+    "leave_team",
+    "create_invitation",
+    "list_invitations",
+    "revoke_invitation",
+    "preview_invitation",
+    "accept_invitation",
+    "list_copy_targets",
+    "copy_task_to_team",
+    "delete_team",
+    "delete_account",
 ];
 
 /// Whether `Rimaia-Team` is ignored for the command `name`, leaving the
@@ -403,6 +440,50 @@ mod tests {
         }
         assert!(!ignores_team_header("list_tasks"));
         assert!(!ignores_team_header("no_such_command"));
+    }
+
+    #[test]
+    fn the_team_header_is_ignored_by_exactly_the_person_scoped_rows() {
+        let person_scoped: BTreeSet<&str> = [
+            // task 050's thirteen
+            "list_teams",
+            "list_runners",
+            "unpair_runner",
+            "get_account",
+            "list_sessions",
+            "revoke_session",
+            "list_api_tokens",
+            "create_personal_access_token",
+            "revoke_api_token",
+            "create_pairing_code",
+            "pair_own_runner",
+            "get_subscription_cost",
+            "set_subscription_cost",
+            // task 051's fourteen
+            "create_team",
+            "list_team_members",
+            "set_member_role",
+            "remove_member",
+            "leave_team",
+            "create_invitation",
+            "list_invitations",
+            "revoke_invitation",
+            "preview_invitation",
+            "accept_invitation",
+            "list_copy_targets",
+            "copy_task_to_team",
+            "delete_team",
+            "delete_account",
+        ]
+        .into();
+        assert_eq!(person_scoped.len(), 27);
+
+        let ignoring: BTreeSet<&str> = COMMANDS
+            .iter()
+            .filter(|command| ignores_team_header(command.name))
+            .map(|command| command.name)
+            .collect();
+        assert_eq!(ignoring, person_scoped);
     }
 
     #[test]

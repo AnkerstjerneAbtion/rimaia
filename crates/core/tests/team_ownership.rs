@@ -31,11 +31,14 @@ async fn a_change_event_names_the_team_of_the_row_it_announces() {
     let repository = TempRepo::init();
     let worktrees = scratch_dir();
 
-    // Registered through a context that can reach the second team alone: a
-    // repository has no parent to take a team from, so it takes the scope's
-    // one team.
+    // Registered by the second team's owner, who alone may (task 051),
+    // through a context that can reach that team alone: a repository has no
+    // parent to take a team from, so it takes the scope's one team.
     let registered = repo::register(
-        &h.context.with_scope(TeamScope::one(second.team_id.clone())),
+        &ServiceContext {
+            actor: second.user_id.clone(),
+            ..h.context.with_scope(TeamScope::one(second.team_id.clone()))
+        },
         h.machine(),
         worktrees.path(),
         NewRepository {

@@ -1932,3 +1932,219 @@ mod tests {
         assert!(wire.get("cost_usd").is_none());
     }
 }
+
+// ---------------------------------------------------------------------------
+// Teams, invitations and roles (ADR-0029, task 051)
+// ---------------------------------------------------------------------------
+
+/// `create_team` and `accept_invitation`: the team as the caller now lists
+/// it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub struct TeamView {
+    pub id: String,
+    pub name: String,
+    pub role: crate::identity::Role,
+    pub personal: bool,
+    pub member_count: i64,
+    pub owner_count: i64,
+}
+
+impl From<crate::teams::Team> for TeamView {
+    fn from(team: crate::teams::Team) -> Self {
+        Self {
+            id: team.id,
+            name: team.name,
+            role: team.role,
+            personal: team.personal,
+            member_count: team.member_count,
+            owner_count: team.owner_count,
+        }
+    }
+}
+
+/// One member of a team.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub struct TeamMemberView {
+    pub user_id: String,
+    pub login: String,
+    pub role: crate::identity::Role,
+    pub joined_at: DateTime<Utc>,
+    /// The person a personal team belongs to, who always stays its owner.
+    pub is_personal_owner: bool,
+}
+
+/// `list_team_members`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub struct TeamMembersView {
+    pub team_id: String,
+    pub members: Vec<TeamMemberView>,
+}
+
+impl TeamMembersView {
+    pub fn new(team_id: &str, members: Vec<crate::teams::members::TeamMember>) -> Self {
+        Self {
+            team_id: team_id.to_string(),
+            members: members
+                .into_iter()
+                .map(|member| TeamMemberView {
+                    user_id: member.user_id,
+                    login: member.login,
+                    role: member.role,
+                    joined_at: member.joined_at,
+                    is_personal_owner: member.is_personal_owner,
+                })
+                .collect(),
+        }
+    }
+}
+
+/// `set_member_role`: the role as it now stands.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub struct MemberRoleView {
+    pub team_id: String,
+    pub user_id: String,
+    pub role: crate::identity::Role,
+}
+
+/// `remove_member` and `leave_team`: who is no longer in the team.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub struct MemberLeftView {
+    pub team_id: String,
+    pub user_id: String,
+    pub removed: bool,
+}
+
+/// One invitation, never its token.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub struct InvitationView {
+    pub id: String,
+    pub team_id: String,
+    pub role: crate::identity::Role,
+    pub status: crate::teams::invitations::InvitationStatus,
+    pub created_by_login: Option<String>,
+    pub created_at: DateTime<Utc>,
+    pub expires_at: DateTime<Utc>,
+    /// Who used it, for an accepted one: the team's record of who let whom
+    /// in.
+    pub accepted_by_login: Option<String>,
+    pub accepted_at: Option<DateTime<Utc>>,
+    pub revoked_at: Option<DateTime<Utc>>,
+}
+
+impl From<crate::teams::invitations::Invitation> for InvitationView {
+    fn from(invitation: crate::teams::invitations::Invitation) -> Self {
+        Self {
+            id: invitation.id,
+            team_id: invitation.team_id,
+            role: invitation.role,
+            status: invitation.status,
+            created_by_login: invitation.created_by_login,
+            created_at: invitation.created_at,
+            expires_at: invitation.expires_at,
+            accepted_by_login: invitation.accepted_by_login,
+            accepted_at: invitation.accepted_at,
+            revoked_at: invitation.revoked_at,
+        }
+    }
+}
+
+/// `create_invitation`: the token, the one time it is shown, and the link's
+/// path, which the user puts after their server's address.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub struct CreatedInvitationView {
+    pub invitation: InvitationView,
+    pub token: String,
+    /// `/invite#<token>`: the token rides in the fragment, which a browser
+    /// never sends to the server.
+    pub path: String,
+}
+
+/// `list_invitations`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub struct InvitationListView {
+    pub team_id: String,
+    pub invitations: Vec<InvitationView>,
+}
+
+/// `revoke_invitation`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub struct InvitationRevokedView {
+    pub invitation_id: String,
+    pub revoked: bool,
+}
+
+/// `preview_invitation`: what a link would admit its holder to.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub struct InvitationPreviewView {
+    pub team_name: String,
+    pub role: crate::identity::Role,
+    pub invited_by_login: Option<String>,
+    pub expires_at: DateTime<Utc>,
+}
+
+impl From<crate::teams::invitations::InvitationPreview> for InvitationPreviewView {
+    fn from(preview: crate::teams::invitations::InvitationPreview) -> Self {
+        Self {
+            team_name: preview.team_name,
+            role: preview.role,
+            invited_by_login: preview.invited_by_login,
+            expires_at: preview.expires_at,
+        }
+    }
+}
+
+/// One repository a copy can go into.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub struct CopyTargetRepositoryView {
+    pub id: String,
+    pub name: String,
+}
+
+/// One team a copy can go into, with its repositories.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub struct CopyTargetView {
+    pub team_id: String,
+    pub team_name: String,
+    pub repositories: Vec<CopyTargetRepositoryView>,
+}
+
+/// `list_copy_targets`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub struct CopyTargetsView {
+    pub teams: Vec<CopyTargetView>,
+}
+
+impl From<Vec<crate::teams::copy::CopyTarget>> for CopyTargetsView {
+    fn from(targets: Vec<crate::teams::copy::CopyTarget>) -> Self {
+        Self {
+            teams: targets
+                .into_iter()
+                .map(|target| CopyTargetView {
+                    team_id: target.team_id,
+                    team_name: target.team_name,
+                    repositories: target
+                        .repositories
+                        .into_iter()
+                        .map(|repository| CopyTargetRepositoryView {
+                            id: repository.id,
+                            name: repository.name,
+                        })
+                        .collect(),
+                })
+                .collect(),
+        }
+    }
+}

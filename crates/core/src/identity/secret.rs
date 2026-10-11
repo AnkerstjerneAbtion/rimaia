@@ -131,6 +131,34 @@ pub fn mint_token(kind: TokenKind) -> Secret {
     Secret(format!("{}{}", kind.prefix(), random_base64url()))
 }
 
+/// What every invitation token begins with (task 051).
+///
+/// Outside [`TokenKind`] on purpose: that enum spells `api_tokens.kind`'s
+/// `CHECK`, and `Authenticate` maps each of its prefixes to a door, so an
+/// invitation variant would either break the first or authenticate as the
+/// second. The prefix is here so a secret scanner recognises a leaked link,
+/// and because `Authenticate` refuses a prefix it does not know, an
+/// invitation pasted as a bearer token is refused without a lookup.
+pub const INVITATION_PREFIX: &str = "rmi_";
+
+/// A new invitation token: [`INVITATION_PREFIX`], then 256 random bits, stored
+/// as [`hash`] of the whole string like every other token.
+pub fn mint_invitation_token() -> Secret {
+    Secret(format!("{INVITATION_PREFIX}{}", random_base64url()))
+}
+
+/// Whether `token` has an invitation token's shape: its prefix, then 43
+/// base64url characters. For a test that checks a minted token without
+/// knowing it.
+pub fn is_invitation_token(token: &str) -> bool {
+    token.strip_prefix(INVITATION_PREFIX).is_some_and(|rest| {
+        rest.len() == 43
+            && rest
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
+    })
+}
+
 /// A new session secret: 256 random bits, with no prefix. Also the OAuth
 /// `state` and the desktop's one-time code, which need the same strength and
 /// nothing to name them.
@@ -288,6 +316,23 @@ mod tests {
             mint_token(TokenKind::Personal)
         );
         assert_eq!(mint_session_secret().expose().len(), 43);
+    }
+
+    #[test]
+    fn an_invitation_token_carries_its_own_prefix_and_no_kind() {
+        let token = mint_invitation_token();
+        let rest = token
+            .expose()
+            .strip_prefix(INVITATION_PREFIX)
+            .expect("the invitation prefix");
+
+        assert_eq!(
+            URL_SAFE_NO_PAD.decode(rest).expect("base64url").len() * 8,
+            256
+        );
+        assert!(is_invitation_token(token.expose()));
+        assert_eq!(TokenKind::of_token(token.expose()), None);
+        assert_ne!(mint_invitation_token(), mint_invitation_token());
     }
 
     #[test]

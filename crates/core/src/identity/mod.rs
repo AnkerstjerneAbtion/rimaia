@@ -19,6 +19,7 @@ use std::fmt;
 use std::str::FromStr;
 
 use chrono::{DateTime, Utc};
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use sqlx::{SqliteConnection, SqlitePool};
 
@@ -64,7 +65,7 @@ pub struct SoloIdentity {
 
 /// What a person may do in a team (ADR-0029 point 3), in the spelling of
 /// `team_memberships.role`'s `CHECK`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum Role {
     Owner,
@@ -148,7 +149,6 @@ pub async fn create_personal_team(
     login: &str,
 ) -> Result<PersonalTeam> {
     let user_id = new_id();
-    let team_id = new_id();
     let now = clock.now();
 
     sqlx::query!(
@@ -159,22 +159,44 @@ pub async fn create_personal_team(
     )
     .execute(&mut *conn)
     .await?;
+    let team_id = insert_team(conn, clock, PERSONAL_TEAM_NAME, Some(&user_id), &user_id).await?;
+
+    Ok(PersonalTeam { user_id, team_id })
+}
+
+/// A team, an owner membership for `owner`, and the team's base instructions
+/// seeded from [`DEFAULT_BASE_INSTRUCTIONS`], inside the caller's
+/// transaction.
+///
+/// The one place a team comes into being: [`create_personal_team`] calls it
+/// for a sign-up's personal team (`personal_user_id` is the person), and
+/// task 051's `teams::create_team` for a team people share (`None`), so the
+/// two kinds cannot drift in what a new team starts with.
+pub(crate) async fn insert_team(
+    conn: &mut SqliteConnection,
+    clock: &dyn Clock,
+    name: &str,
+    personal_user_id: Option<&str>,
+    owner: &str,
+) -> Result<TeamId> {
+    let team_id = new_id();
+    let now = clock.now();
     sqlx::query!(
         "INSERT INTO teams (id, name, personal_user_id, created_at) VALUES (?1, ?2, ?3, ?4)",
         team_id,
-        PERSONAL_TEAM_NAME,
-        user_id,
+        name,
+        personal_user_id,
         now,
     )
     .execute(&mut *conn)
     .await?;
-    let owner = Role::Owner.as_str();
+    let role = Role::Owner.as_str();
     sqlx::query!(
         "INSERT INTO team_memberships (team_id, user_id, role, created_at)
          VALUES (?1, ?2, ?3, ?4)",
         team_id,
-        user_id,
         owner,
+        role,
         now,
     )
     .execute(&mut *conn)
@@ -192,13 +214,12 @@ pub async fn create_personal_team(
         team_id,
         BASE_INSTRUCTIONS,
         DEFAULT_BASE_INSTRUCTIONS,
-        user_id,
+        owner,
         now,
     )
     .execute(&mut *conn)
     .await?;
-
-    Ok(PersonalTeam { user_id, team_id })
+    Ok(team_id)
 }
 
 /// The installation's solo identity: the one already recorded, or a new one.

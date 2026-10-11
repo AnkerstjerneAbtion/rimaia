@@ -6,9 +6,9 @@
 //! There is no `solo_identity`. Each person is made by
 //! [`identity::create_personal_team`], the service a sign-up uses, so each
 //! has a personal team of their own beside the shared one, as a real member
-//! does. The shared team itself and the second membership are written here,
-//! by [`create_shared_team`] and [`add_member`]: they stand in for task 051's
-//! team creation and invitation, which replace their bodies.
+//! does. The shared team is made by [`create_shared_team`], through the helper
+//! task 051's team creation uses, and Bob joins by [`add_member`], through an
+//! invitation Alice makes and he accepts.
 //!
 //! Alice owns the shared team and Bob is a member. Each has a runner. The
 //! repository is registered in the shared team, its team ceiling allowed by
@@ -22,7 +22,7 @@ use tempfile::TempDir;
 use crate::board::{BoardPort, InProcessBoard, LeaseTerm};
 use crate::clock::Clock;
 use crate::context::{ServiceContext, TeamScope};
-use crate::db::{new_id, BoardColumn, MutationSource, Repository};
+use crate::db::{BoardColumn, MutationSource, Repository};
 use crate::events::{LocalEvents, RunnerId, TaskId, TeamId, UserId};
 use crate::identity::{create_personal_team, Role};
 use crate::machine::MachineContext;
@@ -31,32 +31,28 @@ use crate::repo::{self, NewRepository};
 use crate::runner::provider::ProviderProfile;
 use crate::runner::RunnerConfig;
 use crate::tasks::{self, NewTask};
+use crate::teams::{invitations, members};
 use crate::testing::machine::MemoryMachine;
 use crate::testing::{test_epoch, test_pool, TempRepo, TestClock};
 
-/// A team nobody's personal team, owned by `owner`: what task 051's team
-/// creation will write. A fixture, not a service.
+/// A team nobody's personal team, owned by `owner`, written by the helper
+/// task 051's `teams::create_team` writes through, on the caller's
+/// transaction.
 pub async fn create_shared_team(
     conn: &mut SqliteConnection,
     clock: &dyn Clock,
     name: &str,
     owner: &str,
 ) -> TeamId {
-    let team_id = new_id();
-    let now = clock.now();
-    sqlx::query("INSERT INTO teams (id, name, created_at) VALUES (?1, ?2, ?3)")
-        .bind(&team_id)
-        .bind(name)
-        .bind(now)
-        .execute(&mut *conn)
+    crate::identity::insert_team(conn, clock, name, None, owner)
         .await
-        .expect("a shared team must insert");
-    add_member(conn, clock, &team_id, owner, Role::Owner).await;
-    team_id
+        .expect("a shared team must insert")
 }
 
-/// Adds `user_id` to `team_id` with `role`: the helper that stands in for
-/// task 051's invitation, which replaces its body with the real service.
+/// Adds `user_id` to `team_id` with `role`, the way a person joins: one of
+/// the team's owners makes an invitation, and `user_id` accepts it, through
+/// the transaction halves of `create_invitation` and `accept_invitation`, on
+/// the caller's connection.
 pub async fn add_member(
     conn: &mut SqliteConnection,
     clock: &dyn Clock,
@@ -64,26 +60,31 @@ pub async fn add_member(
     user_id: &str,
     role: Role,
 ) {
-    sqlx::query(
-        "INSERT INTO team_memberships (team_id, user_id, role, created_at)
-         VALUES (?1, ?2, ?3, ?4)",
+    let owner: String = sqlx::query_scalar(
+        "SELECT user_id FROM team_memberships WHERE team_id = ?1 AND role = 'owner'
+          ORDER BY created_at, user_id LIMIT 1",
     )
     .bind(team_id)
-    .bind(user_id)
-    .bind(role.as_str())
-    .bind(clock.now())
-    .execute(&mut *conn)
+    .fetch_one(&mut *conn)
     .await
-    .expect("a membership of an existing team must insert");
+    .expect("the team has an owner to invite with");
+    let (_, token) = invitations::create_invitation_in(conn, clock, team_id, role, &owner)
+        .await
+        .expect("an owner's invitation");
+    invitations::accept_invitation_in(conn, clock, token.expose(), user_id)
+        .await
+        .expect("a membership of an existing team must be accepted");
 }
 
-/// Takes `user_id` out of `team_id`: the helper that stands in for task 051's
-/// removal of a member.
-pub async fn remove_member(conn: &mut SqliteConnection, team_id: &str, user_id: &str) {
-    sqlx::query("DELETE FROM team_memberships WHERE team_id = ?1 AND user_id = ?2")
-        .bind(team_id)
-        .bind(user_id)
-        .execute(&mut *conn)
+/// Takes `user_id` out of `team_id`, withdrawing them from its work, through
+/// the transaction half of task 051's removal, on the caller's connection.
+pub async fn remove_member(
+    conn: &mut SqliteConnection,
+    clock: &dyn Clock,
+    team_id: &str,
+    user_id: &str,
+) {
+    members::remove_member_in(conn, clock, team_id, user_id)
         .await
         .expect("removing a membership must succeed");
 }
@@ -193,6 +194,19 @@ impl SharedTeam {
             clock: Arc::new(clock.clone()),
             local: LocalEvents::new(),
         };
+        // The base instructions a new team is seeded with are Alice's first
+        // revision of them (ADR-0032 point 3). Bob has read and accepted
+        // them, so a test starts from a shared team where nothing is owed and
+        // a later edit is the first thing his runner has to consent to.
+        crate::consent::accept(
+            &bob.ctx,
+            &team_id,
+            None,
+            crate::consent::pieces::ContentKind::BaseInstructions,
+            "1",
+        )
+        .await
+        .expect("bob accepts the seeded base instructions");
         let source = TempRepo::init();
         let repository = repo::register(
             &alice.ctx,

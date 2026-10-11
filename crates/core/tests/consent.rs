@@ -493,6 +493,7 @@ async fn base_instructions_edits_need_acceptance_from_members_who_do_not_trust_t
     let team = SharedTeam::new().await;
     let task = team.task(&team.alice, "Alpha", Some(&team.alice)).await;
 
+    promote(&team, &team.bob.user_id).await;
     settings::set_base_instructions(&team.bob.ctx, "Use tabs.")
         .await
         .expect("Bob edits the team's base instructions");
@@ -514,6 +515,7 @@ async fn an_inline_planned_implementation_needs_consent_to_the_base_instructions
     let team = SharedTeam::new().await;
     let task = team.task(&team.alice, "Alpha", Some(&team.alice)).await;
     plan_inline(&team.alice, &task).await;
+    promote(&team, &team.bob.user_id).await;
     settings::set_base_instructions(&team.bob.ctx, "Use tabs.")
         .await
         .expect("Bob edits the team's base instructions");
@@ -586,6 +588,7 @@ async fn plan_now_is_judged_on_the_planner_alone_and_not_the_implementation_afte
     let team = SharedTeam::new().await;
     let task = team.task(&team.alice, "Alpha", Some(&team.alice)).await;
     plan_inline(&team.alice, &task).await;
+    promote(&team, &team.bob.user_id).await;
     settings::set_base_instructions(&team.bob.ctx, "Use tabs.")
         .await
         .expect("Bob edits the team's base instructions");
@@ -694,6 +697,7 @@ async fn review_instructions_edited_after_a_continue_are_never_composed() {
     );
 
     // Between the finish that continued and the review's composition.
+    promote(&team, &team.bob.user_id).await;
     review_config::set_review_settings(
         &team.bob.ctx,
         &ProviderProfile::of(&ClaudeProvider),
@@ -759,6 +763,7 @@ async fn accepting_a_stale_revision_is_invalid_naming_the_current_one() {
 async fn accepting_base_instructions_names_the_team() {
     let team = SharedTeam::new().await;
     let task = team.task(&team.alice, "Alpha", Some(&team.alice)).await;
+    promote(&team, &team.bob.user_id).await;
     settings::set_base_instructions(&team.bob.ctx, "Use tabs.")
         .await
         .expect("Bob edits the team's base instructions");
@@ -768,7 +773,7 @@ async fn accepting_base_instructions_names_the_team() {
         &team.team_id,
         Some(&task),
         ContentKind::BaseInstructions,
-        "1",
+        "2",
     )
     .await
     .expect_err("base instructions belong to the team, not to a task");
@@ -780,7 +785,7 @@ async fn accepting_base_instructions_names_the_team() {
             &team.team_id,
             None,
             ContentKind::BaseInstructions,
-            "1",
+            "2",
         )
         .await
         .expect("accepting names the team, and twice is idempotent");
@@ -1033,6 +1038,7 @@ async fn accepting_findings_another_owners_runner_recorded_lets_the_fix_run() {
 #[tokio::test]
 async fn accepting_review_instructions_a_teammate_changed_lets_the_review_run() {
     let team = SharedTeam::new().await;
+    promote(&team, &team.bob.user_id).await;
     turn_the_loop_on(&team.bob).await;
     let task = team.task(&team.bob, "Bob's", Some(&team.bob)).await;
 
@@ -1411,6 +1417,13 @@ async fn a_plan_written_into_a_personal_team_during_a_shared_team_run_is_marked(
 #[tokio::test]
 async fn planning_while_your_runner_works_on_your_own_task_is_not_marked() {
     let team = SharedTeam::new().await;
+    // Every run in a team composes its base instructions, which a new team is
+    // seeded with by its creator (task 051). Bob's own, here, so the run
+    // holds nothing anyone else wrote.
+    promote(&team, &team.bob.user_id).await;
+    settings::set_base_instructions(&team.bob.ctx, "Bob's rules.")
+        .await
+        .expect("Bob writes the base instructions");
     let first = team.task(&team.bob, "First", Some(&team.bob)).await;
     let second = team.task(&team.bob, "Second", Some(&team.bob)).await;
 
@@ -1472,6 +1485,7 @@ async fn a_plan_edited_after_the_context_was_read_is_never_composed() {
 async fn base_instructions_edited_after_the_context_was_read_are_never_composed() {
     let team = SharedTeam::new().await;
     let carol = carol(&team).await;
+    promote(&team, &carol.actor).await;
     consent::set_trust(&team.bob.ctx, &team.team_id, &carol.actor, true)
         .await
         .expect("Bob trusts Carol, and not Alice");
@@ -1849,7 +1863,7 @@ async fn a_member_cannot_set_the_team_ceiling() {
     assert_eq!(error.code(), ErrorCode::Invalid);
     assert_eq!(
         error.to_string(),
-        "only an owner of this team can change whether it allows unattended runs."
+        "only an owner of this team can change whether a repository allows unattended runs"
     );
 
     repo::set_repository_unattended_ceiling(&team.alice.ctx, &team.repository.id, false)
@@ -1926,7 +1940,7 @@ async fn task_consent_says_why_a_runner_would_or_would_not_take_a_task() {
                 MissingPiece {
                     kind: ContentKind::BaseInstructions,
                     task_id: None,
-                    revision: "1".to_string(),
+                    revision: "2".to_string(),
                     author_login: None,
                     reason: MissingReason::FormerMember,
                 },
@@ -2316,6 +2330,20 @@ async fn retry_refusal(team: &SharedTeam, member: &Member, task: &str) -> String
 }
 
 /// Turns the review loop on for the team, with no instructions of its own.
+/// Makes `user_id` an owner of the shared team: only an owner changes the
+/// team's settings (task 051), and these tests are about what a teammate's
+/// edit costs everyone else.
+async fn promote(team: &SharedTeam, user_id: &str) {
+    rimaia_core::teams::members::set_member_role(
+        &team.alice.ctx,
+        &team.team_id,
+        user_id,
+        Role::Owner,
+    )
+    .await
+    .expect("alice makes them an owner");
+}
+
 async fn turn_the_loop_on(by: &Member) {
     review_config::set_review_settings(
         &by.ctx,

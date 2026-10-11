@@ -63,13 +63,14 @@ async fn a_fresh_database_gets_every_table_the_schema_declares() {
     // `runner_leases` ADR-0031 point 1's, added by task 043, `acceptances`,
     // `trusted_authors` and `runner_pool_teams` ADR-0032's, added by task 045, and
     // `sessions`, `api_tokens`, `api_token_teams` and `pairing_codes` ADR-0030's,
-    // added by task 047.
+    // added by task 047, and `invitations` ADR-0029 point 4's, added by task 051.
     assert_eq!(
         tables,
         vec![
             "acceptances",
             "api_token_teams",
             "api_tokens",
+            "invitations",
             "pairing_codes",
             "repositories",
             "review_bundles",

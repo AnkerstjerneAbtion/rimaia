@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT team_id, id FROM tasks\n            WHERE created_by = ?1 OR assignee_id = ?1 OR assigned_by = ?1\n               OR plan_updated_by = ?1 OR review_instructions_updated_by = ?1\n               OR strategy_requested_by = ?1\n               OR pinned_runner_id IN (SELECT id FROM runners WHERE user_id = ?1)\n            ORDER BY team_id, created_at, id",
+  "describe": {
+    "columns": [
+      {
+        "name": "team_id",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "id",
+        "ordinal": 1,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false
+    ]
+  },
+  "hash": "e538f42cb3f00ddf8404c45840d22022466bb682a8caea9239899bd6982a6a76"
+}

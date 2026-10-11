@@ -266,9 +266,10 @@ pub(crate) async fn get_team(
 /// Writes one team's value for a team key, or removes it with `None`, and
 /// announces the change to that team.
 ///
-/// [`set_team_in`] run over the pool: one statement, so the `execute` *is* the
-/// commit; the publication still follows it, because ADR-0018's rule is about
-/// what a subscriber can read when it re-reads.
+/// [`set_team_in`] in a `BEGIN IMMEDIATE` transaction of its own, because the
+/// owner check it makes is a read the write depends on (task 051); the
+/// publication follows the commit, because ADR-0018's rule is about what a
+/// subscriber can read when it re-reads.
 pub(crate) async fn set_team(
     ctx: &ServiceContext,
     team_id: &str,
@@ -279,9 +280,9 @@ pub(crate) async fn set_team(
         Some(_) => crate::consent::written_during_run(ctx, &ctx.actor).await?,
         None => false,
     };
-    let mut conn = ctx.pool.acquire().await?;
-    set_team_in(ctx, &mut conn, team_id, key, value, during_run).await?;
-    drop(conn);
+    let mut tx = ctx.begin_immediate().await?;
+    set_team_in(ctx, &mut tx, team_id, key, value, during_run).await?;
+    tx.commit().await?;
 
     ctx.publish(ChangeEvent::settings(team_id.to_string()));
     Ok(())
@@ -293,8 +294,11 @@ pub(crate) async fn set_team(
 /// commits them as one and announces once.
 ///
 /// **The one statement that writes `team_settings`.** Task 045 records the
-/// revision and authorship here and task 051 adds the owner check, so a key
-/// added later inherits both without anyone having to remember them. Removal
+/// revision and authorship here and task 051 adds the owner check
+/// (`teams::require_owner`, one phrase for every key: "change the team's
+/// settings"), so a key added later inherits both without anyone having to
+/// remember them. `conn` must be a `BEGIN IMMEDIATE` transaction, because the
+/// role it reads decides the write. Removal
 /// comes here too, for the same reason: a delete that bypassed this function
 /// would be a write those checks never see. Its callers today are the review
 /// loop's save and a repository's strategy default leaving inside its
@@ -316,6 +320,7 @@ pub(crate) async fn set_team_in(
 ) -> Result<()> {
     ensure_placed(key, Placement::Team)?;
     ensure_team_in_scope(ctx, team_id)?;
+    crate::teams::require_owner(conn, ctx, team_id, "change the team's settings").await?;
     match value {
         Some(value) => {
             let now = ctx.clock.now();

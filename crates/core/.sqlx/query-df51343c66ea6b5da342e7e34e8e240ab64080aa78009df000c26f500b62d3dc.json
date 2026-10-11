@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT EXISTS (SELECT 1 FROM solo_identity) AS \"solo!: bool\"",
+  "describe": {
+    "columns": [
+      {
+        "name": "solo!: bool",
+        "ordinal": 0,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "df51343c66ea6b5da342e7e34e8e240ab64080aa78009df000c26f500b62d3dc"
+}

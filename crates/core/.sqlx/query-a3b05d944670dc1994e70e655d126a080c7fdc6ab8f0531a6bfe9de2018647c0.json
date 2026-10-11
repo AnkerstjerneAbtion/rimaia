@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE tasks SET assignee_id = NULL, assigned_by = NULL\n              WHERE team_id = ?1 AND assignee_id = ?2\n             RETURNING id",
+  "describe": {
+    "columns": [
+      {
+        "name": "id",
+        "ordinal": 0,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "a3b05d944670dc1994e70e655d126a080c7fdc6ab8f0531a6bfe9de2018647c0"
+}

@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "DELETE FROM trusted_authors\n          WHERE team_id = ?1 AND (user_id = ?2 OR trusted_user_id = ?2)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "8dd6391bdd5ece18bf5a1e395e4405f8700c3d6842893e29d899d351fd971f55"
+}

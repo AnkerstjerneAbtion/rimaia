@@ -1441,7 +1441,11 @@ pub mod cases {
             tx.commit().await.expect("commit the second team");
             team
         };
-        let other_board = board.with_scope(crate::TeamScope::one(other.team_id.clone()));
+        // Arranged by that team's owner, who alone may register in it (051).
+        let other_board = ServiceContext {
+            actor: other.user_id.clone(),
+            ..board.with_scope(crate::TeamScope::one(other.team_id.clone()))
+        };
         let arranged = Arranged::new(&other_board).await;
         let theirs = arranged.task(&other_board, "Theirs").await;
         let runner = harness.runner(Which::A);

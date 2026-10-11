@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT role FROM team_memberships WHERE team_id = ?1 AND user_id = ?2",
+  "describe": {
+    "columns": [
+      {
+        "name": "role",
+        "ordinal": 0,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "33171f59d704ebeda1f61f87f39e11afe759f85f67e342d6756d2f3adeee1b2d"
+}

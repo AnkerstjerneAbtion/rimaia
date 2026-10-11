@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT team_id FROM team_memberships WHERE user_id = ?1 ORDER BY team_id",
+  "describe": {
+    "columns": [
+      {
+        "name": "team_id",
+        "ordinal": 0,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "194b7500d702db8f11191f0f962ec84579e9ab4453e4682869ec42650926162a"
+}

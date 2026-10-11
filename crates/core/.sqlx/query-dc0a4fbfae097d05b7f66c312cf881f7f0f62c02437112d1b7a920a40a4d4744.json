@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT count(*) AS \"owners!: i64\" FROM team_memberships\n            WHERE team_id = ?1 AND role = 'owner'",
+  "describe": {
+    "columns": [
+      {
+        "name": "owners!: i64",
+        "ordinal": 0,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "dc0a4fbfae097d05b7f66c312cf881f7f0f62c02437112d1b7a920a40a4d4744"
+}

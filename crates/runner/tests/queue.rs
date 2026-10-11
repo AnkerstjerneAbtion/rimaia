@@ -186,9 +186,13 @@ async fn the_queue_never_claims_another_teams_task() {
         tx.commit().await.expect("commit the second team");
         team
     };
-    let as_b = fixture
-        .ctx()
-        .with_scope(rimaia_core::TeamScope::one(team_b.team_id.clone()));
+    // As team B's owner, who alone may register in it (task 051).
+    let as_b = rimaia_core::ServiceContext {
+        actor: team_b.user_id.clone(),
+        ..fixture
+            .ctx()
+            .with_scope(rimaia_core::TeamScope::one(team_b.team_id.clone()))
+    };
     let their_repository = TempRepo::init();
     let registered = repo::register(
         &as_b,
