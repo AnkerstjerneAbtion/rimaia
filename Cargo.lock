@@ -3746,6 +3746,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "rimaia-server"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "pretty_assertions",
+ "reqwest",
+ "rimaia-core",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tower-http",
+ "tracing",
+]
+
+[[package]]
 name = "rmcp"
 version = "3.1.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5461,6 +5477,7 @@ dependencies = [
  "tower",
  "tower-layer",
  "tower-service",
+ "tracing",
  "url",
 ]
 

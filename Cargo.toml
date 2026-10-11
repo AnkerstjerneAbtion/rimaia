@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/core", "crates/runner", "src-tauri"]
+members = ["crates/core", "crates/runner", "crates/server", "src-tauri"]
 
 # Versions live here so the core crate and the Tauri shell can never drift onto
 # two different serde or sqlx. ADR-0015 splits the crates; it does not split the
@@ -90,5 +90,9 @@ base64 = "0.22"
 tempfile = "3"
 thiserror = "2"
 tokio = { version = "1", features = ["full"] }
+# Task 046's request tracing in `rimaia-server`, with no feature here: each
+# crate names the features it takes, `trace` in 046 and `cors` and `fs` in 050
+# (seam-contract D34). Already in the lock through `reqwest`.
+tower-http = { version = "0.6", default-features = false }
 tracing = "0.1"
 uuid = { version = "1", features = ["v4", "serde"] }

@@ -1,0 +1,45 @@
+//! The binary, run as a process (task 046 Scope 8).
+
+use std::process::Command;
+
+#[test]
+fn the_binary_refuses_to_start_without_its_environment() {
+    let output = Command::new(env!("CARGO_BIN_EXE_rimaia-server"))
+        .env_clear()
+        .output()
+        .expect("run the server binary");
+
+    assert!(!output.status.success(), "{output:?}");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("RIMAIA_DATA_DIR"), "{stderr}");
+}
+
+#[test]
+fn the_binary_names_a_bind_it_cannot_make() {
+    let data = tempfile::Builder::new()
+        .prefix("rimaia-server-binary-")
+        .tempdir()
+        .expect("a data directory");
+    // Taken for the length of the test, so the binary's bind fails.
+    let taken = std::net::TcpListener::bind("127.0.0.1:0").expect("bind a port");
+    let address = taken.local_addr().expect("the bound address");
+
+    // The inherited environment otherwise, so the platform's own variables
+    // are there for the socket layer.
+    let output = Command::new(env!("CARGO_BIN_EXE_rimaia-server"))
+        .env("RIMAIA_DATA_DIR", data.path())
+        .env("RIMAIA_LISTEN", address.to_string())
+        .output()
+        .expect("run the server binary");
+
+    assert!(!output.status.success(), "{output:?}");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains(&format!("could not listen on {address}")),
+        "{stderr}"
+    );
+    assert!(
+        data.path().join("rimaia.db").exists(),
+        "the board is opened and migrated before the bind"
+    );
+}

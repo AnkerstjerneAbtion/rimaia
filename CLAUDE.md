@@ -53,6 +53,7 @@ which is the run queue.
 | `crates/core/tests/fixtures/` | Recorded `stream-json` CLI streams and the test-repo builder |
 | `crates/runner/` | `rimaia-runner`: the runner loop, `runner.db` and the headless binary (ADR-0027, ADR-0028) |
 | `crates/runner/migrations/` | `runner.db` migrations. Board migrations stay in `src-tauri/migrations/` |
+| `crates/server/` | `rimaia-server`: the board over HTTP and its binary, which never links the runner (ADR-0027, ADR-0034) |
 | `src-tauri/` | Tauri shell: commands, window, state wiring. Thin |
 | `src-tauri/migrations/` | SQLite migrations (ADR-0003). The test harness applies these too |
 | `src/` | React 19 + TypeScript frontend |
@@ -68,11 +69,14 @@ npm run test                          # vitest run
 npm run build                         # tsc && vite build — the only thing that compiles the CSS
 cargo test -p rimaia-core             # logic tests, no system deps needed
 cargo test -p rimaia-runner           # runner loop and runner.db, no system deps needed
+cargo test -p rimaia-server           # the board over HTTP, on a loopback listener
 cargo fmt --all --check
 cargo clippy -p rimaia-core --all-targets -- -D warnings
 cargo clippy -p rimaia-runner --all-targets -- -D warnings
+cargo clippy -p rimaia-server --all-targets -- -D warnings
 cargo check --workspace --all-targets # includes the Tauri shell
-./scripts/check-command-wiring.sh     # both generate_handler! lists agree, and every commands.ts name is registered
+./scripts/check-command-wiring.sh     # the registry, the one generate_handler! list and every commands.ts wrapper agree
+./scripts/check-crate-boundaries.sh   # rimaia-server links neither the runner, the shell nor tauri
 ```
 
 **These are exactly the commands `.github/workflows/ci.yml` runs.** Keep them identical.
@@ -191,9 +195,12 @@ Rules:
   is a bug (ADR-0006).
 - **Every service reads and writes through its context's scope** (ADR-0029 point 5): an id
   outside it is answered exactly as a never-issued one, and an MCP tool is not done until
-  it has a case in `crates/core/tests/tenant_isolation.rs` (046 extends this to every
-  command).
+  it has a case in `crates/core/tests/tenant_isolation.rs`, nor a board command until it has
+  one in `crates/core/src/testing/api.rs` (049 extends this to the local commands).
 - **Migrations are append-only** once shipped. Never edit a migration that has run.
+- **Every command is a row in `crates/core/src/api/registry.rs`**, `board` or `local`
+  (ADR-0034, seam-contract D32). A board handler receives a `BoardRequest` and nothing else,
+  and a new board row is not done until it has a case in `crates/core/src/testing/api.rs`.
 - **Enums, not strings**, for `column`, `run_state`, `exit_class`, `strategy_mode`.
 - **Tolerant parsing of CLI output.** Unknown event types are persisted and ignored, never
   fatal. A Claude Code update must not break a queue (ADR-0004).
@@ -229,6 +236,11 @@ Rules:
   (ADR-0023). It relocates `runner.db` as well as `rimaia.db` (ADR-0028 point 4). It must be
   an absolute path; a relative one or an unexpanded `~` is refused at startup rather than
   guessed at.
+- **Run the server with `RIMAIA_DATA_DIR=<absolute path> RIMAIA_LISTEN=127.0.0.1:8787 cargo run -p
+  rimaia-server`.** `RIMAIA_DATA_DIR` is required, has no platform default, and follows the
+  app's rules (absolute, no unexpanded `~`); the server keeps `rimaia.db` there, so never point
+  it at a desktop app's data directory. `RIMAIA_LISTEN` is the socket address to bind. Until
+  task 047 the server answers every board command `401`.
 - **Board migrations are applied only through `db::migrate`**, which turns foreign keys off
   around the migrator, checks `PRAGMA foreign_key_check` after, and turns them back on
   (seam-contract D28 part 1). Never apply one to a real `rimaia.db` with `cargo sqlx migrate
