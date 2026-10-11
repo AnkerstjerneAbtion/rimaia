@@ -278,3 +278,6 @@ Rules:
   separate priority field (ADR-0007).
 - A dependency is satisfied when its run **succeeds**, not when a human marks it done
   (ADR-0008). This is deliberate and load-bearing.
+- The runner protocol (`/api/v1/runner/*`) is not in the command registry. Its registry is
+  `BoardMethod::ALL`, and a method added there gets a route, an `HttpBoard` body and a
+  cross-team case in the same commit.

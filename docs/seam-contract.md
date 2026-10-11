@@ -5525,6 +5525,121 @@ trait gains no method, and no claim, refusal sentence or `judge` changes.
 reaches the board as the phase's reason), 058 (the headless runner spawns through the same
 three places), 069 (renders the two commands and describes the fill rule in `ceilingNote`).
 
+### Amendment, 2026-10-11 — what task 052 decided
+
+Task 052 put a network between a runner and the board: `rimaia-server`'s
+`/api/v1/runner/<method>` (`crates/server/src/runner_api.rs`) and `rimaia-runner`'s
+`HttpBoard` (`crates/runner/src/board/http.rs`), with the contract suite run unedited over
+both (`crates/runner/tests/board_port_http.rs`). Point 2's trait gains no method.
+
+- **The wire (point 10).** Every method is `POST /api/v1/runner/<BoardMethod::as_str()>`,
+  mounted outside the board routes' CORS layer, one route per variant through one exhaustive
+  `match`. The request bodies are `rimaia_core::board::wire`'s types, one definition for
+  both ends: the trait method's arguments, `camelCase`, with no runner id and a `provider`
+  on `preview`, `claim` and `run_context` (`ProviderId` serialises as its `as_str`).
+  **`append_transcript`'s query carries the whole `LeaseRef`** (`taskId`, `teamId`,
+  `generation`) plus `runId` and `offset`, not point 10's three fields: the service takes a
+  `LeaseRef`, and deriving the task and team from the run would give this one method a scope
+  no other has. Replies are `200` JSON, a unit `null`; errors are D8's body with D32 point
+  3's status. A malformed body, a missing query and a body over axum's default limit are
+  `invalid` in the error shape, the last naming the limit (`runner_api::BODY_LIMIT_BYTES`).
+- **Who is asking (point 3).** `RunnerCaller` accepts only `Authorization: Bearer rmr_…`
+  resolved to `Door::Runner`; any other credential, a session cookie beside a bearer
+  included, is `unauthenticated`. **The runner's id comes from the token and nowhere
+  else**, so the fence's "held by this runner" compares against the token's runner. The
+  context is `for_caller`: every team the runner's owner belongs to, read on the request,
+  acting as the owner, sourced `System`. A lease's team is checked against that scope by
+  the service's `lease_context`, unchanged. `Rimaia-Team` is never read (D40 point 4).
+- **What a body claims about the caller.** **The provider a body names is verified against
+  `runners.provider`** (`board::runners::paired_provider`): a mismatch is `invalid`, naming
+  both, and a runner whose provider changed is paired again. The server resolves every
+  claim's catalogue from the paired provider and never reads `BoardHost.provider`.
+- **The version (ADR-0037 point 4).** **Every runner method is checked as a write, reads
+  included,** after `RunnerCaller`, through 046's `protocol::check`: a stale runner that
+  could read but not report would compose a run whose result it could not deliver.
+- **Presence.** `board::runners::mark_seen` is the one writer of `runners.last_seen_at`:
+  one conditional `UPDATE`, at most once per `HEARTBEAT_INTERVAL`, publishing nothing.
+  Every runner request calls it once its token and version are accepted, so a runner out of
+  the version window is not "online" for a Run now. The in-process adapter never calls it.
+  `is_online` is "heard from within one `LEASE_LIFETIME`".
+- **Two constants beside `LEASE_LIFETIME` (point 4).** `CLAIM_WAIT_MAX` (30 s, ADR-0031
+  point 2) and `HEARTBEAT_INTERVAL` (30 s, point 3), in `board/lease.rs`.
+  **`board::service::claim` clamps `wait` to `CLAIM_WAIT_MAX`**, so both adapters clamp;
+  053 uses both and restates neither.
+- **The tail is fenced over HTTP only** (043's hand-off). The route calls
+  `service::publish_remote_tail`, which reads `lease::current` and publishes through
+  `ServiceContext::publish_tail` only when the lease holds, otherwise dropping at `debug`;
+  it answers `null` either way. In process a tail stays unfenced. `HttpBoard` queues tails
+  in a channel of 64 (`TAIL_BUFFER`) drained one post at a time; a full queue drops.
+- **The adapter.** `HttpBoard::new(origin, token, provider)` spawns its tail drain, refuses
+  plain HTTP to any host but loopback (`is_loopback` or `localhost`), sets no timeout and
+  never retries. It rebuilds an error from a body that has D8's shape **whatever the
+  status, a `2xx` included**; any other non-success is `internal` naming the status and the
+  origin; a connection that fails is `io` naming the origin. `database` comes back as a
+  `sqlx::Error::Protocol` carrying the message, so its text gains sqlx's prefix; the code
+  is what a caller branches on (D8). No message, `Debug` or span carries the token.
+- **The bundle's bounds (033's hand-off).** **`finish_run` keeps axum's default body limit,
+  and the runner caps the whole encoded bundle** at `runs::bundle::BUNDLE_CAP_BYTES`
+  (1.5 MiB of `encoded_len`). `worktree::bundle::bound`, called last by `capture`, degrades
+  in two steps: the patch dropped (every `Included` file `TooLarge`, `patch` empty,
+  `patch_truncated` true), then the bundle (`None`, read as `NotRecorded`), `head_sha` kept
+  either way. `board::service::finish_run` refuses, as `invalid`, a patch past
+  `PATCH_CAP_BYTES` or a bundle past `BUNDLE_CAP_BYTES`, and the run stays open, in both
+  adapters. A solo run past the cap now stores the degraded bundle, deliberately.
+- **The catalogue crosses the wire tolerantly (036's named exception to point 6, closed).**
+  `Catalogue`, `CatalogueEntry` and `PlannerBudget` lose `deny_unknown_fields`. The stored
+  setting stays strict through `RawCatalogue` and its two private twins,
+  `RawCatalogueEntry` and `RawPlannerBudget`, which `resolve` converts.
+- **Selection plans across every team in scope.** A runner's claim reaches every team its
+  owner belongs to, and `selection::plan` asked `list_tasks`, which reads one team, so a
+  `Next` over HTTP from a runner whose owner is in two teams was refused. The HTTP suite's
+  shared-board cases found it. `plan` now lists each team's `ready` column on its own and
+  merges them in `list_tasks`' own order, by repository and then board order; a repository
+  belongs to one team, so that is the one order there was. Solo, with one team, is
+  unchanged.
+- **Run now, Retry now and Cancel reach a runner through `board::relay`** (D32's 052
+  amendment holds the commands). `RunnerRelay` has `run_now` and `cancel`; `BoardHost.relay`
+  is `rimaia_runner::relay::ShellRelay` in solo and a server's `RelayedRequests`.
+  - **`run_now`'s pre-check is the claim's own.** The claim's checks moved, unchanged, into
+    `lease::admit` (eligibility, no lease row, an edge for the claim's `Edges`); the claim
+    transaction asks it, and `service::check_run_now` asks it read-only through
+    `lease::admits` against the named runner's paired provider. A refusal is the claim's
+    sentence; a task with no edge is the starter's lost-start sentence. The runner's own
+    strategy ceiling is the board's to judge only at the claim that collects the request.
+    Before it, an offline runner is refused (`relay::RUNNER_OFFLINE`).
+  - **Collection.** `relay::claim_next(ctx, runner, relayed, target)` is the claim route's
+    call: for `Next`, this runner's oldest unexpired request first, claimed through
+    `claim(Run { trigger: Queued, continue_session })`; lost or refused, it is dropped and
+    selection proceeds. Capacity does not apply to it. A request expires one
+    `LEASE_LIFETIME` after its press, on the injected clock, and a second press of one task
+    replaces the first. A waiting `Next` is not woken by a press; the runner's next poll
+    collects it (053's cadence).
+  - **`CancelRequests`** (`board/cancel.rs`), keyed by `(task_id, generation)`.
+    `service::heartbeat` takes it and lists a task in `cancel` while its request matches a
+    current lease the calling runner listed; each heartbeat also drops every entry whose
+    lease row no longer exists. `InProcessBoard` holds an always-empty one.
+  - **The two Run now postures.** A relayed Run now is unattended (`Queued`). A runner's own
+    `claim(Run { trigger: Manual })` over its `rmr_` token is accepted as interactive: only
+    that machine holds the token. 059 chooses which its own button takes.
+- **A cancel that reaches a manual start in its preflight stops it before the claim**
+  (`runner::start::CANCELLED_BEFORE_THE_CLAIM`), so `ShellRelay::cancel`, which is
+  `InFlight::cancel` whatever the lease says, leaves nothing written.
+- **The HTTP harness (point 13).** Each constructor builds its in-process twin's people,
+  teams, roles and runners through the services, and gives each runner a token through
+  047's `tokens::create_runner` or `pairing::pair_own_runner`. One difference is forced by
+  the provider check above: `runner_on(which, Ledger)` is a second runner of `which`'s
+  owner paired as Ledger, not `which`'s own row; the cases that ask for it never compare it
+  with `runner_id(which)`. `Harness::board()` is the server host's own context, so a case's
+  writes publish on the channels the routes wait on.
+
+**Binds.** 053 (the adapter's timeouts and backoff over these routes, the heartbeat loop
+and its reaction to `cancel`, `CLAIM_WAIT_MAX` for the long poll and a press waking it),
+054 and 055 (each new `BoardMethod` gets its route, its body in `board::wire`, its
+`HttpBoard` method and a `RUNNER_CASES` row in the same commit), 056 (`append_transcript`'s
+storage and body limit; the outbox can resend a `FinishRun` with no size check of its own),
+058 and 059 (build `HttpBoard`), 061 and 069 (render pinned and requested cards, the
+runner picker).
+
 ---
 
 ## D32 — One command registry: board and local commands, one dispatcher, one caller
@@ -6211,6 +6326,46 @@ written only through `upsert_user`), 073 (the class-2 claim it rests on).
 
 **Binds.** 049 (`getRunTail` is a board wrapper), 050 (the route's closure composes its
 narrowing), 052 (the relay is followed, never written), 056, 059, 060.
+
+### Amendment, 2026-10-11 — what task 052 decided
+
+- **The three run controls are flipped (point 8), one commit each:**
+  `board("start_task_run", Write, runs::start_task_run)`, `board("retry_task_now", Write,
+  runs::retry_task_now)` and `board("cancel_task_run", Write, runs::cancel_task_run)`, the
+  handlers in `api/board/runs.rs`, the shell's three `#[tauri::command]`s and their
+  `generate_handler!` entries deleted, `startRun`, `retryTaskNow` and `cancelRun` calling
+  `board<T>`, each with a `BoardCase` (`Foreign::Ids`; `retry_task_now` is in
+  `REFUSED_FOR_TEAM_A`, since no task of team A's waits to retry). The appendix rows'
+  *From* cells are unchanged. `runs::cancel_in_flight` is gone: its scope check is
+  `authorize_cancel`'s and its cancel the relay's.
+- **`BoardHost` gains `relay: Arc<dyn RunnerRelay>` (point 2).** Solo builds
+  `rimaia_runner::relay::ShellRelay` over the same port, machine, paths, config and
+  `InFlight` the loop runs with; a server builds `RelayedRequests`. **`ServerState` gains
+  `lease_term`** (`LeaseTerm::Renewable(LEASE_LIFETIME)` from `ServerState::new`, which a
+  test harness overrides) **and `relayed: Arc<RelayedRequests>`**, the host's relay itself:
+  `ServerState::new(host, relayed, auth, identity, public_url)` takes it beside the host,
+  and `testing::api::relayed_host` and `relayed_host_over` hand a test both.
+- **Which runner, and who may start, are one core function**,
+  `board::relay::request_start(ctx, door, relay, start)`, which both start handlers call.
+  `Door::Shell` starts on the solo runner (`identity::solo_identity`), so the solo invoke
+  stays `{ taskId }`; any other door names `runnerId`, and **a retry that names none goes to
+  the task's pin**, as the appendix makes a retry a claim through the pin. With neither it is
+  refused: `name the runner to start this task on`. Every door but the shell asks
+  `authorize_start` with `OwnerPresence::Remote` before the relay; the shell's starter asks
+  with `AtRunner`. A task outside the caller's scope is `not_found` first.
+- **Who may stop a run (the appendix left it here).** `board::service::authorize_cancel`:
+  a task outside the scope is `not_found`; one with no lease is `None`, a no-op; otherwise
+  the holding runner's owner or an owner of the task's team may ask, and any other member is
+  refused: `only the owner of the runner holding this task, or an owner of its team, can
+  stop its run`. Stopping a run is a board action on the team's work, like deleting the
+  task; starting one spends someone's machine, which is what ADR-0031 point 7 refuses.
+- **050's gates.** The Cancel gate in `ActiveRunCard` is deleted. Run now's and Retry's
+  stay, and their comments name **069**, not 061 as task 052's file had it: D40's "what the
+  next tasks expect" gives 069 the runner picker and the deletion of both gates, and 061 no
+  longer carries it. The wrappers' optional `runnerId` is sent only when given.
+
+**Binds.** 059 (`AppState.board = None` sends these three to the server; its own Run now
+picks a posture), 061 and 069 (the picker that fills `runnerId`, and the two gates).
 
 ### Appendix — today's 97 commands, classified
 
@@ -7894,7 +8049,7 @@ An implementation task reads the entries its number appears in, before writing c
 | [049](../tasks/049-frontend-transport.md) | D4 · D6 · D7 · D8 · D14 · D20 · D28 · D32 · D33 · D34 · D38, and writes D39 |
 | [050](../tasks/050-the-web-shell.md) | D4 · D6 · D7 · D8 · D10 · D11 · D12 · D14 · D22 · D28 · D29 · D32 · D33 · D34 · D38, and writes D40 |
 | [051](../tasks/051-teams-invitations-and-roles.md) | D3 · D4 · D6 · D7 · D8 · D10 · D16 · D28 · D32 · D33 · D34, the entries 045, 047, 048 and 050 appended (D36, D32's 047 amendment, D38, D40), and writes D41 |
-| [052](../tasks/052-the-runner-protocol-and-an-http-board-adapter.md) | D4 · D6 · D8 · D10 · D14 · D19 · D28 · D29 · D31 · D32 · D33 · D34 · D37 · D38 |
+| [052](../tasks/052-the-runner-protocol-and-an-http-board-adapter.md) | D4 · D6 · D8 · D10 · D14 · D19 · D28 · D29 · D31 · D32 · D33 · D34 · D37 · D38 · D40 |
 | [053](../tasks/053-leases-across-the-network.md) | D4 · D6 · D8 · D9 · D11 · D12 · D14 · D17 · D19 · D21 · D28 · D29 · D31 · D32 · D33 · D37 · D41 |
 | [054](../tasks/054-repositories-by-remote.md) | D2 · D4 · D6 · D7 · D8 · D10 · D11 · D20 · D22 · D25 · D26 · D28 · D30 · D31 · D32 · D33 · D34 |
 | [055](../tasks/055-the-run-scoped-proxy-and-consent-laundering.md) | D4 · D6 · D8 · D17 · D27 · D28 · D29 · D30 · D31 · D32 · D33 · D34 |
