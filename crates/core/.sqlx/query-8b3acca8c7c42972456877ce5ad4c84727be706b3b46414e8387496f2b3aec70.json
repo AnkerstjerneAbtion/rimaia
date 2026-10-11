@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT (t.personal_user_id IS NOT NULL\n                   AND NOT EXISTS (SELECT 1 FROM team_memberships m\n                                    WHERE m.team_id = t.id\n                                      AND m.user_id <> t.personal_user_id)) AS \"alone!: bool\"\n             FROM teams t\n            WHERE t.id = ?1",
+  "describe": {
+    "columns": [
+      {
+        "name": "alone!: bool",
+        "ordinal": 0,
+        "type_info": "Null"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "8b3acca8c7c42972456877ce5ad4c84727be706b3b46414e8387496f2b3aec70"
+}

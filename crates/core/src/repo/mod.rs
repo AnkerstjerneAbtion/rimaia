@@ -517,8 +517,10 @@ pub async fn ensure_unattended_runs_allowed(
 ///
 /// It requires the `Owner` role in the repository's team (ADR-0029's roles
 /// table), through task 051's `teams::require_owner`: a member is refused as
-/// `Invalid`. A personal team has no ceiling, because its owner and the
-/// machine's owner are one person, so it is refused there too.
+/// `Invalid`. A personal team has no ceiling while its person is its only
+/// member, because its owner and the machine's owner are one person, so it is
+/// refused there too. Once someone has joined, it is shared and has one
+/// (ADR-0032's 2026-10-11 amendment).
 #[tracing::instrument(
     skip_all,
     fields(user_id = ctx.actor.as_str(), repository_id = %repository_id)
@@ -537,13 +539,8 @@ pub async fn set_repository_unattended_ceiling(
         "change whether a repository allows unattended runs",
     )
     .await?;
-    let personal = sqlx::query_scalar!(
-        r#"SELECT personal_user_id IS NOT NULL AS "personal!: bool" FROM teams WHERE id = ?1"#,
-        team_id,
-    )
-    .fetch_one(&mut *tx)
-    .await?;
-    if personal {
+    let kind = crate::identity::team_kind_in(&mut tx, &team_id).await?;
+    if kind == crate::identity::TeamKind::Personal {
         return Err(Error::invalid(
             crate::consent::personal_team_has_no_ceiling(),
         ));

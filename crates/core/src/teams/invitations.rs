@@ -22,10 +22,10 @@ use crate::clock::Clock;
 use crate::context::ServiceContext;
 use crate::db::new_id;
 use crate::error::{Error, Result};
-use crate::events::{ChangeEvent, TeamId, UserId};
+use crate::events::{ChangeEvent, RepositoryId, TeamId, UserId};
 use crate::identity::secret::{self, Secret};
 use crate::identity::teams::listing_of;
-use crate::identity::Role;
+use crate::identity::{team_kind_in, Role, TeamKind};
 
 /// How long a link works after it is made.
 pub const INVITATION_LIFETIME_DAYS: i64 = 7;
@@ -250,17 +250,40 @@ pub async fn preview_invitation(ctx: &ServiceContext, token: &str) -> Result<Inv
 pub async fn accept_invitation(ctx: &ServiceContext, token: &str) -> Result<Team> {
     let mut tx = ctx.begin_immediate().await?;
     refuse_solo(&mut tx).await?;
-    let team_id = accept_invitation_in(&mut tx, ctx.clock.as_ref(), token, &ctx.actor).await?;
+    let Joined {
+        team_id,
+        ceilings_allowed,
+    } = accept_invitation_in(&mut tx, ctx.clock.as_ref(), token, &ctx.actor).await?;
     let team = listing_of(&mut tx, &ctx.actor, &team_id).await?;
     tx.commit().await?;
 
+    if !ceilings_allowed.is_empty() {
+        ctx.publish(ChangeEvent::repositories(team_id.clone(), ceilings_allowed));
+    }
     ctx.publish(ChangeEvent::teams(team_id));
     Ok(team)
+}
+
+/// What [`accept_invitation_in`] changed.
+#[derive(Debug)]
+pub(crate) struct Joined {
+    pub team_id: TeamId,
+    /// The repositories whose team ceiling the join set to allowed, because
+    /// the team was its own person's alone until now.
+    pub ceilings_allowed: Vec<RepositoryId>,
 }
 
 /// [`accept_invitation`]'s two statements, on the caller's transaction: the
 /// conditional `UPDATE` that only a usable token's row matches, so single use
 /// needs no lock of its own, then the membership. The team joined.
+///
+/// Joining a personal team that was its person's alone makes it shared, and a
+/// shared team consults its ceiling, which the personal team never did: its
+/// stored value is no team's decision, and left at "forbidden" it would stop
+/// the owner's own runs the moment they invited someone. So every repository
+/// in it starts allowed, in the same transaction (ADR-0032's 2026-10-11
+/// amendment). The ceiling only restricts, and each runner still needs its
+/// owner's consent on its machine, so allowing grants nothing.
 ///
 /// The two refusals after the `UPDATE` rely on the caller rolling back, which
 /// leaves the invitation unused. A current member is told so before the
@@ -271,7 +294,7 @@ pub(crate) async fn accept_invitation_in(
     clock: &dyn Clock,
     token: &str,
     user_id: &str,
-) -> Result<TeamId> {
+) -> Result<Joined> {
     let token_hash = secret::hash(token);
     let now = clock.now();
     let accepted = sqlx::query!(
@@ -297,6 +320,7 @@ pub(crate) async fn accept_invitation_in(
     if accepted.created_by.as_deref() == Some(user_id) {
         return Err(Error::not_found(INVALID_LINK));
     }
+    let was_personal = team_kind_in(conn, &accepted.team_id).await? == TeamKind::Personal;
     sqlx::query!(
         "INSERT INTO team_memberships (team_id, user_id, role, created_at)
          VALUES (?1, ?2, ?3, ?4)",
@@ -307,7 +331,22 @@ pub(crate) async fn accept_invitation_in(
     )
     .execute(&mut *conn)
     .await?;
-    Ok(accepted.team_id)
+    let ceilings_allowed = if was_personal {
+        sqlx::query_scalar!(
+            "UPDATE repositories SET allow_unattended_runs = 1
+              WHERE team_id = ?1 AND allow_unattended_runs = 0
+             RETURNING id",
+            accepted.team_id,
+        )
+        .fetch_all(&mut *conn)
+        .await?
+    } else {
+        Vec::new()
+    };
+    Ok(Joined {
+        team_id: accepted.team_id,
+        ceilings_allowed,
+    })
 }
 
 /// Revokes every link `created_by` made into `team_id` that could still be

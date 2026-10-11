@@ -17,16 +17,16 @@ use pretty_assertions::assert_eq;
 use rimaia_core::api::tail::{TailRelay, SERVER_TAIL_RELAY_CAPACITY};
 use rimaia_core::api::TeamGrant;
 use rimaia_core::api::{self, Authenticate, BoardHost, Caller, Credential, Door, StreamControl};
-use rimaia_core::board::{BoardPort, ClaimTarget, InProcessBoard, LeaseTerm};
+use rimaia_core::board::{BoardPort, ClaimTarget, InProcessBoard, LeaseTerm, RunAuthorship};
 use rimaia_core::consent::eligibility::RunnerEligibility;
-use rimaia_core::consent::{self, pieces::ContentKind};
+use rimaia_core::consent::{self, pieces::ContentKind, EligibilityStatus, TeamCeiling};
 use rimaia_core::db::settings::DEFAULT_BASE_INSTRUCTIONS;
 use rimaia_core::db::BoardColumn;
 use rimaia_core::events::{Change, ChangeEvent};
 use rimaia_core::identity::authenticate::SessionsAndTokens;
 use rimaia_core::identity::rate_limit::RateLimiter;
 use rimaia_core::identity::secret;
-use rimaia_core::identity::{create_personal_team, sessions, tokens, Role};
+use rimaia_core::identity::{create_personal_team, sessions, tokens, Role, TeamKind};
 use rimaia_core::mcp::{self, McpHandle, RunHandles};
 use rimaia_core::repo::{self, NewRepository};
 use rimaia_core::runner::provider::ProviderProfile;
@@ -1012,6 +1012,219 @@ async fn a_personal_team_keeps_the_person_it_belongs_to() {
 }
 
 // ---------------------------------------------------------------------------
+// A personal team someone joins (ADR-0032's 2026-10-11 amendment)
+// ---------------------------------------------------------------------------
+
+/// Alice's personal team with a repository and an unassigned `ready` task in
+/// it, before anyone else joins: `(repository, task)`.
+async fn alices_own_work(team: &SharedTeam) -> (String, String) {
+    let repository = register(team, &team.alice.personal, "alices").await;
+    let task = task_in(&team.alice.personal, &repository, "Own").await;
+    (repository, task)
+}
+
+/// Bob joins Alice's personal team as a member, through the services a link
+/// goes through. Bob acting in it.
+async fn bob_joins_alices_personal_team(team: &SharedTeam) -> ServiceContext {
+    let personal = &team.alice.personal_team;
+    let created = create_invitation(&team.alice.personal, personal, Role::Member)
+        .await
+        .expect("alice invites bob into her personal team");
+    accept_invitation(&team.bob.ctx, created.token.expose())
+        .await
+        .expect("bob joins");
+    acting_in(&team.bob, personal)
+}
+
+async fn ceiling_column(team: &SharedTeam, repository: &str) -> bool {
+    repo::get(&team.alice.personal, repository)
+        .await
+        .expect("read the repository")
+        .allow_unattended_runs
+}
+
+#[tokio::test]
+async fn a_personal_team_that_gains_a_member_is_shared_for_every_rule() {
+    let team = SharedTeam::new().await;
+    let (repository, task) = alices_own_work(&team).await;
+    let alice = &team.alice;
+    assert_eq!(
+        tasks::team_kind_of_task(&alice.personal, &task)
+            .await
+            .expect("the kind"),
+        TeamKind::Personal,
+        "alone, it is personal"
+    );
+
+    bob_joins_alices_personal_team(&team).await;
+
+    // The prompt's inputs are judged as a shared team's (D37).
+    assert_eq!(
+        tasks::team_kind_of_task(&alice.personal, &task)
+            .await
+            .expect("the kind"),
+        TeamKind::Shared
+    );
+    // The ceiling is consulted, and the ceiling command answers.
+    let status = consent::status(&alice.personal, &task, &alice.runner_id)
+        .await
+        .expect("the task's consent");
+    assert_eq!(status.team_ceiling, TeamCeiling::Allowed);
+    repo::set_repository_unattended_ceiling(&alice.personal, &repository, false)
+        .await
+        .expect("a shared team has a ceiling its owner sets");
+    let board = expiring_board(&team, &alice.personal, &alice.runner_id);
+    assert_invalid(
+        &refused(board.claim(run_now(&task)).await),
+        "the team does not allow unattended runs in alices. A team owner can allow them.",
+    );
+    repo::set_repository_unattended_ceiling(&alice.personal, &repository, true)
+        .await
+        .expect("allow it again");
+
+    // The run's context names the plan's author and the machine's owner.
+    let claimed = board
+        .claim(run_now(&task))
+        .await
+        .expect("alice's runner takes her own task")
+        .expect("nobody else holds it");
+    assert_eq!(claimed.context.team_kind, TeamKind::Shared);
+    assert_eq!(
+        claimed.context.authorship,
+        Some(RunAuthorship {
+            plan_revision: 1,
+            plan_author: Some("alice".to_string()),
+            runner_owner: "alice".to_string(),
+            runner_label: "Alice's laptop".to_string(),
+        })
+    );
+}
+
+#[tokio::test]
+async fn the_personal_users_unassigned_tasks_still_run_on_their_runners_after_someone_joins() {
+    let team = SharedTeam::new().await;
+    let (_, task) = alices_own_work(&team).await;
+    let bob = bob_joins_alices_personal_team(&team).await;
+
+    let alices = consent::status(&team.alice.personal, &task, &team.alice.runner_id)
+        .await
+        .expect("alice's runner's view");
+    assert_eq!(alices.eligibility, EligibilityStatus::Assigned);
+    let bobs = consent::status(&bob, &task, &team.bob.runner_id)
+        .await
+        .expect("bob's runner's view");
+    assert_eq!(bobs.eligibility, EligibilityStatus::Unassigned);
+
+    // Bob's runner needs an assignment or a pool opt-in, as in any shared
+    // team.
+    let bobs_board = expiring_board(&team, &bob, &team.bob.runner_id);
+    assert_invalid(
+        &refused(bobs_board.claim(run_now(&task)).await),
+        "this task is unassigned, and Mac mini does not take pool work from this team. \
+         Assign it to yourself, or add the team to the runner's pool.",
+    );
+    claim(
+        &expiring_board(&team, &team.alice.personal, &team.alice.runner_id),
+        &task,
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn a_joined_personal_teams_ceiling_starts_allowed() {
+    let team = SharedTeam::new().await;
+    let (repository, _) = alices_own_work(&team).await;
+    let personal = team.alice.personal_team.clone();
+    assert!(
+        !ceiling_column(&team, &repository).await,
+        "a repository registered in a personal team starts with the column off, unread"
+    );
+    let mut changes = team.alice.ctx.subscribe();
+
+    bob_joins_alices_personal_team(&team).await;
+
+    assert!(ceiling_column(&team, &repository).await);
+    let events = drain(&mut changes);
+    assert!(
+        events
+            .iter()
+            .any(|event| event.audience == Audience::Team(personal.clone())
+                && event.change == Change::Repositories(Arc::from([repository.clone()]))),
+        "the repository's change is announced: {events:?}"
+    );
+
+    // Only the join that makes the team shared allows it. Once the owner
+    // forbids, a further member leaves the decision alone.
+    repo::set_repository_unattended_ceiling(&team.alice.personal, &repository, false)
+        .await
+        .expect("alice forbids");
+    let carol = sign_up(&team, "carol").await;
+    let created = create_invitation(&team.alice.personal, &personal, Role::Member)
+        .await
+        .expect("alice invites carol");
+    accept_invitation(&carol, created.token.expose())
+        .await
+        .expect("carol joins");
+    assert!(!ceiling_column(&team, &repository).await);
+
+    // Joining a team that was never personal leaves its ceiling alone too.
+    repo::set_repository_unattended_ceiling(&team.alice.ctx, &team.repository.id, false)
+        .await
+        .expect("alice forbids in the shared team");
+    let created = create_invitation(&team.alice.ctx, &team.team_id, Role::Member)
+        .await
+        .expect("alice invites carol into the shared team");
+    accept_invitation(&carol, created.token.expose())
+        .await
+        .expect("carol joins it");
+    let shared = repo::get(&team.alice.ctx, &team.repository.id)
+        .await
+        .expect("read the shared repository");
+    assert!(!shared.allow_unattended_runs);
+}
+
+#[tokio::test]
+async fn a_personal_team_left_alone_again_is_personal_again() {
+    let team = SharedTeam::new().await;
+    let (repository, task) = alices_own_work(&team).await;
+    let alice = &team.alice;
+    let bob = bob_joins_alices_personal_team(&team).await;
+    repo::set_repository_unattended_ceiling(&alice.personal, &repository, false)
+        .await
+        .expect("alice forbids while bob is in");
+
+    leave_team(&bob, &alice.personal_team)
+        .await
+        .expect("bob leaves");
+
+    assert_eq!(
+        tasks::team_kind_of_task(&alice.personal, &task)
+            .await
+            .expect("the kind"),
+        TeamKind::Personal
+    );
+    assert!(
+        !ceiling_column(&team, &repository).await,
+        "the stored value stays as it was, unread"
+    );
+    let status = consent::status(&alice.personal, &task, &alice.runner_id)
+        .await
+        .expect("the task's consent");
+    assert_eq!(status.team_ceiling, TeamCeiling::NotConsulted);
+    assert_invalid(
+        &refused(repo::set_repository_unattended_ceiling(&alice.personal, &repository, true).await),
+        "a personal team has no ceiling: this machine's own consent decides.",
+    );
+    let claimed = expiring_board(&team, &alice.personal, &alice.runner_id)
+        .claim(run_now(&task))
+        .await
+        .expect("the forbidden column is not read")
+        .expect("nobody else holds it");
+    assert_eq!(claimed.context.team_kind, TeamKind::Personal);
+    assert_eq!(claimed.context.authorship, None);
+}
+
+// ---------------------------------------------------------------------------
 // What removal withdraws
 // ---------------------------------------------------------------------------
 
@@ -1570,6 +1783,11 @@ async fn an_account_whose_personal_team_has_running_work_cannot_be_deleted() {
         .await
         .expect("bob joins");
     let repository = register(&team, &team.alice.personal, "alices").await;
+    // Registered after Bob joined, so into a shared team, whose ceiling a
+    // new repository starts forbidding.
+    repo::set_repository_unattended_ceiling(&team.alice.personal, &repository, true)
+        .await
+        .expect("alice allows unattended runs");
     let bob = acting_in(&team.bob, &personal);
     let task = task_in(&bob, &repository, "Bob's, in Alice's team").await;
     tasks::assign_task(&bob, &task, Some(&team.bob.user_id))

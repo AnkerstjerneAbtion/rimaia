@@ -934,7 +934,7 @@ async fn read_context(
     // Decided here, under the context's scope, so the runner creates the
     // worktree from it without reading the dependency graph (D31 point 6).
     let base = base_ref::resolve(ctx, &task.task, &repository).await?;
-    let authorship = authorship(ctx, &task.task, runner.id).await?;
+    let authorship = authorship(ctx, &task.task, team_kind, runner.id).await?;
 
     Ok(RunContext {
         task,
@@ -953,17 +953,21 @@ async fn read_context(
 /// ADR-0032 point 7's two facts, from the task's row and the runner's: who
 /// wrote the plan revision and whose machine runs it. `None` in a personal
 /// team, where every author and the machine's owner are one person and the
-/// facts would say nothing.
+/// facts would say nothing; `team_kind` is [`crate::identity::team_kind_in`]'s
+/// answer, so a personal team someone joined gets them.
 async fn authorship(
     ctx: &ServiceContext,
     task: &crate::db::Task,
+    team_kind: TeamKind,
     runner_id: &str,
 ) -> Result<Option<RunAuthorship>> {
+    if team_kind == TeamKind::Personal {
+        return Ok(None);
+    }
     let row = sqlx::query!(
-        r#"SELECT tm.personal_user_id, a.login AS "plan_author?",
+        r#"SELECT a.login AS "plan_author?",
                   o.login AS "runner_owner?", r.label AS "runner_label?"
              FROM tasks t
-             JOIN teams tm ON tm.id = t.team_id
              LEFT JOIN users a ON a.id = t.plan_updated_by
              LEFT JOIN runners r ON r.id = ?2
              LEFT JOIN users o ON o.id = r.user_id
@@ -973,9 +977,6 @@ async fn authorship(
     )
     .fetch_one(&ctx.pool)
     .await?;
-    if row.personal_user_id.is_some() {
-        return Ok(None);
-    }
     let (Some(runner_owner), Some(runner_label)) = (row.runner_owner, row.runner_label) else {
         return Ok(None);
     };

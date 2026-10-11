@@ -43,6 +43,7 @@ use crate::db::new_id;
 use crate::db::settings::BASE_INSTRUCTIONS;
 use crate::error::{Error, Result};
 use crate::events::{ChangeEvent, RunId, RunnerId, TaskId, TeamId, UserId};
+use crate::identity::TeamKind;
 use crate::review::FindingStatus;
 use crate::review_loop::config::REVIEW_INSTRUCTIONS;
 use crate::runner::provider::ProviderId;
@@ -393,7 +394,11 @@ pub(crate) async fn missing(
 #[derive(Debug, Clone)]
 pub(crate) struct TaskRow {
     pub team_id: TeamId,
+    /// Whose personal team it is, if anyone's, for eligibility's
+    /// owner's-own-task branch, which holds whoever else has joined.
     pub personal_owner: Option<UserId>,
+    /// What the ceiling reads: a personal team someone joined is shared.
+    pub kind: TeamKind,
     pub assignee_id: Option<UserId>,
     pub assignee_login: Option<String>,
     pub pinned_runner_id: Option<RunnerId>,
@@ -412,13 +417,14 @@ impl TaskRow {
     }
 
     /// ADR-0032 point 4's team ceiling, which a personal team does not
-    /// consult: its owner and the machine's owner are one person, so the
-    /// runner's consent is the whole decision.
+    /// consult while its person is its only member: its owner and the
+    /// machine's owner are one person, so the runner's consent is the whole
+    /// decision (the 2026-10-11 amendment).
     pub fn team_ceiling(&self) -> TeamCeiling {
-        match (self.personal_owner.is_some(), self.allow_unattended_runs) {
-            (true, _) => TeamCeiling::NotConsulted,
-            (false, true) => TeamCeiling::Allowed,
-            (false, false) => TeamCeiling::Forbidden,
+        match (self.kind, self.allow_unattended_runs) {
+            (TeamKind::Personal, _) => TeamCeiling::NotConsulted,
+            (TeamKind::Shared, true) => TeamCeiling::Allowed,
+            (TeamKind::Shared, false) => TeamCeiling::Forbidden,
         }
     }
 }
@@ -441,9 +447,14 @@ pub(crate) async fn task_row(
     )
     .fetch_optional(&mut *conn)
     .await?;
-    Ok(row.map(|row| TaskRow {
+    let Some(row) = row else {
+        return Ok(None);
+    };
+    let kind = crate::identity::team_kind_in(conn, &row.team_id).await?;
+    Ok(Some(TaskRow {
         team_id: row.team_id,
         personal_owner: row.personal_user_id,
+        kind,
         assignee_id: row.assignee_id,
         assignee_login: row.assignee_login,
         pinned_runner_id: row.pinned_runner_id,
@@ -1054,7 +1065,8 @@ pub enum EligibilityStatus {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum TeamCeiling {
-    /// A personal team: the runner's own consent is the whole decision.
+    /// A personal team only its own person is in: the runner's own consent
+    /// is the whole decision.
     NotConsulted,
     Allowed,
     Forbidden,

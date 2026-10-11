@@ -289,10 +289,6 @@ pub const REFUSED_FOR_TEAM_A: &[(&str, &str)] = &[
         "team A's one repository still has tasks, and removing it is refused until none does",
     ),
     (
-        "set_repository_unattended_ceiling",
-        "both fixture teams are personal teams, which have no ceiling to set",
-    ),
-    (
         "accept_task_strategy",
         "no planner has proposed a strategy on team A's tasks",
     ),

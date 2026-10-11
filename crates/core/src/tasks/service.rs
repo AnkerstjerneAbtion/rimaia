@@ -1629,19 +1629,9 @@ pub(crate) async fn team_of(ctx: &ServiceContext, id: &str) -> Result<TeamId> {
 /// prompt composed for the task may render (seam-contract D37). A task outside
 /// the context's scope is answered as a never-issued one.
 pub async fn team_kind_of_task(ctx: &ServiceContext, id: &str) -> Result<TeamKind> {
-    let scope = ctx.scope.json();
-    let personal_user_id = sqlx::query_scalar!(
-        "SELECT tm.personal_user_id
-           FROM tasks t
-           JOIN teams tm ON tm.id = t.team_id
-          WHERE t.id = ?1 AND t.team_id IN (SELECT value FROM json_each(?2))",
-        id,
-        scope,
-    )
-    .fetch_optional(&ctx.pool)
-    .await?
-    .ok_or_else(|| Error::not_found(format!("no task with id {id}")))?;
-    Ok(TeamKind::of(personal_user_id))
+    let mut conn = ctx.pool.acquire().await?;
+    let team_id = select_task_team(&mut *conn, &ctx.scope.json(), id).await?;
+    crate::identity::team_kind_in(&mut conn, &team_id).await
 }
 
 async fn select_task_team<'e, E>(executor: E, scope: &str, id: &str) -> Result<TeamId>

@@ -103,12 +103,13 @@ impl FromStr for Role {
     }
 }
 
-/// Whether a team is one person's own or one people share (ADR-0029 point 2):
-/// `teams.personal_user_id` set, or not.
+/// Whether a team is one person's own or one people share, as every
+/// personal-team rule reads it: [`team_kind_in`] decides.
 ///
 /// What a composer reads to decide which inputs a prompt may render
 /// (ADR-0032's amendment "every prompt input has a class", seam-contract
-/// D37). In a personal team every author is the runner's owner, so nothing
+/// D37), and what the team ceiling and the run's authorship read (D36
+/// point 1). In a personal team every author is the runner's owner, so nothing
 /// changes there; in a shared team a value nobody consented to, and no write
 /// constrained, is not rendered.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -118,14 +119,35 @@ pub enum TeamKind {
     Shared,
 }
 
-impl TeamKind {
-    /// The kind of a team whose `personal_user_id` is `personal_user_id`.
-    pub fn of<T>(personal_user_id: Option<T>) -> Self {
-        match personal_user_id {
-            Some(_) => TeamKind::Personal,
-            None => TeamKind::Shared,
-        }
-    }
+/// The kind of `team_id`: `Personal` while its only member is its own person
+/// (`teams.personal_user_id`), `Shared` otherwise (ADR-0032's 2026-10-11
+/// amendment). A personal team someone was invited into holds authors other
+/// than the runner's owner, so it is shared for every rule until it is its
+/// person's alone again. The one predicate: every reader of a team's kind goes
+/// through it, so no rule can count a joined personal team as personal.
+///
+/// Who a personal team *belongs to* is a different question, answered by
+/// `personal_user_id` itself: eligibility's "unassigned in the runner owner's
+/// own team" and the rule that a personal team keeps its person read that,
+/// whoever else has joined.
+pub(crate) async fn team_kind_in(conn: &mut SqliteConnection, team_id: &str) -> Result<TeamKind> {
+    let alone = sqlx::query_scalar!(
+        r#"SELECT (t.personal_user_id IS NOT NULL
+                   AND NOT EXISTS (SELECT 1 FROM team_memberships m
+                                    WHERE m.team_id = t.id
+                                      AND m.user_id <> t.personal_user_id)) AS "alone!: bool"
+             FROM teams t
+            WHERE t.id = ?1"#,
+        team_id,
+    )
+    .fetch_optional(&mut *conn)
+    .await?
+    .ok_or_else(|| Error::not_found("There is no team with that id."))?;
+    Ok(if alone {
+        TeamKind::Personal
+    } else {
+        TeamKind::Shared
+    })
 }
 
 /// The user and team [`create_personal_team`] wrote.

@@ -1595,7 +1595,7 @@ async fn a_run_scoped_handle_lists_only_its_own_team() {
 /// A `ScopedTx` counts as a transaction here. It carries the context's scope,
 /// which is why the helpers below may take one, but each of them is still a
 /// door into someone else's transaction, so each is named.
-const STORE_HANDLE_EXCEPTIONS: [(&str, &str); 55] = [
+const STORE_HANDLE_EXCEPTIONS: [(&str, &str); 56] = [
     ("db::connect", "it makes the pool; no context can exist yet"),
     ("db::migrate", "it runs before the context is built"),
     (
@@ -1850,6 +1850,12 @@ const STORE_HANDLE_EXCEPTIONS: [(&str, &str); 55] = [
         "a removal, a departure, a demotion and an account deletion revoke the person's links \
          inside the transaction that checked who asked (051, D41 point 6); it writes one team's \
          rows",
+    ),
+    (
+        "identity::team_kind_in",
+        "the one predicate for a team's kind (ADR-0032's 2026-10-11 amendment) is read inside the \
+         transaction of the claim, the ceiling command and an acceptance, which the kind decides; \
+         every caller passes the team of a row it has already read, and only a kind comes back",
     ),
     (
         "teams::delete::purge",
