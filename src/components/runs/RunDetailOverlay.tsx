@@ -3,6 +3,7 @@ import { createPortal } from "react-dom";
 
 import { useReviewHistory } from "../../hooks/useReviewHistory";
 import { runLabel } from "../../lib/board";
+import { useClientCapabilities } from "../../lib/capabilities";
 import {
   getRun,
   getRunLogPath,
@@ -58,6 +59,15 @@ interface RunDetailOverlayProps {
  * instead of only the one this component was first written under.
  */
 export function RunDetailOverlay({ runId, onClose }: RunDetailOverlayProps) {
+  // The transcript, its path and the live diff fallback are this machine's:
+  // `summarize_run_transcript`, `read_run_transcript_page` and
+  // `search_run_transcript` (task 056 deletes those gates), `reveal_run_log`,
+  // `get_run_log_path` and `get_diff_summary` (stay local). The fallback reads a
+  // branch as it is now on the machine that holds it and serves only runs
+  // recorded before 033, so it is solo's alone: a connected desktop loses it for
+  // those rows.
+  const { mode } = useClientCapabilities();
+  const hasMachine = mode !== "browser";
   const [detail, setDetail] = useState<RunDetail | null>(null);
   const [summary, setSummary] = useState<TranscriptSummary | null>(null);
   const [error, setError] = useState<RimaiaError | null>(null);
@@ -93,6 +103,7 @@ export function RunDetailOverlay({ runId, onClose }: RunDetailOverlayProps) {
   useEffect(() => {
     let active = true;
     setSummary(null);
+    if (!hasMachine) return;
     summarizeRunTranscript(runId).then(
       (result) => {
         if (active) setSummary(result);
@@ -102,7 +113,7 @@ export function RunDetailOverlay({ runId, onClose }: RunDetailOverlayProps) {
     return () => {
       active = false;
     };
-  }, [runId]);
+  }, [runId, hasMachine]);
 
   async function handleReveal() {
     setRevealing(true);
@@ -259,7 +270,7 @@ export function RunDetailOverlay({ runId, onClose }: RunDetailOverlayProps) {
             taskId={detail.taskId}
             review={detail.review}
             prUrl={detail.prUrl}
-            liveDiff="fallback"
+            liveDiff={mode === "solo" ? "fallback" : "none"}
             patch="collapsed"
             afterPullRequest={<OpenFindingsList history={history} runId={runId} />}
           />
@@ -269,6 +280,14 @@ export function RunDetailOverlay({ runId, onClose }: RunDetailOverlayProps) {
             <pre className="run-detail-prompt">{detail.prompt}</pre>
           </section>
 
+          {!hasMachine && (
+            <section className="run-detail-section run-detail-transcript-section">
+              <h4>Transcript</h4>
+              <p className="muted">The transcript is kept on the machine that ran this task.</p>
+            </section>
+          )}
+
+          {hasMachine && (
           <section className="run-detail-section run-detail-transcript-section">
             <h4>Transcript</h4>
             <div className="run-detail-actions">
@@ -298,6 +317,7 @@ export function RunDetailOverlay({ runId, onClose }: RunDetailOverlayProps) {
               </p>
             )}
           </section>
+          )}
         </div>
       )}
     </div>,

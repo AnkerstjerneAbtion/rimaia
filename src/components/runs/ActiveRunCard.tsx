@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 
 import { RUN_KIND_LABELS } from "../../lib/board";
+import { useHasMachine } from "../../lib/capabilities";
 import { cancelRun, getRunTail, getTask, toRimaiaError } from "../../lib/commands";
 import { subscribeToRunsTail, subscribeToTasksChanged } from "../../lib/events";
 import type { RimaiaError, RunTail, TaskSummary } from "../../types";
@@ -49,6 +50,9 @@ interface ActiveRunCardProps {
  * has resolved.
  */
 export function ActiveRunCard({ task, repositoryName }: ActiveRunCardProps) {
+  // `cancel_task_run` is this machine's until task 052 flips it to a board
+  // command and deletes this gate.
+  const hasMachine = useHasMachine();
   const [runId, setRunId] = useState<string | null>(null);
   const [startedAt, setStartedAt] = useState<string | null>(null);
   const [tail, setTail] = useState<RunTail | null>(null);
@@ -284,11 +288,13 @@ export function ActiveRunCard({ task, repositoryName }: ActiveRunCardProps) {
 
       {error && <ErrorBanner error={error} onDismiss={() => setError(null)} />}
 
-      <div className="active-run-actions">
-        <button type="button" onClick={handleCancel} disabled={cancelling}>
-          {cancelling ? "Cancelling…" : "Cancel"}
-        </button>
-      </div>
+      {hasMachine && (
+        <div className="active-run-actions">
+          <button type="button" onClick={handleCancel} disabled={cancelling}>
+            {cancelling ? "Cancelling…" : "Cancel"}
+          </button>
+        </div>
+      )}
     </article>
   );
 }

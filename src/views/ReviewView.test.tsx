@@ -16,7 +16,9 @@ import {
   taskSummary,
   twoLoopHistory,
 } from "../test/reviewFixtures";
-import type { RunReview } from "../types";
+import { BROWSER, connected } from "../test/capabilities";
+import { ClientCapabilitiesProvider } from "../lib/capabilities";
+import type { ClientCapabilities, RunReview } from "../types";
 import { ReviewView } from "./ReviewView";
 
 // Mocked at the Tauri seam, not at `lib/commands.ts`/`lib/events.ts` — see
@@ -688,3 +690,75 @@ function runDetailPlain(taskId: string) {
   void logAvailable;
   return run;
 }
+
+describe("a worktree on another machine (task 050)", () => {
+  const STUDIO = { id: "runner-studio", label: "Studio Mac", unpaired: false };
+
+  function renderUnder(capabilities: ClientCapabilities) {
+    return render(
+      <ClientCapabilitiesProvider capabilities={capabilities}>
+        <ReviewView now={NOW} />
+      </ClientCapabilitiesProvider>,
+    );
+  }
+
+  it("names the worktree's machine instead of opening it", async () => {
+    backend.details["task-a"] = { worktreeRunner: STUDIO };
+    renderUnder(BROWSER);
+    await openQueue(user);
+
+    expect(await screen.findByText("Worktree on Studio Mac")).toBeInTheDocument();
+    expect(
+      within(screen.getByRole("list", { name: "Keyboard shortcuts" })).queryByText(/open the worktree/),
+    ).not.toBeInTheDocument();
+    await user.keyboard("w");
+
+    expect(screen.queryByRole("menu")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Open in" })).not.toBeInTheDocument();
+    expect(sent(backend, "list_open_in_targets")).toEqual([]);
+    expect(sent(backend, "list_local_worktrees")).toEqual([]);
+  });
+
+  it("says an unpaired machine is unpaired", async () => {
+    backend.details["task-a"] = { worktreeRunner: { ...STUDIO, label: "Old laptop", unpaired: true } };
+    renderUnder(BROWSER);
+    await openQueue(user);
+
+    expect(await screen.findByText("Worktree on Old laptop (unpaired)")).toBeInTheDocument();
+  });
+
+  it("shows nothing and ignores w when no run has touched the task", async () => {
+    backend.details["task-a"] = { worktreeRunner: null };
+    renderUnder(BROWSER);
+    await openQueue(user);
+    await screen.findByText(PATCH_LINE);
+
+    await user.keyboard("w");
+
+    expect(screen.queryByText(/^Worktree on/)).not.toBeInTheDocument();
+    expect(screen.queryByRole("menu")).not.toBeInTheDocument();
+    expect(sent(backend, "list_open_in_targets")).toEqual([]);
+  });
+
+  it("opens the menu on w when this desktop's runner is the task's", async () => {
+    backend.details["task-a"] = { worktreeRunner: STUDIO };
+    renderUnder(connected("runner-studio"));
+    await openQueue(user);
+    await screen.findByRole("button", { name: "Open in" });
+
+    await user.keyboard("w");
+
+    expect(await screen.findByRole("menu", { name: "Open the worktree in" })).toBeInTheDocument();
+    expect(screen.queryByText("Worktree on Studio Mac")).not.toBeInTheDocument();
+  });
+
+  it("names the machine on a connected desktop whose runner is another", async () => {
+    backend.details["task-a"] = { worktreeRunner: STUDIO };
+    renderUnder(connected("runner-laptop"));
+    await openQueue(user);
+
+    expect(await screen.findByText("Worktree on Studio Mac")).toBeInTheDocument();
+    await user.keyboard("w");
+    expect(screen.queryByRole("menu")).not.toBeInTheDocument();
+  });
+});

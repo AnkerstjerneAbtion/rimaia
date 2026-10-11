@@ -107,6 +107,7 @@ export function taskDetail(id: string, overrides: Partial<TaskDetail> = {}): Tas
   return {
     ...summary,
     links: [],
+    worktreeRunner: null,
     dependsOn: [],
     lastRun: plainRun(id),
     reviewInstructions: null,

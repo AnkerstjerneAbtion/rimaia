@@ -1,0 +1,349 @@
+/* The web shell (task 050): the sign-in screen, the team switcher, the account
+   page, the runners section of Settings and the line that names another
+   machine's worktree. ADR-0024 throughout - sentence case, state as a word,
+   one accent, fluid width, light and dark designed equally - and no new token:
+   everything here is `styles.css`'s scale. */
+
+/* Sign in ---------------------------------------------------------------- */
+
+.sign-in {
+  display: grid;
+  place-items: center;
+  min-height: 100dvh;
+  padding: var(--space-5);
+  background: var(--surface-0);
+}
+
+.sign-in-card {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--space-4);
+  width: min(26rem, 100%);
+  padding: var(--space-6);
+}
+
+.sign-in-card h1 {
+  margin: 0;
+  font-size: var(--font-size-xl);
+  line-height: var(--line-height-tight);
+}
+
+.sign-in-lede {
+  margin: 0;
+  color: var(--text-2);
+}
+
+/* The reason sits above the link and says it in words; the left rule is a
+   second cue, never the only one. */
+.sign-in-failure {
+  margin: 0;
+  padding: var(--space-3) var(--space-4);
+  border-left: 3px solid var(--status-failed);
+  border-radius: var(--radius-sm);
+  background: var(--danger-bg);
+  color: var(--danger-text);
+}
+
+.sign-in-link {
+  display: inline-block;
+  padding: var(--space-2) var(--space-4);
+  border-radius: var(--radius-sm);
+  text-decoration: none;
+}
+
+/* The team switcher ------------------------------------------------------ */
+
+.team-switcher {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  padding: 0 var(--space-2);
+}
+
+.team-switcher-label {
+  font-size: var(--font-size-xs);
+  font-weight: var(--font-weight-semibold);
+  color: var(--text-3);
+}
+
+.team-switcher-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--font-size-sm);
+  font-weight: var(--font-weight-medium);
+  color: var(--text-1);
+}
+
+.team-switcher-button {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+  width: 100%;
+  padding: var(--space-2) var(--space-3);
+  text-align: left;
+}
+
+.team-switcher-caret {
+  flex: none;
+  color: var(--text-2);
+}
+
+.team-switcher-menu {
+  position: absolute;
+  top: 100%;
+  left: var(--space-2);
+  right: var(--space-2);
+  z-index: 4;
+  list-style: none;
+  margin: var(--space-1) 0 0;
+  padding: var(--space-1);
+  border-radius: var(--radius-sm);
+  background: var(--surface-3);
+  box-shadow: inset 0 0 0 1px var(--border-1), var(--shadow-md);
+}
+
+.team-switcher-menu button {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--space-2);
+  width: 100%;
+  padding: var(--space-2);
+  border: none;
+  background: transparent;
+  box-shadow: none;
+  text-align: left;
+}
+
+.team-switcher-menu button:hover,
+.team-switcher-menu button:focus-visible {
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+/* The chosen team is a word and a rule, not colour alone. */
+.team-switcher-menu button[aria-checked="true"] {
+  box-shadow: inset 2px 0 0 var(--accent);
+}
+
+.team-switcher-menu button[aria-checked="true"] .team-switcher-item-name::after {
+  content: " (current)";
+  font-weight: var(--font-weight-regular);
+  color: var(--text-2);
+}
+
+.team-switcher-item-role {
+  flex: none;
+  font-size: var(--font-size-xs);
+  color: var(--text-2);
+}
+
+@media (max-width: 720px) {
+  .team-switcher-label {
+    display: none;
+  }
+
+  .team-switcher {
+    flex: none;
+    max-width: 10rem;
+  }
+}
+
+/* The account page ------------------------------------------------------- */
+
+.view.account-view {
+  max-width: min(52rem, 100%);
+  gap: var(--space-5);
+}
+
+.account-view .panel h3,
+.runners-section h3 {
+  margin: 0 0 var(--space-1);
+  font-size: var(--font-size-lg);
+  line-height: var(--line-height-tight);
+}
+
+.account-section > .muted {
+  margin: 0 0 var(--space-3);
+}
+
+.account-you {
+  display: flex;
+  align-items: center;
+  gap: var(--space-4);
+  flex-wrap: wrap;
+}
+
+.account-avatar {
+  flex: none;
+  width: 2.5rem;
+  height: 2.5rem;
+  border-radius: var(--radius-full);
+  padding: 0;
+  box-shadow: none;
+}
+
+.account-you-text {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-width: 10rem;
+}
+
+.account-login {
+  font-size: var(--font-size-lg);
+  font-weight: var(--font-weight-semibold);
+  line-height: var(--line-height-tight);
+}
+
+.account-rows {
+  list-style: none;
+  margin: 0 0 var(--space-3);
+  padding: 0;
+}
+
+.account-row {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--space-4);
+  padding: var(--space-3) 0;
+  box-shadow: 0 1px 0 var(--border-1);
+}
+
+.account-row:last-child {
+  box-shadow: none;
+}
+
+.account-row-main {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  min-width: 0;
+}
+
+.account-row-title {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  font-weight: var(--font-weight-medium);
+  overflow-wrap: anywhere;
+}
+
+/* What a row is, as a word beside its name: no pill, no fill. */
+.account-row-flag {
+  font-size: var(--font-size-xs);
+  font-weight: var(--font-weight-regular);
+  color: var(--text-2);
+}
+
+.account-row-flag::before {
+  content: "· ";
+}
+
+.account-row button {
+  flex: none;
+}
+
+.account-actions,
+.account-dialog-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
+
+.account-dialog,
+.account-confirm {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  margin-top: var(--space-3);
+  padding: var(--space-4);
+  border-radius: var(--radius-md);
+  background: var(--surface-2);
+}
+
+.account-confirm {
+  margin-top: var(--space-2);
+}
+
+.account-dialog p,
+.account-confirm p {
+  margin: 0;
+}
+
+.account-field {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  margin: 0 0 var(--space-3);
+  padding: 0;
+  border: 0;
+  font-size: var(--font-size-sm);
+  color: var(--text-2);
+}
+
+.account-field input[type="text"],
+.account-field input[type="number"] {
+  max-width: 26rem;
+  color: var(--text-1);
+}
+
+.account-check {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  color: var(--text-1);
+}
+
+/* A secret or a command: monospace because it is literal text to copy. */
+.account-secret {
+  display: block;
+  padding: var(--space-3);
+  border-radius: var(--radius-sm);
+  background: var(--surface-0);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: var(--font-size-sm);
+  overflow-wrap: anywhere;
+  user-select: all;
+}
+
+/* Settings -> Runners ---------------------------------------------------- */
+
+.runner-rows {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: var(--space-5);
+}
+
+.runner-row h4 {
+  margin: 0 0 var(--space-2);
+  font-size: var(--font-size-md);
+}
+
+.runner-row .detail-list {
+  margin-bottom: var(--space-2);
+}
+
+.runner-row p {
+  margin: 0 0 var(--space-1);
+}
+
+/* Another machine's worktree ---------------------------------------------- */
+
+.worktree-elsewhere {
+  margin: 0;
+  color: var(--text-2);
+}
+
+.review-queue .worktree-elsewhere {
+  margin-top: var(--space-2);
+}

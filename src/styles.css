@@ -111,6 +111,7 @@
    below it. Keep new colour tokens at or above WCAG AA (4.5:1) against the
    surfaces they sit on, in both schemes. */
 
+@import "./styles/account.css";
 @import "./styles/board.css";
 @import "./styles/doctor.css";
 @import "./styles/review.css";

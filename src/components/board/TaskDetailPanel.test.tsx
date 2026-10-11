@@ -52,6 +52,7 @@ function detail(overrides: Partial<TaskDetail> = {}): TaskDetail {
   return {
     ...task(),
     links: [],
+    worktreeRunner: null,
     dependsOn: [],
     lastRun: null,
     effectiveModel: null,

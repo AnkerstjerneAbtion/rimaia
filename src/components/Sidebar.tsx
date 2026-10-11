@@ -1,4 +1,6 @@
+import { useClientCapabilities } from "../lib/capabilities";
 import type { View } from "../types";
+import { TeamSwitcher } from "./TeamSwitcher";
 
 const VIEWS: { id: View; label: string; hint: string }[] = [
   { id: "board", label: "Board", hint: "Tasks waiting, running and done" },
@@ -16,7 +18,17 @@ interface SidebarProps {
   reviewCount?: number;
 }
 
+/** Account is a sidebar entry in every mode but solo, which has no accounts
+ *  (task 050, ADR-0030 point 7). */
+const ACCOUNT: { id: View; label: string; hint: string } = {
+  id: "account",
+  label: "Account",
+  hint: "Sessions, tokens and your runners",
+};
+
 export function Sidebar({ current, onNavigate, version, reviewCount = 0 }: SidebarProps) {
+  const { mode } = useClientCapabilities();
+  const views = mode === "solo" ? VIEWS : [...VIEWS, ACCOUNT];
   return (
     <nav className="sidebar" aria-label="Main">
       <div className="sidebar-brand">
@@ -31,10 +43,12 @@ export function Sidebar({ current, onNavigate, version, reviewCount = 0 }: Sideb
         </div>
       </div>
 
+      {mode !== "solo" && <TeamSwitcher />}
+
       <div className="sidebar-section">
         <span className="sidebar-section-label">Navigate</span>
         <ul className="sidebar-nav">
-          {VIEWS.map((view) => (
+          {views.map((view) => (
             <li key={view.id}>
               <button
                 type="button"

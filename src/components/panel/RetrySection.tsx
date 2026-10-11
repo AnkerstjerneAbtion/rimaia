@@ -1,5 +1,6 @@
 import { useState } from "react";
 
+import { useHasMachine } from "../../lib/capabilities";
 import { formatResumeAfter } from "../../lib/board";
 import { giveUpOnTask, retryTaskNow, toRimaiaError } from "../../lib/commands";
 import type { RimaiaError, Run, RunState } from "../../types";
@@ -42,6 +43,10 @@ export function RetrySection({
 }: RetrySectionProps) {
   const [busy, setBusy] = useState<"retry" | "give-up" | null>(null);
   const [error, setError] = useState<RimaiaError | null>(null);
+  // `retry_task_now` is this machine's until task 069 adds the runner picker it
+  // needs (task 052 flips the command and keeps this gate). Giving up is the
+  // board's, and stays.
+  const hasMachine = useHasMachine();
 
   if (loading || runState !== "waiting_retry") return null;
 
@@ -71,12 +76,14 @@ export function RetrySection({
           ? "This task is waiting, but nothing is scheduled for it."
           : resumeAt === "resuming"
             ? "Its deadline has passed — the queue picks it up as soon as it is running."
-            : `The queue will ${resumeAt}. Retrying now does not wait for that.`}
+            : `The queue will ${resumeAt}.${hasMachine ? " Retrying now does not wait for that." : ""}`}
       </p>
       <div className="retry-section-actions">
-        <button type="button" disabled={busy !== null} onClick={() => act("retry")}>
-          {busy === "retry" ? "Starting…" : "Retry now"}
-        </button>
+        {hasMachine && (
+          <button type="button" disabled={busy !== null} onClick={() => act("retry")}>
+            {busy === "retry" ? "Starting…" : "Retry now"}
+          </button>
+        )}
         <button type="button" disabled={busy !== null} onClick={() => act("give-up")}>
           {busy === "give-up" ? "Giving up…" : "Give up"}
         </button>

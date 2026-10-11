@@ -15,6 +15,9 @@ interface BoardToolbarProps {
   readonly pickedCount: number;
   readonly onPlan: () => void;
   readonly planDisabled: boolean;
+  /** False where there is no machine to run the planner on (task 050): the
+   *  planning commands stay local (D32), and 061 gives a browser its own. */
+  readonly showPlan?: boolean;
   /** ADR-0025's bulk archive, over the same picked set. */
   readonly onArchive: () => void;
   readonly archiveDisabled: boolean;
@@ -45,6 +48,7 @@ export function BoardToolbar({
   pickedCount,
   onPlan,
   planDisabled,
+  showPlan = true,
   onArchive,
   archiveDisabled,
   showArchive,
@@ -86,19 +90,21 @@ export function BoardToolbar({
           it, and by whatever cards are picked — a planner costs cents and the
           run it checks costs a dollar, so this is the cheapest thing on the
           toolbar and reads as such: a quiet control, not a second primary. */}
-      <button
-        type="button"
-        className="board-plan-all"
-        onClick={onPlan}
-        disabled={planDisabled}
-        title={
-          pickedCount > 0
-            ? "Plan the selected cards, one at a time"
-            : "Plan every card in the ready column, one at a time"
-        }
-      >
-        {pickedCount > 0 ? `Plan ${pickedCount} selected` : "Plan ready column"}
-      </button>
+      {showPlan && (
+        <button
+          type="button"
+          className="board-plan-all"
+          onClick={onPlan}
+          disabled={planDisabled}
+          title={
+            pickedCount > 0
+              ? "Plan the selected cards, one at a time"
+              : "Plan every card in the ready column, one at a time"
+          }
+        >
+          {pickedCount > 0 ? `Plan ${pickedCount} selected` : "Plan ready column"}
+        </button>
+      )}
 
       {/* ADR-0025's bulk archive, over task 023's picked set. Only shown when
           something is picked: an "Archive 0 selected" button permanently

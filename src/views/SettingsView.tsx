@@ -1,3 +1,4 @@
+import { useHasMachine } from "../lib/capabilities";
 import { ConcurrencySection } from "./settings/ConcurrencySection";
 import { DeveloperSection } from "./settings/DeveloperSection";
 import { DoctorSection } from "./settings/DoctorSection";
@@ -5,6 +6,7 @@ import { InstructionsSection } from "./settings/InstructionsSection";
 import { McpSection } from "./settings/McpSection";
 import { RepositoriesSection } from "./settings/RepositoriesSection";
 import { ReviewSection } from "./settings/ReviewSection";
+import { RunnersSection } from "./settings/RunnersSection";
 import { SchedulesSection } from "./settings/SchedulesSection";
 import { StorageSection } from "./settings/StorageSection";
 import { StrategySection } from "./settings/StrategySection";
@@ -80,7 +82,35 @@ const BANDS: readonly SettingsBand[] = [
   },
 ];
 
+/**
+ * The same groups with a browser's sections (task 050 Scope 6). Concurrency,
+ * Schedules, MCP, Storage, Doctor and Developer read and change this machine,
+ * and a browser has none: one Runners section stands in for all six, saying
+ * where each runner's settings are changed. Repositories, Instructions, Review
+ * and Strategy are the team's, so they stay, each with its own gates.
+ */
+const BROWSER_BANDS: readonly SettingsBand[] = [
+  {
+    id: "settings-machines",
+    title: "Machines",
+    blurb: "The machines that run your tasks, and where to change their settings.",
+    sections: [{ id: "settings-runners", name: "Runners" }],
+  },
+  {
+    id: "settings-work",
+    title: "What runs",
+    blurb: "The repositories your team queues work for.",
+    sections: [{ id: "settings-repositories", name: "Repositories" }],
+  },
+  BANDS[2],
+];
+
 export function SettingsView() {
+  // Doctor, concurrency, schedules, MCP and storage: this machine's, so they
+  // exist only where there is one (task 050 Scope 6).
+  const hasMachine = useHasMachine();
+  const bands = hasMachine ? BANDS : BROWSER_BANDS;
+  if (!hasMachine) return <BrowserSettingsView bands={bands} />;
   return (
     <div className="view settings-view">
       <header className="view-header">
@@ -94,7 +124,7 @@ export function SettingsView() {
 
       {/* Sticky, so it is still reachable from the bottom of Storage. */}
       <nav className="settings-index" aria-label="Settings sections">
-        {BANDS.map((band) => (
+        {bands.map((band) => (
           <div key={band.id} className="settings-index-group">
             <a className="settings-index-label" href={`#${band.id}`}>
               {band.title}
@@ -174,6 +204,59 @@ export function SettingsView() {
             entry that is there for developers only is a promise the shipped app
             cannot keep. */}
         {import.meta.env.DEV && <DeveloperSection />}
+      </SettingsBandView>
+    </div>
+  );
+}
+
+function BrowserSettingsView({ bands }: { readonly bands: readonly SettingsBand[] }) {
+  return (
+    <div className="view settings-view">
+      <header className="view-header">
+        <h2>Settings</h2>
+        <p>
+          The team's repositories, the instructions and execution strategy every run receives,
+          and the runners that carry them out.
+        </p>
+      </header>
+
+      <nav className="settings-index" aria-label="Settings sections">
+        {bands.map((band) => (
+          <div key={band.id} className="settings-index-group">
+            <a className="settings-index-label" href={`#${band.id}`}>
+              {band.title}
+            </a>
+            <ul>
+              {band.sections.map((section) => (
+                <li key={section.id}>
+                  <a href={`#${section.id}`}>{section.name}</a>
+                </li>
+              ))}
+            </ul>
+          </div>
+        ))}
+      </nav>
+
+      <SettingsBandView band={bands[0]}>
+        <div className="settings-slot" id="settings-runners">
+          <RunnersSection />
+        </div>
+      </SettingsBandView>
+      <SettingsBandView band={bands[1]}>
+        <div className="settings-slot" id="settings-repositories">
+          <RepositoriesSection />
+        </div>
+      </SettingsBandView>
+      <SettingsBandView band={bands[2]}>
+        <div className="settings-slot" id="settings-instructions">
+          <InstructionsSection />
+        </div>
+        <div className="settings-slot" id="settings-review">
+          <ReviewSection />
+        </div>
+        <div className="settings-slot" id="settings-strategy">
+          <StrategySection />
+        </div>
       </SettingsBandView>
     </div>
   );

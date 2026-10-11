@@ -4,6 +4,8 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { invoke } from "@tauri-apps/api/core";
 
 import { RunDetailOverlay } from "./RunDetailOverlay";
+import { ClientCapabilitiesProvider } from "../../lib/capabilities";
+import { BROWSER, connected } from "../../test/capabilities";
 import { twoLoopHistory } from "../../test/reviewFixtures";
 import type { ReviewHistory, RunDetail, StoredBundle } from "../../types";
 
@@ -590,5 +592,55 @@ describe("RunDetailOverlay", () => {
     await screen.findByText("Run detail — Implementation · #2");
     expect(screen.queryByText("Review loop")).toBeNull();
     expect(screen.queryByRole("heading", { name: /findings/i })).toBeNull();
+  });
+});
+
+describe("the live diff fallback (task 050)", () => {
+  const LIVE = async () => ({
+    taskId: "task-1",
+    branch: "rimaia/task-1-add-the-parser",
+    baseRef: "main",
+    diff: { filesChanged: 1, insertions: 5, deletions: 0 },
+    files: [{ path: "src/live.rs", insertions: 5, deletions: 0 }],
+    commits: [],
+  });
+
+  it("uses the live diff fallback in solo only", async () => {
+    answering(runDetail({ review: { source: "not_recorded" }, headSha: null }), LIVE);
+
+    render(<RunDetailOverlay runId="run-1" onClose={() => {}} />);
+
+    expect(await screen.findByText("src/live.rs")).toBeInTheDocument();
+    expect(mockInvoke).toHaveBeenCalledWith("get_diff_summary", { taskId: "task-1" });
+  });
+
+  it.each([
+    ["browser", BROWSER],
+    ["connected", connected("runner-studio")],
+  ])("sends nothing for the fallback under %s capabilities", async (_mode, capabilities) => {
+    answering(runDetail({ review: { source: "not_recorded" }, headSha: null }), LIVE);
+
+    render(
+      <ClientCapabilitiesProvider capabilities={capabilities}>
+        <RunDetailOverlay runId="run-1" onClose={() => {}} />
+      </ClientCapabilitiesProvider>,
+    );
+
+    expect(await screen.findByText("No diff was recorded for this run.")).toBeInTheDocument();
+    expect(invoked("get_diff_summary")).toBe(false);
+  });
+
+  it("reads no transcript and no log path in a browser", async () => {
+    answering(runDetail(), LIVE);
+
+    render(
+      <ClientCapabilitiesProvider capabilities={BROWSER}>
+        <RunDetailOverlay runId="run-1" onClose={() => {}} />
+      </ClientCapabilitiesProvider>,
+    );
+
+    await screen.findByText("Run detail — Implementation · #2");
+    expect(screen.queryByRole("button", { name: "Reveal raw log" })).not.toBeInTheDocument();
+    expect(mockInvoke.mock.calls.map(([command]) => command)).toEqual(["get_run", "get_review_history"]);
   });
 });

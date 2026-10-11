@@ -30,6 +30,7 @@ import type {
 } from "../../types";
 import { ReviewConfigFields } from "../../components/ReviewConfigFields";
 import { useCheckouts } from "../../hooks/useCheckouts";
+import { useHasMachine } from "../../lib/capabilities";
 import { useReviewLevel } from "../../hooks/useReviewLevel";
 import { CredentialSection } from "./CredentialSection";
 import { OnArchiveFields } from "./OnArchiveFields";
@@ -70,12 +71,17 @@ export const NOT_SET_UP = "Not set up on this computer";
 
 export function RepositoriesSection() {
   // The per-machine half of every row (task 066), joined by repository id.
+  // A browser has no machine: `list_checkouts`, `register_repository` (task 054
+  // points the form at a local clone command, and 069 replaces the gate with a
+  // form over the board one) and the remote and credential commands stay
+  // local, so its rows are the team's facts and nothing about a clone.
+  const hasMachine = useHasMachine();
   const {
     checkouts,
     loading: checkoutsLoading,
     error: checkoutsError,
     reload: reloadCheckouts,
-  } = useCheckouts();
+  } = useCheckouts(hasMachine);
   const [repositories, setRepositories] = useState<Repository[] | null>(null);
   const [listError, setListError] = useState<RimaiaError | null>(null);
   const [rowErrors, setRowErrors] = useState<Record<string, RimaiaError | null>>({});
@@ -324,7 +330,7 @@ export function RepositoriesSection() {
         <ErrorBanner error={catalogueError} onDismiss={() => setCatalogueError(null)} />
       )}
 
-      <RepositoryAddForm onRegistered={refresh} />
+      {hasMachine && <RepositoryAddForm onRegistered={refresh} />}
 
       {repositories === null && !listError && <p className="muted">Reading…</p>}
       {repositories && repositories.length === 0 && (
@@ -343,7 +349,8 @@ export function RepositoriesSection() {
             // Not "not set up" while the first read is still out: a row that
             // flashed the refusal on every mount would be claiming a state
             // nobody is in.
-            const notSetUp = !checkout && !checkoutsLoading && checkoutsError === null;
+            const notSetUp =
+              hasMachine && !checkout && !checkoutsLoading && checkoutsError === null;
 
             return (
               <li key={repository.id} className="repo-item">
@@ -410,16 +417,20 @@ export function RepositoriesSection() {
                 ) : (
                   <>
                     <dl className="detail-list">
-                      <dt>Path</dt>
-                      <dd>
-                        {checkout ? (
-                          <code>{checkout.path}</code>
-                        ) : notSetUp ? (
-                          <span className="repo-not-set-up">{NOT_SET_UP}</span>
-                        ) : (
-                          <span className="muted">Reading…</span>
-                        )}
-                      </dd>
+                      {hasMachine && (
+                        <>
+                          <dt>Path</dt>
+                          <dd>
+                            {checkout ? (
+                              <code>{checkout.path}</code>
+                            ) : notSetUp ? (
+                              <span className="repo-not-set-up">{NOT_SET_UP}</span>
+                            ) : (
+                              <span className="muted">Reading…</span>
+                            )}
+                          </dd>
+                        </>
+                      )}
                       <dt>Default branch</dt>
                       <dd>{repository.defaultBranch}</dd>
                       {checkout && (
@@ -430,20 +441,24 @@ export function RepositoriesSection() {
                           </dd>
                         </>
                       )}
-                      <dt>Remote</dt>
-                      <dd>
-                        {notSetUp ? (
-                          <span className="muted">Not known on this computer</span>
-                        ) : !remote || remote.status === "loading" ? (
-                          <span className="muted">Checking…</span>
-                        ) : remote.status === "error" ? (
-                          <span className="muted">Could not be determined.</span>
-                        ) : remote.info.remoteUrl === null ? (
-                          <span className="muted">No remote configured</span>
-                        ) : (
-                          <code>{remote.info.remoteUrl}</code>
-                        )}
-                      </dd>
+                      {hasMachine && (
+                        <>
+                          <dt>Remote</dt>
+                          <dd>
+                            {notSetUp ? (
+                              <span className="muted">Not known on this computer</span>
+                            ) : !remote || remote.status === "loading" ? (
+                              <span className="muted">Checking…</span>
+                            ) : remote.status === "error" ? (
+                              <span className="muted">Could not be determined.</span>
+                            ) : remote.info.remoteUrl === null ? (
+                              <span className="muted">No remote configured</span>
+                            ) : (
+                              <code>{remote.info.remoteUrl}</code>
+                            )}
+                          </dd>
+                        </>
+                      )}
                     </dl>
                     {remote?.status === "ready" &&
                       remote.info.remoteUrl !== null &&

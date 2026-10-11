@@ -8,6 +8,7 @@ import {
   toRimaiaError,
   updateTask,
 } from "../../lib/commands";
+import { useHasMachine } from "../../lib/capabilities";
 import { subscribeToSettingsChanged } from "../../lib/events";
 import type {
   Catalogue,
@@ -209,6 +210,7 @@ export function StrategySection({
   const [error, setError] = useState<RimaiaError | null>(null);
   const [saving, setSaving] = useState(false);
   const { catalogue, providerDisplayName } = useStrategyCatalogue();
+  const hasMachine = useHasMachine();
 
   const plan = parseStrategyPlan(strategyPlan);
   // A proposal the planner still owns. Accepting it is `strategy_source`
@@ -423,9 +425,13 @@ export function StrategySection({
           <p className="strategy-failure-message">
             {`The planner did not produce a strategy (${plan.run?.error ?? "no reason recorded"}). This task runs on the default strategy.`}
           </p>
-          <button type="button" disabled={saving} onClick={handlePlanNow}>
-            Plan now
-          </button>
+          {/* `plan_task_strategy` is this machine's (D32's amendment on the
+              planning commands); task 061 gives a browser its own button. */}
+          {hasMachine && (
+            <button type="button" disabled={saving} onClick={handlePlanNow}>
+              Plan now
+            </button>
+          )}
         </div>
       )}
     </section>

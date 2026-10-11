@@ -16,6 +16,8 @@ import {
 import { SortableContext, sortableKeyboardCoordinates } from "@dnd-kit/sortable";
 
 import { TaskCard } from "./TaskCard";
+import { ClientCapabilitiesProvider } from "../../lib/capabilities";
+import { BROWSER, connected } from "../../test/capabilities";
 import type {
   CheckoutView,
   DetectedOpenInTarget,
@@ -1168,6 +1170,59 @@ describe("TaskCard", () => {
       );
 
       expect(screen.queryByRole("button", { name: "Open in" })).toBeNull();
+    });
+  });
+
+  describe("outside solo (task 050)", () => {
+    const WORKTREES: LocalWorktree[] = [{ taskId: "task-1", path: "/data/worktrees/my repo/task-1" }];
+
+    function renderUnder(capabilities: Parameters<typeof ClientCapabilitiesProvider>[0]["capabilities"]) {
+      render(
+        <ClientCapabilitiesProvider capabilities={capabilities}>
+          <DndHarness>
+            <SortableContext items={["task-1"]}>
+              <TaskCard
+                task={task()}
+                repositoryName="rimaia"
+                now={NOW}
+                selected={false}
+                onSelect={vi.fn()}
+                registerCardRef={vi.fn()}
+                onArrowNavigate={vi.fn()}
+              />
+            </SortableContext>
+          </DndHarness>
+        </ClientCapabilitiesProvider>,
+      );
+    }
+
+    it.each([
+      ["browser", BROWSER],
+      ["connected", connected("runner-studio")],
+    ])("renders no Open in… on a card outside solo (%s)", async (_mode, capabilities) => {
+      mockBackend({
+        openInTargets: [{ target: "vs_code", label: "VS Code" }],
+        worktrees: WORKTREES,
+      });
+      renderUnder(capabilities);
+      await screen.findByText("Wire up the board");
+      // Every read the card makes is on its way by now: the repository lookup
+      // is the one that does not depend on a machine.
+      await waitFor(() => expect(mockInvoke).toHaveBeenCalledWith("list_repositories", undefined));
+
+      expect(screen.queryByRole("button", { name: "Open in" })).toBeNull();
+      expect(mockInvoke).not.toHaveBeenCalledWith("list_open_in_targets", undefined);
+      expect(mockInvoke).not.toHaveBeenCalledWith("list_local_worktrees", undefined);
+    });
+
+    it("renders no Run now and reads no machine state in a browser", async () => {
+      mockBackend({ checkouts: CONSENTED });
+      renderUnder(BROWSER);
+      await waitFor(() => expect(mockInvoke).toHaveBeenCalledWith("list_repositories", undefined));
+
+      expect(screen.queryByRole("button", { name: "Run now" })).toBeNull();
+      expect(screen.queryByText(/not set up on this computer/)).toBeNull();
+      expect(mockInvoke.mock.calls.map(([command]) => command)).toEqual(["list_repositories"]);
     });
   });
 });

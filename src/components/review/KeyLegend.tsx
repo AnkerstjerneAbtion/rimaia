@@ -11,11 +11,15 @@ export function KeyLegend({
   mode,
   noteOpen = false,
   emptyQueue = false,
+  worktreeHere = true,
 }: {
   mode: ReviewMode;
   noteOpen?: boolean;
   /** An empty queue has nothing to walk or decide, so only the way out is listed. */
   emptyQueue?: boolean;
+  /** False when the task on screen has its worktree on another machine (task
+   *  050): `w` does nothing there, so the legend does not list it. */
+  worktreeHere?: boolean;
 }) {
   const entries = noteOpen
     ? [
@@ -23,7 +27,10 @@ export function KeyLegend({
         { keys: ["Esc"], label: "cancel" },
       ]
     : REVIEW_KEYS.filter(
-        (entry) => entry.mode === mode && (!emptyQueue || entry.command === "show_digest"),
+        (entry) =>
+          entry.mode === mode &&
+          (!emptyQueue || entry.command === "show_digest") &&
+          (worktreeHere || entry.command !== "open_worktree"),
       );
   return (
     <ul className="review-legend" aria-label="Keyboard shortcuts">

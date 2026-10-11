@@ -92,6 +92,7 @@ function taskDetailFor(taskId: string, overrides: Partial<TaskDetail> = {}): Tas
   return {
     ...taskSummary({ id: taskId }),
     links: [],
+    worktreeRunner: null,
     dependsOn: [],
     lastRun: {
       id: `run-for-${taskId}`,

@@ -4,9 +4,11 @@ import type { ReactNode } from "react";
 import { useLocalWorktrees } from "../../hooks/useLocalWorktrees";
 import { useRepositories } from "../../hooks/useTasks";
 import { useReviewTarget } from "../../hooks/useReviewTarget";
+import { useClientCapabilities } from "../../lib/capabilities";
 import { approveTask, rejectTask, requestTaskChanges, toRimaiaError } from "../../lib/commands";
 import { isEditableTarget } from "../../lib/keyboard";
 import { openExternalUrl } from "../../lib/open";
+import { worktreeIsHere } from "../../lib/worktreeHere";
 import {
   affectedDependents,
   describeDeparture,
@@ -18,6 +20,7 @@ import type { ReviewCommand } from "../../lib/review";
 import type { RimaiaError, TaskSummary } from "../../types";
 import { ErrorBanner } from "../ErrorBanner";
 import { OpenInMenu } from "../board/OpenInMenu";
+import { WorktreeElsewhere } from "../WorktreeElsewhere";
 import { KeyLegend } from "./KeyLegend";
 import { NoteStep } from "./NoteStep";
 import type { NoteKind } from "./NoteStep";
@@ -82,9 +85,16 @@ export function ReviewQueue({
   const current =
     queue.find((task) => task.id === currentId) ?? (currentId === null ? (queue[0] ?? null) : null);
   const { target, error: targetError } = useReviewTarget(current?.id ?? null);
-  // Whether the card on screen has a worktree on this computer (task 066).
-  const { worktrees } = useLocalWorktrees();
-  const hasWorktree = current !== null && worktrees.has(current.id);
+  // Whether the card on screen has a worktree on this computer (task 066), and
+  // whether this computer is the machine that holds it (task 050): the view
+  // already reads `get_task` for the task on screen, so it has `worktreeRunner`
+  // with no new read. The rule is the panel's, one function. A client with no
+  // machine reads no worktree records (`list_local_worktrees` stays local).
+  const capabilities = useClientCapabilities();
+  const { worktrees } = useLocalWorktrees(capabilities.mode !== "browser");
+  const worktreeRunner = target?.task.worktreeRunner ?? null;
+  const here = worktreeIsHere({ worktreeRunner }, capabilities);
+  const hasWorktree = here && current !== null && worktrees.has(current.id);
 
   const select = useCallback((id: string | null) => {
     currentIdRef.current = id;
@@ -357,6 +367,7 @@ export function ReviewQueue({
                     />
                   )}
                 </div>
+                {!here && <WorktreeElsewhere runner={worktreeRunner} />}
                 {error && note === null && <ErrorBanner error={error} />}
                 {note && (
                   <NoteStep
@@ -375,7 +386,12 @@ export function ReviewQueue({
           </div>
         )}
       </div>
-      <KeyLegend mode="queue" noteOpen={note !== null} emptyQueue={queue.length === 0} />
+      <KeyLegend
+        mode="queue"
+        noteOpen={note !== null}
+        emptyQueue={queue.length === 0}
+        worktreeHere={here}
+      />
     </section>
   );
 }

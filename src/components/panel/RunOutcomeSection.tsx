@@ -1,6 +1,7 @@
 import { useState } from "react";
 
 import { runLabel } from "../../lib/board";
+import { useHasMachine } from "../../lib/capabilities";
 import { getRunLogPath, toRimaiaError } from "../../lib/commands";
 import type { ExitClass, RimaiaError, Run } from "../../types";
 import { ErrorBanner } from "../ErrorBanner";
@@ -72,6 +73,8 @@ function RunOutcomeDetails({ run }: { readonly run: Run }) {
   // transcript is this computer's file, derived from the run's ids.
   const [logPath, setLogPath] = useState<string | null>(null);
   const [pathError, setPathError] = useState<RimaiaError | null>(null);
+  // `get_run_log_path` names a file on this machine, and a browser has none.
+  const hasMachine = useHasMachine();
 
   async function handleCopyLogPath() {
     let path: string;
@@ -142,11 +145,13 @@ function RunOutcomeDetails({ run }: { readonly run: Run }) {
           </>
         )}
       </dl>
-      <div className="run-outcome-actions">
-        <button type="button" onClick={handleCopyLogPath}>
-          {copied ? "Copied" : "Copy log path"}
-        </button>
-      </div>
+      {hasMachine && (
+        <div className="run-outcome-actions">
+          <button type="button" onClick={handleCopyLogPath}>
+            {copied ? "Copied" : "Copy log path"}
+          </button>
+        </div>
+      )}
       {pathError && <ErrorBanner error={pathError} onDismiss={() => setPathError(null)} />}
     </>
   );

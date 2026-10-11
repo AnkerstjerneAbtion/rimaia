@@ -28,7 +28,7 @@ export interface SharedReadState<T> {
 export function createSharedRead<T>(
   read: () => Promise<T>,
   subscribe: (onChanged: () => void) => Promise<UnlistenFn>,
-): () => SharedReadState<T> {
+): (enabled?: boolean) => SharedReadState<T> {
   let state: { value: T | null; error: RimaiaError | null } = { value: null, error: null };
   let latest = 0;
   let unlisten: UnlistenFn | null = null;
@@ -80,12 +80,15 @@ export function createSharedRead<T>(
     state = { value: null, error: null };
   }
 
-  return function useSharedRead(): SharedReadState<T> {
+  return function useSharedRead(enabled = true): SharedReadState<T> {
     const [current, setCurrent] = useState(state);
     const reload = useCallback(() => {
       if (listeners.size > 0) refresh();
     }, []);
     useEffect(() => {
+      // Disabled: a client with no machine to read (task 050), which must not
+      // send the command at all.
+      if (!enabled) return;
       listeners.add(setCurrent);
       if (listeners.size === 1) start();
       else setCurrent(state);
@@ -93,7 +96,7 @@ export function createSharedRead<T>(
         listeners.delete(setCurrent);
         if (listeners.size === 0) stop();
       };
-    }, []);
+    }, [enabled]);
     return { ...current, reload };
   };
 }

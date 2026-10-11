@@ -24,6 +24,7 @@ import { isEditableTarget } from "../../lib/keyboard";
 import type { BoardCard, BoardColumns } from "../../lib/board";
 import type { BoardColumn, RimaiaError, Task, TaskSummary } from "../../types";
 import { useRepositories, useTasks } from "../../hooks/useTasks";
+import { useHasMachine } from "../../lib/capabilities";
 import { ErrorBanner } from "../ErrorBanner";
 import { BoardToolbar } from "./BoardToolbar";
 import { PlanPassPanel, usePlanPass } from "./PlanPassPanel";
@@ -212,6 +213,9 @@ export function rangeBetween(
 // ---------------------------------------------------------------------------
 
 export function Board() {
+  // `plan_task_strategy` and `plan_tasks_strategy` stay local (D32's amendment
+  // on the planning commands), so only a client with a machine offers them.
+  const hasMachine = useHasMachine();
   const [repositoryFilter, setRepositoryFilter] = useState<string | null>(null);
   // ADR-0025's archive, as a view of the same read rather than a second one:
   // `useTasks` flips `list_tasks`' filter and everything downstream — the
@@ -568,6 +572,7 @@ export function Board() {
         newTaskDisabled={repositories.length === 0}
         pickedCount={pickedTaskIds.size}
         planDisabled={planPass.running || repositories.length === 0}
+        showPlan={hasMachine}
         archiveDisabled={archiving}
         showArchive={showArchive}
         onToggleArchive={() => {

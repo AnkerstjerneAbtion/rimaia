@@ -28,12 +28,15 @@ const useCheckoutList = createSharedRead(listCheckouts, subscribeToRepositoriesC
  * `LocalChange::Checkouts`, on the same wire name as the board's (task 048).
  * Every payload means "re-read", including the lagged forwarder's empty array
  * (seam-contract D7). One read is shared by every component mounted at once.
+ *
+ * `enabled` is false where there is no machine (a browser, task 050): nothing
+ * is read and nothing is subscribed to, and the map stays empty.
  */
-export function useCheckouts(): UseCheckoutsResult {
-  const { value, error, reload } = useCheckoutList();
+export function useCheckouts(enabled = true): UseCheckoutsResult {
+  const { value, error, reload } = useCheckoutList(enabled);
   const checkouts = useMemo(
     () => new Map((value ?? []).map((checkout) => [checkout.repositoryId, checkout])),
     [value],
   );
-  return { checkouts, loading: value === null && error === null, error, reload };
+  return { checkouts, loading: enabled && value === null && error === null, error, reload };
 }

@@ -18,6 +18,10 @@ interface RunInfoSectionProps {
   readonly notSetUp: boolean;
   readonly lastRun: Run | null;
   readonly loading: boolean;
+  /** False where this client has no machine (task 050): a path on a computer
+   *  it cannot see is not "not created yet", and the worktree section below
+   *  names the machine that has it. */
+  readonly showWorktree?: boolean;
 }
 
 /**
@@ -33,6 +37,7 @@ export function RunInfoSection({
   notSetUp,
   lastRun,
   loading,
+  showWorktree = true,
 }: RunInfoSectionProps) {
   return (
     <section className="task-detail-section">
@@ -46,16 +51,20 @@ export function RunInfoSection({
             <span className="muted">Not created yet — the first run creates it (task 007).</span>
           )}
         </dd>
-        <dt>Worktree</dt>
-        <dd>
-          {worktreePath ? (
-            <code>{worktreePath}</code>
-          ) : notSetUp ? (
-            <span className="muted">Not set up on this computer.</span>
-          ) : (
-            <span className="muted">Not created yet.</span>
-          )}
-        </dd>
+        {showWorktree && (
+          <>
+            <dt>Worktree</dt>
+            <dd>
+              {worktreePath ? (
+                <code>{worktreePath}</code>
+              ) : notSetUp ? (
+                <span className="muted">Not set up on this computer.</span>
+              ) : (
+                <span className="muted">Not created yet.</span>
+              )}
+            </dd>
+          </>
+        )}
         <dt>Last run</dt>
         <dd>
           {loading && <span className="muted">Loading…</span>}

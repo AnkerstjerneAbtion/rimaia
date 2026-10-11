@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 
 import { useCheckouts } from "../../hooks/useCheckouts";
+import { useHasMachine } from "../../lib/capabilities";
 import { useLocalWorktrees } from "../../hooks/useLocalWorktrees";
 import { getTask, toRimaiaError } from "../../lib/commands";
 import { subscribeToTasksChanged } from "../../lib/events";
@@ -85,8 +86,15 @@ function TaskDetailPanelBody({
   const panelRef = useRef<HTMLElement>(null);
   // This computer's half of the task (task 066): its repository's checkout
   // and where its worktree is, joined by id.
-  const { checkouts, loading: checkoutsLoading, error: checkoutsError } = useCheckouts();
-  const { worktrees } = useLocalWorktrees();
+  // Both are this machine's (`list_checkouts`, `list_local_worktrees`), so a
+  // browser reads neither (task 050).
+  const hasMachine = useHasMachine();
+  const {
+    checkouts,
+    loading: checkoutsLoading,
+    error: checkoutsError,
+  } = useCheckouts(hasMachine);
+  const { worktrees } = useLocalWorktrees(hasMachine);
   const checkout = checkouts.get(task.repositoryId);
   const worktreePath = worktrees.get(task.id) ?? null;
 
@@ -294,6 +302,7 @@ function TaskDetailPanelBody({
             notSetUp={!checkoutsLoading && checkoutsError === null && checkout === undefined}
             lastRun={detail?.lastRun ?? null}
             loading={detailLoading}
+            showWorktree={hasMachine}
           />
 
           {/* Task 008's own section: the last run's outcome (exit class, cost,
@@ -329,7 +338,7 @@ function TaskDetailPanelBody({
             Workspace
           </h3>
 
-          <WorktreeSection taskId={task.id} />
+          <WorktreeSection taskId={task.id} worktreeRunner={detail?.worktreeRunner ?? null} />
 
           {/* Archive above delete, and rendered first, because it is the
               answer to the question most people arrive here with. Deleting is

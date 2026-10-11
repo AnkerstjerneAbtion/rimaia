@@ -26,12 +26,14 @@ const useWorktreeList = createSharedRead(listLocalWorktrees, subscribeToTasksCha
  * `LocalChange::Worktrees`, on the same wire name as the board's (task 048).
  * Every payload means "re-read", including the lagged forwarder's empty array
  * (seam-contract D7). One read is shared by every component mounted at once.
+ *
+ * `enabled` is false where there is no machine (a browser, task 050).
  */
-export function useLocalWorktrees(): UseLocalWorktreesResult {
-  const { value, error, reload } = useWorktreeList();
+export function useLocalWorktrees(enabled = true): UseLocalWorktreesResult {
+  const { value, error, reload } = useWorktreeList(enabled);
   const worktrees = useMemo(
     () => new Map((value ?? []).map((entry) => [entry.taskId, entry.path])),
     [value],
   );
-  return { worktrees, loading: value === null && error === null, error, reload };
+  return { worktrees, loading: enabled && value === null && error === null, error, reload };
 }

@@ -9,6 +9,7 @@ import { useSortable } from "@dnd-kit/sortable";
 import { CSS } from "@dnd-kit/utilities";
 
 import { cardBadge, relativeTime } from "../../lib/board";
+import { useClientCapabilities } from "../../lib/capabilities";
 import { PING_PONG_TEXT, finishedLoop, reviewLoopText } from "../../lib/review";
 import { getQueueStatus, listRepositories, startRun, toRimaiaError } from "../../lib/commands";
 import {
@@ -198,10 +199,13 @@ function loadQueueStatus() {
  * three publishes the Runs view refreshes on: a task moving or ending, or the
  * switch itself (`settings:changed` — `queue_state` lives there).
  */
-function useQueueLookup(): ReadonlyMap<string, QueueEntry> | null {
+function useQueueLookup(enabled: boolean): ReadonlyMap<string, QueueEntry> | null {
   const [lookup, setLookup] = useState(queueCache);
 
   useEffect(() => {
+    // `get_queue_status` reads this machine's queue, which a browser has none
+    // of (task 050): it must not be sent.
+    if (!enabled) return;
     queueSubscribers.add(setLookup);
     loadQueueStatus();
 
@@ -271,7 +275,7 @@ function useQueueLookup(): ReadonlyMap<string, QueueEntry> | null {
         queueUnlistenRunner = null;
       }
     };
-  }, []);
+  }, [enabled]);
 
   return lookup;
 }
@@ -559,9 +563,20 @@ export function TaskCard({
     registerCardRef(task.id, element);
   }
 
+  // What this client can do decides which of the card's controls exist. Run
+  // now and the queue are this machine's (`start_task_run`, `get_queue_status`:
+  // task 069 deletes the first gate with its runner picker); Open in is solo's
+  // alone, because the card names no runner (`TaskSummary`, D12) and so cannot
+  // tell whose worktree it would open. The panel and the review view can.
+  const { mode } = useClientCapabilities();
+  const hasMachine = mode !== "browser";
   const repositories = useRepositoryLookup();
-  const { checkouts, loading: checkoutsLoading, error: checkoutsError } = useCheckouts();
-  const { worktrees } = useLocalWorktrees();
+  const {
+    checkouts,
+    loading: checkoutsLoading,
+    error: checkoutsError,
+  } = useCheckouts(hasMachine);
+  const { worktrees } = useLocalWorktrees(mode === "solo");
   // Unknown, never "not set up", until this computer's read has answered.
   const runNow = runNowState(
     task,
@@ -579,7 +594,7 @@ export function TaskCard({
   // `AlreadyInFlight`/`DependencyNotSatisfied`/`NeedsAttention` for a task in
   // one of those states — never for `idle` — so gating on `idle` costs
   // nothing this task's own scheduler code could otherwise show here.
-  const queuePlan = useQueueLookup();
+  const queuePlan = useQueueLookup(hasMachine);
   const queueEntry =
     task.column === "ready" && task.runState === "idle" ? (queuePlan?.get(task.id) ?? null) : null;
 
@@ -749,7 +764,7 @@ export function TaskCard({
             disk. A task that has never run here has no worktree and shows no
             control at all, which is the normal state of most of the board
             rather than something to report. */}
-        {worktrees.has(task.id) && (
+        {mode === "solo" && worktrees.has(task.id) && (
           <OpenInMenu taskId={task.id} onError={setRunError} />
         )}
         {/* Task 008's "Run now", isolated from the drag/select machinery
@@ -758,17 +773,19 @@ export function TaskCard({
             run, never lift the card or open the panel underneath it. The two
             stoppers sit on the button itself rather than on a wrapper, so the
             explanations below stay part of the card's drag surface. */}
-        <button
-          type="button"
-          className="task-card-run-button"
-          disabled={runNow.kind !== "ready" || starting}
-          title={runNow.kind === "blocked" ? runNow.reason : undefined}
-          onPointerDown={(event) => event.stopPropagation()}
-          onKeyDown={(event) => event.stopPropagation()}
-          onClick={handleRunNow}
-        >
-          {starting ? "Starting…" : runNow.kind === "running" ? "Running…" : "Run now"}
-        </button>
+        {hasMachine && (
+          <button
+            type="button"
+            className="task-card-run-button"
+            disabled={runNow.kind !== "ready" || starting}
+            title={runNow.kind === "blocked" ? runNow.reason : undefined}
+            onPointerDown={(event) => event.stopPropagation()}
+            onKeyDown={(event) => event.stopPropagation()}
+            onClick={handleRunNow}
+          >
+            {starting ? "Starting…" : runNow.kind === "running" ? "Running…" : "Run now"}
+          </button>
+        )}
         </div>
       </div>
 
@@ -777,7 +794,9 @@ export function TaskCard({
           Not queued — {QUEUE_SKIP_LABELS[queueEntry.skip]}
         </p>
       )}
-      {runNow.kind === "blocked" && <p className="task-card-run-locked muted">{runNow.reason}</p>}
+      {hasMachine && runNow.kind === "blocked" && (
+        <p className="task-card-run-locked muted">{runNow.reason}</p>
+      )}
       {runError && <p className="task-card-run-error">{runError.message}</p>}
     </article>
   );
