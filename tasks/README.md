@@ -64,7 +64,7 @@ reviewable in the app afterwards.
 | 51 | [047](047-identity.md) | Identity: sign-in, sessions and tokens | v0.5 | 046 | #34 |
 | 52 | [048](048-events-over-sse.md) | Change events over SSE, filtered by team | v0.5 | 047 | #34 |
 | 53 | [049](049-frontend-transport.md) | A frontend transport per command kind | v0.5 | 048, 028, 017 | #34 |
-| 54 | [050](050-the-web-shell.md) | The web shell | v0.5 | 049 | — |
+| 54 | [050](050-the-web-shell.md) | The web shell | v0.5 | 049 | #34 |
 | 55 | [051](051-teams-invitations-and-roles.md) | Teams, invitations and roles | v0.5 | 050, 073 | — |
 | 56 | [052](052-the-runner-protocol-and-an-http-board-adapter.md) | The runner protocol and an HTTP board adapter | v0.5 | 051 | — |
 | 57 | [070](070-a-context-that-acts-for-nobody.md) | A context that acts for nobody | v0.5 | 045, 046, 048, 051, 052 | — |
