@@ -17,6 +17,7 @@
 //! type across its boundary.
 
 pub mod adopt;
+pub mod identity;
 pub mod machine;
 pub mod queue;
 pub mod store;
