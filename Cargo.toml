@@ -105,6 +105,11 @@ subtle = "2"
 tempfile = "3"
 thiserror = "2"
 tokio = { version = "1", features = ["full"] }
+# Task 048's `ReceiverStream`, which turns a stream's pump channel into the
+# `Stream` axum's `Sse` takes. `rimaia-server` only, no feature: the type sits
+# outside every gate in 0.1.19, which `rmcp` and `sqlx-core` already resolve
+# (seam-contract D34's amendment `048's ask, answered`).
+tokio-stream = { version = "0.1", default-features = false }
 # Task 046's request tracing in `rimaia-server`, with no feature here: each
 # crate names the features it takes, `trace` in 046 and `cors` and `fs` in 050
 # (seam-contract D34). Already in the lock through `reqwest`.

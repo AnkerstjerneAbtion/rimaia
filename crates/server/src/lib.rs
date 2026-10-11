@@ -12,7 +12,9 @@
 //! `identity::authenticate::SessionsAndTokens`: a browser session with its
 //! CSRF header, or a connected desktop's `rmd_` token, and nobody else, on the
 //! board routes. [`auth`] adds the sign-in routes, which are not board
-//! commands, and [`serve`] is the one way any of it is served.
+//! commands, `GET /api/v1/events` streams the board's change events to the
+//! same callers (task 048), and [`serve`] is the one way any of it is
+//! served.
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -23,7 +25,7 @@ use axum::extract::{FromRequestParts, MatchedPath, State};
 use axum::http::request::Parts;
 use axum::http::{header, HeaderValue, Request, StatusCode};
 use axum::response::{IntoResponse, Response};
-use axum::routing::post;
+use axum::routing::{get, post};
 use axum::{Json, Router};
 use rimaia_core::api::{self, protocol, Authenticate, BoardHost, Caller, Effect, COMMANDS};
 use rimaia_core::identity::pending::{DesktopCodes, PendingSignIns};
@@ -36,6 +38,7 @@ use tower_http::trace::TraceLayer;
 pub mod auth;
 mod caller;
 pub mod config;
+mod events;
 pub mod github;
 
 /// What every request reaches: the board host `dispatch` runs against,
@@ -103,7 +106,7 @@ fn http_span<B>(request: &Request<B>) -> tracing::Span {
 }
 
 /// One route per board row, nested under `/api/v1` beside the two JSON auth
-/// routes, whose fallbacks answer in the error shape: a name with no route is
+/// routes and the event stream, whose fallbacks answer in the error shape: a name with no route is
 /// `404 not_found` and a method other than `POST` is `400 invalid`, never
 /// axum's plain text and never a page. The three sign-in navigations sit at
 /// the root.
@@ -127,6 +130,7 @@ pub fn router(state: ServerState) -> Router {
         );
     }
     let commands = commands
+        .route("/events", get(events::stream))
         .merge(auth::api_routes())
         .route_layer(TraceLayer::new_for_http().make_span_with(http_span::<axum::body::Body>))
         .fallback(|| async { ApiError(Error::not_found("there is no such board command")) })
