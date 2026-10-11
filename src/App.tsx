@@ -8,11 +8,13 @@ import { useTasks } from "./hooks/useTasks";
 import { subscribeToSignedOut, subscribeToStaleBundle } from "./lib/auth";
 import { useClientCapabilities } from "./lib/capabilities";
 import { getAccount, getAppInfo, getReviewDigest, listTeams, toRimaiaError } from "./lib/commands";
-import { subscribeToEventStreamFailure } from "./lib/events";
+import { subscribeToEventStreamFailure, subscribeToTeamsChanged } from "./lib/events";
+import { keptInvitation, leaveInvitationPage, takeInvitationFromLocation } from "./lib/invitation";
 import { openingView, reviewQueue } from "./lib/review";
 import { chooseTeam, fallbackTeam, startingTeam } from "./lib/team";
 import { TeamsProvider } from "./lib/teams";
 import { AccountView } from "./views/AccountView";
+import { InviteView } from "./views/InviteView";
 import { BoardView } from "./views/BoardView";
 import { ReviewView } from "./views/ReviewView";
 import { AnalyticsView } from "./views/AnalyticsView";
@@ -36,6 +38,18 @@ function App() {
   return mode === "solo" ? <Shell /> : <SignedInApp />;
 }
 
+/** Which team to show after `teams` was read again: `select` when listed,
+ *  else the one on screen while it still is, else the fallback. */
+function pickTeam(
+  teams: readonly TeamListing[],
+  select: string | undefined,
+  onScreen: string | null,
+): string | undefined {
+  if (select !== undefined && teams.some((team) => team.id === select)) return select;
+  if (onScreen !== null && teams.some((team) => team.id === onScreen)) return onScreen;
+  return fallbackTeam(teams)?.id;
+}
+
 type Phase =
   | { readonly kind: "loading" }
   | { readonly kind: "signed-out" }
@@ -52,6 +66,13 @@ type Phase =
  * through `src/lib/auth.ts`: no component below handles it.
  */
 function SignedInApp() {
+  // `/invite#<token>` (task 051): the token moves into session storage and the
+  // fragment leaves the address bar here, before the first request below.
+  // A token kept across a sign-in brings the person back to it on `/`.
+  const [inviting, setInviting] = useState(
+    () => takeInvitationFromLocation() || keptInvitation() !== null,
+  );
+  const [invitation] = useState(keptInvitation);
   const [phase, setPhase] = useState<Phase>({ kind: "loading" });
   const [stale, setStale] = useState(false);
   // The team on screen, readable from the stream's callback, which outlives
@@ -130,6 +151,44 @@ function SignedInApp() {
     );
   }, []);
 
+  // After a write that changed the person's teams, or a `teams:changed`: the
+  // list again, and the team on screen kept, chosen, or fallen back from.
+  const reload = useCallback(async (select?: string) => {
+    const teams = await listTeams();
+    const next = pickTeam(teams, select, onScreen.current);
+    if (next === undefined) {
+      setPhase({
+        kind: "failed",
+        error: { code: "invalid", message: "You are not in any team yet." },
+      });
+      return;
+    }
+    if (next !== onScreen.current) chooseTeam(next);
+    setPhase({ kind: "ready", teams, currentId: next });
+  }, []);
+
+  // Every stream opens with `teams:changed []`, and a team write announces
+  // itself on it, so the switcher re-reads whenever the set may have moved.
+  const ready = phase.kind === "ready";
+  useEffect(() => {
+    if (!ready) return;
+    let active = true;
+    let unlisten: (() => void) | null = null;
+    subscribeToTeamsChanged(() => {
+      reload().catch(() => {});
+    }).then(
+      (stop) => {
+        if (active) unlisten = stop;
+        else stop();
+      },
+      () => {},
+    );
+    return () => {
+      active = false;
+      unlisten?.();
+    };
+  }, [ready, reload]);
+
   if (phase.kind === "loading") return <div className="app" />;
   if (phase.kind === "signed-out") return <SignInView />;
   if (phase.kind === "failed") {
@@ -141,10 +200,25 @@ function SignedInApp() {
   }
 
   const current = phase.teams.find((team) => team.id === phase.currentId) as TeamListing;
+  const closeInvitation = () => {
+    setInviting(false);
+    leaveInvitationPage();
+  };
   return (
-    <TeamsProvider value={{ teams: phase.teams, current, choose }}>
-      {/* Keyed by team, so no open panel keeps an id from the team it left. */}
-      <Shell key={current.id} staleBundle={stale} />
+    <TeamsProvider value={{ teams: phase.teams, current, choose, reload }}>
+      {inviting ? (
+        <InviteView
+          token={invitation ?? ""}
+          onJoined={(team) => {
+            closeInvitation();
+            reload(team.id).catch(() => {});
+          }}
+          onClose={closeInvitation}
+        />
+      ) : (
+        /* Keyed by team, so no open panel keeps an id from the team it left. */
+        <Shell key={current.id} staleBundle={stale} />
+      )}
     </TeamsProvider>
   );
 }

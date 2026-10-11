@@ -43,7 +43,7 @@ interface Capture {
 }
 
 interface Click {
-  role: "button" | "checkbox" | "combobox";
+  role: "button" | "checkbox" | "combobox" | "menuitem";
   name: string | RegExp;
   choose?: string;
 }
@@ -71,6 +71,11 @@ const LOOP_NEWEST_RUN: Click = { role: "button", name: /^Review · #7/ };
 // worktrees are on other machines.
 const SWITCHER: Click = { role: "button", name: /^Team/ };
 const ELSEWHERE_CARD: Click = { role: "button", name: /Add the doctor banner to every view/ };
+
+// Task 051: opening the switcher's form and the panel's copy are reads; the
+// form's Create and the copy's own button are never named here.
+const NEW_TEAM: Click = { role: "menuitem", name: "New team…" };
+const COPY_TO_TEAM: Click = { role: "button", name: "Copy to team…" };
 
 const CAPTURES: Capture[] = [
   { scenario: "busy", view: "board", ...BOARD },
@@ -176,6 +181,46 @@ const CAPTURES: Capture[] = [
   },
   { scenario: "browser", view: "account", sidebar: "Account", landmark: ".account-view" },
   { scenario: "browser-one-team", view: "board", ...BOARD },
+  // Task 051: the Team section as an owner and as a member, the delete
+  // confirmations, the accept page, New team and Copy to team.
+  {
+    scenario: "team-owner",
+    view: "settings-team",
+    sidebar: "Settings",
+    landmark: ".team-section",
+    tall: true,
+  },
+  { scenario: "team-member", view: "settings-team", sidebar: "Settings", landmark: ".team-section" },
+  {
+    scenario: "team-owner",
+    view: "delete-team",
+    sidebar: "Settings",
+    landmark: ".team-delete",
+    reveal: true,
+  },
+  {
+    scenario: "browser",
+    view: "account-delete",
+    sidebar: "Account",
+    landmark: "#account-delete",
+    reveal: true,
+  },
+  { scenario: "invite", view: "invite", sidebar: null, ready: ".invite-view", landmark: ".invite-details" },
+  {
+    scenario: "team-owner",
+    view: "new-team",
+    ...BOARD,
+    clicks: [SWITCHER, NEW_TEAM],
+    landmark: ".team-switcher-new",
+  },
+  {
+    scenario: "team-owner",
+    view: "task-copy",
+    ...BOARD,
+    clicks: [ELSEWHERE_CARD, COPY_TO_TEAM],
+    landmark: ".task-copy-actions",
+    reveal: true,
+  },
 ];
 
 for (const capture of CAPTURES) {

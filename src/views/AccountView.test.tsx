@@ -127,7 +127,12 @@ describe("the account page", () => {
     setCurrentTeam(PERSONAL.id);
     render(
       <ClientCapabilitiesProvider capabilities={BROWSER}>
-        <TeamsProvider value={{ teams: [PERSONAL, ACME], current: PERSONAL, choose: () => {} }}>
+        <TeamsProvider value={{
+          teams: [PERSONAL, ACME],
+          current: PERSONAL,
+          choose: () => {},
+          reload: async () => {},
+        }}>
           <AccountView />
         </TeamsProvider>
       </ClientCapabilitiesProvider>,

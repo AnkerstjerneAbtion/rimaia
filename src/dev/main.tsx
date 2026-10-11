@@ -9,6 +9,8 @@ import {
   setCommandTransports,
 } from "../lib/commands";
 import { setEventTransport, setEventTransports } from "../lib/events";
+import { INVITATION_STORAGE_KEY } from "../lib/invitation";
+import { TEAM_STORAGE_KEY } from "../lib/team";
 import { buildScenario, isScenarioName, SCENARIO_NAMES } from "./fixtures/seed";
 import { createFixtureTransports } from "./fixtures/transport";
 
@@ -26,6 +28,16 @@ const requested = new URLSearchParams(window.location.search).get("scenario") ??
 if (isScenarioName(requested)) {
   const scenario = buildScenario(requested);
   const transports = createFixtureTransports(scenario);
+  // What a person's own browser would hold when they arrive (task 051): the
+  // team they last chose, and a link's token a sign-in kept. Cleared when a
+  // scenario has none, so one scenario's leftovers never show in another's.
+  if (scenario.currentTeam) window.localStorage.setItem(TEAM_STORAGE_KEY, scenario.currentTeam);
+  else window.localStorage.removeItem(TEAM_STORAGE_KEY);
+  if (scenario.keptInvitation) {
+    window.sessionStorage.setItem(INVITATION_STORAGE_KEY, scenario.keptInvitation);
+  } else {
+    window.sessionStorage.removeItem(INVITATION_STORAGE_KEY);
+  }
   if (scenario.capabilities.mode === "browser") {
     // A browser scenario refuses what a browser refuses, so a local command
     // the interface still sends shows in the picture as the banner it would be.

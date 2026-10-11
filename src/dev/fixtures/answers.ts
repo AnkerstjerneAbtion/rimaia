@@ -37,6 +37,7 @@ import type {
   WorktreeInventory,
   WorktreeStatus,
 } from "../../types";
+import { FIXTURE_NOW } from "./constants";
 import { reviewLevel } from "./seed";
 import type { Scenario } from "./seed";
 
@@ -63,6 +64,25 @@ export function refuse(code: ErrorCode, message: string): never {
 }
 
 const unsupported = (reason: string): Answer => () => refuse("internal", reason);
+
+/** What a solo board answers every team write and the invitation preview
+ *  (task 051 Scope 10). */
+const SOLO_HAS_ONE_TEAM = "a solo board has one team: teams need a Rimaia server";
+
+/** The one answer every unusable invitation token gets (task 051 Scope 5). */
+const INVALID_LINK = "this invitation link is not valid any more: ask a team owner for a new one";
+
+/**
+ * A team write: solo's refusal in solo, `unauthenticated` for a signed-out
+ * scenario, and `answer` otherwise, which changes nothing (task 051).
+ */
+function teamWrite<T>(answer: (scenario: Scenario, args: Args) => T): Answer {
+  return (args, s) => {
+    if (s.capabilities.mode === "solo") refuse("invalid", SOLO_HAS_ONE_TEAM);
+    if (s.account === null) refuse("unauthenticated", "Sign in to continue.");
+    return answer(s, args);
+  };
+}
 
 /** What the solo shell answers every account command (task 047). */
 const noAccounts: Answer = () => refuse("invalid", "Accounts exist only on a Rimaia server.");
@@ -531,6 +551,62 @@ export const ANSWERS: Record<string, Answer> = {
   list_teams: (_args, s) => s.teams,
   list_runners: (_args, s) => s.runners,
   unpair_runner: done,
+
+  // --- teams, invitations and roles (task 051) ------------------------------
+  // Reads answer from the seed; writes answer without changing it, so a new
+  // team or a joined one never joins the seed's `list_teams`.
+  create_team: teamWrite((_s, args) => ({
+    id: "team-new",
+    name: String(args.name),
+    role: "owner",
+    personal: false,
+    memberCount: 1,
+    ownerCount: 1,
+  })),
+  list_team_members: (args, s) => s.teamMembers[String(args.teamId)] ?? [],
+  set_member_role: teamWrite(() => undefined),
+  remove_member: teamWrite(() => undefined),
+  leave_team: teamWrite(() => undefined),
+  create_invitation: teamWrite((s, args) => ({
+    invitation: {
+      id: "invitation-new",
+      teamId: String(args.teamId),
+      role: args.role === "owner" ? "owner" : "member",
+      status: "pending",
+      createdBy: s.account?.id ?? null,
+      createdByLogin: s.account?.login ?? null,
+      createdAt: FIXTURE_NOW,
+      expiresAt: new Date(Date.parse(FIXTURE_NOW) + 7 * 24 * 60 * 60 * 1000).toISOString(),
+      acceptedBy: null,
+      acceptedByLogin: null,
+      acceptedAt: null,
+      revokedAt: null,
+    },
+    token: "rmi_fixture-token-shown-once",
+  })),
+  list_invitations: (args, s) => s.invitations[String(args.teamId)] ?? [],
+  revoke_invitation: teamWrite(() => undefined),
+  preview_invitation: teamWrite((s) => s.invitationPreview ?? refuse("not_found", INVALID_LINK)),
+  accept_invitation: teamWrite((s) => {
+    const preview = s.invitationPreview ?? refuse("not_found", INVALID_LINK);
+    return {
+      id: "team-joined",
+      name: preview.teamName,
+      role: preview.role,
+      personal: false,
+      memberCount: 2,
+      ownerCount: 1,
+    };
+  }),
+  list_copy_targets: (_args, s) => s.copyTargets,
+  copy_task_to_team: teamWrite((s, args) => ({
+    ...findTask(s, args.taskId),
+    id: "task-copy",
+    repositoryId: String(args.repositoryId),
+    column: "not_ready",
+  })),
+  delete_team: teamWrite(() => undefined),
+  delete_account: teamWrite(() => undefined),
 
   // --- doctor and onboarding -------------------------------------------
   run_doctor: (_args, s) => s.doctor,

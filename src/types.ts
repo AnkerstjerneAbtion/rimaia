@@ -2057,14 +2057,14 @@ export interface TaskConsent {
 // (task 050).
 // ---------------------------------------------------------------------------
 
-/** Mirrors `rimaia_core::identity::Role`. */
-export type TeamRole = "owner" | "member";
+/** Mirrors `rimaia_core::identity::Role` (ADR-0029 point 3). */
+export type Role = "owner" | "member";
 
 /** Mirrors `rimaia_core::identity::account::AccountTeam`. */
 export interface AccountTeam {
   id: string;
   name: string;
-  role: TeamRole;
+  role: Role;
 }
 
 /** Mirrors `rimaia_core::identity::account::CurrentCredential`: the session or
@@ -2133,9 +2133,75 @@ export interface PairingCode {
 export interface TeamListing {
   id: string;
   name: string;
-  role: TeamRole;
+  role: Role;
   /** The caller's own personal team, which the switcher falls back to. */
   personal: boolean;
+  /** How many people belong to it, the caller included (task 051). */
+  memberCount: number;
+  /** How many of them are owners: with `personal`, what the account page
+   *  reads to name the teams that block deleting the account. */
+  ownerCount: number;
+}
+
+// ---------------------------------------------------------------------------
+// Teams, invitations and roles (task 051, ADR-0029). Only a Rimaia server
+// manages teams: a solo board refuses every write here.
+// ---------------------------------------------------------------------------
+
+/** Mirrors `rimaia_core::teams::members::TeamMember`. */
+export interface TeamMember {
+  userId: string;
+  login: string;
+  avatarUrl: string | null;
+  role: Role;
+  joinedAt: string;
+  /** The person a personal team belongs to: never removed, demoted or
+   *  allowed to leave. */
+  isPersonalOwner: boolean;
+}
+
+/** Mirrors `rimaia_core::teams::invitations::InvitationStatus`. */
+export type InvitationStatus = "pending" | "accepted" | "expired" | "revoked";
+
+/** Mirrors `rimaia_core::teams::invitations::Invitation`. Never its token. */
+export interface Invitation {
+  id: string;
+  teamId: string;
+  role: Role;
+  status: InvitationStatus;
+  createdBy: string | null;
+  createdByLogin: string | null;
+  createdAt: string;
+  expiresAt: string;
+  /** Who used it: the team's record of who let whom in. */
+  acceptedBy: string | null;
+  acceptedByLogin: string | null;
+  acceptedAt: string | null;
+  revokedAt: string | null;
+}
+
+/** Mirrors `rimaia_core::teams::invitations::CreatedInvitation`: the one
+ *  answer that carries the token. The link is `<origin>/invite#<token>`. */
+export interface CreatedInvitation {
+  invitation: Invitation;
+  token: string;
+}
+
+/** Mirrors `rimaia_core::teams::invitations::InvitationPreview`: what the
+ *  accept page shows before the person joins. */
+export interface InvitationPreview {
+  teamName: string;
+  role: Role;
+  invitedByLogin: string | null;
+  expiresAt: string;
+}
+
+/** Mirrors `rimaia_core::teams::copy::CopyTarget`: a team a task can be
+ *  copied into, with its repositories. */
+export interface CopyTarget {
+  teamId: string;
+  teamName: string;
+  repositories: { id: string; name: string }[];
 }
 
 /** Mirrors `rimaia_core::consent::eligibility::RunnerEligibility`. */

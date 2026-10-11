@@ -2,6 +2,7 @@ import { ErrorBanner } from "../components/ErrorBanner";
 import { getAccount } from "../lib/commands";
 import { useTeams } from "../lib/teams";
 import { AccountRunnersSection } from "./account/AccountRunnersSection";
+import { DeleteAccountSection } from "./account/DeleteAccountSection";
 import { SessionsSection } from "./account/SessionsSection";
 import { TokensSection } from "./account/TokensSection";
 import { YouSection } from "./account/YouSection";
@@ -33,6 +34,7 @@ export function AccountView() {
           <SessionsSection />
           <TokensSection teams={teams?.teams ?? []} />
           <AccountRunnersSection />
+          {teams && <DeleteAccountSection account={account} teams={teams.teams} />}
         </>
       )}
     </div>

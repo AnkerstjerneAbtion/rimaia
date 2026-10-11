@@ -16,6 +16,8 @@ export const PERSONAL: TeamListing = {
   name: "Personal",
   role: "owner",
   personal: true,
+  memberCount: 1,
+  ownerCount: 1,
 };
 
 export const ACME: TeamListing = {
@@ -23,6 +25,8 @@ export const ACME: TeamListing = {
   name: "Acme platform",
   role: "member",
   personal: false,
+  memberCount: 4,
+  ownerCount: 2,
 };
 
 export function account(overrides: Partial<Account> = {}): Account {

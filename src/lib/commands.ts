@@ -7,20 +7,24 @@ import type {
   Analytics,
   ApiTokenSummary,
   AppInfo,
-  ArchivedTask,
   ArchiveReport,
+  ArchivedTask,
   AutoCleanup,
   BoardColumn,
   CheckoutView,
-  ClientCapabilities,
   CleanupReport,
+  ClientCapabilities,
   ContentKind,
+  CopyTarget,
+  CreatedInvitation,
   CredentialStatus,
   DetectedOpenInTarget,
   DiffSummary,
   DoctorDismissal,
   DoctorReport,
   FindingStatus,
+  Invitation,
+  InvitationPreview,
   LocalWorktree,
   McpProbe,
   McpStatus,
@@ -51,6 +55,7 @@ import type {
   ReviewOutcome,
   ReviewSettings,
   RimaiaError,
+  Role,
   Run,
   RunCapacity,
   RunCostSummary,
@@ -82,6 +87,7 @@ import type {
   TaskReview,
   TaskSummary,
   TeamListing,
+  TeamMember,
   TranscriptPage,
   TranscriptSummary,
   UpdateRepositoryInput,
@@ -1498,6 +1504,85 @@ export function listRunners(): Promise<RunnerListing[]> {
 /** Unpairs one of the user's runners: its tokens are revoked and its row stays. */
 export function unpairRunner(id: string): Promise<void> {
   return board<void>("unpair_runner", { id });
+}
+
+// ---------------------------------------------------------------------------
+// Teams, invitations and roles (task 051) — see
+// `crates/core/src/api/board/teams.rs`. Each names its team by id or carries a
+// token, so the server answers them whichever team the request names. A solo
+// board refuses every write here.
+// ---------------------------------------------------------------------------
+
+/** A new team, the user its only owner. */
+export function createTeam(name: string): Promise<TeamListing> {
+  return board<TeamListing>("create_team", { name });
+}
+
+/** Every member of one of the user's teams, in the order they joined. */
+export function listTeamMembers(teamId: string): Promise<TeamMember[]> {
+  return board<TeamMember[]>("list_team_members", { teamId });
+}
+
+/** Makes a member an owner, or an owner a member. Owner only. */
+export function setMemberRole(teamId: string, userId: string, role: Role): Promise<void> {
+  return board<void>("set_member_role", { teamId, userId, role });
+}
+
+/** Takes someone out of a team and withdraws them from its work. Owner only. */
+export function removeMember(teamId: string, userId: string): Promise<void> {
+  return board<void>("remove_member", { teamId, userId });
+}
+
+/** Takes the user out of one of their teams. */
+export function leaveTeam(teamId: string): Promise<void> {
+  return board<void>("leave_team", { teamId });
+}
+
+/** An invitation link's token, the one time it is shown. Owner only. */
+export function createInvitation(teamId: string, role: Role): Promise<CreatedInvitation> {
+  return board<CreatedInvitation>("create_invitation", { teamId, role });
+}
+
+/** Every invitation of a team, newest first. Owner only. */
+export function listInvitations(teamId: string): Promise<Invitation[]> {
+  return board<Invitation[]>("list_invitations", { teamId });
+}
+
+/** Revokes an invitation nobody has used. Owner only. */
+export function revokeInvitation(id: string): Promise<void> {
+  return board<void>("revoke_invitation", { id });
+}
+
+/** What an invitation token would admit the user to. The token travels in the
+ *  body, never in a URL. */
+export function previewInvitation(token: string): Promise<InvitationPreview> {
+  return board<InvitationPreview>("preview_invitation", { token });
+}
+
+/** Joins the team an invitation token names, with the role it grants. */
+export function acceptInvitation(token: string): Promise<TeamListing> {
+  return board<TeamListing>("accept_invitation", { token });
+}
+
+/** Every team the user is in, with its repositories: where a task can go. */
+export function listCopyTargets(): Promise<CopyTarget[]> {
+  return board<CopyTarget[]>("list_copy_targets");
+}
+
+/** A new task in `repositoryId`'s team carrying the plan and nothing else. */
+export function copyTaskToTeam(taskId: string, repositoryId: string): Promise<Task> {
+  return board<Task>("copy_task_to_team", { taskId, repositoryId });
+}
+
+/** Deletes a team and everything it owns, confirmed by its exact name. */
+export function deleteTeam(teamId: string, confirmName: string): Promise<void> {
+  return board<void>("delete_team", { teamId, confirmName });
+}
+
+/** Deletes the user's own account and its personal team, confirmed by their
+ *  exact login. */
+export function deleteAccount(confirmLogin: string): Promise<void> {
+  return board<void>("delete_account", { confirmLogin });
 }
 
 /** A ten-minute, single-use code for `rimaia-runner pair` on a headless machine. */

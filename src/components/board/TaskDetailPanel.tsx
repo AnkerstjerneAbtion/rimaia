@@ -8,6 +8,7 @@ import { subscribeToTasksChanged } from "../../lib/events";
 import type { Repository, RimaiaError, Task, TaskDetail } from "../../types";
 import { ErrorBanner } from "../ErrorBanner";
 import { ArchiveTaskSection } from "../panel/ArchiveTaskSection";
+import { CopyToTeamSection } from "../panel/CopyToTeamSection";
 import { DeleteTaskSection } from "../panel/DeleteTaskSection";
 import { DependenciesEditor } from "../panel/DependenciesEditor";
 import { ExtraInstructionsEditor } from "../panel/ExtraInstructionsEditor";
@@ -348,6 +349,10 @@ function TaskDetailPanelBody({
             checkout={checkout}
             onArchived={onClose}
           />
+
+          {/* Task 051: a task never moves between teams, so the way across is
+              a copy, offered only to someone in more than one. */}
+          <CopyToTeamSection taskId={task.id} />
 
           <DeleteTaskSection taskId={task.id} title={task.title} onDeleted={onClose} />
         </section>

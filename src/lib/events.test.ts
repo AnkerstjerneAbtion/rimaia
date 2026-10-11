@@ -22,6 +22,7 @@ import {
   subscribeToSchedulesChanged,
   subscribeToSettingsChanged,
   subscribeToTasksChanged,
+  subscribeToTeamsChanged,
 } from "./events";
 import type { EventStreamFailure, UnlistenFn } from "./events";
 import { mockHttp } from "../test/http";
@@ -71,6 +72,7 @@ describe("the event transport", () => {
       subscribeToRunsTail("run-1", noop),
       subscribeToSchedulesChanged(noop),
       subscribeToPlanPassProgress(noop),
+      subscribeToTeamsChanged(noop),
     ]);
 
     expect(seen).toEqual([
@@ -82,6 +84,7 @@ describe("the event transport", () => {
       "runs:tail",
       "schedules:changed",
       "plan-pass:progress",
+      "teams:changed",
     ]);
     expect(handles).toEqual(seen.map(() => unlisten));
     expect(mockListen).not.toHaveBeenCalled();
@@ -109,6 +112,7 @@ describe("the event source table", () => {
       subscribeToRunsTail("run-1", noop),
       subscribeToSchedulesChanged(noop),
       subscribeToPlanPassProgress(noop),
+      subscribeToTeamsChanged(noop),
     ]);
 
     expect(Object.keys(EVENT_SOURCES).sort()).toEqual([...seen].sort());
@@ -117,11 +121,27 @@ describe("the event source table", () => {
       "repositories:changed": "both",
       "runs:changed": "board",
       "settings:changed": "board",
+      "teams:changed": "board",
       "runs:tail": "board",
       "plan-pass:progress": "local",
       "runner:changed": "local",
       "schedules:changed": "local",
     });
+  });
+});
+
+describe("the teams subscription", () => {
+  it("subscribes to teams:changed through the board transport once", async () => {
+    const board = vi.fn(async () => () => {});
+    const local = vi.fn(async () => () => {});
+    setEventTransports({ board, local });
+    const onChanged = vi.fn();
+
+    await subscribeToTeamsChanged(onChanged);
+
+    expect(board).toHaveBeenCalledTimes(1);
+    expect(board).toHaveBeenCalledWith("teams:changed", expect.any(Function), undefined);
+    expect(local).not.toHaveBeenCalled();
   });
 });
 

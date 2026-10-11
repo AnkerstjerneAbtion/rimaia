@@ -117,6 +117,7 @@
 @import "./styles/review.css";
 @import "./styles/runs.css";
 @import "./styles/settings.css";
+@import "./styles/teams.css";
 
 :root {
   /* Surfaces (dark, primary). Lifted off pure black and given a trace of blue:

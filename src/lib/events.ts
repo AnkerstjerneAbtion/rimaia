@@ -56,6 +56,7 @@ export const EVENT_SOURCES: Readonly<Record<string, EventSource>> = {
   "repositories:changed": "both",
   "runs:changed": "board",
   "settings:changed": "board",
+  "teams:changed": "board",
   "runs:tail": "board",
   "plan-pass:progress": "local",
   "runner:changed": "local",
@@ -190,6 +191,21 @@ export function subscribeToRepositoriesChanged(
  */
 export function subscribeToSettingsChanged(onChanged: () => void): Promise<UnlistenFn> {
   return subscribe<null>("settings:changed", () => onChanged());
+}
+
+/**
+ * `teams:changed` (task 051) — a team itself changed: it was created or
+ * deleted, someone joined, left or was removed, a role changed, or an
+ * invitation was accepted or revoked. The payload is the team ids; an empty
+ * array is {@link subscribeToTasksChanged}'s "re-read wholesale", which every
+ * stream sends when it opens. That burst is what makes the switcher re-read
+ * after a change to the person's own team set, because the server ends their
+ * stream at once and the event itself may be lost with it.
+ */
+export function subscribeToTeamsChanged(
+  onChanged: (teamIds: string[]) => void,
+): Promise<UnlistenFn> {
+  return subscribe<string[]>("teams:changed", onChanged);
 }
 
 /**

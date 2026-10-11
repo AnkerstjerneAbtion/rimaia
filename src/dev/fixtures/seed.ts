@@ -12,6 +12,9 @@ import type {
   QueueEntry,
   QueueStatus,
   CheckoutView,
+  CopyTarget,
+  Invitation,
+  InvitationPreview,
   LocalWorktree,
   Repository,
   ReviewDigest,
@@ -36,6 +39,7 @@ import type {
   TaskReview,
   TaskSummary,
   TeamListing,
+  TeamMember,
   WorktreeRunner,
 } from "../../types";
 import { FIXTURE_NOW, FIXTURE_SENTINEL } from "./constants";
@@ -75,10 +79,15 @@ export const SCENARIO_NAMES = [
   "review-loop-analytics",
   "review-loop-settings",
   "review-loop-repository",
-  // Task 050: a browser. Signed out, signed in to two teams, and to one.
+  // Task 050: a browser. Signed out, signed in to three teams, and to one.
   "signed-out",
   "browser",
   "browser-one-team",
+  // Task 051: the Team section as an owner and as a member, and the accept
+  // page an invitation link opens.
+  "team-owner",
+  "team-member",
+  "invite",
 ] as const;
 export type ScenarioName = (typeof SCENARIO_NAMES)[number];
 
@@ -143,6 +152,21 @@ export interface Scenario {
   readonly runners: RunnerListing[];
   readonly sessions: SessionSummary[];
   readonly apiTokens: ApiTokenSummary[];
+  /** What `list_team_members` answers, by team id (task 051). */
+  readonly teamMembers: Record<string, TeamMember[]>;
+  /** What `list_invitations` answers, by team id, newest first. */
+  readonly invitations: Record<string, Invitation[]>;
+  /** What `list_copy_targets` answers. */
+  readonly copyTargets: CopyTarget[];
+  /** What `preview_invitation` answers, or `null` for the one refusal every
+   *  unusable link gets. */
+  readonly invitationPreview: InvitationPreview | null;
+  /** The team the fixture entry stores as chosen before the app starts, or
+   *  `null` to let it fall back to the personal team. */
+  readonly currentTeam: string | null;
+  /** An invitation token the fixture entry keeps in session storage before
+   *  the app starts, as a sign-in would leave it: the accept page opens. */
+  readonly keptInvitation: string | null;
   /** `get_task`'s `worktreeRunner`, by task id. A task with no entry has none. */
   readonly worktreeRunners: Record<string, WorktreeRunner>;
   readonly queueStatus: QueueStatus;
@@ -887,6 +911,12 @@ function soloExtras(): Pick<
   | "sessions"
   | "apiTokens"
   | "worktreeRunners"
+  | "teamMembers"
+  | "invitations"
+  | "copyTargets"
+  | "invitationPreview"
+  | "currentTeam"
+  | "keptInvitation"
 > {
   return {
     capabilities: {
@@ -902,6 +932,25 @@ function soloExtras(): Pick<
     sessions: [],
     apiTokens: [],
     worktreeRunners: {},
+    // Solo's one team and its one person, which the two team reads answer
+    // with; every team write refuses solo.
+    teamMembers: {
+      "fixture-team": [
+        {
+          userId: "fixture-user",
+          login: "solo",
+          avatarUrl: null,
+          role: "owner",
+          joinedAt: ago(30 * DAY),
+          isPersonalOwner: true,
+        },
+      ],
+    },
+    invitations: {},
+    copyTargets: [],
+    invitationPreview: null,
+    currentTeam: null,
+    keptInvitation: null,
   };
 }
 
@@ -1749,13 +1798,37 @@ function empty(name: ScenarioName, onboardingDismissed: boolean, withRepository:
  * since unpaired, so the panel and the review queue show whose machine holds
  * each worktree.
  */
-function browserScenario(name: ScenarioName, teamCount: 1 | 2): Scenario {
+function browserScenario(name: ScenarioName, teamCount: 1 | 3): Scenario {
   const board = populated(name, 3, true);
   const studio: WorktreeRunner = { id: "runner-studio", label: "Studio Mac", unpaired: false };
   const old: WorktreeRunner = { id: "runner-old", label: "Old laptop", unpaired: true };
+  // Three teams: the personal one, someone else's where Ada is a member, and
+  // one she alone owns, which the account page names as blocking its deletion.
   const teams: TeamListing[] = [
-    { id: "team-personal", name: "Personal", role: "owner", personal: true },
-    { id: "team-acme", name: "Acme platform", role: "member", personal: false },
+    {
+      id: "team-personal",
+      name: "Personal",
+      role: "owner",
+      personal: true,
+      memberCount: 2,
+      ownerCount: 1,
+    },
+    {
+      id: "team-acme",
+      name: "Acme platform",
+      role: "member",
+      personal: false,
+      memberCount: 5,
+      ownerCount: 2,
+    },
+    {
+      id: "team-engines",
+      name: "Analytical engines, the long-running maintenance and documentation crew",
+      role: "owner",
+      personal: false,
+      memberCount: 4,
+      ownerCount: 1,
+    },
   ].slice(0, teamCount) as TeamListing[];
   return {
     ...board,
@@ -1848,8 +1921,162 @@ function browserScenario(name: ScenarioName, teamCount: 1 | 2): Scenario {
       },
     ],
     worktreeRunners: { "t-review-1": studio, "t-review-2": old, "t-review-3": studio },
+    teamMembers: TEAM_MEMBERS,
+    invitations: TEAM_INVITATIONS,
+    copyTargets: teams.map((team) => ({
+      teamId: team.id,
+      teamName: team.name,
+      repositories: team.personal
+        ? [{ id: "repo-notes", name: "lovelace-notes" }]
+        : board.repositories.map((repository) => ({ id: repository.id, name: repository.name })),
+    })),
+    invitationPreview: null,
+    currentTeam: null,
+    keptInvitation: null,
   };
 }
+
+const ADA: TeamMember = {
+  userId: "user-ada",
+  login: "ada-lovelace",
+  avatarUrl: null,
+  role: "owner",
+  joinedAt: ago(40 * DAY),
+  isPersonalOwner: false,
+};
+
+/** Who is in each browser team (task 051): owners first by when they joined,
+ *  a login long enough to wrap, and the personal team's invited guest. */
+const TEAM_MEMBERS: Record<string, TeamMember[]> = {
+  "team-personal": [
+    { ...ADA, isPersonalOwner: true },
+    {
+      userId: "user-charles",
+      login: "charles-babbage",
+      avatarUrl: null,
+      role: "member",
+      joinedAt: ago(3 * DAY),
+      isPersonalOwner: false,
+    },
+  ],
+  "team-acme": [
+    {
+      userId: "user-grace",
+      login: "grace-hopper",
+      avatarUrl: null,
+      role: "owner",
+      joinedAt: ago(90 * DAY),
+      isPersonalOwner: false,
+    },
+    {
+      userId: "user-linus",
+      login: "linus",
+      avatarUrl: null,
+      role: "owner",
+      joinedAt: ago(80 * DAY),
+      isPersonalOwner: false,
+    },
+    { ...ADA, role: "member", joinedAt: ago(20 * DAY) },
+    {
+      userId: "user-margaret",
+      login: "margaret-hamilton",
+      avatarUrl: null,
+      role: "member",
+      joinedAt: ago(10 * DAY),
+      isPersonalOwner: false,
+    },
+    {
+      userId: "user-long",
+      login: "an-exceptionally-long-github-login-that-has-to-wrap",
+      avatarUrl: null,
+      role: "member",
+      joinedAt: ago(2 * DAY),
+      isPersonalOwner: false,
+    },
+  ],
+  "team-engines": [
+    ADA,
+    {
+      userId: "user-charles",
+      login: "charles-babbage",
+      avatarUrl: null,
+      role: "member",
+      joinedAt: ago(30 * DAY),
+      isPersonalOwner: false,
+    },
+    {
+      userId: "user-mary",
+      login: "mary-somerville",
+      avatarUrl: null,
+      role: "member",
+      joinedAt: ago(12 * DAY),
+      isPersonalOwner: false,
+    },
+    {
+      userId: "user-long",
+      login: "an-exceptionally-long-github-login-that-has-to-wrap",
+      avatarUrl: null,
+      role: "member",
+      joinedAt: ago(DAY),
+      isPersonalOwner: false,
+    },
+  ],
+};
+
+function invitation(overrides: Partial<Invitation> & Pick<Invitation, "id">): Invitation {
+  return {
+    teamId: "team-engines",
+    role: "member",
+    status: "pending",
+    createdBy: "user-ada",
+    createdByLogin: "ada-lovelace",
+    createdAt: ago(DAY),
+    expiresAt: new Date(NOW + 6 * DAY).toISOString(),
+    acceptedBy: null,
+    acceptedByLogin: null,
+    acceptedAt: null,
+    revokedAt: null,
+    ...overrides,
+  };
+}
+
+/** The owned team's invitations, one in each state, newest first. */
+const TEAM_INVITATIONS: Record<string, Invitation[]> = {
+  "team-engines": [
+    invitation({ id: "invitation-pending" }),
+    invitation({
+      id: "invitation-owner",
+      role: "owner",
+      createdAt: ago(2 * DAY),
+      expiresAt: new Date(NOW + 5 * DAY).toISOString(),
+    }),
+    invitation({
+      id: "invitation-accepted",
+      status: "accepted",
+      createdAt: ago(13 * DAY),
+      expiresAt: ago(6 * DAY),
+      acceptedBy: "user-mary",
+      acceptedByLogin: "mary-somerville",
+      acceptedAt: ago(12 * DAY),
+    }),
+    invitation({
+      id: "invitation-revoked",
+      status: "revoked",
+      createdAt: ago(20 * DAY),
+      expiresAt: ago(13 * DAY),
+      revokedAt: ago(19 * DAY),
+    }),
+    invitation({
+      id: "invitation-expired",
+      status: "expired",
+      createdBy: null,
+      createdByLogin: null,
+      createdAt: ago(40 * DAY),
+      expiresAt: ago(33 * DAY),
+    }),
+  ],
+  "team-personal": [],
+};
 
 export function buildScenario(name: ScenarioName): Scenario {
   switch (name) {
@@ -1921,11 +2148,26 @@ export function buildScenario(name: ScenarioName): Scenario {
     case "review-loop-repository":
       return reviewLoopScenario(name);
     case "signed-out":
-      return { ...browserScenario(name, 2), account: null };
+      return { ...browserScenario(name, 3), account: null };
     case "browser":
-      return browserScenario(name, 2);
+      return browserScenario(name, 3);
     case "browser-one-team":
       return browserScenario(name, 1);
+    case "team-owner":
+      return { ...browserScenario(name, 3), currentTeam: "team-engines" };
+    case "team-member":
+      return { ...browserScenario(name, 3), currentTeam: "team-acme" };
+    case "invite":
+      return {
+        ...browserScenario(name, 3),
+        keptInvitation: "rmi_fixture-invitation-token",
+        invitationPreview: {
+          teamName: "Acme platform",
+          role: "member",
+          invitedByLogin: "grace-hopper",
+          expiresAt: new Date(NOW + 6 * DAY).toISOString(),
+        },
+      };
     case "busy":
       return populated(name, 3, true);
     case "one-run":

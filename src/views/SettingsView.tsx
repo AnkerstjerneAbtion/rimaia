@@ -1,4 +1,5 @@
 import { useHasMachine } from "../lib/capabilities";
+import { useTeams } from "../lib/teams";
 import { ConcurrencySection } from "./settings/ConcurrencySection";
 import { DeveloperSection } from "./settings/DeveloperSection";
 import { DoctorSection } from "./settings/DoctorSection";
@@ -10,6 +11,7 @@ import { RunnersSection } from "./settings/RunnersSection";
 import { SchedulesSection } from "./settings/SchedulesSection";
 import { StorageSection } from "./settings/StorageSection";
 import { StrategySection } from "./settings/StrategySection";
+import { TeamSection } from "./settings/TeamSection";
 
 /**
  * One entry in the index at the top of the page and one anchor in the flow
@@ -83,6 +85,18 @@ const BANDS: readonly SettingsBand[] = [
 ];
 
 /**
+ * The team on screen and its people (task 051): first wherever there is a
+ * team switcher, because who may change the settings below is decided here.
+ * Solo has one team and no people to manage, so it has no such group.
+ */
+const TEAM_BAND: SettingsBand = {
+  id: "settings-team",
+  title: "Team",
+  blurb: "Who is in the team on screen, and who may change it.",
+  sections: [{ id: "settings-team-members", name: "Members" }],
+};
+
+/**
  * The same groups with a browser's sections (task 050 Scope 6). Concurrency,
  * Schedules, MCP, Storage, Doctor and Developer read and change this machine,
  * and a browser has none: one Runners section stands in for all six, saying
@@ -109,8 +123,9 @@ export function SettingsView() {
   // Doctor, concurrency, schedules, MCP and storage: this machine's, so they
   // exist only where there is one (task 050 Scope 6).
   const hasMachine = useHasMachine();
-  const bands = hasMachine ? BANDS : BROWSER_BANDS;
-  if (!hasMachine) return <BrowserSettingsView bands={bands} />;
+  const hasTeams = useTeams() !== null;
+  const bands = [...(hasTeams ? [TEAM_BAND] : []), ...(hasMachine ? BANDS : BROWSER_BANDS)];
+  if (!hasMachine) return <BrowserSettingsView bands={bands} hasTeams={hasTeams} />;
   return (
     <div className="view settings-view">
       <header className="view-header">
@@ -143,6 +158,14 @@ export function SettingsView() {
       {/* Each section owns its own error state and <ErrorBanner> instead of
           bubbling up to one shared banner here, so tasks 003 and 006 can add
           sections without touching this composer. */}
+      {hasTeams && (
+        <SettingsBandView band={TEAM_BAND}>
+          <div className="settings-slot" id="settings-team-members">
+            <TeamSection />
+          </div>
+        </SettingsBandView>
+      )}
+
       <SettingsBandView band={BANDS[0]}>
         {/* First on the page: a blocking check is the most urgent thing here,
             because it is the one that silently costs a whole night. */}
@@ -209,14 +232,21 @@ export function SettingsView() {
   );
 }
 
-function BrowserSettingsView({ bands }: { readonly bands: readonly SettingsBand[] }) {
+function BrowserSettingsView({
+  bands,
+  hasTeams,
+}: {
+  readonly bands: readonly SettingsBand[];
+  readonly hasTeams: boolean;
+}) {
+  const [machines, work, brief] = hasTeams ? bands.slice(1) : bands;
   return (
     <div className="view settings-view">
       <header className="view-header">
         <h2>Settings</h2>
         <p>
-          The team's repositories, the instructions and execution strategy every run receives,
-          and the runners that carry them out.
+          The team and its people, its repositories, the instructions and execution strategy
+          every run receives, and the runners that carry them out.
         </p>
       </header>
 
@@ -237,17 +267,24 @@ function BrowserSettingsView({ bands }: { readonly bands: readonly SettingsBand[
         ))}
       </nav>
 
-      <SettingsBandView band={bands[0]}>
+      {hasTeams && (
+        <SettingsBandView band={TEAM_BAND}>
+          <div className="settings-slot" id="settings-team-members">
+            <TeamSection />
+          </div>
+        </SettingsBandView>
+      )}
+      <SettingsBandView band={machines}>
         <div className="settings-slot" id="settings-runners">
           <RunnersSection />
         </div>
       </SettingsBandView>
-      <SettingsBandView band={bands[1]}>
+      <SettingsBandView band={work}>
         <div className="settings-slot" id="settings-repositories">
           <RepositoriesSection />
         </div>
       </SettingsBandView>
-      <SettingsBandView band={bands[2]}>
+      <SettingsBandView band={brief}>
         <div className="settings-slot" id="settings-instructions">
           <InstructionsSection />
         </div>
