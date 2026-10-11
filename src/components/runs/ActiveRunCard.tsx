@@ -167,7 +167,7 @@ export function ActiveRunCard({ task, repositoryName }: ActiveRunCardProps) {
     let active = true;
     let unlisten: (() => void) | undefined;
 
-    subscribeToRunsTail((snapshot) => {
+    subscribeToRunsTail(runId, (snapshot) => {
       if (active && snapshot.runId === runId) {
         setTail(snapshot);
         setTailObservedAt(Date.now());

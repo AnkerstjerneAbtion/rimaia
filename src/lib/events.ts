@@ -1,9 +1,19 @@
+import { fetchEventSource } from "@microsoft/fetch-event-source";
 import { listen } from "@tauri-apps/api/event";
 import type { UnlistenFn } from "@tauri-apps/api/event";
 
-import type { PlanProgress, RunTail } from "../types";
+import { credentialsMode, errorFromResponse, transportHeaders } from "./commands";
+import type { Credential } from "./commands";
+import type { PlanProgress, RimaiaError, RunTail } from "../types";
 
 export type { UnlistenFn };
+
+/** What a subscription can tell the transport that the event name cannot. */
+export interface SubscribeOptions {
+  /** The run a `runs:tail` subscription watches. Only the SSE transport reads
+   *  it: the stream carries a run's tail only if its URL named the run. */
+  runId?: string;
+}
 
 /**
  * What every subscribe wrapper goes through: an event name and a callback
@@ -13,20 +23,107 @@ export type { UnlistenFn };
 export type EventTransport = <P>(
   event: string,
   onPayload: (payload: P) => void,
+  options?: SubscribeOptions,
 ) => Promise<UnlistenFn>;
 
-let installedTransport: EventTransport | undefined;
-
-/** Replace the transport; an entry point calls this, a component never does. */
-export function setEventTransport(transport: EventTransport | undefined): void {
-  installedTransport = transport;
+/**
+ * One transport per event source (task 049). `board` carries what a server
+ * announces; `local` carries what this machine announces, and is `null` in a
+ * browser, which has no machine.
+ */
+export interface EventTransports {
+  board: EventTransport;
+  local: EventTransport | null;
 }
 
-const tauriTransport: EventTransport = <P>(event: string, onPayload: (payload: P) => void) =>
-  listen<P>(event, (e) => onPayload(e.payload));
+/** Where an event arrives from. `both` is an event two machines announce. */
+export type EventSource = "board" | "local" | "both";
 
-function subscribe<P>(event: string, onPayload: (payload: P) => void): Promise<UnlistenFn> {
-  return (installedTransport ?? tauriTransport)<P>(event, onPayload);
+/**
+ * Where each event a subscribe wrapper uses arrives from (task 048's wire
+ * table, ADR-0034 point 4).
+ *
+ * Two names are `both`, because two machines write what they announce: a
+ * task's board row changes on the server and its worktree record changes on
+ * the desktop; a repository's row is the team's and its checkout is the
+ * runner's. The payload means the same on both sides, ids to re-read, so a
+ * subscriber cannot tell which side spoke and does not need to.
+ * `plan-pass:progress` is `local`: its one producer is the desktop's own
+ * planning pass, which emits straight into Tauri.
+ */
+export const EVENT_SOURCES: Readonly<Record<string, EventSource>> = {
+  "tasks:changed": "both",
+  "repositories:changed": "both",
+  "runs:changed": "board",
+  "settings:changed": "board",
+  "runs:tail": "board",
+  "plan-pass:progress": "local",
+  "runner:changed": "local",
+  "schedules:changed": "local",
+};
+
+let installedTransports: EventTransports | undefined;
+
+/** Replace both transports; an entry point calls this, a component never does. */
+export function setEventTransports(transports: EventTransports | undefined): void {
+  installedTransports = transports;
+}
+
+/** Replace the transport for both sources at once: what fixture mode wants. */
+export function setEventTransport(transport: EventTransport | undefined): void {
+  installedTransports = transport ? { board: transport, local: transport } : undefined;
+}
+
+/** Tauri's `listen`, which both sources use when nothing is installed. */
+export const listenEventTransport: EventTransport = <P>(
+  event: string,
+  onPayload: (payload: P) => void,
+) => listen<P>(event, (e) => onPayload(e.payload));
+
+/**
+ * Subscribes through each distinct transport the event's source names: one for
+ * `board` or `local`, and for `both` the board's and the local one unless they
+ * are the same transport (compared by identity), so solo and fixture mode,
+ * where one transport serves both, still deliver each payload once.
+ */
+async function subscribe<P>(
+  event: string,
+  onPayload: (payload: P) => void,
+  options?: SubscribeOptions,
+): Promise<UnlistenFn> {
+  const source = EVENT_SOURCES[event];
+  if (source === undefined) {
+    throw new Error(`events.ts has no source for the event \`${event}\``);
+  }
+  const { board, local } = installedTransports ?? {
+    board: listenEventTransport,
+    local: listenEventTransport,
+  };
+  const transports: EventTransport[] = [];
+  if (source === "board") {
+    transports.push(board);
+  } else if (source === "local") {
+    if (local) transports.push(local);
+  } else {
+    transports.push(board);
+    if (local && local !== board) transports.push(local);
+  }
+
+  const released: UnlistenFn[] = [];
+  for (const transport of transports) {
+    try {
+      released.push(await transport<P>(event, onPayload, options));
+    } catch (thrown) {
+      // A failed subscribe leaves nothing behind.
+      for (const unlisten of released) unlisten();
+      throw thrown;
+    }
+  }
+  // One subscription hands back the transport's own handle.
+  if (released.length === 1) return released[0];
+  return () => {
+    for (const unlisten of released) unlisten();
+  };
 }
 
 /**
@@ -129,11 +226,24 @@ export function subscribeToRunsChanged(
  * counted on the backend, never recovered, because it is already on disk in
  * the run's transcript — there is nothing for a listener to special-case. A
  * component that starts watching mid-run should seed itself from
- * `getRunTail` in `./commands` before subscribing here, and filter on the
- * snapshot's own `runId` if more than one run might be in flight.
+ * `getRunTail` in `./commands` before subscribing here. The subscription
+ * names the run it watches (task 049): a server's stream carries a run's tail
+ * only if its URL named the run, and this wrapper drops any other run's
+ * snapshot that solo's `listen` delivers.
  */
-export function subscribeToRunsTail(onTail: (tail: RunTail) => void): Promise<UnlistenFn> {
-  return subscribe<RunTail>("runs:tail", onTail);
+export function subscribeToRunsTail(
+  runId: string,
+  onTail: (tail: RunTail) => void,
+): Promise<UnlistenFn> {
+  // Solo's `listen` admits every run's tail, and the stream carries only the
+  // runs it was asked for, so the filter keeps both transports to the one run.
+  return subscribe<RunTail>(
+    "runs:tail",
+    (tail) => {
+      if (tail.runId === runId) onTail(tail);
+    },
+    { runId },
+  );
 }
 
 /**
@@ -180,4 +290,247 @@ export function subscribeToPlanPassProgress(
   onProgress: (progress: PlanProgress) => void,
 ): Promise<UnlistenFn> {
   return subscribe<PlanProgress>("plan-pass:progress", onProgress);
+}
+
+// ---------------------------------------------------------------------------
+// The server's stream (task 049, ADR-0034 point 3)
+// ---------------------------------------------------------------------------
+
+/** The first reconnect delay, doubled per failed attempt up to the cap. A
+ *  dropped connection on a laptop that slept must not hammer the server. */
+export const RECONNECT_BASE_MS = 1000;
+/** The longest a reconnect waits, so waking up never costs a minute. */
+export const RECONNECT_CAP_MS = 30000;
+/** The most runs one stream can carry a tail for: the server refuses a ninth
+ *  with `400`, taking every board event with it. */
+export const MAX_TAILS_PER_STREAM = 8;
+
+/** How long attempt `attempt` (counted from 0) waits before reconnecting. */
+export function reconnectDelay(attempt: number): number {
+  return Math.min(RECONNECT_BASE_MS * 2 ** attempt, RECONNECT_CAP_MS);
+}
+
+/** A stream failure asking again cannot fix: reported, and not retried. */
+export interface EventStreamFailure {
+  error: RimaiaError;
+}
+
+class FatalStreamError extends Error {
+  constructor(readonly error: RimaiaError) {
+    super(error.message);
+  }
+}
+
+const failureSubscribers = new Set<(failure: EventStreamFailure) => void>();
+
+/**
+ * Hears every fatal failure of an event stream: `401` (the credential), `400`
+ * (a bad tail), `404` (no events route at all), `426` (version skew). Only
+ * fatal ones: a retriable failure is retried with backoff and reported to no
+ * one, because the stream recovers on its own and every reopen brings the
+ * server's burst. The stream stays closed with its subscribers kept; nothing
+ * reopens it but {@link reconnectEventStream}.
+ */
+export function subscribeToEventStreamFailure(
+  onFailure: (failure: EventStreamFailure) => void,
+): () => void {
+  failureSubscribers.add(onFailure);
+  return () => {
+    failureSubscribers.delete(onFailure);
+  };
+}
+
+/** The streams that have subscribers, for {@link reconnectEventStream}. */
+const liveStreams = new Set<{ reopen: () => void }>();
+
+/**
+ * Reopens the stream with the current credential and headers when it has
+ * subscribers, closing any stream still open; does nothing when it has none.
+ * For after a sign-in and on a team switch.
+ */
+export function reconnectEventStream(): void {
+  for (const stream of [...liveStreams]) stream.reopen();
+}
+
+/**
+ * Server-sent events over the board's one stream per client (ADR-0034 point
+ * 3): the first subscription opens `GET <baseUrl>/api/v1/events`, later ones
+ * share it, and the last unlisten aborts it. A frame's `event` is the event
+ * name and its `data` the JSON payload the Tauri forwarder would have sent.
+ *
+ * `@microsoft/fetch-event-source` is imported here and nowhere else (D34).
+ * Its retry loop is used as it is, with the failure classes decided in
+ * `onopen` (a `4xx` is fatal and a `5xx` or a wrong content type is not) and
+ * obeyed in `onerror`. The request headers are rebuilt for **every** request
+ * the library makes, its own retries included, so a sign-in between two
+ * attempts is picked up.
+ */
+export function sseEventTransport(connection: {
+  baseUrl: string;
+  credential: Credential;
+}): EventTransport {
+  const baseUrl = connection.baseUrl.replace(/\/+$/, "");
+  const { credential } = connection;
+
+  const listeners = new Map<string, Set<(payload: unknown) => void>>();
+  const tails = new Map<string, number>();
+  let subscribers = 0;
+  let controller: AbortController | null = null;
+  // `open` while a stream is live or retrying, `fatal` after a failure asking
+  // again cannot fix, `idle` with no subscribers.
+  let state: "idle" | "open" | "fatal" = "idle";
+  let attempt = 0;
+  let reconnectQueued = false;
+
+  const stream = { reopen };
+
+  function streamUrl(): string {
+    const query = [...tails.keys()].map((id) => `tail=${encodeURIComponent(id)}`).join("&");
+    return `${baseUrl}/api/v1/events${query ? `?${query}` : ""}`;
+  }
+
+  function close() {
+    controller?.abort();
+    controller = null;
+  }
+
+  function open() {
+    close();
+    attempt = 0;
+    state = "open";
+    const mine = new AbortController();
+    controller = mine;
+    const current = () => controller === mine;
+
+    fetchEventSource(streamUrl(), {
+      signal: mine.signal,
+      headers: transportHeaders(credential),
+      credentials: credentialsMode(credential),
+      // Read at call time, so a test's stub is the one reached, and rebuilt
+      // headers ride on the library's own retries as well.
+      fetch: (input, init) =>
+        globalThis.fetch(input, {
+          ...init,
+          headers: { ...init?.headers, ...transportHeaders(credential) },
+        }),
+      async onopen(response) {
+        if (!current()) return;
+        const type = response.headers.get("content-type") ?? "";
+        if (response.status === 200 && type.startsWith("text/event-stream")) {
+          attempt = 0;
+          return;
+        }
+        if (response.status >= 400 && response.status < 500) {
+          throw new FatalStreamError(await errorFromResponse(response));
+        }
+        throw new Error(
+          response.status === 200
+            ? "The server answered the event stream with something that is not one."
+            : `The server answered the event stream with HTTP ${response.status}.`,
+        );
+      },
+      onmessage(message) {
+        if (!current()) return;
+        let payload: unknown;
+        try {
+          payload = JSON.parse(message.data);
+        } catch {
+          return;
+        }
+        for (const listener of [...(listeners.get(message.event) ?? [])]) {
+          try {
+            listener(payload);
+          } catch (thrown) {
+            // A subscriber's bug must not look like a stream failure, which
+            // would reconnect and replay the opening burst into it again.
+            console.error(`a ${message.event} subscriber threw`, thrown);
+          }
+        }
+      },
+      onclose() {
+        // A server ends a stream on purpose (revalidation, a change of
+        // teams) and expects the client to come back; the library reconnects
+        // only if this throws.
+        throw new Error("The server ended the event stream.");
+      },
+      onerror(error) {
+        if (error instanceof FatalStreamError) throw error;
+        return reconnectDelay(attempt++);
+      },
+    }).catch((thrown: unknown) => {
+      if (!current() || !(thrown instanceof FatalStreamError)) return;
+      state = "fatal";
+      controller = null;
+      for (const subscriber of [...failureSubscribers]) subscriber({ error: thrown.error });
+    });
+  }
+
+  function reopen() {
+    if (subscribers > 0) open();
+  }
+
+  // Changing the set of watched runs means reconnecting; the microtask lets a
+  // view that mounts three run cards reconnect once.
+  function reconnectForTails() {
+    if (reconnectQueued) return;
+    reconnectQueued = true;
+    queueMicrotask(() => {
+      reconnectQueued = false;
+      if (subscribers > 0 && state === "open") open();
+    });
+  }
+
+  return async <P>(
+    event: string,
+    onPayload: (payload: P) => void,
+    options?: SubscribeOptions,
+  ): Promise<UnlistenFn> => {
+    const runId = options?.runId;
+    const addsTail = runId !== undefined && !tails.has(runId);
+    if (addsTail && tails.size >= MAX_TAILS_PER_STREAM) {
+      throw {
+        code: "invalid",
+        message: `At most ${MAX_TAILS_PER_STREAM} run tails can be watched at once.`,
+      } satisfies RimaiaError;
+    }
+
+    const listener = onPayload as (payload: unknown) => void;
+    const forEvent = listeners.get(event) ?? new Set();
+    forEvent.add(listener);
+    listeners.set(event, forEvent);
+    if (runId !== undefined) tails.set(runId, (tails.get(runId) ?? 0) + 1);
+    subscribers += 1;
+
+    if (subscribers === 1) {
+      liveStreams.add(stream);
+      open();
+    } else if (addsTail) {
+      reconnectForTails();
+    }
+
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      forEvent.delete(listener);
+      subscribers -= 1;
+      let removesTail = false;
+      if (runId !== undefined) {
+        const remaining = (tails.get(runId) ?? 1) - 1;
+        if (remaining > 0) {
+          tails.set(runId, remaining);
+        } else {
+          tails.delete(runId);
+          removesTail = true;
+        }
+      }
+      if (subscribers === 0) {
+        close();
+        state = "idle";
+        liveStreams.delete(stream);
+      } else if (removesTail) {
+        reconnectForTails();
+      }
+    };
+  };
 }

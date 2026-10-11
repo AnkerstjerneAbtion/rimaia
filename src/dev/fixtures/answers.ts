@@ -1,5 +1,6 @@
 import type {
   ArchiveReport,
+  ClientCapabilities,
   CleanupReport,
   CredentialStatus,
   DiffSummary,
@@ -263,6 +264,15 @@ const SCHEDULE_VIEW: ScheduleView = {
 
 const done: Answer = () => undefined;
 
+/** The solo desktop's answer: everything local is available. */
+const SOLO_CAPABILITIES: ClientCapabilities = {
+  mode: "solo",
+  localRunnerId: "fixture-runner",
+  canOpenInEditor: true,
+  canRevealFiles: true,
+  canChooseFolders: true,
+};
+
 /** The seeded checkout a per-repository setter answers with: writes change
  *  nothing in fixture mode, so the answer is what was seeded. */
 function checkoutOf(scenario: Scenario, id: unknown) {
@@ -274,6 +284,8 @@ export const ANSWERS: Record<string, Answer> = {
   get_app_info: (_args, s) => s.appInfo,
   reveal_app_data_dir: done,
   debug_provoke_error: unsupported("debug_provoke_error has nothing to show"),
+  get_client_capabilities: () => SOLO_CAPABILITIES,
+  choose_folder: unsupported("the folder picker needs a native window"),
 
   // --- repositories -----------------------------------------------------
   list_repositories: (_args, s) => s.repositories,

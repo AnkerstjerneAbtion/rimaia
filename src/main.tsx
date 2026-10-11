@@ -1,9 +1,20 @@
 import React from "react";
 import ReactDOM from "react-dom/client";
 import App from "./App";
+import { ErrorBanner } from "./components/ErrorBanner";
+import { toRimaiaError } from "./lib/commands";
+import { bootstrapClient } from "./lib/client";
 
-ReactDOM.createRoot(document.getElementById("root") as HTMLElement).render(
-  <React.StrictMode>
-    <App />
-  </React.StrictMode>,
+const root = ReactDOM.createRoot(document.getElementById("root") as HTMLElement);
+
+// `App` mounts only once the transports are chosen. When they cannot be,
+// there is nothing behind the banner to dismiss it onto.
+bootstrapClient().then(
+  () =>
+    root.render(
+      <React.StrictMode>
+        <App />
+      </React.StrictMode>,
+    ),
+  (thrown) => root.render(<ErrorBanner error={toRimaiaError(thrown)} />),
 );

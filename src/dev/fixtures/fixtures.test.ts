@@ -44,9 +44,22 @@ describe("fixture answers", () => {
     commands.setCommandTransport(transports.command);
     events.setEventTransport(transports.event);
 
+    // The exports that are not command wrappers: calling one with no
+    // arguments would uninstall the transport under test or reach `invoke`.
+    const notWrappers = new Set([
+      "toRimaiaError",
+      "setCommandTransport",
+      "setCommandTransports",
+      "invokeCommandTransport",
+      "browserLocalTransport",
+      "httpCommandTransport",
+      "transportHeaders",
+      "credentialsMode",
+      "errorFromResponse",
+      "runningInDesktopShell",
+    ]);
     const wrappers = Object.entries(commands).filter(
-      ([name, value]) =>
-        typeof value === "function" && name !== "toRimaiaError" && name !== "setCommandTransport",
+      ([name, value]) => typeof value === "function" && !notWrappers.has(name),
     ) as Array<[string, () => Promise<unknown>]>;
     const subscribers = Object.entries(events).filter(
       ([name, value]) => typeof value === "function" && name.startsWith("subscribeTo"),

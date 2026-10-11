@@ -1,4 +1,4 @@
-import { invoke } from "@tauri-apps/api/core";
+import { invoke, isTauri } from "@tauri-apps/api/core";
 
 import type {
   Account,
@@ -10,6 +10,7 @@ import type {
   AutoCleanup,
   BoardColumn,
   CheckoutView,
+  ClientCapabilities,
   CleanupReport,
   ContentKind,
   CredentialStatus,
@@ -87,36 +88,194 @@ import type {
 /**
  * What `board` and `local` send through: the command name and its arguments in, whatever
  * the backend answered (or a rejection) out. Replaceable so a caller that is
- * not the Tauri shell — fixture mode today, an HTTP client later (ADR-0034
- * point 4) — can answer the same commands without any component knowing.
+ * not the Tauri shell — fixture mode, an HTTP client (ADR-0034 point 4) — can
+ * answer the same commands without any component knowing.
  */
 export type CommandTransport = (
   command: string,
   args?: Record<string, unknown>,
 ) => Promise<unknown>;
 
-// `undefined` means "Tauri's invoke", looked up at call time below. Capturing
-// `invoke` here instead would bind whatever `vi.mock` had installed at import
-// time and break every test that re-mocks it per case.
-let installedTransport: CommandTransport | undefined;
-
 /**
- * Replace the transport `board` and `local` send through. Called by an entry point
- * (`src/dev/main.tsx` today), never by a component, a view or a hook.
+ * One transport per command kind (task 049, ADR-0034 point 4). A `board`
+ * command may go to a server; a `local` one reads or changes this machine and
+ * goes to the desktop shell, or is refused where there is none.
  */
-export function setCommandTransport(transport: CommandTransport | undefined): void {
-  installedTransport = transport;
+export interface CommandTransports {
+  board: CommandTransport;
+  local: CommandTransport;
 }
 
-const tauriTransport: CommandTransport = (command, args) => invoke<unknown>(command, args);
+// `undefined` means "Tauri's invoke for both", looked up at call time below.
+// Capturing `invoke` here instead would bind whatever `vi.mock` had installed
+// at import time and break every test that re-mocks it per case.
+let installedTransports: CommandTransports | undefined;
+
+/**
+ * Replace both transports. Called by an entry point (`src/main.tsx` through
+ * `src/lib/client.ts`), never by a component, a view or a hook.
+ */
+export function setCommandTransports(transports: CommandTransports | undefined): void {
+  installedTransports = transports;
+}
+
+/**
+ * Replace the transport for both kinds at once: what the fixture entry
+ * (`src/dev/main.tsx`) wants, since it answers every command itself.
+ */
+export function setCommandTransport(transport: CommandTransport | undefined): void {
+  installedTransports = transport ? { board: transport, local: transport } : undefined;
+}
+
+/** Tauri's `invoke`, which every kind uses when nothing is installed. */
+export const invokeCommandTransport: CommandTransport = (command, args) =>
+  invoke<unknown>(command, args);
 
 /**
  * The version of the board protocol this client speaks, a copy of
  * `rimaia_core::api::PROTOCOL_VERSION` that `scripts/check-command-wiring.sh`
- * holds equal to it. Not sent yet: task 049's HTTP transport sends it as
- * `Rimaia-Protocol` (ADR-0037 point 4).
+ * holds equal to it. Sent as `Rimaia-Protocol` on every request
+ * ({@link transportHeaders}; ADR-0037 point 4).
  */
 export const PROTOCOL_VERSION = "1.0";
+
+/**
+ * What proves who is asking a server (ADR-0030 points 2 to 4). A browser holds
+ * a session, whose cookie is `HttpOnly` and so never read here; `csrf` returns
+ * the value for the header that goes with it, or `null` when there is none. A
+ * connected desktop holds a bearer token. A request never carries both: the
+ * server refuses one that does (D32 point 7).
+ */
+export type Credential =
+  | { kind: "session"; csrf: () => string | null }
+  | { kind: "bearer"; token: string };
+
+/**
+ * Every header a request to the server carries, built afresh per request so a
+ * new sign-in is picked up without reinstalling anything. The one place
+ * request headers are built: the event stream calls it too, so a header added
+ * here reaches both.
+ */
+export function transportHeaders(credential: Credential): Record<string, string> {
+  const headers: Record<string, string> = {
+    "Content-Type": "application/json",
+    "Rimaia-Protocol": PROTOCOL_VERSION,
+  };
+  if (credential.kind === "bearer") {
+    headers.Authorization = `Bearer ${credential.token}`;
+  } else {
+    const csrf = credential.csrf();
+    if (csrf !== null) headers["X-Rimaia-CSRF"] = csrf;
+  }
+  return headers;
+}
+
+/** The `fetch` credentials mode that goes with a credential: cookies for a
+ *  session, none for a bearer token. */
+export function credentialsMode(credential: Credential): RequestCredentials {
+  return credential.kind === "session" ? "same-origin" : "omit";
+}
+
+/** The origin an error message should name, whatever shape `baseUrl` had. */
+function originOf(baseUrl: string): string {
+  try {
+    return new URL(baseUrl).origin;
+  } catch {
+    return baseUrl;
+  }
+}
+
+/**
+ * A server's answer to a non-success status or a stream refusal: the body's
+ * `{ code, message }` unchanged, because the frontend branches on `code` alone
+ * (D8, D32 point 3), or an `internal` error naming the status when the body is
+ * not that shape, such as a proxy's HTML page.
+ */
+export async function errorFromResponse(response: Response): Promise<RimaiaError> {
+  try {
+    const body: unknown = JSON.parse(await response.text());
+    if (isRimaiaError(body)) return body;
+  } catch {
+    // Not JSON: fall through to the status.
+  }
+  return {
+    code: "internal",
+    message: `The server answered HTTP ${response.status} without an error body.`,
+  };
+}
+
+/**
+ * The HTTP transport (task 049): `POST <baseUrl>/api/v1/<name>` with the
+ * arguments `invoke` would have received as the JSON body, byte for byte. The
+ * only code that sends a command over HTTP (D32 point 6). `globalThis.fetch`
+ * is looked up at call time so a test's stub is the one reached.
+ */
+export function httpCommandTransport(connection: {
+  baseUrl: string;
+  credential: Credential;
+}): CommandTransport {
+  const baseUrl = connection.baseUrl.replace(/\/+$/, "");
+  return async (command, args) => {
+    let response: Response;
+    try {
+      response = await globalThis.fetch(`${baseUrl}/api/v1/${command}`, {
+        method: "POST",
+        headers: transportHeaders(connection.credential),
+        credentials: credentialsMode(connection.credential),
+        body: JSON.stringify(args ?? {}),
+      });
+    } catch (thrown) {
+      const reason = thrown instanceof Error ? thrown.message : String(thrown);
+      throw {
+        code: "internal",
+        message: `Could not reach the server at ${originOf(baseUrl)}: ${reason}.`,
+      } satisfies RimaiaError;
+    }
+    if (!response.ok) throw await errorFromResponse(response);
+    try {
+      // A unit answer is `null` (D32 point 3).
+      return JSON.parse(await response.text()) as unknown;
+    } catch {
+      throw {
+        code: "internal",
+        message: `The server answered HTTP ${response.status} without a JSON body.`,
+      } satisfies RimaiaError;
+    }
+  };
+}
+
+/** What a browser answers `get_client_capabilities` itself (task 049). */
+function browserCapabilities(): ClientCapabilities {
+  return {
+    mode: "browser",
+    localRunnerId: null,
+    canOpenInEditor: false,
+    canRevealFiles: false,
+    canChooseFolders: false,
+  };
+}
+
+/**
+ * A browser's local transport: every local command is refused without a
+ * request, because a browser has no machine to act on (D32 point 6). The one
+ * exception is the question only the client can answer.
+ */
+export const browserLocalTransport: CommandTransport = async (command) => {
+  if (command === "get_client_capabilities") return browserCapabilities();
+  throw {
+    code: "invalid",
+    message: `${command} is only available in the desktop app.`,
+  } satisfies RimaiaError;
+};
+
+/**
+ * Whether this page is inside the desktop shell. Called only by the bootstrap,
+ * never at module load and never on a command's path: the existing mocks of
+ * `@tauri-apps/api/core` provide `invoke` and nothing else.
+ */
+export function runningInDesktopShell(): boolean {
+  return isTauri();
+}
 
 /**
  * The only module in the frontend that imports `invoke`.
@@ -126,9 +285,14 @@ export const PROTOCOL_VERSION = "1.0";
  * rejected command always arrives as a `RimaiaError` with a readable `message`,
  * never as an object that stringifies to `[object Object]`.
  */
-async function send<T>(command: string, args?: Record<string, unknown>): Promise<T> {
+async function send<T>(
+  kind: keyof CommandTransports,
+  command: string,
+  args?: Record<string, unknown>,
+): Promise<T> {
   try {
-    return (await (installedTransport ?? tauriTransport)(command, args)) as T;
+    const transport = installedTransports?.[kind] ?? invokeCommandTransport;
+    return (await transport(command, args)) as T;
   } catch (thrown) {
     throw toRimaiaError(thrown);
   }
@@ -137,10 +301,10 @@ async function send<T>(command: string, args?: Record<string, unknown>): Promise
 /**
  * A board command: a `board` row of `crates/core/src/api/registry.rs`, which
  * the server also answers at `POST /api/v1/<command>` (seam-contract D32 point
- * 6). Sent exactly as `local` is until task 049 gives it the HTTP transport.
+ * 6). Sent through the installed board transport.
  */
 function board<T>(command: string, args?: Record<string, unknown>): Promise<T> {
-  return send<T>(command, args);
+  return send<T>("board", command, args);
 }
 
 /**
@@ -149,7 +313,7 @@ function board<T>(command: string, args?: Record<string, unknown>): Promise<T> {
  * wrapper whose function does not match its row's kind.
  */
 function local<T>(command: string, args?: Record<string, unknown>): Promise<T> {
-  return send<T>(command, args);
+  return send<T>("local", command, args);
 }
 
 /**
@@ -185,6 +349,23 @@ export function getAppInfo(): Promise<AppInfo> {
 
 export function revealAppDataDir(): Promise<void> {
   return local<void>("reveal_app_data_dir");
+}
+
+/**
+ * What this client can do (ADR-0034 point 5): a local command, because only
+ * the client knows. A desktop answers from its shell, a browser answers itself
+ * without a request.
+ */
+export function getClientCapabilities(): Promise<ClientCapabilities> {
+  return local<ClientCapabilities>("get_client_capabilities");
+}
+
+/**
+ * Opens the native folder picker and resolves the chosen path, or `null` when
+ * the user cancelled. A local command so no component imports a Tauri plugin.
+ */
+export function chooseFolder(title: string): Promise<string | null> {
+  return local<string | null>("choose_folder", { title });
 }
 
 /** Only registered in debug builds — see `commands::app::debug_provoke_error`. */

@@ -37,6 +37,23 @@ export interface AppInfo {
   onboardingDismissed: boolean;
 }
 
+/** Mirrors `ClientMode` in `crates/core/src/api/capabilities.rs`. */
+export type ClientMode = "solo" | "connected" | "browser";
+
+/**
+ * Mirrors `ClientCapabilities` in `crates/core/src/api/capabilities.rs`: what
+ * the calling client can do, which only the client knows (ADR-0034 point 5).
+ * A browser answers it itself, without a request.
+ */
+export interface ClientCapabilities {
+  mode: ClientMode;
+  /** The runner on this machine, `null` where there is none to name. */
+  localRunnerId: string | null;
+  canOpenInEditor: boolean;
+  canRevealFiles: boolean;
+  canChooseFolders: boolean;
+}
+
 /**
  * `welcome` is deliberately **not** in `Sidebar`'s `VIEWS` array: it is a
  * destination the app can *start* on and that Settings can send you to, not a

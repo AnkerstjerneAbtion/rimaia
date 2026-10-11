@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { invoke } from "@tauri-apps/api/core";
 
@@ -15,7 +15,15 @@ import {
   approveTask,
   getReviewDigest,
   getAppInfo,
+  getClientCapabilities,
+  getTask,
   getTaskDependents,
+  createTask,
+  deleteTask,
+  listRepositories,
+  runDoctor,
+  setCommandTransports,
+  httpCommandTransport,
   markReviewDigestSeen,
   PROTOCOL_VERSION,
   setCommandTransport,
@@ -33,6 +41,9 @@ import {
   setStrategyDefaults,
   toRimaiaError,
 } from "./commands";
+import { installTransports } from "./client";
+import { setEventTransports } from "./events";
+import { mockHttp } from "../test/http";
 import type { StrategyCatalogueView, StrategyDefaults } from "../types";
 
 // Mocked at the Tauri seam, not at the wrapper module — the wrappers are what
@@ -380,5 +391,268 @@ describe("the account wrappers (task 047)", () => {
       ["create_pairing_code", undefined],
       ["pair_own_runner", { label: "This Mac", provider: "claude-code" }],
     ]);
+  });
+});
+
+describe("the HTTP command transport (task 049)", () => {
+  const SERVER = "https://board.example";
+  const session = { kind: "session", csrf: () => "csrf-1" } as const;
+
+  function installHttp(credential: Parameters<typeof httpCommandTransport>[0]["credential"]) {
+    setCommandTransports({
+      board: httpCommandTransport({ baseUrl: SERVER, credential }),
+      local: (command) => Promise.reject({ code: "invalid", message: `${command} is local` }),
+    });
+  }
+
+  afterEach(() => {
+    setCommandTransports(undefined);
+    setEventTransports(undefined);
+    vi.unstubAllGlobals();
+    document.cookie = "rimaia_csrf=; expires=Thu, 01 Jan 1970 00:00:00 GMT";
+    mockInvoke.mockReset();
+  });
+
+  it("posts a board command to /api/v1/<name> with the invoke arguments as its body", async () => {
+    const http = mockHttp();
+    http.answer("get_task", { id: "task-1" });
+    http.answer("list_repositories", []);
+    installHttp(session);
+
+    await getTask("task-1");
+    await listRepositories();
+
+    expect(http.requests.map((r) => [r.method, r.url, r.body])).toEqual([
+      ["POST", `${SERVER}/api/v1/get_task`, { id: "task-1" }],
+      ["POST", `${SERVER}/api/v1/list_repositories`, {}],
+    ]);
+    expect(JSON.stringify({ id: "task-1" })).toBe('{"id":"task-1"}');
+  });
+
+  it("sends Rimaia-Protocol with the PROTOCOL_VERSION literal on every request", async () => {
+    const http = mockHttp();
+    http.answer("list_repositories", []);
+    installHttp(session);
+
+    await listRepositories();
+    await listRepositories();
+
+    expect(http.requests.map((r) => r.headers["rimaia-protocol"])).toEqual([
+      PROTOCOL_VERSION,
+      PROTOCOL_VERSION,
+    ]);
+    expect(http.requests[0].headers["content-type"]).toBe("application/json");
+  });
+
+  it("sends the CSRF header and no Authorization header with a session credential", async () => {
+    const http = mockHttp();
+    http.answer("list_repositories", []);
+    installHttp(session);
+
+    await listRepositories();
+
+    const [request] = http.requests;
+    expect(request.headers["x-rimaia-csrf"]).toBe("csrf-1");
+    expect(request.headers).not.toHaveProperty("authorization");
+    expect(request.credentials).toBe("same-origin");
+  });
+
+  it("reads the CSRF header from the rimaia_csrf cookie on every request", async () => {
+    const http = mockHttp();
+    http.answer("list_repositories", []);
+    installTransports("browser");
+
+    document.cookie = "rimaia_csrf=first";
+    await listRepositories();
+    document.cookie = "rimaia_csrf=second";
+    await listRepositories();
+    document.cookie = "rimaia_csrf=; expires=Thu, 01 Jan 1970 00:00:00 GMT";
+    await listRepositories();
+
+    expect(http.requests.map((r) => r.headers["x-rimaia-csrf"])).toEqual([
+      "first",
+      "second",
+      undefined,
+    ]);
+    expect(http.requests[2].headers).not.toHaveProperty("x-rimaia-csrf");
+  });
+
+  it("sends a bearer token, omits cookies and sends no CSRF header with a bearer credential", async () => {
+    const http = mockHttp();
+    http.answer("list_repositories", []);
+    installHttp({ kind: "bearer", token: "rmd_secret" });
+
+    await listRepositories();
+
+    const [request] = http.requests;
+    expect(request.headers.authorization).toBe("Bearer rmd_secret");
+    expect(request.headers).not.toHaveProperty("x-rimaia-csrf");
+    expect(request.credentials).toBe("omit");
+  });
+
+  it("resolves a null answer as void", async () => {
+    const http = mockHttp();
+    http.answer("delete_task", null);
+    installHttp(session);
+
+    await expect(deleteTask("task-1")).resolves.toBeNull();
+  });
+
+  it("turns a 200 without a JSON body into an internal error", async () => {
+    const http = mockHttp();
+    http.refuseRaw("list_repositories", 200, "<html>fallback</html>");
+    installHttp(session);
+
+    await expect(listRepositories()).rejects.toEqual({
+      code: "internal",
+      message: "The server answered HTTP 200 without a JSON body.",
+    });
+  });
+
+  it.each([
+    [400, "invalid"],
+    [401, "unauthenticated"],
+    [404, "not_found"],
+    [409, "conflict"],
+    [426, "upgrade_required"],
+    [500, "internal"],
+  ])("rejects with the server's code and message unchanged for %i", async (status, code) => {
+    const http = mockHttp();
+    http.refuse("get_task", status, { code, message: `the server said ${code}` });
+    installHttp(session);
+
+    await expect(getTask("task-1")).rejects.toEqual({ code, message: `the server said ${code}` });
+  });
+
+  it("turns an error body that is not JSON into an internal error naming the status", async () => {
+    const http = mockHttp();
+    http.refuseRaw("get_task", 502, "<html>Bad Gateway</html>");
+    installHttp(session);
+
+    await expect(getTask("task-1")).rejects.toEqual({
+      code: "internal",
+      message: "The server answered HTTP 502 without an error body.",
+    });
+  });
+
+  it("turns a fetch that throws into an internal error naming the server", async () => {
+    const http = mockHttp();
+    http.unreachable("Failed to fetch");
+    installHttp(session);
+
+    await expect(getTask("task-1")).rejects.toEqual({
+      code: "internal",
+      message: `Could not reach the server at ${SERVER}: Failed to fetch.`,
+    });
+  });
+
+  it("gives a wrapper the same answer and the same error through invoke and HTTP", async () => {
+    const repositories = [{ id: "repo-1", name: "rimaia", defaultBranch: "main" }];
+    const created = { id: "task-9", title: "A task" };
+    const refusal = { code: "not_found", message: "task not found" };
+    const input = { repositoryId: "repo-1", title: "A task" };
+
+    mockInvoke.mockImplementation(async (command) => {
+      if (command === "list_repositories") return repositories;
+      if (command === "create_task") return created;
+      throw refusal;
+    });
+    const throughInvoke = [
+      await listRepositories(),
+      await createTask(input),
+      await getTask("nope").catch((error: unknown) => error),
+    ];
+
+    const http = mockHttp();
+    http.answer("list_repositories", repositories);
+    http.answer("create_task", created);
+    http.refuse("get_task", 404, refusal);
+    installHttp(session);
+    const throughHttp = [
+      await listRepositories(),
+      await createTask(input),
+      await getTask("nope").catch((error: unknown) => error),
+    ];
+
+    expect(throughHttp).toEqual(throughInvoke);
+    expect(http.requests[1].body).toEqual({ input });
+  });
+});
+
+describe("the transports by command kind (task 049)", () => {
+  afterEach(() => {
+    setCommandTransports(undefined);
+    setEventTransports(undefined);
+    vi.unstubAllGlobals();
+    mockInvoke.mockReset();
+  });
+
+  it("sends every command through invoke when nothing is installed", async () => {
+    mockInvoke.mockResolvedValue([]);
+
+    await listRepositories();
+    await getAppInfo();
+
+    expect(mockInvoke.mock.calls.map(([command]) => command)).toEqual([
+      "list_repositories",
+      "get_app_info",
+    ]);
+  });
+
+  it("routes board commands to HTTP and local commands to invoke in connected mode", async () => {
+    const http = mockHttp();
+    http.answer("list_repositories", []);
+    mockInvoke.mockResolvedValue({ appVersion: "1.2.3" });
+    installTransports("connected", { serverUrl: "https://board.example", token: "rmd_t" });
+
+    await listRepositories();
+    await getAppInfo();
+
+    expect(http.requests.map((r) => r.name)).toEqual(["list_repositories"]);
+    expect(mockInvoke).toHaveBeenCalledTimes(1);
+    expect(mockInvoke).toHaveBeenCalledWith("get_app_info", undefined);
+  });
+
+  it("refuses a local command in the browser without making a request", async () => {
+    const http = mockHttp();
+    installTransports("browser");
+
+    await expect(runDoctor()).rejects.toEqual({
+      code: "invalid",
+      message: "run_doctor is only available in the desktop app.",
+    });
+
+    expect(http.requests).toEqual([]);
+    expect(mockInvoke).not.toHaveBeenCalled();
+  });
+
+  it("answers get_client_capabilities in the browser without a request", async () => {
+    const http = mockHttp();
+    installTransports("browser");
+
+    await expect(getClientCapabilities()).resolves.toEqual({
+      mode: "browser",
+      localRunnerId: null,
+      canOpenInEditor: false,
+      canRevealFiles: false,
+      canChooseFolders: false,
+    });
+
+    expect(http.requests).toEqual([]);
+    expect(mockInvoke).not.toHaveBeenCalled();
+  });
+
+  it("still sends both kinds through a transport installed with setCommandTransport", async () => {
+    const transport = vi.fn().mockResolvedValue([]);
+    setCommandTransport(transport);
+
+    await listRepositories();
+    await getAppInfo();
+
+    expect(transport.mock.calls.map(([command]) => command)).toEqual([
+      "list_repositories",
+      "get_app_info",
+    ]);
+    expect(mockInvoke).not.toHaveBeenCalled();
   });
 });

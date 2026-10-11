@@ -3,7 +3,6 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { open } from "@tauri-apps/plugin-dialog";
 
 import { RepositoriesSection } from "./RepositoriesSection";
 import type {
@@ -31,18 +30,8 @@ vi.mock("@tauri-apps/api/event", () => ({
   listen: vi.fn(),
 }));
 
-// `@tauri-apps/plugin-dialog` is a separate node_modules package that
-// Vitest's dep graph does not route through the `@tauri-apps/api/core` mock
-// above (its own `invoke` import resolves outside the transformed module
-// graph) - it has no `toRimaiaError` logic of its own to exercise, so it's
-// mocked directly at its own boundary instead.
-vi.mock("@tauri-apps/plugin-dialog", () => ({
-  open: vi.fn(),
-}));
-
 const mockInvoke = vi.mocked(invoke);
 const mockListen = vi.mocked(listen);
-const mockOpen = vi.mocked(open);
 
 function repository(overrides: Partial<Repository> = {}): Repository {
   return {
@@ -147,7 +136,6 @@ function mockBackend(handler: (command: string, args?: unknown) => unknown) {
 beforeEach(() => {
   checkouts = [checkout()];
   mockInvoke.mockReset();
-  mockOpen.mockReset();
   mockListen.mockReset();
   // The default every test but the live-refresh one below wants: a
   // subscription that resolves (so the component's success branch runs) and
@@ -177,9 +165,9 @@ describe("RepositoriesSection", () => {
   });
 
   it("shows the specific backend message for one invalid path, not a generic failure", async () => {
-    mockOpen.mockResolvedValue("/tmp/not-a-repo");
     mockBackend((command) => {
       if (command === "list_repositories") return [];
+      if (command === "choose_folder") return "/tmp/not-a-repo";
       if (command === "register_repository") {
         throw { code: "invalid", message: "/tmp/not-a-repo is not a git repository" };
       }
@@ -196,9 +184,9 @@ describe("RepositoriesSection", () => {
   });
 
   it("shows a different specific backend message for a repository with no commits", async () => {
-    mockOpen.mockResolvedValue("/tmp/empty-repo");
     mockBackend((command) => {
       if (command === "list_repositories") return [];
+      if (command === "choose_folder") return "/tmp/empty-repo";
       if (command === "register_repository") {
         throw { code: "invalid", message: "/tmp/empty-repo has no commits yet" };
       }
@@ -212,6 +200,64 @@ describe("RepositoriesSection", () => {
 
     const banner = await screen.findByRole("alert");
     expect(banner).toHaveTextContent("/tmp/empty-repo has no commits yet");
+  });
+
+  it("registers the folder the picker chose", async () => {
+    mockBackend((command, args) => {
+      if (command === "list_repositories") return [];
+      if (command === "choose_folder") {
+        expect(args).toEqual({ title: "Choose a repository" });
+        return "/code/chosen";
+      }
+      if (command === "register_repository") return repository({ id: "repo-2", name: "chosen" });
+      throw new Error(`unexpected command: ${command}`);
+    });
+
+    render(<RepositoriesSection />);
+    await screen.findByText("No repositories registered yet.");
+
+    fireEvent.click(screen.getByRole("button", { name: "Add repository" }));
+
+    await waitFor(() =>
+      expect(mockInvoke).toHaveBeenCalledWith("register_repository", {
+        input: { path: "/code/chosen" },
+      }),
+    );
+  });
+
+  it("registers nothing when the picker is cancelled", async () => {
+    mockBackend((command) => {
+      if (command === "list_repositories") return [];
+      if (command === "choose_folder") return null;
+      throw new Error(`unexpected command: ${command}`);
+    });
+
+    render(<RepositoriesSection />);
+    await screen.findByText("No repositories registered yet.");
+
+    fireEvent.click(screen.getByRole("button", { name: "Add repository" }));
+
+    await waitFor(() => expect(mockInvoke).toHaveBeenCalledWith("choose_folder", expect.anything()));
+    expect(mockInvoke).not.toHaveBeenCalledWith("register_repository", expect.anything());
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  });
+
+  it("shows the refusal when the folder picker fails", async () => {
+    mockBackend((command) => {
+      if (command === "list_repositories") return [];
+      if (command === "choose_folder") {
+        throw { code: "internal", message: "the folder picker closed without an answer" };
+      }
+      throw new Error(`unexpected command: ${command}`);
+    });
+
+    render(<RepositoriesSection />);
+    await screen.findByText("No repositories registered yet.");
+
+    fireEvent.click(screen.getByRole("button", { name: "Add repository" }));
+
+    const banner = await screen.findByRole("alert");
+    expect(banner).toHaveTextContent("the folder picker closed without an answer");
   });
 
   it("defaults the unattended opt-in to off and requires confirming the honest warning before enabling it", async () => {
