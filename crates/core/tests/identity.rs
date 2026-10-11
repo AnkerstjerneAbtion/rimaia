@@ -20,6 +20,7 @@ use rimaia_core::identity::secret::{self, Secret, TokenKind};
 use rimaia_core::identity::tokens::{self, NewApiToken};
 use rimaia_core::identity::{runners, sessions, sign_in, Role};
 use rimaia_core::runner::provider::{ClaudeProvider, ProviderProfile};
+use rimaia_core::tasks;
 use rimaia_core::testing::{test_epoch, test_pool, TestClock};
 use rimaia_core::{AppPaths, Clock, Error, ErrorCode, ServiceContext, TeamScope};
 use serde_json::{json, Value};
@@ -1293,6 +1294,51 @@ async fn a_listed_runner_carries_what_the_board_knows_about_it() {
     );
 }
 
+/// A task in `user_id`'s personal team with one finished run that names
+/// `runner_id`, written directly: the test is about what unpairing leaves
+/// behind, not about how a run gets claimed. Returns the task's and run's ids.
+async fn seed_run_on(board: &Board, user_id: &str, runner_id: &str) -> (String, String) {
+    let team_id = board.personal_team(user_id).await;
+    let repository_id = db::new_id();
+    let task_id = db::new_id();
+    let run_id = db::new_id();
+    let now = board.clock.now();
+    sqlx::query(
+        "INSERT INTO repositories (id, team_id, name, default_branch, allow_unattended_runs, created_at)
+         VALUES (?1, ?2, 'rimaia', 'main', 0, ?3)",
+    )
+    .bind(&repository_id)
+    .bind(&team_id)
+    .bind(now)
+    .execute(&board.pool)
+    .await
+    .expect("a repository");
+    sqlx::query(
+        "INSERT INTO tasks (id, team_id, repository_id, title, board_column, position, run_state,
+                            created_at, updated_at)
+         VALUES (?1, ?2, ?3, 'ran on the laptop', 'ready', 1.0, 'idle', ?4, ?4)",
+    )
+    .bind(&task_id)
+    .bind(&team_id)
+    .bind(&repository_id)
+    .bind(now)
+    .execute(&board.pool)
+    .await
+    .expect("a task");
+    sqlx::query(
+        "INSERT INTO runs (id, task_id, attempt, status, session_id, prompt, started_at, runner_id)
+         VALUES (?1, ?2, 1, 'succeeded', 'session-1', 'a prompt', ?3, ?4)",
+    )
+    .bind(&run_id)
+    .bind(&task_id)
+    .bind(now)
+    .bind(runner_id)
+    .execute(&board.pool)
+    .await
+    .expect("a run");
+    (task_id, run_id)
+}
+
 #[tokio::test]
 async fn unpairing_a_runner_revokes_its_tokens_and_keeps_its_row() {
     let board = Board::new().await;
@@ -1302,6 +1348,7 @@ async fn unpairing_a_runner_revokes_its_tokens_and_keeps_its_row() {
         .await
         .expect("a runner");
     board.bearer(paired.token.expose()).await.expect("paired");
+    let (task_id, run_id) = seed_run_on(&board, &ada, &paired.runner_id).await;
     board.clock.advance(Duration::minutes(5));
 
     runners::unpair_own(&ctx, &paired.runner_id)
@@ -1309,6 +1356,21 @@ async fn unpairing_a_runner_revokes_its_tokens_and_keeps_its_row() {
         .expect("unpair");
 
     assert_unauthenticated(board.bearer(paired.token.expose()).await, "unpaired");
+    let named: Option<String> = sqlx::query_scalar("SELECT runner_id FROM runs WHERE id = ?1")
+        .bind(&run_id)
+        .fetch_one(&board.pool)
+        .await
+        .expect("the run stays");
+    assert_eq!(named, Some(paired.runner_id.clone()));
+    let detail = tasks::get_task(&ctx, &task_id).await.expect("read");
+    assert_eq!(
+        detail.worktree_runner,
+        Some(tasks::WorktreeRunner {
+            id: paired.runner_id.clone(),
+            label: "laptop".to_string(),
+            unpaired: true,
+        })
+    );
     let unpaired_at: Option<chrono::DateTime<chrono::Utc>> =
         sqlx::query_scalar("SELECT unpaired_at FROM runners WHERE id = ?1")
             .bind(&paired.runner_id)
