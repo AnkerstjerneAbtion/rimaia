@@ -6112,6 +6112,40 @@ amended by the first three.
 **Binds.** 047 (the `Session`/`Browser` arm), 049 (the local half), 054 (the machine-less
 path, inside the core functions), 056 (`BoardHost.paths`), 059 (`AppState.board = None`).
 
+### Amendment, 2026-10-11 — what task 047 decided
+
+Task 047 made point 7's `Caller` real. Five things it met are recorded here; the first amends
+point 7's trait.
+
+- **`Authenticate` gains one provided method, `authenticate_from(credential, user_agent)`.**
+  ADR-0030 point 3 lists every token with "where it was last used", and 047 reads that as the
+  request's `User-Agent`, which `Credential` does not carry. The provided body ignores the
+  agent and calls `authenticate`, so `RefuseAll`, `FixedCaller` and any later implementation
+  that records no use need nothing. `SessionsAndTokens` overrides it, and the server's
+  extractor calls it whenever it has the header. `authenticate` stays the one required method,
+  and the trait is still one value a server swaps. 052's runner routes and 060's `/mcp` call
+  `authenticate_from` too, so a runner's heartbeat records where it came from.
+- **`Error::unauthenticated()` takes no argument** and always says `Sign in to continue.`
+  (`error::UNAUTHENTICATED_MESSAGE`). The extractor's own refusals (both credentials at once,
+  no credential, a door the surface does not accept) use it unchanged in meaning. A cookie
+  without its CSRF header still reaches `Authenticate`, as 046's amendment above says, and is
+  refused there.
+- **`get_account` answers the user's fields at the top level**: `{ id, login, avatarUrl,
+  teams: [{ id, name, role }], current: { kind, id } }`. `teams` is the caller's memberships
+  that the request's scope reaches, by name. `Role` now serializes as `"owner"` or
+  `"member"`, `team_memberships.role`'s spelling.
+- **A login is held to GitHub's own rule at sign-up**: 1 to 39 ASCII letters, digits and
+  hyphens, or `upsert_user` refuses with `internal` and writes nothing. D37 renders logins in
+  a shared team's prompts as class 2, "constrained at sign-up (047)", and this is that
+  constraint, enforced at the one place a login is written rather than trusted to whichever
+  provider sent it.
+- **RFC 7636 Appendix B's challenge ends `…WbuGJSstw-cM`.** Task 047's acceptance criteria
+  quoted it as `…WbuEJSstw-cM`, which no SHA-256 produces; the test asserts the RFC's value,
+  and the task file is corrected to match.
+
+**Binds.** 048, 052 and 060 (`authenticate_from`), 050 (`get_account`'s shape), 051 (logins
+written only through `upsert_user`), 073 (the class-2 claim it rests on).
+
 ### Appendix — today's 97 commands, classified
 
 The table follows the order of the handler list in `src-tauri/src/lib.rs` (lines 394–593 on

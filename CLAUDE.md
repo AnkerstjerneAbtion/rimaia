@@ -236,11 +236,20 @@ Rules:
   (ADR-0023). It relocates `runner.db` as well as `rimaia.db` (ADR-0028 point 4). It must be
   an absolute path; a relative one or an unexpanded `~` is refused at startup rather than
   guessed at.
-- **Run the server with `RIMAIA_DATA_DIR=<absolute path> RIMAIA_LISTEN=127.0.0.1:8787 cargo run -p
-  rimaia-server`.** `RIMAIA_DATA_DIR` is required, has no platform default, and follows the
-  app's rules (absolute, no unexpanded `~`); the server keeps `rimaia.db` there, so never point
-  it at a desktop app's data directory. `RIMAIA_LISTEN` is the socket address to bind. Until
-  task 047 the server answers every board command `401`.
+- **Run the server with `RIMAIA_DATA_DIR=<absolute path> RIMAIA_LISTEN=127.0.0.1:8787
+  RIMAIA_PUBLIC_URL=http://localhost:8787 RIMAIA_GITHUB_CLIENT_ID=… RIMAIA_GITHUB_CLIENT_SECRET=…
+  cargo run -p rimaia-server`.** `RIMAIA_DATA_DIR` is required, has no platform default, and
+  follows the app's rules (absolute, no unexpanded `~`); the server keeps `rimaia.db` there, so
+  never point it at a desktop app's data directory. `RIMAIA_LISTEN` is the socket address to
+  bind. `RIMAIA_PUBLIC_URL` is the origin people reach it at, and the GitHub OAuth app's callback
+  URL must be exactly `<origin>/auth/github/callback`; the client id and secret are that app's.
+  Each missing variable is named at startup, and the secret never is. Sign in from Chrome or
+  Firefox when the origin is `http://localhost`: Safari refuses `Secure` cookies there.
+- **No secret goes into a log line, a `Debug` output, an error message or a URL the server
+  records.** Tokens, session secrets, pairing codes, OAuth codes and `state` are minted,
+  hashed and compared only through `rimaia_core::identity::secret`, and stored only as its
+  hashes (task 047). A type that holds one prints `Secret(…)`, a span records the matched
+  route and never the URI, and a refusal says `Sign in to continue.` whatever went wrong.
 - **Board migrations are applied only through `db::migrate`**, which turns foreign keys off
   around the migrator, checks `PRAGMA foreign_key_check` after, and turns them back on
   (seam-contract D28 part 1). Never apply one to a real `rimaia.db` with `cargo sqlx migrate

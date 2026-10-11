@@ -455,7 +455,7 @@ variables are listed wherever 046 documented its own.
   - `a_stored_hash_is_the_hex_sha256_of_the_whole_token`;
   - `the_pkce_challenge_matches_rfc_7636_appendix_b`: verifier
     `dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk` gives exactly
-    `E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuEJSstw-cM`;
+    `E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM`;
   - `the_csrf_token_is_derived_from_the_session_secret_and_is_neither_it_nor_its_hash`;
   - `a_typed_pairing_code_is_forgiven_case_hyphens_and_lookalikes`;
   - `no_secret_type_prints_its_value_in_debug`, over `Secret`, `NewApiToken`,
@@ -534,7 +534,7 @@ variables are listed wherever 046 documented its own.
 - `github_builds_the_authorize_url_github_documents`: for client id `Iv1.test`, redirect
   `https://rimaia.test/auth/github/callback`, state `state-1` and the RFC 7636 challenge
   above, `authorize_url` is exactly
-  `https://github.com/login/oauth/authorize?client_id=Iv1.test&redirect_uri=https%3A%2F%2Frimaia.test%2Fauth%2Fgithub%2Fcallback&scope=read%3Auser&state=state-1&code_challenge=E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuEJSstw-cM&code_challenge_method=S256`.
+  `https://github.com/login/oauth/authorize?client_id=Iv1.test&redirect_uri=https%3A%2F%2Frimaia.test%2Fauth%2Fgithub%2Fcallback&scope=read%3Auser&state=state-1&code_challenge=E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM&code_challenge_method=S256`.
 - `github_exchanges_a_code_for_the_numeric_subject_and_keeps_no_token`: against a loopback
   stub serving GitHub's documented token and `/user` shapes, the exchange sends the verifier,
   the client secret and `Accept: application/json`, and returns the numeric `id` as the
