@@ -8,6 +8,12 @@ export type ErrorCode =
   /** A report made under a lease that is no longer current (ADR-0031). No solo
    *  path produces it; it is here so the union mirrors the enum. */
   | "conflict"
+  /** No credential the server accepts (seam-contract D32 point 7). Only the
+   *  HTTP transport can produce it; solo answers every command in process. */
+  | "unauthenticated"
+  /** The server will not take a write from this client's protocol version
+   *  (ADR-0037 point 4). Only the HTTP transport can produce it. */
+  | "upgrade_required"
   | "internal";
 
 /** Mirrors the payload `rimaia_core::Error` serializes to. */
