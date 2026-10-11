@@ -7024,12 +7024,20 @@ the question again.
 5. **The canary test** (`crates/core/tests/prompt_inputs.rs`) writes every team-writable text
    field in the table, through the services, as `CANARY-<field>`, composes every prompt kind
    from the claiming runner's context, and asserts each class 1 and class 3 canary appears,
-   no class 4 canary does, and no other canary does either. A second case writes the
+   no class 4 canary does, and no other canary does either. The findings are written by a
+   run: Alice's runner records two through the `BoardPort` with a canary title, body and file,
+   and its fix rejects one with a canary reason, so Bob's runner, taking the fix over, composes
+   `# Findings to address` and `# Findings already rejected` from them. The claiming runner's
+   label is a canary too, and must appear; the other runner's label is one in no class, and
+   must not. No service writes a runner's label yet, so the test writes the column, as it
+   releases the pin 057's "run elsewhere" will. A second case writes the
    runner's reports from Alice's runner through the `BoardPort`: a canary branch, base ref,
    base commit and head commit are each refused, and a canary bundle path, rendered in Alice's
-   own runner's prompts, reaches none of Bob's. Its solo case pins the personal team's
-   prompts. A task that adds a team-writable or runner-written field a prompt renders adds
-   its row to point 1 and its canary to the test, in the same diff.
+   own runner's prompts, reaches none of Bob's. Its solo case runs the same loop and asserts
+   every prompt kind the first case composes, whole, the review once with each set of review
+   instructions, as it was before task 073. A task that adds a team-writable or
+   runner-written field a prompt renders adds its row to point 1 and its canary to the test,
+   in the same diff.
 
 **Why.** (1) replaces finding channels by review with a list a reviewer can check a diff
 against. It counts a runner as a writer because 057's run elsewhere and D36's findings from
