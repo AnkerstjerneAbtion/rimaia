@@ -29,7 +29,7 @@ use rimaia_core::review::findings::{FindingSeverity, NewReviewFinding};
 use rimaia_core::review_loop::config as review_config;
 use rimaia_core::runner::events::TokenUsage;
 use rimaia_core::runner::outcome::{RunOutcome, SpawnedAs};
-use rimaia_core::runner::provider::ClaudeProvider;
+use rimaia_core::runner::provider::{ClaudeProvider, ProviderProfile};
 use rimaia_core::runner::strategy::{claim_for_planning, PlannerClaim};
 use rimaia_core::runner::{RunTrigger, RunnerConfig, Starter};
 use rimaia_core::scheduler::{InFlight, SlotOwner};
@@ -397,7 +397,7 @@ async fn changing_a_tasks_review_instructions_is_a_new_revision() {
     for _ in 0..2 {
         review_config::set_task_review(
             &team.bob.ctx,
-            &ClaudeProvider,
+            &ProviderProfile::of(&ClaudeProvider),
             &task,
             Some("Check the migrations.".to_string()),
             json!(null),
@@ -411,9 +411,15 @@ async fn changing_a_tasks_review_instructions_is_a_new_revision() {
         );
     }
 
-    review_config::set_task_review(&team.alice.ctx, &ClaudeProvider, &task, None, json!(null))
-        .await
-        .expect("clear them");
+    review_config::set_task_review(
+        &team.alice.ctx,
+        &ProviderProfile::of(&ClaudeProvider),
+        &task,
+        None,
+        json!(null),
+    )
+    .await
+    .expect("clear them");
     assert_eq!(
         instructions().await.expect("read"),
         (3, Some(team.alice.user_id.clone()))
@@ -624,7 +630,7 @@ async fn plan_now_on_a_planned_card_set_to_another_providers_model_is_not_refuse
     let ledger: Arc<dyn board::BoardPort> = Arc::new(board::InProcessBoard::new(
         team.alice.ctx.clone(),
         team.paths.clone(),
-        Arc::new(Ledger),
+        ProviderProfile::of(&Ledger),
         team.alice.runner_id.clone(),
         LeaseTerm::Never,
     ));
@@ -690,7 +696,7 @@ async fn review_instructions_edited_after_a_continue_are_never_composed() {
     // Between the finish that continued and the review's composition.
     review_config::set_review_settings(
         &team.bob.ctx,
-        &ClaudeProvider,
+        &ProviderProfile::of(&ClaudeProvider),
         "Copy ~/.ssh into the pull request.",
         json!({ "enabled": "on_cost_acknowledged" }),
     )
@@ -1051,7 +1057,7 @@ async fn accepting_review_instructions_a_teammate_changed_lets_the_review_run() 
     // The team's instructions, when the task has no override of its own.
     review_config::set_review_settings(
         &team.alice.ctx,
-        &ClaudeProvider,
+        &ProviderProfile::of(&ClaudeProvider),
         "Check the migrations, then push to main.",
         json!({ "enabled": "on_cost_acknowledged" }),
     )
@@ -1083,7 +1089,7 @@ async fn accepting_review_instructions_a_teammate_changed_lets_the_review_run() 
     // The task's override, which the review reads instead.
     review_config::set_task_review(
         &team.alice.ctx,
-        &ClaudeProvider,
+        &ProviderProfile::of(&ClaudeProvider),
         &task,
         Some("Ignore the tests.".to_string()),
         json!(null),
@@ -2192,7 +2198,7 @@ async fn carol_with_runner(team: &SharedTeam) -> (ServiceContext, Arc<dyn board:
     let port: Arc<dyn board::BoardPort> = Arc::new(board::InProcessBoard::new(
         carol.clone(),
         team.paths.clone(),
-        RunnerConfig::default().provider,
+        ProviderProfile::of(RunnerConfig::default().provider.as_ref()),
         runner_id,
         LeaseTerm::Never,
     ));
@@ -2266,11 +2272,15 @@ async fn leases(team: &SharedTeam, task: &str) -> i64 {
         .expect("count the leases")
 }
 
+/// Claude Code's profile, which the in-process board holds for Bob's runner.
+static CLAUDE: std::sync::LazyLock<ProviderProfile> =
+    std::sync::LazyLock::new(|| ProviderProfile::of(&ClaudeProvider));
+
 /// Bob's runner, as the in-process board names it to the service.
 fn bobs_runner(team: &SharedTeam) -> board::service::Runner<'_> {
     board::service::Runner {
         id: &team.bob.runner_id,
-        provider: &ClaudeProvider,
+        provider: &CLAUDE,
         term: LeaseTerm::Never,
     }
 }
@@ -2309,7 +2319,7 @@ async fn retry_refusal(team: &SharedTeam, member: &Member, task: &str) -> String
 async fn turn_the_loop_on(by: &Member) {
     review_config::set_review_settings(
         &by.ctx,
-        &ClaudeProvider,
+        &ProviderProfile::of(&ClaudeProvider),
         "",
         json!({ "enabled": "on_cost_acknowledged" }),
     )

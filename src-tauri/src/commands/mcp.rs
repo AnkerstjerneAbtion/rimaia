@@ -10,6 +10,7 @@
 use std::mem;
 
 use rimaia_core::mcp::{self, McpProbe, McpState, McpStatus};
+use rimaia_core::runner::provider::ProviderProfile;
 use rimaia_core::{Error, Result};
 use tauri::State;
 
@@ -60,7 +61,7 @@ pub async fn set_mcp_port(state: State<'_, AppState>, port: u16) -> Result<McpSt
         state.context.clone(),
         port,
         state.run_handles.clone(),
-        state.runner.provider.clone(),
+        ProviderProfile::of(state.runner.provider.as_ref()),
         // Rebuilt from the same shell values the first bind used, for the same
         // reason the `RunHandles` above are reused: a rebind must not quietly
         // narrow what `run_doctor` can see, leave the server unable to plan

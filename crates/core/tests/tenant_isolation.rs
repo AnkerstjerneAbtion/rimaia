@@ -43,6 +43,7 @@ use std::path::{Path, PathBuf};
 
 use pretty_assertions::assert_eq;
 use rimaia_core::mcp::{self, Grant, GrantKind, McpHandle, RunAccess, Tool};
+use rimaia_core::runner::provider::ProviderProfile;
 use rimaia_core::schedule::{self, ScheduleInput};
 use rimaia_core::testing::teams::{TwoTeams, SENTINEL};
 use rimaia_core::{db::ScheduleMode, ServiceContext};
@@ -1391,7 +1392,7 @@ async fn serving(
         ctx.clone(),
         0,
         teams.handles.clone(),
-        teams.doctor().provider,
+        ProviderProfile::of(teams.doctor().provider.as_ref()),
         Some(teams.local(ctx)),
     )
     .await;

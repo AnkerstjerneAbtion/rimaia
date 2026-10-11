@@ -71,7 +71,7 @@ use rimaia_core::runner::prompt::{
     compose_prompt, compose_strategy_prompt, compose_strategy_system_append, compose_system_append,
     PromptTeam, StrategyGuidance,
 };
-use rimaia_core::runner::provider::ClaudeProvider;
+use rimaia_core::runner::provider::{ClaudeProvider, ProviderProfile};
 use rimaia_core::runner::strategy::{
     self as runner_strategy, PlanOutcome, PlanPass, PlanSelection,
 };
@@ -435,9 +435,12 @@ async fn each_run_is_sent_its_own_prompt_and_the_proposal_reaches_the_implementa
     // links, and the planner changed none of them.
     let detail = fixture.detail().await;
     let repository = fixture.repository().await;
-    let catalogue = strategy::catalogue::catalogue(&fixture.harness.context, &ClaudeProvider)
-        .await
-        .expect("the catalogue");
+    let catalogue = strategy::catalogue::catalogue(
+        &fixture.harness.context,
+        &ProviderProfile::of(&ClaudeProvider),
+    )
+    .await
+    .expect("the catalogue");
 
     assert_eq!(
         cli.stdin(1),
@@ -508,9 +511,12 @@ async fn the_planner_prompt_names_the_branch_prepare_created() {
         .branch
         .clone()
         .expect("prepare created the branch");
-    let catalogue = strategy::catalogue::catalogue(&fixture.harness.context, &ClaudeProvider)
-        .await
-        .expect("the catalogue");
+    let catalogue = strategy::catalogue::catalogue(
+        &fixture.harness.context,
+        &ProviderProfile::of(&ClaudeProvider),
+    )
+    .await
+    .expect("the catalogue");
     let expected = compose_strategy_prompt(
         &detail,
         &fixture.repository().await,

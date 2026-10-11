@@ -5,15 +5,13 @@
 //! decides anything, so task 052's HTTP adapter and this one cannot come to
 //! disagree about a rule: they reach the same function.
 
-use std::sync::Arc;
-
 use crate::context::ServiceContext;
 use crate::db::MutationSource;
 use crate::events::RunnerId;
 use crate::paths::AppPaths;
 use crate::review::findings::NewReviewFinding;
 use crate::runner::events::RunTail;
-use crate::runner::provider::AgentProvider;
+use crate::runner::provider::ProviderProfile;
 use crate::tasks::strategy::StrategyPlan;
 
 use super::lease::LeaseTerm;
@@ -27,14 +25,15 @@ use super::types::{
 /// The board, in process.
 ///
 /// `provider` is read only to build [`RunContext::catalogue`], and it must be
-/// the provider of the [`RunnerConfig`](crate::runner::RunnerConfig) this board
-/// serves: a board built for another one would hand the planner the wrong
-/// catalogue, and nothing would fail loudly. `src-tauri` builds both from one
-/// value, and `TestContext::board` takes it from the config.
+/// the profile of the [`RunnerConfig`](crate::runner::RunnerConfig)'s provider
+/// this board serves: a board built for another one would hand the planner the
+/// wrong catalogue, and nothing would fail loudly. `src-tauri` builds both from
+/// one value, and `TestContext::board` takes it from the config. A profile and
+/// not the provider, so nothing on the board side can spawn (D31 point 9).
 pub struct InProcessBoard {
     ctx: ServiceContext,
     paths: AppPaths,
-    provider: Arc<dyn AgentProvider>,
+    provider: ProviderProfile,
     /// The runner this board serves: solo's own, from its `SoloIdentity`
     /// (D31 point 9). It is the adapter's scope, never a request field (D31
     /// point 3), which is why `StartRun` does not carry it.
@@ -53,7 +52,7 @@ impl InProcessBoard {
     pub fn new(
         ctx: ServiceContext,
         paths: AppPaths,
-        provider: Arc<dyn AgentProvider>,
+        provider: ProviderProfile,
         runner_id: RunnerId,
         term: LeaseTerm,
     ) -> Self {
@@ -69,7 +68,7 @@ impl InProcessBoard {
     fn runner(&self) -> Runner<'_> {
         Runner {
             id: &self.runner_id,
-            provider: self.provider.as_ref(),
+            provider: &self.provider,
             term: self.term,
         }
     }

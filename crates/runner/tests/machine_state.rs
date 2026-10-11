@@ -16,6 +16,7 @@ use rimaia_core::db::settings::{self, Dismissal, RunEnvironment, RUNNER_KEYS};
 use rimaia_core::db::ScheduleMode;
 use rimaia_core::doctor::Check;
 use rimaia_core::machine::MachineContext;
+use rimaia_core::runner::provider::ProviderProfile;
 use rimaia_core::schedule::window::{self, RunWindow};
 use rimaia_core::scheduler::{capacity, pause, state, QueueState};
 use rimaia_core::testing::{test_epoch, TestClock};
@@ -439,7 +440,7 @@ async fn a_schedule_opens_its_window_from_the_runner_store() {
     let board_port: Arc<dyn BoardPort> = Arc::new(InProcessBoard::new(
         board.clone(),
         paths.clone(),
-        runner.provider.clone(),
+        ProviderProfile::of(runner.provider.as_ref()),
         solo.runner_id.clone(),
         rimaia_core::board::LeaseTerm::Never,
     ));

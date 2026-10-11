@@ -33,7 +33,7 @@ use rimaia_core::repo::{self, NewRepository};
 use rimaia_core::review::findings::NewReviewFinding;
 use rimaia_core::review_loop::{config as review_config, UnreviewedReason, Verdict};
 use rimaia_core::runner::events::RunTail;
-use rimaia_core::runner::provider::ClaudeProvider;
+use rimaia_core::runner::provider::{ClaudeProvider, ProviderProfile};
 use rimaia_core::runner::strategy::{claim_for_planning, plan_claimed, PlanOutcome};
 use rimaia_core::runner::{run_task, CancelSignal, RunRequest, RunTrigger, RunnerConfig};
 use rimaia_core::scheduler::{InFlight, SlotOwner};
@@ -173,7 +173,7 @@ async fn a_phase_started_by_continue_refuses() {
     let task = f.task("Continue").await;
     review_config::set_review_settings(
         f.ctx(),
-        &ClaudeProvider,
+        &ProviderProfile::of(&ClaudeProvider),
         "Run /review.",
         json!({ "enabled": "on_cost_acknowledged" }),
     )

@@ -1299,7 +1299,7 @@ pub struct RunCostSummary {
 /// appendix), never another team's.
 pub async fn observed_run_cost(
     ctx: &ServiceContext,
-    provider: &dyn crate::runner::provider::AgentProvider,
+    provider: &crate::runner::provider::ProviderProfile,
 ) -> Result<RunCostSummary> {
     let scope = ctx.scope.json();
     let costs: Vec<f64> = sqlx::query_scalar!(
@@ -1325,7 +1325,7 @@ pub async fn observed_run_cost(
     Ok(RunCostSummary {
         median_usd,
         sample_size,
-        inherit_cost_usd: provider.inherit_cost_usd(),
-        provider_display_name: provider.display_name(),
+        inherit_cost_usd: provider.inherit_cost_usd,
+        provider_display_name: provider.display_name,
     })
 }

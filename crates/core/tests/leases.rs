@@ -40,7 +40,7 @@ use rimaia_core::review::findings::{FindingSeverity, NewReviewFinding};
 use rimaia_core::review_loop::config as review_config;
 use rimaia_core::runner::events::{RunTail, TokenUsage};
 use rimaia_core::runner::outcome::{start_run, NewRun, RunOutcome, SpawnedAs};
-use rimaia_core::runner::provider::{ClaudeProvider, ProviderId};
+use rimaia_core::runner::provider::{ClaudeProvider, ProviderId, ProviderProfile};
 use rimaia_core::runner::strategy::{claim_for_planning, plan_claimed, PlannerAccess};
 use rimaia_core::runner::{
     claim_manual_start, run_task, ManualStart, RunRequest, RunTrigger, RunnerConfig,
@@ -905,7 +905,7 @@ async fn every_starter_records_its_claim_before_it_spawns() {
     // Plan now through both MCP tools, over the same witness.
     let server = RimaiaServer::new(
         f.ctx().clone(),
-        Arc::new(ClaudeProvider),
+        ProviderProfile::of(&ClaudeProvider),
         Some(LocalTools {
             machine: f.machine().clone(),
             doctor: testing::doctor::environment(),
@@ -1662,7 +1662,7 @@ impl Fixture {
         Arc::new(InProcessBoard::new(
             self.harness.context.clone(),
             self.paths.clone(),
-            self.config().provider,
+            ProviderProfile::of(self.config().provider.as_ref()),
             self.runner_id(which),
             LeaseTerm::Never,
         ))
@@ -1724,7 +1724,7 @@ impl Fixture {
     async fn turn_the_loop_on(&self) {
         review_config::set_review_settings(
             self.ctx(),
-            &ClaudeProvider,
+            &ProviderProfile::of(&ClaudeProvider),
             "",
             serde_json::json!({ "enabled": "on_cost_acknowledged" }),
         )

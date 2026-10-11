@@ -57,7 +57,7 @@ use crate::review::findings::{self, FindingSeverity, NewReviewFinding};
 use crate::review_loop::{config as review_config, Verdict};
 use crate::runner::events::{RunTail, TokenUsage};
 use crate::runner::outcome::{self, NewRun, RunOutcome, SpawnedAs};
-use crate::runner::provider::{ClaudeProvider, ProviderId};
+use crate::runner::provider::{ClaudeProvider, ProviderId, ProviderProfile};
 use crate::runner::RunTrigger;
 use crate::runs::{self, bundle::RunCapture};
 use crate::scheduler::selection::{self, RunnerView};
@@ -343,7 +343,7 @@ fn finishing_at(outcome: RunOutcome, head: &str) -> FinishRun {
 async fn turn_the_loop_on(board: &ServiceContext) {
     review_config::set_review_settings(
         board,
-        &ClaudeProvider,
+        &ProviderProfile::of(&ClaudeProvider),
         "",
         serde_json::json!({ "enabled": "on_cost_acknowledged" }),
     )
@@ -2259,7 +2259,7 @@ pub mod cases {
         let task_id = arranged.task(board, "Reviewed by opus").await;
         review_config::set_review_settings(
             board,
-            &ClaudeProvider,
+            &ProviderProfile::of(&ClaudeProvider),
             "",
             serde_json::json!({ "enabled": "on_cost_acknowledged", "review_model": "opus" }),
         )
@@ -2807,7 +2807,7 @@ pub mod cases {
         arranged.allow_in_team(board, true).await;
         review_config::set_review_settings(
             board,
-            &ClaudeProvider,
+            &ProviderProfile::of(&ClaudeProvider),
             "",
             serde_json::json!({ "enabled": "on_cost_acknowledged", "review_model": "opus" }),
         )

@@ -50,7 +50,7 @@ use crate::events::TeamId;
 use crate::machine::{leases, MachineContext};
 use crate::runner::events::TokenUsage;
 use crate::runner::outcome::{finish_run, RunOutcome, SpawnedAs};
-use crate::runner::provider::AgentProvider;
+use crate::runner::provider::{AgentProvider, ProviderProfile};
 use crate::runs::bundle::RunCapture;
 use crate::scheduler::attempts::{self, Ending};
 use crate::scheduler::retry;
@@ -235,6 +235,7 @@ pub async fn reconcile_unrecorded(
     held: &[String],
 ) -> Result<Vec<String>> {
     let mut reconciled = Vec::new();
+    let profile = ProviderProfile::of(provider);
 
     for (lease, team_id) in board_lease::held_by(ctx, runner_id).await? {
         if held.contains(&lease.task_id) {
@@ -243,7 +244,7 @@ pub async fn reconcile_unrecorded(
         let task_id = lease.task_id.clone();
         let runner = service::Runner {
             id: runner_id,
-            provider,
+            provider: &profile,
             term: LeaseTerm::Never,
         };
         match settle_unrecorded(ctx, runner, &lease, team_id).await {

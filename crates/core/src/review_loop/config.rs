@@ -42,7 +42,7 @@ use crate::db::settings;
 use crate::error::{Error, Result};
 use crate::events::ChangeEvent;
 use crate::review::findings::FindingSeverity;
-use crate::runner::provider::AgentProvider;
+use crate::runner::provider::ProviderProfile;
 use crate::strategy::catalogue::{self, Catalogue, CatalogueEntry};
 
 /// The global review instructions (ADR-0017), beside ADR-0009's base
@@ -576,7 +576,7 @@ pub async fn get_review_level(
 #[tracing::instrument(skip_all, fields(source = ctx.source.as_str(), user_id = ctx.actor.as_str()))]
 pub async fn set_review_settings(
     ctx: &ServiceContext,
-    provider: &dyn AgentProvider,
+    provider: &ProviderProfile,
     instructions: &str,
     config: serde_json::Value,
 ) -> Result<ReviewSettings> {
@@ -633,7 +633,7 @@ pub async fn set_review_settings(
 )]
 pub async fn set_repository_review_config(
     ctx: &ServiceContext,
-    provider: &dyn AgentProvider,
+    provider: &ProviderProfile,
     repository_id: &str,
     config: serde_json::Value,
 ) -> Result<ReviewConfig> {
@@ -677,7 +677,7 @@ pub async fn set_repository_review_config(
 )]
 pub async fn set_task_review(
     ctx: &ServiceContext,
-    provider: &dyn AgentProvider,
+    provider: &ProviderProfile,
     task_id: &str,
     instructions: Option<String>,
     config: serde_json::Value,

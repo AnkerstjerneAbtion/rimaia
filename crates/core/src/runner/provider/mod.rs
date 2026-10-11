@@ -187,6 +187,36 @@ impl std::fmt::Display for ProviderId {
 }
 
 // ---------------------------------------------------------------------------
+// The board's view of a provider (seam-contract D32 point 2)
+// ---------------------------------------------------------------------------
+
+/// What the board may know about a provider: data, copied out of one, and
+/// nothing it could spawn or compose a prompt with.
+///
+/// The board needs a provider's catalogue (Settings, every strategy write) and
+/// its cost and name (the run-cost summary), and it must never hold the thing
+/// that turns an intent into a child process (ADR-0031 point 1). There is no
+/// `fanout_noun`: composition and its vocabulary stay on the runner.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ProviderProfile {
+    pub id: ProviderId,
+    pub display_name: &'static str,
+    pub inherit_cost_usd: Option<f64>,
+    pub default_catalogue: Catalogue,
+}
+
+impl ProviderProfile {
+    pub fn of(provider: &dyn AgentProvider) -> Self {
+        Self {
+            id: provider.id(),
+            display_name: provider.display_name(),
+            inherit_cost_usd: provider.inherit_cost_usd(),
+            default_catalogue: provider.default_catalogue(),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // The trait
 // ---------------------------------------------------------------------------
 
@@ -759,6 +789,21 @@ mod tests {
     use super::*;
     use pretty_assertions::assert_eq;
     use std::path::Path;
+
+    #[test]
+    fn a_profile_carries_the_providers_board_facts_and_nothing_else() {
+        let profile = ProviderProfile::of(&ClaudeProvider);
+
+        assert_eq!(
+            profile,
+            ProviderProfile {
+                id: ProviderId::ClaudeCode,
+                display_name: ClaudeProvider.display_name(),
+                inherit_cost_usd: ClaudeProvider.inherit_cost_usd(),
+                default_catalogue: ClaudeProvider.default_catalogue(),
+            }
+        );
+    }
 
     const EVERY_OPERATION: &[ForbiddenKind] = &[
         ForbiddenKind::RemoteHistoryRewrite,

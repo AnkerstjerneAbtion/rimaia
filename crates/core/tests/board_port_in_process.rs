@@ -19,7 +19,7 @@ use rimaia_core::db::{BoardColumn, ExitClass, RunKind, RunStatus};
 use rimaia_core::repo::{self, NewRepository};
 use rimaia_core::runner::events::TokenUsage;
 use rimaia_core::runner::outcome::{RunOutcome, SpawnedAs};
-use rimaia_core::runner::provider::{AgentProvider, ClaudeProvider, ProviderId};
+use rimaia_core::runner::provider::{AgentProvider, ClaudeProvider, ProviderId, ProviderProfile};
 use rimaia_core::runner::{RunTrigger, RunnerConfig};
 use rimaia_core::runs::bundle::ReviewBundle;
 use rimaia_core::scheduler::ResumePoint;
@@ -62,7 +62,7 @@ impl InProcess {
         Arc::new(InProcessBoard::new(
             self.contexts[index].clone(),
             self.paths.clone(),
-            provider,
+            ProviderProfile::of(provider.as_ref()),
             self.runners[index].clone(),
             self.term,
         ))
@@ -103,7 +103,7 @@ impl InProcess {
             Arc::new(InProcessBoard::new(
                 contexts[index].clone(),
                 paths.clone(),
-                config.provider.clone(),
+                ProviderProfile::of(config.provider.as_ref()),
                 runners[index].clone(),
                 term,
             ))

@@ -27,7 +27,7 @@ use rimaia_core::events::TaskId;
 use rimaia_core::review_loop::config as review_config;
 use rimaia_core::runner::events::TokenUsage;
 use rimaia_core::runner::outcome::{RunOutcome, SpawnedAs};
-use rimaia_core::runner::provider::{ClaudeProvider, ProviderId};
+use rimaia_core::runner::provider::{ClaudeProvider, ProviderId, ProviderProfile};
 use rimaia_core::runner::RunTrigger;
 use rimaia_core::scheduler::selection::{self, RunnerView};
 use rimaia_core::tasks::{self, Patch, TaskPatch};
@@ -158,9 +158,14 @@ async fn a_continue_into_a_review_is_judged_on_the_review_model_then_the_tasks()
         if let Some(model) = review_model {
             config["review_model"] = json!(model);
         }
-        review_config::set_review_settings(&team.alice.ctx, &ClaudeProvider, "", config)
-            .await
-            .expect("the owner turns the loop on");
+        review_config::set_review_settings(
+            &team.alice.ctx,
+            &ProviderProfile::of(&ClaudeProvider),
+            "",
+            config,
+        )
+        .await
+        .expect("the owner turns the loop on");
         let task = team.task(&team.bob, "Reviewed", Some(&team.bob)).await;
         choose(&team.bob, &task, task_model, None).await;
 

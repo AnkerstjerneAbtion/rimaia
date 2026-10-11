@@ -28,7 +28,7 @@ use serde::{Deserialize, Serialize};
 use crate::context::ServiceContext;
 use crate::db::settings;
 use crate::error::{Error, Result};
-use crate::runner::provider::ProviderId;
+use crate::runner::provider::{ProviderId, ProviderProfile};
 
 /// The `settings` key holding the catalogue, as JSON.
 pub const STRATEGY_CATALOGUE: &str = "strategy_catalogue";
@@ -149,7 +149,7 @@ impl Default for Catalogue {
 }
 
 /// The configured catalogue, or `provider`'s own
-/// [`default_catalogue`](crate::runner::provider::AgentProvider::default_catalogue)
+/// [`default_catalogue`](ProviderProfile::default_catalogue)
 /// when the key is absent or holds something unparseable.
 ///
 /// Tolerant rather than fallible, exactly as
@@ -160,10 +160,7 @@ impl Default for Catalogue {
 /// log line and the built-in list, never an overnight queue.
 ///
 /// The context's one team's catalogue: what Settings shows and edits.
-pub async fn catalogue(
-    ctx: &ServiceContext,
-    provider: &dyn crate::runner::provider::AgentProvider,
-) -> Result<Catalogue> {
+pub async fn catalogue(ctx: &ServiceContext, provider: &ProviderProfile) -> Result<Catalogue> {
     catalogue_for(ctx, ctx.scope.sole()?, provider).await
 }
 
@@ -172,9 +169,9 @@ pub async fn catalogue(
 pub async fn catalogue_for(
     ctx: &ServiceContext,
     team_id: &str,
-    provider: &dyn crate::runner::provider::AgentProvider,
+    provider: &ProviderProfile,
 ) -> Result<Catalogue> {
-    resolved_over(ctx, team_id, provider.default_catalogue()).await
+    resolved_over(ctx, team_id, provider.default_catalogue.clone()).await
 }
 
 /// [`catalogue_for`], for a caller that holds a provider's identity rather
@@ -414,7 +411,7 @@ mod tests {
             "the key is deliberately unseeded"
         );
         assert_eq!(
-            catalogue(&h.context, &ClaudeProvider)
+            catalogue(&h.context, &ProviderProfile::of(&ClaudeProvider))
                 .await
                 .expect("read the default"),
             ClaudeProvider.default_catalogue()
@@ -441,7 +438,7 @@ mod tests {
                 .expect("store a typo");
 
             assert_eq!(
-                catalogue(&h.context, &ClaudeProvider)
+                catalogue(&h.context, &ProviderProfile::of(&ClaudeProvider))
                     .await
                     .expect("read it back"),
                 ClaudeProvider.default_catalogue(),
@@ -467,7 +464,7 @@ mod tests {
         .await
         .expect("store an empty model list");
 
-        let stored = catalogue(&h.context, &ClaudeProvider)
+        let stored = catalogue(&h.context, &ProviderProfile::of(&ClaudeProvider))
             .await
             .expect("read it back");
 
@@ -492,7 +489,7 @@ mod tests {
         .await
         .expect("store a planner with no model");
 
-        let planner = catalogue(&h.context, &ClaudeProvider)
+        let planner = catalogue(&h.context, &ProviderProfile::of(&ClaudeProvider))
             .await
             .expect("read it back")
             .planner;
@@ -538,7 +535,7 @@ mod tests {
             "the user's own formatting is what Settings shows them next time"
         );
         assert_eq!(
-            catalogue(&h.context, &ClaudeProvider)
+            catalogue(&h.context, &ProviderProfile::of(&ClaudeProvider))
                 .await
                 .expect("read it back")
                 .models,
@@ -661,7 +658,7 @@ mod tests {
             }]
         );
         assert_eq!(
-            catalogue(&h.context, &ClaudeProvider)
+            catalogue(&h.context, &ProviderProfile::of(&ClaudeProvider))
                 .await
                 .expect("read it back")
                 .models,

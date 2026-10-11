@@ -15,6 +15,7 @@
 //! its own would have been a second door onto a rule that has to hold at both.
 
 use rimaia_core::db::{BoardColumn, Task};
+use rimaia_core::runner::provider::ProviderProfile;
 use rimaia_core::runner::strategy::{
     PlanOutcome, PlanPass, PlanProgress, PlanResult, PlanSelection,
 };
@@ -84,18 +85,18 @@ pub async fn get_strategy_catalogue(state: State<'_, AppState>) -> Result<Strate
     // own reader and writer.
     let stored = catalogue::stored_text(&state.context).await?;
 
-    let provider = state.runner.provider.as_ref();
-    let default_catalogue = provider.default_catalogue();
+    let provider = ProviderProfile::of(state.runner.provider.as_ref());
+    let default_catalogue = &provider.default_catalogue;
     let default_json = serde_json::to_string_pretty(&default_catalogue)
         .map_err(|error| Error::internal(error.to_string()))?;
 
     Ok(StrategyCatalogueView {
-        catalogue: catalogue::catalogue(&state.context, provider).await?,
+        catalogue: catalogue::catalogue(&state.context, &provider).await?,
         json: stored.unwrap_or_else(|| default_json.clone()),
         default_json,
         provider_info: ProviderInfoView {
-            id: provider.id().as_str().to_string(),
-            display_name: provider.display_name().to_string(),
+            id: provider.id.as_str().to_string(),
+            display_name: provider.display_name.to_string(),
         },
     })
 }

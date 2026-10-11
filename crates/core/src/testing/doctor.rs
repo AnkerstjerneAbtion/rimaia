@@ -142,8 +142,8 @@ pub fn local_tools(machine: &crate::machine::MachineContext) -> crate::mcp::serv
     }
 }
 
-/// The provider a test MCP server's board tools read the catalogue through:
-/// [`environment`]'s, which is Claude Code's (task 041).
-pub fn provider() -> std::sync::Arc<dyn crate::runner::provider::AgentProvider> {
-    environment().provider
+/// The provider profile a test MCP server's board tools read the catalogue
+/// through: [`environment`]'s provider's, which is Claude Code's (task 041).
+pub fn provider() -> crate::runner::provider::ProviderProfile {
+    crate::runner::provider::ProviderProfile::of(environment().provider.as_ref())
 }

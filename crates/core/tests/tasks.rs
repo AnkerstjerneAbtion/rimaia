@@ -18,6 +18,7 @@ use rimaia_core::mcp::requests::GetTaskRequest;
 use rimaia_core::mcp::RimaiaServer;
 use rimaia_core::review::{FindingSeverity, FindingStatus};
 use rimaia_core::review_loop::{config as review_config, UnreviewedReason, Verdict};
+use rimaia_core::runner::provider::ProviderProfile;
 use rimaia_core::tasks::{
     self, LastRunSummary, NewTask, NewTaskLink, Patch, TaskFilter, TaskLinkPatch, TaskPatch,
     TaskSummary,
@@ -2264,7 +2265,7 @@ async fn a_board_across_repositories_reads_each_repositorys_review_config_once()
     let provider = rimaia_core::runner::provider::ClaudeProvider;
     review_config::set_repository_review_config(
         &h.context,
-        &provider,
+        &ProviderProfile::of(&provider),
         &on,
         serde_json::json!({ "enabled": "on_cost_acknowledged", "max_review_loops": 4 }),
     )
@@ -2279,7 +2280,7 @@ async fn a_board_across_repositories_reads_each_repositorys_review_config_once()
     }
     review_config::set_task_review(
         &h.context,
-        &provider,
+        &ProviderProfile::of(&provider),
         &overridden.id,
         None,
         serde_json::json!({ "enabled": "off" }),

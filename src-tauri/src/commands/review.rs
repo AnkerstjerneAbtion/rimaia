@@ -14,6 +14,7 @@ use rimaia_core::review_loop::config::{
     self as review_config, ReviewLevel, ReviewLevelName, ReviewSettings, TaskReview,
 };
 use rimaia_core::review_loop::{self, ReviewConfig, ReviewHistory};
+use rimaia_core::runner::provider::ProviderProfile;
 use rimaia_core::Result;
 use serde_json::Value;
 use tauri::State;
@@ -129,7 +130,7 @@ pub async fn set_review_settings(
 ) -> Result<ReviewSettings> {
     review_config::set_review_settings(
         &state.context,
-        state.runner.provider.as_ref(),
+        &ProviderProfile::of(state.runner.provider.as_ref()),
         &instructions,
         config,
     )
@@ -145,7 +146,7 @@ pub async fn set_repository_review_config(
 ) -> Result<ReviewConfig> {
     review_config::set_repository_review_config(
         &state.context,
-        state.runner.provider.as_ref(),
+        &ProviderProfile::of(state.runner.provider.as_ref()),
         &repository_id,
         config,
     )
@@ -163,7 +164,7 @@ pub async fn set_task_review(
 ) -> Result<TaskReview> {
     review_config::set_task_review(
         &state.context,
-        state.runner.provider.as_ref(),
+        &ProviderProfile::of(state.runner.provider.as_ref()),
         &task_id,
         review_instructions,
         config,

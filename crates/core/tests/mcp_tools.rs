@@ -26,6 +26,7 @@ use rimaia_core::mcp::RimaiaServer;
 use rimaia_core::review::{self, FindingSeverity, NewReviewFinding};
 use rimaia_core::review_loop::config as review_config;
 use rimaia_core::runner::outcome::{start_run, NewRun};
+use rimaia_core::runner::provider::ProviderProfile;
 use rimaia_core::strategy::{settings as strategy_settings, StrategyDefaults};
 use rimaia_core::tasks::{self, NewTask, StrategyPlan, TaskPatch};
 use rimaia_core::testing::{self, TestContext};
@@ -1029,7 +1030,7 @@ async fn a_review_level_says_what_it_inherits_and_what_it_resolves_to() {
     let task = create_task(&h, &repository_id, "Levelled").await;
     review_config::set_review_settings(
         &h.context,
-        &provider,
+        &ProviderProfile::of(&provider),
         "",
         json!({ "enabled": "on_cost_acknowledged", "max_review_loops": 4 }),
     )
@@ -1037,7 +1038,7 @@ async fn a_review_level_says_what_it_inherits_and_what_it_resolves_to() {
     .expect("global");
     review_config::set_repository_review_config(
         &h.context,
-        &provider,
+        &ProviderProfile::of(&provider),
         &repository_id,
         json!({ "max_review_loops": 1, "blocking_severity": "high" }),
     )
@@ -1045,7 +1046,7 @@ async fn a_review_level_says_what_it_inherits_and_what_it_resolves_to() {
     .expect("repository");
     review_config::set_task_review(
         &h.context,
-        &provider,
+        &ProviderProfile::of(&provider),
         &task.id,
         None,
         json!({ "enabled": "off" }),
@@ -1167,7 +1168,7 @@ async fn the_review_settings_answer_the_same_over_mcp_and_the_tauri_command() {
 
     let from_window = review_config::set_repository_review_config(
         &h.context,
-        &provider,
+        &ProviderProfile::of(&provider),
         &repository_id,
         json!({ "blocking_severity": "high" }),
     )
@@ -1197,7 +1198,7 @@ async fn the_review_settings_answer_the_same_over_mcp_and_the_tauri_command() {
 
     let refusal = review_config::set_task_review(
         &h.context,
-        &provider,
+        &ProviderProfile::of(&provider),
         &task.id,
         None,
         json!({ "max_review_loops": 6 }),
@@ -1223,7 +1224,7 @@ async fn max_review_loops_above_five_is_refused() {
     for loops in [0, 5] {
         review_config::set_review_settings(
             &h.context,
-            &provider,
+            &ProviderProfile::of(&provider),
             "",
             json!({ "max_review_loops": loops }),
         )
@@ -1232,7 +1233,7 @@ async fn max_review_loops_above_five_is_refused() {
     }
     let refused = review_config::set_review_settings(
         &h.context,
-        &provider,
+        &ProviderProfile::of(&provider),
         "",
         json!({ "max_review_loops": 6 }),
     )
@@ -1249,15 +1250,16 @@ async fn max_review_loops_above_five_is_refused() {
 async fn a_review_model_outside_the_catalogue_is_refused() {
     let h = TestContext::new().await;
     let provider = rimaia_core::runner::provider::ClaudeProvider;
-    let catalogue = rimaia_core::strategy::catalogue::catalogue(&h.context, &provider)
-        .await
-        .expect("the catalogue");
+    let catalogue =
+        rimaia_core::strategy::catalogue::catalogue(&h.context, &ProviderProfile::of(&provider))
+            .await
+            .expect("the catalogue");
     let listed_model = catalogue.models[0].id.clone();
     let listed_effort = catalogue.efforts[0].id.clone();
 
     review_config::set_review_settings(
         &h.context,
-        &provider,
+        &ProviderProfile::of(&provider),
         "",
         json!({ "review_model": listed_model, "review_effort": listed_effort }),
     )
@@ -1268,10 +1270,14 @@ async fn a_review_model_outside_the_catalogue_is_refused() {
         ("review_model", "gpt-nothing"),
         ("review_effort", "ludicrous"),
     ] {
-        let refused =
-            review_config::set_review_settings(&h.context, &provider, "", json!({ field: value }))
-                .await
-                .expect_err("not in the catalogue");
+        let refused = review_config::set_review_settings(
+            &h.context,
+            &ProviderProfile::of(&provider),
+            "",
+            json!({ field: value }),
+        )
+        .await
+        .expect_err("not in the catalogue");
         assert_eq!(refused.code(), rimaia_core::ErrorCode::Invalid);
         assert!(
             refused.to_string().starts_with(&format!(

@@ -26,7 +26,7 @@ use rimaia_core::runner::events::transcript_path;
 use rimaia_core::runner::limits::{DISALLOWED_TOOLS, MAX_TURNS};
 use rimaia_core::runner::outcome::observed_run_cost;
 use rimaia_core::runner::prompt::{compose_prompt, PromptTeam, StrategyGuidance};
-use rimaia_core::runner::provider::{AgentProvider, ClaudeProvider};
+use rimaia_core::runner::provider::{AgentProvider, ClaudeProvider, ProviderProfile};
 use rimaia_core::runner::strategy::claim_for_planning;
 use rimaia_core::runner::Starter;
 use rimaia_core::runs::{self, transcript};
@@ -1010,7 +1010,7 @@ async fn the_observed_run_cost_is_the_median_of_the_callers_teams_runs() {
         (&t.b, 20.0, 3, "team B"),
         (&t.both, 2.5, 6, "both"),
     ] {
-        let summary = observed_run_cost(ctx, &ClaudeProvider)
+        let summary = observed_run_cost(ctx, &ProviderProfile::of(&ClaudeProvider))
             .await
             .expect("the run-cost summary");
         assert_eq!(summary.median_usd, Some(median), "{label}");

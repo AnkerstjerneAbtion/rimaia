@@ -85,6 +85,7 @@ use rimaia_core::runner::events::TokenUsage;
 use rimaia_core::runner::limits::{DISALLOWED_TOOLS, MAX_TURNS};
 use rimaia_core::runner::outcome::{finish_run, start_run, NewRun, RunOutcome, SpawnedAs};
 use rimaia_core::runner::prompt::compose_resume_prompt;
+use rimaia_core::runner::provider::ProviderProfile;
 use rimaia_core::runner::{claim_manual_start, ManualStart};
 use rimaia_core::runner::{run_task, CancelSignal, RunRequest, RunTrigger, RunnerConfig};
 use rimaia_core::runs::bundle::RunCapture;
@@ -4425,7 +4426,7 @@ impl OneRunner {
         let board: Arc<dyn BoardPort> = Arc::new(InProcessBoard::new(
             harness.context.clone(),
             paths.clone(),
-            config.provider.clone(),
+            ProviderProfile::of(config.provider.as_ref()),
             runner_id.clone(),
             LeaseTerm::Never,
         ));

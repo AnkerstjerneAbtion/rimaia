@@ -25,7 +25,7 @@ use rimaia_core::machine::leases;
 use rimaia_core::mcp::requests::{PlanSelectionRequest, TaskStrategyRequest};
 use rimaia_core::mcp::server::{LocalTools, RimaiaServer};
 use rimaia_core::repo::{self, NewRepository};
-use rimaia_core::runner::provider::{ClaudeProvider, PermissionMode};
+use rimaia_core::runner::provider::{ClaudeProvider, PermissionMode, ProviderProfile};
 use rimaia_core::runner::strategy::{claim_for_planning, PlannerAccess};
 use rimaia_core::runner::{
     claim_manual_start, run_task, ManualStart, RunRequest, RunTrigger, RunnerConfig, Starter,
@@ -417,7 +417,7 @@ impl Fixture {
         let config = self.config();
         RimaiaServer::new(
             self.ctx().clone(),
-            Arc::new(ClaudeProvider),
+            ProviderProfile::of(&ClaudeProvider),
             Some(LocalTools {
                 machine: self.harness.machine().clone(),
                 doctor: testing::doctor::environment(),

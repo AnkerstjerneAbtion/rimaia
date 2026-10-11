@@ -21,6 +21,7 @@ use crate::events::ChangeEvent;
 use crate::identity::{ensure_solo, SoloIdentity};
 use crate::machine::MachineContext;
 use crate::paths::AppPaths;
+use crate::runner::provider::ProviderProfile;
 use crate::runner::{RunnerConfig, Starter};
 use crate::testing::machine::MemoryMachine;
 use crate::testing::{test_pool, TestClock};
@@ -205,7 +206,7 @@ impl TestContext {
         InProcessBoard::new(
             self.context.clone(),
             AppPaths::new(std::env::temp_dir()),
-            RunnerConfig::default().provider,
+            ProviderProfile::of(RunnerConfig::default().provider.as_ref()),
             self.solo.runner_id.clone(),
             LeaseTerm::Never,
         )
@@ -223,7 +224,7 @@ impl TestContext {
         Arc::new(InProcessBoard::new(
             self.context.clone(),
             paths.clone(),
-            config.provider.clone(),
+            ProviderProfile::of(config.provider.as_ref()),
             self.solo.runner_id.clone(),
             LeaseTerm::Never,
         ))

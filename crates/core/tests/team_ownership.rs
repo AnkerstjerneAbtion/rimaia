@@ -15,6 +15,7 @@ use rimaia_core::db::{new_id, BoardColumn, RunKind};
 use rimaia_core::events::TeamId;
 use rimaia_core::identity::{create_personal_team, PersonalTeam};
 use rimaia_core::repo::{self, NewRepository};
+use rimaia_core::runner::provider::ProviderProfile;
 use rimaia_core::runner::{RunTrigger, RunnerConfig};
 use rimaia_core::tasks::{self, NewTask};
 use rimaia_core::testing::db::insert_runner;
@@ -122,7 +123,7 @@ async fn a_run_records_the_runner_that_started_it() {
     let other_board: Arc<dyn BoardPort> = Arc::new(InProcessBoard::new(
         h.context.clone(),
         paths.clone(),
-        config.provider.clone(),
+        ProviderProfile::of(config.provider.as_ref()),
         second_runner.clone(),
         LeaseTerm::Never,
     ));
@@ -169,7 +170,7 @@ async fn a_claims_lease_names_the_tasks_team() {
     let board = InProcessBoard::new(
         both.clone(),
         paths.clone(),
-        RunnerConfig::default().provider,
+        ProviderProfile::of(RunnerConfig::default().provider.as_ref()),
         h.solo.runner_id.clone(),
         LeaseTerm::Never,
     );

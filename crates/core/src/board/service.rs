@@ -37,7 +37,7 @@ use crate::runner::events::RunTail;
 use crate::runner::limits::{self, DEFAULT_MAX_TURNS, DISALLOWED_TOOLS, MAX_TURNS};
 use crate::runner::outcome::{self, NewRun, RunOutcome};
 use crate::runner::process::DEFAULT_DISALLOWED_TOOLS;
-use crate::runner::provider::AgentProvider;
+use crate::runner::provider::ProviderProfile;
 use crate::runner::RunTrigger;
 use crate::runs::bundle::RunCapture;
 use crate::scheduler::attempts::{self, Ending};
@@ -86,7 +86,7 @@ pub async fn preview(
     let ceiling = StrategyCeiling::default();
     let candidate = Candidate {
         runner_id: runner.id,
-        provider: runner.provider.id(),
+        provider: runner.provider.id,
         catalogue: &context.catalogue,
         models: &models,
         ceiling: &ceiling,
@@ -189,7 +189,7 @@ pub async fn authorize_start(
 #[derive(Debug, Clone, Copy)]
 pub struct Runner<'a> {
     pub id: &'a str,
-    pub provider: &'a dyn AgentProvider,
+    pub provider: &'a ProviderProfile,
     /// Whether this board's leases expire. Solo's never do (ADR-0031 point 5).
     pub term: LeaseTerm,
 }
@@ -275,7 +275,7 @@ async fn claim_next(
 ) -> Result<Option<Claim>> {
     let view = RunnerView {
         runner_id: runner.id.to_string(),
-        provider: runner.provider.id(),
+        provider: runner.provider.id,
         repositories: repositories.iter().cloned().collect(),
         ceiling: ceiling.clone(),
     };
@@ -433,7 +433,7 @@ async fn claim_task(
             task_id,
             candidate: Candidate {
                 runner_id: runner.id,
-                provider: runner.provider.id(),
+                provider: runner.provider.id,
                 catalogue: &context.catalogue,
                 models: &models,
                 ceiling,
@@ -784,7 +784,7 @@ pub async fn finish_run(
     };
     let candidate = Candidate {
         runner_id,
-        provider: runner.provider.id(),
+        provider: runner.provider.id,
         catalogue: &catalogue,
         models: &models,
         ceiling: &ceiling,
@@ -994,7 +994,7 @@ async fn authorship(
 /// context (task 067).
 async fn model_inputs(
     ctx: &ServiceContext,
-    provider: &dyn AgentProvider,
+    provider: &ProviderProfile,
     task_id: &str,
 ) -> Result<(catalogue::Catalogue, PhaseModels)> {
     let task = tasks::get_task(ctx, task_id).await?;

@@ -14,6 +14,7 @@ use rimaia_core::consent::ceiling::{self, StrategyCeiling};
 use rimaia_core::db::{settings, RunEnvironment};
 use rimaia_core::runner::outcome::{self, RunCostSummary};
 use rimaia_core::runner::prompt;
+use rimaia_core::runner::provider::ProviderProfile;
 use rimaia_core::{repo, tasks, Result};
 use tauri::State;
 
@@ -72,7 +73,11 @@ pub async fn set_strategy_ceiling(
 /// as the expensive one.
 #[tauri::command]
 pub async fn get_run_cost_summary(state: State<'_, AppState>) -> Result<RunCostSummary> {
-    outcome::observed_run_cost(&state.context, state.runner.provider.as_ref()).await
+    outcome::observed_run_cost(
+        &state.context,
+        &ProviderProfile::of(state.runner.provider.as_ref()),
+    )
+    .await
 }
 
 /// The prompt `task_id` would receive right now, composed the same way task

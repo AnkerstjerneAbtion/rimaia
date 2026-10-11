@@ -23,8 +23,6 @@
 //! `/mcp/run/{token}` is one run working on one task, and the allow table lives
 //! in [`crate::mcp::scope`] rather than in eleven `if` statements here.
 
-use std::sync::Arc;
-
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::wrapper::{Json, Parameters};
 use rmcp::model::{Implementation, ServerCapabilities, ServerInfo};
@@ -67,7 +65,7 @@ use crate::mcp::scope::{RunScope, Tool};
 use crate::review;
 use crate::review_loop::{self, ReviewConfig, ReviewLevel, ReviewSettings, TaskReview};
 use crate::runner::prompt::TEMPLATE_VARIABLES;
-use crate::runner::provider::AgentProvider;
+use crate::runner::provider::ProviderProfile;
 use crate::runner::start::Starter;
 use crate::runner::strategy::{self as runner_strategy, PlanOutcome, PlanSelection, PlannerAccess};
 use crate::schedule;
@@ -99,12 +97,13 @@ pub struct RimaiaServer {
     /// Carried on the *value*, not on the request, which is the whole argument
     /// for putting the token in the path — see [`RunScope`].
     scope: RunScope,
-    /// The agent CLI whose catalogue the board tools read and validate
-    /// against, read for nothing else: the board side's counterpart of
-    /// `InProcessBoard`'s provider (D31 point 9), which task 046 replaces with
-    /// D32's `ProviderProfile`. A field of its own rather than read off
-    /// [`LocalTools`], because the board router serves without a machine.
-    provider: Arc<dyn AgentProvider>,
+    /// The profile of the agent CLI whose catalogue the board tools read and
+    /// validate against, read for nothing else: the board side's counterpart
+    /// of `InProcessBoard`'s provider (D31 point 9), and a profile so the
+    /// board side holds nothing that can spawn (D32 point 2). A field of its
+    /// own rather than read off [`LocalTools`], because the board router
+    /// serves without a machine.
+    provider: ProviderProfile,
     /// This machine, for the local router (task 041). `None` on a host with
     /// no machine, which then serves the board router alone.
     local: Option<LocalTools>,
@@ -173,11 +172,7 @@ impl RimaiaServer {
     /// machine, when the host has one: `Some` serves the local router beside
     /// the board router, and `None`, a server's call, serves the board router
     /// alone (task 041).
-    pub fn new(
-        ctx: ServiceContext,
-        provider: Arc<dyn AgentProvider>,
-        local: Option<LocalTools>,
-    ) -> Self {
+    pub fn new(ctx: ServiceContext, provider: ProviderProfile, local: Option<LocalTools>) -> Self {
         Self {
             ctx,
             scope: RunScope::Operator,
@@ -196,7 +191,7 @@ impl RimaiaServer {
     /// one is [`RunScope::authorize`]'s refusal, never an unknown tool.
     pub fn scoped(
         ctx: ServiceContext,
-        provider: Arc<dyn AgentProvider>,
+        provider: ProviderProfile,
         local: Option<LocalTools>,
         scope: RunScope,
     ) -> Self {
@@ -601,7 +596,7 @@ told about."
     pub async fn get_strategy_catalogue(&self) -> Result<Json<Catalogue>, ToolError> {
         self.scope.authorize(Tool::GetStrategyCatalogue, None)?;
         Ok(Json(
-            strategy::catalogue::catalogue(&self.ctx, self.provider.as_ref()).await?,
+            strategy::catalogue::catalogue(&self.ctx, &self.provider).await?,
         ))
     }
 
@@ -618,7 +613,7 @@ before it is stored, so an unparseable one is refused and the previous catalogue
         self.scope.authorize(Tool::SetStrategyCatalogue, None)?;
         strategy::catalogue::set_catalogue(&self.ctx, &request.catalogue).await?;
         Ok(Json(
-            strategy::catalogue::catalogue(&self.ctx, self.provider.as_ref()).await?,
+            strategy::catalogue::catalogue(&self.ctx, &self.provider).await?,
         ))
     }
 
@@ -995,7 +990,7 @@ that is not in the strategy catalogue."
         Ok(Json(
             review_loop::config::set_review_settings(
                 &self.ctx,
-                self.provider.as_ref(),
+                &self.provider,
                 &request.instructions,
                 request.config,
             )
@@ -1018,7 +1013,7 @@ the loop on is spelled `\"enabled\": \"on_cost_acknowledged\"`; confirm the cost
         Ok(Json(
             review_loop::config::set_repository_review_config(
                 &self.ctx,
-                self.provider.as_ref(),
+                &self.provider,
                 &request.repository_id,
                 request.config,
             )
@@ -1043,7 +1038,7 @@ field (see `get_review_settings`). Turning the loop on is spelled \
         Ok(Json(
             review_loop::config::set_task_review(
                 &self.ctx,
-                self.provider.as_ref(),
+                &self.provider,
                 &request.task_id,
                 request.review_instructions,
                 request.config,
@@ -2092,7 +2087,7 @@ mod tests {
         let harness = crate::testing::TestContext::new().await;
         let info = RimaiaServer::new(
             harness.context.clone(),
-            Arc::new(crate::runner::provider::ClaudeProvider),
+            crate::runner::provider::ProviderProfile::of(&crate::runner::provider::ClaudeProvider),
             Some(crate::testing::doctor::local_tools(harness.machine())),
         )
         .get_info();

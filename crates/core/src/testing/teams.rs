@@ -46,6 +46,7 @@ use crate::mcp::{LocalTools, RunHandles};
 use crate::paths::AppPaths;
 use crate::repo::{self, NewRepository};
 use crate::review::{FindingSeverity, FindingStatus};
+use crate::runner::provider::ProviderProfile;
 use crate::runner::strategy::PlannerAccess;
 use crate::runner::RunnerConfig;
 use crate::scheduler::InFlight;
@@ -256,7 +257,7 @@ impl TwoTeams {
         Arc::new(InProcessBoard::new(
             ctx.clone(),
             self.paths.clone(),
-            self.runner.provider.clone(),
+            ProviderProfile::of(self.runner.provider.as_ref()),
             self.team_a.runner_id.clone(),
             crate::board::LeaseTerm::Never,
         ))

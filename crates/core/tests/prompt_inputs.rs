@@ -41,7 +41,7 @@ use rimaia_core::runner::prompt::{
     compose_review_system_append, compose_strategy_prompt, compose_strategy_system_append,
     compose_system_append, PromptTeam, StrategyGuidance,
 };
-use rimaia_core::runner::provider::ClaudeProvider;
+use rimaia_core::runner::provider::{ClaudeProvider, ProviderProfile};
 use rimaia_core::runner::{RunTrigger, RunnerConfig};
 use rimaia_core::runs::bundle::{BundleFile, PatchInclusion, ReviewBundle};
 use rimaia_core::strategy::catalogue;
@@ -712,7 +712,7 @@ async fn write_canaries(ctx: &ServiceContext, repository_id: &str) -> String {
     .expect("write the base instructions");
     review_config::set_review_settings(
         ctx,
-        &ClaudeProvider,
+        &ProviderProfile::of(&ClaudeProvider),
         "CANARY-review_instructions in {{repo.name}}",
         // The loop on, so a review and a fix run and the findings reach one.
         serde_json::json!({ "enabled": "on_cost_acknowledged" }),
@@ -774,7 +774,7 @@ async fn write_canaries(ctx: &ServiceContext, repository_id: &str) -> String {
 async fn write_review_override(ctx: &ServiceContext, task: &str) {
     review_config::set_task_review(
         ctx,
-        &ClaudeProvider,
+        &ProviderProfile::of(&ClaudeProvider),
         task,
         Some("CANARY-review_override in {{repo.name}}".to_string()),
         serde_json::Value::Null,

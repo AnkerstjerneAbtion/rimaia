@@ -16,6 +16,7 @@ use rimaia_core::machine::{self, MachineContext};
 use rimaia_core::mcp::{self, McpState, RunHandles};
 use rimaia_core::runner::events::RunTail;
 use rimaia_core::runner::process::DEFAULT_GRACE_PERIOD;
+use rimaia_core::runner::provider::ProviderProfile;
 use rimaia_core::runner::RunnerConfig;
 use rimaia_core::scheduler::{self, InFlight};
 use rimaia_core::{
@@ -307,7 +308,7 @@ pub fn run() {
             let board_port: Arc<dyn BoardPort> = Arc::new(InProcessBoard::new(
                 context.clone(),
                 paths.clone(),
-                runner.provider.clone(),
+                ProviderProfile::of(runner.provider.as_ref()),
                 solo.runner_id.clone(),
                 LeaseTerm::Never,
             ));
@@ -458,7 +459,7 @@ pub fn run() {
                 context.clone(),
                 mcp_port,
                 run_handles.clone(),
-                runner.provider.clone(),
+                ProviderProfile::of(runner.provider.as_ref()),
                 // This machine's tools (task 041): a solo shell has a machine,
                 // so both doors serve every tool they served before, and a run
                 // calling a local one gets its scope's refusal.

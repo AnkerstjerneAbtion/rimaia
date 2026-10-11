@@ -43,7 +43,7 @@ use rimaia_core::runner::prompt::{
     compose_fix_prompt, compose_fix_resume, compose_review_resume, compose_review_system_append,
     PromptTeam,
 };
-use rimaia_core::runner::provider::{ClaudeProvider, ProviderId};
+use rimaia_core::runner::provider::{ClaudeProvider, ProviderId, ProviderProfile};
 use rimaia_core::runner::{
     claim_manual_start, run_task, CancelSignal, ManualStart, RunRequest, RunTrigger, RunnerConfig,
 };
@@ -179,12 +179,17 @@ async fn enabling_the_loop_requires_the_cost_acknowledged_spelling() {
 
         // The service, at all three levels.
         for refused in [
-            review_config::set_review_settings(fixture.ctx(), &provider, "", config.clone())
-                .await
-                .err(),
+            review_config::set_review_settings(
+                fixture.ctx(),
+                &ProviderProfile::of(&provider),
+                "",
+                config.clone(),
+            )
+            .await
+            .err(),
             review_config::set_repository_review_config(
                 fixture.ctx(),
-                &provider,
+                &ProviderProfile::of(&provider),
                 &fixture.repository_id,
                 config.clone(),
             )
@@ -192,7 +197,7 @@ async fn enabling_the_loop_requires_the_cost_acknowledged_spelling() {
             .err(),
             review_config::set_task_review(
                 fixture.ctx(),
-                &provider,
+                &ProviderProfile::of(&provider),
                 &fixture.task_id,
                 None,
                 config.clone(),
@@ -210,10 +215,14 @@ async fn enabling_the_loop_requires_the_cost_acknowledged_spelling() {
 
         // The tools: the same refusal, because they hand the raw value to
         // the same functions (the commands do too; see `commands::review`).
-        let service =
-            review_config::set_review_settings(fixture.ctx(), &provider, "", config.clone())
-                .await
-                .expect_err("refused");
+        let service = review_config::set_review_settings(
+            fixture.ctx(),
+            &ProviderProfile::of(&provider),
+            "",
+            config.clone(),
+        )
+        .await
+        .expect_err("refused");
         for over_mcp in [
             operator
                 .set_review_settings(Parameters(request::<SetReviewSettingsRequest>(
@@ -1614,9 +1623,14 @@ impl Fixture {
         for (key, value) in extra.as_object().expect("an object") {
             config[key] = value.clone();
         }
-        review_config::set_review_settings(self.ctx(), &ClaudeProvider, "Run /review.", config)
-            .await
-            .expect("turn the loop on");
+        review_config::set_review_settings(
+            self.ctx(),
+            &ProviderProfile::of(&ClaudeProvider),
+            "Run /review.",
+            config,
+        )
+        .await
+        .expect("turn the loop on");
     }
 
     /// Attempt `attempt` reviews and records `findings` over its handle.

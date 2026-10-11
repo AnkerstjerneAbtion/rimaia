@@ -28,6 +28,7 @@ use crate::identity::{create_personal_team, Role};
 use crate::machine::MachineContext;
 use crate::paths::AppPaths;
 use crate::repo::{self, NewRepository};
+use crate::runner::provider::ProviderProfile;
 use crate::runner::RunnerConfig;
 use crate::tasks::{self, NewTask};
 use crate::testing::machine::MemoryMachine;
@@ -220,7 +221,7 @@ impl SharedTeam {
         Arc::new(InProcessBoard::new(
             member.ctx.clone(),
             self.paths.clone(),
-            RunnerConfig::default().provider,
+            ProviderProfile::of(RunnerConfig::default().provider.as_ref()),
             member.runner_id.clone(),
             LeaseTerm::Never,
         ))

@@ -74,7 +74,7 @@ use tokio::sync::watch;
 use crate::context::{ServiceContext, TeamScope};
 use crate::db::MutationSource;
 use crate::error::{Error, Result};
-use crate::runner::provider::AgentProvider;
+use crate::runner::provider::ProviderProfile;
 
 pub mod error;
 pub mod requests;
@@ -190,7 +190,7 @@ struct Routes {
 struct RunRoute {
     ctx: ServiceContext,
     handles: RunHandles,
-    provider: Arc<dyn AgentProvider>,
+    provider: ProviderProfile,
     /// Carried even though every local tool is `Refused` to a run: the scoped
     /// server is the *same type* as the operator's and offers the same list
     /// (`tools/list` is not filtered by scope, `scope.rs`'s header), and the
@@ -235,7 +235,7 @@ pub async fn build(
     ctx: ServiceContext,
     port: u16,
     handles: RunHandles,
-    provider: Arc<dyn AgentProvider>,
+    provider: ProviderProfile,
     local: Option<LocalTools>,
 ) -> (McpHandle, McpTask) {
     // Every write this server makes is an agent's, not the user's (ADR-0019).
@@ -448,7 +448,7 @@ async fn dispatch(
 /// configuration than the other.
 pub(crate) fn streamable_service(
     ctx: ServiceContext,
-    provider: Arc<dyn AgentProvider>,
+    provider: ProviderProfile,
     local: Option<LocalTools>,
 ) -> StreamableHttpService<RimaiaServer, LocalSessionManager> {
     service_over(move || RimaiaServer::new(ctx.clone(), provider.clone(), local.clone()))
@@ -457,7 +457,7 @@ pub(crate) fn streamable_service(
 /// The same transport, serving one run's scoped view of the same services.
 fn scoped_service(
     ctx: ServiceContext,
-    provider: Arc<dyn AgentProvider>,
+    provider: ProviderProfile,
     local: Option<LocalTools>,
     scope: RunScope,
 ) -> StreamableHttpService<RimaiaServer, LocalSessionManager> {
@@ -575,7 +575,7 @@ mod tests {
             harness.context.clone(),
             0,
             RunHandles::default(),
-            Arc::new(crate::runner::provider::ClaudeProvider),
+            crate::runner::provider::ProviderProfile::of(&crate::runner::provider::ClaudeProvider),
             Some(crate::testing::doctor::local_tools(harness.machine())),
         )
         .await;
@@ -637,7 +637,7 @@ mod tests {
             harness.context.clone(),
             taken,
             handles.clone(),
-            Arc::new(crate::runner::provider::ClaudeProvider),
+            crate::runner::provider::ProviderProfile::of(&crate::runner::provider::ClaudeProvider),
             Some(crate::testing::doctor::local_tools(harness.machine())),
         )
         .await;
