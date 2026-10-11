@@ -207,7 +207,10 @@ async fn call(board: &HttpBoard, method: BoardMethod) {
             })
             .await
             .map(drop),
-        BoardMethod::Heartbeat => board.heartbeat(&[lease.clone()]).await.map(drop),
+        BoardMethod::Heartbeat => board
+            .heartbeat(std::slice::from_ref(&lease))
+            .await
+            .map(drop),
         BoardMethod::RunContext => board.run_context(&lease).await.map(drop),
         BoardMethod::RecordBranch => board.record_branch(&lease, "rimaia/x").await,
         BoardMethod::StartRun => {
