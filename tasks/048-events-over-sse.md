@@ -6,6 +6,7 @@ status: ready
 depends_on: ["047"]
 adrs: ["0034", "0018", "0029", "0030", "0036"]
 size: L
+landed: "#34"
 ---
 
 # Change events over SSE, filtered by team
