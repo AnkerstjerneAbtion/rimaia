@@ -787,3 +787,20 @@ this order, and stop cutting as soon as the rest fits:
 Everything else in Rust stays here, because 047 cannot start without the extractor, the
 registry and the board cases. If you cut, say so in the PR and amend the receiving task's
 file in the same commit, as 039's cut does for this task.
+
+**Decisions, 2026-10-11 (answers to this task's Scope 3 stop).** Task 066 changed three board
+rows after this file was written. Record each in the dated D32 amendment this task writes:
+
+- **`get_run` and `list_runs` read paths.** Since 066, `runs::get_run` and `runs::list_runs`
+  take `&AppPaths` to compute `log_available`. `BoardHost` gains `paths: AppPaths`. Solo
+  passes the app's paths. The server passes `AppPaths` over its `RIMAIA_DATA_DIR`, where
+  `runs/` stays empty until 056, so `logAvailable` is false there. No core signature changes.
+  056 replaces the field with its transcript hold.
+- **`get_review_digest` reads `request.machine`.** It passes `request.machine.as_ref()` to
+  `review::digest`, the same shape as the MCP tool. That makes seven readers of
+  `request.machine`, not six. Point 3a, its acceptance grep and the D32 amendment say seven.
+  The digest's appendix row notes that a server, which has no machine, leaves out the
+  entries skipped for this machine's unattended-run consent. Solo's digest is unchanged.
+- **Five handlers read `request.host.provider`**, not two: the two this file names, plus 021's
+  `set_review_settings`, `set_repository_review_config` and `set_task_review`, as their
+  appendix rows already say. This is not a stop condition.
