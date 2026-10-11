@@ -7674,7 +7674,10 @@ copy carries. 053, 054, 056, 060 and 061 each build on the answers.
    conditional `UPDATE … WHERE accepted_at IS NULL AND revoked_at IS NULL AND expires_at > now
    RETURNING team_id, role`, then the membership insert, so single use takes no lock of its own. A
    caller already in the team is refused `invalid` (`you are already a member of <name>`) and the
-   transaction rolls back, leaving the invitation unused and their role unchanged.
+   transaction rolls back, leaving the invitation unused and their role unchanged. A caller who
+   made the invitation, and is no longer in the team, gets the one unusable-token answer, and the
+   transaction rolls back the same way: a link is never usable by its maker, so it can never
+   return a demoted or removed owner as an owner.
 4. **Roles are read in the write's own `BEGIN IMMEDIATE` transaction, and the last-owner rule
    writes first and counts after.** `teams::require_owner(&mut conn, ctx, team_id, action)` checks
    the scope (a team outside it, or one the actor has left, is `not_found`, `There is no team with
@@ -7698,9 +7701,16 @@ copy carries. 053, 054, 056, 060 and 061 each build on the answers.
    the team's pool, every **unexpired** lease their runners hold on the team's tasks gets
    `expires_at = now` (an already-expired one is left as it is), their trust rows in the team go
    in both directions, a token restricted to the team alone is deleted and one restricted to it
-   and others loses only this team's row. Every `UPDATE` of `tasks` returns its ids, the leases'
-   task ids join them, and after commit the service publishes `Teams` and one `tasks` event (never
-   empty). Re-joining starts from nothing: both were decisions about a member.
+   and others loses only this team's row, and every invitation into the team they made that could
+   still be used (not accepted, revoked or expired) gets `revoked_at = now`
+   (`teams::invitations::revoke_links_made_by`). The same revocation runs when `set_member_role`
+   makes someone a member, and for each of the person's other teams when `delete_account` runs,
+   since a person who signs up again is a new user the maker check in point 3 cannot recognise. A
+   link carries its maker's authority to admit; someone who lost that authority must not keep
+   using it through a token they hold or handed out. Accepted and expired rows keep their status.
+   Every `UPDATE` of `tasks` returns its ids, the leases' task ids join them, and after commit the
+   service publishes `Teams` and one `tasks` event (never empty). Re-joining starts from nothing:
+   both were decisions about a member.
 7. **053's expiry sweep must not pin a task to a runner whose owner is no longer a member of the
    task's team.** A lease expired by a removal is closed by that sweep as `interrupted`; pinning
    its task to the departed person's runner would leave it pinned to a machine that can no longer
