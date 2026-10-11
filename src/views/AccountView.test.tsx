@@ -87,8 +87,10 @@ describe("the account page", () => {
     fireEvent.change(screen.getByLabelText("Label"), { target: { value: "Claude Code" } });
     fireEvent.click(screen.getByRole("button", { name: "Create token" }));
 
-    const dialog = await screen.findByRole("dialog", { name: "New personal access token" });
-    expect(within(dialog).getByText("rmp_the-secret-value")).toBeInTheDocument();
+    // The form and the secret are the same dialog, so it is found before the
+    // create answers; wait for the secret, not the dialog.
+    const dialog = screen.getByRole("dialog", { name: "New personal access token" });
+    expect(await within(dialog).findByText("rmp_the-secret-value")).toBeInTheDocument();
     expect(within(dialog).getByText("This is the only time it will be shown.")).toBeInTheDocument();
     const create = http.requests.find((request) => request.name === "create_personal_access_token");
     expect(create?.body).toEqual({ label: "Claude Code" });
