@@ -52,6 +52,24 @@ pub async fn start_task_run(request: BoardRequest, args: StartTask) -> Result<()
     .await
 }
 
+/// Retry now: asks one runner to resume a task that is waiting out a retry,
+/// now, continuing the session it was in (ADR-0011). A retry is a claim
+/// through the task's pin, so through any door but the solo window a request
+/// that names no runner goes to the pinned one (D32's appendix).
+pub async fn retry_task_now(request: BoardRequest, args: StartTask) -> Result<()> {
+    relay::request_start(
+        &request.ctx,
+        &request.caller.door,
+        request.host.relay.as_ref(),
+        StartRequest {
+            task_id: args.task_id,
+            runner_id: args.runner_id,
+            continue_session: true,
+        },
+    )
+    .await
+}
+
 /// Ends a task's retry loop: `waiting_retry -> failed`.
 ///
 /// Thin over [`scheduler::give_up`], which is where the rule lives — the MCP

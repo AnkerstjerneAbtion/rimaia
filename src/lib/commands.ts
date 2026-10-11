@@ -1143,10 +1143,11 @@ export function cancelRun(taskId: string): Promise<void> {
  * two buttons rather than one.
  *
  * Resolves as soon as the run is under way, not once it finishes — same
- * contract as {@link startRun}.
+ * contract as {@link startRun}. `runnerId` is sent only when given; with none,
+ * a server resumes it on the runner the task is pinned to (task 052).
  */
-export function retryTaskNow(taskId: string): Promise<void> {
-  return local<void>("retry_task_now", { taskId });
+export function retryTaskNow(taskId: string, runnerId?: string): Promise<void> {
+  return board<void>("retry_task_now", withRunner(taskId, runnerId));
 }
 
 /**

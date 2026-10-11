@@ -225,7 +225,7 @@ describe("the execution-strategy wrappers (task 020)", () => {
   });
 });
 
-describe("Run now names its runner only when given one (task 052)", () => {
+describe("Run now and Retry now name their runner only when given one (task 052)", () => {
   beforeEach(() => {
     mockInvoke.mockReset();
     mockInvoke.mockResolvedValue(undefined);
@@ -239,6 +239,17 @@ describe("Run now names its runner only when given one (task 052)", () => {
   it("sends the runner when one is named", async () => {
     await startRun("task-1", "runner-1");
     expect(mockInvoke).toHaveBeenCalledWith("start_task_run", {
+      taskId: "task-1",
+      runnerId: "runner-1",
+    });
+  });
+
+  it("does the same for Retry now", async () => {
+    await retryTaskNow("task-1");
+    expect(mockInvoke).toHaveBeenLastCalledWith("retry_task_now", { taskId: "task-1" });
+
+    await retryTaskNow("task-1", "runner-1");
+    expect(mockInvoke).toHaveBeenLastCalledWith("retry_task_now", {
       taskId: "task-1",
       runnerId: "runner-1",
     });

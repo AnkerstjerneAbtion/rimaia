@@ -803,7 +803,6 @@ static LOCAL_CASES: &[LocalCase] = &[
     local_case("list_local_worktrees", Local::EntityLess),
     // runs
     local_case("cancel_task_run", Local::Ids(Take::Task)),
-    local_case("retry_task_now", Local::Ids(Take::Task)),
     local_case("read_run_transcript_page", Local::Ids(Take::Run)),
     local_case("search_run_transcript", Local::Ids(Take::Run)),
     local_case("summarize_run_transcript", Local::Ids(Take::Run)),
@@ -939,7 +938,7 @@ fn a_warning() -> rimaia_core::db::settings::Dismissal {
 async fn run_local(name: &str, teams: &TwoTeams, subject: &Subject) -> rimaia_core::Result<Value> {
     use rimaia_core::db::settings;
     use rimaia_core::machine;
-    use rimaia_core::runner::{claim_manual_start, strategy as runner_strategy, ManualStart};
+    use rimaia_core::runner::strategy as runner_strategy;
     use rimaia_core::runner::{CancelSignal, Starter};
     use rimaia_core::runs::{self, transcript};
     use rimaia_core::scheduler::{capacity, SlotOwner};
@@ -1124,24 +1123,6 @@ async fn run_local(name: &str, teams: &TwoTeams, subject: &Subject) -> rimaia_co
         "get_worktree_auto_cleanup" => value(worktree::auto_cleanup(machine).await),
         "set_worktree_auto_cleanup" => {
             value(worktree::set_auto_cleanup(machine, worktree::AutoCleanup::Off).await)
-        }
-        // Up to the claim: the run after it is the shell's.
-        "retry_task_now" => {
-            let started = claim_manual_start(
-                Starter::at_runner(ctx, runner_id),
-                board.as_ref(),
-                machine,
-                &teams.paths,
-                &teams.runner,
-                &teams.in_flight,
-                ManualStart {
-                    task_id: task_id.to_string(),
-                    continue_session: true,
-                },
-            )
-            .await?;
-            drop(started);
-            Ok(Value::Null)
         }
         // B's task is really running, so a handler that cancels by bare id
         // is caught by the run it stops and not only by the answer it gives.

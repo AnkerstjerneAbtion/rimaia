@@ -618,7 +618,6 @@ pub fn run() {
         commands::worktree::set_worktree_auto_cleanup,
         commands::worktree::list_local_worktrees,
         commands::runs::cancel_task_run,
-        commands::runs::retry_task_now,
         commands::runs::read_run_transcript_page,
         commands::runs::search_run_transcript,
         commands::runs::summarize_run_transcript,

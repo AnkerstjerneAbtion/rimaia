@@ -317,6 +317,10 @@ pub const REFUSED_FOR_TEAM_A: &[(&str, &str)] = &[
         "no task of team A's is waiting out a retry",
     ),
     (
+        "retry_task_now",
+        "no task of team A's is waiting out a retry, so a resume has no edge to take",
+    ),
+    (
         "leave_team",
         "team A's owner is in only team A, a personal team, which always keeps its person",
     ),
@@ -694,6 +698,14 @@ pub static BOARD_CASES: &[BoardCase] = &[
     // holds the request for its next claim (task 052).
     BoardCase {
         name: "start_task_run",
+        effect: Effect::Write,
+        own: |t| json!({ "taskId": t.team_a.ready, "runnerId": t.team_a.credentials.paired_runner_id }),
+        foreign: Foreign::Ids(
+            |t| json!({ "taskId": t.team_b.ready, "runnerId": t.team_a.credentials.paired_runner_id }),
+        ),
+    },
+    BoardCase {
+        name: "retry_task_now",
         effect: Effect::Write,
         own: |t| json!({ "taskId": t.team_a.ready, "runnerId": t.team_a.credentials.paired_runner_id }),
         foreign: Foreign::Ids(

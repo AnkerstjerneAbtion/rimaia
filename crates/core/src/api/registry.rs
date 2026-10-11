@@ -230,7 +230,7 @@ pub static COMMANDS: LazyLock<Vec<Command>> = LazyLock::new(|| {
         // runs
         board("start_task_run", Write, runs::start_task_run),
         local("cancel_task_run"), // local until task 052 flips it to board
-        local("retry_task_now"),  // local until task 052 flips it to board
+        board("retry_task_now", Write, runs::retry_task_now),
         board("give_up_on_task", Write, runs::give_up_on_task),
         board("get_run_tail", Read, runs::get_run_tail),
         board("list_runs_for_task", Read, runs::list_runs_for_task),

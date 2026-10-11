@@ -19,9 +19,6 @@
 //! catch-up read, `get_run_tail`, is a board command answered from the host's
 //! tail relay (task 048).
 
-use rimaia_core::runner::{
-    claim_manual_start, run_task, ManualStart, RunRequest, Started, Starter,
-};
 use rimaia_core::runs::transcript::{self, SearchHit, TranscriptPage};
 use rimaia_core::runs::{self, PruneCriterion, PruneResult};
 use rimaia_core::{Error, Result};
@@ -30,87 +27,6 @@ use tauri::State;
 use tauri_plugin_opener::OpenerExt;
 
 use crate::state::AppState;
-
-/// Resumes a task that is waiting out a retry, **now**, without waiting for its
-/// deadline.
-///
-/// The operator's override of ADR-0011's wait: they can see that the window
-/// reopened early, or simply want the attempt made while they are watching. It
-/// deliberately ignores two things the queue honours — the task's own
-/// `resume_after` and the global usage-limit hold — for the reason seam-contract
-/// D19 point 5 gives about the concurrency caps: those bound the *scheduler*,
-/// and a person clicking a button with the app in front of them is not the
-/// unattended failure they exist for.
-///
-/// What it does **not** ignore is the session. This continues the attempt chain
-/// rather than starting a fresh one, which is the whole of ADR-0011's "resume,
-/// do not restart" — the worktree keeps its commits and the context is reused.
-/// A task whose runs have been pruned away resumes as a fresh session, because
-/// there is nothing left to continue. A review or fix waiting to be resumed is
-/// refused by the board before anything is claimed (seam-contract D29 point 3).
-#[tauri::command]
-pub async fn retry_task_now(state: State<'_, AppState>, task_id: String) -> Result<()> {
-    start_by_hand(
-        &state,
-        ManualStart {
-            task_id,
-            continue_session: true,
-        },
-    )
-    .await
-}
-
-/// The two buttons' shared half: the core preflight, then the spawn.
-async fn start_by_hand(state: &AppState, start: ManualStart) -> Result<()> {
-    let machine = state.machine.clone();
-    // The process-wide config and board, not fresh defaults: the queue spawns
-    // from these same values, and a button that configured its child
-    // differently from the queue's would be a difference nothing on screen
-    // could explain.
-    let config = state.runner.clone();
-    let board = state.board_port.clone();
-    let paths = state.paths.clone();
-    let task_id = start.task_id.clone();
-
-    // This machine's own runner, asked by the person at it (ADR-0031 point 7).
-    let Started { slot, claim } = claim_manual_start(
-        Starter::at_runner(&state.context, &state.solo.runner_id),
-        board.as_ref(),
-        &machine,
-        &paths,
-        &config,
-        &state.in_flight,
-        start,
-    )
-    .await?;
-
-    let request = RunRequest {
-        cancel: slot.cancel_signal(),
-        // The same registry the queue hands its own runs, so a "Run now" and a
-        // queued run in one repository take turns creating their worktrees
-        // rather than racing `git worktree add` against one `.git` — see
-        // `InFlight::preparation_lock`. This is exactly the pair the caps do
-        // *not* keep apart (D19 point 5), which is what makes it the case that
-        // needs the lock.
-        in_flight: Some(state.in_flight.clone()),
-    };
-
-    tauri::async_runtime::spawn(async move {
-        // Held until the run has finished: the slot is what a second click,
-        // the queue and Plan now all fail against.
-        let _slot = slot;
-        if let Err(error) =
-            run_task(board.as_ref(), &machine, &paths, &config, claim, request).await
-        {
-            tracing::error!(
-                %task_id, %error,
-                "a run could not be started or supervised",
-            );
-        }
-    });
-
-    Ok(())
-}
 
 /// Asks `task_id`'s in-flight run to stop.
 ///
