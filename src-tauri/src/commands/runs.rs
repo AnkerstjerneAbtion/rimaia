@@ -155,14 +155,14 @@ async fn start_by_hand(state: &AppState, start: ManualStart) -> Result<()> {
 
 /// Asks `task_id`'s in-flight run to stop.
 ///
-/// A no-op, not an error, when nothing is running for it — matching
-/// `CancelSignal::cancel`'s own idempotence. The run itself terminates on
-/// ADR-0004's schedule (SIGTERM, a grace period, then SIGKILL) inside
-/// `runner::process::execute`; this only delivers the request.
+/// A no-op, not an error, when nothing is running for a task the caller can
+/// see — matching `CancelSignal::cancel`'s own idempotence. A task outside the
+/// caller's scope is answered as a missing one (`runs::cancel_in_flight`). The
+/// run itself terminates on ADR-0004's schedule (SIGTERM, a grace period, then
+/// SIGKILL) inside `runner::process::execute`; this only delivers the request.
 #[tauri::command]
-pub fn cancel_task_run(state: State<'_, AppState>, task_id: String) -> Result<()> {
-    state.in_flight.cancel(&task_id);
-    Ok(())
+pub async fn cancel_task_run(state: State<'_, AppState>, task_id: String) -> Result<()> {
+    runs::cancel_in_flight(&state.context, &state.in_flight, &task_id).await
 }
 
 // ---------------------------------------------------------------------------

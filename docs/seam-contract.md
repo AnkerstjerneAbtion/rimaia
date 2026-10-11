@@ -7455,6 +7455,14 @@ what the dialog and opener plugins turn into once a page can run without a shell
     for checkouts. The handler had listed every record on the machine, which tells each of two
     teams' members about the other's tasks. 049's local tenant-isolation case found it. 059
     converts this read with the others.
+11. **`cancel_task_run` is scoped** (same amendment, same reason). `runs::cancel_in_flight(ctx,
+    in_flight, task_id)` reads the task through the context's scope first and answers an id
+    outside it as `not_found`, as a never-issued id is. The handler had called
+    `InFlight::cancel` by bare id, and `InFlight` is the machine's, so a team-A caller holding
+    team B's task id stopped B's run and got the same `Ok(())` as for an id that never
+    existed. The local tenant-isolation case is `Local::Ids(Take::Task)` with B's task really
+    in flight, so it fails on the answer and on the run it stopped. A task the caller can see
+    with nothing running is still `Ok(())`. 052 decides who may ask for the board-side version.
 
 **Why.** (1) and (2) give every later task one place to ask what the client is. (3) keeps a
 header added once from being added twice, and out of a retry's stale copy. (4) is what makes a

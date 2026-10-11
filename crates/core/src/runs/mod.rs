@@ -71,6 +71,7 @@ use crate::db::{Run, RunKind, RunStatus};
 use crate::error::{Error, ErrorCode, Result};
 use crate::paths::AppPaths;
 use crate::runner::events::{stderr_path, transcript_path};
+use crate::scheduler::InFlight;
 use crate::worktree::{CommitSummary, DiffStat};
 use bundle::{BundleFile, StoredBundle};
 
@@ -370,6 +371,34 @@ pub async fn review(ctx: &ServiceContext, run_id: &str) -> Result<RunReview> {
 /// exactly this caller.
 pub async fn get_run_row(ctx: &ServiceContext, run_id: &str) -> Result<Run> {
     fetch_run(ctx, run_id).await
+}
+
+/// Asks `task_id`'s in-flight run on this machine to stop: what
+/// `cancel_task_run` does.
+///
+/// `in_flight` is the machine's, not a team's, so the lookup by bare id would
+/// stop a run of a team the caller is not in. The task is read through the
+/// context first, and an id outside it is answered as a never-issued one
+/// (ADR-0029 point 5). Nothing running for a task the caller can see is not an
+/// error: `CancelSignal::cancel` is idempotent, and a Cancel pressed after the
+/// run finished is not a mistake worth reporting.
+pub async fn cancel_in_flight(
+    ctx: &ServiceContext,
+    in_flight: &InFlight,
+    task_id: &str,
+) -> Result<()> {
+    let visible: Option<String> = sqlx::query_scalar(
+        "SELECT id FROM tasks WHERE id = ?1 AND team_id IN (SELECT value FROM json_each(?2))",
+    )
+    .bind(task_id)
+    .bind(ctx.scope.json())
+    .fetch_optional(&ctx.pool)
+    .await?;
+    if visible.is_none() {
+        return Err(Error::not_found(format!("no task with id {task_id}")));
+    }
+    in_flight.cancel(task_id);
+    Ok(())
 }
 
 /// The runner that ran `run_id`, under the context's scope: `None` for a row
@@ -964,6 +993,45 @@ mod tests {
         .await
         .expect("seed a task");
         id
+    }
+
+    #[tokio::test]
+    async fn cancel_in_flight_stops_the_visible_tasks_run() {
+        let h = TestContext::new().await;
+        let repository = seed_repository(&h.context, "repo").await;
+        let task = seed_task(&h.context, &repository, "running").await;
+        let in_flight = InFlight::new();
+        let slot = in_flight
+            .acquire_unbounded(&task, &repository, crate::scheduler::SlotOwner::Manual)
+            .expect("a free slot");
+
+        cancel_in_flight(&h.context, &in_flight, &task)
+            .await
+            .expect("cancel");
+
+        assert!(slot.cancel_signal().is_cancelled());
+    }
+
+    #[tokio::test]
+    async fn cancel_in_flight_with_nothing_running_is_not_an_error() {
+        let h = TestContext::new().await;
+        let repository = seed_repository(&h.context, "repo").await;
+        let task = seed_task(&h.context, &repository, "idle").await;
+
+        cancel_in_flight(&h.context, &InFlight::new(), &task)
+            .await
+            .expect("a no-op");
+    }
+
+    #[tokio::test]
+    async fn cancel_in_flight_answers_a_missing_task_as_not_found() {
+        let h = TestContext::new().await;
+
+        let error = cancel_in_flight(&h.context, &InFlight::new(), "no-such-task")
+            .await
+            .expect_err("a never-issued id");
+
+        assert_eq!(error.code(), ErrorCode::NotFound);
     }
 
     #[allow(clippy::too_many_arguments)]
