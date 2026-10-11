@@ -557,6 +557,152 @@ async fn accepting_while_already_a_member_changes_nothing_and_keeps_the_invitati
     assert_eq!(kept.status, InvitationStatus::Pending);
 }
 
+/// The status `list_invitations` gives the invitation `id`, as an owner of
+/// the shared team reads it.
+async fn status_of(team: &SharedTeam, id: &str) -> InvitationStatus {
+    list_invitations(&team.alice.ctx, &team.team_id)
+        .await
+        .expect("an owner lists")
+        .into_iter()
+        .find(|invitation| invitation.id == id)
+        .expect("the invitation is listed")
+        .status
+}
+
+/// Bob, made an owner of the shared team by Alice.
+async fn promote_bob(team: &SharedTeam) {
+    set_member_role(
+        &team.alice.ctx,
+        &team.team_id,
+        &team.bob.user_id,
+        Role::Owner,
+    )
+    .await
+    .expect("bob becomes an owner");
+}
+
+#[tokio::test]
+async fn a_demoted_owner_who_leaves_cannot_rejoin_as_owner_with_their_own_link() {
+    let team = SharedTeam::new().await;
+    promote_bob(&team).await;
+    let kept = create_invitation(&team.bob.ctx, &team.team_id, Role::Owner)
+        .await
+        .expect("bob, an owner, makes a link and keeps it");
+
+    set_member_role(
+        &team.alice.ctx,
+        &team.team_id,
+        &team.bob.user_id,
+        Role::Member,
+    )
+    .await
+    .expect("alice demotes bob");
+    assert_eq!(
+        status_of(&team, &kept.invitation.id).await,
+        InvitationStatus::Revoked,
+        "the demotion revokes the links bob made as an owner"
+    );
+    leave_team(&team.bob.ctx, &team.team_id)
+        .await
+        .expect("bob leaves");
+    let bob = ServiceContext {
+        scope: TeamScope::one(team.bob.personal_team.clone()),
+        ..team.bob.ctx.clone()
+    };
+
+    let error = refused(accept_invitation(&bob, kept.token.expose()).await);
+
+    assert_eq!(error.code(), ErrorCode::NotFound);
+    assert_eq!(error.to_string(), INVALID_LINK);
+    assert_eq!(
+        role_in(&team.alice.ctx.pool, &team.team_id, &team.bob.user_id).await,
+        None
+    );
+}
+
+#[tokio::test]
+async fn a_removed_owners_pending_links_are_revoked() {
+    let team = SharedTeam::new().await;
+    promote_bob(&team).await;
+    let carol = sign_up(&team, "carol").await;
+    let dave = sign_up(&team, "dave").await;
+    let expired = create_invitation(&team.bob.ctx, &team.team_id, Role::Member)
+        .await
+        .expect("bob makes a link nobody uses");
+    team.clock.set(expired.invitation.expires_at);
+    let used = create_invitation(&team.bob.ctx, &team.team_id, Role::Member)
+        .await
+        .expect("bob invites carol");
+    accept_invitation(&carol, used.token.expose())
+        .await
+        .expect("carol joins");
+    let handed_out = create_invitation(&team.bob.ctx, &team.team_id, Role::Member)
+        .await
+        .expect("bob makes a link for dave");
+    let kept = create_invitation(&team.bob.ctx, &team.team_id, Role::Owner)
+        .await
+        .expect("bob makes a link and keeps it");
+    let alices = create_invitation(&team.alice.ctx, &team.team_id, Role::Member)
+        .await
+        .expect("alice makes a link of her own");
+
+    remove_member(&team.alice.ctx, &team.team_id, &team.bob.user_id)
+        .await
+        .expect("alice removes bob");
+
+    assert_eq!(
+        status_of(&team, &handed_out.invitation.id).await,
+        InvitationStatus::Revoked
+    );
+    assert_eq!(
+        status_of(&team, &kept.invitation.id).await,
+        InvitationStatus::Revoked
+    );
+    assert_eq!(
+        status_of(&team, &used.invitation.id).await,
+        InvitationStatus::Accepted,
+        "a used link keeps saying who let whom in"
+    );
+    assert_eq!(
+        status_of(&team, &expired.invitation.id).await,
+        InvitationStatus::Expired,
+        "an expired link keeps saying it expired"
+    );
+    assert_eq!(
+        status_of(&team, &alices.invitation.id).await,
+        InvitationStatus::Pending,
+        "another owner's links are not bob's to lose"
+    );
+    let error = refused(accept_invitation(&dave, handed_out.token.expose()).await);
+    assert_eq!(error.to_string(), INVALID_LINK);
+}
+
+#[tokio::test]
+async fn deleting_an_account_revokes_the_links_it_made() {
+    let team = SharedTeam::new().await;
+    promote_bob(&team).await;
+    let kept = create_invitation(&team.bob.ctx, &team.team_id, Role::Owner)
+        .await
+        .expect("bob makes a link and keeps it");
+
+    delete_account(&team.bob.ctx, "bob")
+        .await
+        .expect("bob leaves Rimaia");
+    // Signing up again makes a new user, whom the creator check cannot know.
+    let again = sign_up(&team, "bob").await;
+
+    assert_eq!(
+        status_of(&team, &kept.invitation.id).await,
+        InvitationStatus::Revoked
+    );
+    let error = refused(accept_invitation(&again, kept.token.expose()).await);
+    assert_eq!(error.to_string(), INVALID_LINK);
+    assert_eq!(
+        role_in(&team.alice.ctx.pool, &team.team_id, &again.actor).await,
+        None
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Roles
 // ---------------------------------------------------------------------------

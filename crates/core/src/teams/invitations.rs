@@ -243,6 +243,9 @@ pub async fn preview_invitation(ctx: &ServiceContext, token: &str) -> Result<Inv
 /// A caller who is already a member is refused, and the token stays unused:
 /// an invitation is never a way to change one's own role, and a member who is
 /// forwarded an owner's link must not use it up for the person it was for.
+/// For the same reason a link is never usable by the person who made it: once
+/// they are out of the team, their own link gets the one unusable-token
+/// answer, so a demoted or removed owner cannot walk back in as an owner.
 #[tracing::instrument(skip_all, fields(user_id = ctx.actor.as_str()))]
 pub async fn accept_invitation(ctx: &ServiceContext, token: &str) -> Result<Team> {
     let mut tx = ctx.begin_immediate().await?;
@@ -258,6 +261,11 @@ pub async fn accept_invitation(ctx: &ServiceContext, token: &str) -> Result<Team
 /// [`accept_invitation`]'s two statements, on the caller's transaction: the
 /// conditional `UPDATE` that only a usable token's row matches, so single use
 /// needs no lock of its own, then the membership. The team joined.
+///
+/// The two refusals after the `UPDATE` rely on the caller rolling back, which
+/// leaves the invitation unused. A current member is told so before the
+/// creator check, so an owner who opens their own link hears that they are
+/// already in, not that the link is dead.
 pub(crate) async fn accept_invitation_in(
     conn: &mut SqliteConnection,
     clock: &dyn Clock,
@@ -270,7 +278,7 @@ pub(crate) async fn accept_invitation_in(
         "UPDATE invitations SET accepted_by = ?1, accepted_at = ?2
           WHERE token_hash = ?3 AND accepted_at IS NULL AND revoked_at IS NULL
             AND expires_at > ?2
-         RETURNING team_id, role",
+         RETURNING team_id, role, created_by",
         user_id,
         now,
         token_hash,
@@ -286,6 +294,9 @@ pub(crate) async fn accept_invitation_in(
             team.name
         )));
     }
+    if accepted.created_by.as_deref() == Some(user_id) {
+        return Err(Error::not_found(INVALID_LINK));
+    }
     sqlx::query!(
         "INSERT INTO team_memberships (team_id, user_id, role, created_at)
          VALUES (?1, ?2, ?3, ?4)",
@@ -297,6 +308,33 @@ pub(crate) async fn accept_invitation_in(
     .execute(&mut *conn)
     .await?;
     Ok(accepted.team_id)
+}
+
+/// Revokes every link `created_by` made into `team_id` that could still be
+/// used, on the caller's transaction: what a removal, a departure and a
+/// demotion to member do (seam-contract D41 point 6). A link carries its
+/// maker's authority to admit, and someone who lost that authority must not
+/// keep exercising it through a token they still hold or already handed out.
+/// Accepted and expired rows are left as they are, so the history still says
+/// what happened to them.
+pub(crate) async fn revoke_links_made_by(
+    conn: &mut SqliteConnection,
+    clock: &dyn Clock,
+    team_id: &str,
+    created_by: &str,
+) -> Result<()> {
+    let now = clock.now();
+    sqlx::query!(
+        "UPDATE invitations SET revoked_at = ?3
+          WHERE team_id = ?1 AND created_by = ?2
+            AND accepted_at IS NULL AND revoked_at IS NULL AND expires_at > ?3",
+        team_id,
+        created_by,
+        now,
+    )
+    .execute(&mut *conn)
+    .await?;
+    Ok(())
 }
 
 /// One invitation by id, for the answer to its creation.
@@ -361,5 +399,62 @@ impl Row {
             accepted_at: self.accepted_at,
             revoked_at: self.revoked_at,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::identity::{create_personal_team, insert_team};
+    use crate::testing::{test_epoch, test_pool, TestClock};
+    use crate::ErrorCode;
+    use pretty_assertions::assert_eq;
+
+    /// A state no service leaves behind, because every way out of a team, and
+    /// a demotion, revokes the person's links: a usable link whose maker is
+    /// not a member. The creator check is what still refuses it, should a
+    /// later path that ends a membership forget the revocation.
+    #[tokio::test]
+    async fn a_link_is_never_usable_by_the_person_who_made_it() {
+        let pool = test_pool().await;
+        let clock = TestClock::new(test_epoch());
+        let mut conn = pool.acquire().await.expect("a connection");
+        let alice = create_personal_team(&mut conn, &clock, "alice")
+            .await
+            .expect("alice signs up");
+        let carol = create_personal_team(&mut conn, &clock, "carol")
+            .await
+            .expect("carol signs up");
+        let team = insert_team(&mut conn, &clock, "Acme", None, &alice.user_id)
+            .await
+            .expect("alice's team");
+        let (id, token) =
+            create_invitation_in(&mut conn, &clock, &team, Role::Owner, &carol.user_id)
+                .await
+                .expect("a link carol made");
+        drop(conn);
+
+        let mut tx = pool.begin().await.expect("a transaction");
+        let error = accept_invitation_in(&mut tx, &clock, token.expose(), &carol.user_id)
+            .await
+            .expect_err("carol cannot use her own link");
+        drop(tx);
+
+        assert_eq!(error.code(), ErrorCode::NotFound);
+        assert_eq!(error.to_string(), INVALID_LINK);
+        let mut conn = pool.acquire().await.expect("a connection");
+        assert_eq!(
+            role_of(&mut conn, &team, &carol.user_id)
+                .await
+                .expect("read"),
+            None
+        );
+        let accepted_at: Option<String> =
+            sqlx::query_scalar("SELECT accepted_at FROM invitations WHERE id = ?1")
+                .bind(&id)
+                .fetch_one(&mut *conn)
+                .await
+                .expect("the invitation");
+        assert_eq!(accepted_at, None, "the link stays unused");
     }
 }

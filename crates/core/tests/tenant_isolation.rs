@@ -1595,7 +1595,7 @@ async fn a_run_scoped_handle_lists_only_its_own_team() {
 /// A `ScopedTx` counts as a transaction here. It carries the context's scope,
 /// which is why the helpers below may take one, but each of them is still a
 /// door into someone else's transaction, so each is named.
-const STORE_HANDLE_EXCEPTIONS: [(&str, &str); 54] = [
+const STORE_HANDLE_EXCEPTIONS: [(&str, &str); 55] = [
     ("db::connect", "it makes the pool; no context can exist yet"),
     ("db::migrate", "it runs before the context is built"),
     (
@@ -1844,6 +1844,12 @@ const STORE_HANDLE_EXCEPTIONS: [(&str, &str); 54] = [
         "teams::invitations::accept_invitation_in",
         "accept_invitation redeems inside its own transaction (051), and the testing member \
          helper calls it on the caller's transaction; the token names the team",
+    ),
+    (
+        "teams::invitations::revoke_links_made_by",
+        "a removal, a departure, a demotion and an account deletion revoke the person's links \
+         inside the transaction that checked who asked (051, D41 point 6); it writes one team's \
+         rows",
     ),
     (
         "teams::delete::purge",

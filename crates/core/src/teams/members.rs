@@ -6,8 +6,8 @@ use serde::Serialize;
 use sqlx::SqliteConnection;
 
 use super::{
-    ensure_an_owner_remains, refuse_solo, require_owner, role_of, team_row, NO_SUCH_TEAM,
-    PERSONAL_TEAM_KEEPS_ITS_PERSON,
+    ensure_an_owner_remains, invitations, refuse_solo, require_owner, role_of, team_row,
+    NO_SUCH_TEAM, PERSONAL_TEAM_KEEPS_ITS_PERSON,
 };
 use crate::clock::Clock;
 use crate::context::ServiceContext;
@@ -67,7 +67,10 @@ pub async fn list_team_members(ctx: &ServiceContext, team_id: &str) -> Result<Ve
 /// Makes `user_id` an owner or a member of `team_id`. Owner only.
 ///
 /// Demoting a personal team's own person is refused, and so is leaving the
-/// team with no owner (the last-owner rule, applied after the write).
+/// team with no owner (the last-owner rule, applied after the write). A
+/// demotion to member revokes the links the person made while an owner: a
+/// member cannot invite, and an owner's link kept from before must not undo
+/// the demotion.
 #[tracing::instrument(skip_all, fields(user_id = ctx.actor.as_str(), team_id = %team_id))]
 pub async fn set_member_role(
     ctx: &ServiceContext,
@@ -93,6 +96,9 @@ pub async fn set_member_role(
     )
     .execute(&mut *tx)
     .await?;
+    if role == Role::Member {
+        invitations::revoke_links_made_by(&mut tx, ctx.clock.as_ref(), team_id, user_id).await?;
+    }
     ensure_an_owner_remains(&mut tx, team_id).await?;
     tx.commit().await?;
 
@@ -173,6 +179,9 @@ async fn depart(
 ///   than being deleted, so 053's sweep closes its run as `interrupted`; a
 ///   deleted lease would leave the run `running` with nothing to close it;
 /// - their trust rows in the team go in both directions;
+/// - every invitation into the team they made that could still be used is
+///   revoked, so neither they nor anyone they gave a link to gets in on the
+///   authority they no longer have;
 /// - a token of theirs restricted to this team alone is deleted, and one
 ///   restricted to it and others loses this team only: D28 reads no rows as
 ///   every team, so a restriction whose last row went would widen the token.
@@ -241,6 +250,7 @@ pub(crate) async fn remove_member_in(
     )
     .execute(&mut *conn)
     .await?;
+    invitations::revoke_links_made_by(&mut *conn, clock, team_id, user_id).await?;
     sqlx::query!(
         "DELETE FROM api_tokens
           WHERE user_id = ?2

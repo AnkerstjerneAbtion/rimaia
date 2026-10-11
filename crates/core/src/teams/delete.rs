@@ -13,7 +13,7 @@ use serde::Serialize;
 use sqlx::SqliteConnection;
 use tracing::Instrument;
 
-use super::{refuse_solo, require_owner, team_row};
+use super::{invitations, refuse_solo, require_owner, team_row};
 use crate::context::ServiceContext;
 use crate::error::{Error, Result};
 use crate::events::{per_team, ChangeEvent, RepositoryId, TaskId, TeamId, UserId};
@@ -222,7 +222,9 @@ pub struct DeletedAccount {
 /// `teams.personal_user_id` is `RESTRICT`; then the user, whose sessions,
 /// tokens, pairing codes, runners, memberships, settings, acceptances and
 /// trust rows cascade, and whose authorship columns become `NULL`, "a former
-/// member". Every other team's tasks that named them are announced, per team.
+/// member". The links they made into their other teams are revoked first, as
+/// a removal's are. Every other team's tasks that named them are announced,
+/// per team.
 #[tracing::instrument(skip_all, fields(user_id = ctx.actor.as_str()))]
 pub async fn delete_account(ctx: &ServiceContext, confirm_login: &str) -> Result<DeletedAccount> {
     let user_id = ctx.actor.as_str();
@@ -304,6 +306,17 @@ pub async fn delete_account(ctx: &ServiceContext, confirm_login: &str) -> Result
     )
     .fetch_all(&mut *tx)
     .await?;
+    // The deletion is a departure from every other team too, so the links
+    // the account made there go the way a removal's do (D41 point 6). Its
+    // `created_by` becomes `NULL` below, and a person who signs up again is a
+    // new user, so nothing but this revocation stops them walking back into a
+    // team with a link they kept.
+    for team_id in member_of
+        .iter()
+        .filter(|team_id| Some(*team_id) != personal_team.as_ref())
+    {
+        invitations::revoke_links_made_by(&mut tx, ctx.clock.as_ref(), team_id, user_id).await?;
+    }
     sqlx::query!("DELETE FROM users WHERE id = ?1", user_id)
         .execute(&mut *tx)
         .await?;
