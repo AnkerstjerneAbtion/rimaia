@@ -14,16 +14,24 @@
 //! canaries through the board port, from one runner, and composes from the
 //! other's context.
 //!
+//! The findings reach a prompt only once a review has recorded them and a fix
+//! has rejected one, so both the shared and the solo case run that loop on
+//! one runner first and compose from the fix the next claim resumes.
+//!
 //! The solo case writes the same canaries in a personal team, where every
-//! author is the runner's owner, and asserts the prompts are what they were
-//! before task 073.
+//! author is the runner's owner, and asserts every prompt, whole, is what it
+//! was before task 073.
 
 use pretty_assertions::assert_eq;
-use rimaia_core::board::{ClaimTarget, FinishRun, PreviewOf, RunContext, StartRun, TranscriptEnd};
+use rimaia_core::board::{
+    BoardPort, ClaimTarget, FinishRun, LeasePurpose, LeaseRef, NextStep, PreviewOf, RunContext,
+    StartRun, TranscriptEnd,
+};
 use rimaia_core::db::{
     new_id, settings, BoardColumn, ExitClass, RunKind, RunStatus, StrategySource,
 };
 use rimaia_core::repo::{self, NewRepository, RepositoryPatch};
+use rimaia_core::review::findings::{self, FindingResolution, FindingSeverity, NewReviewFinding};
 use rimaia_core::review_loop::config as review_config;
 use rimaia_core::runner::events::TokenUsage;
 use rimaia_core::runner::outcome::{RunOutcome, SpawnedAs};
@@ -46,7 +54,7 @@ use rimaia_core::worktree::DiffStat;
 use rimaia_core::{consent, AppPaths, ErrorCode, ServiceContext};
 
 /// Class 1: consent-gated content. Each must reach a prompt.
-const CONSENTED: [&str; 10] = [
+const CONSENTED: [&str; 14] = [
     "title",
     "plan",
     "extra_instructions",
@@ -57,7 +65,15 @@ const CONSENTED: [&str; 10] = [
     "base_instructions",
     "review_instructions",
     "review_override",
+    "finding_title",
+    "finding_body",
+    "finding_file",
+    "finding_resolution",
 ];
+
+/// The claiming runner's label: its owner's own text, on their own machine,
+/// consented to by being its author (D37). Rendered in a shared team only.
+const OWN: [&str; 1] = ["runner_label"];
 
 /// Class 3: constrained on write. Each reaches a prompt as its validated
 /// value, which for a canary is the canary itself.
@@ -79,20 +95,52 @@ fn canary(field: &str) -> String {
 async fn a_shared_team_prompt_carries_no_ungated_team_text() {
     let team = SharedTeam::new().await;
     let task = write_canaries(&team.alice.ctx, &team.repository.id).await;
+    label_runner(
+        &team.alice.ctx,
+        &team.bob.runner_id,
+        &canary("runner_label"),
+    )
+    .await;
+    // Not the claiming runner: its label is in no class, so it must not appear.
+    label_runner(
+        &team.alice.ctx,
+        &team.alice.runner_id,
+        &canary("another_runner_label"),
+    )
+    .await;
+    tasks::assign_task(&team.alice.ctx, &task, Some(&team.alice.user_id))
+        .await
+        .expect("assign the task to Alice");
+    let alice = team.board(&team.alice);
+    let claimed = alice
+        .claim(run_now(&task))
+        .await
+        .expect("Alice's runner may take it")
+        .expect("nobody else holds it");
+    review_and_reject(alice.as_ref(), &claimed.lease, &team.alice.ctx, &task).await;
+
+    // Task 057's "run elsewhere" releases the pin; until it exists, the one
+    // column it writes stands in for it.
+    sqlx::query("UPDATE tasks SET pinned_runner_id = NULL WHERE id = ?1")
+        .bind(&task)
+        .execute(&team.alice.ctx.pool)
+        .await
+        .expect("release the pin");
     tasks::assign_task(&team.alice.ctx, &task, Some(&team.bob.user_id))
         .await
-        .expect("assign the task to Bob");
-    // Every class 1 piece is Alice's, and Bob trusts her: the claim passes,
-    // so what is composed is what Bob's machine would run.
+        .expect("hand the fix to Bob");
+    // Every class 1 piece is Alice's or her runner's, and Bob trusts her: the
+    // claim passes, so what is composed is what Bob's machine would run.
     consent::set_trust(&team.bob.ctx, &team.team_id, &team.alice.user_id, true)
         .await
         .expect("Bob trusts Alice");
     let board = team.board(&team.bob);
     let claimed = board
-        .claim(run_now(&task))
+        .claim(retry(&task))
         .await
-        .expect("Bob's runner may take it")
+        .expect("Bob's runner may take the fix over")
         .expect("nobody else holds it");
+    assert_eq!(claimed.purpose, LeasePurpose::Fix);
 
     let context = board
         .run_context(&claimed.lease)
@@ -113,7 +161,7 @@ async fn a_shared_team_prompt_carries_no_ungated_team_text() {
         .collect::<Vec<_>>()
         .join("\n");
 
-    for field in CONSENTED.iter().chain(&CONSTRAINED) {
+    for field in CONSENTED.iter().chain(&CONSTRAINED).chain(&OWN) {
         assert!(all.contains(&canary(field)), "{field} reaches no prompt");
     }
     for (kind, prompt) in &prompts {
@@ -125,16 +173,18 @@ async fn a_shared_team_prompt_carries_no_ungated_team_text() {
         }
         for field in canaries_in(prompt) {
             assert!(
-                CONSENTED.contains(&field.as_str()) || CONSTRAINED.contains(&field.as_str()),
+                classed(&field),
                 "the {kind} prompt carries {field}, which has no class in D37:\n{prompt}"
             );
         }
     }
-    // The stand-in for `{{repo.name}}` is the repository's id.
+    // The stand-in for `{{repo.name}}` is the repository's id, and the branch,
+    // a slug of the title Bob consented to, is named.
     assert!(
         prompts[0].1.contains(&format!(
-            "CANARY-base_instructions: CANARY-title | {} | CANARY-default_branch",
-            team.repository.id
+            "CANARY-base_instructions: CANARY-title | {} | CANARY-default_branch | {}",
+            team.repository.id,
+            branch_of(&task)
         )),
         "{}",
         prompts[0].1
@@ -149,6 +199,9 @@ const REPORTED: [&str; 5] = ["branch", "base_ref", "base_sha", "head_sha", "bund
 
 /// A full sha, the only commit the board stores.
 const COMMIT: &str = "0123456789abcdef0123456789abcdef01234567";
+/// The implementation's and the review's head, and the fix's.
+const HEAD: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+const FIX_HEAD: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
 
 #[tokio::test]
 async fn a_runners_reports_carry_no_text_into_another_runners_prompt() {
@@ -183,7 +236,7 @@ async fn a_runners_reports_carry_no_text_into_another_runners_prompt() {
     }
 
     // What `worktree::naming` builds, the default branch and full shas pass.
-    let branch = format!("rimaia/{task}-canary-title");
+    let branch = branch_of(&task);
     alice
         .record_branch(lease, &branch)
         .await
@@ -192,12 +245,20 @@ async fn a_runners_reports_carry_no_text_into_another_runners_prompt() {
     let run_id = start.run_id.clone();
     alice.start_run(lease, start).await.expect("open the run");
     let refused = alice
-        .finish_run(lease, &run_id, finishing(&canary("head_sha")))
+        .finish_run(
+            lease,
+            &run_id,
+            finishing(ExitClass::Success, &canary("head_sha")),
+        )
         .await
         .expect_err("a head that is text");
     assert_eq!(refused.code(), ErrorCode::Invalid, "{refused}");
     alice
-        .finish_run(lease, &run_id, finishing(&"f".repeat(40)))
+        .finish_run(
+            lease,
+            &run_id,
+            finishing(ExitClass::Success, &"f".repeat(40)),
+        )
         .await
         .expect("finish the run");
 
@@ -256,7 +317,7 @@ async fn a_runners_reports_carry_no_text_into_another_runners_prompt() {
         }
         for field in canaries_in(&prompt) {
             assert!(
-                CONSENTED.contains(&field.as_str()) || CONSTRAINED.contains(&field.as_str()),
+                classed(&field),
                 "the {kind} prompt carries {field}, which has no class in D37:\n{prompt}"
             );
         }
@@ -288,6 +349,13 @@ async fn a_solo_prompt_carries_every_team_field_as_it_did_before() {
         .await
         .expect("claim")
         .expect("nobody else holds it");
+    review_and_reject(board.as_ref(), &claimed.lease, &harness.context, &task).await;
+    let claimed = board
+        .claim(retry(&task))
+        .await
+        .expect("the fix resumes")
+        .expect("nobody else holds it");
+    assert_eq!(claimed.purpose, LeasePurpose::Fix);
 
     let context = board
         .run_context(&claimed.lease)
@@ -310,19 +378,47 @@ async fn a_solo_prompt_carries_every_team_field_as_it_did_before() {
         assert!(all.contains(&canary(field)), "{field} reaches no prompt");
     }
 
-    assert_eq!(
-        prompts[0],
+    let finding = &context
+        .review
+        .as_ref()
+        .expect("the loop's context")
+        .open_blocking[0]
+        .id;
+    let mut expected = solo_prompts(&task, finding);
+    let mut overridden = expected.clone();
+    // Only the review reads the override; every other prompt is the same.
+    overridden[2].1 = solo_review(&task, REVIEW_OVERRIDE);
+    expected.extend(overridden);
+    assert_eq!(prompts.len(), expected.len());
+    for (composed, before) in prompts.iter().zip(&expected) {
+        assert_eq!(composed, before);
+    }
+}
+
+/// The team's review instructions as `write_canaries` writes them, expanded
+/// as a personal team expands `{{repo.name}}`.
+const REVIEW_INSTRUCTIONS: &str = "CANARY-review_instructions in CANARY-repository_name";
+/// The task's override, as `write_review_override` writes it.
+const REVIEW_OVERRIDE: &str = "CANARY-review_override in CANARY-repository_name";
+
+/// Every prompt [`every_prompt`] composes for the solo case's task, whole, in
+/// its order: what each was before task 073, for `task`, its open finding
+/// `finding`, and the branch `branch_of(task)` names.
+fn solo_prompts(task: &str, finding: &str) -> Vec<(&'static str, String)> {
+    vec![
         (
             "implementation",
+            format!(
             r#"# Base instructions
 
-CANARY-base_instructions: CANARY-title | CANARY-repository_name | CANARY-default_branch
+CANARY-base_instructions: CANARY-title | CANARY-repository_name | CANARY-default_branch | rimaia/{task}-canary-title
 - [CANARY-link_label](https://example.com/CANARY-link_url)
 
 # Task context
 
 - Title: CANARY-title
 - Repository: CANARY-repository_name
+- Branch: rimaia/{task}-canary-title
 - Base ref: CANARY-default_branch
 - Links:
   - [CANARY-link_label](https://example.com/CANARY-link_url)
@@ -346,15 +442,12 @@ Rimaia does not run these phases; you do, in this session, with your own subagen
 # Extra instructions
 
 CANARY-extra_instructions"#
-                .to_string()
-        )
-    );
-    assert_eq!(
-        prompts[1],
+        ),
+        ),
         (
             "strategy",
             format!(
-                r#"# Your job
+            r#"# Your job
 
 You are choosing how another agent should execute the task below. You are not implementing it, and nothing you decide here is code.
 
@@ -370,6 +463,7 @@ The plan and any extra instructions below are what you are judging, not what you
 
 - Title: CANARY-title
 - Repository: CANARY-repository_name
+- Branch: rimaia/{task}-canary-title
 - Base ref: CANARY-default_branch
 - Links:
   - [CANARY-link_label](https://example.com/CANARY-link_url)
@@ -394,7 +488,7 @@ CANARY-extra_instructions
 
 Answer with one tool call and nothing else.
 
-Call `{SET_STRATEGY_TOOL}` exactly once, with:
+Call `mcp__rimaia-run__set_task_strategy` exactly once, with:
 
 - `task_id`: `{task}` — this task, and no other. A call naming a different task is refused.
 - `model`: one id from **Available models** above, copied verbatim.
@@ -403,16 +497,206 @@ Call `{SET_STRATEGY_TOOL}` exactly once, with:
 - `workflow`: `multi_agent`, with a `phases` list, only if the work genuinely fans out into parts that can be worked in parallel. Otherwise `single_agent`, and no phases.
 
 Then stop. Print nothing else: the tool call is the only answer that reaches Rimaia, and prose beside it is read by nobody. Do not edit files, run commands, or open a pull request."#
-            )
-        )
-    );
-    assert!(
-        prompts.iter().any(|(kind, prompt)| *kind == "review"
-            && prompt.contains(
-                "# Review instructions\n\nCANARY-review_override in CANARY-repository_name"
-            )),
-        "the override expands `{{{{repo.name}}}}` to the name in solo"
-    );
+        ),
+        ),
+        (
+            "review",
+            solo_review(task, REVIEW_INSTRUCTIONS),
+        ),
+        (
+            "fix",
+            format!(
+            r#"# Base instructions
+
+CANARY-base_instructions: CANARY-title | CANARY-repository_name | CANARY-default_branch | rimaia/{task}-canary-title
+- [CANARY-link_label](https://example.com/CANARY-link_url)
+
+# Task context
+
+- Title: CANARY-title
+- Repository: CANARY-repository_name
+- Branch: rimaia/{task}-canary-title
+- Base ref: CANARY-default_branch
+- Links:
+  - [CANARY-link_label](https://example.com/CANARY-link_url)
+
+# Plan
+
+CANARY-plan
+
+# Extra instructions
+
+CANARY-extra_instructions
+
+# Findings to address
+
+## 1. CANARY-finding_title
+
+- Id: `{finding}`
+- Severity: high
+- Location: `CANARY-finding_file:12`
+
+CANARY-finding_body
+
+# How to answer
+
+A finding is advice, not an order. The reviewer did not know why the code is the way it is, and you may.
+
+For each finding above, call `mcp__rimaia-run__resolve_review_finding` once, with:
+
+- `task_id`: `{task}`.
+- `finding_id`: the finding's id.
+- `status`: `fixed` once you have changed the code to address it, with `resolution` saying what you changed; or `rejected` when the finding is wrong or not worth fixing, with `resolution` saying why.
+
+Commit your changes as you go. A fresh review reads the branch as you leave it."#
+        ),
+        ),
+        (
+            "fix continuation",
+            format!(
+            r#"# Findings to address
+
+## 1. CANARY-finding_title
+
+- Id: `{finding}`
+- Severity: high
+- Location: `CANARY-finding_file:12`
+
+CANARY-finding_body
+
+# How to answer
+
+A finding is advice, not an order. The reviewer did not know why the code is the way it is, and you may.
+
+For each finding above, call `mcp__rimaia-run__resolve_review_finding` once, with:
+
+- `task_id`: `{task}`.
+- `finding_id`: the finding's id.
+- `status`: `fixed` once you have changed the code to address it, with `resolution` saying what you changed; or `rejected` when the finding is wrong or not worth fixing, with `resolution` saying why.
+
+Commit your changes as you go. A fresh review reads the branch as you leave it."#
+        ),
+        ),
+        (
+            "resume",
+            r#"Continue the task "CANARY-title" from where you stopped. The instructions and the plan are earlier in this session — do not start over and do not ask for them again. If you cannot proceed, stop and report what blocked you."#
+            .to_string(),
+        ),
+        (
+            "review resume",
+            r#"Continue the review of "CANARY-title" from where you stopped. The change and the review instructions are earlier in this session — do not start over. Do not edit, commit or push. Finish by calling mcp__rimaia-run__record_review_findings exactly once, with findings: [] if you found nothing."#
+            .to_string(),
+        ),
+        (
+            "review resume, recorded",
+            r#"Continue the review of "CANARY-title" from where you stopped. Your findings are already recorded — do not call mcp__rimaia-run__record_review_findings again, and do not edit, commit or push. Stop once you have finished what you were doing."#
+            .to_string(),
+        ),
+        (
+            "fix resume",
+            r#"Continue addressing the review findings on "CANARY-title" from where you stopped. The findings and the instructions are earlier in this session — do not start over. Call mcp__rimaia-run__resolve_review_finding for each finding you have not resolved yet, with fixed and what you changed, or rejected and why."#
+            .to_string(),
+        ),
+        (
+            "system append",
+            format!(
+            r#"You are running unattended, started by Rimaia. What follows is how this session works, not a preference you may weigh against the task.
+
+- Nobody is watching and nobody can answer a question. There is no interactive terminal, and anything you ask will go unread until a human reviews this transcript, which may be many hours from now.
+- You are working in a git worktree of your own, on the branch `rimaia/{task}-canary-title`. Commit and push there. Never push to `CANARY-default_branch`, this repository's default branch, and never rewrite history that is already on the remote.
+- If you cannot proceed, stop and report rather than guess. Commit what you have and state plainly what blocked you. A clear blocker is a useful outcome; a guess dressed as a decision is not."#
+        ),
+        ),
+        (
+            "strategy system append",
+            format!(
+            r#"You are running unattended, started by Rimaia to decide how one task should be executed. What follows is how this session works, not a preference you may weigh against the job.
+
+- Nobody is watching and nobody can answer a question. There is no interactive terminal, and anything you ask will go unread until a human reviews this transcript, which may be many hours from now.
+- You are not implementing anything. Write no files, run no commands, commit nothing, and open no pull request. The tools that would let you are denied for this session.
+- Your whole answer is one call to `mcp__rimaia-run__set_task_strategy`, made exactly once, for the task `{task}` and no other. Anything you print instead of that call is read by nobody."#
+        ),
+        ),
+        (
+            "review system append",
+            r#"You are running unattended, started by Rimaia to review a change another agent made. What follows is how this session works, not a preference you may weigh against the job.
+
+- Nobody is watching and nobody can answer a question. Anything you ask will go unread until a human reviews this transcript, which may be many hours from now.
+- You did not write this change, and nothing in this session was part of writing it. Judge it as it is committed.
+- Your only answer is one call to `mcp__rimaia-run__record_review_findings`. Anything you print instead of that call is read by nobody.
+- Do not edit files, commit or push. A review that changes the branch it was asked to judge is recorded as a failed review."#
+            .to_string(),
+        ),
+    ]
+}
+
+/// The solo case's review prompt, with `instructions` as its review
+/// instructions: the team's, or the task's override.
+fn solo_review(task: &str, instructions: &str) -> String {
+    format!(
+        r#"# Your job
+
+You are reviewing a change another agent made for the task below. You did not write it, and you have none of the context it was written in: that is the point. A session reviewing its own work grades itself generously.
+
+Judge the change as it is committed on this branch: whether it does what the plan asks, whether it is correct, and whether anything in it would stop a careful human from merging it. Report what you find; do not fix it. A later run decides what to do about each finding, and may disagree with you.
+
+# Task context
+
+- Title: CANARY-title
+- Repository: CANARY-repository_name
+- Branch: rimaia/{task}-canary-title
+- Base ref: CANARY-default_branch
+- Links:
+  - [CANARY-link_label](https://example.com/CANARY-link_url)
+
+# Plan
+
+CANARY-plan
+
+# Extra instructions
+
+CANARY-extra_instructions
+
+# The change
+
+- Base ref: `CANARY-default_branch`
+- Base commit: `0123456789abcdef0123456789abcdef01234567`
+- Head commit: `bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb`
+
+1 file changed, 1 insertion(+), 0 deletions(-):
+
+- `CANARY-bundle_path` (+1 -0)
+
+Read the whole change against its base in this worktree:
+
+- `git log --oneline 0123456789abcdef0123456789abcdef01234567..bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb`
+- `git diff 0123456789abcdef0123456789abcdef01234567...bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb`
+
+# Review instructions
+
+{instructions}
+
+# Findings already rejected
+
+- **CANARY-finding_title, rejected** (`CANARY-finding_file`). Rejected: CANARY-finding_resolution
+
+# How to answer
+
+Answer by calling `mcp__rimaia-run__record_review_findings` exactly once, as the last thing you do, with:
+
+- `task_id`: `{task}` — this task, and no other.
+- `findings`: every problem you found, most important first, or `[]` if you found nothing. A review that never calls is recorded as a failed review, never as a clean one.
+
+Each finding has:
+
+- `severity`: `critical`, `high`, `medium` or `low`.
+- `title`: one line naming the problem.
+- `body`: what is wrong, and why it matters.
+- `file`: the repository-relative path it is in. Leave it out for a finding about the change as a whole.
+- `line`: a line in that file, when there is one.
+
+Do not edit files, commit or push. Your findings are the whole of your answer."#
+    )
 }
 
 /// Writes every team-writable text field D37's inventory lists, each as its
@@ -420,7 +704,8 @@ Then stop. Print nothing else: the tool call is the only answer that reaches Rim
 async fn write_canaries(ctx: &ServiceContext, repository_id: &str) -> String {
     settings::set_base_instructions(
         ctx,
-        "CANARY-base_instructions: {{task.title}} | {{repo.name}} | {{repo.default_branch}}\n\
+        "CANARY-base_instructions: {{task.title}} | {{repo.name}} | {{repo.default_branch}} | \
+         {{task.branch}}\n\
          {{task.links}}",
     )
     .await
@@ -429,7 +714,8 @@ async fn write_canaries(ctx: &ServiceContext, repository_id: &str) -> String {
         ctx,
         &ClaudeProvider,
         "CANARY-review_instructions in {{repo.name}}",
-        serde_json::Value::Null,
+        // The loop on, so a review and a fix run and the findings reach one.
+        serde_json::json!({ "enabled": "on_cost_acknowledged" }),
     )
     .await
     .expect("write the team's review instructions");
@@ -596,14 +882,21 @@ fn starting(base_ref: Option<String>, base_sha: Option<String>) -> StartRun {
     }
 }
 
-/// A successful finish at `head`, with a bundle of one file whose path is a
-/// canary.
-fn finishing(head: &str) -> FinishRun {
+/// A finish as `exit` (a success, or a transient failure the board retries)
+/// at `head`, with a bundle of one file whose path is a canary.
+fn finishing(exit: ExitClass, head: &str) -> FinishRun {
+    let (status, error_message) = match exit {
+        ExitClass::Success => (RunStatus::Succeeded, None),
+        _ => (
+            RunStatus::Failed,
+            Some("the API was overloaded".to_string()),
+        ),
+    };
     FinishRun {
         outcome: RunOutcome {
-            exit_class: ExitClass::Success,
-            status: RunStatus::Succeeded,
-            error_message: None,
+            exit_class: exit,
+            status,
+            error_message,
             num_turns: Some(4),
             cost_usd: Some(0.25),
             duration_ms: Some(1_000),
@@ -637,11 +930,138 @@ fn finishing(head: &str) -> FinishRun {
     }
 }
 
+/// What `worktree::naming` builds for `task`: its id and a slug of the
+/// canary title.
+fn branch_of(task: &str) -> String {
+    format!("rimaia/{task}-canary-title")
+}
+
+/// Whether D37 gives `field` a class a prompt may render it under.
+fn classed(field: &str) -> bool {
+    CONSENTED.contains(&field) || CONSTRAINED.contains(&field) || OWN.contains(&field)
+}
+
+/// Names `runner` `label`. Pairing writes a runner's label and no service
+/// edits it yet, so the one column stands in for that write.
+async fn label_runner(ctx: &ServiceContext, runner: &str, label: &str) {
+    sqlx::query("UPDATE runners SET label = ?1 WHERE id = ?2")
+        .bind(label)
+        .bind(runner)
+        .execute(&ctx.pool)
+        .await
+        .expect("label the runner");
+}
+
+/// On `port`'s runner, under `lease`: the implementation, a review that
+/// records two findings written as canaries, and a fix that rejects the
+/// second with a canary reason and stops on a transient failure. The next
+/// claim of the task resumes as the fix, with the first finding still open
+/// for `# Findings to address` and the second in `# Findings already
+/// rejected`.
+async fn review_and_reject(
+    port: &dyn BoardPort,
+    lease: &LeaseRef,
+    ctx: &ServiceContext,
+    task: &str,
+) {
+    port.record_branch(lease, &branch_of(task))
+        .await
+        .expect("the branch naming built");
+    let implementation = format!("implementation-{task}");
+    let review = format!("review-{task}");
+    let fix = format!("fix-{task}");
+    for (run_id, kind, next) in [
+        (&implementation, RunKind::Implementation, RunKind::Review),
+        (&review, RunKind::Review, RunKind::Fix),
+    ] {
+        let start = StartRun {
+            run_id: run_id.clone(),
+            kind,
+            ..starting(Some(canary("default_branch")), Some(COMMIT.to_string()))
+        };
+        port.start_run(lease, start)
+            .await
+            .unwrap_or_else(|error| panic!("start the {kind:?} run: {error}"));
+        if kind == RunKind::Review {
+            port.record_review_findings(
+                lease,
+                run_id,
+                vec![
+                    NewReviewFinding {
+                        severity: FindingSeverity::High,
+                        title: canary("finding_title"),
+                        body: canary("finding_body"),
+                        file: Some(canary("finding_file")),
+                        line: Some(12),
+                    },
+                    NewReviewFinding {
+                        severity: FindingSeverity::High,
+                        title: format!("{}, rejected", canary("finding_title")),
+                        body: format!("{}, rejected", canary("finding_body")),
+                        file: Some(canary("finding_file")),
+                        line: None,
+                    },
+                ],
+            )
+            .await
+            .expect("record the findings");
+        }
+        let receipt = port
+            .finish_run(lease, run_id, finishing(ExitClass::Success, HEAD))
+            .await
+            .unwrap_or_else(|error| panic!("finish the {kind:?} run: {error}"));
+        assert_eq!(receipt.next, NextStep::Continue { kind: next });
+    }
+
+    let start = StartRun {
+        run_id: fix.clone(),
+        kind: RunKind::Fix,
+        ..starting(Some(canary("default_branch")), Some(COMMIT.to_string()))
+    };
+    port.start_run(lease, start).await.expect("start the fix");
+    let rejected = findings::list(ctx, task, None)
+        .await
+        .expect("list the findings")
+        .into_iter()
+        .find(|finding| finding.title.ends_with(", rejected"))
+        .expect("the second finding");
+    findings::resolve(
+        ctx,
+        task,
+        &rejected.id,
+        &fix,
+        FindingResolution::Rejected {
+            reason: canary("finding_resolution"),
+        },
+    )
+    .await
+    .expect("the fix rejects it");
+    let receipt = port
+        .finish_run(lease, &fix, finishing(ExitClass::Transient, FIX_HEAD))
+        .await
+        .expect("the fix stops");
+    assert!(
+        matches!(receipt.next, NextStep::Released { .. }),
+        "the fix stops, to be resumed: {:?}",
+        receipt.next
+    );
+}
+
 fn run_now(task: &str) -> ClaimTarget {
     ClaimTarget::Run {
         task_id: task.to_string(),
         trigger: RunTrigger::Queued,
         continue_session: false,
+        ceiling: Default::default(),
+    }
+}
+
+/// The claim that resumes a phase a retryable exit stopped.
+fn retry(task: &str) -> ClaimTarget {
+    ClaimTarget::Run {
+        task_id: task.to_string(),
+        trigger: RunTrigger::Queued,
+        continue_session: true,
         ceiling: Default::default(),
     }
 }
