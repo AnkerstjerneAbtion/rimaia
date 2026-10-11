@@ -25,10 +25,12 @@ pub mod analytics;
 pub mod consent;
 pub mod repositories;
 pub mod review;
+pub mod runners;
 pub mod runs;
 pub mod settings;
 pub mod strategy;
 pub mod tasks;
+pub mod teams;
 
 /// A command that takes no arguments. Any keys sent are ignored, as Tauri
 /// ignored them.

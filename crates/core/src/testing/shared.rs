@@ -77,6 +77,17 @@ pub async fn add_member(
     .expect("a membership of an existing team must insert");
 }
 
+/// Takes `user_id` out of `team_id`: the helper that stands in for task 051's
+/// removal of a member.
+pub async fn remove_member(conn: &mut SqliteConnection, team_id: &str, user_id: &str) {
+    sqlx::query("DELETE FROM team_memberships WHERE team_id = ?1 AND user_id = ?2")
+        .bind(team_id)
+        .bind(user_id)
+        .execute(&mut *conn)
+        .await
+        .expect("removing a membership must succeed");
+}
+
 /// One person on the shared board.
 pub struct Member {
     pub user_id: UserId,

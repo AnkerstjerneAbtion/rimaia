@@ -27,7 +27,8 @@ use serde::Serialize;
 use serde_json::Value;
 
 use super::board::{
-    account, analytics, consent, repositories, review, runs, settings, strategy, tasks,
+    account, analytics, consent, repositories, review, runners, runs, settings, strategy, tasks,
+    teams,
 };
 use super::{BoardRequest, BoxFuture};
 use crate::error::{Error, Result};
@@ -288,6 +289,10 @@ pub static COMMANDS: LazyLock<Vec<Command>> = LazyLock::new(|| {
         board("revoke_api_token", Write, account::revoke_api_token),
         board("create_pairing_code", Write, account::create_pairing_code),
         board("pair_own_runner", Write, account::pair_own_runner),
+        // the person's teams and runners (task 050)
+        board("list_teams", Read, teams::list_teams),
+        board("list_runners", Read, runners::list_runners),
+        board("unpair_runner", Write, runners::unpair_runner),
         // doctor
         local("run_doctor"),
         local("dismiss_onboarding"),
@@ -295,6 +300,33 @@ pub static COMMANDS: LazyLock<Vec<Command>> = LazyLock::new(|| {
         local("restore_doctor_warning"),
     ]
 });
+
+/// The board commands that are about the person and not the team on screen,
+/// which the server never narrows with `Rimaia-Team` (task 050 Scope 3): the
+/// three of task 050's own, task 047's eight account rows and the user setting
+/// the analytics view reads. Task 051 adds its rows here.
+const IGNORES_TEAM_HEADER: &[&str] = &[
+    "list_teams",
+    "list_runners",
+    "unpair_runner",
+    "get_account",
+    "list_sessions",
+    "revoke_session",
+    "list_api_tokens",
+    "create_personal_access_token",
+    "revoke_api_token",
+    "create_pairing_code",
+    "pair_own_runner",
+    "get_subscription_cost",
+    "set_subscription_cost",
+];
+
+/// Whether `Rimaia-Team` is ignored for the command `name`, leaving the
+/// caller with every membership `Authenticate` read. A name that is not in the
+/// list is narrowed when the header is present.
+pub fn ignores_team_header(name: &str) -> bool {
+    IGNORES_TEAM_HEADER.contains(&name)
+}
 
 /// The row named `name`, or `None` for a name no row has.
 pub fn find(name: &str) -> Option<&'static Command> {
@@ -356,6 +388,21 @@ mod tests {
             .collect();
 
         assert_eq!(duplicates, Vec::<&str>::new());
+    }
+
+    #[test]
+    fn only_board_rows_ignore_the_team_header_and_each_is_listed_once() {
+        let mut seen = BTreeSet::new();
+        for name in IGNORES_TEAM_HEADER {
+            assert!(seen.insert(*name), "{name} is listed twice");
+            assert!(
+                find(name).is_some_and(Command::is_board),
+                "{name} is not a board row"
+            );
+            assert!(ignores_team_header(name));
+        }
+        assert!(!ignores_team_header("list_tasks"));
+        assert!(!ignores_team_header("no_such_command"));
     }
 
     #[test]

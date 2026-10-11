@@ -734,6 +734,25 @@ pub static BOARD_CASES: &[BoardCase] = &[
         own: |_| json!({ "label": "laptop", "provider": "claude-code" }),
         foreign: Foreign::EntityLess,
     },
+    // the person's teams and runners (task 050): another user's runner is B's
+    BoardCase {
+        name: "list_teams",
+        effect: Effect::Read,
+        own: |_| json!({}),
+        foreign: Foreign::EntityLess,
+    },
+    BoardCase {
+        name: "list_runners",
+        effect: Effect::Read,
+        own: |_| json!({}),
+        foreign: Foreign::EntityLess,
+    },
+    BoardCase {
+        name: "unpair_runner",
+        effect: Effect::Write,
+        own: |t| json!({ "id": t.team_a.credentials.paired_runner_id }),
+        foreign: Foreign::Ids(|t| json!({ "id": t.team_b.credentials.paired_runner_id })),
+    },
 ];
 
 // ---------------------------------------------------------------------------

@@ -531,7 +531,9 @@ fn team_ids(caller: &Caller) -> BTreeSet<TeamId> {
         .collect()
 }
 
-fn interval() -> chrono::Duration {
+/// [`STREAM_REVALIDATE_INTERVAL`] as the clock's kind of duration, for a test
+/// that advances a fake clock past it.
+pub fn interval() -> chrono::Duration {
     chrono::Duration::from_std(STREAM_REVALIDATE_INTERVAL)
         .expect("the revalidation interval fits a chrono duration")
 }

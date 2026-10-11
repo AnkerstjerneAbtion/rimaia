@@ -88,6 +88,25 @@ impl Caller {
             door: Door::Shell,
         }
     }
+
+    /// This caller, reaching only `team_id` (task 050 Scope 3): `teams`
+    /// reduced to that one grant, everything else as it was.
+    ///
+    /// The narrowing the server applies once, at the edge, when a request names
+    /// the team on screen with `Rimaia-Team`. A team the caller has no grant
+    /// for is `not_found` with the sentence a missing team gets, so a team
+    /// that exists is not told apart from one that does not (ADR-0029 point 5).
+    pub fn narrow_to(&self, team_id: &str) -> Result<Self> {
+        let grant = self
+            .teams
+            .iter()
+            .find(|grant| grant.team_id == team_id)
+            .ok_or_else(|| Error::not_found("There is no team with that id."))?;
+        Ok(Self {
+            teams: vec![grant.clone()],
+            ..self.clone()
+        })
+    }
 }
 
 /// What a request presented, before anything has checked it.
@@ -216,6 +235,64 @@ mod tests {
                 }],
                 door: Door::Shell,
             }
+        );
+    }
+
+    fn two_team_caller() -> Caller {
+        Caller {
+            user_id: "a-user".to_string(),
+            teams: vec![
+                TeamGrant {
+                    team_id: "team-a".to_string(),
+                    role: Role::Owner,
+                },
+                TeamGrant {
+                    team_id: "team-b".to_string(),
+                    role: Role::Member,
+                },
+            ],
+            door: Door::Browser {
+                session_id: "session".to_string(),
+            },
+        }
+    }
+
+    #[test]
+    fn narrowing_to_a_member_team_selects_it_and_keeps_every_grant() {
+        let caller = two_team_caller();
+
+        let narrowed = caller.narrow_to("team-b").expect("a team the caller is in");
+
+        assert_eq!(
+            narrowed,
+            Caller {
+                teams: vec![TeamGrant {
+                    team_id: "team-b".to_string(),
+                    role: Role::Member,
+                }],
+                ..two_team_caller()
+            }
+        );
+        assert_eq!(
+            caller,
+            two_team_caller(),
+            "the caller still holds both grants"
+        );
+    }
+
+    #[test]
+    fn narrowing_to_a_foreign_team_is_answered_as_a_missing_one() {
+        let caller = two_team_caller();
+
+        let foreign = caller.narrow_to("a-team-the-caller-is-not-in");
+        let never_issued = caller.narrow_to("a-team-nobody-ever-made");
+
+        let foreign = foreign.expect_err("not a member");
+        assert_eq!(foreign.code(), ErrorCode::NotFound);
+        assert_eq!(
+            serde_json::to_value(&foreign).expect("an error serializes"),
+            serde_json::to_value(never_issued.expect_err("never issued"))
+                .expect("an error serializes")
         );
     }
 

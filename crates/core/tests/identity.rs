@@ -18,7 +18,7 @@ use rimaia_core::identity::provider::ProviderIdentity;
 use rimaia_core::identity::rate_limit::RateLimiter;
 use rimaia_core::identity::secret::{self, Secret, TokenKind};
 use rimaia_core::identity::tokens::{self, NewApiToken};
-use rimaia_core::identity::{sessions, sign_in, Role};
+use rimaia_core::identity::{runners, sessions, sign_in, Role};
 use rimaia_core::runner::provider::{ClaudeProvider, ProviderProfile};
 use rimaia_core::testing::{test_epoch, test_pool, TestClock};
 use rimaia_core::{AppPaths, Clock, Error, ErrorCode, ServiceContext, TeamScope};
@@ -1172,4 +1172,195 @@ async fn minting_is_rate_limited_per_user() {
     api::dispatch(&host, adas, "create_pairing_code", json!({}))
         .await
         .expect("a new window");
+}
+
+// ---------------------------------------------------------------------------
+// The person's teams and runners (task 050)
+// ---------------------------------------------------------------------------
+
+/// A host over the board's base context, for dispatching as a caller.
+fn host_of(board: &Board) -> BoardHost {
+    BoardHost {
+        context: board.base.clone(),
+        provider: ProviderProfile::of(&ClaudeProvider),
+        paths: AppPaths::new(std::env::temp_dir()),
+        rate_limits: Arc::new(RateLimiter::new(Arc::new(board.clock.clone()))),
+        tails: rimaia_core::api::TailRelay::new(rimaia_core::api::tail::SOLO_TAIL_RELAY_CAPACITY),
+        streams: rimaia_core::api::StreamControl::new(),
+    }
+}
+
+#[tokio::test]
+async fn list_teams_lists_every_membership_whatever_the_header_says() {
+    let board = Board::new().await;
+    let ada = board.sign_up("ada", "1").await;
+    let personal = board.personal_team(&ada).await;
+    let acme = board.shared_team(&[&ada]).await;
+    let token = board.desktop(&ada).await;
+    let caller = board.bearer(token.token.expose()).await.expect("ada");
+    // What the server's extractor hands the command it narrows for `list_tasks`.
+    let narrowed = caller.narrow_to(&acme).expect("a team ada is in");
+    assert_eq!(team_ids(&narrowed), vec![acme.clone()]);
+    let host = host_of(&board);
+
+    for as_caller in [caller, narrowed] {
+        let listed = api::dispatch(&host, as_caller, "list_teams", json!({}))
+            .await
+            .expect("list_teams");
+
+        assert_eq!(
+            listed,
+            json!([
+                { "id": personal, "name": "Personal", "role": "owner", "personal": true },
+                { "id": acme, "name": "Acme", "role": "member", "personal": false },
+            ])
+        );
+    }
+}
+
+#[tokio::test]
+async fn list_runners_never_shows_another_users_runner() {
+    let board = Board::new().await;
+    let ada = board.sign_up("ada", "1").await;
+    let grace = board.sign_up("grace", "2").await;
+    board.shared_team(&[&ada, &grace]).await;
+    let adas = board.ctx(&ada).await;
+    let graces = board.ctx(&grace).await;
+    let adas_runner = pairing::pair_own_runner(&adas, "Ada's laptop", "claude-code")
+        .await
+        .expect("a runner");
+    let graces_runner = pairing::pair_own_runner(&graces, "Grace's laptop", "claude-code")
+        .await
+        .expect("a runner");
+    let retired = pairing::pair_own_runner(&adas, "Old laptop", "claude-code")
+        .await
+        .expect("a runner");
+    runners::unpair_own(&adas, &retired.runner_id)
+        .await
+        .expect("unpair");
+
+    let listed = |ctx: ServiceContext| async move {
+        runners::list(&ctx)
+            .await
+            .expect("list")
+            .into_iter()
+            .map(|runner| (runner.id, runner.label))
+            .collect::<Vec<_>>()
+    };
+
+    assert_eq!(
+        listed(adas).await,
+        vec![(adas_runner.runner_id, "Ada's laptop".to_string())]
+    );
+    assert_eq!(
+        listed(graces).await,
+        vec![(graces_runner.runner_id, "Grace's laptop".to_string())]
+    );
+}
+
+#[tokio::test]
+async fn a_listed_runner_carries_what_the_board_knows_about_it() {
+    let board = Board::new().await;
+    let ada = board.sign_up("ada", "1").await;
+    let ctx = board.ctx(&ada).await;
+    let paired = pairing::pair_own_runner(&ctx, "laptop", "claude-code")
+        .await
+        .expect("a runner");
+
+    let listed = api::dispatch(
+        &host_of(&board),
+        board
+            .bearer(board.desktop(&ada).await.token.expose())
+            .await
+            .expect("ada"),
+        "list_runners",
+        json!({}),
+    )
+    .await
+    .expect("list_runners");
+
+    assert_eq!(
+        listed,
+        json!([{
+            "id": paired.runner_id,
+            "label": "laptop",
+            "provider": "claude-code",
+            "appVersion": null,
+            "eligibility": "assigned",
+            "pairedAt": test_epoch(),
+            "lastSeenAt": null,
+        }])
+    );
+}
+
+#[tokio::test]
+async fn unpairing_a_runner_revokes_its_tokens_and_keeps_its_row() {
+    let board = Board::new().await;
+    let ada = board.sign_up("ada", "1").await;
+    let ctx = board.ctx(&ada).await;
+    let paired = pairing::pair_own_runner(&ctx, "laptop", "claude-code")
+        .await
+        .expect("a runner");
+    board.bearer(paired.token.expose()).await.expect("paired");
+    board.clock.advance(Duration::minutes(5));
+
+    runners::unpair_own(&ctx, &paired.runner_id)
+        .await
+        .expect("unpair");
+
+    assert_unauthenticated(board.bearer(paired.token.expose()).await, "unpaired");
+    let unpaired_at: Option<chrono::DateTime<chrono::Utc>> =
+        sqlx::query_scalar("SELECT unpaired_at FROM runners WHERE id = ?1")
+            .bind(&paired.runner_id)
+            .fetch_one(&board.pool)
+            .await
+            .expect("the row stays");
+    assert_eq!(unpaired_at, Some(board.clock.now()));
+    assert_eq!(
+        board
+            .count(&format!(
+                "SELECT count(*) FROM api_tokens WHERE runner_id = '{}'",
+                paired.runner_id
+            ))
+            .await,
+        0
+    );
+}
+
+#[tokio::test]
+async fn unpairing_another_users_runner_is_not_found() {
+    let board = Board::new().await;
+    let ada = board.sign_up("ada", "1").await;
+    let grace = board.sign_up("grace", "2").await;
+    let adas = board.ctx(&ada).await;
+    let graces = board.ctx(&grace).await;
+    let graces_runner = pairing::pair_own_runner(&graces, "Grace's laptop", "claude-code")
+        .await
+        .expect("a runner");
+    let retired = pairing::pair_own_runner(&adas, "Old laptop", "claude-code")
+        .await
+        .expect("a runner");
+    runners::unpair_own(&adas, &retired.runner_id)
+        .await
+        .expect("unpair");
+
+    let never = runners::unpair_own(&adas, &db::new_id())
+        .await
+        .expect_err("never issued");
+    for refused in [
+        runners::unpair_own(&adas, &graces_runner.runner_id).await,
+        // Already unpaired: answered as a runner that is not there.
+        runners::unpair_own(&adas, &retired.runner_id).await,
+    ] {
+        let refused = refused.expect_err("not ada's to unpair");
+        assert_eq!(
+            serde_json::to_value(&refused).expect("serialize"),
+            serde_json::to_value(&never).expect("serialize")
+        );
+        assert_eq!(refused.code(), ErrorCode::NotFound);
+    }
+    board
+        .bearer(graces_runner.token.expose())
+        .await
+        .expect("grace's runner is untouched");
 }

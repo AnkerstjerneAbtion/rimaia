@@ -35,9 +35,11 @@ pub mod pairing;
 pub mod pending;
 pub mod provider;
 pub mod rate_limit;
+pub mod runners;
 pub mod secret;
 pub mod sessions;
 pub mod sign_in;
+pub mod teams;
 pub mod tokens;
 
 /// The solo user's login. A placeholder: solo shows no sign-in (ADR-0030
