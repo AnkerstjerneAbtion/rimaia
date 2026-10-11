@@ -31,8 +31,9 @@ use std::time::Duration;
 
 use pretty_assertions::assert_eq;
 use rimaia_core::db::{BoardColumn, ExitClass, RunState, StrategyMode};
+use rimaia_core::events::TeamTail;
 use rimaia_core::repo::{self, NewRepository};
-use rimaia_core::runner::events::{stderr_path, transcript_path, RunTail};
+use rimaia_core::runner::events::{stderr_path, transcript_path};
 use rimaia_core::runner::provider::{ClaudeProvider, ProviderId, ProviderProfile};
 use rimaia_core::runner::{
     run_task, AgentProvider, CancelSignal, RunRequest, RunTrigger, RunnerConfig,
@@ -456,7 +457,7 @@ async fn a_planner_falls_back_when_a_provider_cannot_inject_a_handle() {
 /// Opens a gated stand-in once the run says it is in flight, having cancelled it
 /// first — so the child is signalled, *then* allowed to emit its ending.
 async fn open_the_gate_once_the_run_is_live(
-    mut tail: Receiver<RunTail>,
+    mut tail: Receiver<TeamTail>,
     cancel: CancelSignal,
     gate: &std::path::Path,
 ) {

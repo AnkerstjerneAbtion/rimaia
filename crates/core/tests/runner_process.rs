@@ -59,9 +59,10 @@ use rimaia_core::board::service::team_disallowed_tools;
 use rimaia_core::board::OwnerPresence;
 use rimaia_core::db::settings::{self, RunEnvironment};
 use rimaia_core::db::{BoardColumn, ExitClass, Run, RunState, RunStatus, Task};
+use rimaia_core::events::TeamTail;
 use rimaia_core::mcp::{MCP_SERVER_NAME, RUN_MCP_SERVER_NAME};
 use rimaia_core::repo::{self, NewRepository};
-use rimaia_core::runner::events::{stderr_path, transcript_path, RunEvent, RunTail};
+use rimaia_core::runner::events::{stderr_path, transcript_path, RunEvent};
 use rimaia_core::runner::limits::DISALLOWED_TOOLS;
 use rimaia_core::runner::process::{
     inherited_identity_vars, is_process_identity, verify_permission_mode, DEFAULT_DISALLOWED_TOOLS,
@@ -1154,7 +1155,7 @@ async fn the_live_view_reports_turns_and_the_current_tool_call_while_the_run_is_
 
     let mut snapshots = Vec::new();
     while let Ok(snapshot) = tail.try_recv() {
-        snapshots.push(snapshot);
+        snapshots.push(snapshot.tail);
     }
     assert!(
         snapshots.len() > 1,
@@ -1746,7 +1747,7 @@ fn init_of(fixture: &str) -> rimaia_core::runner::events::InitEvent {
 /// so this needs no sleep and no polling. The bound is there for the failing
 /// case only: a run that dies before it streams anything would otherwise leave
 /// this waiting on a sender that outlives it.
-async fn cancel_once_the_run_is_live(mut tail: Receiver<RunTail>, cancel: CancelSignal) {
+async fn cancel_once_the_run_is_live(mut tail: Receiver<TeamTail>, cancel: CancelSignal) {
     let _ = tokio::time::timeout(TEST_TIMEOUT, tail.recv()).await;
     cancel.cancel();
 }

@@ -582,12 +582,18 @@ impl Replay {
         let root = TempDir::new().expect("temp dir for the run directory");
         let paths = AppPaths::new(root.path());
 
-        let mut stream = EventStream::create(&harness.context, &paths, "task-1", "run-1")
-            .expect("the run directory is creatable")
-            .driven_by(match provider {
-                ProviderId::ClaudeCode => Arc::new(ClaudeProvider) as Arc<dyn AgentProvider>,
-                ProviderId::Ledger => Arc::new(Ledger) as Arc<dyn AgentProvider>,
-            });
+        let mut stream = EventStream::create(
+            &harness.context,
+            &harness.solo.team_id,
+            &paths,
+            "task-1",
+            "run-1",
+        )
+        .expect("the run directory is creatable")
+        .driven_by(match provider {
+            ProviderId::ClaudeCode => Arc::new(ClaudeProvider) as Arc<dyn AgentProvider>,
+            ProviderId::Ledger => Arc::new(Ledger) as Arc<dyn AgentProvider>,
+        });
 
         let mut events = Vec::new();
         for line in lines {

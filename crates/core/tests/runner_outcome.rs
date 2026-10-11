@@ -1186,8 +1186,14 @@ async fn a_stream_classifies_the_same_way_whether_it_is_replayed_or_read_off_the
         .tempdir()
         .expect("temp dir for the run directory");
     let paths = AppPaths::new(root.path());
-    let mut stream = EventStream::create(&harness.context, &paths, "task", "run")
-        .expect("the run directory is creatable");
+    let mut stream = EventStream::create(
+        &harness.context,
+        &harness.solo.team_id,
+        &paths,
+        "task",
+        "run",
+    )
+    .expect("the run directory is creatable");
 
     for line in fixture_lines("max-turns") {
         stream

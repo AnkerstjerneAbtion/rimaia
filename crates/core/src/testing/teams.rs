@@ -39,7 +39,7 @@ use crate::credentials::CredentialAccess;
 use crate::db::settings::{self, placement, Placement, ALL_KEYS};
 use crate::db::{BoardColumn, MutationSource, Repository, RunKind};
 use crate::doctor;
-use crate::events::{ChangeEvent, RunId, RunnerId, TaskId, TeamId, UserId};
+use crate::events::{ChangeEvent, LocalEvents, RunId, RunnerId, TaskId, TeamId, UserId};
 use crate::identity::secret::{Secret, TokenKind};
 use crate::identity::{create_personal_team, pairing, sessions, tokens};
 use crate::machine::MachineContext;
@@ -189,7 +189,7 @@ pub struct TwoTeams {
     pub in_flight: InFlight,
     pub paths: AppPaths,
     /// The one machine both teams' work runs on, over a `MemoryMachine`,
-    /// announcing on the shared channel under team A (task 041).
+    /// announcing on a local channel of its own (tasks 041 and 048).
     pub machine: MachineContext,
     _data: TempDir,
     doctor: doctor::Environment,
@@ -241,8 +241,7 @@ impl TwoTeams {
         let machine = MachineContext {
             store: Arc::new(MemoryMachine::new()),
             clock: Arc::new(clock.clone()),
-            changes: a.changes.clone(),
-            event_team: personal_a.team_id.clone(),
+            local: LocalEvents::new(),
         };
 
         let team_a = arrange(&a, &machine, &clock, &paths, Marking::Plain).await;

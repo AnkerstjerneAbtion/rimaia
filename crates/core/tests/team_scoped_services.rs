@@ -39,7 +39,7 @@ use rimaia_core::strategy::settings::{
 use rimaia_core::tasks::{self, NewTask, TaskFilter, TaskLinkPatch, TaskPatch};
 use rimaia_core::testing::teams::{TwoTeams, SENTINEL};
 use rimaia_core::testing::{self, TempRepo};
-use rimaia_core::{startup, Clock, ErrorCode, Result, ServiceContext};
+use rimaia_core::{startup, ChangeEvent, Clock, ErrorCode, Result, ServiceContext};
 
 // ---------------------------------------------------------------------------
 // A foreign id is a missing one
@@ -298,11 +298,11 @@ async fn a_task_cannot_move_to_another_teams_repository() {
 
 #[tokio::test]
 async fn a_context_reaching_two_teams_is_refused_an_entity_less_call() {
-    let t = TwoTeams::new().await;
+    let mut t = TwoTeams::new().await;
     let before = (t.snapshot(&t.team_a).await, t.snapshot_b().await);
     let worktrees = tempfile::tempdir().expect("a worktrees directory");
     let directory = TempRepo::init();
-    let both = &t.both;
+    let both = &t.both.clone();
 
     let refusals: Vec<(&str, rimaia_core::Error)> = vec![
         (
@@ -337,22 +337,10 @@ async fn a_context_reaching_two_teams_is_refused_an_entity_less_call() {
                 .expect_err("set_base_instructions"),
         ),
         (
-            "set_subscription_cost",
-            settings::set_subscription_monthly_usd(both, Some(5.0))
-                .await
-                .expect_err("set_subscription_cost"),
-        ),
-        (
             "get_review_digest",
             review::digest(both, Some(&t.machine))
                 .await
                 .expect_err("get_review_digest"),
-        ),
-        (
-            "mark_review_digest_seen",
-            review::mark_seen(both, t.clock.now() - Duration::minutes(1))
-                .await
-                .expect_err("mark_review_digest_seen"),
         ),
     ];
 
@@ -382,6 +370,20 @@ async fn a_context_reaching_two_teams_is_refused_an_entity_less_call() {
     assert_eq!(
         page.implementation_spend_usd,
         t.team_a.run_costs[0] + t.team_b.run_costs[0]
+    );
+
+    // And written under any scope, announced to the actor alone, whichever
+    // teams they are in (task 048's `Audience::User`).
+    t.drain_changes();
+    settings::set_subscription_monthly_usd(both, Some(5.0))
+        .await
+        .expect("the actor's own figure, under two teams");
+    review::mark_seen(both, t.clock.now() - Duration::minutes(1))
+        .await
+        .expect("the actor's own marker, under two teams");
+    assert_eq!(
+        t.drain_changes(),
+        vec![ChangeEvent::user_settings(t.team_a.owner_id.clone()); 2]
     );
 }
 
@@ -888,7 +890,12 @@ async fn the_digest_marker_is_written_to_the_actors_user_settings_row() {
         .filter(|event| event.change == Change::Settings)
         .collect();
     assert_eq!(settings_events.len(), 1);
-    assert_eq!(settings_events[0].team_id, t.team_a.team_id);
+    // The marker is the approver's own setting, announced to them alone
+    // (task 048's `Audience::User`).
+    assert_eq!(
+        settings_events[0].audience,
+        rimaia_core::Audience::User(t.team_a.owner_id.clone())
+    );
 
     assert_eq!(t.legacy_setting(MARKER).await.as_deref(), Some(stale));
     assert_eq!(t.user_setting(&t.team_b.owner_id, MARKER).await, None);

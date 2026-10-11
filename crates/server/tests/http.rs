@@ -13,7 +13,7 @@ use common::{state_over, two_teams_state, Answer, TestServer};
 
 async fn serving() -> (TwoTeams, TestServer) {
     let teams = TwoTeams::new().await;
-    let server = TestServer::spawn(two_teams_state(&teams)).await;
+    let server = TestServer::spawn(two_teams_state(&teams).await).await;
     (teams, server)
 }
 
@@ -144,7 +144,7 @@ async fn serving_a_door(token: &str, door: Door) -> (TwoTeams, TestServer) {
         ..testing_api::owner(&teams.team_a, testing_api::desktop("unused"))
     };
     let server = TestServer::spawn(state_over(
-        testing_api::host(&teams),
+        testing_api::host(&teams).await,
         FixedCaller::two_teams(&teams).with(token, caller),
     ))
     .await;

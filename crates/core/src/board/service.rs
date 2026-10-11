@@ -696,7 +696,7 @@ pub async fn append_transcript(
 /// refuses its lease.
 pub fn publish_tail(ctx: &ServiceContext, lease: &LeaseRef, tail: RunTail) {
     if ctx.scope.contains(&lease.team_id) {
-        ctx.publish_tail(tail);
+        ctx.publish_tail(lease.team_id.clone(), tail);
     }
 }
 

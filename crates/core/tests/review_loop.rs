@@ -107,9 +107,9 @@ async fn a_successful_implementation_with_the_loop_off_lands_exactly_as_before()
     assert_eq!(
         drain(&mut fixture.harness),
         vec![
-            // `worktree::prepare` records the worktree in this machine's
-            // store, then the branch it created on the board (task 066).
-            ChangeEvent::tasks(team.clone(), [task.clone()]),
+            // `worktree::prepare` records the branch it created on the
+            // board (task 066). The worktree record is this machine's and is
+            // announced on its local channel (task 048).
             ChangeEvent::tasks(team.clone(), [task.clone()]),
             // `start_run`.
             ChangeEvent::runs(team.clone(), [run.id.clone()]),
@@ -1029,8 +1029,7 @@ async fn the_task_stays_running_between_phases_and_moves_to_in_review_once() {
     assert_eq!(
         drain(&mut fixture.harness),
         vec![
-            // The worktree record and the branch (task 066).
-            ChangeEvent::tasks(team.clone(), [task.clone()]),
+            // The branch (task 066); the worktree record is local (task 048).
             ChangeEvent::tasks(team.clone(), [task.clone()]),
             ChangeEvent::runs(team.clone(), [implementation.clone()]),
             ChangeEvent::tasks(team.clone(), [task.clone()]),

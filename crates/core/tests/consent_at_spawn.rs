@@ -28,6 +28,7 @@ use rimaia_core::board::{
     LeaseRef, OwnerPresence, PreviewOf, RunContext, StartRun, TranscriptAck, TranscriptChunk,
 };
 use rimaia_core::db::{BoardColumn, ExitClass, RunKind, RunState, StrategyMode};
+use rimaia_core::events::TeamTail;
 use rimaia_core::mcp::{self, McpHandle, RunHandles};
 use rimaia_core::repo::{self, NewRepository};
 use rimaia_core::review::findings::NewReviewFinding;
@@ -304,7 +305,7 @@ async fn plan_now_composes_the_planner_from_a_fenced_read_not_the_claims() {
     );
 }
 
-async fn once_the_run_is_live(mut tail: Receiver<RunTail>) {
+async fn once_the_run_is_live(mut tail: Receiver<TeamTail>) {
     tokio::time::timeout(TEST_TIMEOUT, tail.recv())
         .await
         .expect("a run must report itself in flight")

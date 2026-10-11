@@ -23,7 +23,7 @@ use crate::board::{BoardPort, InProcessBoard, LeaseTerm};
 use crate::clock::Clock;
 use crate::context::{ServiceContext, TeamScope};
 use crate::db::{new_id, BoardColumn, MutationSource, Repository};
-use crate::events::{RunnerId, TaskId, TeamId, UserId};
+use crate::events::{LocalEvents, RunnerId, TaskId, TeamId, UserId};
 use crate::identity::{create_personal_team, Role};
 use crate::machine::MachineContext;
 use crate::paths::AppPaths;
@@ -180,8 +180,7 @@ impl SharedTeam {
         let machine = MachineContext {
             store: Arc::new(MemoryMachine::new()),
             clock: Arc::new(clock.clone()),
-            changes: base.changes.clone(),
-            event_team: team_id.clone(),
+            local: LocalEvents::new(),
         };
         let source = TempRepo::init();
         let repository = repo::register(

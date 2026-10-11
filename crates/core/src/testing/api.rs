@@ -29,13 +29,18 @@ use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use tempfile::TempDir;
 
 use crate::api::registry::Effect;
-use crate::api::{Authenticate, BoardHost, BoxFuture, Caller, Credential, Door, TeamGrant};
+use crate::api::tail::SERVER_TAIL_RELAY_CAPACITY;
+use crate::api::{
+    Authenticate, BoardHost, BoxFuture, Caller, Credential, Door, StreamControl, TailRelay,
+    TeamGrant,
+};
 use crate::context::{ServiceContext, TeamScope};
 use crate::db::MutationSource;
 use crate::error::{Error, Result};
 use crate::identity::rate_limit::RateLimiter;
 use crate::identity::secret::{self, TokenKind};
 use crate::identity::Role;
+use crate::runner::events::RunTail;
 use crate::runner::provider::ProviderProfile;
 use crate::testing::teams::{TeamBoard, TwoTeams};
 
@@ -118,20 +123,48 @@ pub fn desktop(token_id: &str) -> Door {
 
 /// A host over `ctx`, with the fixture's provider and paths: what the server
 /// and the shell each build over their own context.
-pub fn host_over(teams: &TwoTeams, ctx: &ServiceContext) -> BoardHost {
+///
+/// Its tail relay follows `ctx`'s live channel, as every host's does, and has
+/// heard one snapshot of each team's implementation run
+/// ([`fixture_tail`]), published through the channel like any other, so
+/// `get_run_tail`'s case has something to answer.
+pub async fn host_over(teams: &TwoTeams, ctx: &ServiceContext) -> BoardHost {
+    let tails = TailRelay::new(SERVER_TAIL_RELAY_CAPACITY);
+    tokio::spawn(tails.follow(ctx.subscribe_tail()));
+    for team in [&teams.team_a, &teams.team_b] {
+        ctx.publish_tail(team.team_id.clone(), fixture_tail(team));
+        // The follower runs on this runtime; yielding lets it record, and
+        // the loop ends the moment it has, with no timer.
+        while tails.latest(&team.implementation_run).is_none() {
+            tokio::task::yield_now().await;
+        }
+    }
     BoardHost {
         context: ctx.clone(),
         provider: ProviderProfile::of(teams.runner.provider.as_ref()),
         paths: teams.paths.clone(),
         rate_limits: Arc::new(RateLimiter::new(Arc::new(teams.clock.clone()))),
+        tails,
+        streams: StreamControl::new(),
     }
 }
 
 /// A host over the fixture's own board. Its base context is team A's, which
 /// [`dispatch`](crate::api::dispatch) replaces with the caller's before any
 /// handler runs.
-pub fn host(teams: &TwoTeams) -> BoardHost {
-    host_over(teams, &teams.a)
+pub async fn host(teams: &TwoTeams) -> BoardHost {
+    host_over(teams, &teams.a).await
+}
+
+/// The snapshot [`host_over`]'s relay holds for `team`'s implementation run.
+pub fn fixture_tail(team: &TeamBoard) -> RunTail {
+    RunTail {
+        run_id: team.implementation_run.clone(),
+        elapsed_ms: 42_000,
+        turns: 3,
+        current_tool: None,
+        last_assistant_text: Some("Running the tests.".to_string()),
+    }
 }
 
 /// A second board holding exactly what the fixture's holds now: the same rows
@@ -622,6 +655,13 @@ pub static BOARD_CASES: &[BoardCase] = &[
     },
     BoardCase {
         name: "get_run",
+        effect: Effect::Read,
+        own: |t| json!({ "runId": t.team_a.implementation_run }),
+        foreign: Foreign::Ids(|t| json!({ "runId": t.team_b.implementation_run })),
+    },
+    // The relay's latest snapshot for team A's run, which `host_over` seeds.
+    BoardCase {
+        name: "get_run_tail",
         effect: Effect::Read,
         own: |t| json!({ "runId": t.team_a.implementation_run }),
         foreign: Foreign::Ids(|t| json!({ "runId": t.team_b.implementation_run })),

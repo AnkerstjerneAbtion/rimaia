@@ -17,6 +17,7 @@
 
 use chrono::{DateTime, Duration, Utc};
 use pretty_assertions::assert_eq;
+use rimaia_core::events::TeamTail;
 use rimaia_core::runner::events::{
     Activity, EndReason, EventStream, InitEvent, McpServer, OtherEvent, RunEvent, RunTail,
     UsageState, WindowReopen, RECENT_ACTIVITY_CAPACITY,
@@ -495,7 +496,7 @@ struct Replay {
     stream: EventStream,
     events: Vec<RunEvent>,
     malformed_lines: u64,
-    tail: tokio::sync::broadcast::Receiver<RunTail>,
+    tail: tokio::sync::broadcast::Receiver<TeamTail>,
 }
 
 impl Replay {
@@ -521,8 +522,14 @@ impl Replay {
         // receivers that already existed — the same trap `TestContext` documents
         // for change events.
         let tail = harness.context.subscribe_tail();
-        let stream = EventStream::create(&harness.context, &paths, TASK_ID, RUN_ID)
-            .expect("the run directory is creatable");
+        let stream = EventStream::create(
+            &harness.context,
+            &harness.solo.team_id,
+            &paths,
+            TASK_ID,
+            RUN_ID,
+        )
+        .expect("the run directory is creatable");
 
         let mut replay = Self {
             _root: root,
@@ -574,7 +581,7 @@ impl Replay {
         let mut published = Vec::new();
         loop {
             match self.tail.try_recv() {
-                Ok(tail) => published.push(tail),
+                Ok(tail) => published.push(tail.tail),
                 Err(TryRecvError::Empty | TryRecvError::Closed) => break,
                 Err(TryRecvError::Lagged(dropped)) => {
                     panic!("the tail channel dropped {dropped} snapshots in a test")

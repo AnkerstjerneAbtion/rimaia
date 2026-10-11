@@ -56,15 +56,17 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use pretty_assertions::assert_eq;
+use rimaia_core::api::events::{plan_progress_wire, PlanProgressView, WireEvent};
 use rimaia_core::board::{BoardPort, Claim, OwnerPresence};
 use rimaia_core::db::settings;
 use rimaia_core::db::{
     BoardColumn, Repository, Run, RunState, RunStatus, StrategyMode, StrategySource, Task,
 };
+use rimaia_core::events::TeamTail;
 use rimaia_core::mcp::requests::PlanSelectionRequest;
 use rimaia_core::mcp::{self, McpHandle, RunHandles, Tool, MCP_SERVER_NAME};
 use rimaia_core::repo::{self, NewRepository};
-use rimaia_core::runner::events::{transcript_path, RunTail};
+use rimaia_core::runner::events::transcript_path;
 use rimaia_core::runner::limits::{DEFAULT_MAX_TURNS, MAX_TURNS};
 use rimaia_core::runner::process::DEFAULT_DISALLOWED_TOOLS;
 use rimaia_core::runner::prompt::{
@@ -1144,6 +1146,63 @@ async fn a_pass_plans_an_eligible_card_and_reports_its_model_effort_and_rational
     );
 }
 
+#[tokio::test]
+async fn plan_progress_keeps_its_wire_form() {
+    // `plan-pass:progress`'s payload moved from the shell into core (task
+    // 048). `src/types.ts`'s `PlanProgress` describes it, so it is pinned byte
+    // for byte, as the shell's `PlanProgressView` serialized it, over a real
+    // pass rather than a hand-built value.
+    let fixture = StrategyFixture::planned().await;
+    let cli = FakeCli::writing_back(&fixture.task_id);
+    let seen: std::sync::Mutex<Vec<(PlanProgressView, WireEvent)>> =
+        std::sync::Mutex::new(Vec::new());
+
+    runner_strategy::plan_all(
+        fixture.harness.starter(OwnerPresence::AtRunner),
+        fixture
+            .harness
+            .board(&fixture.paths, &fixture.config(&cli))
+            .as_ref(),
+        fixture.harness.machine(),
+        &fixture.paths,
+        &fixture.config(&cli),
+        &InFlight::new(),
+        &PlanSelection {
+            column: Some(BoardColumn::Ready),
+            ..PlanSelection::default()
+        },
+        &CancelSignal::new(),
+        &|progress| {
+            let view = PlanProgressView::from(&progress);
+            let wire = plan_progress_wire(&view);
+            seen.lock()
+                .expect("the progress log is not poisoned")
+                .push((view, wire))
+        },
+    )
+    .await
+    .expect("the pass runs");
+
+    let seen = seen.into_inner().expect("the progress log is not poisoned");
+    let [(view, wire)] = seen.as_slice() else {
+        panic!("one card, one progress event: {seen:?}");
+    };
+    // The view, field for field in the order the shell's struct declared.
+    assert_eq!(
+        serde_json::to_string(view).expect("serialize"),
+        format!(
+            r#"{{"completed":1,"total":1,"spentUsd":0.031041,"result":{{"taskId":"{task}","title":"Add truncate_slug","outcome":"planned","model":"{PROPOSED_MODEL}","effort":"{PROPOSED_EFFORT}","rationale":"The plan names a migration and a command surface.","costUsd":0.031041,"skip":null,"reason":null}}}}"#,
+            task = fixture.task_id,
+        )
+    );
+    // And the wire form is that value under its name.
+    assert_eq!(wire.name, "plan-pass:progress");
+    assert_eq!(
+        wire.data,
+        serde_json::to_value(view).expect("the view as a value")
+    );
+}
+
 /// A pass with a stand-in that never calls the tool, so nothing here depends on
 /// a planner succeeding — every test above that uses it is about a *skip*, and
 /// a skip is decided before anything is spawned.
@@ -1432,7 +1491,7 @@ fn canonical(path: &str) -> PathBuf {
 /// so this needs no sleep and no polling — and a strategy run publishes on it
 /// like any other, which is why the hanging stand-in replays as far as its first
 /// `assistant` event before waiting.
-async fn cancel_once_the_run_is_live(mut tail: Receiver<RunTail>, cancel: CancelSignal) {
+async fn cancel_once_the_run_is_live(mut tail: Receiver<TeamTail>, cancel: CancelSignal) {
     let _ = tokio::time::timeout(TEST_TIMEOUT, tail.recv()).await;
     cancel.cancel();
 }

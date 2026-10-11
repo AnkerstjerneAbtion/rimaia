@@ -935,15 +935,17 @@ export function giveUpOnTask(taskId: string): Promise<void> {
 }
 
 /**
- * The most recent live-tail snapshot the backend has seen for `runId`, or
- * `null` when it has not seen one yet. This is what a client that opens the
+ * The most recent live-tail snapshot the board host's tail relay has heard
+ * for `runId`, or `null` when it has heard none yet (task 048). Another
+ * team's run is `not_found`, as a run that never existed is. This is what a
+ * client that opens the
  * Runs view after a run has already started reads once to catch up, before
  * subscribing to {@link subscribeToRunsTail} in `./events` for the rest
  * (seam-contract D14) — a run's own outcome and log path are read through
  * {@link getTask}'s `lastRun`, not through this.
  */
 export function getRunTail(runId: string): Promise<RunTail | null> {
-  return local<RunTail | null>("get_run_tail", { runId });
+  return board<RunTail | null>("get_run_tail", { runId });
 }
 
 // ---------------------------------------------------------------------------

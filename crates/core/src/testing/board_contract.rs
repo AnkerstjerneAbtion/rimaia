@@ -208,8 +208,7 @@ impl Arranged {
         let machine = MachineContext {
             store: std::sync::Arc::new(crate::testing::machine::MemoryMachine::new()),
             clock: board.clock.clone(),
-            changes: board.changes.clone(),
-            event_team: board.scope.sole().expect("a solo board").clone(),
+            local: crate::events::LocalEvents::new(),
         };
         let registered = repo::register(
             board,
@@ -921,9 +920,13 @@ pub mod cases {
 
         runner.publish_tail(&claim.lease, tail("run-1"));
 
+        // With the lease's team, which a stream admits it by (task 048).
         assert_same(
             tails.recv().await.expect("a tail on the board's channel"),
-            tail("run-1"),
+            crate::events::TeamTail {
+                team_id: claim.lease.team_id.clone(),
+                tail: tail("run-1"),
+            },
             "the tail",
         );
     }

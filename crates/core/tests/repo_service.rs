@@ -22,7 +22,7 @@ use rimaia_core::machine::{Checkout, CheckoutView, MachineContext};
 use rimaia_core::repo::{self, NewRepository, RepositoryPatch};
 use rimaia_core::testing::machine::MemoryMachine;
 use rimaia_core::testing::{self, TempRepo, TestClock, TestContext};
-use rimaia_core::{ChangeEvent, ServiceContext};
+use rimaia_core::{ChangeEvent, LocalChange, ServiceContext};
 
 // ---------------------------------------------------------------------------
 // Happy path
@@ -129,8 +129,7 @@ async fn a_registered_repository_is_readable_after_a_fresh_pool_reopens_the_same
         let machine = MachineContext {
             store: Arc::new(MemoryMachine::new()),
             clock: ctx.clock.clone(),
-            changes: ctx.changes.clone(),
-            event_team: ctx.scope.sole().expect("solo").clone(),
+            local: rimaia_core::LocalEvents::new(),
         };
         let registered = register(&ctx, &machine, worktrees_dir.path(), source.path())
             .await
@@ -524,9 +523,14 @@ async fn the_worktree_root_is_set_on_the_checkout_and_returns_its_view() {
 
     assert_eq!(view.worktree_root, "/tmp/somewhere-else");
     assert_eq!(view, CheckoutView::from(checkout_of(&h, &repository).await));
+    // A checkout write: this machine's, on its local channel (task 048).
     assert_eq!(
-        h.changes.try_recv().expect("the checkout publication"),
-        ChangeEvent::repositories(h.solo.team_id.clone(), [repository.id.clone()])
+        h.local.try_recv().expect("the checkout publication"),
+        LocalChange::Checkouts(Arc::from([repository.id.clone()]))
+    );
+    assert!(
+        h.changes.try_recv().is_err(),
+        "nothing on the board's channel"
     );
 
     let error = repo::set_worktree_root(&h.context, h.machine(), &repository.id, "  ".to_string())
@@ -837,8 +841,8 @@ async fn set_allow_unattended_runs_flips_the_consent_and_publishes() {
             .is_ok()
     );
     assert_eq!(
-        h.changes.try_recv().expect("the consent publication"),
-        ChangeEvent::repositories(h.solo.team_id.clone(), [repository.id.clone()])
+        h.local.try_recv().expect("the consent publication"),
+        LocalChange::Checkouts(Arc::from([repository.id.clone()]))
     );
 
     let disabled = repo::set_allow_unattended_runs(&h.context, h.machine(), &repository.id, false)
@@ -916,10 +920,11 @@ async fn checkout_of(h: &TestContext, repository: &Repository) -> Checkout {
         .expect("a registered repository has a checkout")
 }
 
-/// Everything published so far: a registration announces the board row and
-/// then the checkout.
+/// Everything published so far: a registration announces the board row, and
+/// the checkout on the machine's local channel.
 fn drain(h: &mut TestContext) {
     while h.changes.try_recv().is_ok() {}
+    while h.local.try_recv().is_ok() {}
 }
 
 /// A context backed by a real file on disk, for the one test that needs a

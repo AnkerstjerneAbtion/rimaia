@@ -505,7 +505,7 @@ mod end_to_end {
 
     use std::time::Duration;
 
-    use rimaia_core::runner::events::RunTail;
+    use rimaia_core::events::TeamTail;
     use rimaia_core::runner::{run_task, CancelSignal, RunRequest, RunTrigger, RunnerConfig};
     use rimaia_core::testing::board::claim_run;
     use rimaia_core::testing::{open_gate, FakeCli};
@@ -625,7 +625,7 @@ mod end_to_end {
         );
     }
 
-    async fn once_the_run_is_live(mut tail: Receiver<RunTail>) {
+    async fn once_the_run_is_live(mut tail: Receiver<TeamTail>) {
         tokio::time::timeout(TEST_TIMEOUT, tail.recv())
             .await
             .expect("a run must report itself in flight")

@@ -8,12 +8,13 @@
 //! give the same answer.
 
 use std::collections::BTreeSet;
+use std::sync::Arc;
 
 use serde::Serialize;
 
 use crate::db::{OnArchive, Repository};
 use crate::error::{Error, Result};
-use crate::events::ChangeEvent;
+use crate::events::LocalChange;
 
 use super::types::{Checkout, CheckoutPatch, WorktreeRecord};
 use super::MachineContext;
@@ -140,15 +141,15 @@ pub async fn forget_worktree(machine: &MachineContext, task_id: &str) -> Result<
     Ok(())
 }
 
-/// A checkout write, as the window has always heard a repository change.
+/// A checkout write. Local, and on the wire still `repositories:changed`,
+/// because a view re-reads the same ids either way (task 048).
 fn announce_checkout(machine: &MachineContext, repository_id: &str) {
-    // Rides the board's channel under `event_team` until task 048 turns it into
-    // `LocalChange::Checkouts`, which keeps this wire name.
-    machine.publish(|team| ChangeEvent::repositories(team, [repository_id.to_string()]));
+    machine.publish(LocalChange::Checkouts(Arc::from([
+        repository_id.to_string()
+    ])));
 }
 
-/// A worktree-record write, as the window has always heard a task change.
+/// A worktree-record write. Local, and on the wire still `tasks:changed`.
 fn announce_worktree(machine: &MachineContext, task_id: &str) {
-    // Task 048 turns this into `LocalChange::Worktrees`, keeping this wire name.
-    machine.publish(|team| ChangeEvent::tasks(team, [task_id.to_string()]));
+    machine.publish(LocalChange::Worktrees(Arc::from([task_id.to_string()])));
 }

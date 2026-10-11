@@ -12,7 +12,8 @@
 use std::process::ExitCode;
 use std::sync::Arc;
 
-use rimaia_core::api::BoardHost;
+use rimaia_core::api::tail::SERVER_TAIL_RELAY_CAPACITY;
+use rimaia_core::api::{BoardHost, StreamControl, TailRelay};
 use rimaia_core::db::{self, MutationSource};
 use rimaia_core::identity::authenticate::SessionsAndTokens;
 use rimaia_core::identity::rate_limit::RateLimiter;
@@ -81,11 +82,17 @@ async fn serve() -> Result<(), String> {
     // One limiter, which the board host hands the minting commands and the
     // state hands the sign-in routes.
     let rate_limits = Arc::new(RateLimiter::new(context.clock.clone()));
+    // The relay follows the live channel from here, before anything can
+    // publish to it (task 048).
+    let tails = TailRelay::new(SERVER_TAIL_RELAY_CAPACITY);
+    tokio::spawn(tails.follow(context.subscribe_tail()));
     let host = BoardHost {
         context,
         provider: ProviderProfile::of(&ClaudeProvider),
         paths,
         rate_limits,
+        tails,
+        streams: StreamControl::new(),
     };
     let state = ServerState::new(host, Arc::new(auth), Arc::new(github), public_url);
 

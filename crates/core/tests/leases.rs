@@ -1561,8 +1561,7 @@ fn memory_machine(harness: &TestContext) -> MachineContext {
     MachineContext {
         store: Arc::new(MemoryMachine::new()),
         clock: Arc::new(harness.clock.clone()),
-        changes: harness.context.changes.clone(),
-        event_team: harness.solo.team_id.clone(),
+        local: rimaia_core::LocalEvents::new(),
     }
 }
 

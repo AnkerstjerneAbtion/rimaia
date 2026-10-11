@@ -36,6 +36,11 @@
 #      names a command the registry lacks; no `call<` remains.
 #   5. the protocol version: the `PROTOCOL_VERSION` literal in commands.ts
 #      equals `rimaia_core::api::PROTOCOL_VERSION`.
+#   6. the event split (task 048): no wire event name that
+#      crates/core/src/api/events.rs declares appears as a string literal
+#      under src-tauri/src/, so the shell keeps no mapping of its own; and no
+#      file under crates/server/ names `LocalChange` or `LocalEvents`, so no
+#      machine event can reach a server's stream.
 set -euo pipefail
 
 script_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
@@ -43,11 +48,14 @@ repo_root=$(cd "$script_dir/.." && pwd)
 
 registry_rs="$repo_root/crates/core/src/api/registry.rs"
 api_mod_rs="$repo_root/crates/core/src/api/mod.rs"
+api_events_rs="$repo_root/crates/core/src/api/events.rs"
+shell_src="$repo_root/src-tauri/src"
+server_dir="$repo_root/crates/server"
 lib_rs="$repo_root/src-tauri/src/lib.rs"
 commands_dir="$repo_root/src-tauri/src/commands"
 commands_ts="$repo_root/src/lib/commands.ts"
 
-for f in "$registry_rs" "$api_mod_rs" "$lib_rs" "$commands_ts"; do
+for f in "$registry_rs" "$api_mod_rs" "$api_events_rs" "$lib_rs" "$commands_ts"; do
   if [[ ! -f "$f" ]]; then
     echo "check-command-wiring: expected file not found: $f" >&2
     exit 1
@@ -336,6 +344,31 @@ if [[ -z "$ts_version" || $(count_lines "$ts_version") != "1" ]]; then
 fi
 if [[ "$rust_version" != "$ts_version" ]]; then
   complain "PROTOCOL_VERSION is \"$ts_version\" in $commands_ts but \"$rust_version\" in $api_mod_rs — they must be equal"
+fi
+
+# --- 6. The event split -----------------------------------------------------
+#
+# Every `pub const NAME: &str = "<event>";` in api/events.rs is a wire event
+# name. A literal `"<event>"` anywhere under src-tauri/src/ is a mapping the
+# shell keeps beside core's, which drifts the day either is renamed.
+wire_names=$(sed -n 's/^pub const [A-Z_]*: &str = "\([a-z-]*:[a-z-]*\)";$/\1/p' "$api_events_rs")
+if [[ -z "$wire_names" ]]; then
+  echo "check-command-wiring: found no 'pub const NAME: &str = \"<scope>:<event>\";' lines in $api_events_rs — its shape has changed, update the parser in this script" >&2
+  exit 1
+fi
+while IFS= read -r event; do
+  [[ -z "$event" ]] && continue
+  found=$(grep -rnF -- "\"$event\"" "$shell_src" || true)
+  if [[ -n "$found" ]]; then
+    complain "the wire event name \"$event\" is a string literal in the shell — emit core's WireEvent instead (task 048):
+$found"
+  fi
+done <<<"$wire_names"
+
+local_names=$(grep -rnE -- '\bLocal(Change|Events)\b' "$server_dir" || true)
+if [[ -n "$local_names" ]]; then
+  complain "crates/server/ names LocalChange or LocalEvents — machine events never reach a server (task 048):
+$local_names"
 fi
 
 if [[ "$fail" -ne 0 ]]; then

@@ -10,10 +10,9 @@
 //! server's planning tools reach the same rules without passing through this
 //! file (ADR-0006).
 
+use rimaia_core::api::events::{plan_progress_wire, PlanProgressView, PlanResultView};
 use rimaia_core::db::BoardColumn;
-use rimaia_core::runner::strategy::{
-    PlanOutcome, PlanPass, PlanProgress, PlanResult, PlanSelection,
-};
+use rimaia_core::runner::strategy::{PlanPass, PlanSelection};
 use rimaia_core::runner::{probe_cli, strategy as runner_strategy, CancelSignal, Starter};
 use rimaia_core::scheduler::SlotOwner;
 use rimaia_core::{Error, Result};
@@ -141,13 +140,14 @@ pub async fn plan_tasks_strategy(
         &state.in_flight,
         &selection.into(),
         &cancel,
-        // The stream half of "streamed or collected". A failure to emit is not
-        // a reason to abandon a pass the user is paying for — the summary still
-        // arrives when it resolves.
+        // The stream half of "streamed or collected", in the wire form core
+        // gives it (task 048): a local emission, straight into this window,
+        // and never onto a server's stream. A failure to emit is not a reason
+        // to abandon a pass the user is paying for — the summary still arrives
+        // when it resolves.
         &move |progress| {
-            if let Err(error) =
-                app.emit(PLAN_PASS_PROGRESS_EVENT, PlanProgressView::from(&progress))
-            {
+            let wire = plan_progress_wire(&PlanProgressView::from(&progress));
+            if let Err(error) = app.emit(wire.name, wire.data) {
                 tracing::warn!(%error, "could not emit the planning pass progress");
             }
         },
@@ -208,72 +208,8 @@ impl From<PlanSelectionInput> for PlanSelection {
     }
 }
 
-/// The Tauri event carrying live pass progress (seam-contract D7).
-pub const PLAN_PASS_PROGRESS_EVENT: &str = "plan-pass:progress";
-
-/// One card's line, `camelCase` for this boundary.
-///
-/// A projection rather than [`PlanResult`] re-serialized, for the reason
-/// `mcp::responses` gives: the wire shape is the client's contract, and a core
-/// enum reshaped by serde would make every rename a breaking change to the
-/// window.
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct PlanResultView {
-    pub task_id: String,
-    pub title: String,
-    /// `planned`, `skipped`, `failed` or `cancelled`.
-    pub outcome: String,
-    pub model: Option<String>,
-    pub effort: Option<String>,
-    pub rationale: Option<String>,
-    pub cost_usd: Option<f64>,
-    pub skip: Option<String>,
-    pub reason: Option<String>,
-}
-
-impl From<&PlanResult> for PlanResultView {
-    fn from(result: &PlanResult) -> Self {
-        let mut view = Self {
-            task_id: result.task_id.clone(),
-            title: result.title.clone(),
-            outcome: "cancelled".to_string(),
-            model: None,
-            effort: None,
-            rationale: None,
-            cost_usd: None,
-            skip: None,
-            reason: None,
-        };
-        match &result.outcome {
-            PlanOutcome::Planned {
-                model,
-                effort,
-                rationale,
-                cost_usd,
-            } => {
-                view.outcome = "planned".to_string();
-                view.model = model.clone();
-                view.effort = effort.clone();
-                view.rationale = rationale.clone();
-                view.cost_usd = *cost_usd;
-            }
-            PlanOutcome::Skipped(skip) => {
-                view.outcome = "skipped".to_string();
-                view.skip = Some(skip.as_str().to_string());
-                view.reason = Some(skip.message());
-            }
-            PlanOutcome::Failed(reason) => {
-                view.outcome = "failed".to_string();
-                view.reason = Some(reason.clone());
-            }
-            PlanOutcome::Cancelled => {}
-        }
-        view
-    }
-}
-
-/// The end-of-pass summary.
+/// The end-of-pass summary. Each line is core's [`PlanResultView`], the one
+/// `plan-pass:progress` carries too.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PlanPassView {
@@ -292,29 +228,6 @@ impl From<&PlanPass> for PlanPassView {
             skipped: pass.skipped(),
             spent_usd: pass.spent_usd,
             cancelled: pass.cancelled,
-        }
-    }
-}
-
-/// What one `plan-pass:progress` event carries: the card that just finished,
-/// how far through the pass it was, and what has been spent so far.
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct PlanProgressView {
-    /// 1-based, because it is rendered as "3 of 10".
-    pub completed: usize,
-    pub total: usize,
-    pub spent_usd: f64,
-    pub result: PlanResultView,
-}
-
-impl From<&PlanProgress<'_>> for PlanProgressView {
-    fn from(progress: &PlanProgress<'_>) -> Self {
-        Self {
-            completed: progress.index + 1,
-            total: progress.total,
-            spent_usd: progress.spent_usd,
-            result: PlanResultView::from(progress.result),
         }
     }
 }

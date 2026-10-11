@@ -218,11 +218,9 @@ async fn decide(
         team_id.clone(),
         std::iter::once(id.to_string()).chain(rebalanced.into_iter().filter(|rid| rid != id)),
     ));
-    // The marker is a user setting, and a change event needs a team until task
-    // 048's `Audience::User`: it names the acted-on task's team, the one its
-    // `Tasks` event names, so a verdict needs no sole team.
+    // The marker is the actor's own setting, announced to them alone.
     if advanced_marker {
-        ctx.publish(ChangeEvent::settings(team_id));
+        ctx.publish(ChangeEvent::user_settings(ctx.actor.clone()));
     }
 
     let set_aside_branch = (action == Action::Reject)

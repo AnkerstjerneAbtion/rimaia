@@ -1,4 +1,3 @@
-use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
 
 use rimaia_core::api::{BoardHost, Caller};
@@ -7,7 +6,6 @@ use rimaia_core::doctor;
 use rimaia_core::identity::SoloIdentity;
 use rimaia_core::machine::MachineContext;
 use rimaia_core::mcp::{LocalTools, McpHandle, RunHandles};
-use rimaia_core::runner::events::RunTail;
 use rimaia_core::runner::strategy::PlannerAccess;
 use rimaia_core::runner::{CancelSignal, RunnerConfig};
 use rimaia_core::scheduler::InFlight;
@@ -37,14 +35,10 @@ use rimaia_runner::RunnerStore;
 /// `src-tauri` type. Now every door reads one map, and this struct holds no
 /// business rule at all.
 ///
-/// `tails` is what genuinely is the shell's (seam-contract D14): the most
-/// recent live-tail snapshot per run. A run's `EventStream` and `RunProgress`
-/// live entirely on the stack of the task supervising it
-/// (`runner::process::execute`), and there is deliberately no shared registry of
-/// them in core. Publishing a [`RunTail`] on the D14 channel *is* core's whole
-/// answer to "what is happening right now"; remembering the latest one so a
-/// client that opens the Runs view mid-run has something to read is the
-/// shell's to build.
+/// The latest live-tail snapshot per run is the board host's tail relay
+/// (`rimaia_core::api::TailRelay`, task 048), on [`board`](Self::board): a
+/// server relays tails too, and `get_run_tail` is a board command answered
+/// from it.
 ///
 /// `mcp` is the handle onto that server: `lib.rs` binds it as the last step of
 /// `setup()` — nothing outside Rimaia should reach the board until every repair
@@ -88,14 +82,13 @@ pub struct AppState {
     /// `runner_identity` read. Core code never sees this type; it reaches the
     /// same store through [`machine`](Self::machine).
     pub runner_store: RunnerStore,
-    /// The machine context over [`runner_store`](Self::runner_store), the
-    /// board's change sender and the solo team (task 041): what every command
-    /// and subsystem reads and writes this machine's own state through. The
-    /// same value the queue and the MCP server were built with.
+    /// The machine context over [`runner_store`](Self::runner_store), with
+    /// its own local channel (tasks 041 and 048): what every command and
+    /// subsystem reads and writes this machine's own state through. The same
+    /// value the queue and the MCP server were built with.
     pub machine: MachineContext,
     pub paths: AppPaths,
     pub in_flight: InFlight,
-    pub tails: RunTails,
     pub queue: QueueHandle,
     /// The one [`RunnerConfig`] every starter spawns from — task 009's queue,
     /// a manual "Run now", and task 020's "Plan now".
@@ -142,8 +135,8 @@ pub struct AppState {
     ///
     /// One at a time, because a pass is sequential by design and two of them
     /// would be exactly the fan-out task 023's Notes refuse. It lives here
-    /// rather than in `rimaia-core` for the reason `tails` does: it is a
-    /// property of *this window's* button, not of the planning rules, and
+    /// rather than in `rimaia-core` because it is a property of *this
+    /// window's* button, not of the planning rules, and
     /// `plan_all` takes the signal as an argument so the MCP surface — which
     /// has no Cancel button — hands in one nothing holds.
     ///
@@ -163,16 +156,6 @@ pub struct SoloBoard {
     pub caller: Caller,
     pub machine: MachineContext,
 }
-
-/// How many concurrently-tracked runs' tail snapshots [`RunTails`] keeps.
-///
-/// Task 008 starts runs one manual click at a time, so in practice this is
-/// almost always zero or one — the cap exists so an evening of "Run now"
-/// clicks across many tasks does not grow the cache without bound in a
-/// process that runs all night, the same reasoning behind every other bounded
-/// buffer in this codebase (`TAIL_CHANNEL_CAPACITY`, `RECENT_ACTIVITY_CAPACITY`
-/// in `rimaia_core::runner::events`).
-const MAX_TRACKED_RUN_TAILS: usize = 32;
 
 /// This machine's MCP tools: the machine, a doctor over the shell's own paths
 /// and runner, and the planner's access (task 041).
@@ -249,83 +232,5 @@ impl AppState {
     /// shutdown handling while it waits for cancelled runs to actually exit.
     pub fn has_in_flight_runs(&self) -> bool {
         !self.in_flight.is_empty()
-    }
-}
-
-/// A small bounded cache of the most recent [`RunTail`] per run id.
-///
-/// Fed by the D14 forwarding loop `lib.rs` spawns in `setup()` — the same one
-/// that re-emits every snapshot as `runs:tail` — and read back by
-/// `commands::runs::get_run_tail`. This is *not* the deeper ring buffer
-/// seam-contract D14 describes (`RunProgress::recent`, up to 64 individual
-/// assistant-text and tool-call lines): that buffer lives inside the
-/// `EventStream` owned by the task supervising the run, on its own stack,
-/// and rimaia-core exposes no registry of them for anything outside that task
-/// to reach. What crosses the D14 channel is [`RunTail`] — one rolled-up
-/// snapshot of where things stand — so that is the coarser thing a newly
-/// watching client can actually catch up on here: not every recent line, just
-/// the current elapsed time, turn count, tool call and last message.
-#[derive(Default)]
-struct TailCache {
-    /// Insertion order, oldest first, for [`MAX_TRACKED_RUN_TAILS`] eviction.
-    order: VecDeque<String>,
-    latest: HashMap<String, RunTail>,
-}
-
-impl TailCache {
-    fn record(&mut self, tail: RunTail) {
-        if !self.latest.contains_key(&tail.run_id) {
-            self.order.push_back(tail.run_id.clone());
-            if self.order.len() > MAX_TRACKED_RUN_TAILS {
-                if let Some(oldest) = self.order.pop_front() {
-                    self.latest.remove(&oldest);
-                }
-            }
-        }
-        self.latest.insert(tail.run_id.clone(), tail);
-    }
-
-    fn get(&self, run_id: &str) -> Option<RunTail> {
-        self.latest.get(run_id).cloned()
-    }
-}
-
-/// The shell's half of seam-contract D14: the latest live-tail snapshot per run.
-///
-/// Cheap to clone — every clone shares the same map through one `Arc` — so a
-/// command can hand a clone into a `tauri::async_runtime::spawn`'d future
-/// without reaching for a lifetime, the same shape `ServiceContext` already
-/// uses for the same reason.
-///
-/// This was `RunRegistry`, and it registered two things. The other one — which
-/// tasks have a process in flight — moved to `rimaia_core::scheduler::InFlight`,
-/// where it belongs and where the MCP server can also reach it. What is left is
-/// genuinely the shell's, because D14's catch-up snapshot is a thing the
-/// *forwarder* has seen and core deliberately keeps no registry of.
-#[derive(Clone, Default)]
-pub struct RunTails {
-    inner: Arc<Mutex<TailCache>>,
-}
-
-impl RunTails {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    /// Records the latest snapshot for its run. Called only from the D14
-    /// forwarding loop.
-    pub fn record(&self, tail: RunTail) {
-        self.lock().record(tail);
-    }
-
-    /// The latest snapshot for `run_id`, or `None` when the shell has not seen
-    /// one — either nothing has run yet, or it aged out of
-    /// [`MAX_TRACKED_RUN_TAILS`].
-    pub fn get(&self, run_id: &str) -> Option<RunTail> {
-        self.lock().get(run_id)
-    }
-
-    fn lock(&self) -> std::sync::MutexGuard<'_, TailCache> {
-        self.inner.lock().expect("run tail cache poisoned")
     }
 }

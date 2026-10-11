@@ -26,7 +26,7 @@ use rimaia_core::testing::api as testing_api;
 use rimaia_core::testing::teams::TwoTeams;
 use rimaia_core::testing::{TempRepo, TestContext};
 use rimaia_core::worktree::{self, AutoCleanup};
-use rimaia_core::{AppPaths, ErrorCode};
+use rimaia_core::{AppPaths, Audience, ErrorCode};
 use serde_json::{json, Value};
 
 // ---------------------------------------------------------------------------
@@ -36,7 +36,7 @@ use serde_json::{json, Value};
 #[tokio::test]
 async fn dispatch_refuses_a_local_or_unknown_name_as_not_found() {
     let teams = TwoTeams::new().await;
-    let host = testing_api::host(&teams);
+    let host = testing_api::host(&teams).await;
 
     for name in ["get_app_info", "start_task_run", "no_such_command"] {
         let refused = api::dispatch(&host, team_a(&teams), name, json!({}))
@@ -53,7 +53,7 @@ async fn dispatch_refuses_a_local_or_unknown_name_as_not_found() {
 #[tokio::test]
 async fn dispatch_reads_null_arguments_as_an_empty_object() {
     let teams = TwoTeams::new().await;
-    let host = testing_api::host(&teams);
+    let host = testing_api::host(&teams).await;
 
     let from_null = api::dispatch(&host, team_a(&teams), "list_repositories", Value::Null)
         .await
@@ -68,7 +68,7 @@ async fn dispatch_reads_null_arguments_as_an_empty_object() {
 #[tokio::test]
 async fn a_malformed_argument_is_invalid_and_names_the_command() {
     let teams = TwoTeams::new().await;
-    let host = testing_api::host(&teams);
+    let host = testing_api::host(&teams).await;
 
     for args in [json!({}), json!({ "id": 7 }), json!([1, 2]), json!("an id")] {
         let refused = api::dispatch(&host, team_a(&teams), "get_task", args.clone())
@@ -88,7 +88,7 @@ async fn a_malformed_argument_is_invalid_and_names_the_command() {
 async fn dispatch_rescopes_from_the_caller_and_never_hands_over_the_host_context() {
     let teams = TwoTeams::new().await;
     // A base context that names team A, and a caller whose only team is B.
-    let host = testing_api::host_over(&teams, &teams.a);
+    let host = testing_api::host_over(&teams, &teams.a).await;
     let only_b = testing_api::owner(&teams.team_b, testing_api::desktop("b"));
 
     let repositories = api::dispatch(&host, only_b.clone(), "list_repositories", json!({}))
@@ -116,7 +116,7 @@ async fn dispatch_rescopes_from_the_caller_and_never_hands_over_the_host_context
 #[tokio::test]
 async fn dispatch_writes_as_the_callers_user_through_the_callers_door() {
     let mut teams = TwoTeams::new().await;
-    let host = testing_api::host(&teams);
+    let host = testing_api::host(&teams).await;
     let runner = Caller {
         door: Door::Runner {
             runner_id: teams.team_a.runner_id.clone(),
@@ -145,7 +145,7 @@ async fn dispatch_writes_as_the_callers_user_through_the_callers_door() {
     assert!(
         events
             .iter()
-            .all(|event| event.team_id == teams.team_a.team_id),
+            .all(|event| event.audience == Audience::Team(teams.team_a.team_id.clone())),
         "{events:?}"
     );
 }
@@ -153,7 +153,7 @@ async fn dispatch_writes_as_the_callers_user_through_the_callers_door() {
 #[tokio::test]
 async fn a_caller_with_no_team_is_refused_before_any_handler_runs() {
     let teams = TwoTeams::new().await;
-    let host = testing_api::host(&teams);
+    let host = testing_api::host(&teams).await;
     let nobody = Caller {
         teams: Vec::new(),
         ..team_a(&teams)
@@ -176,7 +176,7 @@ async fn a_caller_with_no_team_is_refused_before_any_handler_runs() {
 #[tokio::test]
 async fn invoke_payloads_dispatch_unchanged() {
     let teams = TwoTeams::new().await;
-    let host = testing_api::host(&teams);
+    let host = testing_api::host(&teams).await;
     let a = &teams.team_a;
 
     let payloads = [
@@ -270,7 +270,7 @@ async fn every_case_succeeds_for_team_a_with_its_own_arguments() {
     let mut failures = Vec::new();
     for case in testing_api::BOARD_CASES {
         let (copy, _dir) = testing_api::twin(&teams).await;
-        let host = testing_api::host_over(&teams, &copy);
+        let host = testing_api::host_over(&teams, &copy).await;
         let answer = api::dispatch(&host, team_a(&teams), case.name, (case.own)(&teams)).await;
         let refused = testing_api::REFUSED_FOR_TEAM_A
             .iter()
@@ -568,6 +568,10 @@ impl Solo {
             provider: ProviderProfile::of(&ClaudeProvider),
             paths: AppPaths::new(data.path()),
             rate_limits: Arc::new(RateLimiter::new(Arc::new(harness.clock.clone()))),
+            tails: rimaia_core::api::TailRelay::new(
+                rimaia_core::api::tail::SOLO_TAIL_RELAY_CAPACITY,
+            ),
+            streams: rimaia_core::api::StreamControl::new(),
         };
         let caller = Caller::solo(&harness.solo);
         assert_eq!(

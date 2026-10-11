@@ -30,7 +30,7 @@ use crate::context::ServiceContext;
 use crate::db::Setting;
 use crate::doctor::Check;
 use crate::error::{Error, Result};
-use crate::events::ChangeEvent;
+use crate::events::{ChangeEvent, LocalChange};
 use crate::machine::MachineContext;
 
 /// The global instructions prepended to every composed run prompt (ADR-0009).
@@ -358,19 +358,15 @@ pub(crate) async fn get_user(ctx: &ServiceContext, key: &str) -> Result<Option<S
     get_user_in(ctx, &mut conn, key).await
 }
 
-/// Writes the context's actor's value for a user key, and announces it.
-///
-/// The event names the context's one team, read before the write so a scope
-/// of several is refused untouched: a change event needs a team until task
-/// 048's `Audience::User` gives a person's own settings an audience of their
-/// own, and that is where this refusal ends.
+/// Writes the context's actor's value for a user key, and announces it to
+/// that user alone (`Audience::User`), whatever the scope: a person's own
+/// setting is theirs in every team they are in.
 pub(crate) async fn set_user(ctx: &ServiceContext, key: &str, value: &str) -> Result<()> {
-    let team_id = ctx.scope.sole()?.clone();
     let mut conn = ctx.pool.acquire().await?;
     set_user_in(ctx, &mut conn, key, value).await?;
     drop(conn);
 
-    ctx.publish(ChangeEvent::settings(team_id));
+    ctx.publish(ChangeEvent::user_settings(ctx.actor.clone()));
     Ok(())
 }
 
@@ -434,9 +430,7 @@ pub(crate) async fn set_runner(machine: &MachineContext, key: &str, value: &str)
     ensure_placed(key, Placement::Runner)?;
     machine.store.set_setting(key, value).await?;
 
-    // A machine event on the board's channel, under `event_team`, until task
-    // 048 gives machine events `LocalEvents`.
-    machine.publish(ChangeEvent::settings);
+    machine.publish(LocalChange::Runner);
     Ok(())
 }
 
@@ -446,9 +440,7 @@ pub(crate) async fn clear_runner(machine: &MachineContext, key: &str) -> Result<
     ensure_placed(key, Placement::Runner)?;
     machine.store.clear_setting(key).await?;
 
-    // A machine event on the board's channel, under `event_team`, until task
-    // 048 gives machine events `LocalEvents`.
-    machine.publish(ChangeEvent::settings);
+    machine.publish(LocalChange::Runner);
     Ok(())
 }
 
@@ -580,8 +572,7 @@ pub async fn subscription_monthly_usd(ctx: &ServiceContext) -> Result<Option<f64
 ///
 /// Refuses a negative or non-finite figure rather than storing one the reader
 /// would then have to ignore: this arrives from a form, and the place to say
-/// "that is not a monthly cost" is at the field. Refused under a context that
-/// reaches several teams, by [`set_user`], until task 048's `Audience::User`.
+/// "that is not a monthly cost" is at the field.
 pub async fn set_subscription_monthly_usd(ctx: &ServiceContext, value: Option<f64>) -> Result<()> {
     match value {
         Some(value) if !value.is_finite() || value < 0.0 => Err(Error::invalid(

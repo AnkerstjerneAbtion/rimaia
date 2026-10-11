@@ -51,7 +51,7 @@ fn every_board_command_has_a_case() {
 #[tokio::test]
 async fn every_board_command_has_a_route_and_no_local_command_does() {
     let teams = TwoTeams::new().await;
-    let server = TestServer::spawn(two_teams_state(&teams)).await;
+    let server = TestServer::spawn(two_teams_state(&teams).await).await;
 
     let mut failures = Vec::new();
     for command in COMMANDS.iter() {
@@ -77,7 +77,7 @@ async fn every_board_command_has_a_route_and_no_local_command_does() {
 #[tokio::test]
 async fn a_team_cannot_see_another_teams_ids() {
     let mut teams = TwoTeams::new().await;
-    let server = TestServer::spawn(two_teams_state(&teams)).await;
+    let server = TestServer::spawn(two_teams_state(&teams).await).await;
 
     let mut failures = Vec::new();
     for case in BOARD_CASES {
@@ -158,7 +158,7 @@ async fn both_transports_answer_every_case_identically() {
 
         let (in_process, _in_process_dir) = testing_api::twin(&teams).await;
         let direct = api::dispatch(
-            &testing_api::host_over(&teams, &in_process),
+            &testing_api::host_over(&teams, &in_process).await,
             caller.clone(),
             case.name,
             args.clone(),
@@ -174,7 +174,7 @@ async fn both_transports_answer_every_case_identically() {
 
         let (over_http, _over_http_dir) = testing_api::twin(&teams).await;
         let server = TestServer::spawn(state_over(
-            testing_api::host_over(&teams, &over_http),
+            testing_api::host_over(&teams, &over_http).await,
             FixedCaller::two_teams(&teams),
         ))
         .await;
@@ -228,7 +228,7 @@ async fn both_transports_answer_every_case_identically() {
 #[tokio::test]
 async fn reads_publish_no_change_event() {
     let mut teams = TwoTeams::new().await;
-    let server = TestServer::spawn(two_teams_state(&teams)).await;
+    let server = TestServer::spawn(two_teams_state(&teams).await).await;
 
     let mut failures = Vec::new();
     for case in BOARD_CASES
@@ -254,7 +254,7 @@ async fn reads_publish_no_change_event() {
 #[tokio::test]
 async fn each_team_reads_its_own_board_through_its_own_token() {
     let teams = TwoTeams::new().await;
-    let server = TestServer::spawn(two_teams_state(&teams)).await;
+    let server = TestServer::spawn(two_teams_state(&teams).await).await;
 
     for (token, team) in [(TEAM_A_TOKEN, &teams.team_a), (TEAM_B_TOKEN, &teams.team_b)] {
         let answer = server.command("list_repositories", token, &json!({})).await;

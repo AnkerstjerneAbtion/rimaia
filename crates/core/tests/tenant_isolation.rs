@@ -58,7 +58,8 @@ use rimaia_core::runner::provider::ProviderProfile;
 use rimaia_core::schedule::{self, ScheduleInput};
 use rimaia_core::testing::api::{self as testing_api, Foreign, BOARD_CASES};
 use rimaia_core::testing::teams::{TwoTeams, SENTINEL};
-use rimaia_core::{db::ScheduleMode, ErrorCode, ServiceContext};
+
+use rimaia_core::{db::ScheduleMode, Audience, ChangeEvent, ErrorCode, ServiceContext};
 use rmcp::model::CallToolRequestParams;
 use rmcp::service::RunningService;
 use rmcp::transport::streamable_http_client::StreamableHttpClientTransportConfig;
@@ -467,7 +468,7 @@ fn every_board_command_has_a_cross_team_case() {
 #[tokio::test]
 async fn a_team_cannot_see_another_teams_ids_through_any_board_command() {
     let mut teams = TwoTeams::new().await;
-    let host = testing_api::host(&teams);
+    let host = testing_api::host(&teams).await;
     let team_a = teams.team_a.team_id.clone();
     let caller = testing_api::as_desktop(&teams.team_a);
 
@@ -498,10 +499,13 @@ async fn a_team_cannot_see_another_teams_ids_through_any_board_command() {
                 case.name
             ));
         }
-        // 4. Every event names team A.
-        for event in events.iter().filter(|event| event.team_id != team_a) {
+        // 4. Every event is for team A, or for the acting user alone.
+        for event in events
+            .iter()
+            .filter(|event| !for_team_or_actor(event, &team_a, &teams.team_a.owner_id))
+        {
             failures.push(format!(
-                "{}: an event names another team: {event:?}",
+                "{}: an event is for another team or user: {event:?}",
                 case.name
             ));
         }
@@ -607,10 +611,13 @@ async fn a_team_cannot_see_another_teams_ids_through_any_tool() {
             }
         }
 
-        // 4. Every event names team A.
-        for event in events.iter().filter(|event| event.team_id != team_a) {
+        // 4. Every event is for team A, or for the acting user alone.
+        for event in events
+            .iter()
+            .filter(|event| !for_team_or_actor(event, &team_a, &board.teams.team_a.owner_id))
+        {
             failures.push(format!(
-                "{}: point 4, an event names another team: {event:?}",
+                "{}: point 4, an event is for another team or user: {event:?}",
                 case.tool
             ));
         }
@@ -1650,5 +1657,15 @@ fn substitute(args: &Value, substitutions: &[(String, String)]) -> Value {
                 .collect(),
         ),
         other => other.clone(),
+    }
+}
+
+/// 039's check 4, as task 048 refines it: an event is for team A, or it is
+/// the acting user's own setting (`set_subscription_cost`), which is
+/// announced to that user alone.
+fn for_team_or_actor(event: &ChangeEvent, team_a: &str, actor: &str) -> bool {
+    match &event.audience {
+        Audience::Team(team_id) => team_id == team_a,
+        Audience::User(user_id) => user_id == actor,
     }
 }

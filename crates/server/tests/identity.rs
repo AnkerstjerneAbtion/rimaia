@@ -136,6 +136,10 @@ impl Signing {
             context,
             provider: ProviderProfile::of(&ClaudeProvider),
             paths: AppPaths::new(data.path()),
+            tails: rimaia_core::api::TailRelay::new(
+                rimaia_core::api::tail::SOLO_TAIL_RELAY_CAPACITY,
+            ),
+            streams: rimaia_core::api::StreamControl::new(),
         };
         let auth = SessionsAndTokens {
             pool: pool.clone(),

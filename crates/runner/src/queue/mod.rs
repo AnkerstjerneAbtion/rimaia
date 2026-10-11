@@ -33,10 +33,11 @@
 //!
 //! # It never polls, and it sleeps for exactly one reason
 //!
-//! The loop does work until there is none, then waits on five things: its own
+//! The loop does work until there is none, then waits on six things: its own
 //! control signals; `ChangeEvent` — ADR-0018's channel, handed to [`build`] as
-//! a receiver the shell subscribed; [`InFlight::releases`]; its own
-//! [`JoinSet`]; and a **deadline**. A card dragged to the top of `ready`
+//! a receiver the shell subscribed; `LocalChange` — this machine's own
+//! channel (task 048), subscribed from the machine in [`build`];
+//! [`InFlight::releases`]; its own [`JoinSet`]; and a **deadline**. A card dragged to the top of `ready`
 //! publishes `Tasks`, the loop wakes, asks the board again and claims it.
 //! There is still no interval to tune and nothing that costs a query while the
 //! board is idle.
@@ -235,7 +236,7 @@ use rimaia_core::board::{BoardPort, Claim, ClaimTarget};
 use rimaia_core::consent::ceiling::strategy_ceiling;
 use rimaia_core::db::Schedule;
 use rimaia_core::doctor;
-use rimaia_core::events::ChangeEvent;
+use rimaia_core::events::{ChangeEvent, LocalChange};
 use rimaia_core::machine::{leases, MachineContext};
 use rimaia_core::paths::AppPaths;
 use rimaia_core::runner::start::record_claim;
@@ -276,6 +277,11 @@ pub struct QueueTask {
     /// before anything could publish. Owned by the loop, because only the loop
     /// reads it.
     changes: broadcast::Receiver<ChangeEvent>,
+    /// This machine's local channel (task 048), subscribed in [`build`] for
+    /// the same reason: a schedule edited, the switch flipped by another door,
+    /// a checkout's limit changed. None of them is a board change any more,
+    /// and a loop that heard only the board would sleep through them.
+    local: broadcast::Receiver<LocalChange>,
 }
 
 /// Wires a queue: the handle to keep, and the task to spawn.
@@ -286,10 +292,10 @@ pub struct QueueTask {
 /// - `board` is where the queue claims, releases and has its runs report (D31
 ///   point 8). The shell builds one in `setup()` over the same provider as
 ///   `runner` and hands clones to everything that starts a process.
-/// - `changes` is the board's change channel, subscribed by the caller. In
-///   solo it is also the machine's: a `MachineContext` carries the board's
-///   sender until task 048, so a schedule edited or a switch flipped wakes this
-///   loop as a card moved does.
+/// - `changes` is the board's change channel, subscribed by the caller. The
+///   machine's own channel is subscribed here, from `machine.local`, so a
+///   schedule edited or a switch flipped wakes this loop as a card moved does
+///   (task 048).
 /// - `solo` is the four board reads the loop has no port method for yet.
 /// - `in_flight` is passed rather than created here, because the shell needs
 ///   the same value for its own doors (D19 point 1): one value built in
@@ -307,6 +313,7 @@ pub fn build(
     // `subscribe`, which is what lets `build` be called before anything is
     // spawned.
     let (signals, _) = watch::channel(Signal::default());
+    let local = machine.local.subscribe();
     let shared = Arc::new(Shared {
         machine,
         board,
@@ -324,7 +331,11 @@ pub fn build(
         QueueHandle {
             shared: Arc::clone(&shared),
         },
-        QueueTask { shared, changes },
+        QueueTask {
+            shared,
+            changes,
+            local,
+        },
     )
 }
 
@@ -512,9 +523,10 @@ impl QueueTask {
         let QueueTask {
             shared,
             mut changes,
+            mut local,
         } = self;
         let task = Looping { shared };
-        task.run(&mut changes).await;
+        task.run(&mut changes, &mut local).await;
     }
 }
 
@@ -525,7 +537,11 @@ struct Looping {
 }
 
 impl Looping {
-    async fn run(&self, changes: &mut broadcast::Receiver<ChangeEvent>) {
+    async fn run(
+        &self,
+        changes: &mut broadcast::Receiver<ChangeEvent>,
+        local: &mut broadcast::Receiver<LocalChange>,
+    ) {
         let mut signals = self.shared.signals.subscribe();
         let mut releases = self.shared.in_flight.releases();
         // The runs this queue is supervising. Owned by the loop rather than by
@@ -548,6 +564,7 @@ impl Looping {
             // Before the board is asked, never after — see this module's
             // header.
             drain(changes);
+            drain(local);
 
             // **Before `step`, never after.** A window whose stop time has
             // arrived is closed here, so the pass below cannot claim one more
@@ -593,6 +610,10 @@ impl Looping {
                 // leaves an unfinished task in the set. No arm is a claim.
                 changed = signals.changed() => if changed.is_err() { break },
                 event = changes.recv() => if matches!(event, Err(RecvError::Closed)) { break },
+                // Every local change wakes it: each is a fact about this
+                // machine the next pass may read. `Closed` cannot happen while
+                // the loop holds the machine, whose channel it is.
+                _ = local.recv() => {},
                 // A slot opened. See this module's header on why `ChangeEvent`
                 // cannot carry this and why the arm below does not cover it.
                 _ = releases.changed() => {},
@@ -837,9 +858,8 @@ impl Looping {
             self.shared.record_schedule_error(summary);
             // So the Runs view re-reads and shows it. `queue_state` was not
             // written, so nothing else on this path would have announced
-            // anything at all. A machine event on the board's channel, under
-            // `event_team`, until task 048 gives machine events `LocalEvents`.
-            machine.publish(ChangeEvent::settings);
+            // anything at all. The refusal is this runner's, so it is local.
+            machine.publish(LocalChange::Runner);
             return Ok(Step::Worked);
         }
 
@@ -1409,7 +1429,7 @@ fn earliest(left: Option<DateTime<Utc>>, right: Option<DateTime<Utc>>) -> Option
 /// follows will not see. Draining costs one pass instead of one per event, and
 /// `Lagged` is drained too: on this channel it means the same thing every other
 /// event does, "look again", which is what the caller is about to do anyway.
-fn drain(changes: &mut broadcast::Receiver<ChangeEvent>) {
+fn drain<T: Clone>(changes: &mut broadcast::Receiver<T>) {
     loop {
         match changes.try_recv() {
             Ok(_) | Err(TryRecvError::Lagged(_)) => continue,

@@ -21,7 +21,7 @@ use rimaia_core::schedule::window::{self, RunWindow};
 use rimaia_core::scheduler::{capacity, pause, state, QueueState};
 use rimaia_core::testing::{test_epoch, TestClock};
 use rimaia_core::worktree::cleanup::{self, AutoCleanup};
-use rimaia_core::{mcp, ChangeEvent, Clock, ServiceContext};
+use rimaia_core::{mcp, Clock, LocalChange};
 use rimaia_runner::RunnerStore;
 use sqlx::SqlitePool;
 use tokio::sync::broadcast::Receiver;
@@ -29,17 +29,12 @@ use tokio::sync::broadcast::Receiver;
 use common::{dump, open_board, store_legacy_setting};
 
 /// The machine context the shell builds in `setup()`: over the runner store,
-/// on the board's own sender, under the solo team.
-fn machine_over(store: &RunnerStore, board: &ServiceContext, clock: &TestClock) -> MachineContext {
+/// with a local channel of its own (task 048).
+fn machine_over(store: &RunnerStore, clock: &TestClock) -> MachineContext {
     MachineContext {
         store: Arc::new(store.clone()),
         clock: Arc::new(clock.clone()),
-        changes: board.changes.clone(),
-        event_team: board
-            .scope
-            .sole()
-            .expect("a solo board has one team")
-            .clone(),
+        local: rimaia_core::LocalEvents::new(),
     }
 }
 
@@ -142,11 +137,11 @@ fn planted(now: DateTime<Utc>) -> Vec<Planted> {
 async fn runner_state_is_read_from_the_runner_store() {
     let dir = tempfile::tempdir().expect("temp dir");
     let clock = TestClock::new(test_epoch());
-    let (board, solo) = open_board(&dir.path().join("rimaia.db"), &clock).await;
+    let (board, _solo) = open_board(&dir.path().join("rimaia.db"), &clock).await;
     let store = RunnerStore::open(&dir.path().join("runner.db"))
         .await
         .expect("open the store");
-    let machine = machine_over(&store, &board, &clock);
+    let machine = machine_over(&store, &clock);
     let now = clock.now();
     let table = planted(now);
     assert_eq!(
@@ -202,11 +197,12 @@ async fn runner_state_is_read_from_the_runner_store() {
         .expect("read"));
 
     // Every setter writes `runner_settings`, leaves the board's row byte for
-    // byte, and announces exactly what it announced before task 041: one
-    // `Settings`, for the solo team.
+    // byte, and announces one `LocalChange::Runner` on the machine's own
+    // channel, and nothing on the board's (task 048).
     let board_before = dump(&board.pool, &["settings"]).await;
-    let mut changes = board.subscribe();
-    let settings_event = ChangeEvent::settings(solo.team_id.clone());
+    let mut board_changes = board.subscribe();
+    let mut changes = machine.local.subscribe();
+    let settings_event = LocalChange::Runner;
 
     settings::set_run_environment(&machine, RunEnvironment::Inherit)
         .await
@@ -351,14 +347,18 @@ async fn runner_state_is_read_from_the_runner_store() {
         board_before,
         "no setter touched the board's copy"
     );
+    assert!(
+        board_changes.try_recv().is_err(),
+        "no setter announced anything on the board's channel"
+    );
 }
 
 /// `key` now holds `value` in `runner_settings`, and the write announced
 /// `event` and nothing else.
 async fn expect_written(
     store: &RunnerStore,
-    changes: &mut Receiver<ChangeEvent>,
-    event: &ChangeEvent,
+    changes: &mut Receiver<LocalChange>,
+    event: &LocalChange,
     key: &str,
     value: &str,
 ) {
@@ -375,8 +375,8 @@ async fn expect_written(
 /// exact spelling is its accessor's to read back.
 async fn expect_changed(
     store: &RunnerStore,
-    changes: &mut Receiver<ChangeEvent>,
-    event: &ChangeEvent,
+    changes: &mut Receiver<LocalChange>,
+    event: &LocalChange,
     key: &str,
 ) {
     let planted = planted(test_epoch())
@@ -392,15 +392,15 @@ async fn expect_changed(
 
 async fn expect_cleared(
     store: &RunnerStore,
-    changes: &mut Receiver<ChangeEvent>,
-    event: &ChangeEvent,
+    changes: &mut Receiver<LocalChange>,
+    event: &LocalChange,
     key: &str,
 ) {
     assert_eq!(runner_setting(store.pool(), key).await, None, "{key}");
     expect_one(changes, event, key);
 }
 
-fn expect_one(changes: &mut Receiver<ChangeEvent>, event: &ChangeEvent, key: &str) {
+fn expect_one(changes: &mut Receiver<LocalChange>, event: &LocalChange, key: &str) {
     assert_eq!(
         changes.try_recv().ok().as_ref(),
         Some(event),
@@ -435,7 +435,7 @@ async fn a_schedule_opens_its_window_from_the_runner_store() {
     let store = RunnerStore::open(&dir.path().join("runner.db"))
         .await
         .expect("open the store");
-    let machine = machine_over(&store, &board, &clock);
+    let machine = machine_over(&store, &clock);
     let (_environment, paths, runner) = passing_queue_environment();
     let board_port: Arc<dyn BoardPort> = Arc::new(InProcessBoard::new(
         board.clone(),
@@ -463,7 +463,7 @@ async fn a_schedule_opens_its_window_from_the_runner_store() {
     .expect("create a schedule");
     let board_before = dump(&board.pool, &["settings", "schedules"]).await;
 
-    let mut changes = board.subscribe();
+    let mut changes = machine.local.subscribe();
     let (queue, loop_task) = rimaia_runner::queue::build(
         machine.clone(),
         board_port,

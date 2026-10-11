@@ -27,11 +27,15 @@ use crate::runner::provider::ProviderProfile;
 
 pub mod board;
 pub mod caller;
+pub mod events;
 pub mod protocol;
 pub mod registry;
+pub mod tail;
 
 pub use caller::{Authenticate, Caller, Credential, Door, RefuseAll, TeamGrant};
+pub use events::{StreamControl, Subscription, Tails, WireEvent};
 pub use registry::{Command, Effect, Kind, COMMANDS};
+pub use tail::TailRelay;
 
 /// A boxed, sendable future. A local alias rather than the `futures` crate's,
 /// which nothing else here needs (D32 point 1).
@@ -60,6 +64,12 @@ pub struct BoardHost {
     /// commands that mint a credential (task 047). Solo builds one that
     /// nothing reaches, because the account commands refuse the shell.
     pub rate_limits: Arc<RateLimiter>,
+    /// The latest live snapshot per run, which `get_run_tail` answers from
+    /// (task 048). Whoever builds the host spawns its
+    /// [`follow`](TailRelay::follow) on the context's live channel, once.
+    pub tails: TailRelay,
+    /// Tells a user's open streams to resolve their caller again (task 048).
+    pub streams: StreamControl,
 }
 
 /// Everything a board handler may read.

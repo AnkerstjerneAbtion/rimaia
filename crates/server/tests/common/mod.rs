@@ -143,8 +143,11 @@ impl Answer {
 
 /// A server state over the fixture's own board and clock, authenticated by
 /// `FixedCaller::two_teams`.
-pub fn two_teams_state(teams: &TwoTeams) -> ServerState {
-    state_over(testing_api::host(teams), FixedCaller::two_teams(teams))
+pub async fn two_teams_state(teams: &TwoTeams) -> ServerState {
+    state_over(
+        testing_api::host(teams).await,
+        FixedCaller::two_teams(teams),
+    )
 }
 
 /// A server state over `host`, authenticated by `auth`, signing in with a

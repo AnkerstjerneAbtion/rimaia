@@ -10,19 +10,22 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
-use rimaia_core::api::{BoardHost, Caller};
+use rimaia_core::api::events::{local_reread, local_wire};
+use rimaia_core::api::tail::SOLO_TAIL_RELAY_CAPACITY;
+use rimaia_core::api::{
+    BoardHost, Caller, StreamControl, Subscription, TailRelay, Tails, WireEvent,
+};
 use rimaia_core::board::{BoardPort, InProcessBoard, LeaseTerm};
 use rimaia_core::db::MutationSource;
 use rimaia_core::identity::rate_limit::RateLimiter;
 use rimaia_core::machine::{self, MachineContext};
 use rimaia_core::mcp::{self, McpState, RunHandles};
-use rimaia_core::runner::events::RunTail;
 use rimaia_core::runner::process::DEFAULT_GRACE_PERIOD;
 use rimaia_core::runner::provider::ProviderProfile;
 use rimaia_core::runner::RunnerConfig;
 use rimaia_core::scheduler::{self, InFlight};
 use rimaia_core::{
-    db, identity, startup, worktree, AppPaths, Change, ChangeEvent, Error, ServiceContext,
+    db, identity, startup, worktree, AppPaths, Error, LocalChange, LocalEvents, ServiceContext,
     SystemClock, TeamScope,
 };
 use rimaia_runner::{adopt, RunnerStore};
@@ -31,7 +34,7 @@ use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
 use tokio::sync::broadcast;
 use tokio::sync::broadcast::error::RecvError;
 
-use crate::state::{local_tools, AppState, RunTails, SoloBoard};
+use crate::state::{local_tools, AppState, SoloBoard};
 
 /// The label of the one window `tauri.conf.json` declares. Spelled out because
 /// that file leaves it implicit and Tauri fills it in — an unlabelled window
@@ -216,15 +219,13 @@ pub fn run() {
             }
             // This machine's own state, behind the port core reaches it through
             // (task 041): built once, here, over the store just adopted into,
-            // and handed to everything that reads or writes it. Its events ride
-            // the board's channel under the solo team until task 048 gives them
-            // `LocalEvents`, so the window hears a runner key or a schedule
-            // exactly as it did when they lived in rimaia.db.
+            // and handed to everything that reads or writes it. Its writes are
+            // announced on a local channel of its own (task 048), which the
+            // local forwarder below hears and a server never does.
             let machine = MachineContext {
                 store: Arc::new(runner_store.clone()),
                 clock: Arc::new(SystemClock),
-                changes: context.changes.clone(),
-                event_team: solo.team_id.clone(),
+                local: LocalEvents::new(),
             };
 
             // Nothing is running yet — the process that set any of this is the one
@@ -251,31 +252,6 @@ pub fn run() {
                     }
                 };
 
-            // Subscribed once, here, for the life of the app (ADR-0018): the
-            // shell is the only thing that turns a `ChangeEvent` into a Tauri
-            // event, and it does so from one forwarding task rather than a
-            // listener per window or per command. Subscribing before
-            // `app.manage` hands `context` to any command matters less here
-            // than it does in a test — nothing has published yet — but keeping
-            // the order matches the rule anyway: subscribe first, then let
-            // writers start.
-            let change_events = context.subscribe();
-            tauri::async_runtime::spawn(forward_change_events(app.handle().clone(), change_events));
-
-            // Task 008's D14 channel, subscribed the same way and for the same
-            // reason: once, here, before anything can publish to it. `tails` is
-            // the shell's own bookkeeping — the latest tail snapshot per run
-            // (see `state::RunTails`'s doc) — and the forwarder is what keeps
-            // it current. Which tasks have a process in flight used to be here
-            // too; it is `rimaia_core::scheduler::InFlight` now.
-            let tails = RunTails::new();
-            let tail_events = context.subscribe_tail();
-            tauri::async_runtime::spawn(forward_run_tail(
-                app.handle().clone(),
-                tail_events,
-                tails.clone(),
-            ));
-
             // Task 020's two shared values are built here, ahead of the queue,
             // rather than inside `rimaia_runner::queue::build`, because each is shared
             // with something the queue knows nothing about (see `AppState`'s
@@ -300,6 +276,41 @@ pub fn run() {
             // point 2). One value for the board port, the MCP server and the
             // command host, so none of them reads another provider's catalogue.
             let provider = ProviderProfile::of(runner.provider.as_ref());
+
+            // The solo command host (D32 point 3): board commands reach
+            // `api::dispatch_with_machine` through it, as the solo user owning
+            // the solo team through the window, and the board forwarder below
+            // follows its channels. Its tail relay follows the live channel
+            // from here, before anything can publish to it (task 048).
+            let host = BoardHost {
+                context: context.clone(),
+                provider: provider.clone(),
+                paths: paths.clone(),
+                // Nothing in solo reaches it: the account commands that
+                // mint refuse the shell (task 047).
+                rate_limits: Arc::new(RateLimiter::new(context.clock.clone())),
+                tails: TailRelay::new(SOLO_TAIL_RELAY_CAPACITY),
+                streams: StreamControl::new(),
+            };
+            tauri::async_runtime::spawn(host.tails.follow(context.subscribe_tail()));
+            let caller = Caller::solo(&solo);
+
+            // Both forwarders subscribe here, once, for the life of the app
+            // (ADR-0018), before anything below writes: subscribe first, then
+            // let writers start. The board half is one `Subscription`, the
+            // type a server's stream uses, with the solo caller: the same
+            // admission, so "works in solo" is evidence for "works connected".
+            // It admits every tail, as the window always heard them, and has
+            // no credential to re-check. The local half is this machine's own
+            // channel. Neither holds an event name: both forward core's
+            // `WireEvent`s (task 048).
+            let board_events = Subscription::open(&host, caller.clone(), Tails::All, None);
+            tauri::async_runtime::spawn(forward_board_events(app.handle().clone(), board_events));
+            tauri::async_runtime::spawn(forward_local_events(
+                app.handle().clone(),
+                machine.local.subscribe(),
+            ));
+
             // The one board port every door that starts a process reaches the
             // board through (seam-contract D31 point 8): the queue, the MCP
             // server's planner and the commands, through `AppState`. Built from
@@ -436,14 +447,13 @@ pub fn run() {
             // Task 013's notification watcher. Subscribed here, after the queue
             // exists and before anything can publish — the same "subscribe
             // first, then let writers start" order every other listener in this
-            // hook keeps. It is a third subscriber to ADR-0018's channel, which
-            // that ADR's Consequences already anticipated costing nothing but a
-            // `subscribe()`.
+            // hook keeps. The window is a runner key, so it listens to the
+            // machine's local channel (task 048).
             tauri::async_runtime::spawn(notify::announce_run_windows(
                 app.handle().clone(),
                 machine.clone(),
                 queue.clone(),
-                machine.changes.subscribe(),
+                machine.local.subscribe(),
             ));
 
             // Task 010's MCP server (ADR-0006). Last of the startup steps on
@@ -500,20 +510,11 @@ pub fn run() {
             }
             tauri::async_runtime::spawn(mcp_task.run());
 
-            // The solo command host (D32 point 3): board commands reach
-            // `api::dispatch_with_machine` as the solo user owning the solo
-            // team through the window, with this machine for the handlers that
+            // The host built above, with this machine for the handlers that
             // react on it (task 046 point 3a).
             let board = SoloBoard {
-                host: BoardHost {
-                    context: context.clone(),
-                    provider,
-                    paths: paths.clone(),
-                    // Nothing in solo reaches it: the account commands that
-                    // mint refuse the shell (task 047).
-                    rate_limits: Arc::new(RateLimiter::new(context.clock.clone())),
-                },
-                caller: Caller::solo(&solo),
+                host,
+                caller,
                 machine: machine.clone(),
             };
 
@@ -525,7 +526,6 @@ pub fn run() {
                 machine,
                 paths,
                 in_flight,
-                tails,
                 queue,
                 runner,
                 board_port,
@@ -607,7 +607,6 @@ pub fn run() {
         commands::runs::start_task_run,
         commands::runs::cancel_task_run,
         commands::runs::retry_task_now,
-        commands::runs::get_run_tail,
         commands::runs::read_run_transcript_page,
         commands::runs::search_run_transcript,
         commands::runs::summarize_run_transcript,
@@ -832,101 +831,48 @@ fn report_startup_failure(
         .blocking_show();
 }
 
-/// The ADR-0018 forwarder: the one place a `rimaia-core` `ChangeEvent` becomes
-/// a Tauri event. Runs for the life of the app on one subscription taken once
-/// in `setup()` — not per window, not per command.
+/// The board forwarder (ADR-0018, task 048): the solo window's one
+/// subscription to board events, for the life of the app.
 ///
-/// `RecvError::Lagged` does not end this loop. It means a subscriber fell
-/// behind the broadcast channel's buffer and missed some publications, not
-/// that anything is wrong with the app; the recovery is to tell every view to
-/// re-read wholesale (an empty id array, ADR-0018's wire signal for that) and
-/// carry on. `RecvError::Closed` is the only exit — every `ServiceContext`
-/// clone holding the sender has been dropped, i.e. the app is shutting down.
-async fn forward_change_events(
-    app: tauri::AppHandle,
-    mut events: broadcast::Receiver<ChangeEvent>,
-) {
+/// [`Subscription`] does what used to be done here: the opening re-read, a
+/// wholesale re-read after a lag, and the tail, all as core's `WireEvent`s.
+/// It ends only when the context's channel closes, which is the app shutting
+/// down.
+async fn forward_board_events(app: tauri::AppHandle, mut events: Subscription) {
+    while let Some(event) = events.next().await {
+        emit(&app, event);
+    }
+}
+
+/// The local forwarder (task 048): this machine's changes, which no server
+/// ever sees, for the life of the app.
+///
+/// `RecvError::Lagged` does not end it: it logs the count and tells every
+/// view to re-read this machine's state wholesale, the local half of
+/// ADR-0018's recovery. `RecvError::Closed` is the only exit — the machine
+/// context is gone, i.e. the app is shutting down.
+async fn forward_local_events(app: tauri::AppHandle, mut events: broadcast::Receiver<LocalChange>) {
     loop {
         match events.recv().await {
-            // The team is dropped here: solo's one window shows one team, and
-            // every Tauri event name and payload stays what it was. Filtering
-            // by team is the server's fan-out (task 048).
-            Ok(event) => emit_change_event(&app, &event.change),
+            Ok(change) => emit(&app, local_wire(&change)),
             Err(RecvError::Lagged(dropped)) => {
                 tracing::warn!(
                     dropped,
-                    "change-event receiver fell behind; telling every view to re-read"
+                    "local-event receiver fell behind; telling every view to re-read"
                 );
-                // A `Change` per variant rather than a `ChangeEvent`: "re-read
-                // everything" is not about any one team.
-                emit_change_event(&app, &Change::Tasks(Arc::from([])));
-                emit_change_event(&app, &Change::Repositories(Arc::from([])));
-                emit_change_event(&app, &Change::Runs(Arc::from([])));
-                // Not compiler-forced, unlike `emit_change_event`'s own match:
-                // a variant left out here compiles and simply stops the
-                // schedules panel refreshing after a lag, which is the quietest
-                // possible failure. Listed for that reason.
-                emit_change_event(&app, &Change::Schedules(Arc::from([])));
-                emit_change_event(&app, &Change::Settings);
-            }
-            Err(RecvError::Closed) => break,
-        }
-    }
-}
-
-/// The variant-to-event-name mapping ADR-0018's table fixes. Kept as the only
-/// place those strings appear in the shell, so a renamed event is a one-line
-/// change here rather than a search across every window and command.
-fn emit_change_event(app: &tauri::AppHandle, change: &Change) {
-    let result = match change {
-        Change::Tasks(ids) => app.emit("tasks:changed", ids.as_ref()),
-        Change::Repositories(ids) => app.emit("repositories:changed", ids.as_ref()),
-        Change::Runs(ids) => app.emit("runs:changed", ids.as_ref()),
-        Change::Schedules(ids) => app.emit("schedules:changed", ids.as_ref()),
-        Change::Settings => app.emit("settings:changed", ()),
-    };
-    if let Err(error) = result {
-        tracing::error!(%error, "failed to forward a change event to the frontend");
-    }
-}
-
-/// The seam-contract D14 forwarder: the one place a `rimaia-core` `RunTail`
-/// becomes a `runs:tail` Tauri event. Subscribed once in `setup()`, mirroring
-/// [`forward_change_events`] in shape — but **not** in its recovery, which is
-/// the one thing D14 says to do differently on purpose.
-///
-/// `RecvError::Lagged` here is **discarded and counted, never recovered.**
-/// There is no empty-payload "re-read everything" signal on this channel,
-/// because there is nothing to re-read: a dropped tail line is already on
-/// disk in the run's JSONL transcript (ADR-0013), and the `runs` row is the
-/// other source of truth if the two ever disagree. Building a recovery path
-/// for a lossy, high-frequency view channel is exactly the mistake D14
-/// separated this channel from `ChangeEvent` to avoid.
-///
-/// Every snapshot is also recorded into the shell's own catch-up cache
-/// (`state::RunTails`) before it is forwarded, so a client that starts watching
-/// mid-run and calls `get_run_tail` sees at least this one.
-async fn forward_run_tail(
-    app: tauri::AppHandle,
-    mut events: broadcast::Receiver<RunTail>,
-    tails: RunTails,
-) {
-    loop {
-        match events.recv().await {
-            Ok(tail) => {
-                tails.record(tail.clone());
-                if let Err(error) = app.emit("runs:tail", &tail) {
-                    tracing::error!(%error, "failed to forward a run-tail snapshot to the frontend");
+                for event in local_reread() {
+                    emit(&app, event);
                 }
             }
-            Err(RecvError::Lagged(dropped)) => {
-                tracing::debug!(
-                    dropped,
-                    "run-tail receiver fell behind; the dropped snapshots are already on disk \
-                     in the run's transcript",
-                );
-            }
             Err(RecvError::Closed) => break,
         }
+    }
+}
+
+/// Emits one event into the window, under the name and with the payload core
+/// gave it.
+fn emit(app: &tauri::AppHandle, event: WireEvent) {
+    if let Err(error) = app.emit(event.name, event.data) {
+        tracing::error!(%error, event = event.name, "failed to forward an event to the frontend");
     }
 }

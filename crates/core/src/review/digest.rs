@@ -197,19 +197,14 @@ pub async fn mark_seen(ctx: &ServiceContext, through: DateTime<Utc>) -> Result<D
         ));
     }
 
-    // The marker is the actor's user setting, but a change event needs a team
-    // until task 048's `Audience::User`, and this call names no entity to take
-    // one from: it asks for the context's one team, before anything is
-    // written, so a scope of several is refused untouched.
-    let team_id = ctx.scope.sole()?.clone();
-
     // Read and write in one transaction, so two concurrent calls cannot
     // interleave and leave the smaller value behind.
     let mut tx = ctx.begin_immediate().await?;
     let stored = advance_marker(ctx, &mut tx, through).await?;
     tx.commit().await?;
 
-    ctx.publish(ChangeEvent::settings(team_id));
+    // The actor's own setting, announced to them alone.
+    ctx.publish(ChangeEvent::user_settings(ctx.actor.clone()));
     Ok(stored)
 }
 

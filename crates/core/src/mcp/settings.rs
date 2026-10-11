@@ -81,7 +81,7 @@ pub async fn set_configured_port(machine: &MachineContext, port: u16) -> Result<
 mod tests {
     use super::*;
     use crate::testing::TestContext;
-    use crate::ChangeEvent;
+    use crate::LocalChange;
     use pretty_assertions::assert_eq;
 
     #[tokio::test]
@@ -169,8 +169,9 @@ mod tests {
 
     #[tokio::test]
     async fn writing_the_port_publishes_settings() {
-        // The panel re-reads its status on `settings:changed`, which is the
-        // only way a second window learns the port moved (ADR-0018).
+        // The panel re-reads its status on `runner:changed`, which is the
+        // only way a second window learns the port moved (ADR-0018). A runner
+        // key, so on the machine's local channel (task 048).
         let mut harness = TestContext::new().await;
 
         set_configured_port(harness.machine(), 4600)
@@ -178,8 +179,8 @@ mod tests {
             .expect("store a port");
 
         assert_eq!(
-            harness.changes.try_recv().expect("a publication"),
-            ChangeEvent::settings(harness.solo.team_id.clone())
+            harness.local.try_recv().expect("a publication"),
+            LocalChange::Runner
         );
     }
 }

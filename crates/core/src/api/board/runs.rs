@@ -1,9 +1,9 @@
 //! The run reads every client sees, and giving up on a retry loop (task 015,
 //! ADR-0013; seam-contract D29).
 //!
-//! Starting, cancelling, retrying, tailing and the transcript reads spawn,
-//! signal or read on this machine, and stay local commands in the shell until
-//! the tasks D32's appendix names flip them.
+//! Starting, cancelling, retrying and the transcript reads spawn, signal or
+//! read on this machine, and stay local commands in the shell until the tasks
+//! D32's appendix names flip them. The tail is the host's relay's (task 048).
 
 use chrono::{DateTime, Utc};
 use serde::Deserialize;
@@ -11,6 +11,7 @@ use serde::Deserialize;
 use super::{ByRunId, ByTaskId};
 use crate::api::BoardRequest;
 use crate::db::{Run, RunKind, RunStatus};
+use crate::runner::events::RunTail;
 use crate::runs::{self, RunDetail, RunFilter, RunListEntry};
 use crate::scheduler;
 use crate::Result;
@@ -78,4 +79,21 @@ pub async fn list_runs(request: BoardRequest, args: ListRuns) -> Result<Vec<RunL
 /// under the host's paths. It runs no git (seam-contract D32's appendix).
 pub async fn get_run(request: BoardRequest, args: ByRunId) -> Result<RunDetail> {
     runs::get_run(&request.ctx, &request.host.paths, &args.run_id).await
+}
+
+/// The latest live snapshot of `run_id`, for a client that starts watching
+/// mid-run and has missed every `runs:tail` so far (seam-contract D14), or
+/// `null` when none has been heard.
+///
+/// The run is read under the caller's scope first, so another team's run id
+/// is `not_found` exactly as a never-issued one is; only then does the relay
+/// answer.
+pub async fn get_run_tail(request: BoardRequest, args: ByRunId) -> Result<Option<RunTail>> {
+    runs::get_run_row(&request.ctx, &args.run_id).await?;
+    Ok(request
+        .host
+        .tails
+        .latest(&args.run_id)
+        .filter(|tail| request.ctx.scope.contains(&tail.team_id))
+        .map(|tail| tail.tail))
 }

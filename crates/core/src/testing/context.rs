@@ -17,7 +17,7 @@ use crate::board::{
 };
 use crate::context::{ServiceContext, TeamScope};
 use crate::db::MutationSource;
-use crate::events::ChangeEvent;
+use crate::events::{ChangeEvent, LocalChange, LocalEvents};
 use crate::identity::{ensure_solo, SoloIdentity};
 use crate::machine::MachineContext;
 use crate::paths::AppPaths;
@@ -43,6 +43,10 @@ pub struct TestContext {
     /// Subscribed before the test can call anything, so a publication made by
     /// the call under test is waiting here rather than lost.
     pub changes: Receiver<ChangeEvent>,
+    /// The machine's local channel (task 048), subscribed the same way: where
+    /// a runner key, a schedule, a checkout or a worktree record write is
+    /// announced, and never on [`changes`](Self::changes).
+    pub local: Receiver<LocalChange>,
     /// The same instant the context's `Arc<dyn Clock>` reads — advance this and
     /// the code under test sees the new time.
     pub clock: TestClock,
@@ -102,19 +106,19 @@ impl TestContext {
             solo.user_id.clone(),
         );
         let changes = context.subscribe();
-        // The shell's shape (task 041): the board's own sender and the solo
-        // team, so a machine write reaches `changes` exactly as it reaches the
-        // window, and the same clock the board reads.
+        // The shell's shape (tasks 041 and 048): a local channel of its own,
+        // and the same clock the board reads.
         let machine = MachineContext {
             store: Arc::new(MemoryMachine::new()),
             clock: Arc::new(clock.clone()),
-            changes: context.changes.clone(),
-            event_team: solo.team_id.clone(),
+            local: LocalEvents::new(),
         };
+        let local = machine.local.subscribe();
 
         Self {
             context,
             changes,
+            local,
             clock,
             solo,
             machine,
@@ -122,7 +126,8 @@ impl TestContext {
     }
 
     /// The machine context over this test's [`MemoryMachine`], sharing the
-    /// test's clock, change channel and solo team (task 041).
+    /// test's clock, with its local channel heard on [`local`](Self::local)
+    /// (tasks 041 and 048).
     ///
     /// One store per harness, so what a test writes through it is what the
     /// code under test reads back. A test that asserts on `runner.db` itself

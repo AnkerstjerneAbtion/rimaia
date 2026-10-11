@@ -36,7 +36,7 @@ use crate::api::caller::Caller;
 use crate::clock::Clock;
 use crate::db::MutationSource;
 use crate::error::{Error, Result};
-use crate::events::{ChangeEvent, TeamId, UserId, CHANGE_BUFFER_CAPACITY};
+use crate::events::{ChangeEvent, TeamId, TeamTail, UserId, CHANGE_BUFFER_CAPACITY};
 use crate::runner::events::{RunTail, TAIL_CHANNEL_CAPACITY};
 
 /// The teams a request may touch (ADR-0029 point 5).
@@ -204,8 +204,10 @@ pub struct ServiceContext {
     /// sharing one bounded broadcast would let a chatty run lag a subscriber
     /// into dropping change events, where a drop actually costs something.
     ///
-    /// Prefer [`publish_tail`](Self::publish_tail).
-    pub tail: broadcast::Sender<RunTail>,
+    /// Each snapshot carries its run's team (task 048), so a stream admits it
+    /// without a lookup. Prefer [`publish_tail`](Self::publish_tail), which
+    /// every tail enters through, a remote runner's included (task 052).
+    pub tail: broadcast::Sender<TeamTail>,
     /// Which door every mutation made through this context came from
     /// (ADR-0019).
     ///
@@ -366,22 +368,28 @@ impl ServiceContext {
     /// A receiver for every live-run snapshot published from here on
     /// (seam-contract D14).
     ///
-    /// The shell calls this once in `setup()` and forwards to a `runs:tail`
-    /// Tauri event. A subscriber that reports `RecvError::Lagged` **discards and
-    /// counts** — it does not recover. There is nothing to recover: a dropped
+    /// Followed by the host's tail relay (`api::tail::TailRelay`) and by every
+    /// open stream (`api::events::Subscription`). A subscriber that reports
+    /// `RecvError::Lagged` **discards and counts** — it does not recover. There is nothing to recover: a dropped
     /// tail is a line of scrollback that is already on disk in the run's JSONL
     /// transcript, which is the record. Do not build replay for this channel.
-    pub fn subscribe_tail(&self) -> broadcast::Receiver<RunTail> {
+    pub fn subscribe_tail(&self) -> broadcast::Receiver<TeamTail> {
         self.tail.subscribe()
     }
 
-    /// Announces what a run is doing right now.
+    /// Announces what a run of `team_id`'s is doing right now.
+    ///
+    /// **The one way a tail enters the live channel** (seam-contract D14, as
+    /// task 048 amends it): the in-process board port passes its lease's team,
+    /// and task 052's runner route will pass the team from its lease. Nothing
+    /// writes to the tail relay directly, because the relay is one follower of
+    /// this channel and every open stream is another.
     ///
     /// Infallible for the same reason [`publish`](Self::publish) is, and with a
     /// weaker obligation besides: nothing here is a fact about stored state, so
     /// a snapshot nobody heard has cost nothing at all.
-    pub fn publish_tail(&self, tail: RunTail) {
-        let _ = self.tail.send(tail);
+    pub fn publish_tail(&self, team_id: TeamId, tail: RunTail) {
+        let _ = self.tail.send(TeamTail { team_id, tail });
     }
 }
 
@@ -526,11 +534,14 @@ mod tests {
         let ctx = context().await;
         let mut tail = ctx.subscribe_tail();
 
-        ctx.publish_tail(snapshot(1));
+        ctx.publish_tail(team(&ctx), snapshot(1));
 
         assert_eq!(
             tail.recv().await.expect("the sender is still alive"),
-            snapshot(1)
+            TeamTail {
+                team_id: team(&ctx),
+                tail: snapshot(1),
+            }
         );
     }
 
@@ -538,8 +549,14 @@ mod tests {
     async fn publishing_a_tail_with_nobody_watching_is_not_an_error() {
         let ctx = context().await;
 
-        assert!(ctx.tail.send(snapshot(1)).is_err());
-        ctx.publish_tail(snapshot(1));
+        assert!(ctx
+            .tail
+            .send(TeamTail {
+                team_id: team(&ctx),
+                tail: snapshot(1),
+            })
+            .is_err());
+        ctx.publish_tail(team(&ctx), snapshot(1));
     }
 
     #[tokio::test]
@@ -553,7 +570,7 @@ mod tests {
         let mut behind = ctx.subscribe_tail();
 
         for elapsed in 0..=TAIL_CHANNEL_CAPACITY {
-            ctx.publish_tail(snapshot(elapsed as i64));
+            ctx.publish_tail(team(&ctx), snapshot(elapsed as i64));
         }
 
         assert_eq!(
@@ -564,7 +581,7 @@ mod tests {
             RecvError::Lagged(1)
         );
         assert_eq!(
-            behind.recv().await.expect("the sender is still alive"),
+            behind.recv().await.expect("the sender is still alive").tail,
             snapshot(1)
         );
     }
@@ -579,7 +596,7 @@ mod tests {
         let mut changes = ctx.subscribe();
 
         for elapsed in 0..TAIL_CHANNEL_CAPACITY * 4 {
-            ctx.publish_tail(snapshot(elapsed as i64));
+            ctx.publish_tail(team(&ctx), snapshot(elapsed as i64));
         }
         ctx.publish(ChangeEvent::runs(team(&ctx), ["run".to_string()]));
 

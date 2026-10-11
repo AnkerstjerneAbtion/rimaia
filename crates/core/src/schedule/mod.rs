@@ -46,12 +46,14 @@ pub mod fire;
 pub mod preflight;
 pub mod window;
 
+use std::sync::Arc;
+
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::db::{new_id, Schedule, ScheduleMode};
 use crate::error::{Error, Result};
-use crate::events::ChangeEvent;
+use crate::events::LocalChange;
 use crate::machine::MachineContext;
 use crate::scheduler::inflight::CONCURRENCY_CEILING;
 
@@ -180,9 +182,7 @@ fn not_found(id: &str) -> Error {
 
 /// Announces a write to one schedule.
 fn announce(machine: &MachineContext, id: &str) {
-    // A machine event on the board's channel, under `event_team`, until task
-    // 048 gives machine events `LocalEvents`.
-    machine.publish(|team| ChangeEvent::schedules(team, [id.to_string()]));
+    machine.publish(LocalChange::Schedules(Arc::from([id.to_string()])));
 }
 
 /// Creates a schedule, armed from now.
@@ -756,7 +756,8 @@ mod tests {
     #[tokio::test]
     async fn every_write_announces_itself_on_its_own_channel() {
         // ADR-0018, and seam-contract D24's argument for a variant of its own: a
-        // `schedules` row is an entity, not a key/value setting.
+        // `schedules` row is an entity, not a key/value setting. Local since
+        // task 048: a schedule is this machine's.
         let mut harness = TestContext::new().await;
 
         let created = create(harness.machine(), nightly())
@@ -764,8 +765,12 @@ mod tests {
             .expect("create a schedule");
 
         assert_eq!(
-            harness.changes.try_recv().expect("a waiting publication"),
-            ChangeEvent::schedules(harness.solo.team_id.clone(), [created.id.clone()]),
+            harness.local.try_recv().expect("a waiting publication"),
+            LocalChange::Schedules(Arc::from([created.id.clone()])),
+        );
+        assert!(
+            harness.changes.try_recv().is_err(),
+            "nothing on the board's channel"
         );
     }
 

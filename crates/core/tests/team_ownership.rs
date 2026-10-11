@@ -66,11 +66,9 @@ async fn a_change_event_names_the_team_of_the_row_it_announces() {
     assert_eq!(
         drain(&mut h),
         vec![
+            // This machine's checkout belongs to no team, and is announced on
+            // the machine's local channel, never here (task 048).
             ChangeEvent::repositories(second.team_id.clone(), [registered.id.clone()]),
-            // This machine's checkout, which belongs to no team: it rides the
-            // board's channel under the machine's `event_team`, the solo team,
-            // until task 048 moves it to `LocalEvents` (task 066).
-            ChangeEvent::repositories(h.solo.team_id.clone(), [registered.id]),
             ChangeEvent::tasks(second.team_id.clone(), [task.id]),
         ]
     );

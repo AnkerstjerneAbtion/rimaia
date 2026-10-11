@@ -52,7 +52,7 @@ use crate::clock::Clock;
 use crate::context::ServiceContext;
 use crate::credentials::redact::Redactor;
 use crate::error::Result;
-use crate::events::RunId;
+use crate::events::{RunId, TeamId};
 use crate::paths::AppPaths;
 use crate::runner::provider::{AgentProvider, ClaudeProvider, PermissionMode};
 
@@ -867,9 +867,9 @@ pub struct EventStream {
 /// Where an [`EventStream`]'s tail snapshots go.
 enum TailSink {
     /// A context's D14 channel, through
-    /// [`ServiceContext::publish_tail`]: what a stream built with
-    /// [`EventStream::create`] does.
-    Context(ServiceContext),
+    /// [`ServiceContext::publish_tail`] for the run's team: what a stream
+    /// built with [`EventStream::create`] does.
+    Context(ServiceContext, TeamId),
     /// A channel whoever drives the stream drains: the runner's, whose tail
     /// reaches the board through the board port (D31 point 7). See
     /// [`EventStream::forwarding`].
@@ -882,15 +882,19 @@ impl EventStream {
     /// The run id is the one already on the `runs` row: the row and its
     /// transcript path are created together (ADR-0013), before the first line
     /// exists.
+    ///
+    /// `team_id` is the run's team, which every snapshot carries on the live
+    /// channel (seam-contract D14, as task 048 amends it).
     pub fn create(
         context: &ServiceContext,
+        team_id: &str,
         paths: &AppPaths,
         task_id: &str,
         run_id: &str,
     ) -> Result<Self> {
         Self::open(
             context.clock.clone(),
-            TailSink::Context(context.clone()),
+            TailSink::Context(context.clone(), team_id.to_string()),
             paths,
             task_id,
             run_id,
@@ -1030,7 +1034,7 @@ impl EventStream {
                 TailSink::Outbox(outbox) => {
                     let _ = outbox.send(tail);
                 }
-                TailSink::Context(context) => context.publish_tail(tail),
+                TailSink::Context(context, team_id) => context.publish_tail(team_id.clone(), tail),
             }
         }
 

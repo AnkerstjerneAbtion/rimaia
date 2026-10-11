@@ -9,13 +9,14 @@
 //! # It lives in the shell, and it has to
 //!
 //! `rimaia-core` must not depend on `tauri` (ADR-0015), and a notification is a
-//! `tauri` call. So core publishes the facts — an open window is a `settings`
-//! key, and writing it announces itself on ADR-0018's channel — and this module
-//! turns a *change* in them into a sentence.
+//! `tauri` call. So core publishes the facts — an open window is a runner key,
+//! and writing it announces `LocalChange::Runner` on the machine's local
+//! channel (task 048) — and this module turns a *change* in them into a
+//! sentence.
 //!
 //! # It diffs rather than listening for an event that says "fired"
 //!
-//! There is deliberately no `ChangeEvent::ScheduleFired`. ADR-0018's whole
+//! There is deliberately no `LocalChange::ScheduleFired`. ADR-0018's whole
 //! argument is that events carry ids and never payloads, because an event with
 //! a payload is a second source of truth that is wrong the moment the next
 //! writer commits — and "the window opened" is a fact about stored state, which
@@ -34,7 +35,7 @@
 use rimaia_core::machine::MachineContext;
 use rimaia_core::schedule::window::{self, RunWindow};
 use rimaia_core::scheduler::QueueState;
-use rimaia_core::{Change, ChangeEvent};
+use rimaia_core::LocalChange;
 use rimaia_runner::queue::QueueHandle;
 use tauri::AppHandle;
 use tauri_plugin_notification::NotificationExt;
@@ -50,7 +51,7 @@ pub async fn announce_run_windows(
     app: AppHandle,
     machine: MachineContext,
     queue: QueueHandle,
-    mut events: broadcast::Receiver<ChangeEvent>,
+    mut events: broadcast::Receiver<LocalChange>,
 ) {
     // What the last launch left behind, read once. A crash does not close a
     // window — only quitting does (seam-contract D15's amendment) — so this is
@@ -62,13 +63,7 @@ pub async fn announce_run_windows(
 
     loop {
         match events.recv().await {
-            // Only `Settings` can carry either of these: the window and
-            // `queue_state` are both runner settings, announced as `Settings`. A task moving or a run
-            // ending cannot open a window, so there is nothing to re-read.
-            Ok(ChangeEvent {
-                change: Change::Settings,
-                ..
-            }) => {}
+            Ok(change) if may_move_the_window(&change) => {}
             Ok(_) => continue,
             // A dropped event costs one late comparison, never a missed one:
             // the next event re-reads the same rows and still finds the
@@ -97,6 +92,15 @@ pub async fn announce_run_windows(
             announced_error = error;
         }
     }
+}
+
+/// Whether `change` can open or close a window, or record a refused start.
+///
+/// Only `Runner` can: the window, `queue_state` and the refusal's
+/// announcement are all runner keys (task 048). A schedule edited, a checkout
+/// or a worktree record cannot open a window, so there is nothing to re-read.
+fn may_move_the_window(change: &LocalChange) -> bool {
+    matches!(change, LocalChange::Runner)
 }
 
 /// The open window, or `None` — plus the switch, because a window that is open
@@ -144,5 +148,23 @@ fn notify(app: &AppHandle, title: &str, body: &str) {
         // Denied permission, a headless session, or an OS that refused. None of
         // them is a reason for anything else to behave differently.
         tracing::debug!(%error, "could not show a desktop notification");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Arc;
+
+    #[test]
+    fn a_window_change_arrives_as_a_runner_change_and_nothing_else_re_reads() {
+        assert!(may_move_the_window(&LocalChange::Runner));
+        for other in [
+            LocalChange::Schedules(Arc::from(["nightly".to_string()])),
+            LocalChange::Checkouts(Arc::from(["repository".to_string()])),
+            LocalChange::Worktrees(Arc::from(["task".to_string()])),
+        ] {
+            assert!(!may_move_the_window(&other), "{other:?}");
+        }
     }
 }

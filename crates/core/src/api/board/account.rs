@@ -74,9 +74,15 @@ pub async fn list_sessions(request: BoardRequest, _args: NoArgs) -> Result<Vec<S
 
 /// Deletes one of the caller's sessions. With `get_account`'s `current.id`
 /// this is signing out.
+///
+/// Then every open stream of the caller's resolves its caller again before
+/// it delivers anything more (task 048), so a stream opened with the revoked
+/// session ends rather than outliving it (ADR-0030 point 2).
 pub async fn revoke_session(request: BoardRequest, args: ById) -> Result<()> {
     current(&request)?;
-    sessions::revoke(&request.ctx, &args.id).await
+    sessions::revoke(&request.ctx, &args.id).await?;
+    request.host.streams.revalidate(&request.caller.user_id);
+    Ok(())
 }
 
 /// The caller's tokens, never a hash.
@@ -111,9 +117,12 @@ pub async fn create_personal_access_token(
 }
 
 /// Revokes one of the caller's tokens; a runner token unpairs its runner.
+/// The caller's open streams resolve again, as [`revoke_session`]'s do.
 pub async fn revoke_api_token(request: BoardRequest, args: ById) -> Result<()> {
     current(&request)?;
-    tokens::revoke(&request.ctx, &args.id).await
+    tokens::revoke(&request.ctx, &args.id).await?;
+    request.host.streams.revalidate(&request.caller.user_id);
+    Ok(())
 }
 
 /// A ten-minute, single-use code a headless runner pairs with.

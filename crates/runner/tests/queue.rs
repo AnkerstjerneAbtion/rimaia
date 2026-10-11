@@ -76,6 +76,7 @@ use rimaia_core::consent::ceiling::STRATEGY_CEILING;
 use rimaia_core::db::{
     BoardColumn, ExitClass, OnArchive, RunKind, RunState, RunStatus, ScheduleMode, Task,
 };
+use rimaia_core::events::TeamTail;
 use rimaia_core::machine::{leases, Checkout, HeldLease};
 use rimaia_core::mcp::{Tool, MCP_SERVER_NAME};
 use rimaia_core::repo::{self, NewRepository};
@@ -99,7 +100,7 @@ use rimaia_core::tasks::{self, NewTask, TaskFilter, TaskSummary};
 use rimaia_core::testing::board_contract::Which;
 use rimaia_core::testing::db::insert_runner;
 use rimaia_core::testing::{self, open_gate as open, FakeCli, TempRepo, TestContext};
-use rimaia_core::{AppPaths, ChangeEvent, Clock, ServiceContext};
+use rimaia_core::{AppPaths, ChangeEvent, Clock, LocalChange, ServiceContext};
 use rimaia_runner::queue::{self, QueueHandle, SoloBoard};
 use rimaia_runner::RunnerStore;
 use tempfile::TempDir;
@@ -1006,7 +1007,7 @@ async fn two_concurrent_runs_tail_under_their_own_run_ids() {
         loop {
             match tail.recv().await {
                 Ok(snapshot) => {
-                    seen.insert(snapshot.run_id);
+                    seen.insert(snapshot.tail.run_id);
                     if seen.len() == 2 {
                         return;
                     }
@@ -2977,6 +2978,107 @@ async fn a_blocking_doctor_report_stops_a_scheduled_start_and_says_why() {
 }
 
 #[tokio::test]
+async fn a_refused_scheduled_start_announces_a_local_change() {
+    // The refusal writes no queue state, so it announces itself, for the Runs
+    // view to re-read and show it. The refusal is this runner's, so it is a
+    // `LocalChange::Runner` on the machine's channel, never a board event
+    // (task 048).
+    let mut fixture = Fixture::new().await;
+    let due = fixture.harness.clock.now();
+    let schedule = fixture.add_schedule(once_at("Tonight", due)).await;
+    let mut local = fixture.machine().local.subscribe();
+    while fixture.harness.changes.try_recv().is_ok() {}
+
+    let queue = fixture.spawn_queue_with_runner(RunnerConfig {
+        program: fixture.paths.data_dir().join("no-such-claude"),
+        ..RunnerConfig::default()
+    });
+    tokio::time::timeout(TEST_TIMEOUT, async {
+        while queue.last_step_error().is_none() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("the refusal is recorded");
+    converge().await;
+
+    let mut announced = Vec::new();
+    while let Ok(change) = local.try_recv() {
+        announced.push(change);
+    }
+    assert_eq!(
+        announced,
+        vec![
+            LocalChange::Schedules(Arc::from([schedule])),
+            LocalChange::Runner,
+        ],
+        "the fire, then the refusal"
+    );
+    let mut settings = Vec::new();
+    while let Ok(event) = fixture.harness.changes.try_recv() {
+        if event.change == rimaia_core::Change::Settings {
+            settings.push(event);
+        }
+    }
+    assert_eq!(
+        settings,
+        Vec::<ChangeEvent>::new(),
+        "nothing on the board's channel"
+    );
+
+    queue.shutdown();
+}
+
+#[tokio::test]
+async fn the_runner_loop_wakes_on_a_board_change_and_on_a_local_change() {
+    // A moved publication with its subscriber left behind is a queue that no
+    // longer wakes when started: it compiles, and passes every test that only
+    // checks the publication (task 048's Notes). With the clock stopped and
+    // nothing to claim, nothing else wakes the loop, so a finished pass after
+    // each write is that write's wake.
+    let fixture = Fixture::new().await;
+    let schedule = fixture
+        .add_schedule(nightly_at("Nightly", Some("06:00")))
+        .await;
+    let queue = fixture.spawn_queue();
+    settle(&queue, 0).await;
+
+    // The board arm: a task moved to ready.
+    let before = queue.completed_passes();
+    fixture.add_task("Alpha").await;
+    settle(&queue, before).await;
+
+    // The local arm: a schedule edited.
+    let before = queue.completed_passes();
+    scheduler_schedule::set_enabled(fixture.machine(), &schedule, false)
+        .await
+        .expect("disable the schedule");
+    settle(&queue, before).await;
+
+    // The local arm: the queue started through the store, the way any door
+    // but this handle's own signal would, so only the local channel says so.
+    let before = queue.completed_passes();
+    scheduler::state::set_queue_state(fixture.machine(), QueueState::Running)
+        .await
+        .expect("start the queue");
+    settle(&queue, before).await;
+
+    queue.shutdown();
+}
+
+/// Resolves once the loop has finished a pass after `before`, and parked.
+async fn settle(queue: &QueueHandle, before: u64) {
+    tokio::time::timeout(TEST_TIMEOUT, async {
+        while queue.completed_passes() <= before {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("the write never woke the loop");
+    converge().await;
+}
+
+#[tokio::test]
 async fn quitting_mid_window_closes_the_window_and_the_next_occurrence_still_fires() {
     // Seam-contract D15's amendment, in one test. Quitting still always stops
     // the queue, and now also closes the window — so relaunching at 03:00 does
@@ -4420,8 +4522,7 @@ impl OneRunner {
         let machine = rimaia_core::machine::MachineContext {
             store: Arc::new(store),
             clock: Arc::new(harness.clock.clone()),
-            changes: harness.context.changes.clone(),
-            event_team: harness.solo.team_id.clone(),
+            local: rimaia_core::LocalEvents::new(),
         };
         let board: Arc<dyn BoardPort> = Arc::new(InProcessBoard::new(
             harness.context.clone(),
@@ -4480,7 +4581,7 @@ async fn wait_until(
 ///
 /// The run reporting its own progress (seam-contract D14), which is the only
 /// honest answer to "is it in flight yet" that costs no sleep.
-async fn once_the_run_is_live(mut tail: Receiver<RunTail>) {
+async fn once_the_run_is_live(mut tail: Receiver<TeamTail>) {
     tokio::time::timeout(TEST_TIMEOUT, tail.recv())
         .await
         .expect("a run must report itself in flight")

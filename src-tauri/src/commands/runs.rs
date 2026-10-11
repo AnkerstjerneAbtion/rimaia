@@ -1,5 +1,5 @@
-//! Starting, cancelling and tailing a run (task 008; ADR-0004, ADR-0011,
-//! ADR-0012, ADR-0013; seam-contract D14).
+//! Starting and cancelling a run (task 008; ADR-0004, ADR-0011, ADR-0012,
+//! ADR-0013).
 //!
 //! Every decision that matters — whether the repository has opted in,
 //! whether the CLI is installed, how the process is supervised, how the
@@ -15,9 +15,10 @@
 //! as long as the in-flight registry refuses a second concurrent one. The run
 //! reads every client sees, `get_run` and the history lists among them, are
 //! board commands in `rimaia_core::api::board::runs` (seam-contract D32); what
-//! stays here starts, cancels, tails or reads on this machine.
+//! stays here starts, cancels or reads on this machine. The live tail's
+//! catch-up read, `get_run_tail`, is a board command answered from the host's
+//! tail relay (task 048).
 
-use rimaia_core::runner::events::RunTail;
 use rimaia_core::runner::{
     claim_manual_start, run_task, ManualStart, RunRequest, Started, Starter,
 };
@@ -162,19 +163,6 @@ async fn start_by_hand(state: &AppState, start: ManualStart) -> Result<()> {
 pub fn cancel_task_run(state: State<'_, AppState>, task_id: String) -> Result<()> {
     state.in_flight.cancel(&task_id);
     Ok(())
-}
-
-/// The most recent live-tail snapshot the shell has seen for `run_id`, or
-/// `None` when it has not seen one yet.
-///
-/// This is the read half of seam-contract D14: a client that opens the Runs
-/// view after a run has already started has missed every `runs:tail` event
-/// published so far, and this is what it reads once to catch up before
-/// subscribing for the rest. See [`crate::state::RunTails`]'s own doc for
-/// why this is the latest snapshot rather than a scrollback of every one.
-#[tauri::command]
-pub fn get_run_tail(state: State<'_, AppState>, run_id: String) -> Result<Option<RunTail>> {
-    Ok(state.tails.get(&run_id))
 }
 
 // ---------------------------------------------------------------------------

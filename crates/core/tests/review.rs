@@ -998,7 +998,7 @@ async fn the_review_that_empties_the_queue_advances_the_marker() {
         assert_eq!(f.marker().await, Some(test_epoch()), "{verdict:?}");
         let events = f.drain_events();
         assert!(
-            events.contains(&ChangeEvent::settings(f.harness.solo.team_id.clone())),
+            events.contains(&ChangeEvent::user_settings(f.harness.solo.user_id.clone())),
             "{verdict:?}: {events:?}"
         );
         assert!(
