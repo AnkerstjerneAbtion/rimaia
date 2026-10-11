@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, within } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { invoke } from "@tauri-apps/api/core";
@@ -641,6 +641,14 @@ describe("the live diff fallback (task 050)", () => {
 
     await screen.findByText("Run detail — Implementation · #2");
     expect(screen.queryByRole("button", { name: "Reveal raw log" })).not.toBeInTheDocument();
-    expect(mockInvoke.mock.calls.map(([command]) => command)).toEqual(["get_run", "get_review_history"]);
+    // `get_review_history` is sent from an effect of the render that shows the
+    // heading, and React flushes that effect in a later task than the commit
+    // `findByText` wakes on: asserting at once races it.
+    await waitFor(() =>
+      expect(mockInvoke.mock.calls.map(([command]) => command)).toEqual([
+        "get_run",
+        "get_review_history",
+      ]),
+    );
   });
 });
