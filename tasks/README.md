@@ -61,7 +61,7 @@ reviewable in the app afterwards.
 | 48 | [072](072-the-strategy-ceiling-at-spawn-and-what-the-agent-is-told.md) | The strategy ceiling at spawn, and what the agent is told | v0.5 | 045 | #34 |
 | 49 | [073](073-every-prompt-input-is-consented-generated-or-constrained.md) | Every prompt input is consented, generated or constrained | v0.5 | 045, 072 | #34 |
 | 50 | [046](046-the-server-crate-and-one-command-registry.md) | The server crate and one command registry | v0.5 | 028, 037, 045, 072 | #34 |
-| 51 | [047](047-identity.md) | Identity: sign-in, sessions and tokens | v0.5 | 046 | — |
+| 51 | [047](047-identity.md) | Identity: sign-in, sessions and tokens | v0.5 | 046 | #34 |
 | 52 | [048](048-events-over-sse.md) | Change events over SSE, filtered by team | v0.5 | 047 | — |
 | 53 | [049](049-frontend-transport.md) | A frontend transport per command kind | v0.5 | 048, 028, 017 | — |
 | 54 | [050](050-the-web-shell.md) | The web shell | v0.5 | 049 | — |
