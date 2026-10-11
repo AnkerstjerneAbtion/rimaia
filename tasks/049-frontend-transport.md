@@ -6,6 +6,7 @@ status: ready
 depends_on: ["048", "028", "017"]
 adrs: ["0034", "0024"]
 size: L
+landed: "#34"
 ---
 
 # A frontend transport per command kind
