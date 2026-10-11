@@ -181,6 +181,16 @@ impl RelayedRequests {
         &self.cancels
     }
 
+    /// Every held Run now, as `(task_id, runner_id)` in task order: what a
+    /// test reads to see how many requests a press recorded.
+    #[cfg(any(test, feature = "testing"))]
+    pub fn held(&self) -> Vec<(String, String)> {
+        self.lock()
+            .iter()
+            .map(|(task_id, pending)| (task_id.clone(), pending.runner_id.clone()))
+            .collect()
+    }
+
     fn record(&self, task_id: String, pending: Pending) {
         self.lock().insert(task_id, pending);
     }

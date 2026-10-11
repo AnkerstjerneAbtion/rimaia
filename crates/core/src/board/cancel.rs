@@ -39,9 +39,9 @@ impl CancelRequests {
         self.lock().contains(&(task_id.to_string(), generation))
     }
 
-    /// Every pending request, for the heartbeat that drops the ones whose
-    /// lease has ended.
-    pub(crate) fn pending(&self) -> Vec<(String, i64)> {
+    /// Every pending request, `(task_id, generation)`: what the heartbeat
+    /// walks to drop the ones whose lease has ended.
+    pub fn pending(&self) -> Vec<(String, i64)> {
         self.lock().iter().cloned().collect()
     }
 
