@@ -606,6 +606,9 @@ reaches for a plugin fails the test instead of slipping under an allowance.
     the review view pass unedited. `ActiveRunCard`'s tests pass
     unedited, because the wrapper's own `runId` filter admits exactly the snapshots the
     card's filter did.
+  - **Amendment (D39 point 12):** `src/dev/fixtures/fixtures.test.ts` also changes, by one
+    `notWrappers` set. It mocks `@tauri-apps/api/core` and called every function export of
+    `commands.ts`, and Scope 1's non-wrapper exports cannot be called with no arguments.
   - `./scripts/check-command-wiring.sh` passes with the two new local rows.
   - 028's fixture coverage test passes with rows for `get_client_capabilities` and
     `choose_folder`.

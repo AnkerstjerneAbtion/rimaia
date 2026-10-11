@@ -7463,6 +7463,18 @@ what the dialog and opener plugins turn into once a page can run without a shell
     existed. The local tenant-isolation case is `Local::Ids(Take::Task)` with B's task really
     in flight, so it fails on the answer and on the run it stopped. A task the caller can see
     with nothing running is still `Ok(())`. 052 decides who may ask for the board-side version.
+12. **028's fixture test skips the exports that are not command wrappers** (amends task 049's
+    "Nothing else moved", which lists the test files that may change). `fixtures.test.ts`
+    mocks `@tauri-apps/api/core` and called every function `commands.ts` exports with no
+    arguments, on the premise that each one is a wrapper. Scope 1 exports `httpCommandTransport`,
+    `transportHeaders`, `credentialsMode`, `errorFromResponse` and `runningInDesktopShell`
+    beside the wrappers, and the setters were already exports; calling one with no arguments
+    throws or uninstalls the transport under test. So that file's `notWrappers` set names them,
+    and a future export that is not a wrapper joins it. The edit is the 049 diff's only touch
+    on a test file that mocks `@tauri-apps/api/core` outside the three the task names, and it
+    changes which exports the test calls, not what it asserts. *Declined:* picking wrappers by
+    the `board|local<` regex `commandNamesSent()` already uses, which yields command names
+    (`get_app_info`), not the exports' names, so it would need a second map to maintain.
 
 **Why.** (1) and (2) give every later task one place to ask what the client is. (3) keeps a
 header added once from being added twice, and out of a retry's stale copy. (4) is what makes a
