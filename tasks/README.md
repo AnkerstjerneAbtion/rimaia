@@ -60,7 +60,7 @@ reviewable in the app afterwards.
 | 47 | [045](045-consent-and-eligibility.md) | Consent and eligibility | v0.5 | 021, 039, 043, 044, 067 | #34 |
 | 48 | [072](072-the-strategy-ceiling-at-spawn-and-what-the-agent-is-told.md) | The strategy ceiling at spawn, and what the agent is told | v0.5 | 045 | #34 |
 | 49 | [073](073-every-prompt-input-is-consented-generated-or-constrained.md) | Every prompt input is consented, generated or constrained | v0.5 | 045, 072 | #34 |
-| 50 | [046](046-the-server-crate-and-one-command-registry.md) | The server crate and one command registry | v0.5 | 028, 037, 045, 072 | — |
+| 50 | [046](046-the-server-crate-and-one-command-registry.md) | The server crate and one command registry | v0.5 | 028, 037, 045, 072 | #34 |
 | 51 | [047](047-identity.md) | Identity: sign-in, sessions and tokens | v0.5 | 046 | — |
 | 52 | [048](048-events-over-sse.md) | Change events over SSE, filtered by team | v0.5 | 047 | — |
 | 53 | [049](049-frontend-transport.md) | A frontend transport per command kind | v0.5 | 048, 028, 017 | — |

@@ -6,6 +6,7 @@ status: ready
 depends_on: ["028", "037", "045", "072"]
 adrs: ["0023", "0027", "0029", "0030", "0034", "0037"]
 size: L
+landed: "#34"
 ---
 
 # The server crate and one command registry
