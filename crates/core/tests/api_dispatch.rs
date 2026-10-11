@@ -15,7 +15,7 @@ use std::process::Command;
 use pretty_assertions::assert_eq;
 use rimaia_core::api::{self, BoardHost, Caller, Door, TeamGrant};
 use rimaia_core::archive::{self, OnArchiveOutcome};
-use rimaia_core::db::{BoardColumn, OnArchive, Repository, Task};
+use rimaia_core::db::{BoardColumn, OnArchive, Repository, RunState, Task};
 use rimaia_core::identity::Role;
 use rimaia_core::repo::{self, NewRepository};
 use rimaia_core::runner::provider::{ClaudeProvider, ProviderProfile};
@@ -237,22 +237,21 @@ async fn invoke_payloads_dispatch_unchanged() {
             .unwrap_or_else(|error| panic!("{name} {args}: {error}"));
     }
 
-    // commands.test.ts: `give_up_on_task` with `{ taskId }`. Giving up needs a
-    // task waiting out a retry, so the payload is proven by what refuses it:
-    // the rule, about the card, and not the deserializer.
-    let refused = api::dispatch(
+    // commands.test.ts: `give_up_on_task` with `{ taskId }`, on a task that is
+    // waiting out a retry, which is the only one giving up applies to.
+    for run_state in [RunState::Queued, RunState::Running, RunState::WaitingRetry] {
+        tasks::set_run_state(&teams.a, &a.ready, run_state)
+            .await
+            .expect("a legal run-state transition");
+    }
+    api::dispatch(
         &host,
         team_a(&teams),
         "give_up_on_task",
         json!({ "taskId": a.ready }),
     )
     .await
-    .expect_err("the ready task is not waiting to retry");
-    assert_eq!(refused.code(), ErrorCode::Invalid);
-    assert!(
-        !refused.to_string().contains("could not read its arguments"),
-        "{refused}"
-    );
+    .expect("give up on a task waiting to retry");
 }
 
 // ---------------------------------------------------------------------------
