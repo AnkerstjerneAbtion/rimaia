@@ -41,6 +41,7 @@ use rimaia_core::machine::Checkout;
 use rimaia_core::paths::DATA_DIR_ENV;
 use rimaia_core::runner::provider::ClaudeProvider;
 use rimaia_core::runner::RunnerConfig;
+use rimaia_core::testing::doctor::write_stand_in;
 use rimaia_core::testing::{TempRepo, TestContext};
 use rimaia_core::AppPaths;
 use tempfile::TempDir;
@@ -49,16 +50,12 @@ use tempfile::TempDir;
 // Stand-in binaries
 // ---------------------------------------------------------------------------
 
-/// Writes an executable script at `dir/name` and returns its path.
+/// Writes an executable script at `dir/name` and returns its path, through
+/// `write_stand_in`, because the tests in this file run in parallel and a
+/// script written with a plain `std::fs::write` can fail to spawn on Linux.
 fn stub(dir: &Path, name: &str, body: &str) -> PathBuf {
     let path = dir.join(name);
-    std::fs::write(&path, body).expect("the stub must be writable");
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))
-            .expect("the stub must be executable");
-    }
+    write_stand_in(&path, body);
     path
 }
 
@@ -233,7 +230,7 @@ async fn a_claude_older_than_the_pinned_minimum_warns_instead_of_locking_the_use
     // Deliberately not a failure: see the check's own doc and seam-contract
     // D19. A version string is evidence about what has been tested, not a
     // reason to refuse someone their own queue.
-    assert_eq!(result.status, CheckStatus::Warn);
+    assert_eq!(result.status, CheckStatus::Warn, "{}", result.detail);
     assert!(result.detail.contains("2.0.1"));
 }
 

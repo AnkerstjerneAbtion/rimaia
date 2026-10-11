@@ -64,20 +64,44 @@ pub fn temp_environment() -> (TempDir, Environment) {
 /// all a test needs is to get past the preflight.
 #[cfg(unix)]
 pub fn standin_claude(dir: &Path) -> PathBuf {
-    use std::os::unix::fs::PermissionsExt;
-
     let program = dir.join("claude-standin");
-    std::fs::write(
+    write_stand_in(
         &program,
         "#!/bin/sh\n\
          if [ \"$1\" = '--version' ]; then echo '2.1.234 (Claude Code)'; exit 0; fi\n\
          if [ \"$1\" = 'auth' ]; then echo '{\"loggedIn\": true}'; exit 0; fi\n\
          exit 0\n",
-    )
-    .expect("write the stand-in claude");
-    std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755))
-        .expect("make the stand-in claude executable");
+    );
     program
+}
+
+/// Writes an executable script at `path` that this process never holds open
+/// for writing.
+///
+/// Linux refuses to `exec` a file anything has open for writing (`ETXTBSY`,
+/// "Text file busy"), and a child forked by another test's thread inherits
+/// every descriptor this process has open until that child calls `exec`. A
+/// stand-in written with `std::fs::write` is therefore, now and then, still
+/// open in some unrelated child when the test spawns it, and the spawn fails:
+/// a flake on Linux CI only, since macOS has no such check for scripts.
+///
+/// So the body is written to a file that is never executed, and `cp` writes
+/// the stand-in itself in its own process, where no other thread forks.
+#[cfg(unix)]
+pub fn write_stand_in(path: &Path, body: &str) {
+    use std::os::unix::fs::PermissionsExt;
+
+    let staging = TempDir::new().expect("a staging directory for the stand-in");
+    let source = staging.path().join("body");
+    std::fs::write(&source, body).expect("write the stand-in's body");
+    let copied = std::process::Command::new("cp")
+        .arg(&source)
+        .arg(path)
+        .status()
+        .expect("run cp");
+    assert!(copied.success(), "cp could not write {}", path.display());
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755))
+        .expect("make the stand-in executable");
 }
 
 /// Everything `QueueHandle::start`'s preflight needs to pass without an
