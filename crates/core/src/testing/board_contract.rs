@@ -27,6 +27,8 @@
 //! `a_personal_team_ignores_the_ceiling_column`),
 //! the strategy ceiling across a `Continue` (072:
 //! `a_review_phase_reached_through_continue_with_a_model_outside_the_ceiling_is_released`),
+//! the bundle's two caps (052: the `a_finish_whose_…` cases, which over HTTP
+//! prove the default body limit holds a capped finish),
 //! expiry (053), `run_tool` (055), resends (056).
 
 use std::future::Future;
@@ -59,7 +61,11 @@ use crate::runner::events::{RunTail, TokenUsage};
 use crate::runner::outcome::{self, NewRun, RunOutcome, SpawnedAs};
 use crate::runner::provider::{ClaudeProvider, ProviderId, ProviderProfile};
 use crate::runner::RunTrigger;
-use crate::runs::{self, bundle::RunCapture};
+use crate::runs::bundle::{
+    encoded_len, BundleFile, PatchInclusion, ReviewBundle, RunCapture, BUNDLE_CAP_BYTES,
+    PATCH_CAP_BYTES,
+};
+use crate::runs::{self};
 use crate::scheduler::selection::{self, RunnerView};
 use crate::scheduler::ResumePoint;
 use crate::tasks::strategy::StrategyPlan;
@@ -176,6 +182,9 @@ macro_rules! board_contract {
             a_team_that_forbids_unattended_runs_blocks_every_runner,
             a_personal_team_ignores_the_ceiling_column,
             a_review_phase_reached_through_continue_with_a_model_outside_the_ceiling_is_released,
+            a_finish_whose_patch_exceeds_the_cap_is_invalid,
+            a_finish_whose_file_list_exceeds_the_bundle_cap_is_invalid,
+            a_finish_whose_bundle_is_exactly_at_the_cap_is_recorded,
         );
     };
     (@cases $harness:ty; $($case:ident),* $(,)?) => {
@@ -336,6 +345,63 @@ fn finishing_at(outcome: RunOutcome, head: &str) -> FinishRun {
         head_sha: Some(head.to_string()),
         ..finishing(outcome)
     }
+}
+
+/// A bundle whose [`encoded_len`] is exactly `target`, with a `patch` of
+/// `patch_bytes` bytes, the rest made of files with long paths, the last one
+/// padded to the byte. Every path character is ASCII, so each one is one byte
+/// of JSON.
+fn bundle_of_encoded_len(target: usize, patch_bytes: usize) -> ReviewBundle {
+    let file = |path: String| BundleFile {
+        path,
+        insertions: Some(1),
+        deletions: Some(0),
+        patch: PatchInclusion::TooLarge,
+    };
+    let mut bundle = ReviewBundle {
+        diff: crate::worktree::DiffStat {
+            files_changed: 0,
+            insertions: 0,
+            deletions: 0,
+        },
+        files: vec![file(String::new())],
+        commits: Vec::new(),
+        patch: "+".repeat(patch_bytes),
+        patch_bytes: patch_bytes as i64,
+        patch_truncated: true,
+    };
+    let path = |index: usize| format!("generated/{index:06}/{}", "p".repeat(240));
+    // Every added file is the same size, a comma included, so the count is
+    // arithmetic rather than a re-encoding per file.
+    let per_file = serde_json::to_vec(&file(path(0)))
+        .expect("a file serializes")
+        .len()
+        + 1;
+    let mut count = target.saturating_sub(encoded_len(&bundle)) / per_file + 1;
+    loop {
+        bundle.files.truncate(1);
+        bundle
+            .files
+            .extend((1..=count).map(|index| file(path(index))));
+        bundle.diff.files_changed = bundle.files.len() as i64;
+        if encoded_len(&bundle) <= target {
+            break;
+        }
+        count -= 1;
+    }
+    let short = target - encoded_len(&bundle);
+    bundle.files[0].path.push_str(&"q".repeat(short));
+    assert_same(encoded_len(&bundle), target, "the bundle's encoded length");
+    bundle
+}
+
+/// How many `review_bundles` rows `run_id` has, read past every service.
+async fn bundle_rows(board: &ServiceContext, run_id: &str) -> i64 {
+    sqlx::query_scalar("SELECT count(*) FROM review_bundles WHERE run_id = ?1")
+        .bind(run_id)
+        .fetch_one(&board.pool)
+        .await
+        .expect("count the run's bundles")
 }
 
 /// Turns the review loop on for the whole board, through its own service.
@@ -2871,5 +2937,131 @@ pub mod cases {
             .expect("read the task");
         assert_same(detail.task.column, BoardColumn::InReview, "the column");
         assert_same(detail.task.run_state, RunState::Idle, "the run state");
+    }
+
+    // -----------------------------------------------------------------------
+    // Task 052: the bundle's two caps, applied by the service for both
+    // adapters
+    // -----------------------------------------------------------------------
+
+    /// A run started and ready to finish, on runner `A`.
+    async fn ready_to_finish<H: Harness>(harness: &H, title: &str) -> (Arranged, LeaseRef, String) {
+        let arranged = Arranged::new(harness.board()).await;
+        let task_id = arranged.task(harness.board(), title).await;
+        let runner = harness.runner(Which::A);
+        let claim = claimed(runner.as_ref(), run_target(&task_id, false)).await;
+        let run_id = new_id();
+        runner
+            .start_run(&claim.lease, starting(&run_id, RunKind::Implementation))
+            .await
+            .expect("start the run");
+        (arranged, claim.lease, run_id)
+    }
+
+    pub async fn a_finish_whose_patch_exceeds_the_cap_is_invalid<H: Harness>() {
+        let harness = H::start().await;
+        let (_arranged, lease, run_id) = ready_to_finish(&harness, "Patched past the cap").await;
+        let bundle = ReviewBundle {
+            patch: "+".repeat(PATCH_CAP_BYTES + 1),
+            patch_bytes: (PATCH_CAP_BYTES + 1) as i64,
+            patch_truncated: false,
+            ..bundle_of_encoded_len(4_096, 0)
+        };
+
+        let error = harness
+            .runner(Which::A)
+            .finish_run(
+                &lease,
+                &run_id,
+                FinishRun {
+                    bundle: Some(bundle),
+                    ..finishing_at(succeeded(), HEAD)
+                },
+            )
+            .await
+            .expect_err("a patch past the cap");
+
+        assert_same(error.code(), ErrorCode::Invalid, "the code");
+        assert_same(
+            error.to_string(),
+            format!(
+                "a review bundle's patch is limited to {PATCH_CAP_BYTES} bytes, and this one has \
+                 {}; the runner bounds its bundle before it finishes a run",
+                PATCH_CAP_BYTES + 1
+            ),
+            "the refusal",
+        );
+        let run = runs::get_run_row(harness.board(), &run_id)
+            .await
+            .expect("read the run");
+        assert_same(run.ended_at, None, "the run was left open");
+    }
+
+    pub async fn a_finish_whose_file_list_exceeds_the_bundle_cap_is_invalid<H: Harness>() {
+        let harness = H::start().await;
+        let (_arranged, lease, run_id) = ready_to_finish(&harness, "Listed past the cap").await;
+        let bundle = bundle_of_encoded_len(BUNDLE_CAP_BYTES + 1, 1_024);
+        assert!(
+            bundle.patch.len() < PATCH_CAP_BYTES,
+            "the patch is under its own cap"
+        );
+
+        let error = harness
+            .runner(Which::A)
+            .finish_run(
+                &lease,
+                &run_id,
+                FinishRun {
+                    bundle: Some(bundle),
+                    ..finishing_at(succeeded(), HEAD)
+                },
+            )
+            .await
+            .expect_err("a bundle past the cap");
+
+        assert_same(error.code(), ErrorCode::Invalid, "the code");
+        assert_same(
+            error.to_string(),
+            format!(
+                "a review bundle is limited to {BUNDLE_CAP_BYTES} bytes as JSON, and this one has \
+                 {}; the runner bounds its bundle before it finishes a run",
+                BUNDLE_CAP_BYTES + 1
+            ),
+            "the refusal, from the service and not the transport",
+        );
+        let run = runs::get_run_row(harness.board(), &run_id)
+            .await
+            .expect("read the run");
+        assert_same(run.ended_at, None, "the run was left open");
+    }
+
+    pub async fn a_finish_whose_bundle_is_exactly_at_the_cap_is_recorded<H: Harness>() {
+        let harness = H::start().await;
+        let (_arranged, lease, run_id) = ready_to_finish(&harness, "Exactly at the cap").await;
+        let bundle = bundle_of_encoded_len(BUNDLE_CAP_BYTES, 1_024);
+
+        let receipt = harness
+            .runner(Which::A)
+            .finish_run(
+                &lease,
+                &run_id,
+                FinishRun {
+                    outcome: RunOutcome {
+                        error_message: Some("e".repeat(4 * 1024)),
+                        ..succeeded()
+                    },
+                    bundle: Some(bundle),
+                    ..finishing_at(succeeded(), HEAD)
+                },
+            )
+            .await
+            .expect("a bundle at the cap is recorded");
+
+        assert!(receipt.run.ended_at.is_some(), "the run closed");
+        assert_same(
+            bundle_rows(harness.board(), &run_id).await,
+            1,
+            "the bundle was stored",
+        );
     }
 }

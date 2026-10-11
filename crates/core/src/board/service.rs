@@ -39,7 +39,9 @@ use crate::runner::outcome::{self, NewRun, RunOutcome};
 use crate::runner::process::DEFAULT_DISALLOWED_TOOLS;
 use crate::runner::provider::ProviderProfile;
 use crate::runner::RunTrigger;
-use crate::runs::bundle::RunCapture;
+use crate::runs::bundle::{
+    encoded_len, ReviewBundle, RunCapture, BUNDLE_CAP_BYTES, PATCH_CAP_BYTES,
+};
 use crate::scheduler::attempts::{self, Ending};
 use crate::scheduler::retry;
 use crate::scheduler::selection::{self, RunnerView};
@@ -742,6 +744,9 @@ pub async fn finish_run(
              `resume_after` is the board's to decide (ADR-0011)",
         ));
     }
+    if let Some(bundle) = &bundle {
+        check_bundle(bundle)?;
+    }
 
     // Read before the first transaction opens: the attempt history is read
     // over the pool, which a held write lock would block.
@@ -1198,6 +1203,30 @@ async fn check_start(
     Err(Error::invalid(format!(
         "the base ref {label:?} is refused: {BASE_REF_RULE}"
     )))
+}
+
+/// Refuses a bundle past either cap (task 052). The runner already bounds what
+/// it computes (`worktree::bundle::bound`), so this only ever refuses a runner
+/// that is buggy or not the one it claims to be. In the service, not a
+/// handler, so both adapters apply it (ADR-0006); a bundle just over the cap
+/// is still under the `finish_run` route's body limit, so over HTTP it reaches
+/// here as `invalid` rather than dying in the transport.
+fn check_bundle(bundle: &ReviewBundle) -> Result<()> {
+    if bundle.patch.len() > PATCH_CAP_BYTES {
+        return Err(Error::invalid(format!(
+            "a review bundle's patch is limited to {PATCH_CAP_BYTES} bytes, and this one has {}; \
+             the runner bounds its bundle before it finishes a run",
+            bundle.patch.len(),
+        )));
+    }
+    let encoded = encoded_len(bundle);
+    if encoded > BUNDLE_CAP_BYTES {
+        return Err(Error::invalid(format!(
+            "a review bundle is limited to {BUNDLE_CAP_BYTES} bytes as JSON, and this one has \
+             {encoded}; the runner bounds its bundle before it finishes a run",
+        )));
+    }
+    Ok(())
 }
 
 /// Refuses a head commit that is not a full sha.

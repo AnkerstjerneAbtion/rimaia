@@ -19,6 +19,7 @@
 //! - **The transport limit.** Task 052's `finish_run` route keeps axum's 2 MB
 //!   default body limit (D34). A 512 KiB patch roughly doubles in the worst
 //!   realistic JSON escaping, so the patch alone never forces a special limit.
+//!   The lists beside it are bounded with it, by [`BUNDLE_CAP_BYTES`].
 //! - **Storage.** Every board write is replicated (ADR-0037), and every row
 //!   whose branch carries commits stores its own bundle, so a night costs at
 //!   most runs × 512 KiB of patch.
@@ -50,6 +51,45 @@ use crate::worktree::{CommitSummary, DiffStat};
 /// The most bytes of patch a bundle stores. See this module's header for why
 /// it is 512 KiB.
 pub const PATCH_CAP_BYTES: usize = 512 * 1024;
+
+/// The most bytes a whole bundle may take on the wire, as [`encoded_len`]
+/// counts them (task 052).
+///
+/// The patch is capped, and `files` and `commits` are not: a run that
+/// regenerates ten thousand files, or a branch that merged four thousand
+/// commits of base history, would make a `FinishRun` larger than the
+/// `finish_run` route's body limit, axum's default 2 MiB, which stays where it
+/// is (seam-contract D34). Such a run could then never be finished over HTTP.
+/// So the runner bounds the whole encoded bundle
+/// (`worktree::bundle::bound`), and the board refuses one past it
+/// (`board::service::finish_run`). 1.5 MiB leaves 512 KiB of the limit for the
+/// rest of a `FinishRun`: an outcome, two shas, a timestamp and a transcript
+/// length. The cap is on bytes, not on a count of entries, because a path has
+/// no fixed size.
+pub const BUNDLE_CAP_BYTES: usize = 1536 * 1024;
+
+/// The length of `bundle`'s `serde_json` encoding, which is what crosses the
+/// wire inside a `FinishRun`, counted through a writer that keeps nothing.
+pub fn encoded_len(bundle: &ReviewBundle) -> usize {
+    let mut counter = ByteCounter(0);
+    serde_json::to_writer(&mut counter, bundle)
+        .expect("a review bundle always serializes, and counting bytes cannot fail");
+    counter.0
+}
+
+/// A sink that counts what is written to it and allocates nothing.
+struct ByteCounter(usize);
+
+impl std::io::Write for ByteCounter {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.0 += bytes.len();
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
 
 /// What a run's branch carried at its finish: the value a runner produces and
 /// D31's `FinishRun::bundle` carries.
@@ -172,6 +212,32 @@ mod tests {
                 inclusion
             );
         }
+    }
+
+    #[test]
+    fn the_encoded_length_is_the_length_of_the_json_a_finish_carries() {
+        let bundle = ReviewBundle {
+            diff: DiffStat {
+                files_changed: 1,
+                insertions: 1,
+                deletions: 0,
+            },
+            files: vec![BundleFile {
+                path: "ünïcode path.txt".to_string(),
+                insertions: Some(1),
+                deletions: Some(0),
+                patch: PatchInclusion::Included,
+            }],
+            commits: vec![],
+            patch: "+\"quoted\"\n".to_string(),
+            patch_bytes: 12,
+            patch_truncated: false,
+        };
+
+        assert_eq!(
+            encoded_len(&bundle),
+            serde_json::to_vec(&bundle).expect("serialize").len()
+        );
     }
 
     #[test]

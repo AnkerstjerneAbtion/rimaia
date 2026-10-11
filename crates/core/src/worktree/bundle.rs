@@ -23,7 +23,10 @@ use std::path::Path;
 
 use super::git;
 use crate::error::{Error, Result};
-use crate::runs::bundle::{BundleFile, PatchInclusion, ReviewBundle, RunCapture, PATCH_CAP_BYTES};
+use crate::runs::bundle::{
+    encoded_len, BundleFile, PatchInclusion, ReviewBundle, RunCapture, BUNDLE_CAP_BYTES,
+    PATCH_CAP_BYTES,
+};
 use crate::worktree::FileDiffStat;
 
 /// What a section header looks like. Inside a patch a line starting with this
@@ -102,7 +105,17 @@ pub async fn build(
 ///   has at least one commit: the *branch* ends with commits, whichever attempt
 ///   authored them. When [`build`] fails, the failure is logged and
 ///   `head_sha` is kept.
+///
+/// The bundle is held to [`BUNDLE_CAP_BYTES`] last, by [`bound`]: past it the
+/// patch is dropped, and past it again the bundle is, `head_sha` kept either
+/// way (task 052).
 pub async fn capture(worktree_path: &Path, base_sha: Option<&str>) -> RunCapture {
+    capture_with_cap(worktree_path, base_sha, BUNDLE_CAP_BYTES).await
+}
+
+/// [`capture`], bounded by `cap` rather than [`BUNDLE_CAP_BYTES`], so a test
+/// can reach the cap with a repository of a few files.
+async fn capture_with_cap(worktree_path: &Path, base_sha: Option<&str>, cap: usize) -> RunCapture {
     let head_sha = match git::head_sha(worktree_path).await {
         Ok(sha) => sha,
         Err(error) => {
@@ -139,8 +152,59 @@ pub async fn capture(worktree_path: &Path, base_sha: Option<&str>) -> RunCapture
 
     RunCapture {
         head_sha: Some(head_sha),
-        bundle,
+        bundle: bundle.and_then(|bundle| bound(bundle, cap)),
     }
+}
+
+/// `bundle`, held to `cap` bytes of [`encoded_len`], in two steps (task 052):
+///
+/// 1. Over the cap, the patch goes the way [`PATCH_CAP_BYTES`]' budget drops a
+///    section: every `Included` file becomes `TooLarge`, `patch` is empty and
+///    `patch_truncated` is true. `files`, `commits` and `diff` are kept. That
+///    is a state task 033 already stores and renders: the cap cut something.
+/// 2. Still over the cap, the lists alone are too large, and this is `None`:
+///    task 033's own path for a bundle that could not be built, which
+///    `get_run` reads as `NotRecorded`, the reading that is never false.
+///
+/// Neither step adds a column to say why (D28 has none, and D4 reserves no
+/// migration); each logs the counts, so a missing patch or bundle has its
+/// reason in the runner's log. Pure, so its cases build values rather than
+/// repositories of twenty thousand files.
+pub fn bound(bundle: ReviewBundle, cap: usize) -> Option<ReviewBundle> {
+    let size = encoded_len(&bundle);
+    if size <= cap {
+        return Some(bundle);
+    }
+    tracing::warn!(
+        files = bundle.files.len(),
+        commits = bundle.commits.len(),
+        encoded_bytes = size,
+        cap,
+        "the review bundle is over its cap; recording it without its patch",
+    );
+
+    let mut bundle = bundle;
+    for file in &mut bundle.files {
+        if file.patch == PatchInclusion::Included {
+            file.patch = PatchInclusion::TooLarge;
+        }
+    }
+    bundle.patch = String::new();
+    bundle.patch_truncated = true;
+
+    let size = encoded_len(&bundle);
+    if size <= cap {
+        return Some(bundle);
+    }
+    tracing::warn!(
+        files = bundle.files.len(),
+        commits = bundle.commits.len(),
+        encoded_bytes = size,
+        cap,
+        "the review bundle's lists alone are over its cap; recording the head commit without a \
+         bundle",
+    );
+    None
 }
 
 /// Which sections, by position, are binary: their numstat row is `-` `-`.
@@ -317,6 +381,192 @@ mod tests {
         assert_eq!(assembled.text, "");
         assert!(!assembled.truncated);
         assert_eq!(assembled.total_bytes, patch.len() as i64);
+    }
+
+    fn file(path: &str, patch: PatchInclusion) -> BundleFile {
+        BundleFile {
+            path: path.to_string(),
+            insertions: Some(1),
+            deletions: Some(0),
+            patch,
+        }
+    }
+
+    fn commit(index: usize) -> crate::worktree::CommitSummary {
+        crate::worktree::CommitSummary {
+            sha: format!("{index:040x}"),
+            short_sha: format!("{index:07x}"),
+            subject: format!("Commit {index}"),
+            author: "Rimaia Test".to_string(),
+            committed_at: "2026-08-20T12:00:00Z".parse().expect("a literal timestamp"),
+        }
+    }
+
+    /// Two included files, one binary, one commit, and a patch of
+    /// `patch_bytes` bytes.
+    fn a_bundle(patch_bytes: usize) -> ReviewBundle {
+        ReviewBundle {
+            diff: crate::worktree::DiffStat {
+                files_changed: 3,
+                insertions: 3,
+                deletions: 0,
+            },
+            files: vec![
+                file("src/a.rs", PatchInclusion::Included),
+                file("logo.png", PatchInclusion::Binary),
+                file("src/b.rs", PatchInclusion::Included),
+            ],
+            commits: vec![commit(1)],
+            patch: "+".repeat(patch_bytes),
+            patch_bytes: patch_bytes as i64,
+            patch_truncated: false,
+        }
+    }
+
+    #[test]
+    fn a_bundle_under_the_cap_is_left_exactly_as_built() {
+        let built = a_bundle(1_000);
+
+        assert_eq!(bound(built.clone(), encoded_len(&built)), Some(built));
+    }
+
+    #[test]
+    fn a_bundle_over_the_cap_drops_its_patch_and_keeps_its_lists() {
+        let built = a_bundle(10_000);
+        let cap = encoded_len(&built) - 1;
+
+        let bounded = bound(built.clone(), cap).expect("the lists alone fit");
+
+        assert_eq!(
+            bounded,
+            ReviewBundle {
+                files: vec![
+                    file("src/a.rs", PatchInclusion::TooLarge),
+                    file("logo.png", PatchInclusion::Binary),
+                    file("src/b.rs", PatchInclusion::TooLarge),
+                ],
+                patch: String::new(),
+                patch_truncated: true,
+                ..built.clone()
+            }
+        );
+        assert_eq!(bounded.diff, built.diff);
+        assert_eq!(bounded.commits, built.commits);
+        assert!(encoded_len(&bounded) <= cap);
+    }
+
+    #[test]
+    fn a_bundle_whose_lists_alone_exceed_the_cap_is_dropped() {
+        let files = (0..20_000)
+            .map(|index| {
+                file(
+                    &format!("generated/module_{index:05}/schema_definitions.json"),
+                    PatchInclusion::TooLarge,
+                )
+            })
+            .collect::<Vec<_>>();
+        let built = ReviewBundle {
+            files,
+            commits: (0..100).map(commit).collect(),
+            ..a_bundle(0)
+        };
+        assert!(encoded_len(&built) > BUNDLE_CAP_BYTES);
+
+        assert_eq!(bound(built, BUNDLE_CAP_BYTES), None);
+    }
+
+    #[tokio::test]
+    async fn an_oversized_bundle_is_dropped_and_head_sha_is_kept() {
+        use crate::db::{BoardColumn, ExitClass, RunKind, RunState, RunStatus};
+        use crate::runner::outcome::{finish_run, start_run, NewRun, RunOutcome};
+        use crate::runs::{self, RunReview};
+        use crate::testing::{TempRepo, TestContext};
+
+        let source = TempRepo::init();
+        let base_sha = source.head_sha();
+        let source = source.commit("a.txt", &"a\n".repeat(200), "Add a").commit(
+            "b.txt",
+            &"b\n".repeat(200),
+            "Add b",
+        );
+        let head_sha = source.head_sha();
+
+        // A few hundred bytes: the two commits' list is over it on its own.
+        let capture = capture_with_cap(source.path(), Some(&base_sha), 300).await;
+
+        assert_eq!(capture.head_sha.as_deref(), Some(head_sha.as_str()));
+        assert_eq!(capture.bundle, None);
+
+        // Recorded as a finish would record it, and read back.
+        let h = TestContext::new().await;
+        let data = tempfile::TempDir::new().expect("a data directory");
+        let paths = crate::AppPaths::new(data.path());
+        let repository = crate::repo::register(
+            &h.context,
+            h.machine(),
+            &paths.worktrees_dir(),
+            crate::repo::NewRepository {
+                path: source.path().to_string_lossy().into_owned(),
+                name: None,
+                worktree_root: None,
+            },
+        )
+        .await
+        .expect("register the repository");
+        let task = crate::tasks::create_task(
+            &h.context,
+            crate::tasks::NewTask {
+                repository_id: repository.id,
+                title: "Regenerate everything".to_string(),
+                plan: Some("1. Regenerate".to_string()),
+                extra_instructions: None,
+                column: Some(BoardColumn::Ready),
+                links: vec![],
+            },
+        )
+        .await
+        .expect("create a task");
+        for state in [RunState::Queued, RunState::Running] {
+            crate::tasks::set_run_state(&h.context, &task.id, state)
+                .await
+                .expect("walk the task into running");
+        }
+        let run = start_run(
+            &h.context,
+            &paths,
+            NewRun {
+                task_id: task.id.clone(),
+                kind: RunKind::Implementation,
+                session_id: "session".to_string(),
+                prompt: "regenerate".to_string(),
+                base_ref: Some("main".to_string()),
+                base_sha: Some(base_sha.clone()),
+            },
+        )
+        .await
+        .expect("open the run");
+        let outcome = RunOutcome {
+            exit_class: ExitClass::Success,
+            status: RunStatus::Succeeded,
+            error_message: None,
+            num_turns: Some(1),
+            cost_usd: None,
+            duration_ms: None,
+            pr_url: None,
+            usage_limit_resets_at: None,
+            resume_after: None,
+            spawned_as: Default::default(),
+            usage: Default::default(),
+        };
+        finish_run(&h.context, &run.id, &outcome, &capture)
+            .await
+            .expect("close the run");
+
+        let detail = runs::get_run(&h.context, &paths, &run.id)
+            .await
+            .expect("get_run");
+        assert_eq!(detail.run.head_sha, Some(head_sha));
+        assert_eq!(detail.review, RunReview::NotRecorded);
     }
 
     #[test]
