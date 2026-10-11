@@ -9,24 +9,20 @@
 //! returns before the work it started is done, and something for a second
 //! click on the same task to fail against instead of a second child process.
 //!
-//! "Read the *most recent* run's outcome and its log path" needs no command
-//! of its own: that is `TaskDetail.lastRun`, which `commands::tasks::get_task`
-//! already returns — the run this crate just started **is** the task's most
-//! recent attempt for as long as the in-flight registry refuses a
-//! second concurrent one. Task 015's [`get_run`] below is a different read:
-//! *any* attempt by id, with what its branch carried when it ended alongside
-//! it (ADR-0013, task 033), for a history list that shows every attempt rather
-//! than only the last one.
+//! "Read the *most recent* run's outcome" needs no command of its own: that is
+//! `TaskDetail.lastRun`, which the board command `get_task` already returns —
+//! the run this crate just started **is** the task's most recent attempt for
+//! as long as the in-flight registry refuses a second concurrent one. The run
+//! reads every client sees, `get_run` and the history lists among them, are
+//! board commands in `rimaia_core::api::board::runs` (seam-contract D32); what
+//! stays here starts, cancels, tails or reads on this machine.
 
-use chrono::{DateTime, Utc};
-use rimaia_core::db::{Run, RunKind, RunStatus};
 use rimaia_core::runner::events::RunTail;
 use rimaia_core::runner::{
     claim_manual_start, run_task, ManualStart, RunRequest, Started, Starter,
 };
 use rimaia_core::runs::transcript::{self, SearchHit, TranscriptPage};
-use rimaia_core::runs::{self, PruneCriterion, PruneResult, RunDetail, RunFilter, RunListEntry};
-use rimaia_core::scheduler;
+use rimaia_core::runs::{self, PruneCriterion, PruneResult};
 use rimaia_core::{Error, Result};
 use serde::Deserialize;
 use tauri::State;
@@ -156,16 +152,6 @@ async fn start_by_hand(state: &AppState, start: ManualStart) -> Result<()> {
     Ok(())
 }
 
-/// Ends a task's retry loop: `waiting_retry -> failed`.
-///
-/// Thin over [`scheduler::give_up`], which is where the rule lives — the MCP
-/// tool of the same name calls the identical function, which is what ADR-0006
-/// asks for and ADR-0021 makes a rule.
-#[tauri::command]
-pub async fn give_up_on_task(state: State<'_, AppState>, task_id: String) -> Result<()> {
-    scheduler::give_up(&state.context, &task_id).await
-}
-
 /// Asks `task_id`'s in-flight run to stop.
 ///
 /// A no-op, not an error, when nothing is running for it — matching
@@ -194,61 +180,6 @@ pub fn get_run_tail(state: State<'_, AppState>, run_id: String) -> Result<Option
 // ---------------------------------------------------------------------------
 // Run history, run detail and the transcript viewer (task 015, ADR-0013)
 // ---------------------------------------------------------------------------
-
-/// Every run of `task_id`, newest attempt first — the task detail panel's
-/// history list.
-#[tauri::command]
-pub async fn list_runs_for_task(state: State<'_, AppState>, task_id: String) -> Result<Vec<Run>> {
-    runs::list_runs_for_task(&state.context, &task_id).await
-}
-
-/// What the frontend sends [`list_runs`]. Mirrors
-/// [`rimaia_core::runs::RunFilter`] — a field left out matches everything,
-/// the same contract [`super::tasks::TaskFilterInput`] states for the board.
-#[derive(Debug, Default, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct RunFilterInput {
-    #[serde(default)]
-    pub repository_id: Option<String>,
-    #[serde(default)]
-    pub status: Option<RunStatus>,
-    #[serde(default)]
-    pub kind: Option<RunKind>,
-    #[serde(default)]
-    pub since: Option<DateTime<Utc>>,
-    #[serde(default)]
-    pub until: Option<DateTime<Utc>>,
-}
-
-/// The global Runs view's history: every run matching `filter`, newest
-/// first, with its task's title and repository name for a list that spans
-/// every repository.
-#[tauri::command]
-pub async fn list_runs(
-    state: State<'_, AppState>,
-    filter: RunFilterInput,
-) -> Result<Vec<RunListEntry>> {
-    runs::list_runs(
-        &state.context,
-        &state.paths,
-        RunFilter {
-            repository_id: filter.repository_id,
-            status: filter.status,
-            kind: filter.kind,
-            since: filter.since,
-            until: filter.until,
-        },
-    )
-    .await
-}
-
-/// One run's full detail: its own outcome, the review its finish recorded
-/// (ADR-0013's ordering), and whether its transcript file still resolves. A
-/// board read: it runs no git (seam-contract D32's appendix).
-#[tauri::command]
-pub async fn get_run(state: State<'_, AppState>, run_id: String) -> Result<RunDetail> {
-    runs::get_run(&state.context, &state.paths, &run_id).await
-}
 
 /// One page of `run_id`'s transcript, oldest-shown-line first.
 ///

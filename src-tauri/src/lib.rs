@@ -10,6 +10,7 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
+use rimaia_core::api::{BoardHost, Caller};
 use rimaia_core::board::{BoardPort, InProcessBoard, LeaseTerm};
 use rimaia_core::db::MutationSource;
 use rimaia_core::machine::{self, MachineContext};
@@ -23,14 +24,13 @@ use rimaia_core::{
     db, identity, startup, worktree, AppPaths, Change, ChangeEvent, Error, ServiceContext,
     SystemClock, TeamScope,
 };
-use rimaia_runner::queue::SoloBoard;
 use rimaia_runner::{adopt, RunnerStore};
 use tauri::{Emitter, Manager, RunEvent};
 use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
 use tokio::sync::broadcast;
 use tokio::sync::broadcast::error::RecvError;
 
-use crate::state::{local_tools, AppState, RunTails};
+use crate::state::{local_tools, AppState, RunTails, SoloBoard};
 
 /// The label of the one window `tauri.conf.json` declares. Spelled out because
 /// that file leaves it implicit and Tauri fills it in — an unlabelled window
@@ -294,6 +294,11 @@ pub fn run() {
                 run_handles: run_handles.clone(),
                 ..RunnerConfig::default()
             };
+            // What the board side knows of that provider: its catalogue, cost
+            // and name, and nothing it could spawn with (seam-contract D32
+            // point 2). One value for the board port, the MCP server and the
+            // command host, so none of them reads another provider's catalogue.
+            let provider = ProviderProfile::of(runner.provider.as_ref());
             // The one board port every door that starts a process reaches the
             // board through (seam-contract D31 point 8): the queue, the MCP
             // server's planner and the commands, through `AppState`. Built from
@@ -308,7 +313,7 @@ pub fn run() {
             let board_port: Arc<dyn BoardPort> = Arc::new(InProcessBoard::new(
                 context.clone(),
                 paths.clone(),
-                ProviderProfile::of(runner.provider.as_ref()),
+                provider.clone(),
                 solo.runner_id.clone(),
                 LeaseTerm::Never,
             ));
@@ -416,7 +421,7 @@ pub fn run() {
                 machine.clone(),
                 Arc::clone(&board_port),
                 context.subscribe(),
-                SoloBoard::new(
+                rimaia_runner::queue::SoloBoard::new(
                     context.clone(),
                     solo.runner_id.clone(),
                     runner.provider.id(),
@@ -459,7 +464,7 @@ pub fn run() {
                 context.clone(),
                 mcp_port,
                 run_handles.clone(),
-                ProviderProfile::of(runner.provider.as_ref()),
+                provider.clone(),
                 // This machine's tools (task 041): a solo shell has a machine,
                 // so both doors serve every tool they served before, and a run
                 // calling a local one gets its scope's refusal.
@@ -494,8 +499,23 @@ pub fn run() {
             }
             tauri::async_runtime::spawn(mcp_task.run());
 
+            // The solo command host (D32 point 3): board commands reach
+            // `api::dispatch_with_machine` as the solo user owning the solo
+            // team through the window, with this machine for the handlers that
+            // react on it (task 046 point 3a).
+            let board = SoloBoard {
+                host: BoardHost {
+                    context: context.clone(),
+                    provider,
+                    paths: paths.clone(),
+                },
+                caller: Caller::solo(&solo),
+                machine: machine.clone(),
+            };
+
             app.manage(AppState {
                 context,
+                board: Some(board),
                 solo,
                 runner_store,
                 machine,
@@ -537,75 +557,34 @@ pub fn run() {
             Ok(())
         });
 
-    // `generate_handler!` needs a literal list, so the debug-only command is
-    // added by picking a whole list rather than by conditioning one entry.
-    #[cfg(debug_assertions)]
-    let builder = builder.invoke_handler(tauri::generate_handler![
+    // One literal list of the local commands, and only those: every command is
+    // a row in `crates/core/src/api/registry.rs`, and a board row is answered
+    // by `commands::board::route` through `api::dispatch_with_machine`, never
+    // registered here (seam-contract D32 points 3 and 4). The locked
+    // tauri-macros parses an outer attribute on an entry, so the one debug-only
+    // command is gated in place, and a release build has nothing to forget.
+    // `scripts/check-command-wiring.sh` holds this list equal to the
+    // registry's local rows.
+    let builder = builder.invoke_handler(commands::board::route(tauri::generate_handler![
         commands::app::get_app_info,
         commands::app::reveal_app_data_dir,
+        #[cfg(debug_assertions)]
         commands::app::debug_provoke_error,
-        commands::repositories::list_repositories,
         commands::repositories::list_checkouts,
         commands::repositories::register_repository,
-        commands::repositories::update_repository,
         commands::repositories::set_repository_worktree_root,
         commands::repositories::set_repository_unattended_runs,
-        commands::repositories::set_repository_unattended_ceiling,
         commands::repositories::set_repository_on_archive,
         commands::repositories::set_repository_max_concurrency,
-        commands::repositories::remove_repository,
         commands::repositories::get_repository_remote_info,
         commands::repositories::get_repository_credential_status,
         commands::repositories::set_repository_credential,
         commands::repositories::remove_repository_credential,
-        commands::tasks::create_task,
-        commands::tasks::get_task,
-        commands::tasks::list_tasks,
-        commands::tasks::update_task,
-        commands::tasks::delete_task,
-        commands::tasks::archive_task,
-        commands::tasks::archive_tasks,
-        commands::tasks::unarchive_task,
-        commands::tasks::move_task,
-        commands::tasks::set_task_run_state,
-        commands::tasks::add_task_link,
-        commands::tasks::update_task_link,
-        commands::tasks::remove_task_link,
-        commands::tasks::reorder_task_link,
-        commands::tasks::set_task_dependencies,
-        commands::tasks::assign_task,
-        commands::tasks::get_blocking_reason,
-        commands::review::approve_task,
-        commands::review::reject_task,
-        commands::review::request_task_changes,
-        commands::review::get_task_dependents,
-        commands::review::get_review_digest,
-        commands::review::mark_review_digest_seen,
-        commands::review::list_review_findings,
-        commands::review::get_review_history,
-        commands::review::get_review_level,
-        commands::review::get_review_settings,
-        commands::review::set_review_settings,
-        commands::review::set_repository_review_config,
-        commands::review::set_task_review,
-        commands::consent::accept_content,
-        commands::consent::get_task_consent,
-        commands::settings::get_base_instructions,
-        commands::settings::set_base_instructions,
         commands::settings::get_run_environment,
-        commands::settings::get_run_cost_summary,
         commands::settings::set_run_environment,
         commands::settings::get_strategy_ceiling,
         commands::settings::set_strategy_ceiling,
         commands::settings::preview_composed_prompt,
-        commands::strategy::get_strategy_catalogue,
-        commands::strategy::set_strategy_catalogue,
-        commands::strategy::get_strategy_defaults,
-        commands::strategy::set_strategy_defaults,
-        commands::strategy::get_strategy_approval,
-        commands::strategy::set_strategy_approval,
-        commands::strategy::accept_task_strategy,
-        commands::strategy::clear_task_strategy,
         commands::strategy::plan_task_strategy,
         commands::strategy::plan_tasks_strategy,
         commands::strategy::cancel_plan_pass,
@@ -624,11 +603,7 @@ pub fn run() {
         commands::runs::start_task_run,
         commands::runs::cancel_task_run,
         commands::runs::retry_task_now,
-        commands::runs::give_up_on_task,
         commands::runs::get_run_tail,
-        commands::runs::list_runs_for_task,
-        commands::runs::list_runs,
-        commands::runs::get_run,
         commands::runs::read_run_transcript_page,
         commands::runs::search_run_transcript,
         commands::runs::summarize_run_transcript,
@@ -654,136 +629,11 @@ pub fn run() {
         commands::mcp::get_mcp_status,
         commands::mcp::set_mcp_port,
         commands::mcp::test_mcp_connection,
-        commands::analytics::get_analytics,
-        commands::analytics::get_subscription_cost,
-        commands::analytics::set_subscription_cost,
         commands::doctor::run_doctor,
         commands::doctor::dismiss_onboarding,
         commands::doctor::dismiss_doctor_warning,
         commands::doctor::restore_doctor_warning,
-    ]);
-    #[cfg(not(debug_assertions))]
-    let builder = builder.invoke_handler(tauri::generate_handler![
-        commands::app::get_app_info,
-        commands::app::reveal_app_data_dir,
-        commands::repositories::list_repositories,
-        commands::repositories::list_checkouts,
-        commands::repositories::register_repository,
-        commands::repositories::update_repository,
-        commands::repositories::set_repository_worktree_root,
-        commands::repositories::set_repository_unattended_runs,
-        commands::repositories::set_repository_unattended_ceiling,
-        commands::repositories::set_repository_on_archive,
-        commands::repositories::set_repository_max_concurrency,
-        commands::repositories::remove_repository,
-        commands::repositories::get_repository_remote_info,
-        commands::repositories::get_repository_credential_status,
-        commands::repositories::set_repository_credential,
-        commands::repositories::remove_repository_credential,
-        commands::tasks::create_task,
-        commands::tasks::get_task,
-        commands::tasks::list_tasks,
-        commands::tasks::update_task,
-        commands::tasks::delete_task,
-        commands::tasks::archive_task,
-        commands::tasks::archive_tasks,
-        commands::tasks::unarchive_task,
-        commands::tasks::move_task,
-        commands::tasks::set_task_run_state,
-        commands::tasks::add_task_link,
-        commands::tasks::update_task_link,
-        commands::tasks::remove_task_link,
-        commands::tasks::reorder_task_link,
-        commands::tasks::set_task_dependencies,
-        commands::tasks::assign_task,
-        commands::tasks::get_blocking_reason,
-        commands::review::approve_task,
-        commands::review::reject_task,
-        commands::review::request_task_changes,
-        commands::review::get_task_dependents,
-        commands::review::get_review_digest,
-        commands::review::mark_review_digest_seen,
-        commands::review::list_review_findings,
-        commands::review::get_review_history,
-        commands::review::get_review_level,
-        commands::review::get_review_settings,
-        commands::review::set_review_settings,
-        commands::review::set_repository_review_config,
-        commands::review::set_task_review,
-        commands::consent::accept_content,
-        commands::consent::get_task_consent,
-        commands::settings::get_base_instructions,
-        commands::settings::set_base_instructions,
-        commands::settings::get_run_environment,
-        commands::settings::get_run_cost_summary,
-        commands::settings::set_run_environment,
-        commands::settings::get_strategy_ceiling,
-        commands::settings::set_strategy_ceiling,
-        commands::settings::preview_composed_prompt,
-        commands::strategy::get_strategy_catalogue,
-        commands::strategy::set_strategy_catalogue,
-        commands::strategy::get_strategy_defaults,
-        commands::strategy::set_strategy_defaults,
-        commands::strategy::get_strategy_approval,
-        commands::strategy::set_strategy_approval,
-        commands::strategy::accept_task_strategy,
-        commands::strategy::clear_task_strategy,
-        commands::strategy::plan_task_strategy,
-        commands::strategy::plan_tasks_strategy,
-        commands::strategy::cancel_plan_pass,
-        commands::worktree::get_worktree_status,
-        commands::worktree::get_diff_summary,
-        commands::worktree::reveal_task_worktree,
-        commands::worktree::list_open_in_targets,
-        commands::worktree::open_task_worktree_in,
-        commands::worktree::get_worktree_inventory,
-        commands::worktree::remove_task_worktree,
-        commands::worktree::cleanup_done_worktrees,
-        commands::worktree::cleanup_merged_worktrees,
-        commands::worktree::get_worktree_auto_cleanup,
-        commands::worktree::set_worktree_auto_cleanup,
-        commands::worktree::list_local_worktrees,
-        commands::runs::start_task_run,
-        commands::runs::cancel_task_run,
-        commands::runs::retry_task_now,
-        commands::runs::give_up_on_task,
-        commands::runs::get_run_tail,
-        commands::runs::list_runs_for_task,
-        commands::runs::list_runs,
-        commands::runs::get_run,
-        commands::runs::read_run_transcript_page,
-        commands::runs::search_run_transcript,
-        commands::runs::summarize_run_transcript,
-        commands::runs::reveal_run_log,
-        commands::runs::get_run_log_path,
-        commands::runs::get_run_log_size,
-        commands::runs::prune_run_logs,
-        commands::queue::start_queue,
-        commands::queue::pause_queue,
-        commands::queue::resume_queue,
-        commands::queue::stop_queue,
-        commands::queue::get_queue_status,
-        commands::queue::get_run_capacity,
-        commands::queue::set_schedule_mode,
-        commands::queue::set_max_concurrency,
-        commands::schedules::list_schedules,
-        commands::schedules::create_schedule,
-        commands::schedules::update_schedule,
-        commands::schedules::set_schedule_enabled,
-        commands::schedules::delete_schedule,
-        commands::schedules::preview_schedule_preflight,
-        commands::schedules::list_timezones,
-        commands::mcp::get_mcp_status,
-        commands::mcp::set_mcp_port,
-        commands::mcp::test_mcp_connection,
-        commands::analytics::get_analytics,
-        commands::analytics::get_subscription_cost,
-        commands::analytics::set_subscription_cost,
-        commands::doctor::run_doctor,
-        commands::doctor::dismiss_onboarding,
-        commands::doctor::dismiss_doctor_warning,
-        commands::doctor::restore_doctor_warning,
-    ]);
+    ]));
 
     // `Builder::run(context)` is exactly `build(context)?.run(|_, _| {})`
     // (tauri 2.11.5 `src/app.rs:2449`) — spelling it out rather than using the

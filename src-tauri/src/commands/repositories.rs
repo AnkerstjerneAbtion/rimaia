@@ -1,4 +1,7 @@
-//! Repository registration commands (task 003, ADR-0002, ADR-0005, ADR-0012).
+//! This machine's repository commands (task 003, ADR-0002, ADR-0005,
+//! ADR-0012; task 066): registering a clone, its checkout, its consent and its
+//! credential. The board's half, listing, editing, the team ceiling and
+//! removal, is `rimaia_core::api::board::repositories` (seam-contract D32).
 //!
 //! Every validation, every git call, and the unattended-runs opt-in itself all
 //! live in `rimaia_core::repo` — this file only reshapes the wire args into
@@ -20,7 +23,7 @@ use rimaia_core::credentials::provision::{self, Verification};
 use rimaia_core::credentials::Secret;
 use rimaia_core::db::{OnArchive, Repository};
 use rimaia_core::machine::{self, Checkout, CheckoutView};
-use rimaia_core::repo::{self, NewRepository, RemoteInfo, RepositoryPatch};
+use rimaia_core::repo::{self, NewRepository, RemoteInfo};
 use rimaia_core::{Error, Result};
 use serde::Deserialize;
 use tauri::State;
@@ -39,30 +42,6 @@ pub struct RegisterRepositoryInput {
     pub name: Option<String>,
     #[serde(default)]
     pub worktree_root: Option<String>,
-}
-
-/// What the frontend sends [`update_repository`]. Mirrors [`RepositoryPatch`]
-/// field for field — every field left `None` leaves that column unchanged.
-///
-/// The board's half only. `worktreeRoot` left in task 066 for
-/// [`set_repository_worktree_root`]: it is this machine's setting (D32's
-/// appendix), and an unknown key off the wire is ignored rather than refused,
-/// as it always was.
-#[derive(Debug, Default, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct UpdateRepositoryInput {
-    #[serde(default)]
-    pub name: Option<String>,
-    #[serde(default)]
-    pub default_branch: Option<String>,
-}
-
-/// Every registered repository, alphabetically — the order Settings shows
-/// them in. The board's half, with no path (task 066); this machine's clones
-/// are [`list_checkouts`].
-#[tauri::command]
-pub async fn list_repositories(state: State<'_, AppState>) -> Result<Vec<Repository>> {
-    repo::list(&state.context).await
 }
 
 /// This machine's checkout of every repository it has one of (task 066): the
@@ -97,25 +76,6 @@ pub async fn register_repository(
     .await
 }
 
-/// Edits an already-registered repository. Does not re-run git validation —
-/// see [`repo::update`]'s own doc for why.
-#[tauri::command]
-pub async fn update_repository(
-    state: State<'_, AppState>,
-    id: String,
-    patch: UpdateRepositoryInput,
-) -> Result<Repository> {
-    repo::update(
-        &state.context,
-        &id,
-        RepositoryPatch {
-            name: patch.name,
-            default_branch: patch.default_branch,
-        },
-    )
-    .await
-}
-
 /// Moves where this machine creates a repository's worktrees (task 066, D32's
 /// Binds): `update_repository`'s `worktreeRoot`, now this machine's checkout.
 #[tauri::command]
@@ -136,7 +96,7 @@ pub async fn set_repository_worktree_root(
 /// Raises or lowers ADR-0010's per-repository cap on how many runs this
 /// repository holds at once.
 ///
-/// Its own command rather than a field on [`update_repository`] for the same
+/// Its own command rather than a field on `update_repository` for the same
 /// reason the unattended-runs opt-in is: it is a deliberate act with a
 /// consequence the panel has to state — two agents in one repository fight over
 /// ports, test databases and lockfiles — and burying it in an "edit name and
@@ -180,27 +140,6 @@ pub async fn set_repository_unattended_runs(
     allow: bool,
 ) -> Result<CheckoutView> {
     repo::set_allow_unattended_runs(&state.context, &state.machine, &id, allow).await
-}
-
-/// Sets the team ceiling: whether the repository's team allows unattended runs
-/// in it at all (ADR-0032 point 4). A board command, refused to a member and
-/// on a personal team; [`set_repository_unattended_runs`] stays this runner's
-/// own consent.
-#[tauri::command]
-pub async fn set_repository_unattended_ceiling(
-    state: State<'_, AppState>,
-    id: String,
-    allowed: bool,
-) -> Result<Repository> {
-    repo::set_repository_unattended_ceiling(&state.context, &id, allowed).await
-}
-
-/// Removes a repository. Refused, naming how many, when any task still
-/// references it; then this machine forgets its worktree records and its
-/// checkout (task 066).
-#[tauri::command]
-pub async fn remove_repository(state: State<'_, AppState>, id: String) -> Result<()> {
-    repo::remove(&state.context, Some(&state.machine), &id).await
 }
 
 /// Fresh inspection of a repository's remote and `gh` readiness — never

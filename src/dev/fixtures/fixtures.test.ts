@@ -23,9 +23,9 @@ afterEach(() => {
 
 /** The same shape `scripts/check-command-wiring.sh` parses. */
 function commandNamesSent(): string[] {
-  return [...commandsSource.matchAll(/call<[^(]*>\(\s*["']([A-Za-z0-9_]+)["']/g)].map(
-    (match) => match[1],
-  );
+  return [
+    ...commandsSource.matchAll(/(?:board|local)<[^(]*>\(\s*["']([A-Za-z0-9_]+)["']/g),
+  ].map((match) => match[1]);
 }
 
 describe("fixture answers", () => {

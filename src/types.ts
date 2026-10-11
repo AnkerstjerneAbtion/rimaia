@@ -858,7 +858,7 @@ export interface Catalogue {
  * What {@link getStrategyCatalogue} returns: the same key read three ways,
  * because Settings' textarea and the panel's dropdowns want different things
  * out of it and a second round trip would let them disagree. Mirrors
- * `StrategyCatalogueView` in `src-tauri/src/commands/strategy.rs`.
+ * `StrategyCatalogueView` in `crates/core/src/api/board/strategy.rs`.
  */
 export interface StrategyCatalogueView {
   /** The parsed value the dropdowns render — already the built-in list if the

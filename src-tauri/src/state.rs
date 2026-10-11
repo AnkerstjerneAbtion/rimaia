@@ -1,6 +1,7 @@
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
 
+use rimaia_core::api::{BoardHost, Caller};
 use rimaia_core::board::BoardPort;
 use rimaia_core::doctor;
 use rimaia_core::identity::SoloIdentity;
@@ -64,7 +65,19 @@ use rimaia_runner::RunnerStore;
 /// shared for the same kind of reason: a second copy would be a second answer.
 /// See each field's own doc.
 pub struct AppState {
+    /// The board's own context, unscoped to any one request.
+    ///
+    /// **A local handler never reads it** (seam-contract D32 point 8): when
+    /// one needs board state it dispatches a board command or goes through a
+    /// named `rimaia-core` read, so task 059, which sets [`board`](Self::board)
+    /// to `None` on a connected desktop, has a list to convert rather than a
+    /// search. The reads already here are those D32's 2026-10-04 amendment
+    /// lists; add no new one.
     pub context: ServiceContext,
+    /// The solo command host board commands are dispatched to (D32 point 3):
+    /// `Some` in solo, the only mode before task 059, which sets `None` when a
+    /// desktop is connected and its board commands go to the server.
+    pub board: Option<SoloBoard>,
     /// The installation's solo team, user and runner (seam-contract D28 part
     /// 3), as `identity::ensure_solo` returned them at startup. `context` is
     /// already scoped to the team and acting for the user; this keeps the
@@ -136,6 +149,19 @@ pub struct AppState {
     ///
     /// A `Mutex` held only for the swap, never across an `await`.
     pub plan_pass: Mutex<Option<CancelSignal>>,
+}
+
+/// What `commands::board::route` dispatches a board command with in solo.
+///
+/// `machine` is the same [`MachineContext`] as [`AppState::machine`]: what lets
+/// archiving, dragging to `done`, approving, rejecting and removing a
+/// repository keep reacting on this machine in the same call (task 046 point
+/// 3a). A server's host has none.
+#[derive(Clone)]
+pub struct SoloBoard {
+    pub host: BoardHost,
+    pub caller: Caller,
+    pub machine: MachineContext,
 }
 
 /// How many concurrently-tracked runs' tail snapshots [`RunTails`] keeps.

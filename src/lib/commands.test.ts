@@ -6,8 +6,11 @@ import {
   acceptTaskStrategy,
   approveTask,
   getReviewDigest,
+  getAppInfo,
   getTaskDependents,
   markReviewDigestSeen,
+  PROTOCOL_VERSION,
+  setCommandTransport,
   rejectTask,
   requestTaskChanges,
   clearTaskStrategy,
@@ -26,9 +29,10 @@ import type { StrategyCatalogueView, StrategyDefaults } from "../types";
 
 // Mocked at the Tauri seam, not at the wrapper module — the wrappers are what
 // is under test here, and mocking them would leave the command names and
-// argument keys they send untested. Those names are exactly what
-// `scripts/check-command-wiring.sh` cross-checks against `lib.rs`, and the
-// argument keys are the half of the contract no script can see.
+// argument keys they send untested. Those names, and whether each wrapper calls
+// `board` or `local`, are exactly what `scripts/check-command-wiring.sh`
+// cross-checks against the registry, and the argument keys are the half of the
+// contract no script can see.
 vi.mock("@tauri-apps/api/core", () => ({
   invoke: vi.fn(),
 }));
@@ -185,7 +189,8 @@ describe("the execution-strategy wrappers (task 020)", () => {
   });
 
   it("rejects with a renderable RimaiaError when a strategy command is refused", async () => {
-    // Every wrapper goes through the same `call`, so one of them is enough to
+    // Every wrapper goes through the same `send`, board and local alike, so one
+    // of them is enough to
     // pin that a refusal arrives as `{code, message}` and not as whatever
     // `invoke` happened to throw.
     mockInvoke.mockRejectedValue({
@@ -276,5 +281,41 @@ describe("the review wrappers (task 034)", () => {
     expect(mockInvoke).toHaveBeenNthCalledWith(3, "mark_review_digest_seen", {
       through: "2026-10-04T12:00:00.000Z",
     });
+  });
+});
+
+describe("board and local (seam-contract D32 point 6)", () => {
+  beforeEach(() => {
+    mockInvoke.mockReset();
+    setCommandTransport(undefined);
+  });
+
+  it("sends a board and a local command through the same invoke, unchanged", async () => {
+    mockInvoke.mockResolvedValue(undefined);
+
+    await getTaskDependents("task-1");
+    await getAppInfo();
+
+    expect(mockInvoke).toHaveBeenNthCalledWith(1, "get_task_dependents", { taskId: "task-1" });
+    expect(mockInvoke).toHaveBeenNthCalledWith(2, "get_app_info", undefined);
+  });
+
+  it("sends both through an installed transport, as fixture mode does", async () => {
+    const transport = vi.fn().mockResolvedValue(null);
+    setCommandTransport(transport);
+
+    await getTaskDependents("task-1");
+    await getAppInfo();
+
+    expect(transport.mock.calls).toEqual([
+      ["get_task_dependents", { taskId: "task-1" }],
+      ["get_app_info", undefined],
+    ]);
+    expect(mockInvoke).not.toHaveBeenCalled();
+    setCommandTransport(undefined);
+  });
+
+  it("carries the protocol version the server speaks", () => {
+    expect(PROTOCOL_VERSION).toBe("1.0");
   });
 });
