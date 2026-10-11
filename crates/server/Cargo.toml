@@ -39,5 +39,9 @@ tracing = { workspace = true }
 # approved (seam-contract D34).
 [dev-dependencies]
 rimaia-core = { path = "../core", features = ["testing"] }
+# The runner protocol's tests move the test clock by a duration and compare
+# the instants presence records (task 052). The workspace line `rimaia-core`
+# already uses, so no crate enters the lock (seam-contract D6, D34).
+chrono = { workspace = true }
 pretty_assertions = "1"
 tempfile = { workspace = true }

@@ -191,6 +191,32 @@ pub async fn board_before(file: &Path, version: &str) -> SqlitePool {
     pool
 }
 
+/// Every row of each of `tables`, as text, in insertion order: equal before
+/// and after a call exactly when the call wrote nothing to them. Read past
+/// every service, for a test crate that has no `sqlx` of its own.
+pub async fn rows_of(pool: &SqlitePool, tables: &[&str]) -> Vec<String> {
+    let mut rows = Vec::new();
+    for table in tables {
+        let columns: Vec<String> =
+            sqlx::query_scalar(&format!("SELECT name FROM pragma_table_info('{table}')"))
+                .fetch_all(pool)
+                .await
+                .expect("read a table's columns");
+        let quoted = columns
+            .iter()
+            .map(|column| format!("quote({column})"))
+            .collect::<Vec<_>>()
+            .join(" || '|' || ");
+        let found: Vec<String> =
+            sqlx::query_scalar(&format!("SELECT {quoted} FROM {table} ORDER BY rowid"))
+                .fetch_all(pool)
+                .await
+                .expect("read a table's rows");
+        rows.extend(found.into_iter().map(|row| format!("{table}: {row}")));
+    }
+    rows
+}
+
 /// Every table in a board database, by name, in a stable order: what a test
 /// dumps when it asserts some step wrote none of them.
 ///
