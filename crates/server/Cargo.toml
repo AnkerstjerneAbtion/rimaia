@@ -6,12 +6,11 @@ description = "The Rimaia board over HTTP, and its binary (ADR-0027, ADR-0034)."
 
 # The board's HTTP door: `POST /api/v1/<name>` for every board row of
 # `rimaia_core::api::registry`, through `api::dispatch`. It never links the
-# runner (ADR-0027 point 6), no desktop-framework crate, and no `sqlx`: it
-# reaches the store only through `rimaia-core`, and holds no query macro and no
-# `.sqlx/` (seam-contract D33 point 2). `rimaia_server_does_not_depend_on_rimaia_runner`
-# and `scripts/check-crate-boundaries.sh` hold it to that. Every crate D34 gives
-# a later task (`axum-extra`, `sha2`, `rand`, `subtle`, `clap`) arrives with
-# that task.
+# runner (ADR-0027 point 6) or a desktop-framework crate, and takes no database
+# crate of its own: it reaches the store only through `rimaia-core`, and holds
+# no query macro and no offline query cache (seam-contract D33 point 2). A test
+# in `src/lib.rs` and `scripts/check-crate-boundaries.sh` hold it to that.
+# Every crate D34 gives a later task arrives with that task.
 
 [dependencies]
 rimaia-core = { path = "../core" }
