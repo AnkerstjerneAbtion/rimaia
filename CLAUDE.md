@@ -178,6 +178,10 @@ Rules:
 
 - **Fake the clock. Never fake git or the filesystem.** Git runs against real repos in
   `tempfile::TempDir`. A mocked git proves your mock works.
+- **A frontend test reaches the HTTP transport through `src/test/http.ts`'s `mockHttp()`**, which
+  stubs `fetch` beside the `invoke` mocks (D39). Neither `commands.ts` nor `events.ts` is ever
+  mocked: a test goes through the wrappers, as a component does, and calls
+  `vi.unstubAllGlobals()` in `afterEach`.
 - **The Claude CLI is faked by replaying recorded fixture streams**, not by mocking a
   trait. Fixtures live in `crates/core/tests/fixtures/`.
 - **No `sleep` in tests.** Ever. Inject the clock.

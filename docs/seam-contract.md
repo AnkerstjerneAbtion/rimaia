@@ -399,6 +399,13 @@ Three npm packages and eight Cargo entries are approved for team mode, each for 
 task, in [D34](#d34--team-modes-dependencies-approved-up-front-a-d6-amendment). The list is
 still closed.
 
+### Amendment, 2026-10-11 — the dialog plugin's npm half goes (task 049)
+
+`@tauri-apps/plugin-dialog` leaves `package.json`: the folder picker is now the local command
+`choose_folder`, so no JavaScript calls the plugin. The Cargo crate and the plugin's init stay,
+because the startup dialog and `choose_folder` use them. This is a removal; the list stays
+closed. See [D39](#d39--task-049s-cross-cutting-choices).
+
 ## D7 — The event-subscription seam in the frontend
 
 **Question.** Three MVP tasks add Tauri events the UI listens to. Where does the frontend
@@ -6223,6 +6230,8 @@ There are 45 board commands: 37 from 046, and 8 flipped later. There are 52 loca
 | `get_app_info` | app | local | — | 046 | Paths, version and `onboardingDismissed` belong to this machine (ADR-0028 §2) |
 | `reveal_app_data_dir` | app | local | — | 046 | Opens a local directory |
 | `debug_provoke_error` | app | local | — | 046 | Debug builds only |
+| `get_client_capabilities` | app | local | — | 049 | What the calling client can do; a browser answers it itself, without a request (D39). No MCP tool: it answers a fact only the calling client knows (D20.6's desktop-referent exception) |
+| `choose_folder` | app | local | — | 049 | The native folder picker, so no component imports a Tauri plugin (D39). No MCP tool: an MCP client passes a path to `register_repository` (D20.6's exception) |
 | `list_repositories` | repositories | board | Read | 046 | The DTO loses `path`, `worktreeRoot` and the per-machine columns (ADR-0028 §2) |
 | `register_repository` | repositories | board | Write | 054, local until then | Split in two. The board half keeps the name and takes a remote (ADR-0033 §1). The local half maps a clone (ADR-0033 §2), and 054 names it |
 | `update_repository` | repositories | board | Write | 046 | Name and default branch. `worktreeRoot` is a runner setting and left the patch in task 066 for the local `set_repository_worktree_root` (below). No MCP tool, as before |
@@ -7353,6 +7362,125 @@ could reach. (7) applies ADR-0030 point 2 to a request that lasts for hours.
 
 ---
 
+## D39 — Task 049's cross-cutting choices
+
+**Question.** ADR-0034 point 4 says the frontend picks a transport per command kind and per
+mode, and point 5 says the UI asks what its client can do. It does not say what the pair of
+transports looks like, who builds a request's headers, what a stream does when a server
+refuses it, how a client asks for a run's tail, what a browser answers a local command with, or
+what the dialog and opener plugins turn into once a page can run without a shell. 050, 054,
+056, 059, 061 and 063 each build on the answers.
+
+**Decision.**
+
+1. **`get_client_capabilities` is a local command, and a browser answers it itself.**
+   `ClientCapabilities { mode: "solo" | "connected" | "browser", localRunnerId: string | null,
+   canOpenInEditor, canRevealFiles, canChooseFolders: boolean }`, in `src/types.ts` and in
+   `rimaia_core::api::capabilities` (a `ClientMode` enum, not a string). The desktop's answer is
+   `ClientCapabilities::desktop(runner_id, server_url)` over `runner_identity`
+   (`rimaia_runner::identity::current`): `connected` with a `server_url`, `solo` without, every
+   `can*` true. The browser's answer is fixed, returned by its local transport without a
+   request: `{ mode: "browser", localRunnerId: null, canOpenInEditor: false, canRevealFiles:
+   false, canChooseFolders: false }`. 063 adds `canUpdate` on both sides. *Declined:* deriving
+   the booleans in the page from the platform, which is the guess this command replaces.
+2. **The bootstrap is `src/lib/client.ts`.** `installTransports("solo" | "browser" |
+   "connected", connection?)` is pure apart from calling the setters; `bootstrapClient()` is
+   what `src/main.tsx` awaits before the first render. `csrfFromCookie()` reads the readable
+   `rimaia_csrf` cookie (047) on every call, never cached. A `connected` answer rejects with
+   `{ code: "internal", message: "This desktop is set to connect to a server, which this build
+   cannot do yet (task 059)." }` and installs nothing. When bootstrap rejects, `main.tsx`
+   renders `ErrorBanner` alone and never `App`. No component calls a setter or reads the mode
+   (`boundary.test.ts`). *Declined:* falling back to solo on `connected`, which writes to a
+   board nobody reads.
+3. **`transportHeaders(credential)` in `commands.ts` is the one place request headers are
+   built**, afresh per request: `Content-Type`, `Rimaia-Protocol` (the `PROTOCOL_VERSION`
+   literal), and either `X-Rimaia-CSRF` (a session, left out when there is none) or
+   `Authorization: Bearer` (a token), never both. `credentialsMode` is `same-origin` or
+   `omit` to match. The event stream calls both, and so does every request the stream's
+   library retries, so a header 050 adds (the team) reaches both transports and a retry
+   carries a new sign-in. *Declined:* headers built once per stream, which resend a stale CSRF.
+4. **Events have a source.** `EVENT_SOURCES` maps each event name to `board`, `local` or
+   `both`, copying D38's table: `tasks:changed` and `repositories:changed` are `both`,
+   `plan-pass:progress`, `runner:changed` and `schedules:changed` are `local`, the rest
+   `board`. A `both` row subscribes through the board transport and the local one, **once per
+   distinct transport, compared by identity**, so solo and fixture mode, where one transport
+   serves both, still deliver each payload once. A source whose transport is `null` (local in a
+   browser) resolves an `UnlistenFn` and subscribes to nothing. One subscription hands back the
+   transport's own `UnlistenFn`; two hand back one that releases both, and a failed second
+   releases the first. *Declined:* a `local` row for the two-sided names, which a connected
+   desktop would never hear its own worktrees from.
+5. **A stream's failures have two classes.** `onopen` throws a fatal error for a `4xx` (`401`,
+   `400`, and defensively `404` and `426`), carrying the body's `{ code, message }`, and a
+   retriable one for a `5xx` or a `200` that is not `text/event-stream`; `onclose` always
+   throws a retriable one, because a server ends a stream on revalidation and expects the
+   client back. A retriable failure reconnects after `reconnectDelay(attempt)`:
+   `RECONNECT_BASE_MS = 1000` doubled to `RECONNECT_CAP_MS = 30000`, reset when a stream
+   opens, reported to no one. A fatal one closes the stream, keeps every subscriber and its
+   refcount, and is reported to `subscribeToEventStreamFailure` as `EventStreamFailure {
+   error }`. Nothing reopens it but `reconnectEventStream()`, which 050 calls after a sign-in
+   and on a team switch. *Declined:* retrying a `4xx`, a request loop against a server that
+   has said no, and reporting retriable failures, which the stream's own recovery makes noise.
+6. **The tail is asked for at connect, from a refcounted set.** `subscribeToRunsTail(runId,
+   onTail)` passes `{ runId }` to the transport and keeps its own `runId` filter, because
+   solo's `listen` admits every run. The SSE transport holds a refcounted set of run ids, sends
+   it as repeated `?tail=`, and reconnects (coalesced with `queueMicrotask`) when an id enters
+   or its last subscriber leaves. A ninth distinct id is refused at subscription with
+   `{ code: "invalid", message: "At most 8 run tails can be watched at once." }`. A stale id
+   stays in the list and delivers nothing, as D38 point 6 has it. A `400` on an open that named
+   tails is fatal and is not retried without them. *Declined:* watching the eight most recent,
+   which freezes a card still on screen.
+7. **Plugins stay behind `src/lib`.** `choose_folder` (`{ title }`, `string | null`, `null` for
+   a cancel) replaces the dialog plugin in `RepositoryAddForm`, through `chooseFolder()`.
+   `src/lib/open.ts` keeps an installed `UrlOpener` (`setUrlOpener`), defaulting to the opener
+   plugin's `openUrl`; `installTransports("browser")` installs `browserUrlOpener`, which calls
+   `window.open(url, "_blank", "noopener,noreferrer")` for `http:` and `https:` and refuses
+   anything else with `{ code: "invalid", message: "Only http and https links can be opened:
+   <url>." }`. `boundary.test.ts` names `open.ts` as the one file that may import a plugin.
+   *Declined:* an `open_url` local command, which the browser would still refuse, and which
+   would cost the desktop a Rust command, a registry row and a fixture row for what the plugin
+   already does.
+8. **`mockHttp()` in `src/test/http.ts` is the suite's HTTP mock**, `vi.stubGlobal("fetch")`
+   beside the `invoke` mocks: `answer`, `refuse`, `refuseRaw`, `unreachable`, `requests`
+   (`{ name, url, method, headers, credentials, body }`, header names lower-cased), and
+   `events()` with `send`, `end`, `fail`, `failOpen`, `opens` and `open`. An unknown name
+   answers `404 { code: "not_found" }`. Neither wrapper module is ever mocked.
+9. **`get_client_capabilities` and `choose_folder` have no MCP tool**, under D20.6's
+   2026-09-04 desktop-referent exception. The first answers a fact only the calling client
+   knows; the second opens a native dialog, and an MCP client passes a path to
+   `register_repository`. ADR-0021 point 1 calls a command without a tool a defect unless the
+   exception is recorded; this is the record.
+10. **`list_local_worktrees` is scoped** (amends D32's 2026-10-04 amendment, which allows a
+    local handler a named read over the board). `worktree::local_records(ctx, machine)` leaves
+    out a worktree record whose task is outside the caller's teams, as `repo::checkouts` does
+    for checkouts. The handler had listed every record on the machine, which tells each of two
+    teams' members about the other's tasks. 049's local tenant-isolation case found it. 059
+    converts this read with the others.
+
+**Why.** (1) and (2) give every later task one place to ask what the client is. (3) keeps a
+header added once from being added twice, and out of a retry's stale copy. (4) is what makes a
+connected desktop hear both sides of a task. (5) is what stops a signed-out tab being a request
+loop and a browser board silently going stale after the first revalidation. (6) keeps a
+refused tail from taking every board event with it. (7) is the rule "no component imports a
+Tauri plugin" made testable. (8) is how the transports are proved without a server.
+
+**What the next tasks expect.**
+
+- **050:** `bootstrapClient()` working in a browser, `subscribeToEventStreamFailure` for
+  `unauthenticated` and `upgrade_required`, `reconnectEventStream()` after a sign-in and on a
+  team switch, `transportHeaders` as the place to add the team header, `getClientCapabilities()`
+  for browser states, and CORS admitting `Authorization`, `Rimaia-Protocol` and `Content-Type`
+  from the Tauri origins.
+- **054:** `choose_folder` and `mockHttp()`.
+- **056:** `getClientCapabilities()` and `localRunnerId`.
+- **059:** `installTransports("connected", { serverUrl, token })` exactly as tested, replacing
+  `client.test.ts`'s loud-failure case; `plan-pass:progress` already arrives through `listen`.
+- **061:** `localRunnerId`, to tell "your runner" from someone else's.
+- **063:** `canUpdate` on `ClientCapabilities`, on both sides.
+
+**Binds.** 050, 054, 056, 059, 061, 063.
+
+---
+
 ## How to use this
 
 An implementation task reads the entries its number appears in, before writing code:
@@ -7406,7 +7534,7 @@ An implementation task reads the entries its number appears in, before writing c
 | [046](../tasks/046-the-server-crate-and-one-command-registry.md) | D2 · D4 · D6 · D7 · D8 · D10 · D11 · D16 · D20 · D26 · D28 · D29 · D31 · D32 · D33 · D34 |
 | [047](../tasks/047-identity.md) | D4 · D6 · D8 · D10 · D11 · D28 · D31 · D32 · D33 · D34 |
 | [048](../tasks/048-events-over-sse.md) | D2 · D4 · D6 · D7 · D8 · D10 · D14 · D24 · D28 · D31 · D32 · D33 · D34, and writes D38 |
-| [049](../tasks/049-frontend-transport.md) | D4 · D6 · D7 · D8 · D14 · D20 · D28 · D32 · D33 · D34 · D38 |
+| [049](../tasks/049-frontend-transport.md) | D4 · D6 · D7 · D8 · D14 · D20 · D28 · D32 · D33 · D34 · D38, and writes D39 |
 | [050](../tasks/050-the-web-shell.md) | D4 · D6 · D7 · D8 · D10 · D11 · D12 · D14 · D22 · D28 · D29 · D32 · D33 · D34 · D38 |
 | [051](../tasks/051-teams-invitations-and-roles.md) | D2 · D3 · D4 · D6 · D7 · D8 · D10 · D16 · D28 · D32 · D33 · D34, and the entries 045, 048, 050 and 073 add |
 | [052](../tasks/052-the-runner-protocol-and-an-http-board-adapter.md) | D4 · D6 · D8 · D10 · D14 · D19 · D28 · D29 · D31 · D32 · D33 · D34 · D37 · D38 |
