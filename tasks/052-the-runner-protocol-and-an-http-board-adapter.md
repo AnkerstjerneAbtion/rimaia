@@ -798,11 +798,10 @@ id alone and a forged id would replace another run's catch-up tail. The case now
 run on its lease and publishes that run's tail; its assertion is unchanged. D31's 052
 amendment records the rule and the correction.
 
-**Signed off, 2026-10-11.** The waiver above was approved by the session orchestrating this
-backlog, under the user's standing instruction to decide such questions, not by the
-implementer who wrote it. The case was wrong as written: it published a tail for a run its
-lease never started, which the run-id check now rightly refuses. The user may overrule this,
-and the alternative is a lease-only fence that brings back the forged catch-up tail.
+**Approved by the user, 2026-10-12.** Asked directly whether to approve this one-case
+exception to "no change to any existing case", the user answered yes: keep the stricter
+run-id check, and keep the case as corrected. This replaces the orchestrating session's
+sign-off of 2026-10-11, which was not the user's own.
 
 **A second known cost.** A run past `BUNDLE_CAP_BYTES` shows no in-app patch, and one
 whose lists alone pass it shows no bundle at all, only `NotRecorded`. Both are runs that
