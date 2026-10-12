@@ -277,8 +277,9 @@ enum Route {
 /// a try and the wait is still buffered and wakes it.
 ///
 /// The solo loop always sends a zero `wait`, and so never subscribes here; the
-/// waiting form is task 053's long poll, which adds the clamp and the
-/// `earliest_due` wake to this body (D31's 2026-10-10 amendment).
+/// waiting form is the long poll, whose `wait` [`claim`] has already clamped
+/// to [`CLAIM_WAIT_MAX`] (task 052). Task 053 adds the `earliest_due` wake to
+/// this body (D31's 2026-10-10 amendment).
 async fn claim_next(
     ctx: &ServiceContext,
     runner: Runner<'_>,

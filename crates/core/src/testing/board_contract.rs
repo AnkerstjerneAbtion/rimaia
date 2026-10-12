@@ -28,7 +28,9 @@
 //! the strategy ceiling across a `Continue` (072:
 //! `a_review_phase_reached_through_continue_with_a_model_outside_the_ceiling_is_released`),
 //! the bundle's two caps (052: the `a_finish_whose_…` cases, which over HTTP
-//! prove the default body limit holds a capped finish),
+//! prove the default body limit holds a capped finish), the clamp on a
+//! `Next`'s wait (052:
+//! `a_next_claim_waits_no_longer_than_the_maximum_whatever_it_asks_for`),
 //! expiry (053), `run_tool` (055), resends (056).
 
 use std::future::Future;
@@ -44,7 +46,7 @@ use crate::board::service::{authorize_start, OwnerPresence};
 use crate::board::{
     BoardMethod, BoardPort, Claim, ClaimTarget, FinishRun, FreeCapacity, Heartbeat, LeasePurpose,
     LeaseRef, LeaseTerm, NextStep, PreviewOf, StartRun, TranscriptChunk, TranscriptEnd,
-    LEASE_LIFETIME,
+    CLAIM_WAIT_MAX, LEASE_LIFETIME,
 };
 use crate::clock::Clock;
 use crate::consent::{self, eligibility::RunnerEligibility};
@@ -162,6 +164,7 @@ macro_rules! board_contract {
             two_runners_claiming_next_for_one_task_get_exactly_one_claim,
             a_waiting_next_claim_returns_as_soon_as_a_task_becomes_startable,
             a_waiting_next_claim_returns_none_once_its_wait_has_passed,
+            a_next_claim_waits_no_longer_than_the_maximum_whatever_it_asks_for,
             two_runners_racing_for_one_task_get_exactly_one_claim,
             every_lease_method_refuses_a_stale_generation,
             a_lease_naming_a_missing_task_is_not_found_and_a_released_lease_is_conflict,
@@ -2028,6 +2031,49 @@ pub mod cases {
         harness.clock().advance(Duration::seconds(31));
 
         let claim = joined(waiting, "the claim to give up at its deadline").await;
+        assert!(claim.is_none(), "nothing was startable: {claim:?}");
+        assert_same(
+            tasks::get_task(board, &task_id)
+                .await
+                .expect("read the task"),
+            before,
+            "nothing was written",
+        );
+    }
+
+    pub async fn a_next_claim_waits_no_longer_than_the_maximum_whatever_it_asks_for<H: Harness>() {
+        let harness = H::start().await;
+        let board = harness.board();
+        let arranged = Arranged::new(board).await;
+        let task_id = arranged
+            .task_in(board, "Never made ready", BoardColumn::NotReady)
+            .await;
+        let before = tasks::get_task(board, &task_id)
+            .await
+            .expect("read the task");
+        let repository = arranged.repository_id.clone();
+        let runner = harness.runner(Which::A);
+
+        let waiting = tokio::spawn(async move {
+            runner
+                .claim(next_target_waiting(
+                    &[&repository],
+                    1,
+                    &[(&repository, 1)],
+                    StdDuration::from_secs(10 * 60),
+                ))
+                .await
+        });
+        converge().await;
+        assert!(!waiting.is_finished(), "returned before any wait passed");
+
+        // Exactly the maximum, and no further: a claim that honoured the ten
+        // minutes it asked for is still waiting, and `joined` names it.
+        harness
+            .clock()
+            .advance(Duration::from_std(CLAIM_WAIT_MAX).expect("a representable wait"));
+
+        let claim = joined(waiting, "the claim to give up at the clamped deadline").await;
         assert!(claim.is_none(), "nothing was startable: {claim:?}");
         assert_same(
             tasks::get_task(board, &task_id)
