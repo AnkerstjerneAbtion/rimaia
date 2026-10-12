@@ -679,6 +679,24 @@ async fn a_team_owner_can_stop_a_members_run() {
 }
 
 #[tokio::test]
+async fn a_member_can_stop_a_run_on_a_runner_they_own() {
+    let s = SharedServer::new().await;
+    let task = s.task(&s.team.bob, "Bob's plan").await;
+    let lease = s.claim(&s.bob_runner, &task).await;
+
+    // Bob is only a member of the team: the holding runner being his is what
+    // lets him stop it.
+    let stopped = s
+        .doors
+        .command(&s.bob_desktop, "cancel_task_run", json!({ "taskId": task }))
+        .await;
+
+    assert_eq!(stopped.status, 200, "{}", stopped.body);
+    let heartbeat = s.doors.heartbeat(&s.bob_runner, &[&lease]).await;
+    assert_eq!(heartbeat["cancel"], json!([task]));
+}
+
+#[tokio::test]
 async fn a_member_who_owns_neither_the_runner_nor_the_team_cannot_stop_its_run() {
     let s = SharedServer::new().await;
     let task = s.task(&s.team.alice, "Alice's plan").await;
