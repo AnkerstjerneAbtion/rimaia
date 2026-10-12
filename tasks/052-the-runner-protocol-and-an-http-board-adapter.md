@@ -6,6 +6,7 @@ status: ready
 depends_on: ["051"]
 adrs: ["0031", "0034", "0037", "0027"]
 size: L
+landed: "#34"
 ---
 
 # The runner protocol and an HTTP board adapter

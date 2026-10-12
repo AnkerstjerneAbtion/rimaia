@@ -66,7 +66,7 @@ reviewable in the app afterwards.
 | 53 | [049](049-frontend-transport.md) | A frontend transport per command kind | v0.5 | 048, 028, 017 | #34 |
 | 54 | [050](050-the-web-shell.md) | The web shell | v0.5 | 049 | #34 |
 | 55 | [051](051-teams-invitations-and-roles.md) | Teams, invitations and roles | v0.5 | 050, 073 | #34 |
-| 56 | [052](052-the-runner-protocol-and-an-http-board-adapter.md) | The runner protocol and an HTTP board adapter | v0.5 | 051 | — |
+| 56 | [052](052-the-runner-protocol-and-an-http-board-adapter.md) | The runner protocol and an HTTP board adapter | v0.5 | 051 | #34 |
 | 57 | [070](070-a-context-that-acts-for-nobody.md) | A context that acts for nobody | v0.5 | 045, 046, 048, 051, 052 | — |
 | 58 | [053](053-leases-across-the-network.md) | Leases across the network | v0.5 | 052, 070 | — |
 | 59 | [054](054-repositories-by-remote.md) | Repositories by remote, checkouts by runner | v0.5 | 052, 053 | — |
