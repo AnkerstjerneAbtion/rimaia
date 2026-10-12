@@ -10,23 +10,32 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
+use rimaia_core::api::events::{local_reread, local_wire};
+use rimaia_core::api::tail::SOLO_TAIL_RELAY_CAPACITY;
+use rimaia_core::api::{
+    BoardHost, Caller, StreamControl, Subscription, TailRelay, Tails, WireEvent,
+};
+use rimaia_core::board::{BoardPort, InProcessBoard, LeaseTerm};
 use rimaia_core::db::MutationSource;
-use rimaia_core::doctor;
+use rimaia_core::identity::rate_limit::RateLimiter;
+use rimaia_core::machine::{self, MachineContext};
 use rimaia_core::mcp::{self, McpState, RunHandles};
-use rimaia_core::runner::events::RunTail;
 use rimaia_core::runner::process::DEFAULT_GRACE_PERIOD;
-use rimaia_core::runner::strategy::PlannerAccess;
+use rimaia_core::runner::provider::ProviderProfile;
 use rimaia_core::runner::RunnerConfig;
 use rimaia_core::scheduler::{self, InFlight};
 use rimaia_core::{
-    db, startup, worktree, AppPaths, ChangeEvent, Error, ServiceContext, SystemClock,
+    db, identity, startup, worktree, AppPaths, Error, LocalChange, LocalEvents, ServiceContext,
+    SystemClock, TeamScope,
 };
+use rimaia_runner::relay::ShellRelay;
+use rimaia_runner::{adopt, RunnerStore};
 use tauri::{Emitter, Manager, RunEvent};
 use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
 use tokio::sync::broadcast;
 use tokio::sync::broadcast::error::RecvError;
 
-use crate::state::{AppState, RunTails};
+use crate::state::{local_tools, AppState, SoloBoard};
 
 /// The label of the one window `tauri.conf.json` declares. Spelled out because
 /// that file leaves it implicit and Tauri fills it in — an unlabelled window
@@ -130,28 +139,31 @@ pub fn run() {
                 return Err(err.into());
             }
 
-            // Nothing is running yet — the process that set any of this is the one
-            // that just died — so whatever `survey` finds is history, not a live
-            // condition. It logs its own warning when the report isn't empty and
-            // otherwise only reads (see its module docs); repairing a stuck
-            // `running` task, a vanished worktree or a missing run log belongs to
-            // tasks 004, 007 and 008 respectively, not to startup.
-            let report = match tauri::async_runtime::block_on(startup::survey(&pool)) {
-                Ok(report) => report,
-                Err(err) => {
-                    log_startup_failure("startup survey", &paths.db_file(), &err);
-                    report_startup_failure(
-                        app.handle(),
-                        "survey what the last launch left behind",
-                        Some(&logs_dir),
-                        &err,
-                    );
-                    return Err(err.into());
-                }
-            };
+            // The installation's solo team, user and runner (ADR-0029 point 2,
+            // seam-contract D28 part 3): adopted by the migration above on a
+            // board that had something to adopt, created here on one that did
+            // not. After the migration, because the tables are the migration's,
+            // and before any `ServiceContext`, because its scope is what this
+            // returns. A file that belongs to a server is refused here, through
+            // the same loud path a failed migration takes (D11).
+            let solo =
+                match tauri::async_runtime::block_on(identity::ensure_solo(&pool, &SystemClock)) {
+                    Ok(solo) => solo,
+                    Err(err) => {
+                        log_startup_failure("establish the solo identity", &paths.db_file(), &err);
+                        report_startup_failure(
+                            app.handle(),
+                            "establish this computer's identity on the board",
+                            Some(&logs_dir),
+                            &err,
+                        );
+                        return Err(err.into());
+                    }
+                };
 
             // One `ServiceContext` for the whole process (ADR-0018): the pool
-            // above, a system clock, and a fresh change-event sender. Every
+            // above, moved in here and never touched bare again, a system
+            // clock, and a fresh change-event sender. Every
             // `rimaia-core` service task 003 onward calls goes through this,
             // never a bare pool — that is what makes the MCP server (task 010)
             // a second caller of the same rules instead of a second
@@ -160,101 +172,89 @@ pub fn run() {
             // through (ADR-0019). The scheduler and the MCP server are handed
             // this same context and each re-sources its own clone at
             // construction, so nothing below has to remember to pass a source.
-            let context = ServiceContext::new(pool, Arc::new(SystemClock), MutationSource::Ui);
+            // Scoped to the solo team and acting for the solo user, whom every
+            // door in solo acts for (ADR-0029 point 5, ADR-0030 point 8); the
+            // scheduler and the MCP server inherit both with their clone.
+            let context = ServiceContext::new(
+                pool,
+                Arc::new(SystemClock),
+                MutationSource::Ui,
+                TeamScope::one(solo.team_id.clone()),
+                solo.user_id.clone(),
+            );
 
-            // Subscribed once, here, for the life of the app (ADR-0018): the
-            // shell is the only thing that turns a `ChangeEvent` into a Tauri
-            // event, and it does so from one forwarding task rather than a
-            // listener per window or per command. Subscribing before
-            // `app.manage` hands `context` to any command matters less here
-            // than it does in a test — nothing has published yet — but keeping
-            // the order matches the rule anyway: subscribe first, then let
-            // writers start.
-            let change_events = context.subscribe();
-            tauri::async_runtime::spawn(forward_change_events(app.handle().clone(), change_events));
-
-            // Task 008's D14 channel, subscribed the same way and for the same
-            // reason: once, here, before anything can publish to it. `tails` is
-            // the shell's own bookkeeping — the latest tail snapshot per run
-            // (see `state::RunTails`'s doc) — and the forwarder is what keeps
-            // it current. Which tasks have a process in flight used to be here
-            // too; it is `rimaia_core::scheduler::InFlight` now.
-            let tails = RunTails::new();
-            let tail_events = context.subscribe_tail();
-            tauri::async_runtime::spawn(forward_run_tail(
-                app.handle().clone(),
-                tail_events,
-                tails.clone(),
-            ));
-
-            // Task 009's repair for `survey`'s `tasks_left_running` finding
-            // (ADR-0010, ADR-0011, seam-contract D9): a task still `running`
-            // is not a live condition (nothing was running when this process
-            // started), it is what a crash left behind, and it has to be
-            // settled *before* the queue below ever reads the board. A queue
-            // that started selecting while a stale `running` row was still
-            // sitting there could read it as legitimately in flight forever
-            // (nothing in the MVP transitions a task out of `running` except
-            // a run finishing) — this is what finishes it instead, through
-            // the same services every other caller uses
-            // (`runner::outcome::finish_run`, `tasks::set_run_state`), never a
-            // raw `UPDATE`. It shares this startup with `worktree::reconcile`
-            // below in either order — each only acts on a state the other has
-            // not already produced — but it must land before the queue is
-            // built, which is why it is sequenced here rather than after.
-            let reconciled = match tauri::async_runtime::block_on(scheduler::reconcile_interrupted(
-                &context, &report,
-            )) {
-                Ok(reconciled) => reconciled,
-                Err(err) => {
-                    log_startup_failure("reconcile interrupted runs", &paths.db_file(), &err);
-                    report_startup_failure(
-                        app.handle(),
-                        "reconcile runs a previous launch left running",
-                        Some(&logs_dir),
-                        &err,
-                    );
-                    return Err(err.into());
-                }
-            };
-            if !reconciled.is_empty() {
-                tracing::info!(
-                    tasks = reconciled.len(),
-                    "marked tasks a previous launch left running as interrupted",
-                );
-            }
-
-            // Task 007's repair step for `survey`'s `missing_worktrees` finding
-            // (ADR-0005: "repository state on disk is authoritative"). Placed
-            // after the subscriber above, matching that step's own "subscribe
-            // first, then let writers start" — `reconcile` is itself a writer,
-            // just one that runs once at startup instead of once per command.
-            // Unlike a failed migration this is recoverable: `reconcile` takes
-            // no `Result`, logs and skips whatever it cannot clear, and so
-            // cannot itself stop the window from opening.
-            tauri::async_runtime::block_on(worktree::reconcile(
+            // The runner's own store, beside the board (ADR-0028 points 3 and 4),
+            // and this machine's one-time adoption out of the board into it
+            // (seam-contract D28, "The runner set"). After the context, because
+            // adoption reads the board through it; before anything reads
+            // machine state, so every reader finds it adopted. Each fails
+            // like its neighbours (D11), naming runner.db in the log line. The
+            // second step's name is neutral on purpose: when it is a refusal of a
+            // runner.db from another board, nothing was copied, and the name the
+            // user sees must still be true.
+            let runner_db_file = paths.runner_db_file();
+            let runner_store =
+                match tauri::async_runtime::block_on(RunnerStore::open(&runner_db_file)) {
+                    Ok(store) => store,
+                    Err(err) => {
+                        log_startup_failure("open the runner store", &runner_db_file, &err);
+                        report_startup_failure(
+                            app.handle(),
+                            "open the runner store",
+                            Some(&logs_dir),
+                            &err,
+                        );
+                        return Err(err.into());
+                    }
+                };
+            if let Err(err) = tauri::async_runtime::block_on(adopt::adopt_board(
                 &context,
-                &report.missing_worktrees,
-            ));
+                &runner_store,
+                &solo,
+                &paths,
+            )) {
+                const STEP: &str = "adopt this machine's state into the runner store";
+                log_startup_failure(STEP, &runner_db_file, &err);
+                report_startup_failure(app.handle(), STEP, Some(&logs_dir), &err);
+                return Err(err.into());
+            }
+            // This machine's own state, behind the port core reaches it through
+            // (task 041): built once, here, over the store just adopted into,
+            // and handed to everything that reads or writes it. Its writes are
+            // announced on a local channel of its own (task 048), which the
+            // local forwarder below hears and a server never does.
+            let machine = MachineContext {
+                store: Arc::new(runner_store.clone()),
+                clock: Arc::new(SystemClock),
+                local: LocalEvents::new(),
+            };
 
-            // Task 009's one long-lived queue, built and spawned once here —
-            // after both reconciliations above have committed, never before.
-            // `tauri::async_runtime::spawn` rather than a bare `tokio::spawn`
-            // for the reason every other background task in this hook uses
-            // it: Tauri's async runtime *is* Tokio, so this rides the runtime
-            // already here instead of starting a second.
-            //
-            // `in_flight` is built here and handed to both the queue and
-            // `AppState`, which is what lets a manual "Run now", a "Plan now"
-            // and the queue's own claim refuse to double-spawn a process for
-            // the same task. It used to be an `attach_queue` back-reference
-            // from a shell-side map onto the queue's private one; one registry
-            // both doors read needs no wiring between them, and is reachable
-            // from `rimaia-core` — which is what ADR-0021's known gap was
-            // waiting on.
-            //
+            // Nothing is running yet — the process that set any of this is the one
+            // that just died — so whatever `survey` finds is history, not a live
+            // condition. It logs its own warning when the report isn't empty and
+            // otherwise only reads (see its module docs); repairing a stuck
+            // `running` task, a vanished worktree or a missing run log belongs to
+            // tasks 004, 007 and 008 respectively, not to startup. It runs under
+            // the context, so it reports only the solo team's rows (task 039),
+            // and reads worktrees from this machine's records and transcripts
+            // from the paths their ids derive (task 066).
+            let report =
+                match tauri::async_runtime::block_on(startup::survey(&context, &machine, &paths)) {
+                    Ok(report) => report,
+                    Err(err) => {
+                        log_startup_failure("startup survey", &paths.db_file(), &err);
+                        report_startup_failure(
+                            app.handle(),
+                            "survey what the last launch left behind",
+                            Some(&logs_dir),
+                            &err,
+                        );
+                        return Err(err.into());
+                    }
+                };
+
             // Task 020's two shared values are built here, ahead of the queue,
-            // rather than inside `scheduler::build`, because each is shared
+            // rather than inside `rimaia_runner::queue::build`, because each is shared
             // with something the queue knows nothing about (see `AppState`'s
             // own docs): the `RunnerConfig` with every other starter, so a
             // manual "Run now" and the queue cannot spawn differently
@@ -272,35 +272,208 @@ pub fn run() {
                 run_handles: run_handles.clone(),
                 ..RunnerConfig::default()
             };
-            let in_flight = InFlight::new();
-            let (queue, queue_task) = scheduler::build(
+            // What the board side knows of that provider: its catalogue, cost
+            // and name, and nothing it could spawn with (seam-contract D32
+            // point 2). One value for the board port, the MCP server and the
+            // command host, so none of them reads another provider's catalogue.
+            let provider = ProviderProfile::of(runner.provider.as_ref());
+
+            // The one board port every door that starts a process reaches the
+            // board through (seam-contract D31 point 8): the queue, the MCP
+            // server's planner and the commands, through `AppState`. Built from
+            // the `runner` value above and nothing else, because the board's
+            // provider must be the runner's — a board built for another one
+            // would hand the planner the wrong catalogue, silently.
+            // It serves the solo runner, the one machine a solo board runs on,
+            // and records it on every run it opens (D31 point 9). Its leases
+            // never expire: the board and its one runner are this process
+            // (ADR-0031 point 5). Built before the reconcile below, which
+            // settles this runner's held leases through it.
+            let board_port: Arc<dyn BoardPort> = Arc::new(InProcessBoard::new(
                 context.clone(),
                 paths.clone(),
-                runner.clone(),
+                provider.clone(),
+                solo.runner_id.clone(),
+                LeaseTerm::Never,
+            ));
+
+            // `in_flight` is built here and handed to the queue, the relay
+            // below and `AppState`, which is what lets a manual "Run now", a
+            // "Plan now" and the queue's own claim refuse to double-spawn a
+            // process for the same task. It used to be an `attach_queue`
+            // back-reference from a shell-side map onto the queue's private
+            // one; one registry every door reads needs no wiring between
+            // them, and is reachable from `rimaia-core` — which is what
+            // ADR-0021's known gap was waiting on.
+            let in_flight = InFlight::new();
+
+            // The solo command host (D32 point 3): board commands reach
+            // `api::dispatch_with_machine` through it, as the solo user owning
+            // the solo team through the window, and the board forwarder below
+            // follows its channels. Its tail relay follows the live channel
+            // from here, before anything can publish to it (task 048). Run
+            // now, Retry now and Cancel reach this machine's runner through
+            // its relay, the shell's own starter (task 052).
+            let host = BoardHost {
+                context: context.clone(),
+                provider: provider.clone(),
+                paths: paths.clone(),
+                // Nothing in solo reaches it: the account commands that
+                // mint refuse the shell (task 047).
+                rate_limits: Arc::new(RateLimiter::new(context.clock.clone())),
+                tails: TailRelay::new(SOLO_TAIL_RELAY_CAPACITY),
+                streams: StreamControl::new(),
+                relay: Arc::new(ShellRelay {
+                    board: Arc::clone(&board_port),
+                    machine: machine.clone(),
+                    paths: paths.clone(),
+                    config: runner.clone(),
+                    in_flight: in_flight.clone(),
+                }),
+            };
+            tauri::async_runtime::spawn(host.tails.follow(context.subscribe_tail()));
+            let caller = Caller::solo(&solo);
+
+            // Both forwarders subscribe here, once, for the life of the app
+            // (ADR-0018), before anything below writes: subscribe first, then
+            // let writers start. The board half is one `Subscription`, the
+            // type a server's stream uses, with the solo caller: the same
+            // admission, so "works in solo" is evidence for "works connected".
+            // It admits every tail, as the window always heard them, and has
+            // no credential to re-check. The local half is this machine's own
+            // channel. Neither holds an event name: both forward core's
+            // `WireEvent`s (task 048).
+            let board_events = Subscription::open(&host, caller.clone(), Tails::All, None);
+            tauri::async_runtime::spawn(forward_board_events(app.handle().clone(), board_events));
+            tauri::async_runtime::spawn(forward_local_events(
+                app.handle().clone(),
+                machine.local.subscribe(),
+            ));
+
+            // ADR-0031 point 5: this runner reconciles the leases it held, and
+            // nothing else, before the queue below ever reads the board. A task
+            // still `running` is not a live condition (nothing was running when
+            // this process started); it is what a crash left behind, and a queue
+            // that started selecting while it sat there would read it as
+            // legitimately in flight forever. Each lease is settled through the
+            // board port, the same door every report takes: an open run is
+            // finished as interrupted, which lands the task by ADR-0011's table
+            // and pins it here; a lease with no run is released.
+            let reconciled = match tauri::async_runtime::block_on(scheduler::reconcile_held(
+                board_port.as_ref(),
+                &machine,
+            )) {
+                Ok(reconciled) => reconciled,
+                Err(err) => {
+                    log_startup_failure("reconcile held leases", &runner_db_file, &err);
+                    report_startup_failure(
+                        app.handle(),
+                        "reconcile the leases this runner held",
+                        Some(&logs_dir),
+                        &err,
+                    );
+                    return Err(err.into());
+                }
+            };
+            // Solo's arm: what the board holds for this runner that its own
+            // record cannot know about — a lease committed just before a crash
+            // stopped the record of it, and tasks an older build left `running`
+            // or `queued` with no lease at all. Neither can exist in team mode.
+            let unrecorded = match tauri::async_runtime::block_on(async {
+                let held: Vec<String> = machine::leases::held(&machine)
+                    .await?
+                    .into_iter()
+                    .map(|lease| lease.task_id)
+                    .collect();
+                scheduler::reconcile_unrecorded(
+                    &context,
+                    &solo.runner_id,
+                    runner.provider.as_ref(),
+                    &held,
+                )
+                .await
+            }) {
+                Ok(unrecorded) => unrecorded,
+                Err(err) => {
+                    log_startup_failure("reconcile unrecorded runs", &paths.db_file(), &err);
+                    report_startup_failure(
+                        app.handle(),
+                        "reconcile runs no lease recorded",
+                        Some(&logs_dir),
+                        &err,
+                    );
+                    return Err(err.into());
+                }
+            };
+            if !reconciled.is_empty() || !unrecorded.is_empty() {
+                tracing::info!(
+                    tasks = reconciled.len() + unrecorded.len(),
+                    "marked tasks a previous launch left running as interrupted",
+                );
+            }
+
+            // Task 007's repair step for `survey`'s `missing_worktrees` finding
+            // (ADR-0005: "repository state on disk is authoritative"). After
+            // both lease steps, never before: its `correct_run_state` moves a
+            // `running` task to `failed` through `set_run_state`, and run first
+            // it would leave that task's lease row behind, so every later claim
+            // of it would be lost. Placed after the subscriber above, matching
+            // that step's own "subscribe first, then let writers start" —
+            // `reconcile` is itself a writer, just one that runs once at
+            // startup instead of once per command.
+            // Unlike a failed migration this is recoverable: `reconcile` takes
+            // no `Result`, logs and skips whatever it cannot clear, and so
+            // cannot itself stop the window from opening.
+            tauri::async_runtime::block_on(worktree::reconcile(
+                &context,
+                &machine,
+                &report.missing_worktrees,
+            ));
+
+            // Task 009's one long-lived queue, built and spawned once here —
+            // after both reconciliations above have committed, never before.
+            // `tauri::async_runtime::spawn` rather than a bare `tokio::spawn`
+            // for the reason every other background task in this hook uses
+            // it: Tauri's async runtime *is* Tokio, so this rides the runtime
+            // already here instead of starting a second.
+
+            // The loop is the runner crate's (task 042). It claims through the
+            // port, wakes on the board's channel, and reads the board only
+            // through `SoloBoard`'s four named reads.
+            let (queue, queue_task) = rimaia_runner::queue::build(
+                machine.clone(),
+                Arc::clone(&board_port),
+                context.subscribe(),
+                rimaia_runner::queue::SoloBoard::new(
+                    context.clone(),
+                    solo.runner_id.clone(),
+                    runner.provider.id(),
+                ),
                 in_flight.clone(),
+                paths.clone(),
+                runner.clone(),
             );
             tauri::async_runtime::spawn(queue_task.run());
 
             // Task 013's notification watcher. Subscribed here, after the queue
             // exists and before anything can publish — the same "subscribe
             // first, then let writers start" order every other listener in this
-            // hook keeps. It is a third subscriber to ADR-0018's channel, which
-            // that ADR's Consequences already anticipated costing nothing but a
-            // `subscribe()`.
+            // hook keeps. The window is a runner key, so it listens to the
+            // machine's local channel (task 048).
             tauri::async_runtime::spawn(notify::announce_run_windows(
                 app.handle().clone(),
-                context.clone(),
+                machine.clone(),
                 queue.clone(),
-                context.subscribe(),
+                machine.local.subscribe(),
             ));
 
             // Task 010's MCP server (ADR-0006). Last of the startup steps on
             // purpose: this is the first thing in this hook that a process
             // *outside* Rimaia can write through, and nothing outside should
             // reach the board until every repair this startup was going to
-            // make has been made — `reconcile_interrupted`, `worktree::reconcile`
+            // make has been made — the two lease steps, `worktree::reconcile`
             // and the queue's own construction all sit above it.
-            let mcp_port = tauri::async_runtime::block_on(mcp::configured_port(&context.pool))
+            let mcp_port = tauri::async_runtime::block_on(mcp::configured_port(&machine))
                 .unwrap_or_else(|error| {
                     tracing::warn!(
                         %error,
@@ -313,22 +486,18 @@ pub fn run() {
                 context.clone(),
                 mcp_port,
                 run_handles.clone(),
-                // The shell's own paths and runner, not `Programs::default` —
-                // so `run_doctor` over MCP reports on the same `claude` binary
-                // and the same data directory the window does. ADR-0021's
-                // parity is only worth having if both surfaces answer about the
-                // same installation.
-                doctor::Environment::for_runner(paths.clone(), &runner),
-                // Task 023, and ADR-0021's named gap closed: the MCP server can
-                // now start a planner, because everything it needs to — the data
-                // directory, the `claude` the runner would spawn, and the one
-                // in-flight registry every other door takes leases from — is
-                // reachable from `rimaia-core` and handed in here.
-                PlannerAccess {
-                    paths: paths.clone(),
-                    runner: runner.clone(),
-                    in_flight: in_flight.clone(),
-                },
+                provider.clone(),
+                // This machine's tools (task 041): a solo shell has a machine,
+                // so both doors serve every tool they served before, and a run
+                // calling a local one gets its scope's refusal.
+                Some(local_tools(
+                    &machine,
+                    &paths,
+                    &runner,
+                    &in_flight,
+                    &board_port,
+                    &solo.runner_id,
+                )),
             ));
             let mcp_status = mcp_handle.status();
             match mcp_status.state {
@@ -352,13 +521,25 @@ pub fn run() {
             }
             tauri::async_runtime::spawn(mcp_task.run());
 
+            // The host built above, with this machine for the handlers that
+            // react on it (task 046 point 3a).
+            let board = SoloBoard {
+                host,
+                caller,
+                machine: machine.clone(),
+            };
+
             app.manage(AppState {
                 context,
+                board: Some(board),
+                solo,
+                runner_store,
+                machine,
                 paths,
                 in_flight,
-                tails,
                 queue,
                 runner,
+                board_port,
                 run_handles,
                 mcp: std::sync::Mutex::new(mcp_handle),
                 plan_pass: std::sync::Mutex::new(None),
@@ -391,54 +572,36 @@ pub fn run() {
             Ok(())
         });
 
-    // `generate_handler!` needs a literal list, so the debug-only command is
-    // added by picking a whole list rather than by conditioning one entry.
-    #[cfg(debug_assertions)]
-    let builder = builder.invoke_handler(tauri::generate_handler![
+    // One literal list of the local commands, and only those: every command is
+    // a row in `crates/core/src/api/registry.rs`, and a board row is answered
+    // by `commands::board::route` through `api::dispatch_with_machine`, never
+    // registered here (seam-contract D32 points 3 and 4). The locked
+    // tauri-macros parses an outer attribute on an entry, so the one debug-only
+    // command is gated in place, and a release build has nothing to forget.
+    // `scripts/check-command-wiring.sh` holds this list equal to the
+    // registry's local rows.
+    let builder = builder.invoke_handler(commands::board::route(tauri::generate_handler![
         commands::app::get_app_info,
         commands::app::reveal_app_data_dir,
+        #[cfg(debug_assertions)]
         commands::app::debug_provoke_error,
-        commands::repositories::list_repositories,
+        commands::app::get_client_capabilities,
+        commands::app::choose_folder,
+        commands::repositories::list_checkouts,
         commands::repositories::register_repository,
-        commands::repositories::update_repository,
+        commands::repositories::set_repository_worktree_root,
         commands::repositories::set_repository_unattended_runs,
         commands::repositories::set_repository_on_archive,
         commands::repositories::set_repository_max_concurrency,
-        commands::repositories::remove_repository,
         commands::repositories::get_repository_remote_info,
         commands::repositories::get_repository_credential_status,
         commands::repositories::set_repository_credential,
         commands::repositories::remove_repository_credential,
-        commands::tasks::create_task,
-        commands::tasks::get_task,
-        commands::tasks::list_tasks,
-        commands::tasks::update_task,
-        commands::tasks::delete_task,
-        commands::tasks::archive_task,
-        commands::tasks::archive_tasks,
-        commands::tasks::unarchive_task,
-        commands::tasks::move_task,
-        commands::tasks::set_task_run_state,
-        commands::tasks::add_task_link,
-        commands::tasks::update_task_link,
-        commands::tasks::remove_task_link,
-        commands::tasks::reorder_task_link,
-        commands::tasks::set_task_dependencies,
-        commands::tasks::get_blocking_reason,
-        commands::settings::get_base_instructions,
-        commands::settings::set_base_instructions,
         commands::settings::get_run_environment,
-        commands::settings::get_run_cost_summary,
         commands::settings::set_run_environment,
+        commands::settings::get_strategy_ceiling,
+        commands::settings::set_strategy_ceiling,
         commands::settings::preview_composed_prompt,
-        commands::strategy::get_strategy_catalogue,
-        commands::strategy::set_strategy_catalogue,
-        commands::strategy::get_strategy_defaults,
-        commands::strategy::set_strategy_defaults,
-        commands::strategy::get_strategy_approval,
-        commands::strategy::set_strategy_approval,
-        commands::strategy::accept_task_strategy,
-        commands::strategy::clear_task_strategy,
         commands::strategy::plan_task_strategy,
         commands::strategy::plan_tasks_strategy,
         commands::strategy::cancel_plan_pass,
@@ -453,18 +616,12 @@ pub fn run() {
         commands::worktree::cleanup_merged_worktrees,
         commands::worktree::get_worktree_auto_cleanup,
         commands::worktree::set_worktree_auto_cleanup,
-        commands::runs::start_task_run,
-        commands::runs::cancel_task_run,
-        commands::runs::retry_task_now,
-        commands::runs::give_up_on_task,
-        commands::runs::get_run_tail,
-        commands::runs::list_runs_for_task,
-        commands::runs::list_runs,
-        commands::runs::get_run,
+        commands::worktree::list_local_worktrees,
         commands::runs::read_run_transcript_page,
         commands::runs::search_run_transcript,
         commands::runs::summarize_run_transcript,
         commands::runs::reveal_run_log,
+        commands::runs::get_run_log_path,
         commands::runs::get_run_log_size,
         commands::runs::prune_run_logs,
         commands::queue::start_queue,
@@ -485,113 +642,11 @@ pub fn run() {
         commands::mcp::get_mcp_status,
         commands::mcp::set_mcp_port,
         commands::mcp::test_mcp_connection,
-        commands::analytics::get_analytics,
-        commands::analytics::get_subscription_cost,
-        commands::analytics::set_subscription_cost,
         commands::doctor::run_doctor,
         commands::doctor::dismiss_onboarding,
         commands::doctor::dismiss_doctor_warning,
         commands::doctor::restore_doctor_warning,
-    ]);
-    #[cfg(not(debug_assertions))]
-    let builder = builder.invoke_handler(tauri::generate_handler![
-        commands::app::get_app_info,
-        commands::app::reveal_app_data_dir,
-        commands::repositories::list_repositories,
-        commands::repositories::register_repository,
-        commands::repositories::update_repository,
-        commands::repositories::set_repository_unattended_runs,
-        commands::repositories::set_repository_on_archive,
-        commands::repositories::set_repository_max_concurrency,
-        commands::repositories::remove_repository,
-        commands::repositories::get_repository_remote_info,
-        commands::repositories::get_repository_credential_status,
-        commands::repositories::set_repository_credential,
-        commands::repositories::remove_repository_credential,
-        commands::tasks::create_task,
-        commands::tasks::get_task,
-        commands::tasks::list_tasks,
-        commands::tasks::update_task,
-        commands::tasks::delete_task,
-        commands::tasks::archive_task,
-        commands::tasks::archive_tasks,
-        commands::tasks::unarchive_task,
-        commands::tasks::move_task,
-        commands::tasks::set_task_run_state,
-        commands::tasks::add_task_link,
-        commands::tasks::update_task_link,
-        commands::tasks::remove_task_link,
-        commands::tasks::reorder_task_link,
-        commands::tasks::set_task_dependencies,
-        commands::tasks::get_blocking_reason,
-        commands::settings::get_base_instructions,
-        commands::settings::set_base_instructions,
-        commands::settings::get_run_environment,
-        commands::settings::get_run_cost_summary,
-        commands::settings::set_run_environment,
-        commands::settings::preview_composed_prompt,
-        commands::strategy::get_strategy_catalogue,
-        commands::strategy::set_strategy_catalogue,
-        commands::strategy::get_strategy_defaults,
-        commands::strategy::set_strategy_defaults,
-        commands::strategy::get_strategy_approval,
-        commands::strategy::set_strategy_approval,
-        commands::strategy::accept_task_strategy,
-        commands::strategy::clear_task_strategy,
-        commands::strategy::plan_task_strategy,
-        commands::strategy::plan_tasks_strategy,
-        commands::strategy::cancel_plan_pass,
-        commands::worktree::get_worktree_status,
-        commands::worktree::get_diff_summary,
-        commands::worktree::reveal_task_worktree,
-        commands::worktree::list_open_in_targets,
-        commands::worktree::open_task_worktree_in,
-        commands::worktree::get_worktree_inventory,
-        commands::worktree::remove_task_worktree,
-        commands::worktree::cleanup_done_worktrees,
-        commands::worktree::cleanup_merged_worktrees,
-        commands::worktree::get_worktree_auto_cleanup,
-        commands::worktree::set_worktree_auto_cleanup,
-        commands::runs::start_task_run,
-        commands::runs::cancel_task_run,
-        commands::runs::retry_task_now,
-        commands::runs::give_up_on_task,
-        commands::runs::get_run_tail,
-        commands::runs::list_runs_for_task,
-        commands::runs::list_runs,
-        commands::runs::get_run,
-        commands::runs::read_run_transcript_page,
-        commands::runs::search_run_transcript,
-        commands::runs::summarize_run_transcript,
-        commands::runs::reveal_run_log,
-        commands::runs::get_run_log_size,
-        commands::runs::prune_run_logs,
-        commands::queue::start_queue,
-        commands::queue::pause_queue,
-        commands::queue::resume_queue,
-        commands::queue::stop_queue,
-        commands::queue::get_queue_status,
-        commands::queue::get_run_capacity,
-        commands::queue::set_schedule_mode,
-        commands::queue::set_max_concurrency,
-        commands::schedules::list_schedules,
-        commands::schedules::create_schedule,
-        commands::schedules::update_schedule,
-        commands::schedules::set_schedule_enabled,
-        commands::schedules::delete_schedule,
-        commands::schedules::preview_schedule_preflight,
-        commands::schedules::list_timezones,
-        commands::mcp::get_mcp_status,
-        commands::mcp::set_mcp_port,
-        commands::mcp::test_mcp_connection,
-        commands::analytics::get_analytics,
-        commands::analytics::get_subscription_cost,
-        commands::analytics::set_subscription_cost,
-        commands::doctor::run_doctor,
-        commands::doctor::dismiss_onboarding,
-        commands::doctor::dismiss_doctor_warning,
-        commands::doctor::restore_doctor_warning,
-    ]);
+    ]));
 
     // `Builder::run(context)` is exactly `build(context)?.run(|_, _| {})`
     // (tauri 2.11.5 `src/app.rs:2449`) — spelling it out rather than using the
@@ -642,11 +697,11 @@ pub fn run() {
 ///
 /// `queue.shutdown()` runs **first** and, by itself, cancels nothing — it
 /// only stops the queue's loop from claiming *more* tasks once the ones it is
-/// supervising end (`scheduler::queue`'s own module doc explains why racing
+/// supervising end (`rimaia_runner::queue`'s own module doc explains why racing
 /// that loop's next claim against this exit path, instead of ordering against
 /// it, would leave a task claimed with nobody left supervising it). Cancelling
 /// the runs actually in flight is `AppState::cancel_everything` right after,
-/// which reaches every lease in the shared registry exactly as it reaches a
+/// which reaches every slot in the shared registry exactly as it reaches a
 /// manual one. Net effect: quitting mid-run cancels those runs the same way
 /// pressing the queue's own Stop button would — including that button's side
 /// effect of leaving `queue_state = paused` for the next launch — and the wait
@@ -654,7 +709,7 @@ pub fn run() {
 /// performs the cancellation itself.
 ///
 /// **Both halves still hold with N runs (task 012), and neither needed a
-/// change.** `cancel_all` signals every lease in one pass rather than the one
+/// change.** `cancel_all` signals every slot in one pass rather than the one
 /// the queue happened to hold, so N children are SIGTERMed at the same instant
 /// and the single grace period below covers all of them rather than N of them
 /// in series. `has_in_flight_runs` is `!in_flight.is_empty()`, which is already
@@ -662,7 +717,7 @@ pub fn run() {
 /// this loop, and the queue's own `JoinSet` drain — converge on the same
 /// condition from opposite sides without either being able to block the other:
 /// the drain awaits supervisors that have already been asked to stop, and each
-/// of them frees its lease on the way out, which is what this loop is watching.
+/// of them frees its slot on the way out, which is what this loop is watching.
 async fn shut_down(app: &tauri::AppHandle) {
     let Some(state) = app.try_state::<AppState>() else {
         // Nothing was ever `manage`d — setup failed before reaching that
@@ -786,96 +841,48 @@ fn report_startup_failure(
         .blocking_show();
 }
 
-/// The ADR-0018 forwarder: the one place a `rimaia-core` `ChangeEvent` becomes
-/// a Tauri event. Runs for the life of the app on one subscription taken once
-/// in `setup()` — not per window, not per command.
+/// The board forwarder (ADR-0018, task 048): the solo window's one
+/// subscription to board events, for the life of the app.
 ///
-/// `RecvError::Lagged` does not end this loop. It means a subscriber fell
-/// behind the broadcast channel's buffer and missed some publications, not
-/// that anything is wrong with the app; the recovery is to tell every view to
-/// re-read wholesale (an empty id array, ADR-0018's wire signal for that) and
-/// carry on. `RecvError::Closed` is the only exit — every `ServiceContext`
-/// clone holding the sender has been dropped, i.e. the app is shutting down.
-async fn forward_change_events(
-    app: tauri::AppHandle,
-    mut events: broadcast::Receiver<ChangeEvent>,
-) {
+/// [`Subscription`] does what used to be done here: the opening re-read, a
+/// wholesale re-read after a lag, and the tail, all as core's `WireEvent`s.
+/// It ends only when the context's channel closes, which is the app shutting
+/// down.
+async fn forward_board_events(app: tauri::AppHandle, mut events: Subscription) {
+    while let Some(event) = events.next().await {
+        emit(&app, event);
+    }
+}
+
+/// The local forwarder (task 048): this machine's changes, which no server
+/// ever sees, for the life of the app.
+///
+/// `RecvError::Lagged` does not end it: it logs the count and tells every
+/// view to re-read this machine's state wholesale, the local half of
+/// ADR-0018's recovery. `RecvError::Closed` is the only exit — the machine
+/// context is gone, i.e. the app is shutting down.
+async fn forward_local_events(app: tauri::AppHandle, mut events: broadcast::Receiver<LocalChange>) {
     loop {
         match events.recv().await {
-            Ok(event) => emit_change_event(&app, event),
+            Ok(change) => emit(&app, local_wire(&change)),
             Err(RecvError::Lagged(dropped)) => {
                 tracing::warn!(
                     dropped,
-                    "change-event receiver fell behind; telling every view to re-read"
+                    "local-event receiver fell behind; telling every view to re-read"
                 );
-                emit_change_event(&app, ChangeEvent::tasks(Vec::<String>::new()));
-                emit_change_event(&app, ChangeEvent::repositories(Vec::<String>::new()));
-                emit_change_event(&app, ChangeEvent::runs(Vec::<String>::new()));
-                // Not compiler-forced, unlike `emit_change_event`'s own match:
-                // a variant left out here compiles and simply stops the
-                // schedules panel refreshing after a lag, which is the quietest
-                // possible failure. Listed for that reason.
-                emit_change_event(&app, ChangeEvent::schedules(Vec::<String>::new()));
-                emit_change_event(&app, ChangeEvent::Settings);
-            }
-            Err(RecvError::Closed) => break,
-        }
-    }
-}
-
-/// The variant-to-event-name mapping ADR-0018's table fixes. Kept as the only
-/// place those strings appear in the shell, so a renamed event is a one-line
-/// change here rather than a search across every window and command.
-fn emit_change_event(app: &tauri::AppHandle, event: ChangeEvent) {
-    let result = match &event {
-        ChangeEvent::Tasks(ids) => app.emit("tasks:changed", ids.as_ref()),
-        ChangeEvent::Repositories(ids) => app.emit("repositories:changed", ids.as_ref()),
-        ChangeEvent::Runs(ids) => app.emit("runs:changed", ids.as_ref()),
-        ChangeEvent::Schedules(ids) => app.emit("schedules:changed", ids.as_ref()),
-        ChangeEvent::Settings => app.emit("settings:changed", ()),
-    };
-    if let Err(error) = result {
-        tracing::error!(%error, "failed to forward a change event to the frontend");
-    }
-}
-
-/// The seam-contract D14 forwarder: the one place a `rimaia-core` `RunTail`
-/// becomes a `runs:tail` Tauri event. Subscribed once in `setup()`, mirroring
-/// [`forward_change_events`] in shape — but **not** in its recovery, which is
-/// the one thing D14 says to do differently on purpose.
-///
-/// `RecvError::Lagged` here is **discarded and counted, never recovered.**
-/// There is no empty-payload "re-read everything" signal on this channel,
-/// because there is nothing to re-read: a dropped tail line is already on
-/// disk in the run's JSONL transcript (ADR-0013), and the `runs` row is the
-/// other source of truth if the two ever disagree. Building a recovery path
-/// for a lossy, high-frequency view channel is exactly the mistake D14
-/// separated this channel from `ChangeEvent` to avoid.
-///
-/// Every snapshot is also recorded into the shell's own catch-up cache
-/// (`state::RunTails`) before it is forwarded, so a client that starts watching
-/// mid-run and calls `get_run_tail` sees at least this one.
-async fn forward_run_tail(
-    app: tauri::AppHandle,
-    mut events: broadcast::Receiver<RunTail>,
-    tails: RunTails,
-) {
-    loop {
-        match events.recv().await {
-            Ok(tail) => {
-                tails.record(tail.clone());
-                if let Err(error) = app.emit("runs:tail", &tail) {
-                    tracing::error!(%error, "failed to forward a run-tail snapshot to the frontend");
+                for event in local_reread() {
+                    emit(&app, event);
                 }
             }
-            Err(RecvError::Lagged(dropped)) => {
-                tracing::debug!(
-                    dropped,
-                    "run-tail receiver fell behind; the dropped snapshots are already on disk \
-                     in the run's transcript",
-                );
-            }
             Err(RecvError::Closed) => break,
         }
+    }
+}
+
+/// Emits one event into the window, under the name and with the payload core
+/// gave it.
+fn emit(app: &tauri::AppHandle, event: WireEvent) {
+    if let Err(error) = app.emit(event.name, event.data) {
+        tracing::error!(%error, event = event.name, "failed to forward an event to the frontend");
     }
 }

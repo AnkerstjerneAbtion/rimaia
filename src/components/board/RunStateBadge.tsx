@@ -1,21 +1,14 @@
-import { cardBadge, formatResumeAfter } from "../../lib/board";
-import type { ExitClass, RunState } from "../../types";
-
-const LABELS: Record<NonNullable<ReturnType<typeof cardBadge>>, string> = {
-  running: "Running",
-  queued: "Queued",
-  blocked: "Blocked",
-  waiting_retry: "Waiting for retry",
-  failed: "Failed",
-  interrupted: "Interrupted",
-  cancelled: "Cancelled",
-};
+import { badgeLabel, cardBadge, formatResumeAfter } from "../../lib/board";
+import type { ExitClass, RunKind, RunState } from "../../types";
 
 interface RunStateBadgeProps {
   runState: RunState;
   /** Structurally typed rather than `LastRunSummary`, so both the summary the
    *  card holds and the whole `Run` the panel holds satisfy it. */
   lastRun: {
+    /** What the newest row was for: the words say "Reviewing" for a review
+     *  and "Running" for an implementation, off the same state key. */
+    readonly kind: RunKind;
     readonly exitClass: ExitClass | null;
     readonly resumeAfter?: string | null;
   } | null;
@@ -59,7 +52,7 @@ export function RunStateBadge({ runState, lastRun, blockedByIncomplete }: RunSta
         className={badge === "running" ? "status-dot status-dot-live" : "status-dot"}
         aria-hidden="true"
       />
-      {LABELS[badge]}
+      {badgeLabel(badge, lastRun?.kind)}
       {resumeAt && <span className="run-badge-detail"> · {resumeAt}</span>}
     </span>
   );

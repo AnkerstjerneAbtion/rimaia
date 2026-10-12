@@ -2,18 +2,23 @@ import { fireEvent, render, screen } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 
 import { OnArchiveFields } from "./OnArchiveFields";
-import type { Repository } from "../../types";
+import type { CheckoutView, Repository } from "../../types";
 
-function repository(overrides: Partial<Repository> = {}): Repository {
+const REPOSITORY: Repository = {
+  id: "repo-1",
+  name: "rimaia",
+  defaultBranch: "main",
+  createdAt: "2026-08-20T09:00:00Z",
+};
+
+/** This computer's checkout, which holds the policy (task 066). */
+function checkout(overrides: Partial<CheckoutView> = {}): CheckoutView {
   return {
-    id: "repo-1",
-    name: "rimaia",
+    repositoryId: "repo-1",
     path: "/code/rimaia",
-    defaultBranch: "main",
     worktreeRoot: "/data/worktrees/rimaia",
-    allowUnattendedRuns: true,
     maxConcurrency: 1,
-    createdAt: "2026-08-20T09:00:00Z",
+    unattendedConsent: true,
     onArchive: "none",
     onArchiveScript: null,
     ...overrides,
@@ -24,7 +29,7 @@ describe("OnArchiveFields", () => {
   it("offers the three states as radios, so two can never be chosen at once", () => {
     // The exclusivity is the schema's, and the form draws it rather than
     // enforcing it behind the user's back (ADR-0025 point 4).
-    render(<OnArchiveFields repository={repository()} onChange={vi.fn()} />);
+    render(<OnArchiveFields repository={REPOSITORY} checkout={checkout()} onChange={vi.fn()} />);
 
     const radios = screen.getAllByRole("radio");
     expect(radios).toHaveLength(3);
@@ -35,7 +40,8 @@ describe("OnArchiveFields", () => {
     const onChange = vi.fn();
     render(
       <OnArchiveFields
-        repository={repository({ onArchive: "remove_worktree" })}
+        repository={REPOSITORY}
+        checkout={checkout({ onArchive: "remove_worktree" })}
         onChange={onChange}
       />,
     );
@@ -47,7 +53,7 @@ describe("OnArchiveFields", () => {
 
   it("does not store worktree deletion until the user acknowledges what it deletes", () => {
     const onChange = vi.fn();
-    render(<OnArchiveFields repository={repository()} onChange={onChange} />);
+    render(<OnArchiveFields repository={REPOSITORY} checkout={checkout()} onChange={onChange} />);
 
     fireEvent.click(screen.getByRole("radio", { name: "Delete the task's worktree" }));
 
@@ -61,7 +67,7 @@ describe("OnArchiveFields", () => {
 
   it("cancelling the acknowledgement puts the radio back where it was", () => {
     const onChange = vi.fn();
-    render(<OnArchiveFields repository={repository()} onChange={onChange} />);
+    render(<OnArchiveFields repository={REPOSITORY} checkout={checkout()} onChange={onChange} />);
 
     fireEvent.click(screen.getByRole("radio", { name: "Delete the task's worktree" }));
     fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
@@ -76,7 +82,7 @@ describe("OnArchiveFields", () => {
   it("will not save the script mode with an empty path", () => {
     // The service refuses `script` without one, and a radio that flipped and
     // then errored would be showing a state the database never reached.
-    render(<OnArchiveFields repository={repository()} onChange={vi.fn()} />);
+    render(<OnArchiveFields repository={REPOSITORY} checkout={checkout()} onChange={vi.fn()} />);
 
     fireEvent.click(screen.getByRole("radio", { name: "Run my own script" }));
 
@@ -85,7 +91,7 @@ describe("OnArchiveFields", () => {
 
   it("sends the mode and the path together", () => {
     const onChange = vi.fn();
-    render(<OnArchiveFields repository={repository()} onChange={onChange} />);
+    render(<OnArchiveFields repository={REPOSITORY} checkout={checkout()} onChange={onChange} />);
 
     fireEvent.click(screen.getByRole("radio", { name: "Run my own script" }));
     fireEvent.change(screen.getByLabelText("Script to run"), {
@@ -99,7 +105,8 @@ describe("OnArchiveFields", () => {
   it("warns that a script gives up every guard Rimaia has", () => {
     render(
       <OnArchiveFields
-        repository={repository({ onArchive: "script", onArchiveScript: "/opt/teardown.sh" })}
+        repository={REPOSITORY}
+        checkout={checkout({ onArchive: "script", onArchiveScript: "/opt/teardown.sh" })}
         onChange={vi.fn()}
       />,
     );
@@ -108,16 +115,32 @@ describe("OnArchiveFields", () => {
     expect(screen.getByText(/not a command line/)).toBeInTheDocument();
   });
 
+  it("reads the stored policy off the checkout, not the board's row", () => {
+    // The joined state: what the form shows is this computer's checkout.
+    render(
+      <OnArchiveFields
+        repository={REPOSITORY} checkout={checkout({ onArchive: "remove_worktree" })}
+        onChange={vi.fn()}
+      />,
+    );
+
+    expect(
+      (screen.getByRole("radio", { name: "Delete the task's worktree" }) as HTMLInputElement)
+        .checked,
+    ).toBe(true);
+  });
+
   it("repaints from the stored row when another writer changes it", () => {
     // The MCP server is a supported writer of the same row (ADR-0006), so the
     // form follows the database rather than its own last click.
     const { rerender } = render(
-      <OnArchiveFields repository={repository()} onChange={vi.fn()} />,
+      <OnArchiveFields repository={REPOSITORY} checkout={checkout()} onChange={vi.fn()} />,
     );
 
     rerender(
       <OnArchiveFields
-        repository={repository({ onArchive: "script", onArchiveScript: "/opt/elsewhere.sh" })}
+        repository={REPOSITORY}
+        checkout={checkout({ onArchive: "script", onArchiveScript: "/opt/elsewhere.sh" })}
         onChange={vi.fn()}
       />,
     );

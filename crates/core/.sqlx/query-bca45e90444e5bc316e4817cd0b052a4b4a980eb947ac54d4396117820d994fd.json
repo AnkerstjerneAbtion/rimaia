@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT t.name FROM team_memberships m JOIN teams t ON t.id = m.team_id\n            WHERE m.user_id = ?1 AND m.role = 'owner' AND t.personal_user_id IS NULL\n              AND (SELECT count(*) FROM team_memberships o\n                    WHERE o.team_id = t.id AND o.role = 'owner') = 1\n            ORDER BY t.name, t.id",
+  "describe": {
+    "columns": [
+      {
+        "name": "name",
+        "ordinal": 0,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "bca45e90444e5bc316e4817cd0b052a4b4a980eb947ac54d4396117820d994fd"
+}

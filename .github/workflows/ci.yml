@@ -20,14 +20,15 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # Belongs to the `shell` job by subject (it's about the Tauri
-      # command wiring), but it's placed here, first, on purpose: it reads
-      # src-tauri/src/lib.rs and src/lib/commands.ts as plain text, so it
-      # needs no Rust toolchain, no apt packages, and no `npm ci` — nothing
-      # this job installs below. Running it before any of that gives the
-      # fastest possible signal for the one gap ADR-0015 admits no E2E test
-      # covers: a command registered in only one of lib.rs's two
-      # `generate_handler!` lists.
+      # Belongs to the `shell` job by subject (it's about the command
+      # wiring), but it's placed here, first, on purpose: it reads the
+      # registry (crates/core/src/api/registry.rs), the shell's single
+      # `generate_handler!` list, its command definitions and
+      # src/lib/commands.ts as plain text, so it needs no Rust toolchain, no
+      # apt packages, and no `npm ci` — nothing this job installs below.
+      # Running it before any of that gives the fastest possible signal for
+      # the gap ADR-0015 admits no E2E test covers: a command whose row, list
+      # entry and wrapper disagree (seam-contract D32 point 5).
       - name: Check Tauri command wiring
         run: ./scripts/check-command-wiring.sh
 
@@ -97,11 +98,41 @@ jobs:
         if: matrix.os == 'ubuntu-latest'
         run: cargo clippy -p rimaia-core --all-targets -- -D warnings
 
+      # Its own line rather than `-p rimaia-core -p rimaia-runner`: one invocation
+      # unifies both crates' features, so a feature only the runner enables would
+      # compile here and nowhere else (seam-contract D33). The runner links
+      # rimaia-core, so the D-Bus step above already covers it.
+      - name: Clippy (runner)
+        if: matrix.os == 'ubuntu-latest'
+        run: cargo clippy -p rimaia-runner --all-targets -- -D warnings
+
+      # Its own line for the reason the runner's is (seam-contract D33).
+      - name: Clippy (server)
+        if: matrix.os == 'ubuntu-latest'
+        run: cargo clippy -p rimaia-server --all-targets -- -D warnings
+
+      # ADR-0027 point 6 from the build graph itself: rimaia-server reaches
+      # neither the runner, the desktop shell nor tauri through any edge.
+      # The graph is the same on every platform, so Linux only.
+      - name: Crate boundaries
+        if: matrix.os == 'ubuntu-latest'
+        run: ./scripts/check-crate-boundaries.sh
+
       # Verbatim what CLAUDE.md documents, on every platform. No feature flag
       # and no `--no-default-features`: the invocation that diverges from the
       # documented one is the invocation nobody runs locally.
       - name: Test
         run: cargo test -p rimaia-core
+
+      # On every platform, like the core tests: runner.db is a real file in a
+      # TempDir, and its paths are what differ between the three.
+      - name: Test (runner)
+        run: cargo test -p rimaia-runner
+
+      # On every platform: the contract suite binds a real loopback listener,
+      # and the binary test runs the built executable.
+      - name: Test (server)
+        run: cargo test -p rimaia-server
 
   shell:
     name: Tauri shell (check only)

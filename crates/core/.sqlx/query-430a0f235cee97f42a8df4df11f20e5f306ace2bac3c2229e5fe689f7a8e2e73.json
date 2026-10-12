@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT provider FROM runners WHERE id = ?1",
+  "describe": {
+    "columns": [
+      {
+        "name": "provider",
+        "ordinal": 0,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "430a0f235cee97f42a8df4df11f20e5f306ace2bac3c2229e5fe689f7a8e2e73"
+}

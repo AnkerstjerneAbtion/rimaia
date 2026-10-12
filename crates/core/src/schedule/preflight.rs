@@ -11,7 +11,8 @@
 //! [`preview`] calls [`selection::plan`] verbatim and reports what it returns —
 //! the same order, the same [`queue_position`], the same [`SkipReason`] and the
 //! same [`explanation`]. Not "the same rules": literally the same function, the
-//! one `try_step` itself calls on every pass. A second implementation of
+//! one the queue's `ClaimTarget::Next` claim runs on every pass, over the same
+//! repositories `scheduler::view::for_runner` lists. A second implementation of
 //! eligibility that agreed with the first today is a second implementation that
 //! disagrees with it in a month, and a preflight that lies is worse than no
 //! preflight — the whole point is that the user trusts it enough to walk away.
@@ -42,8 +43,9 @@ use serde::Serialize;
 use crate::context::ServiceContext;
 use crate::db::ScheduleMode;
 use crate::error::Result;
+use crate::machine::MachineContext;
 use crate::schedule::{self, fire};
-use crate::scheduler::selection::{self, QueueEntry};
+use crate::scheduler::selection::{self, QueueEntry, RunnerView};
 
 /// What a schedule would do if it fired now.
 ///
@@ -96,9 +98,21 @@ impl PreflightSummary {
 }
 
 /// What `schedule_id` would do, against the board as it is right now.
-pub async fn preview(ctx: &ServiceContext, schedule_id: &str) -> Result<PreflightSummary> {
-    let schedule = schedule::get(ctx, schedule_id).await?;
-    let now = ctx.clock.now();
+///
+/// The schedule is this machine's, from `machine`. The plan is the board's,
+/// read through `board` with the same [`selection::plan`] the queue's claim
+/// runs, for `runner`: its repositories are the list
+/// `scheduler::view::for_runner` builds, which is what the runner sends with
+/// every `ClaimTarget::Next`. Both doors, the Tauri command and the local MCP
+/// handler, build it there (task 042), with the runner's own id (task 043).
+pub async fn preview(
+    machine: &MachineContext,
+    board: &ServiceContext,
+    schedule_id: &str,
+    runner: &RunnerView,
+) -> Result<PreflightSummary> {
+    let schedule = schedule::get(machine, schedule_id).await?;
+    let now = machine.clock.now();
 
     let next_fire_at = fire::next_fire_at(&schedule, now)?;
     // Measured from the occurrence the schedule would honour, not from `now`,
@@ -119,6 +133,6 @@ pub async fn preview(ctx: &ServiceContext, schedule_id: &str) -> Result<Prefligh
         closes_at,
         mode: schedule.mode,
         max_concurrency: schedule.max_concurrency,
-        plan: selection::plan(ctx).await?,
+        plan: selection::plan(board, runner).await?,
     })
 }

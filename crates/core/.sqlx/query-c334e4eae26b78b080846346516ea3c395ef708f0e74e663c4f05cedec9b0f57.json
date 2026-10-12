@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT generation FROM runner_leases WHERE task_id = ?1",
+  "describe": {
+    "columns": [
+      {
+        "name": "generation",
+        "ordinal": 0,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "c334e4eae26b78b080846346516ea3c395ef708f0e74e663c4f05cedec9b0f57"
+}

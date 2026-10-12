@@ -34,7 +34,7 @@ export interface UseDoctorResult {
   readonly restore: (dismissal: DoctorDismissal) => Promise<void>;
 }
 
-export function useDoctor(): UseDoctorResult {
+export function useDoctor(enabled = true): UseDoctorResult {
   const [report, setReport] = useState<DoctorReport | null>(null);
   const [running, setRunning] = useState(true);
   const [error, setError] = useState<RimaiaError | null>(null);
@@ -59,8 +59,11 @@ export function useDoctor(): UseDoctorResult {
   }, []);
 
   useEffect(() => {
-    void rerun();
-  }, [rerun]);
+    // `run_doctor` probes this machine, so a client with none (a browser,
+    // task 050) never asks.
+    if (enabled) void rerun();
+    else setRunning(false);
+  }, [rerun, enabled]);
 
   /**
    * Applies one write's answer to the report already on screen, rather than

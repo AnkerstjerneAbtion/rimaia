@@ -1,0 +1,62 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT t.team_id, tm.personal_user_id, t.assignee_id, a.login AS \"assignee_login?\",\n                  t.pinned_runner_id, p.label AS \"pinned_label?\", r.name AS repository_name,\n                  r.allow_unattended_runs AS \"allow_unattended_runs: bool\"\n             FROM tasks t\n             JOIN teams tm ON tm.id = t.team_id\n             JOIN repositories r ON r.id = t.repository_id\n             LEFT JOIN users a ON a.id = t.assignee_id\n             LEFT JOIN runners p ON p.id = t.pinned_runner_id\n            WHERE t.id = ?1",
+  "describe": {
+    "columns": [
+      {
+        "name": "team_id",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "personal_user_id",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "assignee_id",
+        "ordinal": 2,
+        "type_info": "Text"
+      },
+      {
+        "name": "assignee_login?",
+        "ordinal": 3,
+        "type_info": "Text"
+      },
+      {
+        "name": "pinned_runner_id",
+        "ordinal": 4,
+        "type_info": "Text"
+      },
+      {
+        "name": "pinned_label?",
+        "ordinal": 5,
+        "type_info": "Text"
+      },
+      {
+        "name": "repository_name",
+        "ordinal": 6,
+        "type_info": "Text"
+      },
+      {
+        "name": "allow_unattended_runs: bool",
+        "ordinal": 7,
+        "type_info": "Bool"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      true,
+      true,
+      false,
+      true,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "021cce8c2d7fb383deab21ae30c71b3eb257ddd662837722a4db7d3bea776dcd"
+}

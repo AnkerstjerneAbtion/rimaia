@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "DELETE FROM api_tokens WHERE runner_id = ?1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": []
+  },
+  "hash": "bdaafe2ef9fd40dd5d1c1d5ab14e0cdbd221cc3a4c0e23ddce9c69d47f50ca74"
+}

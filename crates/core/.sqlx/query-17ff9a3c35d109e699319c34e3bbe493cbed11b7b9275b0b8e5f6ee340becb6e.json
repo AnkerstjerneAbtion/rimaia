@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT r.default_branch FROM tasks t JOIN repositories r ON r.id = t.repository_id\n          WHERE t.id = ?1 AND t.team_id IN (SELECT value FROM json_each(?2))",
+  "describe": {
+    "columns": [
+      {
+        "name": "default_branch",
+        "ordinal": 0,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "17ff9a3c35d109e699319c34e3bbe493cbed11b7b9275b0b8e5f6ee340becb6e"
+}

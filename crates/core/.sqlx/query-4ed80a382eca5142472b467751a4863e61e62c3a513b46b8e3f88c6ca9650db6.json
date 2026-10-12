@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT r.label FROM runner_leases l\n             JOIN runners r ON r.id = l.runner_id\n             JOIN tasks t ON t.id = l.task_id\n            WHERE r.user_id = ?1 AND (?2 IS NULL OR t.team_id <> ?2)\n            ORDER BY r.label\n            LIMIT 1",
+  "describe": {
+    "columns": [
+      {
+        "name": "label",
+        "ordinal": 0,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "4ed80a382eca5142472b467751a4863e61e62c3a513b46b8e3f88c6ca9650db6"
+}

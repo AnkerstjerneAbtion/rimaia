@@ -1,24 +1,40 @@
-import { invoke } from "@tauri-apps/api/core";
+import { invoke, isTauri } from "@tauri-apps/api/core";
+
+import { reportSignedOut } from "./auth";
 
 import type {
+  Account,
   Analytics,
+  ApiTokenSummary,
   AppInfo,
-  ArchivedTask,
   ArchiveReport,
+  ArchivedTask,
   AutoCleanup,
   BoardColumn,
+  CheckoutView,
   CleanupReport,
+  ClientCapabilities,
+  ContentKind,
+  CopyTarget,
+  CreatedInvitation,
   CredentialStatus,
   DetectedOpenInTarget,
   DiffSummary,
   DoctorDismissal,
   DoctorReport,
+  FindingStatus,
+  Invitation,
+  InvitationPreview,
+  LocalWorktree,
   McpProbe,
   McpStatus,
+  NewApiToken,
   NewTaskInput,
   NewTaskLinkInput,
   OnArchive,
   OpenInTarget,
+  PairedRunner,
+  PairingCode,
   PlanPass,
   PlanSelectionInput,
   PreflightSummary,
@@ -30,7 +46,16 @@ import type {
   RemovalAuthorizationInput,
   RemovedWorktree,
   Repository,
+  ReviewConfig,
+  ReviewDigest,
+  ReviewFinding,
+  ReviewHistory,
+  ReviewLevel,
+  ReviewLevelName,
+  ReviewOutcome,
+  ReviewSettings,
   RimaiaError,
+  Role,
   Run,
   RunCapacity,
   RunCostSummary,
@@ -40,21 +65,29 @@ import type {
   RunListEntry,
   RunState,
   RunTail,
+  RunnerListing,
   Schedule,
   ScheduleInput,
   ScheduleMode,
   ScheduleView,
   SearchHit,
+  SessionSummary,
   StrategyApproval,
   StrategyCatalogueView,
+  StrategyCeiling,
   StrategyDefaults,
   Task,
+  TaskConsent,
+  TaskDependent,
   TaskDetail,
   TaskFilterInput,
   TaskLink,
   TaskLinkPatchInput,
   TaskPatchInput,
+  TaskReview,
   TaskSummary,
+  TeamListing,
+  TeamMember,
   TranscriptPage,
   TranscriptSummary,
   UpdateRepositoryInput,
@@ -63,19 +96,261 @@ import type {
 } from "../types";
 
 /**
+ * What `board` and `local` send through: the command name and its arguments in, whatever
+ * the backend answered (or a rejection) out. Replaceable so a caller that is
+ * not the Tauri shell — fixture mode, an HTTP client (ADR-0034 point 4) — can
+ * answer the same commands without any component knowing.
+ */
+export type CommandTransport = (
+  command: string,
+  args?: Record<string, unknown>,
+) => Promise<unknown>;
+
+/**
+ * One transport per command kind (task 049, ADR-0034 point 4). A `board`
+ * command may go to a server; a `local` one reads or changes this machine and
+ * goes to the desktop shell, or is refused where there is none.
+ */
+export interface CommandTransports {
+  board: CommandTransport;
+  local: CommandTransport;
+}
+
+// `undefined` means "Tauri's invoke for both", looked up at call time below.
+// Capturing `invoke` here instead would bind whatever `vi.mock` had installed
+// at import time and break every test that re-mocks it per case.
+let installedTransports: CommandTransports | undefined;
+
+/**
+ * Replace both transports. Called by an entry point (`src/main.tsx` through
+ * `src/lib/client.ts`), never by a component, a view or a hook.
+ */
+export function setCommandTransports(transports: CommandTransports | undefined): void {
+  installedTransports = transports;
+}
+
+/**
+ * Replace the transport for both kinds at once: what the fixture entry
+ * (`src/dev/main.tsx`) wants, since it answers every command itself.
+ */
+export function setCommandTransport(transport: CommandTransport | undefined): void {
+  installedTransports = transport ? { board: transport, local: transport } : undefined;
+}
+
+/** Tauri's `invoke`, which every kind uses when nothing is installed. */
+export const invokeCommandTransport: CommandTransport = (command, args) =>
+  invoke<unknown>(command, args);
+
+/**
+ * The version of the board protocol this client speaks, a copy of
+ * `rimaia_core::api::PROTOCOL_VERSION` that `scripts/check-command-wiring.sh`
+ * holds equal to it. Sent as `Rimaia-Protocol` on every request
+ * ({@link transportHeaders}; ADR-0037 point 4).
+ */
+export const PROTOCOL_VERSION = "1.0";
+
+/**
+ * What proves who is asking a server (ADR-0030 points 2 to 4). A browser holds
+ * a session, whose cookie is `HttpOnly` and so never read here; `csrf` returns
+ * the value for the header that goes with it, or `null` when there is none. A
+ * connected desktop holds a bearer token. A request never carries both: the
+ * server refuses one that does (D32 point 7).
+ */
+export type Credential =
+  | { kind: "session"; csrf: () => string | null }
+  | { kind: "bearer"; token: string };
+
+// The team on screen (task 050 Scope 3): transport metadata, as
+// `Rimaia-Protocol` is, so no command's arguments change and both transports
+// keep the wire shapes identical. The server narrows the caller to it; it is
+// sent on every request and stored nowhere there.
+let currentTeamId: string | null = null;
+
+/**
+ * Names the team the next requests are about, or `null` before one is chosen.
+ * `src/lib/team.ts` is the only caller. A component never sets a header.
+ */
+export function setCurrentTeam(teamId: string | null): void {
+  currentTeamId = teamId;
+}
+
+/**
+ * Every header a request to the server carries, built afresh per request so a
+ * new sign-in or a new team is picked up without reinstalling anything. The
+ * one place request headers are built: the event stream calls it too, so a
+ * header added here reaches both.
+ */
+export function transportHeaders(credential: Credential): Record<string, string> {
+  const headers: Record<string, string> = {
+    "Content-Type": "application/json",
+    "Rimaia-Protocol": PROTOCOL_VERSION,
+  };
+  if (currentTeamId !== null) headers["Rimaia-Team"] = currentTeamId;
+  if (credential.kind === "bearer") {
+    headers.Authorization = `Bearer ${credential.token}`;
+  } else {
+    const csrf = credential.csrf();
+    if (csrf !== null) headers["X-Rimaia-CSRF"] = csrf;
+  }
+  return headers;
+}
+
+/** The `fetch` credentials mode that goes with a credential: cookies for a
+ *  session, none for a bearer token. */
+export function credentialsMode(credential: Credential): RequestCredentials {
+  return credential.kind === "session" ? "same-origin" : "omit";
+}
+
+/** The origin an error message should name, whatever shape `baseUrl` had. */
+function originOf(baseUrl: string): string {
+  try {
+    return new URL(baseUrl).origin;
+  } catch {
+    return baseUrl;
+  }
+}
+
+/**
+ * A server's answer to a non-success status or a stream refusal: the body's
+ * `{ code, message }` unchanged, because the frontend branches on `code` alone
+ * (D8, D32 point 3), or an `internal` error naming the status when the body is
+ * not that shape, such as a proxy's HTML page.
+ */
+export async function errorFromResponse(response: Response): Promise<RimaiaError> {
+  try {
+    const body: unknown = JSON.parse(await response.text());
+    if (isRimaiaError(body)) return body;
+  } catch {
+    // Not JSON: fall through to the status.
+  }
+  return {
+    code: "internal",
+    message: `The server answered HTTP ${response.status} without an error body.`,
+  };
+}
+
+/**
+ * The HTTP transport (task 049): `POST <baseUrl>/api/v1/<name>` with the
+ * arguments `invoke` would have received as the JSON body, byte for byte. The
+ * only code that sends a command over HTTP (D32 point 6). `globalThis.fetch`
+ * is looked up at call time so a test's stub is the one reached.
+ */
+export function httpCommandTransport(connection: {
+  baseUrl: string;
+  credential: Credential;
+  /** Called when the server answers `upgrade_required`: the page is older than
+   *  it. A browser reloads (once per bundle, see `client.ts`); a desktop leaves
+   *  it to the updater (task 063). The error still reaches the caller. */
+  onUpgradeRequired?: () => void;
+}): CommandTransport {
+  const baseUrl = connection.baseUrl.replace(/\/+$/, "");
+  return async (command, args) => {
+    let response: Response;
+    try {
+      response = await globalThis.fetch(`${baseUrl}/api/v1/${command}`, {
+        method: "POST",
+        headers: transportHeaders(connection.credential),
+        credentials: credentialsMode(connection.credential),
+        body: JSON.stringify(args ?? {}),
+      });
+    } catch (thrown) {
+      const reason = thrown instanceof Error ? thrown.message : String(thrown);
+      throw {
+        code: "internal",
+        message: `Could not reach the server at ${originOf(baseUrl)}: ${reason}.`,
+      } satisfies RimaiaError;
+    }
+    if (!response.ok) {
+      const error = await errorFromResponse(response);
+      if (error.code === "upgrade_required") connection.onUpgradeRequired?.();
+      throw error;
+    }
+    try {
+      // A unit answer is `null` (D32 point 3).
+      return JSON.parse(await response.text()) as unknown;
+    } catch {
+      throw {
+        code: "internal",
+        message: `The server answered HTTP ${response.status} without a JSON body.`,
+      } satisfies RimaiaError;
+    }
+  };
+}
+
+/** What a browser answers `get_client_capabilities` itself (task 049). */
+function browserCapabilities(): ClientCapabilities {
+  return {
+    mode: "browser",
+    localRunnerId: null,
+    canOpenInEditor: false,
+    canRevealFiles: false,
+    canChooseFolders: false,
+  };
+}
+
+/**
+ * A browser's local transport: every local command is refused without a
+ * request, because a browser has no machine to act on (D32 point 6). The one
+ * exception is the question only the client can answer.
+ */
+export const browserLocalTransport: CommandTransport = async (command) => {
+  if (command === "get_client_capabilities") return browserCapabilities();
+  throw {
+    code: "invalid",
+    message: `${command} is only available in the desktop app.`,
+  } satisfies RimaiaError;
+};
+
+/**
+ * Whether this page is inside the desktop shell. Called only by the bootstrap,
+ * never at module load and never on a command's path: the existing mocks of
+ * `@tauri-apps/api/core` provide `invoke` and nothing else.
+ */
+export function runningInDesktopShell(): boolean {
+  return isTauri();
+}
+
+/**
  * The only module in the frontend that imports `invoke`.
  *
- * Every backend call goes through `call`, so the serialization boundary has one
- * place to be wrong instead of one per component — and so a rejected command
- * always arrives as a `RimaiaError` with a readable `message`, never as an
- * object that stringifies to `[object Object]`.
+ * Every backend call goes through `board` or `local`, so the serialization
+ * boundary has one place to be wrong instead of one per component — and so a
+ * rejected command always arrives as a `RimaiaError` with a readable `message`,
+ * never as an object that stringifies to `[object Object]`.
  */
-async function call<T>(command: string, args?: Record<string, unknown>): Promise<T> {
+async function send<T>(
+  kind: keyof CommandTransports,
+  command: string,
+  args?: Record<string, unknown>,
+): Promise<T> {
   try {
-    return await invoke<T>(command, args);
+    const transport = installedTransports?.[kind] ?? invokeCommandTransport;
+    return (await transport(command, args)) as T;
   } catch (thrown) {
-    throw toRimaiaError(thrown);
+    const error = toRimaiaError(thrown);
+    // A board command is the only kind a server can refuse for a credential,
+    // and the one place that reacts is `App` (task 050 Scope 6).
+    if (kind === "board" && error.code === "unauthenticated") reportSignedOut();
+    throw error;
   }
+}
+
+/**
+ * A board command: a `board` row of `crates/core/src/api/registry.rs`, which
+ * the server also answers at `POST /api/v1/<command>` (seam-contract D32 point
+ * 6). Sent through the installed board transport.
+ */
+function board<T>(command: string, args?: Record<string, unknown>): Promise<T> {
+  return send<T>("board", command, args);
+}
+
+/**
+ * A local command: a `local` row of the registry, served only by the desktop
+ * shell, because it reads or changes this machine. The wiring script fails a
+ * wrapper whose function does not match its row's kind.
+ */
+function local<T>(command: string, args?: Record<string, unknown>): Promise<T> {
+  return send<T>("local", command, args);
 }
 
 /**
@@ -106,41 +381,87 @@ function isRimaiaError(value: unknown): value is RimaiaError {
 }
 
 export function getAppInfo(): Promise<AppInfo> {
-  return call<AppInfo>("get_app_info");
+  return local<AppInfo>("get_app_info");
 }
 
 export function revealAppDataDir(): Promise<void> {
-  return call<void>("reveal_app_data_dir");
+  return local<void>("reveal_app_data_dir");
+}
+
+/**
+ * What this client can do (ADR-0034 point 5): a local command, because only
+ * the client knows. A desktop answers from its shell, a browser answers itself
+ * without a request.
+ */
+export function getClientCapabilities(): Promise<ClientCapabilities> {
+  return local<ClientCapabilities>("get_client_capabilities");
+}
+
+/**
+ * Opens the native folder picker and resolves the chosen path, or `null` when
+ * the user cancelled. A local command so no component imports a Tauri plugin.
+ */
+export function chooseFolder(title: string): Promise<string | null> {
+  return local<string | null>("choose_folder", { title });
 }
 
 /** Only registered in debug builds — see `commands::app::debug_provoke_error`. */
 export function debugProvokeError(): Promise<void> {
-  return call<void>("debug_provoke_error");
+  return local<void>("debug_provoke_error");
 }
 
 // ---------------------------------------------------------------------------
-// Repositories (task 003) — see `src-tauri/src/commands/repositories.rs`.
+// Repositories (task 003) — see `crates/core/src/api/board/repositories.rs`
+// for the board half and `src-tauri/src/commands/repositories.rs` for this
+// machine's.
 // ---------------------------------------------------------------------------
 
 export function listRepositories(): Promise<Repository[]> {
-  return call<Repository[]>("list_repositories");
+  return board<Repository[]>("list_repositories");
 }
 
 export function registerRepository(input: RegisterRepositoryInput): Promise<Repository> {
-  return call<Repository>("register_repository", { input });
+  return local<Repository>("register_repository", { input });
 }
 
 export function updateRepository(
   id: string,
   patch: UpdateRepositoryInput,
 ): Promise<Repository> {
-  return call<Repository>("update_repository", { id, patch });
+  return board<Repository>("update_repository", { id, patch });
+}
+
+/** This computer's clone of every repository it has one of (task 066): the
+ *  per-machine fields {@link Repository} no longer carries. A repository with
+ *  no entry is not set up on this computer. */
+export function listCheckouts(): Promise<CheckoutView[]> {
+  return local<CheckoutView[]>("list_checkouts");
+}
+
+/** Moves where this computer creates a repository's worktrees — what
+ *  `updateRepository`'s `worktreeRoot` did until task 066. */
+export function setRepositoryWorktreeRoot(
+  repositoryId: string,
+  worktreeRoot: string,
+): Promise<CheckoutView> {
+  return local<CheckoutView>("set_repository_worktree_root", { repositoryId, worktreeRoot });
 }
 
 /** The caller is responsible for the ADR-0012 confirmation dialog before
- *  passing `allow: true` — this only performs the already-agreed act. */
-export function setRepositoryUnattendedRuns(id: string, allow: boolean): Promise<Repository> {
-  return call<Repository>("set_repository_unattended_runs", { id, allow });
+ *  passing `allow: true` — this only performs the already-agreed act. Writes
+ *  this computer's consent (task 066). */
+export function setRepositoryUnattendedRuns(id: string, allow: boolean): Promise<CheckoutView> {
+  return local<CheckoutView>("set_repository_unattended_runs", { id, allow });
+}
+
+/**
+ * Sets the team ceiling: whether a shared team allows unattended runs in this
+ * repository at all (ADR-0032 point 4). Only a team owner may, and a personal
+ * team has none — this machine's consent, {@link setRepositoryUnattendedRuns},
+ * is the whole decision there.
+ */
+export function setRepositoryUnattendedCeiling(id: string, allowed: boolean): Promise<Repository> {
+  return board<Repository>("set_repository_unattended_ceiling", { id, allowed });
 }
 
 /**
@@ -157,8 +478,8 @@ export function setRepositoryOnArchive(
   id: string,
   onArchive: OnArchive,
   script: string | null,
-): Promise<Repository> {
-  return call<Repository>("set_repository_on_archive", { id, onArchive, script });
+): Promise<CheckoutView> {
+  return local<CheckoutView>("set_repository_on_archive", { id, onArchive, script });
 }
 
 /**
@@ -173,16 +494,16 @@ export function setRepositoryOnArchive(
 export function setRepositoryMaxConcurrency(
   id: string,
   maxConcurrency: number,
-): Promise<Repository> {
-  return call<Repository>("set_repository_max_concurrency", { id, maxConcurrency });
+): Promise<CheckoutView> {
+  return local<CheckoutView>("set_repository_max_concurrency", { id, maxConcurrency });
 }
 
 export function removeRepository(id: string): Promise<void> {
-  return call<void>("remove_repository", { id });
+  return board<void>("remove_repository", { id });
 }
 
 export function getRepositoryRemoteInfo(id: string): Promise<RemoteInfo> {
-  return call<RemoteInfo>("get_repository_remote_info", { id });
+  return local<RemoteInfo>("get_repository_remote_info", { id });
 }
 
 /**
@@ -193,7 +514,7 @@ export function getRepositoryRemoteInfo(id: string): Promise<RemoteInfo> {
  * the delete.
  */
 export function getRepositoryCredentialStatus(id: string): Promise<CredentialStatus> {
-  return call<CredentialStatus>("get_repository_credential_status", { id });
+  return local<CredentialStatus>("get_repository_credential_status", { id });
 }
 
 /**
@@ -208,23 +529,23 @@ export function setRepositoryCredential(
   token: string,
   label: string | null,
 ): Promise<CredentialStatus> {
-  return call<CredentialStatus>("set_repository_credential", { id, token, label });
+  return local<CredentialStatus>("set_repository_credential", { id, token, label });
 }
 
 export function removeRepositoryCredential(id: string): Promise<CredentialStatus> {
-  return call<CredentialStatus>("remove_repository_credential", { id });
+  return local<CredentialStatus>("remove_repository_credential", { id });
 }
 
 // ---------------------------------------------------------------------------
-// Tasks (task 004) — see `src-tauri/src/commands/tasks.rs`.
+// Tasks (task 004) — see `crates/core/src/api/board/tasks.rs`.
 // ---------------------------------------------------------------------------
 
 export function createTask(input: NewTaskInput): Promise<Task> {
-  return call<Task>("create_task", { input });
+  return board<Task>("create_task", { input });
 }
 
 export function getTask(id: string): Promise<TaskDetail> {
-  return call<TaskDetail>("get_task", { id });
+  return board<TaskDetail>("get_task", { id });
 }
 
 /**
@@ -236,15 +557,15 @@ export function getTask(id: string): Promise<TaskDetail> {
  * `filter` narrows the result; an empty object matches every task.
  */
 export function listTasks(filter: TaskFilterInput = {}): Promise<TaskSummary[]> {
-  return call<TaskSummary[]>("list_tasks", { filter });
+  return board<TaskSummary[]>("list_tasks", { filter });
 }
 
 export function updateTask(id: string, patch: TaskPatchInput): Promise<Task> {
-  return call<Task>("update_task", { id, patch });
+  return board<Task>("update_task", { id, patch });
 }
 
 export function deleteTask(id: string): Promise<void> {
-  return call<void>("delete_task", { id });
+  return board<void>("delete_task", { id });
 }
 
 /**
@@ -256,7 +577,7 @@ export function deleteTask(id: string): Promise<void> {
  * archiving can trigger a deletion, and a process is writing in that directory.
  */
 export function archiveTask(id: string): Promise<ArchivedTask> {
-  return call<ArchivedTask>("archive_task", { id });
+  return board<ArchivedTask>("archive_task", { id });
 }
 
 /**
@@ -267,13 +588,131 @@ export function archiveTask(id: string): Promise<ArchivedTask> {
  * point 2).
  */
 export function archiveTasks(ids: readonly string[]): Promise<ArchiveReport> {
-  return call<ArchiveReport>("archive_tasks", { ids });
+  return board<ArchiveReport>("archive_tasks", { ids });
 }
 
 /** Puts an archived task back in the column it was in. Nothing the cleanup
  *  deleted comes back. */
 export function unarchiveTask(id: string): Promise<Task> {
-  return call<Task>("unarchive_task", { id });
+  return board<Task>("unarchive_task", { id });
+}
+
+/**
+ * Approves a task waiting in review: it moves to the bottom of `done`.
+ *
+ * Rejects when the task is not in review, is archived, or has a run queued,
+ * running or waiting to retry. The same refusals apply to the two verdicts
+ * below, and they come from one rule in `rimaia_core::review`.
+ */
+export function approveTask(taskId: string): Promise<Task> {
+  return board<Task>("approve_task", { taskId });
+}
+
+/**
+ * Rejects a reviewed task: back to the bottom of `ready` with `note` appended
+ * to its extra instructions, its worktree removed and its branch **set aside in
+ * git, never deleted**, so the next run starts on a fresh branch. Rejects for a
+ * blank note, and for a worktree holding uncommitted changes (there is no force).
+ */
+export function rejectTask(taskId: string, note: string): Promise<ReviewOutcome> {
+  return board<ReviewOutcome>("reject_task", { taskId, note });
+}
+
+/**
+ * Sends a reviewed task back for another round: back to the bottom of `ready`
+ * with `note` appended, its worktree and branch kept, so the next run builds
+ * on the reviewed commits. Rejects for a blank note.
+ */
+export function requestTaskChanges(taskId: string, note: string): Promise<ReviewOutcome> {
+  return board<ReviewOutcome>("request_task_changes", { taskId, note });
+}
+
+/** The tasks that depend directly on this one, and which already built on it. */
+export function getTaskDependents(taskId: string): Promise<TaskDependent[]> {
+  return board<TaskDependent[]>("get_task_dependents", { taskId });
+}
+
+/** What the queue did since the last finished review. Render it as returned. */
+export function getReviewDigest(): Promise<ReviewDigest> {
+  return board<ReviewDigest>("get_review_digest");
+}
+
+/**
+ * What review runs found on a task, oldest review first and each review's
+ * findings in the order the reviewer gave them, optionally of one status. The
+ * read only: no window writes a finding (seam-contract D30 point 5).
+ */
+export function listReviewFindings(
+  taskId: string,
+  status?: FindingStatus,
+): Promise<ReviewFinding[]> {
+  return board<ReviewFinding[]>("list_review_findings", { taskId, status: status ?? null });
+}
+
+/**
+ * Every loop the task has had, oldest first: each review with its findings,
+ * the fix after it and what that fix resolved, and the ping-pong lists. Render
+ * it as returned. Grouping into loops, what blocks and the counts are core's
+ * (task 037); a window that regroups runs or recounts findings has written a
+ * second copy of a rule.
+ */
+export function getReviewHistory(taskId: string): Promise<ReviewHistory> {
+  return board<ReviewHistory>("get_review_history", { taskId });
+}
+
+/**
+ * One level of the loop's configuration next to what it inherits and what it
+ * resolves to. `id` is the repository's or the task's, and is left out for
+ * `global`.
+ */
+export function getReviewLevel(level: ReviewLevelName, id?: string): Promise<ReviewLevel> {
+  return board<ReviewLevel>("get_review_level", { level, id: id ?? null });
+}
+
+/** The global review instructions and loop configuration. */
+export function getReviewSettings(): Promise<ReviewSettings> {
+  return board<ReviewSettings>("get_review_settings");
+}
+
+/**
+ * Replaces the global review instructions and loop configuration. `enabled`
+ * can only be `"off"` or `"on_cost_acknowledged"`: the type has no `true`, and
+ * core refuses one that arrives anyway. An empty `config` clears every field.
+ */
+export function setReviewSettings(
+  instructions: string,
+  config: ReviewConfig,
+): Promise<ReviewSettings> {
+  return board<ReviewSettings>("set_review_settings", { instructions, config });
+}
+
+/** Replaces one repository's loop configuration; an empty one inherits all. */
+export function setRepositoryReviewConfig(
+  repositoryId: string,
+  config: ReviewConfig,
+): Promise<ReviewConfig> {
+  return board<ReviewConfig>("set_repository_review_config", { repositoryId, config });
+}
+
+/**
+ * Replaces one task's override of the review instructions (`null` or blank
+ * falls back to the global text) and its loop configuration.
+ */
+export function setTaskReview(
+  taskId: string,
+  reviewInstructions: string | null,
+  config: ReviewConfig,
+): Promise<TaskReview> {
+  return board<TaskReview>("set_task_review", { taskId, reviewInstructions, config });
+}
+
+/**
+ * Marks the digest seen through `through`, normally the `until` of the digest
+ * that was shown. Never moves the marker backwards; a future instant rejects.
+ * Resolves with what is stored.
+ */
+export function markReviewDigestSeen(through: string): Promise<string> {
+  return board<string>("mark_review_digest_seen", { through });
 }
 
 /**
@@ -288,26 +727,26 @@ export function moveTask(
   beforeId: string | null,
   afterId: string | null,
 ): Promise<Task> {
-  return call<Task>("move_task", { id, column, beforeId, afterId });
+  return board<Task>("move_task", { id, column, beforeId, afterId });
 }
 
 export function setTaskRunState(id: string, runState: RunState): Promise<Task> {
-  return call<Task>("set_task_run_state", { id, runState });
+  return board<Task>("set_task_run_state", { id, runState });
 }
 
 export function addTaskLink(taskId: string, input: NewTaskLinkInput): Promise<TaskLink> {
-  return call<TaskLink>("add_task_link", { taskId, input });
+  return board<TaskLink>("add_task_link", { taskId, input });
 }
 
 export function updateTaskLink(
   linkId: string,
   patch: TaskLinkPatchInput,
 ): Promise<TaskLink> {
-  return call<TaskLink>("update_task_link", { linkId, patch });
+  return board<TaskLink>("update_task_link", { linkId, patch });
 }
 
 export function removeTaskLink(linkId: string): Promise<void> {
-  return call<void>("remove_task_link", { linkId });
+  return board<void>("remove_task_link", { linkId });
 }
 
 export function reorderTaskLink(
@@ -315,7 +754,7 @@ export function reorderTaskLink(
   beforeId: string | null,
   afterId: string | null,
 ): Promise<TaskLink> {
-  return call<TaskLink>("reorder_task_link", { linkId, beforeId, afterId });
+  return board<TaskLink>("reorder_task_link", { linkId, beforeId, afterId });
 }
 
 /**
@@ -328,38 +767,77 @@ export function reorderTaskLink(
  * stored set, sorted.
  */
 export function setTaskDependencies(taskId: string, dependsOn: string[]): Promise<string[]> {
-  return call<string[]>("set_task_dependencies", { taskId, dependsOn });
+  return board<string[]>("set_task_dependencies", { taskId, dependsOn });
+}
+
+/** Assigns a task to one member of its team, whose runners alone will run it;
+ *  `null` returns it to the team's pool (ADR-0032 point 1). */
+export function assignTask(taskId: string, assigneeId: string | null): Promise<Task> {
+  return board<Task>("assign_task", { taskId, assigneeId });
+}
+
+/**
+ * Records that the user read `revision` of one piece of content a teammate
+ * changed and accepts running it (ADR-0032 point 3). `taskId` is `null`
+ * exactly for the team's base and review instructions; for a base commit it is
+ * the dependency that made the commit. Only the current revision is accepted.
+ */
+export function acceptContent(
+  teamId: string,
+  taskId: string | null,
+  kind: ContentKind,
+  revision: string,
+): Promise<void> {
+  return board<void>("accept_content", { teamId, taskId, kind, revision });
+}
+
+/** Why one of the user's runners would or would not take a task. */
+export function getTaskConsent(taskId: string, runnerId: string): Promise<TaskConsent> {
+  return board<TaskConsent>("get_task_consent", { taskId, runnerId });
 }
 
 /** The dependencies keeping a task out of the queue, whole rows, in the order
  *  ADR-0008 picks a base branch in. Empty means nothing is blocking it. */
 export function getBlockingReason(taskId: string): Promise<Task[]> {
-  return call<Task[]>("get_blocking_reason", { taskId });
+  return board<Task[]>("get_blocking_reason", { taskId });
 }
 
 // ---------------------------------------------------------------------------
-// Settings (task 006) — see `src-tauri/src/commands/settings.rs`.
+// Settings (task 006) — see `crates/core/src/api/board/settings.rs` for the
+// team's and `src-tauri/src/commands/settings.rs` for this machine's.
 // ---------------------------------------------------------------------------
 
 export function getBaseInstructions(): Promise<string> {
-  return call<string>("get_base_instructions");
+  return board<string>("get_base_instructions");
 }
 
 export function setBaseInstructions(value: string): Promise<void> {
-  return call<void>("set_base_instructions", { value });
+  return board<void>("set_base_instructions", { value });
 }
 
 export function getRunEnvironment(): Promise<RunEnvironment> {
-  return call<RunEnvironment>("get_run_environment");
+  return local<RunEnvironment>("get_run_environment");
 }
 /** What runs on this machine have actually cost — see `RunCostSummary`. */
 export async function getRunCostSummary(): Promise<RunCostSummary> {
-  return call<RunCostSummary>("get_run_cost_summary");
+  return board<RunCostSummary>("get_run_cost_summary");
 }
 
 
 export function setRunEnvironment(value: RunEnvironment): Promise<void> {
-  return call<void>("set_run_environment", { value });
+  return local<void>("set_run_environment", { value });
+}
+
+/** This runner's strategy ceiling — see `StrategyCeiling`. A local runner
+ *  setting (seam-contract D32). */
+export function getStrategyCeiling(): Promise<StrategyCeiling> {
+  return local<StrategyCeiling>("get_strategy_ceiling");
+}
+
+/** Replaces this runner's strategy ceiling whole. The next claim and the next
+ *  spawn read it; a run already spawned keeps what it was spawned with. */
+export function setStrategyCeiling(ceiling: StrategyCeiling): Promise<void> {
+  return local<void>("set_strategy_ceiling", { ceiling });
 }
 
 /**
@@ -368,11 +846,12 @@ export function setRunEnvironment(value: RunEnvironment): Promise<void> {
  * approximation. Read fresh on every call; nothing here caches.
  */
 export function previewComposedPrompt(taskId: string): Promise<string> {
-  return call<string>("preview_composed_prompt", { taskId });
+  return local<string>("preview_composed_prompt", { taskId });
 }
 
 // ---------------------------------------------------------------------------
-// Execution strategy (task 020) — see `src-tauri/src/commands/strategy.rs`.
+// Execution strategy (task 020) — see `crates/core/src/api/board/strategy.rs`,
+// and `src-tauri/src/commands/strategy.rs` for planning.
 //
 // The *mode* is deliberately absent from this list: it travels as
 // `strategyMode` on {@link updateTask}'s patch, so the panel and the
@@ -388,7 +867,7 @@ export function previewComposedPrompt(taskId: string): Promise<string> {
  * is a settings write, and a second window has to learn about it.
  */
 export function getStrategyCatalogue(): Promise<StrategyCatalogueView> {
-  return call<StrategyCatalogueView>("get_strategy_catalogue");
+  return board<StrategyCatalogueView>("get_strategy_catalogue");
 }
 
 /**
@@ -400,7 +879,7 @@ export function getStrategyCatalogue(): Promise<StrategyCatalogueView> {
  * is not something to make a user discover from a log file.
  */
 export function setStrategyCatalogue(value: string): Promise<StrategyCatalogueView> {
-  return call<StrategyCatalogueView>("set_strategy_catalogue", { value });
+  return board<StrategyCatalogueView>("set_strategy_catalogue", { value });
 }
 
 /**
@@ -413,7 +892,7 @@ export function setStrategyCatalogue(value: string): Promise<StrategyCatalogueVi
 export function getStrategyDefaults(
   repositoryId: string | null = null,
 ): Promise<StrategyDefaults> {
-  return call<StrategyDefaults>("get_strategy_defaults", { repositoryId });
+  return board<StrategyDefaults>("get_strategy_defaults", { repositoryId });
 }
 
 /** Writes one repository's default strategy, or the global one. There is no
@@ -423,20 +902,20 @@ export function setStrategyDefaults(
   repositoryId: string | null,
   value: StrategyDefaults,
 ): Promise<void> {
-  return call<void>("set_strategy_defaults", { repositoryId, value });
+  return board<void>("set_strategy_defaults", { repositoryId, value });
 }
 
 /** Whether a proposal runs on its own or waits for a human. An absent setting
  *  reads `"automatic"`. */
 export function getStrategyApproval(): Promise<StrategyApproval> {
-  return call<StrategyApproval>("get_strategy_approval");
+  return board<StrategyApproval>("get_strategy_approval");
 }
 
 /** Stores the approval setting. **Nothing reads it yet** — the gate lands after
  *  tasks 011 and 012 — but a control that forgot its answer on relaunch would
  *  be worse than none. */
 export function setStrategyApproval(value: StrategyApproval): Promise<void> {
-  return call<void>("set_strategy_approval", { value });
+  return board<void>("set_strategy_approval", { value });
 }
 
 /**
@@ -448,7 +927,7 @@ export function setStrategyApproval(value: StrategyApproval): Promise<void> {
  * field. There is no `accepted` column behind either.
  */
 export function acceptTaskStrategy(taskId: string): Promise<Task> {
-  return call<Task>("accept_task_strategy", { taskId });
+  return board<Task>("accept_task_strategy", { taskId });
 }
 
 /**
@@ -460,7 +939,7 @@ export function acceptTaskStrategy(taskId: string): Promise<Task> {
  * does not re-trigger anything.
  */
 export function clearTaskStrategy(taskId: string): Promise<Task> {
-  return call<Task>("clear_task_strategy", { taskId });
+  return board<Task>("clear_task_strategy", { taskId });
 }
 
 /**
@@ -474,7 +953,7 @@ export function clearTaskStrategy(taskId: string): Promise<Task> {
  * either kind — is already in flight for the task.
  */
 export function planTaskStrategy(taskId: string): Promise<void> {
-  return call<void>("plan_task_strategy", { taskId });
+  return local<void>("plan_task_strategy", { taskId });
 }
 
 /**
@@ -491,7 +970,7 @@ export function planTaskStrategy(taskId: string): Promise<void> {
  * limit the evening's real work needed.
  */
 export function planTasksStrategy(selection: PlanSelectionInput): Promise<PlanPass> {
-  return call<PlanPass>("plan_tasks_strategy", { selection });
+  return local<PlanPass>("plan_tasks_strategy", { selection });
 }
 
 /**
@@ -500,7 +979,7 @@ export function planTasksStrategy(selection: PlanSelectionInput): Promise<PlanPa
  * write to its own card.
  */
 export function cancelPlanPass(): Promise<void> {
-  return call<void>("cancel_plan_pass");
+  return local<void>("cancel_plan_pass");
 }
 
 // ---------------------------------------------------------------------------
@@ -508,28 +987,36 @@ export function cancelPlanPass(): Promise<void> {
 // ---------------------------------------------------------------------------
 
 export function getWorktreeStatus(taskId: string): Promise<WorktreeStatus> {
-  return call<WorktreeStatus>("get_worktree_status", { taskId });
+  return local<WorktreeStatus>("get_worktree_status", { taskId });
 }
 
 /**
- * The diff and the commits a run detail view opens with (task 015,
- * ADR-0013): files changed, insertions, deletions, the per-file breakdown,
- * and the commit list. Scoped to the branch, not to one attempt — every
- * attempt of a task shares one branch, so this is the same summary
- * regardless of which run's detail view fetched it.
+ * The task's branch as it is **now**, read live from git: files changed,
+ * insertions, deletions, the per-file breakdown, and the commit list. A local
+ * command (seam-contract D32): it needs the machine that holds the clone.
+ *
+ * Since task 033 a run's own diff is the review its finish recorded, on
+ * {@link getRun}. This is only the run detail overlay's fallback for a run
+ * that recorded nothing, labelled there as the branch's current state.
  */
 export function getDiffSummary(taskId: string): Promise<DiffSummary> {
-  return call<DiffSummary>("get_diff_summary", { taskId });
+  return local<DiffSummary>("get_diff_summary", { taskId });
 }
 
 /**
  * Opens the task's worktree directory in the OS file manager. "Copy path"
  * needs no command — a component already has the path from
- * {@link getWorktreeStatus} or from `TaskDetail.worktreePath`, and the
+ * {@link getWorktreeStatus} or from {@link listLocalWorktrees}, and the
  * system clipboard is a browser API away.
  */
 export function revealTaskWorktree(taskId: string): Promise<void> {
-  return call<void>("reveal_task_worktree", { taskId });
+  return local<void>("reveal_task_worktree", { taskId });
+}
+
+/** Every worktree this computer records (task 066): what task DTOs carried
+ *  as `worktreePath` until no board DTO held a path. Join by `taskId`. */
+export function listLocalWorktrees(): Promise<LocalWorktree[]> {
+  return local<LocalWorktree[]>("list_local_worktrees");
 }
 
 /**
@@ -542,7 +1029,7 @@ export function revealTaskWorktree(taskId: string): Promise<void> {
  * different feature from the one asked for.
  */
 export function listOpenInTargets(): Promise<DetectedOpenInTarget[]> {
-  return call<DetectedOpenInTarget[]>("list_open_in_targets");
+  return local<DetectedOpenInTarget[]>("list_open_in_targets");
 }
 
 /**
@@ -553,7 +1040,7 @@ export function listOpenInTargets(): Promise<DetectedOpenInTarget[]> {
  * silently doing nothing.
  */
 export function openTaskWorktreeIn(taskId: string, target: OpenInTarget): Promise<void> {
-  return call<void>("open_task_worktree_in", { taskId, target });
+  return local<void>("open_task_worktree_in", { taskId, target });
 }
 
 // ---------------------------------------------------------------------------
@@ -563,7 +1050,7 @@ export function openTaskWorktreeIn(taskId: string, target: OpenInTarget): Promis
 /** Every worktree with its task, branch, size, last activity and merged state,
  *  plus the total shown alongside {@link getRunLogSize}. */
 export function getWorktreeInventory(): Promise<WorktreeInventory> {
-  return call<WorktreeInventory>("get_worktree_inventory");
+  return local<WorktreeInventory>("get_worktree_inventory");
 }
 
 /**
@@ -578,37 +1065,38 @@ export function removeTaskWorktree(
   taskId: string,
   authorization: RemovalAuthorizationInput = {},
 ): Promise<RemovedWorktree> {
-  return call<RemovedWorktree>("remove_task_worktree", { taskId, authorization });
+  return local<RemovedWorktree>("remove_task_worktree", { taskId, authorization });
 }
 
 /** Removes the worktree of every task in `done`, with every force off and
  *  every branch kept — a bulk action carries no more authority than the user
  *  would have granted one worktree at a time. */
 export function cleanupDoneWorktrees(): Promise<CleanupReport> {
-  return call<CleanupReport>("cleanup_done_worktrees");
+  return local<CleanupReport>("cleanup_done_worktrees");
 }
 
 /** The same, for every worktree whose branch the default branch already
  *  contains. A squash-merged branch reads as unmerged and is left alone: the
  *  false negative costs a click, the false positive costs a commit. */
 export function cleanupMergedWorktrees(): Promise<CleanupReport> {
-  return call<CleanupReport>("cleanup_merged_worktrees");
+  return local<CleanupReport>("cleanup_merged_worktrees");
 }
 
 /** Whether a task reaching `done` takes its worktree with it. Off unless
  *  somebody turned it on. */
 export function getWorktreeAutoCleanup(): Promise<AutoCleanup> {
-  return call<AutoCleanup>("get_worktree_auto_cleanup");
+  return local<AutoCleanup>("get_worktree_auto_cleanup");
 }
 
 /** Sets that policy. `on_done_acknowledged` is the only "on" spelling, so
  *  enabling it means having been told what it deletes. */
 export function setWorktreeAutoCleanup(setting: AutoCleanup): Promise<void> {
-  return call<void>("set_worktree_auto_cleanup", { setting });
+  return local<void>("set_worktree_auto_cleanup", { setting });
 }
 
 // ---------------------------------------------------------------------------
-// Runs (task 008) — see `src-tauri/src/commands/runs.rs`.
+// Runs (task 008) — see `src-tauri/src/commands/runs.rs`, and
+// `crates/core/src/api/board/runs.rs` for giving up.
 // ---------------------------------------------------------------------------
 
 /**
@@ -621,9 +1109,18 @@ export function setWorktreeAutoCleanup(setting: AutoCleanup): Promise<void> {
  * A repository that has not opted in to unattended runs (ADR-0012), a
  * missing `claude` CLI, or a task already running rejects with a
  * {@link RimaiaError} describing which.
+ *
+ * `runnerId` names the runner to start it on (task 052), and is sent only
+ * when given: the desktop's own window starts on this machine's runner and
+ * sends `{ taskId }` alone, as it always has.
  */
-export function startRun(taskId: string): Promise<void> {
-  return call<void>("start_task_run", { taskId });
+export function startRun(taskId: string, runnerId?: string): Promise<void> {
+  return board<void>("start_task_run", withRunner(taskId, runnerId));
+}
+
+/** `{ taskId }`, with `runnerId` only when a runner was named. */
+function withRunner(taskId: string, runnerId?: string): Record<string, unknown> {
+  return runnerId === undefined ? { taskId } : { taskId, runnerId };
 }
 
 /**
@@ -632,7 +1129,7 @@ export function startRun(taskId: string): Promise<void> {
  * already finished.
  */
 export function cancelRun(taskId: string): Promise<void> {
-  return call<void>("cancel_task_run", { taskId });
+  return board<void>("cancel_task_run", { taskId });
 }
 
 /**
@@ -646,10 +1143,11 @@ export function cancelRun(taskId: string): Promise<void> {
  * two buttons rather than one.
  *
  * Resolves as soon as the run is under way, not once it finishes — same
- * contract as {@link startRun}.
+ * contract as {@link startRun}. `runnerId` is sent only when given; with none,
+ * a server resumes it on the runner the task is pinned to (task 052).
  */
-export function retryTaskNow(taskId: string): Promise<void> {
-  return call<void>("retry_task_now", { taskId });
+export function retryTaskNow(taskId: string, runnerId?: string): Promise<void> {
+  return board<void>("retry_task_now", withRunner(taskId, runnerId));
 }
 
 /**
@@ -661,30 +1159,33 @@ export function retryTaskNow(taskId: string): Promise<void> {
  * on for anything else.
  */
 export function giveUpOnTask(taskId: string): Promise<void> {
-  return call<void>("give_up_on_task", { taskId });
+  return board<void>("give_up_on_task", { taskId });
 }
 
 /**
- * The most recent live-tail snapshot the backend has seen for `runId`, or
- * `null` when it has not seen one yet. This is what a client that opens the
+ * The most recent live-tail snapshot the board host's tail relay has heard
+ * for `runId`, or `null` when it has heard none yet (task 048). Another
+ * team's run is `not_found`, as a run that never existed is. This is what a
+ * client that opens the
  * Runs view after a run has already started reads once to catch up, before
  * subscribing to {@link subscribeToRunsTail} in `./events` for the rest
  * (seam-contract D14) — a run's own outcome and log path are read through
  * {@link getTask}'s `lastRun`, not through this.
  */
 export function getRunTail(runId: string): Promise<RunTail | null> {
-  return call<RunTail | null>("get_run_tail", { runId });
+  return board<RunTail | null>("get_run_tail", { runId });
 }
 
 // ---------------------------------------------------------------------------
 // Run history and the transcript viewer (task 015, ADR-0013) — see
-// `src-tauri/src/commands/runs.rs`.
+// `crates/core/src/api/board/runs.rs` for the history and
+// `src-tauri/src/commands/runs.rs` for the transcript.
 // ---------------------------------------------------------------------------
 
 /** Every run of `taskId`, newest attempt first — the task detail panel's
  *  history list. */
 export function listRunsForTask(taskId: string): Promise<Run[]> {
-  return call<Run[]>("list_runs_for_task", { taskId });
+  return board<Run[]>("list_runs_for_task", { taskId });
 }
 
 /**
@@ -693,16 +1194,16 @@ export function listRunsForTask(taskId: string): Promise<Run[]> {
  * repository. `filter` narrows the result; an empty object matches every run.
  */
 export function listRuns(filter: RunFilterInput = {}): Promise<RunListEntry[]> {
-  return call<RunListEntry[]>("list_runs", { filter });
+  return board<RunListEntry[]>("list_runs", { filter });
 }
 
 /**
- * One run's full detail: its own outcome, the branch's diff and commits
+ * One run's full detail: its own outcome, the review its finish recorded
  * (ADR-0013's ordering), the exact prompt it received, and whether its
- * transcript file still resolves.
+ * transcript file still resolves. A board read that runs no git (task 033).
  */
 export function getRun(runId: string): Promise<RunDetail> {
-  return call<RunDetail>("get_run", { runId });
+  return board<RunDetail>("get_run", { runId });
 }
 
 /**
@@ -715,7 +1216,7 @@ export function readRunTranscriptPage(
   offset: number,
   limit?: number,
 ): Promise<TranscriptPage> {
-  return call<TranscriptPage>("read_run_transcript_page", { runId, offset, limit });
+  return local<TranscriptPage>("read_run_transcript_page", { runId, offset, limit });
 }
 
 /**
@@ -724,7 +1225,7 @@ export function readRunTranscriptPage(
  * than a rendering of it.
  */
 export function searchRunTranscript(runId: string, query: string): Promise<SearchHit[]> {
-  return call<SearchHit[]>("search_run_transcript", { runId, query });
+  return local<SearchHit[]>("search_run_transcript", { runId, query });
 }
 
 /**
@@ -734,21 +1235,25 @@ export function searchRunTranscript(runId: string, query: string): Promise<Searc
  * every {@link getRun}.
  */
 export function summarizeRunTranscript(runId: string): Promise<TranscriptSummary> {
-  return call<TranscriptSummary>("summarize_run_transcript", { runId });
+  return local<TranscriptSummary>("summarize_run_transcript", { runId });
 }
 
-/** Reveals `runId`'s raw JSONL transcript in the OS file manager. "Copy log
- *  path" needs no command — every caller already has `Run.logPath` from
- *  {@link getRun} or {@link listRunsForTask}, and the system clipboard is a
- *  browser API away. */
+/** Reveals `runId`'s raw JSONL transcript in the OS file manager. */
 export function revealRunLog(runId: string): Promise<void> {
-  return call<void>("reveal_run_log", { runId });
+  return local<void>("reveal_run_log", { runId });
+}
+
+/** Where a run's transcript is on this computer, derived from its ids
+ *  (ADR-0013): what "copy log path" copies, fetched on the action because
+ *  `Run` carries no `logPath` since task 066. */
+export function getRunLogPath(taskId: string, runId: string): Promise<string> {
+  return local<string>("get_run_log_path", { taskId, runId });
 }
 
 /** Total bytes on disk across every run's transcript, for Settings' storage
  *  report alongside worktree size. */
 export function getRunLogSize(): Promise<number> {
-  return call<number>("get_run_log_size");
+  return local<number>("get_run_log_size");
 }
 
 /**
@@ -758,7 +1263,7 @@ export function getRunLogSize(): Promise<number> {
  * state a deleted-by-hand transcript already renders rather than errors on.
  */
 export function pruneRunLogs(criterion: PruneCriterionInput): Promise<PruneResult> {
-  return call<PruneResult>("prune_run_logs", { criterion });
+  return local<PruneResult>("prune_run_logs", { criterion });
 }
 
 // ---------------------------------------------------------------------------
@@ -778,19 +1283,19 @@ export function pruneRunLogs(criterion: PruneCriterionInput): Promise<PruneResul
  * Re-read on {@link subscribeToSchedulesChanged}.
  */
 export function listSchedules(): Promise<ScheduleView[]> {
-  return call<ScheduleView[]>("list_schedules");
+  return local<ScheduleView[]>("list_schedules");
 }
 
 /** Creates a schedule, armed from now — so one created at 23:00 for "every
  *  night at 22:00" means tomorrow, not one minute ago. */
 export function createSchedule(input: ScheduleInput): Promise<Schedule> {
-  return call<Schedule>("create_schedule", { input });
+  return local<Schedule>("create_schedule", { input });
 }
 
 /** Replaces a schedule's configuration, leaving its fire history alone: editing
  *  tonight's stop time does not make tonight's start happen again. */
 export function updateSchedule(id: string, input: ScheduleInput): Promise<Schedule> {
-  return call<Schedule>("update_schedule", { id, input });
+  return local<Schedule>("update_schedule", { id, input });
 }
 
 /**
@@ -800,25 +1305,25 @@ export function updateSchedule(id: string, input: ScheduleInput): Promise<Schedu
  * does not immediately fire for the last of thirty nights it missed.
  */
 export function setScheduleEnabled(id: string, enabled: boolean): Promise<Schedule> {
-  return call<Schedule>("set_schedule_enabled", { id, enabled });
+  return local<Schedule>("set_schedule_enabled", { id, enabled });
 }
 
 export function deleteSchedule(id: string): Promise<void> {
-  return call<void>("delete_schedule", { id });
+  return local<void>("delete_schedule", { id });
 }
 
 /** What this schedule would do if it fired now: which tasks run, in what order,
  *  and which are blocked and why. Computed from the same function the queue
  *  loop itself calls, so it cannot drift from what actually happens. */
 export function previewSchedulePreflight(id: string): Promise<PreflightSummary> {
-  return call<PreflightSummary>("preview_schedule_preflight", { id });
+  return local<PreflightSummary>("preview_schedule_preflight", { id });
 }
 
 /** Every IANA zone name a schedule may use. The list the picker offers and the
  *  list the service accepts come from one `chrono-tz` table, which is what
  *  keeps a timezone package out of `package.json`. */
 export function listTimezones(): Promise<string[]> {
-  return call<string[]>("list_timezones");
+  return local<string[]>("list_timezones");
 }
 
 // ---------------------------------------------------------------------------
@@ -828,23 +1333,23 @@ export function listTimezones(): Promise<string[]> {
 /** Starts working the `ready` column top-down, one task at a time. Idempotent
  *  — starting an already-running queue is not an error. */
 export function startQueue(): Promise<void> {
-  return call<void>("start_queue");
+  return local<void>("start_queue");
 }
 
 /** The same action as {@link startQueue}, under the name the user presses
  *  after a pause. */
 export function resumeQueue(): Promise<void> {
-  return call<void>("resume_queue");
+  return local<void>("resume_queue");
 }
 
 /** Starts nothing new; lets the current run finish. */
 export function pauseQueue(): Promise<void> {
-  return call<void>("pause_queue");
+  return local<void>("pause_queue");
 }
 
 /** Pause, plus cancel whatever the queue is currently running. */
 export function stopQueue(): Promise<void> {
-  return call<void>("stop_queue");
+  return local<void>("stop_queue");
 }
 
 /**
@@ -852,33 +1357,34 @@ export function stopQueue(): Promise<void> {
  * tasks it holds processes for right now, and every `ready` task in board
  * order with the reason the queue will pass over each one it cannot start.
  * Re-read fresh on every call — subscribe to {@link subscribeToTasksChanged},
- * {@link subscribeToRunsChanged} and {@link subscribeToSettingsChanged} in
- * `./events` and re-fetch on any of them, since a task moving, a run ending,
- * or the queue's own switch (`queue_state` lives in `settings`) can each
- * change what this returns.
+ * {@link subscribeToRunsChanged}, {@link subscribeToRunnerChanged} and
+ * {@link subscribeToSettingsChanged} in `./events` and re-fetch on any of
+ * them, since a task moving, a run ending, the queue's own switch or window
+ * (runner keys, on `runner:changed`) or a team setting the plan reads can
+ * each change what this returns.
  */
 export function getQueueStatus(): Promise<QueueStatus> {
-  return call<QueueStatus>("get_queue_status");
+  return local<QueueStatus>("get_queue_status");
 }
 
 /** How many runs the queue may have in flight, as configured (ADR-0010): the
  *  mode, the stored limit, and the ceiling no setting can raise. One call for
  *  all three, because the control renders them together. */
 export function getRunCapacity(): Promise<RunCapacity> {
-  return call<RunCapacity>("get_run_capacity");
+  return local<RunCapacity>("get_run_capacity");
 }
 
 /** Switches the queue between one run at a time and several. Answers with the
  *  whole configuration, so the caller need not re-read what it just wrote. */
 export function setScheduleMode(mode: ScheduleMode): Promise<RunCapacity> {
-  return call<RunCapacity>("set_schedule_mode", { mode });
+  return local<RunCapacity>("set_schedule_mode", { mode });
 }
 
 /** How many runs `"parallel"` may have in flight at once. Refused outside
  *  `1..=ceiling` with a message the panel renders — a stored value out of range
  *  is tolerated and clamped, a value from this form is not. */
 export function setMaxConcurrency(value: number): Promise<RunCapacity> {
-  return call<RunCapacity>("set_max_concurrency", { value });
+  return local<RunCapacity>("set_max_concurrency", { value });
 }
 
 // ---------------------------------------------------------------------------
@@ -892,10 +1398,11 @@ export function setMaxConcurrency(value: number): Promise<RunCapacity> {
  * A cached snapshot of the bind, which is the thing that fails; it is not a
  * live check that the server is still answering. That is
  * {@link testMcpConnection}. Re-read on mount and on
- * {@link subscribeToSettingsChanged}, since `mcp_port` is a settings key.
+ * {@link subscribeToRunnerChanged}, since `mcp_port` is this machine's runner
+ * key.
  */
 export function getMcpStatus(): Promise<McpStatus> {
-  return call<McpStatus>("get_mcp_status");
+  return local<McpStatus>("get_mcp_status");
 }
 
 /**
@@ -906,17 +1413,17 @@ export function getMcpStatus(): Promise<McpStatus> {
  * listening races itself.
  */
 export function setMcpPort(port: number): Promise<McpStatus> {
-  return call<McpStatus>("set_mcp_port", { port });
+  return local<McpStatus>("set_mcp_port", { port });
 }
 
 /** One real `initialize` + `tools/list` round trip against the running server,
  *  the way a client would — not a "something is listening" check. */
 export function testMcpConnection(): Promise<McpProbe> {
-  return call<McpProbe>("test_mcp_connection");
+  return local<McpProbe>("test_mcp_connection");
 }
 
 // ---------------------------------------------------------------------------
-// Analytics (task 024) — see `src-tauri/src/commands/analytics.rs`.
+// Analytics (task 024) — see `crates/core/src/api/board/analytics.rs`.
 // ---------------------------------------------------------------------------
 
 /**
@@ -928,7 +1435,7 @@ export function testMcpConnection(): Promise<McpProbe> {
  * exclusive, so two adjacent periods never both claim a run.
  */
 export function getAnalytics(from: Date | null, to: Date | null): Promise<Analytics> {
-  return call<Analytics>("get_analytics", {
+  return board<Analytics>("get_analytics", {
     from: from?.toISOString() ?? null,
     to: to?.toISOString() ?? null,
   });
@@ -936,12 +1443,166 @@ export function getAnalytics(from: Date | null, to: Date | null): Promise<Analyt
 
 /** What the user says they pay per month, or `null` when they have not said. */
 export function getSubscriptionCost(): Promise<number | null> {
-  return call<number | null>("get_subscription_cost");
+  return board<number | null>("get_subscription_cost");
 }
 
 /** Stores it, or clears it with `null`. A negative figure is refused. */
 export function setSubscriptionCost(value: number | null): Promise<void> {
-  return call<void>("set_subscription_cost", { value });
+  return board<void>("set_subscription_cost", { value });
+}
+
+// ---------------------------------------------------------------------------
+// Accounts (task 047) — see `crates/core/src/api/board/account.rs`. Only a
+// Rimaia server has accounts; the solo shell refuses each of these.
+// ---------------------------------------------------------------------------
+
+/** The signed-in user, their teams, and the credential this request used. */
+export function getAccount(): Promise<Account> {
+  return board<Account>("get_account");
+}
+
+/** The user's live browser sessions. */
+export function listSessions(): Promise<SessionSummary[]> {
+  return board<SessionSummary[]>("list_sessions");
+}
+
+/**
+ * Deletes one of the user's sessions. With {@link getAccount}'s `current.id`
+ * this is signing out: the next request on the old cookie is
+ * `unauthenticated`.
+ */
+export function revokeSession(id: string): Promise<void> {
+  return board<void>("revoke_session", { id });
+}
+
+/** The user's desktop, runner and personal access tokens. Never a secret. */
+export function listApiTokens(): Promise<ApiTokenSummary[]> {
+  return board<ApiTokenSummary[]>("list_api_tokens");
+}
+
+/**
+ * A personal access token for an MCP client, the one time its secret is
+ * shown. No `teamIds` means every team the user belongs to, now and later;
+ * no `expiresInDays` means it never expires.
+ */
+export function createPersonalAccessToken(
+  label: string,
+  teamIds?: string[],
+  expiresInDays?: number,
+): Promise<NewApiToken> {
+  return board<NewApiToken>("create_personal_access_token", { label, teamIds, expiresInDays });
+}
+
+/** Revokes a token. Revoking a runner's token unpairs the runner. */
+export function revokeApiToken(id: string): Promise<void> {
+  return board<void>("revoke_api_token", { id });
+}
+
+/**
+ * Every team the user belongs to, personal team first (task 050). About the
+ * person, so it is answered whichever team a request names.
+ */
+export function listTeams(): Promise<TeamListing[]> {
+  return board<TeamListing[]>("list_teams");
+}
+
+/** The user's own paired runners, with what the board knows of each. */
+export function listRunners(): Promise<RunnerListing[]> {
+  return board<RunnerListing[]>("list_runners");
+}
+
+/** Unpairs one of the user's runners: its tokens are revoked and its row stays. */
+export function unpairRunner(id: string): Promise<void> {
+  return board<void>("unpair_runner", { id });
+}
+
+// ---------------------------------------------------------------------------
+// Teams, invitations and roles (task 051) — see
+// `crates/core/src/api/board/teams.rs`. Each names its team by id or carries a
+// token, so the server answers them whichever team the request names. A solo
+// board refuses every write here.
+// ---------------------------------------------------------------------------
+
+/** A new team, the user its only owner. */
+export function createTeam(name: string): Promise<TeamListing> {
+  return board<TeamListing>("create_team", { name });
+}
+
+/** Every member of one of the user's teams, in the order they joined. */
+export function listTeamMembers(teamId: string): Promise<TeamMember[]> {
+  return board<TeamMember[]>("list_team_members", { teamId });
+}
+
+/** Makes a member an owner, or an owner a member. Owner only. */
+export function setMemberRole(teamId: string, userId: string, role: Role): Promise<void> {
+  return board<void>("set_member_role", { teamId, userId, role });
+}
+
+/** Takes someone out of a team and withdraws them from its work. Owner only. */
+export function removeMember(teamId: string, userId: string): Promise<void> {
+  return board<void>("remove_member", { teamId, userId });
+}
+
+/** Takes the user out of one of their teams. */
+export function leaveTeam(teamId: string): Promise<void> {
+  return board<void>("leave_team", { teamId });
+}
+
+/** An invitation link's token, the one time it is shown. Owner only. */
+export function createInvitation(teamId: string, role: Role): Promise<CreatedInvitation> {
+  return board<CreatedInvitation>("create_invitation", { teamId, role });
+}
+
+/** Every invitation of a team, newest first. Owner only. */
+export function listInvitations(teamId: string): Promise<Invitation[]> {
+  return board<Invitation[]>("list_invitations", { teamId });
+}
+
+/** Revokes an invitation nobody has used. Owner only. */
+export function revokeInvitation(id: string): Promise<void> {
+  return board<void>("revoke_invitation", { id });
+}
+
+/** What an invitation token would admit the user to. The token travels in the
+ *  body, never in a URL. */
+export function previewInvitation(token: string): Promise<InvitationPreview> {
+  return board<InvitationPreview>("preview_invitation", { token });
+}
+
+/** Joins the team an invitation token names, with the role it grants. */
+export function acceptInvitation(token: string): Promise<TeamListing> {
+  return board<TeamListing>("accept_invitation", { token });
+}
+
+/** Every team the user is in, with its repositories: where a task can go. */
+export function listCopyTargets(): Promise<CopyTarget[]> {
+  return board<CopyTarget[]>("list_copy_targets");
+}
+
+/** A new task in `repositoryId`'s team carrying the plan and nothing else. */
+export function copyTaskToTeam(taskId: string, repositoryId: string): Promise<Task> {
+  return board<Task>("copy_task_to_team", { taskId, repositoryId });
+}
+
+/** Deletes a team and everything it owns, confirmed by its exact name. */
+export function deleteTeam(teamId: string, confirmName: string): Promise<void> {
+  return board<void>("delete_team", { teamId, confirmName });
+}
+
+/** Deletes the user's own account and its personal team, confirmed by their
+ *  exact login. */
+export function deleteAccount(confirmLogin: string): Promise<void> {
+  return board<void>("delete_account", { confirmLogin });
+}
+
+/** A ten-minute, single-use code for `rimaia-runner pair` on a headless machine. */
+export function createPairingCode(): Promise<PairingCode> {
+  return board<PairingCode>("create_pairing_code");
+}
+
+/** The connected desktop's own runner, paired with no code. Desktop only. */
+export function pairOwnRunner(label: string, provider: string): Promise<PairedRunner> {
+  return board<PairedRunner>("pair_own_runner", { label, provider });
 }
 
 // ---------------------------------------------------------------------------
@@ -959,7 +1620,7 @@ export function setSubscriptionCost(value: number | null): Promise<void> {
  * it is called on mount and on an explicit Re-check — never on an event.
  */
 export function runDoctor(): Promise<DoctorReport> {
-  return call<DoctorReport>("run_doctor");
+  return local<DoctorReport>("run_doctor");
 }
 
 /**
@@ -970,7 +1631,7 @@ export function runDoctor(): Promise<DoctorReport> {
  * screen the user can already open.
  */
 export function dismissOnboarding(): Promise<void> {
-  return call<void>("dismiss_onboarding");
+  return local<void>("dismiss_onboarding");
 }
 
 /**
@@ -981,10 +1642,10 @@ export function dismissOnboarding(): Promise<void> {
  * already marked by `DoctorReport::new`.
  */
 export function dismissDoctorWarning(dismissal: DoctorDismissal): Promise<DoctorDismissal[]> {
-  return call<DoctorDismissal[]>("dismiss_doctor_warning", { dismissal });
+  return local<DoctorDismissal[]>("dismiss_doctor_warning", { dismissal });
 }
 
 /** Brings one back — including a dismissal that no longer matches any row. */
 export function restoreDoctorWarning(dismissal: DoctorDismissal): Promise<DoctorDismissal[]> {
-  return call<DoctorDismissal[]>("restore_doctor_warning", { dismissal });
+  return local<DoctorDismissal[]>("restore_doctor_warning", { dismissal });
 }

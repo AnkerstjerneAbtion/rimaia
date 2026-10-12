@@ -1,0 +1,38 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT singleton, runner_id, server_url, created_at AS \"created_at: DateTime<Utc>\"\n             FROM runner_identity",
+  "describe": {
+    "columns": [
+      {
+        "name": "singleton",
+        "ordinal": 0,
+        "type_info": "Integer"
+      },
+      {
+        "name": "runner_id",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "server_url",
+        "ordinal": 2,
+        "type_info": "Text"
+      },
+      {
+        "name": "created_at: DateTime<Utc>",
+        "ordinal": 3,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      false,
+      false,
+      true,
+      false
+    ]
+  },
+  "hash": "7ac22b8223f4bc90514791cec9f1b617def73cd3c28ecd9d97a9957241b5e4cb"
+}

@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT r.task_id FROM runs r JOIN tasks t ON t.id = r.task_id\n          WHERE r.id = ?1 AND t.team_id IN (SELECT value FROM json_each(?2))",
+  "describe": {
+    "columns": [
+      {
+        "name": "task_id",
+        "ordinal": 0,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "870d2cdc53e4256d3cc0f8020270d9cde86a6eb0b1e92fc66e890566a8ff8782"
+}

@@ -30,14 +30,35 @@
 //! summed off `tasks.strategy_plan`'s envelope, and implementation spend is the
 //! `runs` total. The difference between them is the overhead of deciding versus
 //! doing, which is the only reason either number is on the page.
+//!
+//! # Which kinds of run each figure counts (seam-contract D29 point 7)
+//!
+//! From task 021 a task's rows mix implementation, review and fix runs, and
+//! each figure says which it means:
+//!
+//! - **every kind**: spend, spend by day, the model mix, the unrecorded
+//!   counts, the longest run, unattended hours and the task counts, and so
+//!   cost per completed task. A task's review loop is part of what the task
+//!   cost, and "every failed attempt included" extends to it.
+//! - **implementation only**: `implementation_spend_usd`, `outcomes` and its
+//!   failure rate (a review's `succeeded` means the reviewer ran, not that the
+//!   work was good), the median duration (a median over forty-minute
+//!   implementations and three-minute reviews describes neither), and the
+//!   strategy buckets (a task's strategy mode does not choose a review's
+//!   model).
+//! - **review and fix only**: `review_loop_spend_usd` and
+//!   `review_loop_outcomes`, so that `spend_usd` is always
+//!   `implementation_spend_usd + review_loop_spend_usd`.
 
 use chrono::{DateTime, Datelike, NaiveDate, Utc};
 use serde::Serialize;
 use sqlx::sqlite::SqliteRow;
-use sqlx::{FromRow, Row, SqlitePool};
+use sqlx::{FromRow, Row};
+
+use crate::context::ServiceContext;
 
 use crate::db::settings;
-use crate::db::{BoardColumn, RunStatus, StrategyMode};
+use crate::db::{BoardColumn, RunKind, RunStatus, StrategyMode};
 use crate::error::Result;
 use crate::tasks::strategy::StrategyPlan;
 
@@ -65,6 +86,7 @@ pub struct Period {
 struct AnalyticsRun {
     id: String,
     task_id: String,
+    kind: RunKind,
     status: RunStatus,
     started_at: DateTime<Utc>,
     ended_at: Option<DateTime<Utc>>,
@@ -83,6 +105,7 @@ impl FromRow<'_, SqliteRow> for AnalyticsRun {
         Ok(Self {
             id: row.try_get("id")?,
             task_id: row.try_get("task_id")?,
+            kind: row.try_get("kind")?,
             status: row.try_get("status")?,
             started_at: row.try_get("started_at")?,
             ended_at: row.try_get("ended_at")?,
@@ -107,6 +130,16 @@ pub struct RunOutcomes {
 }
 
 impl RunOutcomes {
+    fn count(&mut self, status: RunStatus) {
+        match status {
+            RunStatus::Succeeded => self.succeeded += 1,
+            RunStatus::Failed => self.failed += 1,
+            RunStatus::Cancelled => self.cancelled += 1,
+            RunStatus::Interrupted => self.interrupted += 1,
+            RunStatus::Running => self.running += 1,
+        }
+    }
+
     pub fn total(&self) -> usize {
         self.succeeded + self.failed + self.cancelled + self.interrupted + self.running
     }
@@ -165,9 +198,13 @@ pub struct LongestRun {
 pub struct Analytics {
     pub period: Period,
 
+    /// Implementation runs only: a review's `succeeded` says the reviewer
+    /// ran, not that the work was good (D29 point 7).
     pub outcomes: RunOutcomes,
 
-    /// Summed over the rows that **have** a cost. See `runsWithoutCost`.
+    /// Summed over the rows that **have** a cost, of every kind. See
+    /// `runsWithoutCost`. Always `implementation_spend_usd +
+    /// review_loop_spend_usd`.
     pub spend_usd: f64,
     pub spend_by_day: Vec<DaySpend>,
     /// How many runs in this period recorded no `cost_usd` at all — a run that
@@ -187,6 +224,8 @@ pub struct Analytics {
     /// number and a dash is not a lie.
     pub cost_per_completed_task_usd: Option<f64>,
 
+    /// Implementation runs only, for the reason [`outcomes`](Self::outcomes)
+    /// is.
     pub median_duration_seconds: Option<i64>,
     pub longest_run: Option<LongestRun>,
     /// Summed run duration. **Not wall-clock**: two runs in parallel (ADR-0010)
@@ -196,13 +235,20 @@ pub struct Analytics {
     pub unattended_hours: f64,
 
     pub models: Vec<ModelUse>,
+    /// Implementation runs only: a task's strategy mode chooses its
+    /// implementation's model, never a review's.
     pub strategies: Vec<StrategyUse>,
 
     /// Off `tasks.strategy_plan`, because a planner has no `runs` row (D17).
     pub planner_spend_usd: f64,
-    /// The `runs` total, restated beside the planner's so the two can be read
-    /// as a ratio without the reader doing arithmetic.
+    /// What implementation runs cost, restated beside the planner's so the two
+    /// can be read as a ratio without the reader doing arithmetic.
     pub implementation_spend_usd: f64,
+    /// What review and fix runs cost (ADR-0017's loop, D29 point 7).
+    pub review_loop_spend_usd: f64,
+    /// How review and fix runs ended, kept apart from
+    /// [`outcomes`](Self::outcomes) so neither rate describes the other.
+    pub review_loop_outcomes: RunOutcomes,
 
     /// What the user says they pay per month. **Absent, not zero**, until they
     /// enter one — and presented as *theirs*, because Rimaia cannot verify it.
@@ -210,14 +256,21 @@ pub struct Analytics {
 }
 
 /// Everything on the page, computed from `runs` at read time.
-pub async fn analytics(pool: &SqlitePool, period: Period) -> Result<Analytics> {
-    let runs = runs_in(pool, period).await?;
+///
+/// An aggregate, so it spans every team in the context's scope ("over the
+/// caller's teams' runs", D32's appendix) rather than asking for one, and
+/// never counts a run of a team outside it.
+pub async fn analytics(ctx: &ServiceContext, period: Period) -> Result<Analytics> {
+    let runs = runs_in(ctx, period).await?;
 
     let mut outcomes = RunOutcomes::default();
-    let mut spend_usd = 0.0;
+    let mut review_loop_outcomes = RunOutcomes::default();
+    let mut implementation_spend_usd = 0.0;
+    let mut review_loop_spend_usd = 0.0;
     let mut runs_without_cost = 0;
     let mut runs_without_model = 0;
     let mut durations: Vec<i64> = Vec::new();
+    let mut implementation_durations: Vec<i64> = Vec::new();
     let mut longest: Option<LongestRun> = None;
     let mut by_day: Vec<DaySpend> = Vec::new();
     let mut by_model: Vec<ModelUse> = Vec::new();
@@ -226,16 +279,16 @@ pub async fn analytics(pool: &SqlitePool, period: Period) -> Result<Analytics> {
     let mut completed: Vec<&str> = Vec::new();
 
     for run in &runs {
-        match run.status {
-            RunStatus::Succeeded => outcomes.succeeded += 1,
-            RunStatus::Failed => outcomes.failed += 1,
-            RunStatus::Cancelled => outcomes.cancelled += 1,
-            RunStatus::Interrupted => outcomes.interrupted += 1,
-            RunStatus::Running => outcomes.running += 1,
+        let is_implementation = run.kind == RunKind::Implementation;
+        if is_implementation {
+            outcomes.count(run.status);
+        } else {
+            review_loop_outcomes.count(run.status);
         }
 
         match run.cost_usd {
-            Some(cost) => spend_usd += cost,
+            Some(cost) if is_implementation => implementation_spend_usd += cost,
+            Some(cost) => review_loop_spend_usd += cost,
             None => runs_without_cost += 1,
         }
 
@@ -269,24 +322,29 @@ pub async fn analytics(pool: &SqlitePool, period: Period) -> Result<Analytics> {
             None => runs_without_model += 1,
         }
 
-        match by_strategy
-            .iter_mut()
-            .find(|entry| entry.mode == run.task_strategy_mode)
-        {
-            Some(entry) => {
-                entry.runs += 1;
-                entry.spend_usd += run.cost_usd.unwrap_or(0.0);
+        if is_implementation {
+            match by_strategy
+                .iter_mut()
+                .find(|entry| entry.mode == run.task_strategy_mode)
+            {
+                Some(entry) => {
+                    entry.runs += 1;
+                    entry.spend_usd += run.cost_usd.unwrap_or(0.0);
+                }
+                None => by_strategy.push(StrategyUse {
+                    mode: run.task_strategy_mode,
+                    runs: 1,
+                    spend_usd: run.cost_usd.unwrap_or(0.0),
+                }),
             }
-            None => by_strategy.push(StrategyUse {
-                mode: run.task_strategy_mode,
-                runs: 1,
-                spend_usd: run.cost_usd.unwrap_or(0.0),
-            }),
         }
 
         if let Some(ended_at) = run.ended_at {
             let seconds = (ended_at - run.started_at).num_seconds().max(0);
             durations.push(seconds);
+            if is_implementation {
+                implementation_durations.push(seconds);
+            }
             if longest.as_ref().is_none_or(|held| seconds > held.seconds) {
                 longest = Some(LongestRun {
                     run_id: run.id.clone(),
@@ -310,7 +368,11 @@ pub async fn analytics(pool: &SqlitePool, period: Period) -> Result<Analytics> {
     // two orderings disagree.
     by_model.sort_by(|a, b| b.runs.cmp(&a.runs).then(a.model.cmp(&b.model)));
     by_strategy.sort_by_key(|entry| std::cmp::Reverse(entry.runs));
-    durations.sort_unstable();
+    implementation_durations.sort_unstable();
+    // The total is the sum of its two halves rather than a third accumulator,
+    // so the invariant D29 point 7 states holds exactly and not to within a
+    // float rounding.
+    let spend_usd = implementation_spend_usd + review_loop_spend_usd;
 
     let unattended_hours = durations.iter().sum::<i64>() as f64 / 3600.0;
     let tasks_completed = completed.len();
@@ -328,14 +390,16 @@ pub async fn analytics(pool: &SqlitePool, period: Period) -> Result<Analytics> {
         // numerator is every run in the period. See this module's header.
         cost_per_completed_task_usd: (tasks_completed > 0)
             .then(|| spend_usd / tasks_completed as f64),
-        median_duration_seconds: median(&durations),
+        median_duration_seconds: median(&implementation_durations),
         longest_run: longest,
         unattended_hours,
         models: by_model,
         strategies: by_strategy,
-        planner_spend_usd: planner_spend(pool, period).await?,
-        implementation_spend_usd: spend_usd,
-        subscription_monthly_usd: settings::subscription_monthly_usd(pool).await?,
+        planner_spend_usd: planner_spend(ctx, period).await?,
+        implementation_spend_usd,
+        review_loop_spend_usd,
+        review_loop_outcomes,
+        subscription_monthly_usd: settings::subscription_monthly_usd(ctx).await?,
     })
 }
 
@@ -353,14 +417,14 @@ fn median(sorted: &[i64]) -> Option<i64> {
 /// the bounds are optional, so the predicate is not fixed at compile time — and
 /// the projection is narrow on purpose: `runs.prompt` is kilobytes a sum has no
 /// use for.
-async fn runs_in(pool: &SqlitePool, period: Period) -> Result<Vec<AnalyticsRun>> {
+async fn runs_in(ctx: &ServiceContext, period: Period) -> Result<Vec<AnalyticsRun>> {
     let mut sql = String::from(
-        "SELECT r.id, r.task_id, r.status, r.started_at, r.ended_at, r.cost_usd, r.model,
+        "SELECT r.id, r.task_id, r.kind, r.status, r.started_at, r.ended_at, r.cost_usd, r.model,
                 t.board_column AS task_column, t.title AS task_title,
                 t.strategy_mode AS task_strategy_mode
          FROM runs r
          JOIN tasks t ON t.id = r.task_id
-         WHERE 1 = 1",
+         WHERE t.team_id IN (SELECT value FROM json_each(?))",
     );
     if period.from.is_some() {
         sql.push_str(" AND r.started_at >= ?");
@@ -370,7 +434,7 @@ async fn runs_in(pool: &SqlitePool, period: Period) -> Result<Vec<AnalyticsRun>>
     }
     sql.push_str(" ORDER BY r.started_at ASC");
 
-    let mut query = sqlx::query_as::<_, AnalyticsRun>(&sql);
+    let mut query = sqlx::query_as::<_, AnalyticsRun>(&sql).bind(ctx.scope.json());
     if let Some(from) = period.from {
         query = query.bind(from);
     }
@@ -378,7 +442,7 @@ async fn runs_in(pool: &SqlitePool, period: Period) -> Result<Vec<AnalyticsRun>>
         query = query.bind(to);
     }
 
-    Ok(query.fetch_all(pool).await?)
+    Ok(query.fetch_all(&ctx.pool).await?)
 }
 
 /// What the planners cost, summed off the proposals they wrote.
@@ -390,10 +454,11 @@ async fn runs_in(pool: &SqlitePool, period: Period) -> Result<Vec<AnalyticsRun>>
 /// A proposal whose envelope will not parse contributes nothing rather than
 /// failing the page: the same tolerance every other reader of that column
 /// applies, and a hand-edited row is not a reason a chart cannot be drawn.
-async fn planner_spend(pool: &SqlitePool, period: Period) -> Result<f64> {
+async fn planner_spend(ctx: &ServiceContext, period: Period) -> Result<f64> {
     let mut sql = String::from(
         "SELECT strategy_plan FROM tasks
-         WHERE strategy_plan IS NOT NULL AND strategy_updated_at IS NOT NULL",
+         WHERE team_id IN (SELECT value FROM json_each(?))
+           AND strategy_plan IS NOT NULL AND strategy_updated_at IS NOT NULL",
     );
     if period.from.is_some() {
         sql.push_str(" AND strategy_updated_at >= ?");
@@ -402,7 +467,7 @@ async fn planner_spend(pool: &SqlitePool, period: Period) -> Result<f64> {
         sql.push_str(" AND strategy_updated_at < ?");
     }
 
-    let mut query = sqlx::query_scalar::<_, String>(&sql);
+    let mut query = sqlx::query_scalar::<_, String>(&sql).bind(ctx.scope.json());
     if let Some(from) = period.from {
         query = query.bind(from);
     }
@@ -411,7 +476,7 @@ async fn planner_spend(pool: &SqlitePool, period: Period) -> Result<f64> {
     }
 
     Ok(query
-        .fetch_all(pool)
+        .fetch_all(&ctx.pool)
         .await?
         .into_iter()
         .filter_map(|stored| StrategyPlan::from_stored(Some(&stored)))

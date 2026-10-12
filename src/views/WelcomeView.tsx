@@ -4,6 +4,7 @@ import { DoctorResultList } from "../components/DoctorResultList";
 import { ErrorBanner } from "../components/ErrorBanner";
 import { McpAddCommand } from "../components/McpAddCommand";
 import { RepositoryAddForm } from "../components/RepositoryAddForm";
+import { useCheckouts } from "../hooks/useCheckouts";
 import { useDoctor } from "../hooks/useDoctor";
 import { dismissOnboarding, getBaseInstructions, listRepositories, toRimaiaError } from "../lib/commands";
 import { resultsFor, statusLabel, worstStatus } from "../lib/doctor";
@@ -44,6 +45,7 @@ function StepBadge({ done, status }: { done: boolean; status: DoctorStatus | nul
 
 export function WelcomeView({ onFinish }: { onFinish: () => void }) {
   const { report, running, rerun } = useDoctor();
+  const { checkouts } = useCheckouts();
   const [repositories, setRepositories] = useState<Repository[]>([]);
   const [instructions, setInstructions] = useState("");
   const [error, setError] = useState<RimaiaError | null>(null);
@@ -75,7 +77,10 @@ export function WelcomeView({ onFinish }: { onFinish: () => void }) {
     }
   }
 
-  const unattended = repositories.filter((repository) => repository.allowUnattendedRuns);
+  // This computer's consent, off its checkouts (task 066).
+  const unattended = repositories.filter(
+    (repository) => checkouts.get(repository.id)?.unattendedConsent === true,
+  );
 
   const steps: Step[] = [
     {

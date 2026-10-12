@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT step, adopted_at AS \"adopted_at: DateTime<Utc>\" FROM adoptions ORDER BY step",
+  "describe": {
+    "columns": [
+      {
+        "name": "step",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "adopted_at: DateTime<Utc>",
+        "ordinal": 1,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      false,
+      false
+    ]
+  },
+  "hash": "71b2d949d173958d0f56e9b9589893d9368c67e035c17f929ad8a283b56ebd82"
+}

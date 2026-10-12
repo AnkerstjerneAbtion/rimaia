@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO held_leases\n                    (task_id, team_id, purpose, run_id, generation, acquired_at)\n                   VALUES (?1, ?2, ?3, ?4, ?5, ?6)\n                   ON CONFLICT (task_id) DO UPDATE SET\n                    team_id = excluded.team_id, purpose = excluded.purpose,\n                    run_id = excluded.run_id, generation = excluded.generation,\n                    acquired_at = excluded.acquired_at",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 6
+    },
+    "nullable": []
+  },
+  "hash": "f4a4f4597751e5ffc9da22108068d4e1af00e521754fc0bec7acc07258b0ecfe"
+}

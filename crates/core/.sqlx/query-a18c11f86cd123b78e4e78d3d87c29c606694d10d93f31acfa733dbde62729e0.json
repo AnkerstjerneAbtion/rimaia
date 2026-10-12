@@ -1,0 +1,50 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT u.id AS user_id, u.login, u.avatar_url, m.role,\n                  m.created_at AS \"joined_at: DateTime<Utc>\",\n                  COALESCE(t.personal_user_id = u.id, 0) AS \"is_personal_owner!: bool\"\n             FROM team_memberships m\n             JOIN users u ON u.id = m.user_id\n             JOIN teams t ON t.id = m.team_id\n            WHERE m.team_id = ?1\n            ORDER BY m.created_at, u.login, u.id",
+  "describe": {
+    "columns": [
+      {
+        "name": "user_id",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "login",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "avatar_url",
+        "ordinal": 2,
+        "type_info": "Text"
+      },
+      {
+        "name": "role",
+        "ordinal": 3,
+        "type_info": "Text"
+      },
+      {
+        "name": "joined_at: DateTime<Utc>",
+        "ordinal": 4,
+        "type_info": "Text"
+      },
+      {
+        "name": "is_personal_owner!: bool",
+        "ordinal": 5,
+        "type_info": "Null"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false,
+      true,
+      false,
+      false,
+      null
+    ]
+  },
+  "hash": "a18c11f86cd123b78e4e78d3d87c29c606694d10d93f31acfa733dbde62729e0"
+}

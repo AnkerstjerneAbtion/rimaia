@@ -2,15 +2,16 @@ import { useState } from "react";
 
 import { archiveTask, toRimaiaError, unarchiveTask } from "../../lib/commands";
 import { describeCleanup, describeCleanupIntent } from "../../lib/archive";
-import type { Repository, RimaiaError, Task } from "../../types";
+import type { CheckoutView, RimaiaError, Task } from "../../types";
 import { ErrorBanner } from "../ErrorBanner";
 
 interface ArchiveTaskSectionProps {
   readonly task: Task;
-  /** The task's own repository, when the caller has the list. The cleanup
-   *  sentence is read off it — a panel with no list can still archive, it just
-   *  cannot say in advance what the cleanup will do. */
-  readonly repository: Repository | undefined;
+  /** This computer's checkout of the task's repository (task 066). The
+   *  cleanup sentence is read off it — a repository not set up on this
+   *  computer has nothing here to clean up, so the archive says nothing in
+   *  advance. */
+  readonly checkout: CheckoutView | undefined;
   /** Called after a successful archive, the same way `DeleteTaskSection`
    *  closes the panel: `Board`'s "task missing" effect would get there on the
    *  next `tasks:changed`, but not before a render pointed at a card the board
@@ -30,13 +31,13 @@ interface ArchiveTaskSectionProps {
  * An archived task shows `Unarchive` instead, so the panel a user reaches from
  * the archive list is the same panel, not a read-only copy of it.
  */
-export function ArchiveTaskSection({ task, repository, onArchived }: ArchiveTaskSectionProps) {
+export function ArchiveTaskSection({ task, checkout, onArchived }: ArchiveTaskSectionProps) {
   const [confirming, setConfirming] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<RimaiaError | null>(null);
   const [cleanup, setCleanup] = useState<string | null>(null);
 
-  const intent = describeCleanupIntent(repository);
+  const intent = describeCleanupIntent(checkout);
 
   function fail(thrown: unknown) {
     setError(toRimaiaError(thrown));

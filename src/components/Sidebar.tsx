@@ -1,7 +1,10 @@
+import { useClientCapabilities } from "../lib/capabilities";
 import type { View } from "../types";
+import { TeamSwitcher } from "./TeamSwitcher";
 
 const VIEWS: { id: View; label: string; hint: string }[] = [
   { id: "board", label: "Board", hint: "Tasks waiting, running and done" },
+  { id: "review", label: "Review", hint: "Last night, and what waits for a verdict" },
   { id: "runs", label: "Runs", hint: "What the agent did overnight" },
   { id: "analytics", label: "Analytics", hint: "What it has cost, and what it did" },
   { id: "settings", label: "Settings", hint: "Repositories, instructions, storage" },
@@ -11,9 +14,21 @@ interface SidebarProps {
   current: View;
   onNavigate: (view: View) => void;
   version?: string | null;
+  /** Tasks waiting in `in_review`; shown beside the Review entry when above zero. */
+  reviewCount?: number;
 }
 
-export function Sidebar({ current, onNavigate, version }: SidebarProps) {
+/** Account is a sidebar entry in every mode but solo, which has no accounts
+ *  (task 050, ADR-0030 point 7). */
+const ACCOUNT: { id: View; label: string; hint: string } = {
+  id: "account",
+  label: "Account",
+  hint: "Sessions, tokens and your runners",
+};
+
+export function Sidebar({ current, onNavigate, version, reviewCount = 0 }: SidebarProps) {
+  const { mode } = useClientCapabilities();
+  const views = mode === "solo" ? VIEWS : [...VIEWS, ACCOUNT];
   return (
     <nav className="sidebar" aria-label="Main">
       <div className="sidebar-brand">
@@ -28,10 +43,12 @@ export function Sidebar({ current, onNavigate, version }: SidebarProps) {
         </div>
       </div>
 
+      {mode !== "solo" && <TeamSwitcher />}
+
       <div className="sidebar-section">
         <span className="sidebar-section-label">Navigate</span>
         <ul className="sidebar-nav">
-          {VIEWS.map((view) => (
+          {views.map((view) => (
             <li key={view.id}>
               <button
                 type="button"
@@ -39,7 +56,12 @@ export function Sidebar({ current, onNavigate, version }: SidebarProps) {
                 aria-current={current === view.id ? "page" : undefined}
                 onClick={() => onNavigate(view.id)}
               >
-                <span className="sidebar-link-label">{view.label}</span>
+                <span className="sidebar-link-label">
+                  {view.label}
+                  {view.id === "review" && reviewCount > 0 && (
+                    <span className="sidebar-link-count tabular-nums">{reviewCount}</span>
+                  )}
+                </span>
                 <span className="sidebar-link-hint">{view.hint}</span>
               </button>
             </li>

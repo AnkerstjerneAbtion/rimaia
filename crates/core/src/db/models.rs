@@ -243,6 +243,36 @@ pub enum RunStatus {
     Interrupted,
 }
 
+/// What a run was for (ADR-0017, seam-contract D29).
+///
+/// Written once, by `start_run`, and never updated: a run does not change kind.
+/// `attempt` stays one sequence per task across every kind, so the highest
+/// attempt is still the newest row whatever it was for, and each reader of
+/// `runs` says which kinds it means rather than assuming they are all attempts
+/// at the task.
+///
+/// There is no `Strategy`: the planner writes no row (D17.5), and the column's
+/// `CHECK` refuses the word.
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Hash,
+    Serialize,
+    Deserialize,
+    sqlx::Type,
+    schemars::JsonSchema,
+)]
+#[sqlx(rename_all = "snake_case")]
+#[serde(rename_all = "snake_case")]
+pub enum RunKind {
+    Implementation,
+    Review,
+    Fix,
+}
+
 /// How a task's model and effort get chosen (ADR-0016).
 ///
 /// Not [`ScheduleMode`], which is ADR-0010's sequential-or-parallel run
@@ -413,76 +443,31 @@ impl MutationSource {
     }
 }
 
-/// A registered local git repository (ADR-0005).
+/// A repository on the board (ADR-0005, ADR-0033 point 1).
 ///
-/// The repository on disk is authoritative: this row records what Rimaia was told,
-/// and startup reconciliation trusts the filesystem where the two disagree. Which
-/// is also why there is no `remote_url` — `git remote get-url` answers it every
-/// time and a cached copy can only go stale.
-#[derive(Debug, Clone, PartialEq, Serialize, sqlx::FromRow)]
+/// The board's half only. Everything true of one machine's clone (where it
+/// is, where its worktrees go, how many runs it holds, the runner's consent,
+/// the archive policy and the credential metadata) is that machine's
+/// [`Checkout`](crate::machine::Checkout) since task 066, so no board DTO
+/// carries an absolute path (ADR-0028 point 2). The repository on disk is
+/// still authoritative about itself, which is also why there is no
+/// `remote_url`: `git remote get-url` answers it every time.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, sqlx::FromRow)]
 #[serde(rename_all = "camelCase")]
 pub struct Repository {
     pub id: String,
     pub name: String,
-    /// `String`, not `PathBuf`: the column is `TEXT`, it is a string again the
-    /// moment it crosses to the frontend, and callers that touch the filesystem
-    /// take a `Path::new` on it.
-    pub path: String,
     pub default_branch: String,
-    pub worktree_root: String,
-    /// ADR-0012's per-repository opt-in to `--permission-mode bypassPermissions`.
-    /// Never widened without amending that ADR.
+    /// ADR-0032 point 4's team ceiling on unattended runs: what this column
+    /// became when the runner's own consent moved to the checkout.
+    ///
+    /// **Not serialized**, to the frontend or to MCP, until task 045 names it
+    /// and gives it a command. Nothing reads it before then either: the
+    /// consent a run needs is the checkout's
+    /// [`unattended_consent`](crate::machine::Checkout::unattended_consent).
+    #[serde(skip)]
     pub allow_unattended_runs: bool,
-    /// How many runs this repository will hold at once (ADR-0010), `1` unless
-    /// the user opted out.
-    ///
-    /// A cap of its own rather than a share of the global `max_concurrency`,
-    /// because the thing it protects is not the machine: "two agents in two
-    /// worktrees of the same repo is safe for git, but they will fight over
-    /// ports, test databases, and lockfiles." Worktree isolation (ADR-0005)
-    /// does nothing about any of those, which is why raising this is a
-    /// deliberate per-repository act and not a consequence of turning
-    /// parallelism on.
-    ///
-    /// `i64` because SQLite's `INTEGER` is one and D10's argument against
-    /// clever column types applies here too; [`scheduler::capacity`] is what
-    /// turns a hand-edited `0` into a usable number.
-    ///
-    /// [`scheduler::capacity`]: crate::scheduler::capacity
-    pub max_concurrency: i64,
     pub created_at: DateTime<Utc>,
-    /// The forge login this repository's own token resolved to (task 022,
-    /// ADR-0020), or `None` when it carries no credential.
-    ///
-    /// **It doubles as the flag.** A repository with a login is one a run must
-    /// spawn with its own token, and one whose keychain item has since
-    /// vanished refuses to start rather than falling back to the operator's
-    /// ambient login — which is why the spawn path reads this column instead of
-    /// asking the keychain whether anything is there. A keychain that cannot be
-    /// reached has to be a refusal, not an absence.
-    ///
-    /// `unverified` when `gh` was not installed at save time: a missing local
-    /// tool says nothing about the token, so the save is allowed and marked.
-    pub credential_login: Option<String>,
-    /// What the user called it — "fine-grained, rimaia only, expires March".
-    pub credential_label: Option<String>,
-    pub credential_added_at: Option<DateTime<Utc>>,
-    /// What archiving a task in this repository cleans up (ADR-0025 point 4).
-    ///
-    /// One slot, three states, mutually exclusive **by construction** rather
-    /// than by a rule in a service: two live fields would let Rimaia's guarded
-    /// removal run against a directory a script had already deleted, and would
-    /// make "what happens when I archive" a two-field question.
-    pub on_archive: OnArchive,
-    /// The executable [`OnArchive::Script`] names — an absolute path to one
-    /// file, never a command line (ADR-0025 point 5).
-    ///
-    /// Meaningful only when [`on_archive`](Repository::on_archive) is
-    /// [`Script`](OnArchive::Script), and validated when it is *written* rather
-    /// than when an archive fires: a path that is relative, missing, a
-    /// directory or not executable is a form error at 11am, not a surprise at
-    /// 3am.
-    pub on_archive_script: Option<String>,
 }
 
 /// What one archive cleans up, per repository (ADR-0025 point 4).
@@ -544,7 +529,7 @@ pub struct Setting {
 ///
 /// It carries everything an agent needs to work with no further conversation, and
 /// everything the user needs to review the result the next morning.
-#[derive(Debug, Clone, PartialEq, Serialize, sqlx::FromRow)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, sqlx::FromRow)]
 #[serde(rename_all = "camelCase")]
 pub struct Task {
     pub id: String,
@@ -566,8 +551,10 @@ pub struct Task {
     /// arithmetic lives in [`crate::tasks`] rather than on this struct.
     pub position: f64,
     pub run_state: RunState,
+    /// The task's branch (ADR-0005), recorded by the runner that made it. Where
+    /// its worktree is on that machine is the machine's own record, never this
+    /// row (ADR-0028 point 2, task 066).
     pub branch: Option<String>,
-    pub worktree_path: Option<String>,
     pub strategy_mode: StrategyMode,
     /// Free text, not an enum. ADR-0016 populates both dropdowns from
     /// configuration because models ship faster than releases do, so a closed set
@@ -600,11 +587,37 @@ pub struct Task {
     /// orthogonal to [`run_state`](Task::run_state), for the same reason
     /// ADR-0007 gives for keeping those two apart.
     pub archived_at: Option<DateTime<Utc>>,
+    /// Who wrote the task (ADR-0030 point 8), from task 045. `None` for a
+    /// deleted account, which leaves "a former member", or for a row a server
+    /// held before anyone was recorded.
+    #[serde(default)]
+    pub created_by: Option<String>,
+    /// The one person whose runners run this task (ADR-0032 point 1). `None`
+    /// is the team's pool; in a personal team an unassigned task is its
+    /// owner's own, which `consent::eligibility` decides, not this column.
+    #[serde(default)]
+    pub assignee_id: Option<String>,
+    #[serde(default)]
+    pub assigned_by: Option<String>,
+    /// ADR-0032 point 3's revision of `plan` and `extra_instructions`
+    /// together: incremented by every write that changes either, and by
+    /// nothing else.
+    #[serde(default = "first_revision")]
+    pub plan_revision: i64,
+    /// Who wrote the current plan revision.
+    #[serde(default)]
+    pub plan_updated_by: Option<String>,
+}
+
+/// The revision every revisioned column starts at, and what a board that
+/// predates task 045 sends for one it does not know.
+const fn first_revision() -> i64 {
+    1
 }
 
 /// One external reference on a task — an Asana task, a GitHub issue, a doc
 /// (ADR-0007).
-#[derive(Debug, Clone, PartialEq, Serialize, sqlx::FromRow)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, sqlx::FromRow)]
 #[serde(rename_all = "camelCase")]
 pub struct TaskLink {
     pub id: String,
@@ -636,9 +649,12 @@ pub struct TaskDependency {
 
 /// One attempt (ADR-0011), holding only what the UI queries.
 ///
-/// The event stream itself is a JSONL file at [`log_path`](Run::log_path), which is
-/// how ADR-0013 keeps megabytes of transcript out of every board query.
-#[derive(Debug, Clone, PartialEq, Serialize, sqlx::FromRow)]
+/// The event stream itself is a JSONL file whose path is a pure function of the
+/// task and run ids (ADR-0013, `runner::events::transcript_path`), which is how
+/// megabytes of transcript stay out of every board query. The `log_path` column
+/// is still written until task 056 and read by nothing (task 066): a path is
+/// one machine's fact, and no board DTO carries one.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, sqlx::FromRow)]
 #[serde(rename_all = "camelCase")]
 pub struct Run {
     pub id: String,
@@ -646,6 +662,9 @@ pub struct Run {
     /// Unique within the task, enforced by an index rather than assumed: two
     /// writers racing to claim a task must not both record attempt 3.
     pub attempt: i64,
+    /// What the run was for (D29). Older rows read as
+    /// [`Implementation`](RunKind::Implementation), which is what they were.
+    pub kind: RunKind,
     pub status: RunStatus,
     /// Generated by Rimaia *before* the spawn, so `--resume` works even if the
     /// process dies before its `init` event (ADR-0004). Every attempt of one task
@@ -663,10 +682,6 @@ pub struct Run {
     /// Both arrive on the terminal `result` event; neither is derived.
     pub num_turns: Option<i64>,
     pub cost_usd: Option<f64>,
-    /// Known at row creation, being a pure function of the task and run ids
-    /// (ADR-0013). A row whose file has vanished is marked at startup rather than
-    /// trusted — a reconciliation rule, not a reason for this to be optional.
-    pub log_path: String,
     pub pr_url: Option<String>,
     /// When the next attempt may start: the usage-limit reset plus jitter, or the
     /// current backoff step (ADR-0011).
@@ -674,6 +689,9 @@ pub struct Run {
     /// The branch this attempt was created from (ADR-0008): the repository's
     /// default branch, or a dependency's branch when the task has one. A fact
     /// about the attempt, not about what the resolver would answer today.
+    /// Since task 044 a label: a chained run's commit is `base_sha`, which may
+    /// be behind this branch's tip, and a dependency whose branch is gone is
+    /// named by that commit here too.
     pub base_ref: Option<String>,
     /// ADR-0022's capture columns: what this attempt was spawned as, and what it
     /// spent. Written once by `finish_run` and never updated.
@@ -690,6 +708,21 @@ pub struct Run {
     pub output_tokens: Option<i64>,
     pub cache_read_tokens: Option<i64>,
     pub cache_creation_tokens: Option<i64>,
+    /// The commit the worktree's `HEAD` was on when the run ended (ADR-0033
+    /// point 4), written by `finish_run` from what the runner measured. Recorded
+    /// whether or not the attempt committed anything, because a review commits
+    /// nothing and its `head_sha` is still the commit it cleared (D29 point 5).
+    ///
+    /// NULL means not recorded (seam-contract D18): a run from before task 033,
+    /// one still in flight, one a crash closed, or one whose worktree could not
+    /// be read at the finish. Never backfilled.
+    pub head_sha: Option<String>,
+    /// The commit this attempt was built on, and the authoritative half of
+    /// the base (task 044): the fork point `git merge-base <revision> HEAD` in
+    /// the worktree, where the revision is the dependency's successful head
+    /// when the run chained and [`base_ref`](Self::base_ref) otherwise. Written
+    /// at the open beside `base_ref`. NULL on the same terms as `head_sha`.
+    pub base_sha: Option<String>,
 }
 
 /// A named run configuration (ADR-0010).
@@ -850,6 +883,13 @@ mod tests {
     }
 
     #[test]
+    fn run_kinds_round_trip_through_their_schema_spelling() {
+        agrees_with_the_schema(RunKind::Implementation, "implementation");
+        agrees_with_the_schema(RunKind::Review, "review");
+        agrees_with_the_schema(RunKind::Fix, "fix");
+    }
+
+    #[test]
     fn strategy_modes_and_sources_round_trip_through_their_schema_spelling() {
         agrees_with_the_schema(StrategyMode::Default, "default");
         agrees_with_the_schema(StrategyMode::Manual, "manual");
@@ -889,7 +929,6 @@ mod tests {
             position: 1.5,
             run_state: RunState::WaitingRetry,
             branch: Some("rimaia/wire-the-board".to_string()),
-            worktree_path: None,
             strategy_mode: StrategyMode::Planned,
             model: Some("opus".to_string()),
             effort: None,
@@ -900,6 +939,11 @@ mod tests {
             updated_at: timestamp("2026-08-20T12:30:00Z"),
             source: MutationSource::Mcp,
             archived_at: None,
+            created_by: None,
+            assignee_id: None,
+            assigned_by: None,
+            plan_revision: 1,
+            plan_updated_by: None,
         };
 
         assert_eq!(
@@ -916,7 +960,6 @@ mod tests {
                 "position": 1.5,
                 "runState": "waiting_retry",
                 "branch": "rimaia/wire-the-board",
-                "worktreePath": null,
                 "strategyMode": "planned",
                 "model": "opus",
                 "effort": null,
@@ -933,27 +976,24 @@ mod tests {
                 // the value that means "on the board", which is why the card
                 // can read it directly rather than asking for a flag beside it.
                 "archivedAt": null,
+                // Task 045's attribution, assignment and plan revision.
+                "createdBy": null,
+                "assigneeId": null,
+                "assignedBy": null,
+                "planRevision": 1,
+                "planUpdatedBy": null,
             })
         );
     }
 
     #[test]
-    fn a_repository_serializes_its_booleans_and_timestamps_for_the_frontend() {
+    fn a_repository_serializes_no_machine_fact_and_not_the_team_ceiling() {
         let repository = Repository {
             id: "3f2b1c00-0000-4000-8000-000000000003".to_string(),
             name: "rimaia".to_string(),
-            path: "/Users/someone/Code/My Projects/rimaia".to_string(),
             default_branch: "main".to_string(),
-            worktree_root: "/Users/someone/Library/Application Support/com.rimaia.app/worktrees"
-                .to_string(),
             allow_unattended_runs: true,
-            max_concurrency: 1,
             created_at: timestamp("2026-08-20T12:00:00Z"),
-            credential_login: None,
-            credential_label: None,
-            credential_added_at: None,
-            on_archive: OnArchive::None,
-            on_archive_script: None,
         };
 
         assert_eq!(
@@ -961,25 +1001,13 @@ mod tests {
             json!({
                 "id": "3f2b1c00-0000-4000-8000-000000000003",
                 "name": "rimaia",
-                "path": "/Users/someone/Code/My Projects/rimaia",
                 "defaultBranch": "main",
-                "worktreeRoot": "/Users/someone/Library/Application Support/com.rimaia.app/worktrees",
-                "allowUnattendedRuns": true,
-                "maxConcurrency": 1,
                 // RFC 3339 UTC, which is byte-for-byte what the TEXT column holds.
                 "createdAt": "2026-08-20T12:00:00Z",
-                // Task 022's three, and `null` is the shape that matters: a
-                // repository with no credential says so on the wire rather
-                // than omitting the fields, so the pane renders "not
-                // configured" instead of "unknown".
-                "credentialLogin": null,
-                "credentialLabel": null,
-                "credentialAddedAt": null,
-                // ADR-0025's cleanup slot. `"none"` rather than an omitted
-                // field for the same reason as the three above: the Settings
-                // pane renders a chosen "do nothing", not an unknown.
-                "onArchive": "none",
-                "onArchiveScript": null,
+                // No path, root, cap, consent, archive policy or credential:
+                // those are the checkout's (task 066). And no
+                // `allowUnattendedRuns`: the team ceiling is not on the wire
+                // until task 045 names it.
             })
         );
     }

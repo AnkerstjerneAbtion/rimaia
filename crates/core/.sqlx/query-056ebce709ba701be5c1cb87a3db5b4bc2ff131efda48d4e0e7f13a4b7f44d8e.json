@@ -1,0 +1,44 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT l.id, l.task_id, l.label, l.url, l.position\n           FROM task_links l\n           JOIN tasks t ON t.id = l.task_id\n          WHERE l.id = ?1 AND t.team_id IN (SELECT value FROM json_each(?2))",
+  "describe": {
+    "columns": [
+      {
+        "name": "id",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "task_id",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "label",
+        "ordinal": 2,
+        "type_info": "Text"
+      },
+      {
+        "name": "url",
+        "ordinal": 3,
+        "type_info": "Text"
+      },
+      {
+        "name": "position",
+        "ordinal": 4,
+        "type_info": "Float"
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "056ebce709ba701be5c1cb87a3db5b4bc2ff131efda48d4e0e7f13a4b7f44d8e"
+}

@@ -1,0 +1,86 @@
+{
+  "db_name": "SQLite",
+  "query": "\n        -- machine_state adoption (task 041; task 065 deletes this read)\n        SELECT id, name, path, worktree_root, max_concurrency,\n               allow_unattended_runs AS \"allow_unattended_runs: bool\",\n               on_archive AS \"on_archive: OnArchive\", on_archive_script,\n               credential_login, credential_label,\n               credential_added_at AS \"credential_added_at: DateTime<Utc>\",\n               created_at AS \"created_at: DateTime<Utc>\"\n          FROM repositories\n         ORDER BY id\n        ",
+  "describe": {
+    "columns": [
+      {
+        "name": "id",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "name",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "path",
+        "ordinal": 2,
+        "type_info": "Text"
+      },
+      {
+        "name": "worktree_root",
+        "ordinal": 3,
+        "type_info": "Text"
+      },
+      {
+        "name": "max_concurrency",
+        "ordinal": 4,
+        "type_info": "Integer"
+      },
+      {
+        "name": "allow_unattended_runs: bool",
+        "ordinal": 5,
+        "type_info": "Bool"
+      },
+      {
+        "name": "on_archive: OnArchive",
+        "ordinal": 6,
+        "type_info": "Text"
+      },
+      {
+        "name": "on_archive_script",
+        "ordinal": 7,
+        "type_info": "Text"
+      },
+      {
+        "name": "credential_login",
+        "ordinal": 8,
+        "type_info": "Text"
+      },
+      {
+        "name": "credential_label",
+        "ordinal": 9,
+        "type_info": "Text"
+      },
+      {
+        "name": "credential_added_at: DateTime<Utc>",
+        "ordinal": 10,
+        "type_info": "Text"
+      },
+      {
+        "name": "created_at: DateTime<Utc>",
+        "ordinal": 11,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      false,
+      false,
+      true,
+      true,
+      false,
+      false,
+      false,
+      true,
+      true,
+      true,
+      true,
+      false
+    ]
+  },
+  "hash": "a21e5a9bb20aa461acdd20f1b63918e290d6b9301ea1a13d2f64a4287c168abe"
+}

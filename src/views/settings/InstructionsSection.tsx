@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import type { ChangeEvent } from "react";
 
 import { ErrorBanner } from "../../components/ErrorBanner";
+import { useHasMachine } from "../../lib/capabilities";
 import {
   getBaseInstructions,
   getRunEnvironment,
@@ -63,6 +64,10 @@ export function InstructionsSection() {
   // (if a task is already selected) re-composes against what a run would
   // now actually receive rather than what it showed a moment ago.
   const [previewNonce, setPreviewNonce] = useState(0);
+  // The run environment and the composed-prompt preview are this machine's
+  // (`get_run_environment`, `set_run_environment`, `preview_composed_prompt`):
+  // base instructions are the team's, and stay.
+  const hasMachine = useHasMachine();
 
   useEffect(() => {
     getBaseInstructions().then(setBaseInstructionsState, (thrown) =>
@@ -96,19 +101,23 @@ export function InstructionsSection() {
         )}
       </div>
 
-      <div className="instructions-subsection">
-        <h4>Run environment</h4>
-        <RunEnvironmentToggle />
-      </div>
+      {hasMachine && (
+        <>
+          <div className="instructions-subsection">
+            <h4>Run environment</h4>
+            <RunEnvironmentToggle />
+          </div>
 
-      <div className="instructions-subsection">
-        <h4>Preview</h4>
-        <p className="muted">
-          The exact prompt a run would receive right now, for a chosen task — byte for byte
-          what <code>compose_prompt</code> produces for a real run, not an approximation.
-        </p>
-        <ComposedPromptPreview refreshSignal={previewNonce} />
-      </div>
+          <div className="instructions-subsection">
+            <h4>Preview</h4>
+            <p className="muted">
+              The exact prompt a run would receive right now, for a chosen task — byte for byte
+              what <code>compose_prompt</code> produces for a real run, not an approximation.
+            </p>
+            <ComposedPromptPreview refreshSignal={previewNonce} />
+          </div>
+        </>
+      )}
     </section>
   );
 }

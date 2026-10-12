@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT team_id FROM api_token_teams WHERE token_id = ?1",
+  "describe": {
+    "columns": [
+      {
+        "name": "team_id",
+        "ordinal": 0,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "c4ee5ff34bb891705b00a12273503280d172898b28ee01aadcb791c5b7c5cb13"
+}

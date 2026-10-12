@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO runners (id, user_id, label, provider, paired_at)\n         VALUES (?1, ?2, ?3, ?4, ?5)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 5
+    },
+    "nullable": []
+  },
+  "hash": "51fdc738d543909d0c0498d8c5cd7e23c0feee41961e46bc2d9dc825f1fa93ff"
+}

@@ -436,8 +436,12 @@ describe("StorageSection", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "I understand — turn it on" }));
 
+    // The box comes back unticked the moment the gate closes and is ticked only
+    // once the write resolves, so wait for the ticked box itself: finding the
+    // box and then asserting races the write.
     const write = await screen.findByRole("checkbox", {
       name: /Remove a task's worktree automatically/,
+      checked: true,
     });
     expect(write).toBeChecked();
     expect(calls.find((call) => call.command === "set_worktree_auto_cleanup")?.args).toEqual({
@@ -467,11 +471,13 @@ describe("StorageSection", () => {
 
     fireEvent.click(toggle);
 
-    expect(
-      (await screen.findByRole("checkbox", {
-        name: /Remove a task's worktree automatically/,
-      })) as HTMLInputElement,
-    ).not.toBeChecked();
+    // React puts the controlled box back to ticked until the write resolves,
+    // so wait for the unticked box rather than asserting on the one found.
+    const write = await screen.findByRole("checkbox", {
+      name: /Remove a task's worktree automatically/,
+      checked: false,
+    });
+    expect(write).not.toBeChecked();
     expect(calls.find((call) => call.command === "set_worktree_auto_cleanup")?.args).toEqual({
       setting: "off",
     });

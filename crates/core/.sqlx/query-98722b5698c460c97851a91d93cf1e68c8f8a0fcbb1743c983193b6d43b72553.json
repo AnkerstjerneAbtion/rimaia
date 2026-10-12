@@ -1,0 +1,62 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT t.id AS task_id, t.title AS task_title, t.repository_id, t.branch,\n                  t.board_column AS \"column: BoardColumn\",\n                  t.run_state AS \"run_state: RunState\",\n                  r.name AS repository_name, r.default_branch\n             FROM tasks t\n             JOIN repositories r ON r.id = t.repository_id\n            WHERE t.team_id = ?1 AND t.id IN (SELECT value FROM json_each(?2))\n            ORDER BY r.name, t.title",
+  "describe": {
+    "columns": [
+      {
+        "name": "task_id",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "task_title",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "repository_id",
+        "ordinal": 2,
+        "type_info": "Text"
+      },
+      {
+        "name": "branch",
+        "ordinal": 3,
+        "type_info": "Text"
+      },
+      {
+        "name": "column: BoardColumn",
+        "ordinal": 4,
+        "type_info": "Text"
+      },
+      {
+        "name": "run_state: RunState",
+        "ordinal": 5,
+        "type_info": "Text"
+      },
+      {
+        "name": "repository_name",
+        "ordinal": 6,
+        "type_info": "Text"
+      },
+      {
+        "name": "default_branch",
+        "ordinal": 7,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      true,
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "98722b5698c460c97851a91d93cf1e68c8f8a0fcbb1743c983193b6d43b72553"
+}

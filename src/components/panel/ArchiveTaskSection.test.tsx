@@ -4,7 +4,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { invoke } from "@tauri-apps/api/core";
 
 import { ArchiveTaskSection } from "./ArchiveTaskSection";
-import type { Repository, Task } from "../../types";
+import type { CheckoutView, Task } from "../../types";
 
 vi.mock("@tauri-apps/api/core", () => ({
   invoke: vi.fn(),
@@ -27,7 +27,6 @@ function task(overrides: Partial<Task> = {}): Task {
     position: 0,
     runState: "idle",
     branch: null,
-    worktreePath: null,
     strategyMode: "default",
     model: null,
     effort: null,
@@ -42,16 +41,14 @@ function task(overrides: Partial<Task> = {}): Task {
   };
 }
 
-function repository(overrides: Partial<Repository> = {}): Repository {
+/** This computer's checkout of the task's repository (task 066). */
+function checkout(overrides: Partial<CheckoutView> = {}): CheckoutView {
   return {
-    id: "repo-1",
-    name: "rimaia",
+    repositoryId: "repo-1",
     path: "/code/rimaia",
-    defaultBranch: "main",
     worktreeRoot: "/data/worktrees/rimaia",
-    allowUnattendedRuns: true,
     maxConcurrency: 1,
-    createdAt: "2026-08-20T09:00:00Z",
+    unattendedConsent: true,
     onArchive: "none",
     onArchiveScript: null,
     ...overrides,
@@ -63,7 +60,7 @@ const CLEAN = { taskId: "task-1", title: "Ship the thing", archivedAt: "x", clea
 describe("ArchiveTaskSection", () => {
   it("does not archive on the first click — it asks first", () => {
     render(
-      <ArchiveTaskSection task={task()} repository={repository()} onArchived={vi.fn()} />,
+      <ArchiveTaskSection task={task()} checkout={checkout()} onArchived={vi.fn()} />,
     );
 
     fireEvent.click(screen.getByRole("button", { name: "Archive task" }));
@@ -76,7 +73,7 @@ describe("ArchiveTaskSection", () => {
 
   it("says nothing about cleanup when the repository cleans nothing up", () => {
     render(
-      <ArchiveTaskSection task={task()} repository={repository()} onArchived={vi.fn()} />,
+      <ArchiveTaskSection task={task()} checkout={checkout()} onArchived={vi.fn()} />,
     );
 
     fireEvent.click(screen.getByRole("button", { name: "Archive task" }));
@@ -91,7 +88,7 @@ describe("ArchiveTaskSection", () => {
     render(
       <ArchiveTaskSection
         task={task()}
-        repository={repository({ onArchive: "remove_worktree" })}
+        checkout={checkout({ onArchive: "remove_worktree" })}
         onArchived={vi.fn()}
       />,
     );
@@ -106,7 +103,7 @@ describe("ArchiveTaskSection", () => {
     render(
       <ArchiveTaskSection
         task={task()}
-        repository={repository({ onArchive: "script", onArchiveScript: "/opt/teardown.sh" })}
+        checkout={checkout({ onArchive: "script", onArchiveScript: "/opt/teardown.sh" })}
         onArchived={vi.fn()}
       />,
     );
@@ -117,11 +114,25 @@ describe("ArchiveTaskSection", () => {
     expect(screen.getByText(/none of its own guards/)).toBeInTheDocument();
   });
 
+  it("says nothing in advance for a repository not set up on this computer", () => {
+    // No checkout here is nothing here to clean up, whatever another
+    // computer's checkout would do.
+    render(<ArchiveTaskSection task={task()} checkout={undefined} onArchived={vi.fn()} />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Archive task" }));
+
+    expect(screen.queryByText(/worktree will be deleted/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/cleanup script will run/)).not.toBeInTheDocument();
+    expect(
+      screen.getByRole("alertdialog", { name: 'Confirm archive "Ship the thing"' }),
+    ).toBeInTheDocument();
+  });
+
   it("archives and closes the panel once the confirmation is accepted", async () => {
     mockInvoke.mockResolvedValue(CLEAN);
     const onArchived = vi.fn();
     render(
-      <ArchiveTaskSection task={task()} repository={repository()} onArchived={onArchived} />,
+      <ArchiveTaskSection task={task()} checkout={checkout()} onArchived={onArchived} />,
     );
 
     fireEvent.click(screen.getByRole("button", { name: "Archive task" }));
@@ -140,7 +151,7 @@ describe("ArchiveTaskSection", () => {
     });
     const onArchived = vi.fn();
     render(
-      <ArchiveTaskSection task={task()} repository={repository()} onArchived={onArchived} />,
+      <ArchiveTaskSection task={task()} checkout={checkout()} onArchived={onArchived} />,
     );
 
     fireEvent.click(screen.getByRole("button", { name: "Archive task" }));
@@ -153,7 +164,7 @@ describe("ArchiveTaskSection", () => {
   it("shows the refusal when archiving is rejected", async () => {
     mockInvoke.mockRejectedValue({ code: "invalid", message: "Cancel the run first" });
     render(
-      <ArchiveTaskSection task={task()} repository={repository()} onArchived={vi.fn()} />,
+      <ArchiveTaskSection task={task()} checkout={checkout()} onArchived={vi.fn()} />,
     );
 
     fireEvent.click(screen.getByRole("button", { name: "Archive task" }));
@@ -168,7 +179,7 @@ describe("ArchiveTaskSection", () => {
     render(
       <ArchiveTaskSection
         task={task({ archivedAt: "2026-09-15T10:00:00Z" })}
-        repository={repository()}
+        checkout={checkout()}
         onArchived={onArchived}
       />,
     );

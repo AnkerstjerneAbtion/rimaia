@@ -9,9 +9,12 @@
 //! room again. That last property is task 002's own acceptance criterion —
 //! "`position_between` including the rebalance path" — end to end.
 
-use rimaia_core::db::{BoardColumn, RunState};
+use std::sync::Arc;
+
+use rimaia_core::db::{BoardColumn, MutationSource, RunState};
 use rimaia_core::tasks::{position_between, rebalance_column, Placement};
-use rimaia_core::testing::test_pool;
+use rimaia_core::testing::{test_epoch, test_pool, TestClock};
+use rimaia_core::{ServiceContext, TeamScope};
 use sqlx::SqlitePool;
 
 #[tokio::test]
@@ -250,7 +253,19 @@ const T3: &str = "2026-08-20T00:02:00+00:00";
 /// at one connection, and holding this one open would deadlock the next query
 /// rather than fail it.
 async fn rebalance(pool: &SqlitePool, repository_id: &str, column: BoardColumn) -> Vec<String> {
-    let mut tx = pool
+    // A renumber runs inside a transaction a context opened (task 039), so
+    // this builds the solo context the shell would over the same pool.
+    let solo = rimaia_core::identity::ensure_solo(pool, &TestClock::new(test_epoch()))
+        .await
+        .expect("a fresh board gets a solo identity");
+    let context = ServiceContext::new(
+        pool.clone(),
+        Arc::new(TestClock::new(test_epoch())),
+        MutationSource::System,
+        TeamScope::one(solo.team_id),
+        solo.user_id,
+    );
+    let mut tx = context
         .begin()
         .await
         .expect("the sole test connection must still be available");
@@ -307,13 +322,15 @@ async fn updated_at_by_id(pool: &SqlitePool, repository_id: &str) -> Vec<(String
 /// its id as the foreign key `tasks.repository_id` requires.
 async fn seed_repository(pool: &SqlitePool) -> String {
     let id = rimaia_core::db::new_id();
+    let team_id = solo_team(pool).await;
     sqlx::query!(
         r#"
-        INSERT INTO repositories (id, name, path, default_branch, worktree_root, allow_unattended_runs, created_at)
-        VALUES (?1, 'rimaia', '/tmp/rimaia', 'main', '/tmp/rimaia-worktrees', 0, ?2)
+        INSERT INTO repositories (id, team_id, name, default_branch, allow_unattended_runs, created_at)
+        VALUES (?1, ?3, 'rimaia', 'main', 0, ?2)
         "#,
         id,
         T1,
+        team_id,
     )
     .execute(pool)
     .await
@@ -332,12 +349,13 @@ async fn seed_task(
     position: f64,
     created_at: &str,
 ) {
+    let team_id = solo_team(pool).await;
     sqlx::query!(
         r#"
         INSERT INTO tasks (
-            id, repository_id, title, board_column, position, run_state, created_at, updated_at
+            id, team_id, repository_id, title, board_column, position, run_state, created_at, updated_at
         )
-        VALUES (?1, ?2, 'a seeded task', ?3, ?4, ?5, ?6, ?7)
+        VALUES (?1, ?8, ?2, 'a seeded task', ?3, ?4, ?5, ?6, ?7)
         "#,
         id,
         repository_id,
@@ -346,8 +364,22 @@ async fn seed_task(
         RunState::Idle,
         created_at,
         created_at,
+        team_id,
     )
     .execute(pool)
     .await
     .expect("seed a task");
+}
+
+/// The solo team the board's rows belong to: the identity `TestContext`
+/// already created, or a first launch's, read through the same
+/// `identity::ensure_solo` either way.
+async fn solo_team(pool: &SqlitePool) -> String {
+    rimaia_core::identity::ensure_solo(
+        pool,
+        &rimaia_core::testing::TestClock::new(rimaia_core::testing::test_epoch()),
+    )
+    .await
+    .expect("the board's solo identity")
+    .team_id
 }

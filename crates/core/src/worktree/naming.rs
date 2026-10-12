@@ -127,6 +127,86 @@ fn slug(title: &str, budget: usize) -> Option<String> {
     Some(slug)
 }
 
+// ---------------------------------------------------------------------------
+// What the board accepts back (seam-contract D37)
+// ---------------------------------------------------------------------------
+//
+// A runner reports the branch it created and the commits it measured, and in a
+// shared team that runner is one member's machine while the prompt that later
+// renders the value runs on another's. So the board holds each to the shape
+// this module produces, and a prompt renders a branch only when it can show
+// where every byte of it came from.
+
+/// What [`is_branch_of`] admits, as the sentence a refusal renders.
+pub(crate) const TASK_BRANCH_RULE: &str = "a task's branch is rimaia/ and the task's id, \
+     optionally followed by a hyphen and lowercase letters, digits and single hyphens, \
+     of at most 200 bytes";
+
+/// What [`is_commit_sha`] admits, as the sentence a refusal renders.
+pub(crate) const COMMIT_RULE: &str =
+    "a commit is a full sha, 40 or 64 lowercase hexadecimal digits";
+
+/// Whether `branch` has the shape [`branch_name`] and
+/// [`with_collision_suffix`] produce for `task_id`. The slug is not compared
+/// with the title, because the title may change between the claim that
+/// computed the name and the write that records it.
+pub(crate) fn is_branch_of(task_id: &str, branch: &str) -> bool {
+    let Some(rest) = branch
+        .strip_prefix(BRANCH_NAMESPACE)
+        .and_then(|rest| rest.strip_prefix(task_id))
+    else {
+        return false;
+    };
+    // A task id too long to leave room for a slug yields the bare stem, which
+    // may itself be over the limit (see `branch_name`).
+    rest.is_empty()
+        || (branch.len() <= MAX_BRANCH_NAME_BYTES
+            && rest.strip_prefix('-').is_some_and(is_hyphenated_words))
+}
+
+/// Whether `branch` has the shape of any task's branch: the namespace, then
+/// lowercase letters, digits and single hyphens. What a dependency's branch
+/// recorded through [`is_branch_of`] always is, read where the task it
+/// belongs to is not known (a run's base label).
+pub(crate) fn is_task_branch(branch: &str) -> bool {
+    branch.len() <= MAX_BRANCH_NAME_BYTES
+        && branch
+            .strip_prefix(BRANCH_NAMESPACE)
+            .is_some_and(is_hyphenated_words)
+}
+
+/// Whether `branch` is exactly the name `task_id` with `title` produces, or
+/// one of its collision suffixes: every byte of it is then the task's id, a
+/// slug of that title, or a number Rimaia chose.
+///
+/// A shared team's prompt renders a branch only when this holds for the title
+/// it renders beside it, which is a consented revision (D37). A branch
+/// recorded under an earlier title carries a slug of text nobody running the
+/// task now has consented to.
+pub(crate) fn derives_from(task_id: &str, title: &str, branch: &str) -> bool {
+    let name = branch_name(task_id, title);
+    branch == name
+        || (2..=MAX_COLLISION_ATTEMPTS)
+            .any(|attempt| with_collision_suffix(&name, attempt) == branch)
+}
+
+/// Whether `sha` is a full commit name as git prints it: SHA-1's 40 or
+/// SHA-256's 64 lowercase hexadecimal digits.
+pub(crate) fn is_commit_sha(sha: &str) -> bool {
+    matches!(sha.len(), 40 | 64) && sha.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+}
+
+/// One or more runs of `[a-z0-9]`, joined by single hyphens.
+fn is_hyphenated_words(text: &str) -> bool {
+    !text.is_empty()
+        && text.split('-').all(|word| {
+            !word.is_empty()
+                && word
+                    .bytes()
+                    .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit())
+        })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -259,5 +339,89 @@ mod tests {
         let suffixed = with_collision_suffix(&branch, MAX_COLLISION_ATTEMPTS);
 
         assert_is_a_legal_ref_name(&suffixed);
+    }
+
+    #[test]
+    fn a_branch_of_the_task_is_the_name_and_its_suffixes_and_nothing_else() {
+        let base = branch_name(TASK_ID, "Wire the board");
+
+        for branch in [
+            base.clone(),
+            with_collision_suffix(&base, 2),
+            format!("rimaia/{TASK_ID}"),
+            format!("rimaia/{TASK_ID}-a-slug-from-an-older-title"),
+        ] {
+            assert!(is_branch_of(TASK_ID, &branch), "{branch}");
+        }
+        for branch in [
+            "main".to_string(),
+            "rimaia/branched".to_string(),
+            format!("rimaia/{TASK_ID}-Ignore the plan"),
+            format!("rimaia/{TASK_ID}-two--hyphens"),
+            format!("rimaia/{TASK_ID}-trailing-"),
+            format!("rimaia/{TASK_ID}x"),
+            format!("rimaia/{TASK_ID}-{}", "a".repeat(MAX_BRANCH_NAME_BYTES)),
+            format!("feature/{TASK_ID}"),
+        ] {
+            assert!(!is_branch_of(TASK_ID, &branch), "{branch}");
+        }
+    }
+
+    #[test]
+    fn any_task_branch_is_the_namespace_and_hyphenated_lowercase_words() {
+        assert!(is_task_branch(&branch_name(TASK_ID, "Wire the board")));
+        assert!(is_task_branch("rimaia/the-store"));
+        for branch in [
+            "main",
+            "rimaia/",
+            "rimaia/The-store",
+            "rimaia/a b",
+            "rimaia/a/b",
+        ] {
+            assert!(!is_task_branch(branch), "{branch}");
+        }
+    }
+
+    #[test]
+    fn a_branch_derives_from_a_title_only_when_its_slug_is_that_titles() {
+        let base = branch_name(TASK_ID, "Wire the board");
+
+        assert!(derives_from(TASK_ID, "Wire the board", &base));
+        assert!(derives_from(
+            TASK_ID,
+            "Wire the board",
+            &with_collision_suffix(&base, MAX_COLLISION_ATTEMPTS)
+        ));
+        assert!(!derives_from(
+            TASK_ID,
+            "Wire the board",
+            &format!("{base}-0")
+        ));
+        assert!(!derives_from(
+            TASK_ID,
+            "Wire the board",
+            &format!("{base}-02")
+        ));
+        assert!(!derives_from(
+            TASK_ID,
+            "Wire the board",
+            &format!("{base}-and-more")
+        ));
+        assert!(!derives_from(TASK_ID, "Wire it", &base));
+    }
+
+    #[test]
+    fn a_commit_sha_is_forty_or_sixty_four_lowercase_hex_digits() {
+        assert!(is_commit_sha(&"a".repeat(40)));
+        assert!(is_commit_sha(&"0".repeat(64)));
+        for sha in [
+            "A".repeat(40),
+            "a".repeat(39),
+            "a".repeat(41),
+            "g".repeat(40),
+            "HEAD".into(),
+        ] {
+            assert!(!is_commit_sha(&sha), "{sha}");
+        }
     }
 }

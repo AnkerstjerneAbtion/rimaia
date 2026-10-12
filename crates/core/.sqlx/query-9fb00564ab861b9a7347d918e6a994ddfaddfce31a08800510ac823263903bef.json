@@ -1,0 +1,62 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT l.task_id, l.purpose AS \"purpose: LeasePurpose\", l.run_id, l.runner_id,\n                  l.generation, l.acquired_at AS \"acquired_at: DateTime<Utc>\",\n                  l.expires_at AS \"expires_at: DateTime<Utc>\", t.team_id\n             FROM runner_leases l JOIN tasks t ON t.id = l.task_id\n            WHERE l.runner_id = ?1 AND t.team_id IN (SELECT value FROM json_each(?2))\n            ORDER BY l.task_id",
+  "describe": {
+    "columns": [
+      {
+        "name": "task_id",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "purpose: LeasePurpose",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "run_id",
+        "ordinal": 2,
+        "type_info": "Text"
+      },
+      {
+        "name": "runner_id",
+        "ordinal": 3,
+        "type_info": "Text"
+      },
+      {
+        "name": "generation",
+        "ordinal": 4,
+        "type_info": "Integer"
+      },
+      {
+        "name": "acquired_at: DateTime<Utc>",
+        "ordinal": 5,
+        "type_info": "Text"
+      },
+      {
+        "name": "expires_at: DateTime<Utc>",
+        "ordinal": 6,
+        "type_info": "Text"
+      },
+      {
+        "name": "team_id",
+        "ordinal": 7,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      false,
+      false,
+      true,
+      false,
+      false,
+      false,
+      true,
+      false
+    ]
+  },
+  "hash": "9fb00564ab861b9a7347d918e6a994ddfaddfce31a08800510ac823263903bef"
+}

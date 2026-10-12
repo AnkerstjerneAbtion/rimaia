@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO runner_leases\n            (task_id, purpose, run_id, runner_id, generation, acquired_at, expires_at)\n           VALUES (?1, 'strategy', NULL, ?2, ?3, ?4, NULL)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 4
+    },
+    "nullable": []
+  },
+  "hash": "7702298229973066fbdee317d975b31caebf54b6e5e7ea7133ca8b6bc26a39d0"
+}

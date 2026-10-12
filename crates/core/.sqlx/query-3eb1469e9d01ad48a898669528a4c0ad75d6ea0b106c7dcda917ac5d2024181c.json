@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE runners SET last_seen_at = ?1\n          WHERE id = ?2 AND (last_seen_at IS NULL OR last_seen_at < ?3)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": []
+  },
+  "hash": "3eb1469e9d01ad48a898669528a4c0ad75d6ea0b106c7dcda917ac5d2024181c"
+}

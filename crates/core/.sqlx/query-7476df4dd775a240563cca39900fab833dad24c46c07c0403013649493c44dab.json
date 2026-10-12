@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT r.cost_usd AS \"cost_usd!: f64\"\n             FROM runs r JOIN tasks t ON t.id = r.task_id\n            WHERE t.team_id IN (SELECT value FROM json_each(?1))\n              AND r.cost_usd IS NOT NULL AND r.cost_usd > 0\n            ORDER BY r.cost_usd ASC",
+  "describe": {
+    "columns": [
+      {
+        "name": "cost_usd!: f64",
+        "ordinal": 0,
+        "type_info": "Float"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      true
+    ]
+  },
+  "hash": "7476df4dd775a240563cca39900fab833dad24c46c07c0403013649493c44dab"
+}

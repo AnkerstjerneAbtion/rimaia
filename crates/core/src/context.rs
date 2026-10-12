@@ -18,17 +18,176 @@
 //! Cloning is cheap by design — the pool and the sender are handles, the clock is
 //! an `Arc` — so a context is passed by clone into a spawned run without anyone
 //! reaching for a lifetime.
+//!
+//! ADR-0019 fixed the struct's shape and said a later field is a later record.
+//! ADR-0029 is that record for [`scope`](ServiceContext::scope), the teams a
+//! request may touch, and ADR-0030 for [`actor`](ServiceContext::actor), the
+//! user it acts for. Neither has a default, for `source`'s reason: whoever
+//! builds a context is the only one who knows the answer, so the compiler makes
+//! them say it.
 
 use std::fmt;
 use std::sync::Arc;
 
-use sqlx::SqlitePool;
+use sqlx::{SqliteConnection, SqlitePool};
 use tokio::sync::broadcast;
 
+use crate::api::caller::Caller;
 use crate::clock::Clock;
 use crate::db::MutationSource;
-use crate::events::{ChangeEvent, CHANGE_BUFFER_CAPACITY};
+use crate::error::{Error, Result};
+use crate::events::{ChangeEvent, TeamId, TeamTail, UserId, CHANGE_BUFFER_CAPACITY};
 use crate::runner::events::{RunTail, TAIL_CHANNEL_CAPACITY};
+
+/// The teams a request may touch (ADR-0029 point 5).
+///
+/// A set rather than one team, because an entity's id determines its team
+/// (ADR-0035 point 2): an MCP token or a signed-in member can reach several
+/// teams, and the edge resolves which ones once, before any service runs.
+/// Never empty, so "may touch nothing" cannot be mistaken for "unfiltered",
+/// and kept sorted and deduplicated, so two scopes naming the same teams
+/// compare equal.
+///
+/// Every service filters by it (task 039): a lookup by id outside it is
+/// answered exactly as a never-issued id is, and a list never returns a row
+/// from outside it.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct TeamScope {
+    teams: Arc<[TeamId]>,
+}
+
+impl TeamScope {
+    /// A scope of exactly one team: solo's, or a request that named one.
+    pub fn one(team_id: impl Into<TeamId>) -> Self {
+        Self {
+            teams: Arc::from([team_id.into()]),
+        }
+    }
+
+    /// A scope of every team in `teams`, or `Invalid` when there are none.
+    pub fn of(teams: impl IntoIterator<Item = TeamId>) -> Result<Self> {
+        let mut teams: Vec<TeamId> = teams.into_iter().collect();
+        teams.sort();
+        teams.dedup();
+        if teams.is_empty() {
+            return Err(Error::invalid(
+                "a request has to be scoped to at least one team",
+            ));
+        }
+        Ok(Self {
+            teams: teams.into(),
+        })
+    }
+
+    pub fn contains(&self, team_id: &str) -> bool {
+        self.teams
+            .binary_search_by(|team| team.as_str().cmp(team_id))
+            .is_ok()
+    }
+
+    /// Every team in scope, sorted.
+    pub fn teams(&self) -> &[TeamId] {
+        &self.teams
+    }
+
+    /// The one team in scope, or `Invalid` when there are several.
+    ///
+    /// For a call that names no entity and acts on one team (ADR-0035 point
+    /// 2): listing a board, registering a repository, a team setting. The
+    /// queue's selection lists each team's board this way and merges them
+    /// (task 052), because a runner's claim reaches every team its owner is
+    /// in. Anything that names an entity takes the entity's
+    /// team instead, because a scope of several teams cannot say which.
+    ///
+    /// The refusal lists the reachable teams by id, in the scope's order. Ids
+    /// rather than names: this reads nothing, every personal team is named
+    /// `Personal`, and the scope is the caller's own teams, so the ids reveal
+    /// nothing it could not already reach.
+    pub fn sole(&self) -> Result<&TeamId> {
+        match self.teams.as_ref() {
+            [team] => Ok(team),
+            teams => Err(Error::invalid(format!(
+                "this needs one team, and the request reaches {}: {}",
+                teams.len(),
+                teams.join(", ")
+            ))),
+        }
+    }
+
+    /// The scope as a JSON array of ids, for a query to read with
+    /// `team_id IN (SELECT value FROM json_each(?))`.
+    ///
+    /// One bind whatever the number of teams, so a scoped query is a fixed
+    /// statement the offline cache can check (seam-contract D5), and the
+    /// filter is in the query rather than a comparison made in Rust after a
+    /// fetch (task 039).
+    pub fn json(&self) -> String {
+        serde_json::to_string(self.teams.as_ref())
+            .expect("a list of strings always serializes to JSON")
+    }
+}
+
+/// A transaction opened through a [`ServiceContext`], carrying the scope its
+/// queries filter by.
+///
+/// What a helper takes when it reaches the store partway through someone
+/// else's transaction: a review verdict moves its card, a run opens under its
+/// task. It takes `&mut ScopedTx` rather than a bare connection, so it cannot
+/// be handed a connection with no scope behind it, and it filters by
+/// [`scope`](Self::scope) like every other service.
+///
+/// It is still a transaction, so it buys no way around task 039's rule:
+/// `no_service_takes_a_pool_without_a_scope` scans it as it scans
+/// `Transaction`, and every function visible outside its module that takes or
+/// returns one has its own entry, with a reason, in that test's
+/// `STORE_HANDLE_EXCEPTIONS`. A private helper needs none.
+///
+/// It is always a real transaction, which a bare `&mut SqliteConnection` is
+/// not: a pooled connection in autocommit satisfies that type just as well,
+/// and `tasks::position::rebalance_column` documents what a renumber outside
+/// one costs.
+///
+/// Derefs to the connection, so a private helper that takes
+/// `&mut SqliteConnection` is handed `&mut tx` exactly as it was handed a
+/// `sqlx::Transaction`.
+pub struct ScopedTx {
+    tx: sqlx::Transaction<'static, sqlx::Sqlite>,
+    scope: TeamScope,
+}
+
+impl ScopedTx {
+    /// The teams this transaction's queries may touch: its context's.
+    pub fn scope(&self) -> &TeamScope {
+        &self.scope
+    }
+
+    pub async fn commit(self) -> Result<()> {
+        self.tx.commit().await?;
+        Ok(())
+    }
+}
+
+impl std::ops::Deref for ScopedTx {
+    type Target = SqliteConnection;
+
+    fn deref(&self) -> &Self::Target {
+        &self.tx
+    }
+}
+
+impl std::ops::DerefMut for ScopedTx {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.tx
+    }
+}
+
+impl fmt::Debug for ScopedTx {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ScopedTx")
+            .field("scope", &self.scope)
+            .finish_non_exhaustive()
+    }
+}
 
 #[derive(Clone)]
 pub struct ServiceContext {
@@ -47,8 +206,10 @@ pub struct ServiceContext {
     /// sharing one bounded broadcast would let a chatty run lag a subscriber
     /// into dropping change events, where a drop actually costs something.
     ///
-    /// Prefer [`publish_tail`](Self::publish_tail).
-    pub tail: broadcast::Sender<RunTail>,
+    /// Each snapshot carries its run's team (task 048), so a stream admits it
+    /// without a lookup. Prefer [`publish_tail`](Self::publish_tail), which
+    /// every tail enters through, a remote runner's included (task 052).
+    pub tail: broadcast::Sender<TeamTail>,
     /// Which door every mutation made through this context came from
     /// (ADR-0019).
     ///
@@ -58,6 +219,21 @@ pub struct ServiceContext {
     /// the MCP server, each of which re-sources its own clone with
     /// [`with_source`](Self::with_source) at construction.
     pub source: MutationSource,
+    /// The teams this context may touch (ADR-0029 point 5).
+    ///
+    /// Resolved once, at the edge that built the context: solo's shell from
+    /// its [`SoloIdentity`](crate::identity::SoloIdentity), and later a
+    /// server's session, an MCP token or a runner's lease. A clone keeps it, so
+    /// `mcp::build` and `rimaia_runner::queue::build` inherit the shell's.
+    pub scope: TeamScope,
+    /// The user every mutation through this context is made for (ADR-0030
+    /// point 8).
+    ///
+    /// A plain user id (seam-contract D10) rather than an enum, because every
+    /// writer through task 053 acts for someone: the solo user, a signed-in
+    /// caller, a runner's owner. It is recorded on every service span as
+    /// `user_id`; task 045's `tasks.created_by` is the first column to store it.
+    pub actor: UserId,
 }
 
 impl ServiceContext {
@@ -72,8 +248,16 @@ impl ServiceContext {
     /// default is wrong somewhere — [`MutationSource::Ui`] is wrong for the
     /// scheduler, [`MutationSource::System`] is wrong for the shell — and a
     /// field that is wrong by omission is worse than one the compiler makes
-    /// the caller name. There is deliberately no `Default` impl.
-    pub fn new(pool: SqlitePool, clock: Arc<dyn Clock>, source: MutationSource) -> Self {
+    /// the caller name. There is deliberately no `Default` impl. `scope` and
+    /// `actor` are parameters for the same reason: a context scoped to nobody
+    /// in particular is exactly the cross-team read ADR-0029 forbids.
+    pub fn new(
+        pool: SqlitePool,
+        clock: Arc<dyn Clock>,
+        source: MutationSource,
+        scope: TeamScope,
+        actor: UserId,
+    ) -> Self {
         // The receivers are dropped immediately; the senders stay alive on their
         // own and `subscribe` mints receivers on demand. Nothing sent before the
         // first `subscribe` is buffered, which is why a test subscribes first.
@@ -85,12 +269,14 @@ impl ServiceContext {
             changes,
             tail,
             source,
+            scope,
+            actor,
         }
     }
 
     /// The same context, attributing its mutations to `source` (ADR-0019).
     ///
-    /// Called once per subsystem at construction — `scheduler::build` and
+    /// Called once per subsystem at construction — `rimaia_runner::queue::build` and
     /// `mcp::build` each do it — so the shell hands one context to both and
     /// never thinks about the field again.
     ///
@@ -104,6 +290,50 @@ impl ServiceContext {
             source,
             ..self.clone()
         }
+    }
+
+    /// The same context, reaching only the teams in `scope`.
+    ///
+    /// Clones for [`with_source`](Self::with_source)'s reason: a narrowed
+    /// context publishes on the *same* senders, so a write made through it
+    /// still reaches every subscriber.
+    pub fn with_scope(&self, scope: TeamScope) -> Self {
+        Self {
+            scope,
+            ..self.clone()
+        }
+    }
+
+    /// The same context, as `caller` (seam-contract D32 point 7): the one
+    /// place a caller becomes a context.
+    ///
+    /// `source` from the caller's door, `scope` from its grants and `actor`
+    /// from its user, on the same senders. A caller with no team is `Invalid`,
+    /// because a scope of nobody is not "unfiltered".
+    pub fn for_caller(&self, caller: &Caller) -> Result<Self> {
+        Ok(Self {
+            source: caller.door.source(),
+            scope: TeamScope::of(caller.teams.iter().map(|grant| grant.team_id.clone()))?,
+            actor: caller.user_id.clone(),
+            ..self.clone()
+        })
+    }
+
+    /// Opens a deferred transaction scoped to this context's teams.
+    pub async fn begin(&self) -> Result<ScopedTx> {
+        Ok(ScopedTx {
+            tx: self.pool.begin().await?,
+            scope: self.scope.clone(),
+        })
+    }
+
+    /// Opens a `BEGIN IMMEDIATE` transaction scoped to this context's teams,
+    /// for a read the write after it depends on (see `tasks::set_run_state`).
+    pub async fn begin_immediate(&self) -> Result<ScopedTx> {
+        Ok(ScopedTx {
+            tx: self.pool.begin_with("BEGIN IMMEDIATE").await?,
+            scope: self.scope.clone(),
+        })
     }
 
     /// A receiver for every event published from here on.
@@ -140,22 +370,28 @@ impl ServiceContext {
     /// A receiver for every live-run snapshot published from here on
     /// (seam-contract D14).
     ///
-    /// The shell calls this once in `setup()` and forwards to a `runs:tail`
-    /// Tauri event. A subscriber that reports `RecvError::Lagged` **discards and
-    /// counts** — it does not recover. There is nothing to recover: a dropped
+    /// Followed by the host's tail relay (`api::tail::TailRelay`) and by every
+    /// open stream (`api::events::Subscription`). A subscriber that reports
+    /// `RecvError::Lagged` **discards and counts** — it does not recover. There is nothing to recover: a dropped
     /// tail is a line of scrollback that is already on disk in the run's JSONL
     /// transcript, which is the record. Do not build replay for this channel.
-    pub fn subscribe_tail(&self) -> broadcast::Receiver<RunTail> {
+    pub fn subscribe_tail(&self) -> broadcast::Receiver<TeamTail> {
         self.tail.subscribe()
     }
 
-    /// Announces what a run is doing right now.
+    /// Announces what a run of `team_id`'s is doing right now.
+    ///
+    /// **The one way a tail enters the live channel** (seam-contract D14, as
+    /// task 048 amends it): the in-process board port passes its lease's team,
+    /// and task 052's runner route will pass the team from its lease. Nothing
+    /// writes to the tail relay directly, because the relay is one follower of
+    /// this channel and every open stream is another.
     ///
     /// Infallible for the same reason [`publish`](Self::publish) is, and with a
     /// weaker obligation besides: nothing here is a fact about stored state, so
     /// a snapshot nobody heard has cost nothing at all.
-    pub fn publish_tail(&self, tail: RunTail) {
-        let _ = self.tail.send(tail);
+    pub fn publish_tail(&self, team_id: TeamId, tail: RunTail) {
+        let _ = self.tail.send(TeamTail { team_id, tail });
     }
 }
 
@@ -167,6 +403,8 @@ impl fmt::Debug for ServiceContext {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("ServiceContext")
             .field("source", &self.source)
+            .field("scope", &self.scope)
+            .field("actor", &self.actor)
             .field("subscribers", &self.changes.receiver_count())
             .field("tail_subscribers", &self.tail.receiver_count())
             .finish_non_exhaustive()
@@ -176,6 +414,8 @@ impl fmt::Debug for ServiceContext {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::events::Change;
+    use crate::identity::ensure_solo;
     use crate::testing::{test_pool, TestClock};
     use chrono::{DateTime, Utc};
     use pretty_assertions::assert_eq;
@@ -185,16 +425,31 @@ mod tests {
         let start: DateTime<Utc> = DateTime::parse_from_rfc3339("2026-08-20T02:00:00Z")
             .expect("test timestamp must be valid RFC 3339")
             .with_timezone(&Utc);
+        let pool = test_pool().await;
+        let clock = TestClock::new(start);
+        let solo = ensure_solo(&pool, &clock)
+            .await
+            .expect("a fresh board gets a solo identity");
         ServiceContext::new(
-            test_pool().await,
-            Arc::new(TestClock::new(start)),
+            pool,
+            Arc::new(clock),
             MutationSource::Ui,
+            TeamScope::one(solo.team_id),
+            solo.user_id,
         )
     }
 
+    /// The team every event in these tests is published for: the solo one.
+    fn team(ctx: &ServiceContext) -> TeamId {
+        ctx.scope
+            .sole()
+            .expect("a solo context has one team")
+            .clone()
+    }
+
     fn task_ids(event: &ChangeEvent) -> Vec<String> {
-        match event {
-            ChangeEvent::Tasks(ids) => ids.to_vec(),
+        match &event.change {
+            Change::Tasks(ids) => ids.to_vec(),
             other => panic!("expected a task change, got {other:?}"),
         }
     }
@@ -204,11 +459,11 @@ mod tests {
         let ctx = context().await;
         let mut changes = ctx.subscribe();
 
-        ctx.publish(ChangeEvent::tasks(["moved".to_string()]));
+        ctx.publish(ChangeEvent::tasks(team(&ctx), ["moved".to_string()]));
 
         assert_eq!(
             changes.recv().await.expect("the sender is still alive"),
-            ChangeEvent::tasks(["moved".to_string()])
+            ChangeEvent::tasks(team(&ctx), ["moved".to_string()])
         );
     }
 
@@ -219,8 +474,8 @@ mod tests {
         // `publish` is the thing that swallows it.
         let ctx = context().await;
 
-        assert!(ctx.changes.send(ChangeEvent::Settings).is_err());
-        ctx.publish(ChangeEvent::Settings);
+        assert!(ctx.changes.send(ChangeEvent::settings(team(&ctx))).is_err());
+        ctx.publish(ChangeEvent::settings(team(&ctx)));
     }
 
     #[tokio::test]
@@ -229,9 +484,9 @@ mod tests {
         let mut board = ctx.subscribe();
         let mut mcp = ctx.subscribe();
 
-        ctx.publish(ChangeEvent::runs(["run".to_string()]));
+        ctx.publish(ChangeEvent::runs(team(&ctx), ["run".to_string()]));
 
-        let published = ChangeEvent::runs(["run".to_string()]);
+        let published = ChangeEvent::runs(team(&ctx), ["run".to_string()]);
         assert_eq!(board.recv().await.expect("board"), published);
         assert_eq!(mcp.recv().await.expect("mcp"), published);
     }
@@ -246,7 +501,7 @@ mod tests {
         let mut behind = ctx.subscribe();
 
         for sequence in 0..=CHANGE_BUFFER_CAPACITY {
-            ctx.publish(ChangeEvent::tasks([sequence.to_string()]));
+            ctx.publish(ChangeEvent::tasks(team(&ctx), [sequence.to_string()]));
         }
 
         let lag = behind
@@ -266,13 +521,13 @@ mod tests {
         let ctx = context().await;
         let mut changes = ctx.subscribe();
 
-        ctx.publish(ChangeEvent::tasks([]));
-        ctx.publish(ChangeEvent::Settings);
+        ctx.publish(ChangeEvent::tasks(team(&ctx), []));
+        ctx.publish(ChangeEvent::settings(team(&ctx)));
 
         // The settings event, not the suppressed one, is what is waiting.
         assert_eq!(
             changes.try_recv().expect("the settings event"),
-            ChangeEvent::Settings
+            ChangeEvent::settings(team(&ctx))
         );
     }
 
@@ -281,11 +536,14 @@ mod tests {
         let ctx = context().await;
         let mut tail = ctx.subscribe_tail();
 
-        ctx.publish_tail(snapshot(1));
+        ctx.publish_tail(team(&ctx), snapshot(1));
 
         assert_eq!(
             tail.recv().await.expect("the sender is still alive"),
-            snapshot(1)
+            TeamTail {
+                team_id: team(&ctx),
+                tail: snapshot(1),
+            }
         );
     }
 
@@ -293,8 +551,14 @@ mod tests {
     async fn publishing_a_tail_with_nobody_watching_is_not_an_error() {
         let ctx = context().await;
 
-        assert!(ctx.tail.send(snapshot(1)).is_err());
-        ctx.publish_tail(snapshot(1));
+        assert!(ctx
+            .tail
+            .send(TeamTail {
+                team_id: team(&ctx),
+                tail: snapshot(1),
+            })
+            .is_err());
+        ctx.publish_tail(team(&ctx), snapshot(1));
     }
 
     #[tokio::test]
@@ -308,7 +572,7 @@ mod tests {
         let mut behind = ctx.subscribe_tail();
 
         for elapsed in 0..=TAIL_CHANNEL_CAPACITY {
-            ctx.publish_tail(snapshot(elapsed as i64));
+            ctx.publish_tail(team(&ctx), snapshot(elapsed as i64));
         }
 
         assert_eq!(
@@ -319,7 +583,7 @@ mod tests {
             RecvError::Lagged(1)
         );
         assert_eq!(
-            behind.recv().await.expect("the sender is still alive"),
+            behind.recv().await.expect("the sender is still alive").tail,
             snapshot(1)
         );
     }
@@ -334,13 +598,13 @@ mod tests {
         let mut changes = ctx.subscribe();
 
         for elapsed in 0..TAIL_CHANNEL_CAPACITY * 4 {
-            ctx.publish_tail(snapshot(elapsed as i64));
+            ctx.publish_tail(team(&ctx), snapshot(elapsed as i64));
         }
-        ctx.publish(ChangeEvent::runs(["run".to_string()]));
+        ctx.publish(ChangeEvent::runs(team(&ctx), ["run".to_string()]));
 
         assert_eq!(
             changes.recv().await.expect("the change event survived"),
-            ChangeEvent::runs(["run".to_string()])
+            ChangeEvent::runs(team(&ctx), ["run".to_string()])
         );
     }
 
@@ -364,11 +628,14 @@ mod tests {
         let mut changes = ctx.subscribe();
 
         ctx.with_source(MutationSource::Mcp)
-            .publish(ChangeEvent::tasks(["written-over-mcp".to_string()]));
+            .publish(ChangeEvent::tasks(
+                team(&ctx),
+                ["written-over-mcp".to_string()],
+            ));
 
         assert_eq!(
             changes.recv().await.expect("the sender is still alive"),
-            ChangeEvent::tasks(["written-over-mcp".to_string()])
+            ChangeEvent::tasks(team(&ctx), ["written-over-mcp".to_string()])
         );
     }
 
@@ -396,11 +663,193 @@ mod tests {
         let mut changes = ctx.subscribe();
 
         ctx.clone()
-            .publish(ChangeEvent::repositories(["repo".to_string()]));
+            .publish(ChangeEvent::repositories(team(&ctx), ["repo".to_string()]));
 
         assert_eq!(
             changes.recv().await.expect("the sender is still alive"),
-            ChangeEvent::repositories(["repo".to_string()])
+            ChangeEvent::repositories(team(&ctx), ["repo".to_string()])
+        );
+    }
+
+    const OTHER_TEAM: &str = "3f2b1c00-0000-4000-8000-0000000000b2";
+
+    #[tokio::test]
+    async fn with_scope_publishes_to_the_original_subscribers() {
+        // `with_source`'s guarantee, for the field 039's doors narrow: a
+        // context scoped down to one team still publishes where the board
+        // listens.
+        let ctx = context().await;
+        let mut changes = ctx.subscribe();
+
+        ctx.with_scope(TeamScope::one(OTHER_TEAM))
+            .publish(ChangeEvent::tasks(
+                OTHER_TEAM.to_string(),
+                ["in-another-team".to_string()],
+            ));
+
+        assert_eq!(
+            changes.recv().await.expect("the sender is still alive"),
+            ChangeEvent::tasks(OTHER_TEAM.to_string(), ["in-another-team".to_string()])
+        );
+    }
+
+    #[tokio::test]
+    async fn with_scope_changes_only_the_scope() {
+        let ctx = context().await;
+        let both = TeamScope::of([team(&ctx), OTHER_TEAM.to_string()]).expect("two teams");
+
+        let narrowed = ctx.with_scope(both.clone());
+
+        assert_eq!(narrowed.scope, both);
+        assert_eq!(
+            ctx.scope,
+            TeamScope::one(team(&ctx)),
+            "the original is untouched"
+        );
+        assert_eq!(narrowed.actor, ctx.actor);
+        assert_eq!(narrowed.source, ctx.source);
+        assert_eq!(narrowed.clock.now(), ctx.clock.now());
+        assert!(narrowed.changes.same_channel(&ctx.changes));
+        assert!(narrowed.tail.same_channel(&ctx.tail));
+    }
+
+    #[test]
+    fn a_scope_names_at_least_one_team() {
+        let error = TeamScope::of([]).expect_err("an empty scope");
+        assert_eq!(error.code(), crate::ErrorCode::Invalid);
+
+        let scope = TeamScope::of([
+            OTHER_TEAM.to_string(),
+            "3f2b1c00-0000-4000-8000-0000000000a1".to_string(),
+            OTHER_TEAM.to_string(),
+        ])
+        .expect("two teams, one named twice");
+        assert_eq!(
+            scope.teams(),
+            [
+                "3f2b1c00-0000-4000-8000-0000000000a1".to_string(),
+                OTHER_TEAM.to_string()
+            ],
+            "sorted and deduplicated"
+        );
+        assert!(scope.contains(OTHER_TEAM));
+        assert!(!scope.contains("3f2b1c00-0000-4000-8000-0000000000c3"));
+    }
+
+    #[test]
+    fn a_scope_of_two_teams_has_no_sole_team() {
+        let one = TeamScope::one(OTHER_TEAM);
+        assert_eq!(one.sole().expect("one team"), OTHER_TEAM);
+
+        let two = TeamScope::of([
+            OTHER_TEAM.to_string(),
+            "3f2b1c00-0000-4000-8000-0000000000a1".to_string(),
+        ])
+        .expect("two teams");
+        assert_eq!(
+            two.sole().expect_err("two teams have no sole one").code(),
+            crate::ErrorCode::Invalid
+        );
+    }
+
+    #[test]
+    fn the_sole_team_refusal_lists_the_reachable_teams_in_order() {
+        let two = TeamScope::of([
+            OTHER_TEAM.to_string(),
+            "3f2b1c00-0000-4000-8000-0000000000a1".to_string(),
+        ])
+        .expect("two teams");
+
+        assert_eq!(
+            two.sole().expect_err("two teams").to_string(),
+            format!(
+                "this needs one team, and the request reaches 2: \
+                 3f2b1c00-0000-4000-8000-0000000000a1, {OTHER_TEAM}"
+            )
+        );
+    }
+
+    #[test]
+    fn a_scope_binds_as_a_json_array_of_its_teams() {
+        let two = TeamScope::of([
+            OTHER_TEAM.to_string(),
+            "3f2b1c00-0000-4000-8000-0000000000a1".to_string(),
+        ])
+        .expect("two teams");
+
+        assert_eq!(
+            two.json(),
+            format!(r#"["3f2b1c00-0000-4000-8000-0000000000a1","{OTHER_TEAM}"]"#)
+        );
+    }
+
+    fn caller(user_id: &str, teams: &[&str], door: crate::api::Door) -> Caller {
+        Caller {
+            user_id: user_id.to_string(),
+            teams: teams
+                .iter()
+                .map(|team| crate::api::TeamGrant {
+                    team_id: team.to_string(),
+                    role: crate::identity::Role::Member,
+                })
+                .collect(),
+            door,
+        }
+    }
+
+    #[tokio::test]
+    async fn for_caller_sets_source_scope_and_actor() {
+        let ctx = context().await;
+        let team_a = "3f2b1c00-0000-4000-8000-0000000000a1";
+        let as_runner = caller(
+            "a-runner-owner",
+            &[OTHER_TEAM, team_a],
+            crate::api::Door::Runner {
+                runner_id: "runner".to_string(),
+            },
+        );
+
+        let scoped = ctx.for_caller(&as_runner).expect("a caller in two teams");
+
+        assert_eq!(scoped.source, MutationSource::System);
+        assert_eq!(
+            scoped.scope,
+            TeamScope::of([team_a.to_string(), OTHER_TEAM.to_string()]).expect("two teams")
+        );
+        assert_eq!(scoped.actor, "a-runner-owner");
+        assert!(
+            scoped.changes.same_channel(&ctx.changes),
+            "a caller's context publishes where the board listens"
+        );
+        assert!(scoped.tail.same_channel(&ctx.tail));
+        assert_eq!(ctx.source, MutationSource::Ui, "the original is untouched");
+    }
+
+    #[tokio::test]
+    async fn a_caller_with_no_team_is_refused() {
+        let ctx = context().await;
+
+        let refused = ctx
+            .for_caller(&caller("a-user", &[], crate::api::Door::Shell))
+            .expect_err("a scope of nobody");
+
+        assert_eq!(refused.code(), crate::ErrorCode::Invalid);
+    }
+
+    #[tokio::test]
+    async fn the_debug_output_names_the_scope_and_the_actor() {
+        // Hand-written, so a field it does not list is silently missing.
+        let ctx = context().await;
+
+        let printed = format!("{ctx:?}");
+
+        assert!(
+            printed.contains(&format!("scope: {:?}", ctx.scope)),
+            "{printed}"
+        );
+        assert!(
+            printed.contains(&format!("actor: {:?}", ctx.actor)),
+            "{printed}"
         );
     }
 }

@@ -1,0 +1,80 @@
+{
+  "db_name": "SQLite",
+  "query": "\n        SELECT repository_id, path, worktree_root, max_concurrency,\n               unattended_consent AS \"unattended_consent: bool\",\n               on_archive AS \"on_archive: OnArchive\", on_archive_script,\n               credential_login, credential_label,\n               credential_added_at AS \"credential_added_at: DateTime<Utc>\",\n               created_at AS \"created_at: DateTime<Utc>\"\n          FROM checkouts WHERE repository_id = ?1\n        ",
+  "describe": {
+    "columns": [
+      {
+        "name": "repository_id",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "path",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "worktree_root",
+        "ordinal": 2,
+        "type_info": "Text"
+      },
+      {
+        "name": "max_concurrency",
+        "ordinal": 3,
+        "type_info": "Integer"
+      },
+      {
+        "name": "unattended_consent: bool",
+        "ordinal": 4,
+        "type_info": "Bool"
+      },
+      {
+        "name": "on_archive: OnArchive",
+        "ordinal": 5,
+        "type_info": "Text"
+      },
+      {
+        "name": "on_archive_script",
+        "ordinal": 6,
+        "type_info": "Text"
+      },
+      {
+        "name": "credential_login",
+        "ordinal": 7,
+        "type_info": "Text"
+      },
+      {
+        "name": "credential_label",
+        "ordinal": 8,
+        "type_info": "Text"
+      },
+      {
+        "name": "credential_added_at: DateTime<Utc>",
+        "ordinal": 9,
+        "type_info": "Text"
+      },
+      {
+        "name": "created_at: DateTime<Utc>",
+        "ordinal": 10,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      true,
+      true,
+      true,
+      true,
+      false
+    ]
+  },
+  "hash": "667f0e42246e41c2cafdf2fc08d2798483c210c9af1da2f50dc05a069fed0a69"
+}

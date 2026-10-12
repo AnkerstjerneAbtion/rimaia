@@ -140,6 +140,15 @@ pub enum ProviderId {
 }
 
 impl ProviderId {
+    /// Every provider this build knows, the test-only one included when it is
+    /// compiled (task 067's model rule asks each of them whether it claims a
+    /// model).
+    pub const ALL: &'static [ProviderId] = &[
+        Self::ClaudeCode,
+        #[cfg(feature = "testing")]
+        Self::Ledger,
+    ];
+
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::ClaudeCode => "claude-code",
@@ -147,11 +156,114 @@ impl ProviderId {
             Self::Ledger => "ledger",
         }
     }
+
+    /// The provider `value` names in [`as_str`](Self::as_str)'s spelling, or
+    /// `Invalid` for a name this build does not know. In a build without the
+    /// `testing` feature `ledger` is unknown, as the variant is. A pairing
+    /// runner names its provider this way (task 047), and so does a claim
+    /// (task 052).
+    pub fn parse(value: &str) -> Result<Self> {
+        Self::ALL
+            .iter()
+            .copied()
+            .find(|id| id.as_str() == value)
+            .ok_or_else(|| {
+                Error::invalid(format!(
+                    "`{value}` is not an agent provider this server knows."
+                ))
+            })
+    }
+
+    /// The provider's own [`AgentProvider::default_catalogue`], for a caller
+    /// that holds the identity and not the provider: the board, which over
+    /// HTTP learns a runner's provider as this value (seam-contract D31 point
+    /// 10).
+    pub fn default_catalogue(self) -> Catalogue {
+        match self {
+            Self::ClaudeCode => ClaudeProvider.default_catalogue(),
+            #[cfg(feature = "testing")]
+            Self::Ledger => crate::testing::provider::Ledger.default_catalogue(),
+        }
+    }
+
+    /// The provider's own [`AgentProvider::display_name`], for the same
+    /// caller: a refusal names the provider in the words a person reads.
+    pub fn display_name(self) -> &'static str {
+        match self {
+            Self::ClaudeCode => ClaudeProvider.display_name(),
+            #[cfg(feature = "testing")]
+            Self::Ledger => crate::testing::provider::Ledger.display_name(),
+        }
+    }
 }
 
 impl std::fmt::Display for ProviderId {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(self.as_str())
+    }
+}
+
+/// On the wire as [`as_str`](ProviderId::as_str)'s spelling: a runner names
+/// its provider in the bodies of `preview`, `claim` and `run_context` (task
+/// 052, seam-contract D31 point 10).
+impl serde::Serialize for ProviderId {
+    fn serialize<S: serde::Serializer>(
+        &self,
+        serializer: S,
+    ) -> std::result::Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for ProviderId {
+    fn deserialize<D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> std::result::Result<Self, D::Error> {
+        let value = String::deserialize(deserializer)?;
+        Self::parse(&value).map_err(serde::de::Error::custom)
+    }
+}
+
+impl ProviderProfile {
+    /// The profile of the provider `id` names: what the board resolves a
+    /// claim's catalogue from when it holds the identity a runner sent rather
+    /// than a provider (task 052).
+    pub fn for_id(id: ProviderId) -> Self {
+        match id {
+            ProviderId::ClaudeCode => Self::of(&ClaudeProvider),
+            #[cfg(feature = "testing")]
+            ProviderId::Ledger => Self::of(&crate::testing::provider::Ledger),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The board's view of a provider (seam-contract D32 point 2)
+// ---------------------------------------------------------------------------
+
+/// What the board may know about a provider: data, copied out of one, and
+/// nothing it could spawn or compose a prompt with.
+///
+/// The board needs a provider's catalogue (Settings, every strategy write) and
+/// its cost and name (the run-cost summary), and it must never hold the thing
+/// that turns an intent into a child process (ADR-0031 point 1). There is no
+/// `fanout_noun`: composition and its vocabulary stay on the runner.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ProviderProfile {
+    pub id: ProviderId,
+    pub display_name: &'static str,
+    pub inherit_cost_usd: Option<f64>,
+    pub default_catalogue: Catalogue,
+}
+
+impl ProviderProfile {
+    pub fn of(provider: &dyn AgentProvider) -> Self {
+        Self {
+            id: provider.id(),
+            display_name: provider.display_name(),
+            inherit_cost_usd: provider.inherit_cost_usd(),
+            default_catalogue: provider.default_catalogue(),
+        }
     }
 }
 
@@ -227,9 +339,9 @@ pub trait AgentProvider: std::fmt::Debug + Send + Sync + 'static {
     /// than fails; see `doctor::checks::agent_cli`.
     fn minimum_version(&self) -> Version;
 
-    /// How this provider spells one of Rimaia's MCP tools, so the prompt's
-    /// instruction and the planner's allow-list read the same string. Claude:
-    /// `mcp__rimaia__set_task_strategy`.
+    /// How this provider spells one of Rimaia's MCP tools at `server`, so the
+    /// prompt's instruction and the planner's allow-list read the same string.
+    /// Claude, at the run-scoped handle: `mcp__rimaia-run__set_task_strategy`.
     fn tool_handle(&self, server: &str, tool: &str) -> String;
 
     /// The word this provider's agent will recognise for fanning out work
@@ -479,6 +591,38 @@ pub fn negotiate(
     caps: &Capabilities,
     intent: &RunIntent<'_>,
 ) -> std::result::Result<RunPlan, Refusal> {
+    // Two wiring mistakes, refused first and for every intent rather than
+    // trusted to each call site (seam-contract D30 points 1 and 3). A handle
+    // named for the operator's server would be denied by the operator-surface
+    // denial every run carries, or worse, pre-approve that surface; and a grant
+    // with nothing to grant it through must never become a silent
+    // `--allowedTools` for it.
+    if let Some(handle) = &intent.rimaia_handle {
+        if handle.server == crate::mcp::MCP_SERVER_NAME {
+            return Err(Refusal {
+                provider: caps.id,
+                axis: RefusalAxis::HandleInjection,
+                message: format!(
+                    "a run's handle must be served as `{}`, never under the operator's `{}`, \
+                     which every run is denied.",
+                    crate::mcp::RUN_MCP_SERVER_NAME,
+                    crate::mcp::MCP_SERVER_NAME,
+                ),
+            });
+        }
+    }
+    if !intent.required_tools.is_empty() && intent.rimaia_handle.is_none() {
+        return Err(Refusal {
+            provider: caps.id,
+            axis: RefusalAxis::HandleInjection,
+            message: format!(
+                "this run names tools it must call ({}) but carries no handle to call them \
+                 through.",
+                intent.required_tools.join(", "),
+            ),
+        });
+    }
+
     let autonomy = intent.permission_mode.autonomy();
     let mut plan = RunPlan {
         prompt_style: if intent.session.is_continuation() && caps.session.can_continue() {
@@ -697,6 +841,32 @@ mod tests {
     use pretty_assertions::assert_eq;
     use std::path::Path;
 
+    #[test]
+    fn a_provider_id_parses_from_its_own_spelling_and_nothing_else() {
+        for id in ProviderId::ALL {
+            assert_eq!(ProviderId::parse(id.as_str()).expect("its own name"), *id);
+        }
+        for unknown in ["", "claude", "Claude-Code", "codex"] {
+            let refused = ProviderId::parse(unknown).expect_err(unknown);
+            assert_eq!(refused.code(), crate::ErrorCode::Invalid, "{unknown:?}");
+        }
+    }
+
+    #[test]
+    fn a_profile_carries_the_providers_board_facts_and_nothing_else() {
+        let profile = ProviderProfile::of(&ClaudeProvider);
+
+        assert_eq!(
+            profile,
+            ProviderProfile {
+                id: ProviderId::ClaudeCode,
+                display_name: ClaudeProvider.display_name(),
+                inherit_cost_usd: ClaudeProvider.inherit_cost_usd(),
+                default_catalogue: ClaudeProvider.default_catalogue(),
+            }
+        );
+    }
+
     const EVERY_OPERATION: &[ForbiddenKind] = &[
         ForbiddenKind::RemoteHistoryRewrite,
         ForbiddenKind::RemoteBranchDeletion,
@@ -890,7 +1060,7 @@ mod tests {
         let planner = RunIntent {
             rimaia_handle: Some(RimaiaHandle {
                 url: "http://127.0.0.1:4517/mcp/run/token".to_string(),
-                server: "rimaia",
+                server: crate::mcp::RUN_MCP_SERVER_NAME,
             }),
             ..intent(PermissionMode::AcceptEdits)
         };

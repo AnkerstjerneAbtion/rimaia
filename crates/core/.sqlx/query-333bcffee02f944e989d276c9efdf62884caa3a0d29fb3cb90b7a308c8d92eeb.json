@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT team_id FROM repositories\n         WHERE id = ?1 AND team_id IN (SELECT value FROM json_each(?2))",
+  "describe": {
+    "columns": [
+      {
+        "name": "team_id",
+        "ordinal": 0,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "333bcffee02f944e989d276c9efdf62884caa3a0d29fb3cb90b7a308c8d92eeb"
+}

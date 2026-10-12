@@ -1,12 +1,17 @@
+import { useHasMachine } from "../lib/capabilities";
+import { useTeams } from "../lib/teams";
 import { ConcurrencySection } from "./settings/ConcurrencySection";
 import { DeveloperSection } from "./settings/DeveloperSection";
 import { DoctorSection } from "./settings/DoctorSection";
 import { InstructionsSection } from "./settings/InstructionsSection";
 import { McpSection } from "./settings/McpSection";
 import { RepositoriesSection } from "./settings/RepositoriesSection";
+import { ReviewSection } from "./settings/ReviewSection";
+import { RunnersSection } from "./settings/RunnersSection";
 import { SchedulesSection } from "./settings/SchedulesSection";
 import { StorageSection } from "./settings/StorageSection";
 import { StrategySection } from "./settings/StrategySection";
+import { TeamSection } from "./settings/TeamSection";
 
 /**
  * One entry in the index at the top of the page and one anchor in the flow
@@ -64,6 +69,7 @@ const BANDS: readonly SettingsBand[] = [
     blurb: "The prompt every task inherits, and what it is spawned with.",
     sections: [
       { id: "settings-instructions", name: "Instructions" },
+      { id: "settings-review", name: "Review" },
       { id: "settings-strategy", name: "Strategy" },
     ],
   },
@@ -78,7 +84,48 @@ const BANDS: readonly SettingsBand[] = [
   },
 ];
 
+/**
+ * The team on screen and its people (task 051): first wherever there is a
+ * team switcher, because who may change the settings below is decided here.
+ * Solo has one team and no people to manage, so it has no such group.
+ */
+const TEAM_BAND: SettingsBand = {
+  id: "settings-team",
+  title: "Team",
+  blurb: "Who is in the team on screen, and who may change it.",
+  sections: [{ id: "settings-team-members", name: "Members" }],
+};
+
+/**
+ * The same groups with a browser's sections (task 050 Scope 6). Concurrency,
+ * Schedules, MCP, Storage, Doctor and Developer read and change this machine,
+ * and a browser has none: one Runners section stands in for all six, saying
+ * where each runner's settings are changed. Repositories, Instructions, Review
+ * and Strategy are the team's, so they stay, each with its own gates.
+ */
+const BROWSER_BANDS: readonly SettingsBand[] = [
+  {
+    id: "settings-machines",
+    title: "Machines",
+    blurb: "The machines that run your tasks, and where to change their settings.",
+    sections: [{ id: "settings-runners", name: "Runners" }],
+  },
+  {
+    id: "settings-work",
+    title: "What runs",
+    blurb: "The repositories your team queues work for.",
+    sections: [{ id: "settings-repositories", name: "Repositories" }],
+  },
+  BANDS[2],
+];
+
 export function SettingsView() {
+  // Doctor, concurrency, schedules, MCP and storage: this machine's, so they
+  // exist only where there is one (task 050 Scope 6).
+  const hasMachine = useHasMachine();
+  const hasTeams = useTeams() !== null;
+  const bands = [...(hasTeams ? [TEAM_BAND] : []), ...(hasMachine ? BANDS : BROWSER_BANDS)];
+  if (!hasMachine) return <BrowserSettingsView bands={bands} hasTeams={hasTeams} />;
   return (
     <div className="view settings-view">
       <header className="view-header">
@@ -92,7 +139,7 @@ export function SettingsView() {
 
       {/* Sticky, so it is still reachable from the bottom of Storage. */}
       <nav className="settings-index" aria-label="Settings sections">
-        {BANDS.map((band) => (
+        {bands.map((band) => (
           <div key={band.id} className="settings-index-group">
             <a className="settings-index-label" href={`#${band.id}`}>
               {band.title}
@@ -111,6 +158,14 @@ export function SettingsView() {
       {/* Each section owns its own error state and <ErrorBanner> instead of
           bubbling up to one shared banner here, so tasks 003 and 006 can add
           sections without touching this composer. */}
+      {hasTeams && (
+        <SettingsBandView band={TEAM_BAND}>
+          <div className="settings-slot" id="settings-team-members">
+            <TeamSection />
+          </div>
+        </SettingsBandView>
+      )}
+
       <SettingsBandView band={BANDS[0]}>
         {/* First on the page: a blocking check is the most urgent thing here,
             because it is the one that silently costs a whole night. */}
@@ -145,6 +200,13 @@ export function SettingsView() {
         <div className="settings-slot" id="settings-instructions">
           <InstructionsSection />
         </div>
+        {/* Review sits with the instructions it extends: what a review run is
+            told is one more thing a run receives besides its own plan, and its
+            loop multiplies what every run costs, so it is read next to the
+            strategy that sets what each run is spawned with. */}
+        <div className="settings-slot" id="settings-review">
+          <ReviewSection />
+        </div>
         {/* Between the instructions and the MCP server on purpose: the strategy
             decides what a run is spawned with, which reads as the next thing
             after what it is told — and a planned task's proposal arrives back
@@ -165,6 +227,73 @@ export function SettingsView() {
             entry that is there for developers only is a promise the shipped app
             cannot keep. */}
         {import.meta.env.DEV && <DeveloperSection />}
+      </SettingsBandView>
+    </div>
+  );
+}
+
+function BrowserSettingsView({
+  bands,
+  hasTeams,
+}: {
+  readonly bands: readonly SettingsBand[];
+  readonly hasTeams: boolean;
+}) {
+  const [machines, work, brief] = hasTeams ? bands.slice(1) : bands;
+  return (
+    <div className="view settings-view">
+      <header className="view-header">
+        <h2>Settings</h2>
+        <p>
+          The team and its people, its repositories, the instructions and execution strategy
+          every run receives, and the runners that carry them out.
+        </p>
+      </header>
+
+      <nav className="settings-index" aria-label="Settings sections">
+        {bands.map((band) => (
+          <div key={band.id} className="settings-index-group">
+            <a className="settings-index-label" href={`#${band.id}`}>
+              {band.title}
+            </a>
+            <ul>
+              {band.sections.map((section) => (
+                <li key={section.id}>
+                  <a href={`#${section.id}`}>{section.name}</a>
+                </li>
+              ))}
+            </ul>
+          </div>
+        ))}
+      </nav>
+
+      {hasTeams && (
+        <SettingsBandView band={TEAM_BAND}>
+          <div className="settings-slot" id="settings-team-members">
+            <TeamSection />
+          </div>
+        </SettingsBandView>
+      )}
+      <SettingsBandView band={machines}>
+        <div className="settings-slot" id="settings-runners">
+          <RunnersSection />
+        </div>
+      </SettingsBandView>
+      <SettingsBandView band={work}>
+        <div className="settings-slot" id="settings-repositories">
+          <RepositoriesSection />
+        </div>
+      </SettingsBandView>
+      <SettingsBandView band={brief}>
+        <div className="settings-slot" id="settings-instructions">
+          <InstructionsSection />
+        </div>
+        <div className="settings-slot" id="settings-review">
+          <ReviewSection />
+        </div>
+        <div className="settings-slot" id="settings-strategy">
+          <StrategySection />
+        </div>
       </SettingsBandView>
     </div>
   );

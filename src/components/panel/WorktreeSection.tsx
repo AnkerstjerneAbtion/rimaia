@@ -1,12 +1,38 @@
 import { useEffect, useState } from "react";
 
+import { useClientCapabilities } from "../../lib/capabilities";
 import { getWorktreeStatus, revealTaskWorktree, toRimaiaError } from "../../lib/commands";
 import { subscribeToTasksChanged } from "../../lib/events";
-import type { RimaiaError, WorktreeStatus } from "../../types";
+import { worktreeIsHere } from "../../lib/worktreeHere";
+import type { RimaiaError, WorktreeRunner, WorktreeStatus } from "../../types";
 import { ErrorBanner } from "../ErrorBanner";
+import { WorktreeElsewhere } from "../WorktreeElsewhere";
 
 interface WorktreeSectionProps {
   readonly taskId: string;
+  /** The machine that holds the task's worktree (`get_task`'s
+   *  `worktreeRunner`). Left out, it is `null`, which only solo reads as "here". */
+  readonly worktreeRunner?: WorktreeRunner | null;
+}
+
+/**
+ * The panel's worktree section: the live status when the worktree is on this
+ * machine, and its machine's name when it is not (task 050 Scope 5). The rule
+ * is {@link worktreeIsHere}'s, shared with the review view. When it is false,
+ * `get_worktree_status` and `reveal_task_worktree` are never sent: both read
+ * this machine's disk.
+ */
+export function WorktreeSection({ taskId, worktreeRunner = null }: WorktreeSectionProps) {
+  const capabilities = useClientCapabilities();
+  if (!worktreeIsHere({ worktreeRunner }, capabilities)) {
+    return (
+      <section className="task-detail-section worktree-section">
+        <h4>Worktree</h4>
+        <WorktreeElsewhere runner={worktreeRunner} />
+      </section>
+    );
+  }
+  return <LocalWorktreeSection taskId={taskId} />;
 }
 
 /**
@@ -22,7 +48,7 @@ interface WorktreeSectionProps {
  * cards on the board have never run, and "no worktree yet" is what that
  * looks like, not a failure (task 007's own instruction).
  */
-export function WorktreeSection({ taskId }: WorktreeSectionProps) {
+function LocalWorktreeSection({ taskId }: { readonly taskId: string }) {
   const [status, setStatus] = useState<WorktreeStatus | null>(null);
   const [statusError, setStatusError] = useState<RimaiaError | null>(null);
   const [revealing, setRevealing] = useState(false);

@@ -27,14 +27,14 @@ describe("RunStateBadge", () => {
   });
 
   it("reads interrupted off the last run for a failed task (D9), not a bare failed badge", () => {
-    render(<RunStateBadge runState="failed" lastRun={{ exitClass: "interrupted" }} />);
+    render(<RunStateBadge runState="failed" lastRun={{ kind: "implementation", exitClass: "interrupted" }} />);
     const badge = screen.getByText("Interrupted");
     expect(badge.className).toContain("run-badge-interrupted");
     expect(badge.className).not.toContain("run-badge-failed");
   });
 
   it("shows failed when the last run stopped for any other reason", () => {
-    render(<RunStateBadge runState="failed" lastRun={{ exitClass: "fatal" }} />);
+    render(<RunStateBadge runState="failed" lastRun={{ kind: "implementation", exitClass: "fatal" }} />);
     expect(screen.getByText("Failed").className).toContain("run-badge-failed");
   });
 
@@ -47,7 +47,7 @@ describe("RunStateBadge", () => {
     render(
       <RunStateBadge
         runState="waiting_retry"
-        lastRun={{ exitClass: "usage_limit", resumeAfter: at.toISOString() }}
+        lastRun={{ kind: "implementation", exitClass: "usage_limit", resumeAfter: at.toISOString() }}
       />,
     );
 
@@ -59,9 +59,48 @@ describe("RunStateBadge", () => {
   it("still renders a waiting badge when nothing is scheduled", () => {
     // A hand-edited row, or a starter this codebase has not met. The badge is
     // still true; there is simply no time to add to it.
-    render(<RunStateBadge runState="waiting_retry" lastRun={{ exitClass: null }} />);
+    render(<RunStateBadge runState="waiting_retry" lastRun={{ kind: "implementation", exitClass: null }} />);
 
     const badge = screen.getByText("Waiting for retry");
     expect(badge.textContent).not.toContain("resumes");
+  });
+
+  it("names a running review and a running fix by what they are, keeping the running state", () => {
+    const { unmount } = render(
+      <RunStateBadge runState="running" lastRun={{ kind: "review", exitClass: null }} />,
+    );
+    const reviewing = screen.getByText("Reviewing");
+    expect(reviewing.className).toContain("run-badge-running");
+    expect(screen.queryByText("Running")).toBeNull();
+    unmount();
+
+    render(<RunStateBadge runState="running" lastRun={{ kind: "fix", exitClass: null }} />);
+    expect(screen.getByText("Fixing").className).toContain("run-badge-running");
+  });
+
+  it("says a review is the one waiting for its retry, with the time", () => {
+    const at = new Date(Date.now() + 4 * 60 * 60 * 1000);
+    render(
+      <RunStateBadge
+        runState="waiting_retry"
+        lastRun={{ kind: "review", exitClass: "usage_limit", resumeAfter: at.toISOString() }}
+      />,
+    );
+
+    const badge = screen.getByText(/Review waiting for retry/);
+    expect(badge.className).toContain("run-badge-waiting_retry");
+    expect(badge.textContent).toContain("resumes");
+  });
+
+  it("reads a crashed review as interrupted, off the run (D9)", () => {
+    render(
+      <RunStateBadge runState="failed" lastRun={{ kind: "review", exitClass: "interrupted" }} />,
+    );
+    expect(screen.getByText("Review interrupted").className).toContain("run-badge-interrupted");
+  });
+
+  it("does not let a kind rename queued or blocked, which have no row yet", () => {
+    render(<RunStateBadge runState="queued" lastRun={{ kind: "review", exitClass: null }} />);
+    expect(screen.getByText("Queued")).toBeTruthy();
   });
 });

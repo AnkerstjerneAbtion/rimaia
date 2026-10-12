@@ -41,8 +41,15 @@ pub struct TempRepo {
 impl TempRepo {
     /// A repository on [`DEFAULT_BRANCH`] with exactly one commit.
     pub fn init() -> Self {
+        Self::init_with_prefix("rimaia-repo-")
+    }
+
+    /// [`init`](Self::init), in a directory whose name starts with `prefix`:
+    /// for a test that has to find the path in an answer, such as task 039's
+    /// sentinel scan.
+    pub fn init_with_prefix(prefix: &str) -> Self {
         let root = tempfile::Builder::new()
-            .prefix("rimaia-repo-")
+            .prefix(prefix)
             .tempdir()
             .expect("temp dir for the test repository");
 
@@ -168,7 +175,7 @@ impl TempRepo {
 
 /// Runs git in `dir` and returns trimmed stdout, panicking with both streams on
 /// failure — a git error in a test is a broken test, not a handled condition.
-fn git<S: AsRef<OsStr>>(dir: &Path, args: &[S]) -> String {
+pub(crate) fn git<S: AsRef<OsStr>>(dir: &Path, args: &[S]) -> String {
     let output = Command::new("git")
         .current_dir(dir)
         .args(args)

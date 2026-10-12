@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "DELETE FROM pairing_codes WHERE code_hash = ?1\n           RETURNING user_id, expires_at AS \"expires_at: DateTime<Utc>\"",
+  "describe": {
+    "columns": [
+      {
+        "name": "user_id",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "expires_at: DateTime<Utc>",
+        "ordinal": 1,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false
+    ]
+  },
+  "hash": "5714b17b95f2f41e991cf8b1c7ffa2680b8428f51fd38cf483120a4f36cc6630"
+}

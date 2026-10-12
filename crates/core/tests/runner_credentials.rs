@@ -34,8 +34,10 @@ use rimaia_core::credentials::inject::AMBIENT_FORGE_VARS;
 use rimaia_core::credentials::{CredentialAccess, CredentialStore, Secret};
 use rimaia_core::db::{BoardColumn, RunStatus};
 use rimaia_core::repo::{self, NewRepository};
+use rimaia_core::runner::events::transcript_path;
 use rimaia_core::runner::{run_task, CancelSignal, RunRequest, RunTrigger, RunnerConfig};
 use rimaia_core::tasks::{self, NewTask};
+use rimaia_core::testing::board::claim_run;
 use rimaia_core::testing::credentials::MemoryStore;
 use rimaia_core::testing::fixtures::fixture_path;
 use rimaia_core::testing::{TempRepo, TestContext};
@@ -71,6 +73,7 @@ impl Fixture {
 
         let registered = repo::register(
             &harness.context,
+            harness.machine(),
             &paths.worktrees_dir(),
             NewRepository {
                 path: repository.path().to_string_lossy().into_owned(),
@@ -80,7 +83,7 @@ impl Fixture {
         )
         .await
         .expect("register the test repository");
-        repo::set_allow_unattended_runs(&harness.context, &registered.id, true)
+        repo::set_allow_unattended_runs(&harness.context, harness.machine(), &registered.id, true)
             .await
             .expect("ADR-0012's per-repository opt-in");
 
@@ -120,6 +123,7 @@ impl Fixture {
             .expect("store the sentinel");
         repo::set_credential_metadata(
             &self.harness.context,
+            self.harness.machine(),
             &self.repository_id,
             Some("ea"),
             Some("test"),
@@ -137,14 +141,16 @@ impl Fixture {
     }
 
     async fn run(&self, cli: &FakeCli) -> rimaia_core::Result<rimaia_core::db::Run> {
+        let config = self.config(cli);
+        let board = self.harness.board(&self.paths, &config);
+        let claim = claim_run(board.as_ref(), &self.task_id, RunTrigger::Queued, false).await?;
         run_task(
-            &self.harness.context,
+            board.as_ref(),
+            self.harness.machine(),
             &self.paths,
-            &self.config(cli),
+            &config,
+            claim,
             RunRequest {
-                task_id: self.task_id.clone(),
-                trigger: RunTrigger::Queued,
-                resume: None,
                 cancel: CancelSignal::new(),
                 in_flight: None,
             },
@@ -352,7 +358,8 @@ async fn the_sentinel_appears_in_no_row_no_transcript_and_no_log() {
         Some(SENTINEL)
     );
 
-    let transcript = std::fs::read_to_string(&run.log_path).expect("the transcript exists");
+    let log_path = transcript_path(&fixture.paths, &run.task_id, &run.id);
+    let transcript = std::fs::read_to_string(&log_path).expect("the transcript exists");
     assert!(
         transcript.contains("[redacted]"),
         "the echoed token should have been replaced, not merely absent: {transcript}",
@@ -360,7 +367,7 @@ async fn the_sentinel_appears_in_no_row_no_transcript_and_no_log() {
     assert!(!transcript.contains(SENTINEL), "the transcript leaked it");
 
     for entry in std::fs::read_dir(
-        Path::new(&run.log_path)
+        log_path
             .parent()
             .expect("a transcript lives in a directory"),
     )

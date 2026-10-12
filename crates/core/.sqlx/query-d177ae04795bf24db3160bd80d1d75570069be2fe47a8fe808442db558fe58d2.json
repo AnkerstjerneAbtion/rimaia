@@ -1,0 +1,44 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT id, name, default_branch, allow_unattended_runs,\n            created_at AS \"created_at: DateTime<Utc>\"\n           FROM repositories WHERE id = ?1",
+  "describe": {
+    "columns": [
+      {
+        "name": "id",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "name",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "default_branch",
+        "ordinal": 2,
+        "type_info": "Text"
+      },
+      {
+        "name": "allow_unattended_runs",
+        "ordinal": 3,
+        "type_info": "Bool"
+      },
+      {
+        "name": "created_at: DateTime<Utc>",
+        "ordinal": 4,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "d177ae04795bf24db3160bd80d1d75570069be2fe47a8fe808442db558fe58d2"
+}

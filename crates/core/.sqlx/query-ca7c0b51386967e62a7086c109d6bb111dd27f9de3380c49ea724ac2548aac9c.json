@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT r.token_id, r.team_id\n           FROM api_token_teams r JOIN api_tokens t ON t.id = r.token_id\n          WHERE t.user_id = ?1\n          ORDER BY r.team_id",
+  "describe": {
+    "columns": [
+      {
+        "name": "token_id",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "team_id",
+        "ordinal": 1,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false
+    ]
+  },
+  "hash": "ca7c0b51386967e62a7086c109d6bb111dd27f9de3380c49ea724ac2548aac9c"
+}

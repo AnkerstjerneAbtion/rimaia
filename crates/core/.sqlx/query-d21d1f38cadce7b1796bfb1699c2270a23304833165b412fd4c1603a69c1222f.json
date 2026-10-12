@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT EXISTS (SELECT 1 FROM runner_leases WHERE task_id = ?1 AND generation = ?2)\n               AS \"live!: bool\"",
+  "describe": {
+    "columns": [
+      {
+        "name": "live!: bool",
+        "ordinal": 0,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "d21d1f38cadce7b1796bfb1699c2270a23304833165b412fd4c1603a69c1222f"
+}

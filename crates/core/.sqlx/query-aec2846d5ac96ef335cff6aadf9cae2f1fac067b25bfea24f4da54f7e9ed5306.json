@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT id FROM tasks\n          WHERE id IN (SELECT value FROM json_each(?1))\n            AND team_id IN (SELECT value FROM json_each(?2))\n          ORDER BY id",
+  "describe": {
+    "columns": [
+      {
+        "name": "id",
+        "ordinal": 0,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "aec2846d5ac96ef335cff6aadf9cae2f1fac067b25bfea24f4da54f7e9ed5306"
+}

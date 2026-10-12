@@ -198,10 +198,10 @@ export function AnalyticsView() {
             <Figure
               label="Failure rate"
               value={failureRate(report)}
-              note={`${report.outcomes.failed} failed of ${finished(report)} finished`}
+              note={`${report.outcomes.failed} failed of ${finished(report)} finished implementation runs`}
             />
             <Figure
-              label="Median run"
+              label="Median implementation run"
               value={
                 report.medianDurationSeconds === null
                   ? "—"
@@ -238,6 +238,45 @@ export function AnalyticsView() {
                   </li>
                 ))}
               </ul>
+            </section>
+          )}
+
+          {/* ADR-0017's loop, kept apart from the implementation figures above:
+              a review that `succeeded` says the reviewer ran, not that the work
+              was good (seam-contract D29 point 7), so its outcomes are not
+              folded into the failure rate. Spent above is every kind, and the
+              split is core's — nothing here adds the two halves back up. */}
+          {hasReviewLoopRuns(report) && (
+            <section className="panel analytics-review-loops">
+              <h3>Review loops</h3>
+              <p className="muted">
+                What review and fix runs cost, apart from the implementation runs. The failure
+                rate and median above count implementation runs only: a review that succeeded
+                says the reviewer ran, not that the work was good.
+              </p>
+              <section className="analytics-figures">
+                <Figure label="Review and fix spend" value={money(report.reviewLoopSpendUsd)} />
+                <Figure
+                  label="Implementation spend"
+                  value={money(report.implementationSpendUsd)}
+                />
+              </section>
+              <table className="analytics-table">
+                <thead>
+                  <tr>
+                    <th scope="col">Review and fix runs</th>
+                    <th scope="col">Runs</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {OUTCOME_ROWS.map(([key, label]) => (
+                    <tr key={key}>
+                      <td>{label}</td>
+                      <td className="tabular-nums">{report.reviewLoopOutcomes[key]}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
             </section>
           )}
 
@@ -337,6 +376,27 @@ export function AnalyticsView() {
         </>
       )}
     </div>
+  );
+}
+
+const OUTCOME_ROWS: ReadonlyArray<readonly [keyof Analytics["outcomes"], string]> = [
+  ["succeeded", "Succeeded"],
+  ["failed", "Failed"],
+  ["cancelled", "Cancelled"],
+  ["interrupted", "Interrupted"],
+  ["running", "In flight"],
+];
+
+/** Whether the range holds a review or fix row at all: the group is absent
+ *  otherwise, so an installation that never turned the loop on sees the page
+ *  it always saw. */
+function hasReviewLoopRuns(report: Analytics): boolean {
+  const outcomes = report.reviewLoopOutcomes;
+  return (
+    report.reviewLoopSpendUsd > 0 ||
+    outcomes.succeeded + outcomes.failed + outcomes.cancelled + outcomes.interrupted +
+      outcomes.running >
+      0
   );
 }
 

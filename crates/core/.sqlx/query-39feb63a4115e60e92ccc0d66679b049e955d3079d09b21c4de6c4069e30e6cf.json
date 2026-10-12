@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "DELETE FROM repositories WHERE team_id = ?1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": []
+  },
+  "hash": "39feb63a4115e60e92ccc0d66679b049e955d3079d09b21c4de6c4069e30e6cf"
+}

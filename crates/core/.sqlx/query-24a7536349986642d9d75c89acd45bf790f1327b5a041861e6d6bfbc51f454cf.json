@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT branch FROM tasks WHERE id = ?1 AND team_id IN (SELECT value FROM json_each(?2))",
+  "describe": {
+    "columns": [
+      {
+        "name": "branch",
+        "ordinal": 0,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      true
+    ]
+  },
+  "hash": "24a7536349986642d9d75c89acd45bf790f1327b5a041861e6d6bfbc51f454cf"
+}

@@ -1,0 +1,48 @@
+[package]
+name = "rimaia-runner"
+version = "0.1.0"
+edition = "2021"
+description = "The Rimaia runner: runner.db, what one machine keeps for itself, and its HTTP board adapter (ADR-0027, ADR-0028)."
+
+# A library only; the headless binary is task 058's. Like `rimaia-core`, nothing
+# here may require a display server, WebKit or GTK: the headless runner links
+# this crate on a machine that has none, so no desktop-framework crate belongs in
+# either table below.
+# Compiles the loop's test-only accessor (`QueueHandle::completed_passes`), the
+# way `rimaia-core`'s feature of the same name compiles its `testing` module:
+# off for every consumer, on for this crate's own tests through the
+# self-referencing dev-dependency below.
+[features]
+testing = []
+
+[dependencies]
+rimaia-core = { path = "../core" }
+chrono = { workspace = true }
+# The HTTP board adapter (task 052): a runner's token goes to a server over
+# TLS, so this crate turns on reqwest's TLS here and never on the workspace
+# line, where `rimaia-core`'s probe stays plain HTTP to 127.0.0.1
+# (seam-contract D34). Bodies are built with `serde_json::to_vec`, so neither
+# `json` nor `form` is enabled, and a query string is built on the `Url`.
+reqwest = { workspace = true, features = ["rustls"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sqlx = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+
+# `rimaia-core` again, with `testing` on, for the clock and the pre-038 board
+# builder. `pretty_assertions` is pinned directly because `crates/core` pins it
+# directly; the same requirement resolves to the version Cargo.lock already
+# holds, so no crate enters the lock (seam-contract D6, D34).
+[dev-dependencies]
+rimaia-core = { path = "../core", features = ["testing"] }
+rimaia-runner = { path = ".", features = ["testing"] }
+# The real server router, which the board port's contract suite runs against
+# over HTTP (seam-contract D31 point 13). The direction ADR-0027 point 6
+# allows: the server never depends on this crate.
+rimaia-server = { path = "../server" }
+# Stub routers the adapter's own tests answer with, on the workspace line the
+# server already uses, so no crate enters the lock (seam-contract D34).
+axum = { workspace = true }
+pretty_assertions = "1"
+tempfile = { workspace = true }

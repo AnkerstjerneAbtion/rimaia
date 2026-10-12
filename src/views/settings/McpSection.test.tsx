@@ -272,8 +272,8 @@ describe("McpSection", () => {
     expect(await screen.findByText(/connection refused/)).toBeInTheDocument();
   });
 
-  it("re-reads the status when settings:changed fires", async () => {
-    // `mcp_port` is a settings key, so any other writer announces itself there
+  it("re-reads the status when runner:changed fires", async () => {
+    // `mcp_port` is a runner key, so any other writer announces itself there
     // — which is the third of the three ways this panel stays fresh without an
     // event of its own.
     let reads = 0;
@@ -288,7 +288,7 @@ describe("McpSection", () => {
     });
     let announce: (() => void) | null = null;
     mockListen.mockImplementation(async (event, handler) => {
-      if (event === "settings:changed") {
+      if (event === "runner:changed") {
         announce = () => (handler as (payload: unknown) => void)({ payload: null });
       }
       return vi.fn();

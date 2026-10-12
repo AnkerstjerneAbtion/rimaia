@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT login FROM users WHERE id = ?1",
+  "describe": {
+    "columns": [
+      {
+        "name": "login",
+        "ordinal": 0,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "43c2c7813d5b9c8b4a52ec78799f946928ff983e1e1a9ad37c5c3b9ec01cab82"
+}

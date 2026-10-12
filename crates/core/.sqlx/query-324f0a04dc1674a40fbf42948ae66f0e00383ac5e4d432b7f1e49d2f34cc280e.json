@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE team_memberships SET role = ?1 WHERE team_id = ?2 AND user_id = ?3",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": []
+  },
+  "hash": "324f0a04dc1674a40fbf42948ae66f0e00383ac5e4d432b7f1e49d2f34cc280e"
+}

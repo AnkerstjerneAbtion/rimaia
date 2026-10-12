@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT review_instructions, review_config FROM tasks\n          WHERE id = ?1 AND team_id IN (SELECT value FROM json_each(?2))",
+  "describe": {
+    "columns": [
+      {
+        "name": "review_instructions",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "review_config",
+        "ordinal": 1,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      true,
+      true
+    ]
+  },
+  "hash": "e618760f00904e43c7e86b6b107b7dd4ba7083f8b65e61a211dd521ea06f1f80"
+}

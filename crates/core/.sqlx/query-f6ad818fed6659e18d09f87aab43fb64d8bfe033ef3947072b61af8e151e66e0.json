@@ -1,0 +1,38 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT t.team_id, l.generation AS \"generation?\", r.user_id AS \"holder_owner?\",\n                  EXISTS (SELECT 1 FROM team_memberships m\n                           WHERE m.team_id = t.team_id AND m.user_id = ?3\n                             AND m.role = 'owner') AS \"team_owner!: bool\"\n             FROM tasks t\n             LEFT JOIN runner_leases l ON l.task_id = t.id\n             LEFT JOIN runners r ON r.id = l.runner_id\n            WHERE t.id = ?1 AND t.team_id IN (SELECT value FROM json_each(?2))",
+  "describe": {
+    "columns": [
+      {
+        "name": "team_id",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "generation?",
+        "ordinal": 1,
+        "type_info": "Integer"
+      },
+      {
+        "name": "holder_owner?",
+        "ordinal": 2,
+        "type_info": "Text"
+      },
+      {
+        "name": "team_owner!: bool",
+        "ordinal": 3,
+        "type_info": "Null"
+      }
+    ],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      null
+    ]
+  },
+  "hash": "f6ad818fed6659e18d09f87aab43fb64d8bfe033ef3947072b61af8e151e66e0"
+}

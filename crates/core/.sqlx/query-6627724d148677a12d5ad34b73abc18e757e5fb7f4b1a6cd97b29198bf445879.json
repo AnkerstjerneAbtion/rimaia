@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE tasks SET lease_generation = lease_generation + 1 WHERE id = ?1\n         RETURNING lease_generation",
+  "describe": {
+    "columns": [
+      {
+        "name": "lease_generation",
+        "ordinal": 0,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "6627724d148677a12d5ad34b73abc18e757e5fb7f4b1a6cd97b29198bf445879"
+}

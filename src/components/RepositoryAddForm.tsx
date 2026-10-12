@@ -1,9 +1,7 @@
 import { useState } from "react";
 
-import { open } from "@tauri-apps/plugin-dialog";
-
 import { ErrorBanner } from "./ErrorBanner";
-import { registerRepository, toRimaiaError } from "../lib/commands";
+import { chooseFolder, registerRepository, toRimaiaError } from "../lib/commands";
 import type { RimaiaError } from "../types";
 
 /**
@@ -23,14 +21,14 @@ export function RepositoryAddForm({ onRegistered }: { onRegistered: () => void }
 
   async function handleAdd() {
     setError(null);
-    let selected: string | string[] | null;
+    let selected: string | null;
     try {
-      selected = await open({ directory: true, multiple: false, title: "Choose a repository" });
+      selected = await chooseFolder("Choose a repository");
     } catch (thrown) {
       setError(toRimaiaError(thrown));
       return;
     }
-    if (!selected || Array.isArray(selected)) return; // cancelled
+    if (!selected) return; // cancelled
 
     setAdding(true);
     try {

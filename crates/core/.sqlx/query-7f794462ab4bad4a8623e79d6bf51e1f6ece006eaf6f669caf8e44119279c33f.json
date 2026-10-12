@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT OR IGNORE INTO acceptances\n            (id, user_id, team_id, task_id, content, revision, accepted_at)\n         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 7
+    },
+    "nullable": []
+  },
+  "hash": "7f794462ab4bad4a8623e79d6bf51e1f6ece006eaf6f669caf8e44119279c33f"
+}

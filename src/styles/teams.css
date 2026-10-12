@@ -1,0 +1,246 @@
+/* Teams, invitations and roles (task 051): the switcher's New team form, the
+   Team section of Settings, the accept page, deleting an account and copying
+   a task. ADR-0024 throughout, and no new token: everything here is
+   `styles.css`'s scale, and every state is said in words. */
+
+/* New team, from the switcher -------------------------------------------- */
+
+.team-switcher-new-button {
+  align-self: flex-start;
+  margin-top: var(--space-1);
+  padding: var(--space-1) var(--space-2);
+  font-size: var(--font-size-xs);
+}
+
+.team-switcher-menu .team-switcher-menu-new {
+  margin-top: var(--space-1);
+  padding-top: var(--space-1);
+  box-shadow: inset 0 1px 0 var(--border-1);
+}
+
+.team-switcher-new {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  margin-top: var(--space-2);
+  padding: var(--space-3);
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
+}
+
+.team-switcher-new-field {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  font-size: var(--font-size-xs);
+  color: var(--text-2);
+}
+
+.team-switcher-new-field input {
+  min-width: 0;
+  color: var(--text-1);
+}
+
+.team-switcher-new-error {
+  margin: 0;
+  font-size: var(--font-size-xs);
+  color: var(--danger-text);
+  overflow-wrap: anywhere;
+}
+
+.team-switcher-new-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
+
+/* Settings -> Team -------------------------------------------------------- */
+
+.team-section h3 {
+  margin: 0 0 var(--space-1);
+  font-size: var(--font-size-lg);
+  line-height: var(--line-height-tight);
+  overflow-wrap: anywhere;
+}
+
+.team-section > .muted {
+  margin: 0 0 var(--space-3);
+}
+
+/* Settings' panel eyebrow (`.settings-view .panel > h4`), for the headings
+   nested a level deeper too, so Members, Invite people and Delete team read
+   as one structure. */
+.team-section .team-subheading {
+  margin: var(--space-5) 0 var(--space-2);
+  padding-top: var(--space-3);
+  box-shadow: inset 0 1px 0 var(--border-1);
+  font-size: var(--font-size-xs);
+  font-weight: var(--font-weight-semibold);
+  color: var(--text-2);
+}
+
+.team-member .account-row-title {
+  overflow-wrap: anywhere;
+}
+
+.team-member-controls {
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.team-role select {
+  min-width: 7rem;
+}
+
+.team-leave {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: var(--space-3);
+  margin-top: var(--space-2);
+}
+
+.team-leave p {
+  margin: 0;
+  flex: 1;
+  min-width: 14rem;
+}
+
+.team-invitations > .muted {
+  margin: 0 0 var(--space-3);
+}
+
+.team-invite-form {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: var(--space-3);
+}
+
+.team-invite-form .account-field {
+  margin: 0;
+}
+
+.team-pending {
+  margin-top: var(--space-3);
+}
+
+.team-history {
+  margin-top: var(--space-2);
+}
+
+.team-history summary {
+  cursor: pointer;
+  font-size: var(--font-size-sm);
+  color: var(--text-2);
+}
+
+.team-history .account-rows {
+  margin-top: var(--space-2);
+}
+
+.team-delete {
+  margin-top: var(--space-5);
+}
+
+.team-section .team-delete .team-subheading {
+  margin: 0;
+  padding-top: 0;
+  box-shadow: none;
+}
+
+/* The accept page --------------------------------------------------------- */
+
+.invite-card {
+  width: min(32rem, 100%);
+}
+
+.invite-card h1 {
+  overflow-wrap: anywhere;
+}
+
+.invite-details {
+  width: 100%;
+  grid-template-columns: 7rem 1fr;
+  margin: 0;
+}
+
+.invite-details dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+/* A refusal says so in words; the left rule is a second cue, as on sign-in. */
+.invite-refusal {
+  margin: 0;
+  padding: var(--space-3) var(--space-4);
+  border-left: 3px solid var(--status-failed);
+  border-radius: var(--radius-sm);
+  background: var(--danger-bg);
+  color: var(--danger-text);
+}
+
+/* Deleting an account ----------------------------------------------------- */
+
+.account-blocking {
+  margin: 0 0 var(--space-3);
+}
+
+.account-blocking p {
+  margin: 0 0 var(--space-1);
+}
+
+.account-blocking ul {
+  margin: 0;
+  padding-left: var(--space-5);
+  overflow-wrap: anywhere;
+}
+
+/* Copy to team, in the task panel ------------------------------------------ */
+
+.task-copy-form {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.task-copy-form p {
+  margin: 0;
+}
+
+.task-copy-field {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  font-size: var(--font-size-sm);
+  color: var(--text-2);
+}
+
+.task-copy-field select {
+  max-width: 100%;
+  color: var(--text-1);
+}
+
+.task-copy-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
+
+.task-copy > .muted {
+  margin: 0 0 var(--space-2);
+}
+
+/* The sidebar is narrow: the form's two buttons fit one row at its width. */
+.team-switcher-new-actions button {
+  padding: var(--space-1) var(--space-3);
+  font-size: var(--font-size-sm);
+}
+
+.task-copy-heading {
+  margin: 0;
+  font-size: var(--font-size-md);
+  font-weight: var(--font-weight-semibold);
+}

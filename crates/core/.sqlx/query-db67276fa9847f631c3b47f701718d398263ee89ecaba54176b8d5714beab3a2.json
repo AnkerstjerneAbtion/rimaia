@@ -1,0 +1,56 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT id, label, provider, app_version,\n                  eligibility AS \"eligibility: RunnerEligibility\",\n                  paired_at AS \"paired_at: DateTime<Utc>\",\n                  last_seen_at AS \"last_seen_at: DateTime<Utc>\"\n             FROM runners\n            WHERE user_id = ?1 AND unpaired_at IS NULL\n            ORDER BY paired_at, id",
+  "describe": {
+    "columns": [
+      {
+        "name": "id",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "label",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "provider",
+        "ordinal": 2,
+        "type_info": "Text"
+      },
+      {
+        "name": "app_version",
+        "ordinal": 3,
+        "type_info": "Text"
+      },
+      {
+        "name": "eligibility: RunnerEligibility",
+        "ordinal": 4,
+        "type_info": "Text"
+      },
+      {
+        "name": "paired_at: DateTime<Utc>",
+        "ordinal": 5,
+        "type_info": "Text"
+      },
+      {
+        "name": "last_seen_at: DateTime<Utc>",
+        "ordinal": 6,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      true,
+      false,
+      false,
+      true
+    ]
+  },
+  "hash": "db67276fa9847f631c3b47f701718d398263ee89ecaba54176b8d5714beab3a2"
+}

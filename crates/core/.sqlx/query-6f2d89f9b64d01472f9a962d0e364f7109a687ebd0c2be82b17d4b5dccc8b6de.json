@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT label, url FROM task_links WHERE task_id = ?1 ORDER BY position ASC, id ASC",
+  "describe": {
+    "columns": [
+      {
+        "name": "label",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "url",
+        "ordinal": 1,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false
+    ]
+  },
+  "hash": "6f2d89f9b64d01472f9a962d0e364f7109a687ebd0c2be82b17d4b5dccc8b6de"
+}

@@ -1,34 +1,61 @@
 #!/usr/bin/env bash
 #
-# Guards against the one failure mode nothing else in CI catches: a Tauri
-# command registered in only one of the two `generate_handler!` lists in
-# src-tauri/src/lib.rs, or a frontend wrapper in src/lib/commands.ts that
-# calls a command name that isn't registered anywhere.
+# Keeps the one command registry and its three readers in agreement
+# (seam-contract D32 point 5). Every command is a row in
+# crates/core/src/api/registry.rs, `board` or `local`:
 #
-# `generate_handler!` needs a literal list, so lib.rs carries two of them —
-# one under `#[cfg(debug_assertions)]`, one under `#[cfg(not(debug_assertions))]`
-# — and a command meant to ship has to be added to both by hand. Forgetting
-# the second one compiles, passes clippy, passes every Rust and Vitest test,
-# and works in `npm run tauri dev` (always a debug build); it only 404s in
-# the shipped app. ADR-0015 accepts no end-to-end tests and names this exact
-# gap as the accepted consequence — this script is what stands in for the
-# E2E test that would otherwise catch it.
+#   - a board row is answered through `api::dispatch` — in process by the
+#     shell's `commands::board::route`, over HTTP by rimaia-server's routes —
+#     and is never registered with Tauri;
+#   - a local row is answered by the shell's single `generate_handler!` list
+#     in src-tauri/src/lib.rs, and by nothing else;
+#   - src/lib/commands.ts sends every row through exactly one wrapper, which
+#     calls `board<T>` or `local<T>` to match the row's kind.
 #
-# Two assertions:
-#   1. debug list == release list, plus whatever in the debug list is itself
-#      #[cfg(debug_assertions)]-gated at its definition site.
-#   2. every command name literal passed to call<T>() in commands.ts is
-#      registered in at least one of the two lists.
+# None of that is generated, so drift compiles, passes clippy and every test,
+# and only fails at runtime: a local row missing from the list 404s in the app,
+# a board name in the list has two paths, and a wrapper calling the wrong
+# function sends a command over the wrong transport once task 049 gives them
+# different ones. ADR-0015 accepts no end-to-end tests and names this gap; this
+# script stands in for the test that would catch it. It needs no Rust
+# toolchain, and is bash 3.2-safe (macOS's /bin/bash) with no jq.
+#
+# It checks, and fails closed whenever a file no longer has the shape it
+# parses:
+#   1. the registry: every `board("<name>", Read|Write` and `local("<name>")`
+#      row, line comments stripped and matched across the whole file so a row
+#      rustfmt wraps cannot hide. A duplicate name, or no rows, fails.
+#   2. the handler list: exactly one `generate_handler![` block, equal to the
+#      local rows in both directions. `#[cfg(debug_assertions)]` may gate only
+#      a `debug_`-prefixed entry.
+#   3. the definitions: every `#[tauri::command]` in src-tauri/src/commands/
+#      is in the handler list, and one gated on `#[cfg(debug_assertions)]` is
+#      `debug_`-prefixed.
+#   4. the wrappers: every row has exactly one `board<T>("<name>"` or
+#      `local<T>("<name>"` call in commands.ts, of the row's kind; no call
+#      names a command the registry lacks; no `call<` remains.
+#   5. the protocol version: the `PROTOCOL_VERSION` literal in commands.ts
+#      equals `rimaia_core::api::PROTOCOL_VERSION`.
+#   6. the event split (task 048): no wire event name that
+#      crates/core/src/api/events.rs declares appears as a string literal
+#      under src-tauri/src/, so the shell keeps no mapping of its own; and no
+#      file under crates/server/ names `LocalChange` or `LocalEvents`, so no
+#      machine event can reach a server's stream.
 set -euo pipefail
 
 script_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 repo_root=$(cd "$script_dir/.." && pwd)
 
+registry_rs="$repo_root/crates/core/src/api/registry.rs"
+api_mod_rs="$repo_root/crates/core/src/api/mod.rs"
+api_events_rs="$repo_root/crates/core/src/api/events.rs"
+shell_src="$repo_root/src-tauri/src"
+server_dir="$repo_root/crates/server"
 lib_rs="$repo_root/src-tauri/src/lib.rs"
 commands_dir="$repo_root/src-tauri/src/commands"
 commands_ts="$repo_root/src/lib/commands.ts"
 
-for f in "$lib_rs" "$commands_ts"; do
+for f in "$registry_rs" "$api_mod_rs" "$api_events_rs" "$lib_rs" "$commands_ts"; do
   if [[ ! -f "$f" ]]; then
     echo "check-command-wiring: expected file not found: $f" >&2
     exit 1
@@ -39,72 +66,165 @@ if [[ ! -d "$commands_dir" ]]; then
   exit 1
 fi
 
-# The three awk programs below are written out to real files rather than fed
-# in as `<<'HEREDOC'` blocks on the same line as a `$(...)` capture: bash has
-# a long-standing parser bug where a heredoc nested inside a command
-# substitution miscounts the quotes and parens in its own body (both of
-# which an awk regex is thick with) and never finds the substitution's
-# closing `)`. Heredocs as standalone statements are fine; it's specifically
-# the nesting that breaks.
+# The awk programs are written out to real files rather than fed in as
+# `<<'HEREDOC'` blocks inside a `$(...)` capture: bash has a long-standing
+# parser bug where a heredoc nested inside a command substitution miscounts
+# the quotes and parens in its own body (both of which an awk regex is thick
+# with). Heredocs as standalone statements are fine.
 workdir=$(mktemp -d)
 trap 'rm -rf "$workdir"' EXIT
 
-# --- 1. Read both generate_handler! lists out of lib.rs --------------------
-#
-# Assumed shape: exactly one `#[cfg(debug_assertions)]` line and one
-# `#[cfg(not(debug_assertions))]` line, each directly followed by a
-# `tauri::generate_handler![` call whose body is one `module::path::name,`
-# entry per line up to a closing `]);`. If lib.rs stops looking like that,
-# `handler_lines` comes back empty and the empty-list check below fails
-# closed instead of silently passing.
-cat >"$workdir/handler_lists.awk" <<'AWK'
-/^[ \t]*#\[cfg\(debug_assertions\)\][ \t]*$/        { pending = "debug"; next }
-/^[ \t]*#\[cfg\(not\(debug_assertions\)\)\][ \t]*$/ { pending = "release"; next }
-/generate_handler!\[/ {
-  if (pending == "") next
-  collecting = pending
-  pending = ""
-  next
+fail=0
+complain() {
+  echo "check-command-wiring: $*" >&2
+  fail=1
 }
-collecting != "" {
-  if ($0 ~ /\]\);/) { collecting = ""; next }
-  line = $0
-  gsub(/^[ \t]+/, "", line)
-  gsub(/,[ \t]*$/, "", line)
-  if (line == "") next
-  n = split(line, parts, "::")
-  print collecting ":" parts[n]
-  next
-}
-AWK
-
-handler_lines=$(awk -f "$workdir/handler_lists.awk" "$lib_rs")
-debug_list=$(printf '%s\n' "$handler_lines" | awk -F: '$1 == "debug" { print $2 }')
-release_list=$(printf '%s\n' "$handler_lines" | awk -F: '$1 == "release" { print $2 }')
-
-if [[ -z "$debug_list" ]]; then
-  echo "check-command-wiring: found no entries under #[cfg(debug_assertions)] in $lib_rs — its shape has changed, update the parser in this script" >&2
-  exit 1
-fi
 
 # `contains NEEDLE HAYSTACK` — HAYSTACK is a newline-separated string, tested
 # with a literal, whole-line match. Plain strings rather than bash arrays
-# throughout this script, on purpose: an *explicitly empty* array reference
-# under `set -u` is a hard error on the bash 3.2 that ships as /bin/bash on
-# macOS, and this script has to run there, not just on CI's bash 5.
+# throughout, on purpose: an explicitly empty array under `set -u` is a hard
+# error on bash 3.2.
 contains() {
   local needle="$1" haystack="$2"
   printf '%s\n' "$haystack" | grep -qxF -- "$needle"
 }
 
-# --- 2. Find every command definition gated on #[cfg(debug_assertions)] ----
+count_lines() {
+  printf '%s\n' "$1" | grep -c . || true
+}
+
+# --- 1. The registry ---------------------------------------------------------
 #
-# Assumed shape: the attributes and doc comments belonging to one `pub fn`
-# sit on contiguous lines directly above it, in either order. Among those
-# lines, `#[tauri::command]` marks it as a command; `#[cfg(debug_assertions)]`
-# marks it debug-only. A blank line between the attribute block and the `pub
-# fn` breaks this — none of the current command definitions have one.
-cat >"$workdir/gated_commands.awk" <<'AWK'
+# The whole file as one string, with `//` comments removed (a line comment
+# names the task that flips a local row, and must not be read as a row), then
+# every `board("name", Read|Write` and `local("name")` in order, as
+# `board:name` or `local:name`. The quote is built with sprintf for the
+# heredoc reason above.
+cat >"$workdir/registry_rows.awk" <<'AWK'
+BEGIN { q = sprintf("%c", 34) }
+{
+  line = $0
+  sub("//.*$", "", line)
+  content = content line "\n"
+}
+END {
+  rest = content
+  pattern = "(board|local)\\([ \t\n]*" q "[A-Za-z0-9_]+" q "[ \t\n]*(,[ \t\n]*(Read|Write)|\\))"
+  while (match(rest, pattern)) {
+    row = substr(rest, RSTART, RLENGTH)
+    kind = substr(row, 1, 5)
+    name = row
+    sub("^(board|local)\\([ \t\n]*" q, "", name)
+    sub(q ".*$", "", name)
+    if (kind == "board" && row !~ /(Read|Write)$/) {
+      print "malformed:" name
+    } else if (kind == "local" && row !~ /\)$/) {
+      print "malformed:" name
+    } else {
+      print kind ":" name
+    }
+    rest = substr(rest, RSTART + RLENGTH)
+  }
+}
+AWK
+
+registry_lines=$(awk -f "$workdir/registry_rows.awk" "$registry_rs")
+if [[ -z "$registry_lines" ]]; then
+  echo "check-command-wiring: found no board(...) or local(...) rows in $registry_rs — its shape has changed, update the parser in this script" >&2
+  exit 1
+fi
+malformed=$(printf '%s\n' "$registry_lines" | awk -F: '$1 == "malformed" { print $2 }')
+while IFS= read -r name; do
+  [[ -z "$name" ]] && continue
+  complain "'$name' in $registry_rs is neither board(\"$name\", Read|Write, …) nor local(\"$name\") — the parser cannot read it"
+done <<<"$malformed"
+board_rows=$(printf '%s\n' "$registry_lines" | awk -F: '$1 == "board" { print $2 }')
+local_rows=$(printf '%s\n' "$registry_lines" | awk -F: '$1 == "local" { print $2 }')
+all_rows=$(printf '%s\n%s\n' "$board_rows" "$local_rows" | grep . || true)
+
+duplicates=$(printf '%s\n' "$all_rows" | sort | uniq -d)
+while IFS= read -r name; do
+  [[ -z "$name" ]] && continue
+  complain "'$name' has more than one row in $registry_rs — a command is one row of one kind"
+done <<<"$duplicates"
+
+# --- 2. The handler list -----------------------------------------------------
+#
+# Exactly one `generate_handler![` block, whose body is one
+# `module::path::name,` entry per line, optionally preceded by a
+# `#[cfg(debug_assertions)]` line, up to the `]` that closes it. Each entry
+# prints as `plain:name` or `gated:name`; a line that is neither prints as
+# `unparsed:<line>`, so a changed shape fails rather than passes.
+cat >"$workdir/handler_list.awk" <<'AWK'
+/generate_handler!\[/ { blocks++; collecting = 1; gated = 0; next }
+collecting {
+  line = $0
+  gsub(/^[ \t]+|[ \t]+$/, "", line)
+  if (line == "") next
+  if (line ~ /^\]/) { collecting = 0; next }
+  if (line ~ /^\/\//) next
+  if (line == "#[cfg(debug_assertions)]") { gated = 1; next }
+  if (line ~ /^[A-Za-z_][A-Za-z0-9_]*(::[A-Za-z_][A-Za-z0-9_]*)*,?$/) {
+    sub(/,$/, "", line)
+    n = split(line, parts, "::")
+    print (gated ? "gated:" : "plain:") parts[n]
+    gated = 0
+    next
+  }
+  print "unparsed:" line
+}
+END { print "blocks:" blocks + 0 }
+AWK
+
+handler_lines=$(awk -f "$workdir/handler_list.awk" "$lib_rs")
+block_count=$(printf '%s\n' "$handler_lines" | awk -F: '$1 == "blocks" { print $2 }')
+if [[ "$block_count" != "1" ]]; then
+  echo "check-command-wiring: expected exactly one generate_handler![ block in $lib_rs, found $block_count — the local rows are one list (seam-contract D32 point 4)" >&2
+  exit 1
+fi
+unparsed=$(printf '%s\n' "$handler_lines" | awk '/^unparsed:/ { sub(/^unparsed:/, ""); print }')
+while IFS= read -r line; do
+  [[ -z "$line" ]] && continue
+  complain "cannot read '$line' in the generate_handler! list in $lib_rs — one module::path::name entry per line, optionally under #[cfg(debug_assertions)]"
+done <<<"$unparsed"
+handler_list=$(printf '%s\n' "$handler_lines" | awk -F: '$1 == "plain" || $1 == "gated" { print $2 }')
+gated_entries=$(printf '%s\n' "$handler_lines" | awk -F: '$1 == "gated" { print $2 }')
+if [[ -z "$handler_list" ]]; then
+  echo "check-command-wiring: found no entries in the generate_handler! list in $lib_rs — its shape has changed, update the parser in this script" >&2
+  exit 1
+fi
+
+while IFS= read -r name; do
+  [[ -z "$name" ]] && continue
+  case "$name" in
+    debug_*) ;;
+    *) complain "'$name' is under #[cfg(debug_assertions)] in the generate_handler! list in $lib_rs, but only a debug_-prefixed command may be gated" ;;
+  esac
+done <<<"$gated_entries"
+
+while IFS= read -r name; do
+  [[ -z "$name" ]] && continue
+  if contains "$name" "$board_rows"; then
+    complain "'$name' is a board row in $registry_rs and must not be in the generate_handler! list in $lib_rs — commands::board::route answers it through api::dispatch, and a command has one path"
+  elif ! contains "$name" "$local_rows"; then
+    complain "'$name' is in the generate_handler! list in $lib_rs but has no row in $registry_rs — add local(\"$name\") there"
+  fi
+done <<<"$handler_list"
+
+while IFS= read -r name; do
+  [[ -z "$name" ]] && continue
+  if ! contains "$name" "$handler_list"; then
+    complain "'$name' is a local row in $registry_rs but is missing from the generate_handler! list in $lib_rs — the app would answer it 'command not found'"
+  fi
+done <<<"$local_rows"
+
+# --- 3. The definitions ------------------------------------------------------
+#
+# The attributes and doc comments belonging to one `fn` sit on contiguous
+# lines directly above it. Among them, `#[tauri::command]` marks a command and
+# `#[cfg(debug_assertions)]` marks it debug-only. Each prints as
+# `command:name` or `gated:name`.
+cat >"$workdir/definitions.awk" <<'AWK'
 function reset() { in_cmd = 0; in_cfg = 0 }
 FNR == 1 { reset() }
 {
@@ -113,112 +233,146 @@ FNR == 1 { reset() }
   if (t ~ /^#\[tauri::command/)            { in_cmd = 1; next }
   if (t ~ /^#\[cfg\(debug_assertions\)\]/) { in_cfg = 1; next }
   if (t ~ /^#\[/ || t ~ /^\/\/\// || t ~ /^\/\/!/) next
-  if (t ~ /^pub(\([a-zA-Z_:]+\))?[ \t]+fn[ \t]+[A-Za-z0-9_]+/) {
-    if (in_cmd && in_cfg) {
-      match(t, /fn[ \t]+[A-Za-z0-9_]+/)
-      name = substr(t, RSTART + 3, RLENGTH - 3)
-      gsub(/^[ \t]+/, "", name)
-      print name
-    }
-    reset()
-    next
+  if (in_cmd && t ~ /^pub(\([a-zA-Z_:]+\))?[ \t]+(async[ \t]+)?fn[ \t]+[A-Za-z0-9_]+/) {
+    match(t, /fn[ \t]+[A-Za-z0-9_]+/)
+    name = substr(t, RSTART + 3, RLENGTH - 3)
+    gsub(/^[ \t]+/, "", name)
+    print (in_cfg ? "gated:" : "command:") name
   }
   reset()
 }
 AWK
 
-rs_files=()
+rs_files=""
 while IFS= read -r -d '' f; do
-  rs_files+=("$f")
+  rs_files="$rs_files$f"$'\n'
 done < <(find "$commands_dir" -type f -name '*.rs' -print0)
-
-gated_commands=""
-if [[ ${#rs_files[@]} -gt 0 ]]; then
-  gated_commands=$(awk -f "$workdir/gated_commands.awk" "${rs_files[@]}")
+definition_lines=""
+if [[ -n "$rs_files" ]]; then
+  # One file per line; no command source path contains a newline.
+  definition_lines=$(printf '%s' "$rs_files" | tr '\n' '\0' | xargs -0 awk -f "$workdir/definitions.awk")
+fi
+if [[ -z "$definition_lines" ]]; then
+  echo "check-command-wiring: found no #[tauri::command] definitions under $commands_dir — their shape has changed, update the parser in this script" >&2
+  exit 1
 fi
 
-fail=0
-
-# Convention check: a #[cfg(debug_assertions)]-gated command must carry the
-# `debug_` name prefix. This is deliberately a second, independent read of
-# "is this debug-only" (naming, not gating) so that a debug-only command
-# that forgets the prefix fails here loudly instead of quietly falling out
-# of the diff below and passing as if it needed no release registration.
-while IFS= read -r name; do
-  [[ -z "$name" ]] && continue
-  case "$name" in
-    debug_*) ;;
-    *)
-      echo "check-command-wiring: '$name' is #[cfg(debug_assertions)]-gated at its definition but its name doesn't start with 'debug_' — rename it to that convention (this script relies on the prefix to trust that a debug-only command was left out of the release list on purpose)" >&2
-      fail=1
-      ;;
-  esac
-done <<<"$gated_commands"
-
-# --- 3. release list must equal debug list minus the gated commands --------
-while IFS= read -r name; do
-  [[ -z "$name" ]] && continue
-  if ! contains "$name" "$gated_commands" && ! contains "$name" "$release_list"; then
-    echo "check-command-wiring: '$name' is registered in the #[cfg(debug_assertions)] handler list in $lib_rs, is not itself #[cfg(debug_assertions)]-gated, but is missing from the #[cfg(not(debug_assertions))] handler list — it will 404 in a release build. Add it to the release generate_handler! list." >&2
-    fail=1
+while IFS= read -r entry; do
+  [[ -z "$entry" ]] && continue
+  kind=${entry%%:*}
+  name=${entry#*:}
+  if [[ "$kind" == "gated" ]]; then
+    case "$name" in
+      debug_*) ;;
+      *) complain "'$name' is #[cfg(debug_assertions)]-gated at its definition but its name doesn't start with 'debug_' — rename it to that convention" ;;
+    esac
   fi
-done <<<"$debug_list"
-
-while IFS= read -r name; do
-  [[ -z "$name" ]] && continue
-  if ! contains "$name" "$debug_list"; then
-    echo "check-command-wiring: '$name' is registered in the #[cfg(not(debug_assertions))] handler list in $lib_rs but not in the #[cfg(debug_assertions)] one — every release command must also be listed in the debug list. Add it there." >&2
-    fail=1
+  if ! contains "$name" "$handler_list"; then
+    complain "'$name' is a #[tauri::command] under $commands_dir but is in no generate_handler! list — classify it with a row in $registry_rs, and register a local row in $lib_rs"
   fi
-done <<<"$release_list"
+done <<<"$definition_lines"
 
-# --- 4. every command name literal call<T>() uses must be registered -------
+# --- 4. The wrappers ---------------------------------------------------------
 #
-# Assumed shape: every backend call goes through the private `call<T>(...)`
-# in commands.ts (per that file's own top-of-file comment), and the command
-# name is always the first argument, a plain quoted string literal. The
-# quote character itself is built with sprintf rather than written literally
-# in the awk source, for the same bash heredoc-quote-counting reason as
-# above — this file is written by a plain heredoc, so it would be safe here,
-# but staying consistent avoids re-discovering the bug the next time this
-# gets refactored.
-cat >"$workdir/ts_commands.awk" <<'AWK'
-BEGIN { q = sprintf("%c", 39) }
-# Read the whole file into one string rather than matching line by line: a
-# call broken across lines (the command name on its own line, or trailing
-# args after it) has no line that contains both `call<...>(` and the quoted
-# name, so a per-line match misses it. `[^(]*` (not `[^>]*`) for the generic
-# so a nested generic like `call<Record<string, unknown>>(...)` still finds
-# the literal `>(` that closes it — a class excluding only `>` stops one `>`
-# short whenever the generic itself contains a `>`.
+# The whole file as one string, so a call broken across lines still matches:
+# every `board<...>("name"` and `local<...>("name"` as `board:name` or
+# `local:name`. `[^(]*` for the generic so a nested one such as
+# `board<Record<string, unknown>>(` still finds the `>(` that closes it.
+cat >"$workdir/wrappers.awk" <<'AWK'
+BEGIN { q = sprintf("%c", 39); d = sprintf("%c", 34) }
 { content = content $0 "\n" }
 END {
   line = content
-  while (match(line, "call<[^(]*>\\([ \t\n]*[\"" q "][A-Za-z0-9_]+[\"" q "]")) {
+  while (match(line, "(board|local)<[^(]*>\\([ \t\n]*[" d q "][A-Za-z0-9_]+[" d q "]")) {
     seg = substr(line, RSTART, RLENGTH)
-    sub("^call<[^(]*>\\([ \t\n]*", "", seg)
-    gsub("[\"" q "]", "", seg)
-    print seg
+    kind = substr(seg, 1, 5)
+    sub("^(board|local)<[^(]*>\\([ \t\n]*[" d q "]", "", seg)
+    sub("[" d q "]$", "", seg)
+    print kind ":" seg
     line = substr(line, RSTART + RLENGTH)
   }
 }
 AWK
 
-ts_commands=$(awk -f "$workdir/ts_commands.awk" "$commands_ts")
+if grep -q 'call<' "$commands_ts"; then
+  complain "$commands_ts still has a call< — every wrapper calls board<T> or local<T> (seam-contract D32 point 6)"
+fi
+
+wrapper_lines=$(awk -f "$workdir/wrappers.awk" "$commands_ts")
+if [[ -z "$wrapper_lines" ]]; then
+  echo "check-command-wiring: found no board<T>(...) or local<T>(...) calls in $commands_ts — its shape has changed, update the parser in this script" >&2
+  exit 1
+fi
+wrapped=$(printf '%s\n' "$wrapper_lines" | awk -F: '{ print $2 }')
+
+while IFS= read -r entry; do
+  [[ -z "$entry" ]] && continue
+  kind=${entry%%:*}
+  name=${entry#*:}
+  if contains "$name" "$board_rows"; then
+    [[ "$kind" == "board" ]] || complain "'$name' is a board row in $registry_rs but its wrapper in $commands_ts calls $kind<T> — call board<T>"
+  elif contains "$name" "$local_rows"; then
+    [[ "$kind" == "local" ]] || complain "'$name' is a local row in $registry_rs but its wrapper in $commands_ts calls $kind<T> — call local<T>"
+  else
+    complain "'$name' is sent by $commands_ts but has no row in $registry_rs — the backend would answer it 'command not found'"
+  fi
+done <<<"$wrapper_lines"
+
+twice=$(printf '%s\n' "$wrapped" | sort | uniq -d)
+while IFS= read -r name; do
+  [[ -z "$name" ]] && continue
+  complain "'$name' is sent by more than one wrapper in $commands_ts — each command has exactly one"
+done <<<"$twice"
 
 while IFS= read -r name; do
   [[ -z "$name" ]] && continue
-  if ! contains "$name" "$debug_list" && ! contains "$name" "$release_list"; then
-    echo "check-command-wiring: '$name' is passed to call<T>() in $commands_ts but is not registered in either generate_handler! list in $lib_rs — the frontend will get a command-not-found error at runtime." >&2
-    fail=1
+  if ! contains "$name" "$wrapped"; then
+    complain "'$name' has a row in $registry_rs but no wrapper in $commands_ts — add one that calls board<T> or local<T>"
   fi
-done <<<"$ts_commands"
+done <<<"$all_rows"
+
+# --- 5. The protocol version -------------------------------------------------
+rust_version=$(sed -n 's/^pub const PROTOCOL_VERSION: &str = "\([^"]*\)";$/\1/p' "$api_mod_rs")
+ts_version=$(sed -n 's/^export const PROTOCOL_VERSION = "\([^"]*\)";$/\1/p' "$commands_ts")
+if [[ -z "$rust_version" || $(count_lines "$rust_version") != "1" ]]; then
+  echo "check-command-wiring: expected one 'pub const PROTOCOL_VERSION: &str = \"…\";' line in $api_mod_rs — its shape has changed, update the parser in this script" >&2
+  exit 1
+fi
+if [[ -z "$ts_version" || $(count_lines "$ts_version") != "1" ]]; then
+  echo "check-command-wiring: expected one 'export const PROTOCOL_VERSION = \"…\";' line in $commands_ts — its shape has changed, update the parser in this script" >&2
+  exit 1
+fi
+if [[ "$rust_version" != "$ts_version" ]]; then
+  complain "PROTOCOL_VERSION is \"$ts_version\" in $commands_ts but \"$rust_version\" in $api_mod_rs — they must be equal"
+fi
+
+# --- 6. The event split -----------------------------------------------------
+#
+# Every `pub const NAME: &str = "<event>";` in api/events.rs is a wire event
+# name. A literal `"<event>"` anywhere under src-tauri/src/ is a mapping the
+# shell keeps beside core's, which drifts the day either is renamed.
+wire_names=$(sed -n 's/^pub const [A-Z_]*: &str = "\([a-z-]*:[a-z-]*\)";$/\1/p' "$api_events_rs")
+if [[ -z "$wire_names" ]]; then
+  echo "check-command-wiring: found no 'pub const NAME: &str = \"<scope>:<event>\";' lines in $api_events_rs — its shape has changed, update the parser in this script" >&2
+  exit 1
+fi
+while IFS= read -r event; do
+  [[ -z "$event" ]] && continue
+  found=$(grep -rnF -- "\"$event\"" "$shell_src" || true)
+  if [[ -n "$found" ]]; then
+    complain "the wire event name \"$event\" is a string literal in the shell — emit core's WireEvent instead (task 048):
+$found"
+  fi
+done <<<"$wire_names"
+
+local_names=$(grep -rnE -- '\bLocal(Change|Events)\b' "$server_dir" || true)
+if [[ -n "$local_names" ]]; then
+  complain "crates/server/ names LocalChange or LocalEvents — machine events never reach a server (task 048):
+$local_names"
+fi
 
 if [[ "$fail" -ne 0 ]]; then
   exit 1
 fi
 
-debug_count=$(printf '%s\n' "$debug_list" | grep -c . || true)
-release_count=$(printf '%s\n' "$release_list" | grep -c . || true)
-gated_count=$(printf '%s\n' "$gated_commands" | grep -c . || true)
-echo "check-command-wiring: OK ($debug_count debug, $release_count release, $gated_count debug-only)"
+echo "check-command-wiring: OK ($(count_lines "$board_rows") board, $(count_lines "$local_rows") local, $(count_lines "$gated_entries") debug-only, protocol $rust_version)"

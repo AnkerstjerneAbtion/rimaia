@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT sql AS \"sql!\" FROM sqlite_master\n            WHERE type = 'index' AND name = 'idx_runs_task_attempt'",
+  "describe": {
+    "columns": [
+      {
+        "name": "sql!",
+        "ordinal": 0,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      true
+    ]
+  },
+  "hash": "502787b508ee935c52e5b60ad3ec602d61002699cc8ab0efcedb6c5998cecbcf"
+}

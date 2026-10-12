@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT 1 AS \"member!: i64\" FROM team_memberships WHERE team_id = ?1 AND user_id = ?2",
+  "describe": {
+    "columns": [
+      {
+        "name": "member!: i64",
+        "ordinal": 0,
+        "type_info": "Null"
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "fc38b781a5c511294042773c5117b9f4d0976ece81457f58ab3ca2c7f5e0a238"
+}

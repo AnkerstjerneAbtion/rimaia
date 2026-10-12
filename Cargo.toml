@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/core", "src-tauri"]
+members = ["crates/core", "crates/runner", "crates/server", "src-tauri"]
 
 # Versions live here so the core crate and the Tauri shell can never drift onto
 # two different serde or sqlx. ADR-0015 splits the crates; it does not split the
@@ -8,6 +8,12 @@ members = ["crates/core", "src-tauri"]
 [workspace.dependencies]
 anyhow = "1"
 axum = "0.8"
+# Task 047's cookie jar in `rimaia-server`, feature `cookie` only (seam-contract
+# D34): `CookieJar` sets `HttpOnly`, `Secure` and `SameSite` from typed fields,
+# where a hand-formatted `Set-Cookie` would drop one unnoticed. No signed or
+# private jar, because the session store is the `sessions` table. The 0.12 line
+# builds on the `axum = "0.8"` above, so `cargo tree -d` shows one `axum`.
+axum-extra = { version = "0.12", default-features = false }
 chrono = { version = "0.4", features = ["serde"] }
 # Task 013's two, and both are confined to `schedule::cron` (seam-contract D24).
 #
@@ -87,8 +93,26 @@ keyring = { version = "3", features = [
 # transitively through `reqwest`, so promoting it to a direct dependency costs
 # no new tree — see seam-contract D25 for why an encoder was not hand-rolled.
 base64 = "0.22"
+# Task 047's three, confined to `rimaia-core`'s `identity` module (seam-contract
+# D34). `sha2` hashes every stored secret and is PKCE's S256; it was already in
+# the tree through sqlx's `migrate`. `rand` is the OS-seeded CSPRNG behind every
+# token, session secret, verifier, `state` and pairing code, on the line `rmcp`
+# already pulls in. `subtle` is the constant-time comparison ADR-0030's
+# Consequences require for a secret compared in memory.
+rand = "0.10"
+sha2 = "0.10"
+subtle = "2"
 tempfile = "3"
 thiserror = "2"
 tokio = { version = "1", features = ["full"] }
+# Task 048's `ReceiverStream`, which turns a stream's pump channel into the
+# `Stream` axum's `Sse` takes. `rimaia-server` only, no feature: the type sits
+# outside every gate in 0.1.19, which `rmcp` and `sqlx-core` already resolve
+# (seam-contract D34's amendment `048's ask, answered`).
+tokio-stream = { version = "0.1", default-features = false }
+# Task 046's request tracing in `rimaia-server`, with no feature here: each
+# crate names the features it takes, `trace` in 046 and `cors` and `fs` in 050
+# (seam-contract D34). Already in the lock through `reqwest`.
+tower-http = { version = "0.6", default-features = false }
 tracing = "0.1"
 uuid = { version = "1", features = ["v4", "serde"] }

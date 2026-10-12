@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO pairing_codes (code_hash, user_id, created_at, expires_at)\n         VALUES (?1, ?2, ?3, ?4)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 4
+    },
+    "nullable": []
+  },
+  "hash": "e68e8cf951c4f7d32e7bc62273f79e94fdf95028334241dfcb978a60336b71ea"
+}

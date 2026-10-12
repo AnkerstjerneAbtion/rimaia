@@ -1,5 +1,7 @@
 import { useEffect, useState } from "react";
 
+import { runLabel } from "../../lib/board";
+import { useHasMachine } from "../../lib/capabilities";
 import { listRunsForTask, pruneRunLogs, toRimaiaError } from "../../lib/commands";
 import { subscribeToRunsChanged } from "../../lib/events";
 import { formatBytes } from "../../lib/format";
@@ -25,6 +27,7 @@ interface RunHistorySectionProps {
  * task's history.
  */
 export function RunHistorySection({ taskId }: RunHistorySectionProps) {
+  const hasMachine = useHasMachine();
   const [runs, setRuns] = useState<Run[] | null>(null);
   const [error, setError] = useState<RimaiaError | null>(null);
   const [selectedRunId, setSelectedRunId] = useState<string | null>(null);
@@ -104,7 +107,7 @@ export function RunHistorySection({ taskId }: RunHistorySectionProps) {
             {runs.map((run) => (
               <li key={run.id}>
                 <button type="button" onClick={() => setSelectedRunId(run.id)}>
-                  <span>Attempt {run.attempt}</span>
+                  <span>{runLabel(run.kind, run.attempt)}</span>
                   <span
                     className={
                       run.exitClass
@@ -137,6 +140,8 @@ export function RunHistorySection({ taskId }: RunHistorySectionProps) {
               one control rather than a dialog — the panel is not a modal
               surface (`TaskDetailPanel`'s own doc), and a `window.confirm`
               would be the app's only native one. */}
+          {/* `prune_run_logs` deletes this machine's files (stays local). */}
+          {hasMachine && (
           <div className="run-history-actions">
             {confirmingPrune ? (
               <>
@@ -164,6 +169,7 @@ export function RunHistorySection({ taskId }: RunHistorySectionProps) {
               </span>
             )}
           </div>
+          )}
         </>
       )}
 

@@ -131,3 +131,43 @@ about to use. `--append-system-prompt` (mitigation 4) still carries the orchestr
 now including the task id the run may address and the tool it must answer with. The
 transcript (mitigation 5) is written for the planner too, under its own name — seam-contract
 D17.
+
+---
+
+## Amendment, 2026-10-09 — review and fix phases (ADR-0017, task 021)
+
+The loop adds two shapes. Both take **the posture the claim's trigger gives** — the
+implementation's, `bypassPermissions` for a queued run behind the per-repository opt-in,
+`acceptEdits` for one a person started — and both carry exactly one pre-approved tool.
+
+| Shape | Permission mode | What it may write |
+| --- | --- | --- |
+| **Review phase** | The trigger's, + `--allowedTools mcp__rimaia-run__record_review_findings` | **No file mutation**: `Write`, `Edit` and `NotebookEdit` are denied on top of the implementation blocklist. Bash is allowed. Its one write is its findings |
+| **Fix phase** | The trigger's, + `--allowedTools mcp__rimaia-run__resolve_review_finding` | What an implementation run may, plus resolving its own task's open findings |
+
+`required_tools` is exactly the one tool each prompt tells the run to call (seam-contract
+D30 point 7), and its handle is a grant scoped to that run's own id, revoked when the phase
+ends. The operator surface is denied to both, as it is to every run.
+
+**Why the shell stays allowed for a reviewer.** A review that cannot run the test suite is
+guessing, and the suite is a shell command. Denying `Bash` would buy a reviewer that cannot
+check anything; the review would read the diff and grade it, which is the weakest form of
+review there is.
+
+**What the shell could do instead, and what closes it.** `AnyFileMutation` covers the
+editing tools, not `sed -i`, a redirect or `git commit`. Two checks close the gap, and they
+are why allowing the shell is safe rather than hopeful:
+
+- **Before a review spawns**, a worktree with uncommitted changes to tracked files refuses
+  the phase: the reviewer judges commits, and a review of a dirty tree cannot tell its own
+  edits from the implementation's.
+- **After it exits**, a review that left tracked changes is rewritten to `fatal` with "The
+  review changed the worktree without committing." — the way the posture check rewrites a
+  run whose `init` echoed a mode nobody asked for.
+- **A review that committed** moved `HEAD`, which the board compares across the whole
+  phase, and reads as unreviewed: a reviewer that changed the branch it was asked to judge
+  has become an unreviewed fixer.
+
+Untracked files are ignored by both checks, because a test run leaves them. None of the
+three can lead to a clean verdict, so the failure mode they guard against — a task marked
+"reviewed, clean" that is not (ADR-0017) — needs the reviewer to change nothing at all.

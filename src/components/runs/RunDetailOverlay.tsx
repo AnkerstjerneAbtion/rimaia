@@ -1,15 +1,28 @@
 import { useEffect, useState } from "react";
 import { createPortal } from "react-dom";
 
+import { useReviewHistory } from "../../hooks/useReviewHistory";
+import { runLabel } from "../../lib/board";
+import { useClientCapabilities } from "../../lib/capabilities";
 import {
   getRun,
+  getRunLogPath,
   revealRunLog,
   summarizeRunTranscript,
   toRimaiaError,
 } from "../../lib/commands";
+import {
+  PING_PONG_TEXT,
+  currentLoop,
+  isNewestRun,
+  loopPingPong,
+  reviewLoopText,
+} from "../../lib/review";
 import { EXIT_CLASS_LABELS, formatCostUsd } from "../panel/RunOutcomeSection";
 import type { RimaiaError, RunDetail, TranscriptSummary } from "../../types";
 import { ErrorBanner } from "../ErrorBanner";
+import { OpenFindingsList } from "../findings/OpenFindingsList";
+import { RunReviewSections } from "./RunReviewSections";
 import { TranscriptViewer } from "./TranscriptViewer";
 
 interface RunDetailOverlayProps {
@@ -22,6 +35,9 @@ interface RunDetailOverlayProps {
  * commits, PR link, the exact prompt, then the transcript — "diff and
  * commits before transcript is the whole design ... reviewing means looking
  * at the change; the transcript is for when the diff raises a question."
+ * Since task 033 the diff and commits are what the run's finish recorded, not
+ * the branch as it is now; see {@link RunReviewSections}, which
+ * also renders the pull request section and is shared with the morning review.
  *
  * An overlay rather than a route: this app has "three views with no URLs, no
  * nesting and no deep links to preserve" (`App.tsx`'s own comment), so a run
@@ -43,12 +59,24 @@ interface RunDetailOverlayProps {
  * instead of only the one this component was first written under.
  */
 export function RunDetailOverlay({ runId, onClose }: RunDetailOverlayProps) {
+  // The transcript, its path and the live diff fallback are this machine's:
+  // `summarize_run_transcript`, `read_run_transcript_page` and
+  // `search_run_transcript` (task 056 deletes those gates), `reveal_run_log`,
+  // `get_run_log_path` and `get_diff_summary` (stay local). The fallback reads a
+  // branch as it is now on the machine that holds it and serves only runs
+  // recorded before 033, so it is solo's alone: a connected desktop loses it for
+  // those rows.
+  const { mode } = useClientCapabilities();
+  const hasMachine = mode !== "browser";
   const [detail, setDetail] = useState<RunDetail | null>(null);
   const [summary, setSummary] = useState<TranscriptSummary | null>(null);
   const [error, setError] = useState<RimaiaError | null>(null);
   const [revealing, setRevealing] = useState(false);
   const [revealError, setRevealError] = useState<RimaiaError | null>(null);
   const [copied, setCopied] = useState(false);
+  // The loop's findings and verdict belong to the task, and which task is only
+  // known once the run has loaded.
+  const { history } = useReviewHistory(detail?.taskId ?? null);
 
   useEffect(() => {
     let active = true;
@@ -75,6 +103,7 @@ export function RunDetailOverlay({ runId, onClose }: RunDetailOverlayProps) {
   useEffect(() => {
     let active = true;
     setSummary(null);
+    if (!hasMachine) return;
     summarizeRunTranscript(runId).then(
       (result) => {
         if (active) setSummary(result);
@@ -84,7 +113,7 @@ export function RunDetailOverlay({ runId, onClose }: RunDetailOverlayProps) {
     return () => {
       active = false;
     };
-  }, [runId]);
+  }, [runId, hasMachine]);
 
   async function handleReveal() {
     setRevealing(true);
@@ -98,20 +127,36 @@ export function RunDetailOverlay({ runId, onClose }: RunDetailOverlayProps) {
     }
   }
 
+  // The path is fetched on the action, because a run carries none since task
+  // 066: the transcript is this computer's file, derived from the run's ids.
   async function handleCopyPath() {
     if (!detail) return;
+    let path: string;
     try {
-      await navigator.clipboard.writeText(detail.logPath);
+      path = await getRunLogPath(detail.taskId, detail.id);
+    } catch (thrown) {
+      setRevealError(toRimaiaError(thrown));
+      setCopied(false);
+      return;
+    }
+    try {
+      await navigator.clipboard.writeText(path);
       setCopied(true);
     } catch {
       setCopied(false);
     }
   }
 
+  // The verdict joins the outcome of the task's newest row only: it describes
+  // the loop's current state, which an older row did not leave.
+  const loop = history && isNewestRun(history, runId) ? currentLoop(history) : null;
+  const loopText = reviewLoopText(loop);
+  const loopLine = loop && loopText ? { text: loopText, pingPong: loopPingPong(loop) } : null;
+
   return createPortal(
     <div className="run-detail-overlay" role="dialog" aria-label="Run detail">
       <div className="run-detail-overlay-header">
-        <h3>Run detail{detail ? ` — attempt ${detail.attempt}` : ""}</h3>
+        <h3>Run detail{detail ? ` — ${runLabel(detail.kind, detail.attempt)}` : ""}</h3>
         <button type="button" className="run-detail-close" onClick={onClose} aria-label="Close">
           Esc
         </button>
@@ -167,6 +212,17 @@ export function RunDetailOverlay({ runId, onClose }: RunDetailOverlayProps) {
               </div>
             </div>
             <dl className="detail-list">
+              {loopLine && (
+                <>
+                  <dt>Review loop</dt>
+                  <dd className="run-detail-loop">
+                    <span>{loopLine.text}</span>
+                    {loopLine.pingPong && (
+                      <span className="run-detail-loop-signal">{PING_PONG_TEXT}</span>
+                    )}
+                  </dd>
+                </>
+              )}
               {detail.errorMessage && (
                 <>
                   <dt>Error</dt>
@@ -210,69 +266,29 @@ export function RunDetailOverlay({ runId, onClose }: RunDetailOverlayProps) {
             </dl>
           </section>
 
-          <section className="run-detail-section">
-            <h4>Diff summary</h4>
-            <p>
-              {detail.diff.diff.filesChanged} {detail.diff.diff.filesChanged === 1 ? "file" : "files"}{" "}
-              changed (+{detail.diff.diff.insertions} / -{detail.diff.diff.deletions})
-            </p>
-            {detail.diff.files.length > 0 && (
-              <ul className="run-detail-file-list">
-                {detail.diff.files.map((file) => (
-                  <li key={file.path}>
-                    <code>{file.path}</code>
-                    {file.insertions == null ? (
-                      <span className="muted">binary</span>
-                    ) : (
-                      <span className="run-detail-diffstat">
-                        +{file.insertions} / -{file.deletions}
-                      </span>
-                    )}
-                  </li>
-                ))}
-              </ul>
-            )}
-          </section>
+          <RunReviewSections
+            taskId={detail.taskId}
+            review={detail.review}
+            prUrl={detail.prUrl}
+            liveDiff={mode === "solo" ? "fallback" : "none"}
+            patch="collapsed"
+            afterPullRequest={<OpenFindingsList history={history} runId={runId} />}
+          />
 
-          <section className="run-detail-section">
-            <h4>Commits</h4>
-            {detail.diff.commits.length === 0 ? (
-              <p className="muted">No commits on this branch yet.</p>
-            ) : (
-              <ul className="run-detail-commit-list">
-                {detail.diff.commits.map((commit) => (
-                  <li key={commit.sha}>
-                    {/* One flex item per column, not a text node between two
-                        elements: an anonymous flex item cannot be aligned or
-                        truncated, and the author has to sit against the right
-                        edge however long the subject is. */}
-                    <span>
-                      <code>{commit.shortSha}</code> {commit.subject}
-                    </span>
-                    <span className="run-detail-diffstat">{commit.author}</span>
-                  </li>
-                ))}
-              </ul>
-            )}
-          </section>
-
-          <section className="run-detail-section">
-            <h4>Pull request</h4>
-            {detail.prUrl ? (
-              <a href={detail.prUrl} target="_blank" rel="noreferrer">
-                {detail.prUrl}
-              </a>
-            ) : (
-              <p className="muted">No pull request opened yet.</p>
-            )}
-          </section>
-
-          <section className="run-detail-section">
+          <section className="run-detail-section run-detail-prompt-section">
             <h4>Prompt</h4>
             <pre className="run-detail-prompt">{detail.prompt}</pre>
           </section>
 
-          <section className="run-detail-section">
+          {!hasMachine && (
+            <section className="run-detail-section run-detail-transcript-section">
+              <h4>Transcript</h4>
+              <p className="muted">The transcript is kept on the machine that ran this task.</p>
+            </section>
+          )}
+
+          {hasMachine && (
+          <section className="run-detail-section run-detail-transcript-section">
             <h4>Transcript</h4>
             <div className="run-detail-actions">
               <button
@@ -301,6 +317,7 @@ export function RunDetailOverlay({ runId, onClose }: RunDetailOverlayProps) {
               </p>
             )}
           </section>
+          )}
         </div>
       )}
     </div>,

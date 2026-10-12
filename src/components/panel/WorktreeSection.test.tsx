@@ -5,6 +5,8 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 
 import { WorktreeSection } from "./WorktreeSection";
+import { ClientCapabilitiesProvider } from "../../lib/capabilities";
+import { BROWSER, connected } from "../../test/capabilities";
 import type { WorktreeStatus } from "../../types";
 
 // Mocked at the Tauri seam, not `lib/commands.ts` or `lib/events.ts` — see
@@ -256,5 +258,56 @@ describe("WorktreeSection", () => {
     render(<WorktreeSection taskId="task-1" />);
 
     expect(await screen.findByText("git worktree list failed")).toBeInTheDocument();
+  });
+});
+
+describe("WorktreeSection on a machine that is not the one holding the worktree (task 050)", () => {
+  const STUDIO = { id: "runner-studio", label: "Studio Mac", unpaired: false };
+  const OLD = { id: "runner-old", label: "Old laptop", unpaired: true };
+
+  it("renders exactly the machine's name and sends no local command", () => {
+    render(
+      <ClientCapabilitiesProvider capabilities={BROWSER}>
+        <WorktreeSection taskId="task-1" worktreeRunner={STUDIO} />
+      </ClientCapabilitiesProvider>,
+    );
+
+    expect(screen.getByText("Worktree on Studio Mac")).toBeInTheDocument();
+    expect(mockInvoke).not.toHaveBeenCalled();
+    expect(screen.queryByRole("button")).not.toBeInTheDocument();
+  });
+
+  it("says an unpaired machine is unpaired", () => {
+    render(
+      <ClientCapabilitiesProvider capabilities={BROWSER}>
+        <WorktreeSection taskId="task-1" worktreeRunner={OLD} />
+      </ClientCapabilitiesProvider>,
+    );
+
+    expect(screen.getByText("Worktree on Old laptop (unpaired)")).toBeInTheDocument();
+    expect(mockInvoke).not.toHaveBeenCalled();
+  });
+
+  it("names a machine that is not this desktop's runner, and reads this machine's own", async () => {
+    mockInvoke.mockImplementation(async (command) => {
+      if (command === "get_worktree_status") return worktreeStatus();
+      throw new Error(`unexpected command: ${command}`);
+    });
+    const { rerender } = render(
+      <ClientCapabilitiesProvider capabilities={connected("runner-laptop")}>
+        <WorktreeSection taskId="task-1" worktreeRunner={STUDIO} />
+      </ClientCapabilitiesProvider>,
+    );
+    expect(screen.getByText("Worktree on Studio Mac")).toBeInTheDocument();
+    expect(mockInvoke).not.toHaveBeenCalled();
+
+    rerender(
+      <ClientCapabilitiesProvider capabilities={connected("runner-studio")}>
+        <WorktreeSection taskId="task-1" worktreeRunner={STUDIO} />
+      </ClientCapabilitiesProvider>,
+    );
+
+    expect(await screen.findByText("rimaia/task-1-wire-the-board")).toBeInTheDocument();
+    expect(screen.queryByText("Worktree on Studio Mac")).not.toBeInTheDocument();
   });
 });

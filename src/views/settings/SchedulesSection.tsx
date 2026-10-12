@@ -551,6 +551,12 @@ function explain(skip: string | null): string {
       return "waiting to resume";
     case "needs_attention":
       return "the last run did not succeed";
+    case "not_eligible":
+      return "assigned to someone else, or outside the pool this runner takes";
+    case "consent_missing":
+      return "waiting for you to accept a change";
+    case "forbidden_by_team":
+      return "the team does not allow unattended runs in this repository";
     default:
       return "skipped";
   }

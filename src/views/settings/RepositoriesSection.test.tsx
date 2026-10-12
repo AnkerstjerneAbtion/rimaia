@@ -3,10 +3,16 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { open } from "@tauri-apps/plugin-dialog";
 
 import { RepositoriesSection } from "./RepositoriesSection";
-import type { Repository, StrategyCatalogueView, StrategyDefaults } from "../../types";
+import type {
+  CheckoutView,
+  Repository,
+  ReviewConfig,
+  ReviewLevel,
+  StrategyCatalogueView,
+  StrategyDefaults,
+} from "../../types";
 
 // `commands.ts` and `events.ts` both bottom out in `@tauri-apps/api/core`'s
 // `invoke` - mocking here, rather than the wrappers, exercises the real
@@ -24,34 +30,36 @@ vi.mock("@tauri-apps/api/event", () => ({
   listen: vi.fn(),
 }));
 
-// `@tauri-apps/plugin-dialog` is a separate node_modules package that
-// Vitest's dep graph does not route through the `@tauri-apps/api/core` mock
-// above (its own `invoke` import resolves outside the transformed module
-// graph) - it has no `toRimaiaError` logic of its own to exercise, so it's
-// mocked directly at its own boundary instead.
-vi.mock("@tauri-apps/plugin-dialog", () => ({
-  open: vi.fn(),
-}));
-
 const mockInvoke = vi.mocked(invoke);
 const mockListen = vi.mocked(listen);
-const mockOpen = vi.mocked(open);
 
 function repository(overrides: Partial<Repository> = {}): Repository {
   return {
     id: "repo-1",
     name: "rimaia",
-    path: "/Users/dev/code/rimaia",
     defaultBranch: "main",
-    worktreeRoot: "/Users/dev/.local/share/rimaia/worktrees/rimaia",
-    allowUnattendedRuns: false,
-    maxConcurrency: 1,
     createdAt: "2026-08-20T12:00:00+00:00",
+    ...overrides,
+  };
+}
+
+/** This computer's checkout of {@link repository} (task 066): the path, the
+ *  consent, the cap and the archive policy the board's row no longer has. */
+function checkout(overrides: Partial<CheckoutView> = {}): CheckoutView {
+  return {
+    repositoryId: "repo-1",
+    path: "/Users/dev/code/rimaia",
+    worktreeRoot: "/Users/dev/worktrees/rimaia",
+    maxConcurrency: 1,
+    unattendedConsent: false,
     onArchive: "none",
     onArchiveScript: null,
     ...overrides,
   };
 }
+
+/** What `list_checkouts` answers; a test that writes a checkout replaces it. */
+let checkouts: CheckoutView[] = [];
 
 const CATALOGUE_JSON = `{
   "models": [{ "id": "opus", "label": "Opus" }, { "id": "sonnet", "label": "Sonnet" }],
@@ -78,6 +86,16 @@ function catalogueView(): StrategyCatalogueView {
   };
 }
 
+function inheritingEverything(): ReviewLevel {
+  const inherited: ReviewConfig = {
+    enabled: "off",
+    max_review_loops: 2,
+    blocking_severity: "medium",
+    fix_session: "fresh",
+  };
+  return { config: {}, inherited, effective: inherited };
+}
+
 /**
  * Installs an `invoke` implementation that already answers the two reads every
  * row makes for its default strategy (task 020), and delegates everything else
@@ -89,10 +107,15 @@ function catalogueView(): StrategyCatalogueView {
  */
 function mockBackend(handler: (command: string, args?: unknown) => unknown) {
   mockInvoke.mockImplementation(async (command, args) => {
+    // This computer's checkouts (task 066), which every row joins to.
+    if (command === "list_checkouts") return checkouts;
     if (command === "get_strategy_catalogue") return catalogueView();
     if (command === "get_strategy_defaults") {
       return { mode: "default" } satisfies StrategyDefaults;
     }
+    // Task 037's per-row review loop level, for the same reason: every row
+    // reads it and none of the tests below are about it.
+    if (command === "get_review_level") return inheritingEverything();
     // Task 022's per-row credential read, answered here for the same reason
     // the two above are: every row makes it, and no test in this file is
     // about it.
@@ -111,8 +134,8 @@ function mockBackend(handler: (command: string, args?: unknown) => unknown) {
 }
 
 beforeEach(() => {
+  checkouts = [checkout()];
   mockInvoke.mockReset();
-  mockOpen.mockReset();
   mockListen.mockReset();
   // The default every test but the live-refresh one below wants: a
   // subscription that resolves (so the component's success branch runs) and
@@ -142,9 +165,9 @@ describe("RepositoriesSection", () => {
   });
 
   it("shows the specific backend message for one invalid path, not a generic failure", async () => {
-    mockOpen.mockResolvedValue("/tmp/not-a-repo");
     mockBackend((command) => {
       if (command === "list_repositories") return [];
+      if (command === "choose_folder") return "/tmp/not-a-repo";
       if (command === "register_repository") {
         throw { code: "invalid", message: "/tmp/not-a-repo is not a git repository" };
       }
@@ -161,9 +184,9 @@ describe("RepositoriesSection", () => {
   });
 
   it("shows a different specific backend message for a repository with no commits", async () => {
-    mockOpen.mockResolvedValue("/tmp/empty-repo");
     mockBackend((command) => {
       if (command === "list_repositories") return [];
+      if (command === "choose_folder") return "/tmp/empty-repo";
       if (command === "register_repository") {
         throw { code: "invalid", message: "/tmp/empty-repo has no commits yet" };
       }
@@ -179,8 +202,66 @@ describe("RepositoriesSection", () => {
     expect(banner).toHaveTextContent("/tmp/empty-repo has no commits yet");
   });
 
+  it("registers the folder the picker chose", async () => {
+    mockBackend((command, args) => {
+      if (command === "list_repositories") return [];
+      if (command === "choose_folder") {
+        expect(args).toEqual({ title: "Choose a repository" });
+        return "/code/chosen";
+      }
+      if (command === "register_repository") return repository({ id: "repo-2", name: "chosen" });
+      throw new Error(`unexpected command: ${command}`);
+    });
+
+    render(<RepositoriesSection />);
+    await screen.findByText("No repositories registered yet.");
+
+    fireEvent.click(screen.getByRole("button", { name: "Add repository" }));
+
+    await waitFor(() =>
+      expect(mockInvoke).toHaveBeenCalledWith("register_repository", {
+        input: { path: "/code/chosen" },
+      }),
+    );
+  });
+
+  it("registers nothing when the picker is cancelled", async () => {
+    mockBackend((command) => {
+      if (command === "list_repositories") return [];
+      if (command === "choose_folder") return null;
+      throw new Error(`unexpected command: ${command}`);
+    });
+
+    render(<RepositoriesSection />);
+    await screen.findByText("No repositories registered yet.");
+
+    fireEvent.click(screen.getByRole("button", { name: "Add repository" }));
+
+    await waitFor(() => expect(mockInvoke).toHaveBeenCalledWith("choose_folder", expect.anything()));
+    expect(mockInvoke).not.toHaveBeenCalledWith("register_repository", expect.anything());
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  });
+
+  it("shows the refusal when the folder picker fails", async () => {
+    mockBackend((command) => {
+      if (command === "list_repositories") return [];
+      if (command === "choose_folder") {
+        throw { code: "internal", message: "the folder picker closed without an answer" };
+      }
+      throw new Error(`unexpected command: ${command}`);
+    });
+
+    render(<RepositoriesSection />);
+    await screen.findByText("No repositories registered yet.");
+
+    fireEvent.click(screen.getByRole("button", { name: "Add repository" }));
+
+    const banner = await screen.findByRole("alert");
+    expect(banner).toHaveTextContent("the folder picker closed without an answer");
+  });
+
   it("defaults the unattended opt-in to off and requires confirming the honest warning before enabling it", async () => {
-    const repo = repository({ allowUnattendedRuns: false });
+    const repo = repository();
     mockBackend((command) => {
       if (command === "list_repositories") return [repo];
       if (command === "get_repository_remote_info") return { remoteUrl: null, ghReady: null };
@@ -212,14 +293,13 @@ describe("RepositoriesSection", () => {
   });
 
   it("enables unattended runs only once the confirmation is accepted", async () => {
-    const repo = repository({ allowUnattendedRuns: false });
-    let allow = false;
+    const repo = repository();
     mockBackend((command, args) => {
-      if (command === "list_repositories") return [{ ...repo, allowUnattendedRuns: allow }];
+      if (command === "list_repositories") return [repo];
       if (command === "get_repository_remote_info") return { remoteUrl: null, ghReady: null };
       if (command === "set_repository_unattended_runs") {
-        allow = (args as { allow: boolean }).allow;
-        return { ...repo, allowUnattendedRuns: allow };
+        checkouts = [checkout({ unattendedConsent: (args as { allow: boolean }).allow })];
+        return checkouts[0];
       }
       throw new Error(`unexpected command: ${command}`);
     });
@@ -239,6 +319,60 @@ describe("RepositoriesSection", () => {
     await waitFor(() => {
       expect(screen.getByRole("checkbox", { name: "Allow unattended agent runs" })).toBeChecked();
     });
+  });
+
+  it("says a repository with no checkout is not set up on this computer, and offers none of its controls", async () => {
+    checkouts = [];
+    mockBackend((command) => {
+      if (command === "list_repositories") return [repository()];
+      throw new Error(`unexpected command: ${command}`);
+    });
+
+    render(<RepositoriesSection />);
+
+    expect(await screen.findByText("Not set up on this computer")).toBeInTheDocument();
+    expect(screen.getByText("main")).toBeInTheDocument();
+    // Every control below is this computer's checkout, and there is none.
+    expect(screen.queryByRole("checkbox", { name: "Allow unattended agent runs" })).toBeNull();
+    expect(screen.queryByLabelText("Runs at once")).toBeNull();
+    expect(screen.queryByText("/Users/dev/code/rimaia")).toBeNull();
+    // Nor is the remote asked for: it is read from a clone this computer lacks.
+    expect(mockInvoke).not.toHaveBeenCalledWith("get_repository_remote_info", expect.anything());
+  });
+
+  it("saves the worktree root to the checkout, and the name and branch to the board", async () => {
+    mockBackend((command, args) => {
+      if (command === "list_repositories") return [repository()];
+      if (command === "get_repository_remote_info") return { remoteUrl: null, ghReady: null };
+      if (command === "update_repository") return repository();
+      if (command === "set_repository_worktree_root") {
+        checkouts = [checkout({ worktreeRoot: (args as { worktreeRoot: string }).worktreeRoot })];
+        return checkouts[0];
+      }
+      throw new Error(`unexpected command: ${command}`);
+    });
+
+    render(<RepositoriesSection />);
+    expect(await screen.findByText("/Users/dev/worktrees/rimaia")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Edit" }));
+    fireEvent.change(screen.getByLabelText("Worktree root"), {
+      target: { value: "/Volumes/Fast/worktrees" },
+    });
+    // The edit form's own Save; the credential pane below has one too.
+    const form = screen.getByLabelText("Worktree root").closest("form") as HTMLFormElement;
+    fireEvent.click(within(form).getByRole("button", { name: "Save" }));
+
+    await waitFor(() =>
+      expect(mockInvoke).toHaveBeenCalledWith("set_repository_worktree_root", {
+        repositoryId: "repo-1",
+        worktreeRoot: "/Volumes/Fast/worktrees",
+      }),
+    );
+    expect(mockInvoke).toHaveBeenCalledWith("update_repository", {
+      id: "repo-1",
+      patch: { name: "rimaia", defaultBranch: "main" },
+    });
+    expect(await screen.findByText("/Volumes/Fast/worktrees")).toBeInTheDocument();
   });
 
   it("shows the backend's refusal, including the task count, when removing a repository with tasks", async () => {
@@ -295,6 +429,91 @@ describe("RepositoriesSection", () => {
     expect(listCalls).toBe(2);
   });
 
+  describe("the review loop (task 037)", () => {
+    function backendWithLevel(inheritedEnabled: "off" | "on_cost_acknowledged") {
+      const repo = repository();
+      let stored: ReviewConfig = {};
+      mockInvoke.mockImplementation(async (command, args) => {
+        if (command === "list_checkouts") return checkouts;
+        if (command === "list_repositories") return [repo];
+        if (command === "get_repository_remote_info") return { remoteUrl: null, ghReady: null };
+        if (command === "get_strategy_catalogue") return catalogueView();
+        if (command === "get_strategy_defaults") return { mode: "default" };
+        if (command === "get_repository_credential_status") {
+          return {
+            configured: false,
+            login: null,
+            label: null,
+            addedAt: null,
+            store: { state: "absent" },
+            sshRemote: false,
+          };
+        }
+        if (command === "get_review_level") {
+          const inherited = { ...inheritingEverything().inherited, enabled: inheritedEnabled };
+          return { config: stored, inherited, effective: { ...inherited, ...stored } };
+        }
+        if (command === "set_repository_review_config") {
+          stored = (args as { config: ReviewConfig }).config;
+          return stored;
+        }
+        if (command === "get_run_cost_summary") {
+          return { medianUsd: null, sampleSize: 0, inheritCostUsd: null, providerDisplayName: "x" };
+        }
+        throw new Error(`unexpected command: ${command}`);
+      });
+    }
+
+    function sentWrites() {
+      return mockInvoke.mock.calls.filter(([name]) => name === "set_repository_review_config");
+    }
+
+    it("says what the repository inherits, from the backend's answer", async () => {
+      backendWithLevel("on_cost_acknowledged");
+      render(<RepositoriesSection />);
+
+      expect(await screen.findByLabelText("Inherit (on)")).toBeChecked();
+      expect(screen.getByRole("option", { name: "Inherit (2)" })).toBeInTheDocument();
+    });
+
+    it("writes the acknowledgement for the repository's own id, only once acknowledged", async () => {
+      backendWithLevel("off");
+      render(<RepositoriesSection />);
+
+      fireEvent.click(await screen.findByLabelText("On"));
+
+      expect(await screen.findByRole("alertdialog", { name: /turning on the review loop/i }))
+        .toBeInTheDocument();
+      expect(sentWrites()).toHaveLength(0);
+
+      fireEvent.click(screen.getByRole("button", { name: "Turn on review loop" }));
+      await waitFor(() => expect(sentWrites()).toHaveLength(1));
+      expect(sentWrites()[0][1]).toEqual({
+        repositoryId: "repo-1",
+        config: { enabled: "on_cost_acknowledged" },
+      });
+    });
+
+    it("sets and clears a field at the repository level", async () => {
+      backendWithLevel("off");
+      render(<RepositoriesSection />);
+
+      const severity = await screen.findByLabelText("Blocking severity");
+      fireEvent.change(severity, { target: { value: "low" } });
+      await waitFor(() => expect(sentWrites()).toHaveLength(1));
+      expect(sentWrites()[0][1]).toEqual({
+        repositoryId: "repo-1",
+        config: { blocking_severity: "low" },
+      });
+
+      fireEvent.change(await screen.findByLabelText("Blocking severity"), {
+        target: { value: "" },
+      });
+      await waitFor(() => expect(sentWrites()).toHaveLength(2));
+      expect(sentWrites()[1][1]).toEqual({ repositoryId: "repo-1", config: {} });
+    });
+  });
+
   it("stores a default strategy against that repository's own id and keeps it on the row", async () => {
     // ADR-0016's "a repo of small tasks can default low without touching each
     // card": the write has to name the repository, since the global key and a
@@ -302,6 +521,7 @@ describe("RepositoriesSection", () => {
     const repo = repository();
     const stored: Record<string, StrategyDefaults> = {};
     mockInvoke.mockImplementation(async (command, args) => {
+      if (command === "list_checkouts") return checkouts;
       if (command === "list_repositories") return [repo];
       if (command === "get_repository_remote_info") return { remoteUrl: null, ghReady: null };
       if (command === "get_strategy_catalogue") return catalogueView();
@@ -366,13 +586,12 @@ describe("RepositoriesSection", () => {
   });
 
   it("writes the per-repository cap and warns about what two agents in one repository share", async () => {
-    let stored = 1;
     mockBackend((command, args) => {
-      if (command === "list_repositories") return [repository({ maxConcurrency: stored })];
+      if (command === "list_repositories") return [repository()];
       if (command === "get_repository_remote_info") return { remoteUrl: null, ghReady: null };
       if (command === "set_repository_max_concurrency") {
-        stored = (args as { maxConcurrency: number }).maxConcurrency;
-        return repository({ maxConcurrency: stored });
+        checkouts = [checkout({ maxConcurrency: (args as { maxConcurrency: number }).maxConcurrency })];
+        return checkouts[0];
       }
       throw new Error(`unexpected command: ${command}`);
     });
@@ -415,10 +634,12 @@ describe("RepositoriesSection", () => {
   it("reverts the row's strategy dropdown and shows the backend's refusal when the write fails", async () => {
     const repo = repository();
     mockInvoke.mockImplementation(async (command) => {
+      if (command === "list_checkouts") return checkouts;
       if (command === "list_repositories") return [repo];
       if (command === "get_repository_remote_info") return { remoteUrl: null, ghReady: null };
       if (command === "get_strategy_catalogue") return catalogueView();
       if (command === "get_strategy_defaults") return { mode: "default" };
+      if (command === "get_review_level") return inheritingEverything();
       if (command === "get_repository_credential_status") {
         return {
           configured: false,

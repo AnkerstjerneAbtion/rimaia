@@ -127,6 +127,21 @@ pub(super) async fn default_branch(dir: &Path) -> Result<Option<String>> {
     current_branch(dir).await
 }
 
+/// Whether `name` is a branch name by `git check-ref-format --branch`.
+///
+/// Run outside any repository's say: `--branch` expands `@{-1}` to the
+/// branch checked out before, inside a repository, and prints the result. So
+/// a name counts only when git prints it back unchanged, whatever directory
+/// the process happens to be in.
+pub(super) async fn is_branch_name(name: &str) -> Result<bool> {
+    let output = tokio::process::Command::new(GIT_CLI)
+        .args(["check-ref-format", "--branch", name])
+        .output()
+        .await
+        .map_err(|error| Error::internal(format!("could not run git check-ref-format: {error}")))?;
+    Ok(output.status.success() && String::from_utf8_lossy(&output.stdout).trim_end() == name)
+}
+
 /// `git remote get-url origin`, or `None` when there is no `origin` remote.
 /// Task 003 only ever looks at `origin`; a repository whose only remote is
 /// named something else is out of scope for the MVP.

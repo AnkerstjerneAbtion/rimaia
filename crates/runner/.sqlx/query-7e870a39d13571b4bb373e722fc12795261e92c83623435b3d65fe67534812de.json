@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT last_fired_at AS \"last_fired_at: DateTime<Utc>\" FROM schedules WHERE id = ?1",
+  "describe": {
+    "columns": [
+      {
+        "name": "last_fired_at: DateTime<Utc>",
+        "ordinal": 0,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      true
+    ]
+  },
+  "hash": "7e870a39d13571b4bb373e722fc12795261e92c83623435b3d65fe67534812de"
+}

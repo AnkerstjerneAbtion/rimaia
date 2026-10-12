@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "-- runs.log_path written until 056\n           INSERT INTO runs\n            (id, task_id, attempt, kind, status, session_id, prompt, started_at, log_path,\n             base_ref, base_sha, runner_id)\n           VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 12
+    },
+    "nullable": []
+  },
+  "hash": "9fe87c486c73da539eed8864b7d8a1c6eb7e9f28e84eb34f8f4144521a63e2fb"
+}

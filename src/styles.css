@@ -111,10 +111,13 @@
    below it. Keep new colour tokens at or above WCAG AA (4.5:1) against the
    surfaces they sit on, in both schemes. */
 
+@import "./styles/account.css";
 @import "./styles/board.css";
 @import "./styles/doctor.css";
+@import "./styles/review.css";
 @import "./styles/runs.css";
 @import "./styles/settings.css";
+@import "./styles/teams.css";
 
 :root {
   /* Surfaces (dark, primary). Lifted off pure black and given a trace of blue:
@@ -458,6 +461,15 @@ body {
   background: var(--accent-soft);
   border-left-color: var(--accent);
   color: var(--text-1);
+}
+
+.sidebar-link-count {
+  margin-left: var(--space-2);
+  padding: 0 var(--space-2);
+  border-radius: var(--radius-full);
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-size: var(--font-size-xs);
 }
 
 .sidebar-link[aria-current="page"] .sidebar-link-label {

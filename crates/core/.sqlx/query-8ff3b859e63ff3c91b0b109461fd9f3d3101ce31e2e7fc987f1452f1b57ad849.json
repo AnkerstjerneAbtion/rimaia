@@ -1,0 +1,44 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT l.task_id, l.purpose AS \"purpose: LeasePurpose\", l.runner_id, t.team_id,\n                  t.run_state AS \"run_state: crate::db::RunState\"\n             FROM runner_leases l\n             JOIN runners r ON r.id = l.runner_id\n             JOIN tasks t ON t.id = l.task_id\n            WHERE r.user_id = ?1\n              AND (l.expires_at IS NULL OR l.expires_at > ?2)\n            ORDER BY l.task_id",
+  "describe": {
+    "columns": [
+      {
+        "name": "task_id",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "purpose: LeasePurpose",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "runner_id",
+        "ordinal": 2,
+        "type_info": "Text"
+      },
+      {
+        "name": "team_id",
+        "ordinal": 3,
+        "type_info": "Text"
+      },
+      {
+        "name": "run_state: crate::db::RunState",
+        "ordinal": 4,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "8ff3b859e63ff3c91b0b109461fd9f3d3101ce31e2e7fc987f1452f1b57ad849"
+}

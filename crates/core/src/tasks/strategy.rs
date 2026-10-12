@@ -38,13 +38,14 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::context::ServiceContext;
+use crate::clock::Clock;
+use crate::context::{ScopedTx, ServiceContext};
 use crate::db::{StrategyMode, StrategySource, Task};
 use crate::error::{Error, Result};
 use crate::events::ChangeEvent;
 use crate::strategy::settings as strategy_settings;
 use crate::strategy::{effective_strategy, StrategyDefaults};
-use crate::tasks::service::fetch_task_row;
+use crate::tasks::service::{fetch_task_row, record_plan_revision, task_row, team_of_task};
 
 /// The envelope version this build writes. Stamped by
 /// [`set_task_strategy`], never taken from the caller — a proposal that
@@ -345,7 +346,12 @@ pub fn needs_planning(task: &Task, mode: StrategyMode) -> bool {
 /// to record whatever they like about their own card.
 #[tracing::instrument(
     skip_all,
-    fields(source = ctx.source.as_str(), task_id = %task_id, status = ?plan.status)
+    fields(
+        source = ctx.source.as_str(),
+        user_id = ctx.actor.as_str(),
+        task_id = %task_id,
+        status = ?plan.status,
+    )
 )]
 pub async fn set_task_strategy(
     ctx: &ServiceContext,
@@ -353,18 +359,79 @@ pub async fn set_task_strategy(
     plan: StrategyPlan,
     source: StrategySource,
 ) -> Result<Task> {
+    let prepared = prepare_strategy(ctx, task_id, plan).await?;
+
+    let mut tx = ctx.begin().await?;
+    write_strategy(&mut tx, ctx.clock.as_ref(), task_id, prepared, source).await?;
+    let team_id = team_of_task(&mut tx, task_id).await?;
+    tx.commit().await?;
+
+    // Publish before the read-back, exactly as `create_task` does and for its
+    // stated reason: the row is committed, so a failed re-read must not cost
+    // the notification for a mutation that already happened (ADR-0018). It is
+    // also how the panel learns a planner wrote back mid-run, which is the only
+    // signal there is — the strategy run has no `runs` row to watch.
+    ctx.publish(ChangeEvent::tasks(team_id, [task_id.to_string()]));
+    task_row(ctx, task_id).await
+}
+
+/// What [`write_strategy`] needs read before its transaction opens.
+pub(crate) struct PreparedStrategy {
+    plan: StrategyPlan,
+    stored: String,
+    defaults: ResolvedDefaults,
+    /// Who is writing, and point 6's mark, for the plan revision a change to
+    /// the phase prose records.
+    author: String,
+    written_during_run: bool,
+}
+
+/// [`set_task_strategy`]'s reads, made over the pool **before** the write's
+/// transaction opens.
+///
+/// Outside the transaction because `strategy::settings` reads over the pool,
+/// and holding a write transaction open across two more reads to defend
+/// against a settings change landing in the same millisecond would cost more
+/// than the race is worth. The defaults are configuration a human edits, not a
+/// value another writer moves under us.
+pub(crate) async fn prepare_strategy(
+    ctx: &ServiceContext,
+    task_id: &str,
+    plan: StrategyPlan,
+) -> Result<PreparedStrategy> {
     let plan = plan.repaired();
     let stored = plan.to_stored()?;
-
-    // Read outside the transaction: `strategy::settings` takes the pool, and
-    // holding a write transaction open across two more reads to defend against
-    // a settings change landing in the same millisecond would cost more than
-    // the race is worth. The defaults are configuration a human edits, not a
-    // value another writer moves under us.
     let defaults = resolved_defaults(ctx, task_id).await?;
+    let written_during_run = crate::consent::written_during_run(ctx, &ctx.actor).await?;
+    Ok(PreparedStrategy {
+        plan,
+        stored,
+        defaults,
+        author: ctx.actor.clone(),
+        written_during_run,
+    })
+}
 
-    let mut tx = ctx.pool.begin().await?;
-    let current = fetch_task_row(&mut *tx, task_id).await?;
+/// [`set_task_strategy`]'s guard and write, inside a transaction the caller
+/// holds, commits and announces.
+///
+/// The board port's `record_strategy` holds the transaction its fence read the
+/// lease in (task 043), so a fenced planner writes nothing.
+pub(crate) async fn write_strategy(
+    tx: &mut ScopedTx,
+    clock: &dyn Clock,
+    task_id: &str,
+    prepared: PreparedStrategy,
+    source: StrategySource,
+) -> Result<()> {
+    let PreparedStrategy {
+        plan,
+        stored,
+        defaults,
+        author,
+        written_during_run,
+    } = prepared;
+    let current = fetch_task_row(tx, task_id).await?;
 
     if source == StrategySource::Planner {
         let mode = effective_strategy(&current, &defaults.repository, &defaults.global).mode;
@@ -378,7 +445,7 @@ pub async fn set_task_strategy(
         }
     }
 
-    let now = ctx.clock.now();
+    let now = clock.now();
     sqlx::query!(
         r#"UPDATE tasks SET strategy_plan = ?1, strategy_source = ?2, strategy_updated_at = ?3,
             model = ?4, effort = ?5, updated_at = ?3 WHERE id = ?6"#,
@@ -389,18 +456,32 @@ pub async fn set_task_strategy(
         plan.effort,
         task_id,
     )
-    .execute(&mut *tx)
+    .execute(&mut **tx)
     .await?;
 
-    tx.commit().await?;
+    let stored_before = StrategyPlan::from_stored(current.strategy_plan.as_deref());
+    if phase_prose(stored_before.as_ref()) != phase_prose(Some(&plan)) {
+        record_plan_revision(tx, task_id, &author, written_during_run).await?;
+    }
+    Ok(())
+}
 
-    // Publish before the read-back, exactly as `create_task` does and for its
-    // stated reason: the row is committed, so a failed re-read must not cost
-    // the notification for a mutation that already happened (ADR-0018). It is
-    // also how the panel learns a planner wrote back mid-run, which is the only
-    // signal there is — the strategy run has no `runs` row to watch.
-    ctx.publish(ChangeEvent::tasks([task_id.to_string()]));
-    fetch_task_row(&ctx.pool, task_id).await
+/// The free text of a strategy's phases, in order: each phase's `name` and
+/// `summary`. ADR-0032's 2026-10-10 amendment makes it plan content, because
+/// the implementation prompt's strategy guidance renders it.
+///
+/// The rest of the envelope is not: the model, effort, workflow and agent
+/// counts change what a run costs, not what it is told, and the runner's
+/// strategy ceiling governs them (ADR-0032 point 3). The rationale is read by a
+/// human on the card and never reaches a prompt.
+fn phase_prose(plan: Option<&StrategyPlan>) -> Vec<(&str, &str)> {
+    plan.map(|plan| {
+        plan.phases
+            .iter()
+            .map(|phase| (phase.name.as_str(), phase.summary.as_str()))
+            .collect()
+    })
+    .unwrap_or_default()
 }
 
 /// Takes authorship of a recorded proposal: `strategy_source` flips
@@ -417,10 +498,17 @@ pub async fn set_task_strategy(
 /// The proposal itself is untouched, so the panel keeps rendering the
 /// rationale and the phases after it has been accepted; what changes is who
 /// the run is executing on behalf of.
-#[tracing::instrument(skip_all, fields(source = ctx.source.as_str(), task_id = %task_id))]
+#[tracing::instrument(
+    skip_all,
+    fields(
+        source = ctx.source.as_str(),
+        user_id = ctx.actor.as_str(),
+        task_id = %task_id,
+    )
+)]
 pub async fn accept_task_strategy(ctx: &ServiceContext, task_id: &str) -> Result<Task> {
-    let mut tx = ctx.pool.begin().await?;
-    let current = fetch_task_row(&mut *tx, task_id).await?;
+    let mut tx = ctx.begin().await?;
+    let current = fetch_task_row(&mut tx, task_id).await?;
 
     if current.strategy_plan.is_none() {
         return Err(Error::invalid(format!(
@@ -440,10 +528,11 @@ pub async fn accept_task_strategy(ctx: &ServiceContext, task_id: &str) -> Result
     .execute(&mut *tx)
     .await?;
 
+    let team_id = team_of_task(&mut tx, task_id).await?;
     tx.commit().await?;
 
-    ctx.publish(ChangeEvent::tasks([task_id.to_string()]));
-    fetch_task_row(&ctx.pool, task_id).await
+    ctx.publish(ChangeEvent::tasks(team_id, [task_id.to_string()]));
+    task_row(ctx, task_id).await
 }
 
 /// Forgets the recorded proposal — the panel's "Re-plan", and the **only**
@@ -461,10 +550,18 @@ pub async fn accept_task_strategy(ctx: &ServiceContext, task_id: &str) -> Result
 ///
 /// Idempotent: clearing a task that has nothing recorded is not an error, only
 /// a no-op with a publication.
-#[tracing::instrument(skip_all, fields(source = ctx.source.as_str(), task_id = %task_id))]
+#[tracing::instrument(
+    skip_all,
+    fields(
+        source = ctx.source.as_str(),
+        user_id = ctx.actor.as_str(),
+        task_id = %task_id,
+    )
+)]
 pub async fn clear_task_strategy(ctx: &ServiceContext, task_id: &str) -> Result<Task> {
-    let mut tx = ctx.pool.begin().await?;
-    fetch_task_row(&mut *tx, task_id).await?;
+    let written_during_run = crate::consent::written_during_run(ctx, &ctx.actor).await?;
+    let mut tx = ctx.begin().await?;
+    let current = fetch_task_row(&mut tx, task_id).await?;
 
     let now = ctx.clock.now();
     sqlx::query!(
@@ -475,11 +572,18 @@ pub async fn clear_task_strategy(ctx: &ServiceContext, task_id: &str) -> Result<
     )
     .execute(&mut *tx)
     .await?;
+    // Forgetting phase prose changes what the next prompt is told as much as
+    // rewriting it does, so it is a plan revision like any other edit to it.
+    let stored_before = StrategyPlan::from_stored(current.strategy_plan.as_deref());
+    if !phase_prose(stored_before.as_ref()).is_empty() {
+        record_plan_revision(&mut tx, task_id, &ctx.actor, written_during_run).await?;
+    }
 
+    let team_id = team_of_task(&mut tx, task_id).await?;
     tx.commit().await?;
 
-    ctx.publish(ChangeEvent::tasks([task_id.to_string()]));
-    fetch_task_row(&ctx.pool, task_id).await
+    ctx.publish(ChangeEvent::tasks(team_id, [task_id.to_string()]));
+    task_row(ctx, task_id).await
 }
 
 /// The two levels of default that stand behind one task, read together.
@@ -487,7 +591,7 @@ pub async fn clear_task_strategy(ctx: &ServiceContext, task_id: &str) -> Result<
 /// A struct rather than a tuple because the two are trivially swappable at a
 /// call site and [`effective_strategy`] would resolve a global default as a
 /// repository one without complaint.
-pub(super) struct ResolvedDefaults {
+pub(crate) struct ResolvedDefaults {
     pub(super) repository: StrategyDefaults,
     pub(super) global: StrategyDefaults,
 }
@@ -498,19 +602,24 @@ pub(super) struct ResolvedDefaults {
 /// the row in hand before it starts its transaction — which is the order
 /// [`set_task_strategy`] needs, since the settings accessors take the pool.
 async fn resolved_defaults(ctx: &ServiceContext, task_id: &str) -> Result<ResolvedDefaults> {
-    let task = fetch_task_row(&ctx.pool, task_id).await?;
+    let task = task_row(ctx, task_id).await?;
     defaults_for_repository(ctx, &task.repository_id).await
 }
 
 /// The same, for a repository already known — the board read's path, where one
 /// query answered for fifty cards and the repository ids are on them.
+///
+/// Both levels are the repository's own team's, which is the task's: the
+/// defaults a card resolves through are the ones its team configured, whichever
+/// teams the context reaches.
 pub(super) async fn defaults_for_repository(
     ctx: &ServiceContext,
     repository_id: &str,
 ) -> Result<ResolvedDefaults> {
+    let team_id = crate::repo::team_of(ctx, repository_id).await?;
     Ok(ResolvedDefaults {
-        repository: strategy_settings::repository_default(&ctx.pool, repository_id).await?,
-        global: strategy_settings::global_default(&ctx.pool).await?,
+        repository: strategy_settings::repository_default(ctx, repository_id).await?,
+        global: strategy_settings::global_default_for(ctx, &team_id).await?,
     })
 }
 
@@ -826,7 +935,6 @@ four independent parts, enabling efficient parallel execution."
             position: 1.0,
             run_state: RunState::Idle,
             branch: None,
-            worktree_path: None,
             strategy_mode: StrategyMode::Planned,
             model: None,
             effort: None,
@@ -837,6 +945,11 @@ four independent parts, enabling efficient parallel execution."
             updated_at: test_epoch(),
             source: MutationSource::Ui,
             archived_at: None,
+            created_by: None,
+            assignee_id: None,
+            assigned_by: None,
+            plan_revision: 1,
+            plan_updated_by: None,
         }
     }
 }

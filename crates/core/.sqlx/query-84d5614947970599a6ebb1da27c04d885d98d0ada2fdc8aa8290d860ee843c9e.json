@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT team_id FROM runner_pool_teams WHERE runner_id = ?1 ORDER BY team_id",
+  "describe": {
+    "columns": [
+      {
+        "name": "team_id",
+        "ordinal": 0,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "84d5614947970599a6ebb1da27c04d885d98d0ada2fdc8aa8290d860ee843c9e"
+}

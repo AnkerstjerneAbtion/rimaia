@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT trusted_user_id FROM trusted_authors WHERE user_id = ?1 AND team_id = ?2",
+  "describe": {
+    "columns": [
+      {
+        "name": "trusted_user_id",
+        "ordinal": 0,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "80795a0866bb942910229bb4cbc3c25d280bfe099452a9b6d30da03b2426f5cd"
+}

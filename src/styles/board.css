@@ -561,9 +561,10 @@
    the title is what the eye should land on. */
 .task-card-head {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   justify-content: space-between;
-  gap: var(--space-2);
+  gap: var(--space-1) var(--space-2);
   min-height: 1.1rem;
 }
 
@@ -763,6 +764,29 @@
   line-height: var(--line-height-tight);
   color: var(--badge-blocked-text);
   overflow-wrap: anywhere;
+}
+
+/* The review loop's line (task 037). Words only: no tick, no success colour,
+   and nothing that reads as a pass, because a loop with nothing blocking is a
+   statement about one reviewer's pass and not a verdict on the work. The
+   ping-pong signal is a second element so it survives wrapping as its own
+   phrase, with a dashed rule rather than a hue to set it apart in greyscale. */
+.task-card-loop {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0 var(--space-2);
+  margin: 0;
+  font-size: var(--font-size-xs);
+  line-height: var(--line-height-tight);
+  color: var(--text-2);
+  overflow-wrap: anywhere;
+}
+
+.task-card-loop-signal {
+  font-weight: var(--font-weight-medium);
+  color: var(--text-1);
+  text-decoration: underline dashed;
+  text-underline-offset: 0.2em;
 }
 
 /* The action row (task 008's "Run now", task 009's queue position). "Run now"

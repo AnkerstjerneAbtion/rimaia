@@ -28,3 +28,6 @@ dist-ssr
 
 # Conductor workspace scratch
 .context
+
+# Screenshots written by `npm run screenshot` (task 028)
+.screenshots/

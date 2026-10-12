@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT count(*) AS \"running!: i64\"\n             FROM runner_leases l JOIN tasks t ON t.id = l.task_id\n            WHERE t.team_id = ?1 AND (l.expires_at IS NULL OR l.expires_at > ?2)",
+  "describe": {
+    "columns": [
+      {
+        "name": "running!: i64",
+        "ordinal": 0,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "01774eb3678a1cf2298e5cd833a4fbc465876681cc4ea02f39d09384c0a14eae"
+}

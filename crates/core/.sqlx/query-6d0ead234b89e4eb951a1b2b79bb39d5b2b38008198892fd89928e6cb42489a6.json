@@ -1,0 +1,32 @@
+{
+  "db_name": "SQLite",
+  "query": "\n        -- machine_state adoption (task 041; task 065 deletes this read)\n        SELECT id AS task_id, repository_id, worktree_path AS \"path!\"\n          FROM tasks\n         WHERE worktree_path IS NOT NULL\n         ORDER BY id\n        ",
+  "describe": {
+    "columns": [
+      {
+        "name": "task_id",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "repository_id",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "path!",
+        "ordinal": 2,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      false,
+      false,
+      true
+    ]
+  },
+  "hash": "6d0ead234b89e4eb951a1b2b79bb39d5b2b38008198892fd89928e6cb42489a6"
+}

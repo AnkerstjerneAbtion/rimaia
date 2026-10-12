@@ -48,7 +48,7 @@ pub fn temp_environment() -> (TempDir, Environment) {
 ///
 /// **`claude` is a prerequisite, not a dependency (ADR-0004): it is installed on
 /// a developer's machine and absent from a CI runner.** Since task 018,
-/// [`QueueHandle::start`](crate::scheduler::QueueHandle::start) runs the doctor,
+/// `rimaia_runner::queue::QueueHandle::start` runs the doctor,
 /// which spawns that binary — so a test that starts a queue against
 /// `RunnerConfig::default()`, whose `program` is a bare `claude` resolved on
 /// `PATH`, passes locally and fails on CI. That is not a flake; it is the test
@@ -64,20 +64,44 @@ pub fn temp_environment() -> (TempDir, Environment) {
 /// all a test needs is to get past the preflight.
 #[cfg(unix)]
 pub fn standin_claude(dir: &Path) -> PathBuf {
-    use std::os::unix::fs::PermissionsExt;
-
     let program = dir.join("claude-standin");
-    std::fs::write(
+    write_stand_in(
         &program,
         "#!/bin/sh\n\
          if [ \"$1\" = '--version' ]; then echo '2.1.234 (Claude Code)'; exit 0; fi\n\
          if [ \"$1\" = 'auth' ]; then echo '{\"loggedIn\": true}'; exit 0; fi\n\
          exit 0\n",
-    )
-    .expect("write the stand-in claude");
-    std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755))
-        .expect("make the stand-in claude executable");
+    );
     program
+}
+
+/// Writes an executable script at `path` that this process never holds open
+/// for writing.
+///
+/// Linux refuses to `exec` a file anything has open for writing (`ETXTBSY`,
+/// "Text file busy"), and a child forked by another test's thread inherits
+/// every descriptor this process has open until that child calls `exec`. A
+/// stand-in written with `std::fs::write` is therefore, now and then, still
+/// open in some unrelated child when the test spawns it, and the spawn fails:
+/// a flake on Linux CI only, since macOS has no such check for scripts.
+///
+/// So the body is written to a file that is never executed, and `cp` writes
+/// the stand-in itself in its own process, where no other thread forks.
+#[cfg(unix)]
+pub fn write_stand_in(path: &Path, body: &str) {
+    use std::os::unix::fs::PermissionsExt;
+
+    let staging = TempDir::new().expect("a staging directory for the stand-in");
+    let source = staging.path().join("body");
+    std::fs::write(&source, body).expect("write the stand-in's body");
+    let copied = std::process::Command::new("cp")
+        .arg(&source)
+        .arg(path)
+        .status()
+        .expect("run cp");
+    assert!(copied.success(), "cp could not write {}", path.display());
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755))
+        .expect("make the stand-in executable");
 }
 
 /// Everything `QueueHandle::start`'s preflight needs to pass without an
@@ -112,10 +136,38 @@ pub fn passing_queue_environment() -> (TempDir, AppPaths, RunnerConfig) {
 /// **A test that actually plans must not use this** — the `claude` here is a
 /// bare name resolved on `PATH`, which is a prerequisite CI does not have
 /// (ADR-0004). Build one from [`passing_queue_environment`] instead.
+///
+/// Its board is [`Unwired`](crate::testing::board::Unwired), which refuses
+/// every call, so a test that reaches the planner through it fails with a
+/// sentence rather than planning against nothing.
 pub fn planner_access() -> crate::runner::strategy::PlannerAccess {
     crate::runner::strategy::PlannerAccess {
         paths: AppPaths::new(std::env::temp_dir().join("rimaia-placeholder-not-created")),
         runner: RunnerConfig::default(),
         in_flight: crate::scheduler::InFlight::new(),
+        board: std::sync::Arc::new(crate::testing::board::Unwired),
+        // A runner no board row names: nothing is pinned to it, and a test
+        // that reaches a plan through here pins nothing either.
+        runner_id: "a-runner-this-test-never-registered".to_string(),
     }
+}
+
+/// This machine's local tools for a test MCP server that never plans: the
+/// test's own machine store, [`environment`] and [`planner_access`] (task 041).
+///
+/// For `RimaiaServer::new`, `RimaiaServer::scoped` and `mcp::build`, which
+/// serve the local router only when handed one. A test that plans builds its
+/// own from [`passing_queue_environment`], for [`planner_access`]'s reason.
+pub fn local_tools(machine: &crate::machine::MachineContext) -> crate::mcp::server::LocalTools {
+    crate::mcp::server::LocalTools {
+        machine: machine.clone(),
+        doctor: environment(),
+        planner: planner_access(),
+    }
+}
+
+/// The provider profile a test MCP server's board tools read the catalogue
+/// through: [`environment`]'s provider's, which is Claude Code's (task 041).
+pub fn provider() -> crate::runner::provider::ProviderProfile {
+    crate::runner::provider::ProviderProfile::of(environment().provider.as_ref())
 }

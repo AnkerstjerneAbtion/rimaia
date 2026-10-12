@@ -115,3 +115,69 @@ wired up by a later reader who assumes the omission was an oversight. Base instr
 implementation workflow: commit as you work, run the suite, open a pull request. A planner
 that opens a pull request is a defect, and the cheapest place to make that impossible is
 the signature. Its section list is fixed in seam-contract D17.
+
+---
+
+## Amendment, 2026-10-09 — the review and fix prompts (ADR-0017, task 021)
+
+Two more composed prompts, built by the same rules as the other two: level-1 headings, the
+same separator, an empty section omitted with its heading, and no trailing newline. Tool
+names are the provider's spelling at the run-scoped server, `rimaia-run`.
+
+**The review prompt**, in order:
+
+```
+1. Your job                   (fixed: a fresh reviewer, judging what is committed)
+2. Task context               (title, repository, branch, the loop's base ref, links)
+3. The plan                   (task.plan)
+4. Extra instructions         (task.extra_instructions)
+5. The change                 (base ref, base and head commit, the bundle's stat and files,
+                               and the two git commands that read the whole branch)
+6. Review instructions        (the task's override, else the global text; expanded)
+7. Findings already rejected  (each with the fixer's reason)
+8. How to answer              (exactly one record_review_findings call; [] when clean)
+```
+
+Like the planner's, **it has no base-instructions parameter**: base instructions say "open a
+pull request", and a reviewer that opens one is a defect. `# The change` never embeds the
+patch: the worktree holds it whole, and a capped copy would be truncated silently.
+
+**Review instructions are an override, not an addition.** A task's `review_instructions`,
+when it says anything, replaces the global text; a blank one falls back to it. An override
+that added would run two review skills on one change. ADR-0009's five template variables
+expand there as in base instructions, and an unknown one stays verbatim. With neither set
+the section is omitted and `# Your job` stands alone: Rimaia ships no review methodology.
+
+**The fix prompt**, in order: `# Base instructions` · `# Task context` · `# Plan` ·
+`# Extra instructions` · `# Findings to address` · `# How to answer`. Base instructions are
+included, because a fix is implementation work. `# Findings to address` renders each of the
+newest review's open blocking findings with its id, severity, location, title and body, and
+nothing else. `# How to answer` says a finding is advice, not an order, and asks for one
+`resolve_review_finding` per finding, `fixed` with what changed or `rejected` with why.
+
+A fix that continues the implementation's own session (`fix_session = resume`) is sent only
+the last two sections: the session already holds the rest, the rule this ADR states for every
+resumed run.
+
+`# Task context` names the base the loop's rows recorded, which since task 011 can be a
+dependency's branch, so it agrees with `# The change`. The implementation and planner prompts
+still pass the repository's default branch, and their bytes are unchanged.
+
+**Resumed after a retryable exit**, in place of the implementation's continuation — whose
+"continue the task" would tell a reviewer to implement — one paragraph each:
+
+- a review that has not yet recorded: *Continue the review of "{title}" from where you
+  stopped. The change and the review instructions are earlier in this session — do not start
+  over. Do not edit, commit or push. Finish by calling {tool} exactly once, with findings: []
+  if you found nothing.*
+- a review that already recorded: *Continue the review of "{title}" from where you stopped.
+  Your findings are already recorded — do not call {tool} again, and do not edit, commit or
+  push. Stop once you have finished what you were doing.*
+- a fix: *Continue addressing the review findings on "{title}" from where you stopped. The
+  findings and the instructions are earlier in this session — do not start over. Call {tool}
+  for each finding you have not resolved yet, with fixed and what you changed, or rejected and
+  why.*
+
+The two review variants exist because the store refuses a second record call from one row,
+not from a second row of the same review; the recorded variant is what keeps a resumed
+reviewer from recording twice. The exact strings are pinned in `tests/prompt.rs`.

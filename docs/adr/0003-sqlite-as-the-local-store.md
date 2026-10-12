@@ -131,3 +131,11 @@ where. One `.sqlx/` at the workspace root, generated with
 then the workspace root when resolving the cache, and `rimaia-core` is the only crate that
 holds queries, so the workspace root is where every consumer — `cargo check` on the
 workspace, clippy, CI — finds it without a per-crate override.
+
+#### Amendment, 2026-10-10 — superseded by ADR-0028 and seam-contract D33 (task 040)
+
+The section above no longer holds. ADR-0028 point 3 gives the runner a second store with its
+own migration set, and one `cargo sqlx prepare --workspace` against one `DATABASE_URL` cannot
+describe two schemas. Seam-contract D33 puts one cache in each crate that holds query macros,
+`crates/core/.sqlx/` for the board and `crates/runner/.sqlx/` for the runner, leaves none at
+the workspace root, and replaces the recipe. CLAUDE.md carries the recipe.

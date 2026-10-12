@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO team_settings\n                    (team_id, key, value, revision, updated_by, updated_at, written_during_run)\n                 VALUES (?1, ?2, ?3, 1, ?4, ?5, ?6)\n                 ON CONFLICT (team_id, key) DO UPDATE\n                    SET value = excluded.value, revision = team_settings.revision + 1,\n                        updated_by = excluded.updated_by, updated_at = excluded.updated_at,\n                        written_during_run = excluded.written_during_run\n                  WHERE team_settings.value IS NOT excluded.value",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 6
+    },
+    "nullable": []
+  },
+  "hash": "29ee572fa9b5be246b8a290574c3c241b0f498d43f493c726cf4144835cb4396"
+}

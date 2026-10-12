@@ -10,7 +10,9 @@ import {
   removeRepository,
   setRepositoryMaxConcurrency,
   setRepositoryOnArchive,
+  setRepositoryReviewConfig,
   setRepositoryUnattendedRuns,
+  setRepositoryWorktreeRoot,
   setStrategyDefaults,
   toRimaiaError,
   updateRepository,
@@ -18,12 +20,18 @@ import {
 import { subscribeToRepositoriesChanged } from "../../lib/events";
 import type {
   Catalogue,
+  CheckoutView,
   OnArchive,
   RemoteInfo,
   Repository,
+  ReviewConfig,
   RimaiaError,
   StrategyDefaults,
 } from "../../types";
+import { ReviewConfigFields } from "../../components/ReviewConfigFields";
+import { useCheckouts } from "../../hooks/useCheckouts";
+import { useHasMachine } from "../../lib/capabilities";
+import { useReviewLevel } from "../../hooks/useReviewLevel";
 import { CredentialSection } from "./CredentialSection";
 import { OnArchiveFields } from "./OnArchiveFields";
 import { StrategyDefaultsFields } from "./StrategyDefaultsFields";
@@ -44,18 +52,36 @@ type RemoteInfoState =
 interface EditDraft {
   name: string;
   defaultBranch: string;
-  worktreeRoot: string;
+  /** `null` for a repository this computer has no checkout of: there is no
+   *  worktree root here to edit. */
+  worktreeRoot: string | null;
 }
 
-function draftFrom(repository: Repository): EditDraft {
+function draftFrom(repository: Repository, checkout: CheckoutView | undefined): EditDraft {
   return {
     name: repository.name,
     defaultBranch: repository.defaultBranch,
-    worktreeRoot: repository.worktreeRoot,
+    worktreeRoot: checkout?.worktreeRoot ?? null,
   };
 }
 
+/** What a repository row says in place of everything this computer would
+ *  know about its clone, when it has none (task 066). */
+export const NOT_SET_UP = "Not set up on this computer";
+
 export function RepositoriesSection() {
+  // The per-machine half of every row (task 066), joined by repository id.
+  // A browser has no machine: `list_checkouts`, `register_repository` (task 054
+  // points the form at a local clone command, and 069 replaces the gate with a
+  // form over the board one) and the remote and credential commands stay
+  // local, so its rows are the team's facts and nothing about a clone.
+  const hasMachine = useHasMachine();
+  const {
+    checkouts,
+    loading: checkoutsLoading,
+    error: checkoutsError,
+    reload: reloadCheckouts,
+  } = useCheckouts(hasMachine);
   const [repositories, setRepositories] = useState<Repository[] | null>(null);
   const [listError, setListError] = useState<RimaiaError | null>(null);
   const [rowErrors, setRowErrors] = useState<Record<string, RimaiaError | null>>({});
@@ -70,6 +96,10 @@ export function RepositoriesSection() {
   >({});
 
   const refresh = useCallback(() => {
+    // A write to a checkout announces itself on `repositories:changed` too,
+    // but the row that made it repaints from both reads now rather than on
+    // the event.
+    reloadCheckouts();
     listRepositories().then(
       (repos) => {
         setRepositories(repos);
@@ -77,7 +107,7 @@ export function RepositoriesSection() {
       },
       (thrown) => setListError(toRimaiaError(thrown)),
     );
-  }, []);
+  }, [reloadCheckouts]);
 
   useEffect(() => {
     refresh();
@@ -120,6 +150,9 @@ export function RepositoriesSection() {
     if (!repositories) return;
     for (const repository of repositories) {
       if (fetchedRemoteIds.current.has(repository.id)) continue;
+      // The remote is read from this computer's clone: a repository with no
+      // checkout here has none to ask.
+      if (!checkouts.has(repository.id)) continue;
       fetchedRemoteIds.current.add(repository.id);
       setRemoteInfos((prev) => ({ ...prev, [repository.id]: { status: "loading" } }));
       getRepositoryRemoteInfo(repository.id).then(
@@ -128,7 +161,7 @@ export function RepositoriesSection() {
         () => setRemoteInfos((prev) => ({ ...prev, [repository.id]: { status: "error" } })),
       );
     }
-  }, [repositories]);
+  }, [repositories, checkouts]);
 
   // The lists the per-repository strategy dropdowns draw from (task 020). One
   // read for the whole section rather than one per row: it is a single
@@ -160,7 +193,7 @@ export function RepositoriesSection() {
 
   function beginEdit(repository: Repository) {
     setEditingId(repository.id);
-    setDraft(draftFrom(repository));
+    setDraft(draftFrom(repository, checkouts.get(repository.id)));
     setRowErrors((prev) => ({ ...prev, [repository.id]: null }));
   }
 
@@ -176,8 +209,14 @@ export function RepositoriesSection() {
       await updateRepository(id, {
         name: draft.name,
         defaultBranch: draft.defaultBranch,
-        worktreeRoot: draft.worktreeRoot,
       });
+      // The worktree root is this computer's, with a command of its own since
+      // task 066; sent only when it changed, so an edit of the name alone
+      // writes nothing to the checkout.
+      const checkout = checkouts.get(id);
+      if (checkout && draft.worktreeRoot !== null && draft.worktreeRoot !== checkout.worktreeRoot) {
+        await setRepositoryWorktreeRoot(id, draft.worktreeRoot);
+      }
       setEditingId(null);
       setDraft(null);
       setRowErrors((prev) => ({ ...prev, [id]: null }));
@@ -238,8 +277,12 @@ export function RepositoriesSection() {
   // repaint from what the backend actually kept. An optimistic 12 that was
   // never written would leave the control claiming a cap the queue does not
   // have.
-  async function handleConcurrencyChange(repository: Repository, next: number) {
-    if (!Number.isInteger(next) || next === repository.maxConcurrency) return;
+  async function handleConcurrencyChange(
+    repository: Repository,
+    checkout: CheckoutView,
+    next: number,
+  ) {
+    if (!Number.isInteger(next) || next === checkout.maxConcurrency) return;
     setRowErrors((prev) => ({ ...prev, [repository.id]: null }));
     try {
       await setRepositoryMaxConcurrency(repository.id, next);
@@ -287,7 +330,7 @@ export function RepositoriesSection() {
         <ErrorBanner error={catalogueError} onDismiss={() => setCatalogueError(null)} />
       )}
 
-      <RepositoryAddForm onRegistered={refresh} />
+      {hasMachine && <RepositoryAddForm onRegistered={refresh} />}
 
       {repositories === null && !listError && <p className="muted">Reading…</p>}
       {repositories && repositories.length === 0 && (
@@ -302,6 +345,12 @@ export function RepositoriesSection() {
             const rowError = rowErrors[repository.id];
             const confirming = confirmingUnattendedId === repository.id;
             const strategyDefault = defaultsByRepository[repository.id];
+            const checkout = checkouts.get(repository.id);
+            // Not "not set up" while the first read is still out: a row that
+            // flashed the refusal on every mount would be claiming a state
+            // nobody is in.
+            const notSetUp =
+              hasMachine && !checkout && !checkoutsLoading && checkoutsError === null;
 
             return (
               <li key={repository.id} className="repo-item">
@@ -345,17 +394,19 @@ export function RepositoriesSection() {
                         }
                       />
                     </label>
-                    <label htmlFor={`repo-worktree-${repository.id}`}>
-                      Worktree root
-                      <input
-                        id={`repo-worktree-${repository.id}`}
-                        type="text"
-                        value={draft.worktreeRoot}
-                        onChange={(event) =>
-                          setDraft({ ...draft, worktreeRoot: event.target.value })
-                        }
-                      />
-                    </label>
+                    {draft.worktreeRoot !== null && (
+                      <label htmlFor={`repo-worktree-${repository.id}`}>
+                        Worktree root
+                        <input
+                          id={`repo-worktree-${repository.id}`}
+                          type="text"
+                          value={draft.worktreeRoot}
+                          onChange={(event) =>
+                            setDraft({ ...draft, worktreeRoot: event.target.value })
+                          }
+                        />
+                      </label>
+                    )}
                     <div className="repo-actions">
                       <button type="submit">Save</button>
                       <button type="button" onClick={() => cancelEdit(repository.id)}>
@@ -366,28 +417,48 @@ export function RepositoriesSection() {
                 ) : (
                   <>
                     <dl className="detail-list">
-                      <dt>Path</dt>
-                      <dd>
-                        <code>{repository.path}</code>
-                      </dd>
+                      {hasMachine && (
+                        <>
+                          <dt>Path</dt>
+                          <dd>
+                            {checkout ? (
+                              <code>{checkout.path}</code>
+                            ) : notSetUp ? (
+                              <span className="repo-not-set-up">{NOT_SET_UP}</span>
+                            ) : (
+                              <span className="muted">Reading…</span>
+                            )}
+                          </dd>
+                        </>
+                      )}
                       <dt>Default branch</dt>
                       <dd>{repository.defaultBranch}</dd>
-                      <dt>Worktree root</dt>
-                      <dd>
-                        <code>{repository.worktreeRoot}</code>
-                      </dd>
-                      <dt>Remote</dt>
-                      <dd>
-                        {!remote || remote.status === "loading" ? (
-                          <span className="muted">Checking…</span>
-                        ) : remote.status === "error" ? (
-                          <span className="muted">Could not be determined.</span>
-                        ) : remote.info.remoteUrl === null ? (
-                          <span className="muted">No remote configured</span>
-                        ) : (
-                          <code>{remote.info.remoteUrl}</code>
-                        )}
-                      </dd>
+                      {checkout && (
+                        <>
+                          <dt>Worktree root</dt>
+                          <dd>
+                            <code>{checkout.worktreeRoot}</code>
+                          </dd>
+                        </>
+                      )}
+                      {hasMachine && (
+                        <>
+                          <dt>Remote</dt>
+                          <dd>
+                            {notSetUp ? (
+                              <span className="muted">Not known on this computer</span>
+                            ) : !remote || remote.status === "loading" ? (
+                              <span className="muted">Checking…</span>
+                            ) : remote.status === "error" ? (
+                              <span className="muted">Could not be determined.</span>
+                            ) : remote.info.remoteUrl === null ? (
+                              <span className="muted">No remote configured</span>
+                            ) : (
+                              <code>{remote.info.remoteUrl}</code>
+                            )}
+                          </dd>
+                        </>
+                      )}
                     </dl>
                     {remote?.status === "ready" &&
                       remote.info.remoteUrl !== null &&
@@ -408,12 +479,17 @@ export function RepositoriesSection() {
                   </>
                 )}
 
+                {/* Everything below, down to the credential, is this
+                    computer's checkout (task 066), so a repository with none
+                    here has none of it to show. */}
+                {checkout && (
+                <>
                 <div className="unattended-toggle">
                   <label htmlFor={`unattended-${repository.id}`}>
                     <input
                       id={`unattended-${repository.id}`}
                       type="checkbox"
-                      checked={repository.allowUnattendedRuns}
+                      checked={checkout.unattendedConsent}
                       onChange={(event) =>
                         handleUnattendedToggle(repository, event.target.checked)
                       }
@@ -435,13 +511,13 @@ export function RepositoriesSection() {
                     id={`concurrency-${repository.id}`}
                     type="number"
                     min={1}
-                    value={repository.maxConcurrency}
+                    value={checkout.maxConcurrency}
                     onChange={(event) =>
-                      handleConcurrencyChange(repository, Number(event.target.value))
+                      handleConcurrencyChange(repository, checkout, Number(event.target.value))
                     }
                   />
                   <p className="muted">
-                    {repository.maxConcurrency > 1
+                    {checkout.maxConcurrency > 1
                       ? "Two agents in this repository will fight over ports, test databases and lockfiles — git keeps their worktrees apart and nothing keeps those apart."
                       : "Raise this only for a repository whose tasks genuinely do not interfere. Running several repositories at once needs nothing here."}
                   </p>
@@ -454,8 +530,11 @@ export function RepositoriesSection() {
                     would run the wrong teardown against the wrong project. */}
                 <OnArchiveFields
                   repository={repository}
+                  checkout={checkout}
                   onChange={(mode, script) => handleOnArchiveChange(repository, mode, script)}
                 />
+                </>
+                )}
 
                 {/* Beside the opt-in, because the two answer the same
                     question about this repository: what a run here is allowed
@@ -476,11 +555,16 @@ export function RepositoriesSection() {
                   </div>
                 )}
 
+                {/* Task 037's review loop, one level down from Settings →
+                    Review and one up from the task: every task here inherits
+                    what is not set on its own card. */}
+                <RepositoryReview repository={repository} catalogue={catalogue} />
+
                 {/* Task 022, beside the opt-in and the default strategy for
                     the same reason both of those are here: the three answer one
                     question about this repository — what a run here may do,
                     what it is spawned with, and whose access it acts under. */}
-                <CredentialSection repositoryId={repository.id} />
+                {checkout && <CredentialSection repositoryId={repository.id} />}
 
                 {confirming && (
                   <div
@@ -515,5 +599,42 @@ export function RepositoriesSection() {
         </ul>
       )}
     </section>
+  );
+}
+
+/**
+ * One repository's review loop configuration (task 037), in the shape of
+ * `OnArchiveFields` and the strategy default beside it. Its own component so
+ * each row reads and subscribes to its own level; the section above would
+ * otherwise need a hook per repository, which a hook cannot be.
+ */
+function RepositoryReview({
+  repository,
+  catalogue,
+}: {
+  readonly repository: Repository;
+  readonly catalogue: Catalogue | null;
+}) {
+  const level = useReviewLevel("repository", repository.id);
+
+  async function save(config: ReviewConfig) {
+    await setRepositoryReviewConfig(repository.id, config);
+    await level.reload();
+  }
+
+  return (
+    <div className="repo-review">
+      <h5>Review loop</h5>
+      {level.error && <ErrorBanner error={level.error} onDismiss={level.dismissError} />}
+      {level.data && (
+        <ReviewConfigFields
+          scope="repository"
+          idPrefix={`repo-review-${repository.id}`}
+          level={level.data}
+          catalogue={catalogue}
+          onChange={save}
+        />
+      )}
+    </div>
   );
 }

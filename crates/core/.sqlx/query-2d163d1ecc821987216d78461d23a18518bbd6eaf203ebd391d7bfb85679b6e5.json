@@ -1,0 +1,44 @@
+{
+  "db_name": "SQLite",
+  "query": "\n        SELECT id, name, default_branch, allow_unattended_runs,\n               created_at AS \"created_at: chrono::DateTime<chrono::Utc>\"\n        FROM repositories\n        WHERE id = ?1 AND team_id IN (SELECT value FROM json_each(?2))\n        ",
+  "describe": {
+    "columns": [
+      {
+        "name": "id",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "name",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "default_branch",
+        "ordinal": 2,
+        "type_info": "Text"
+      },
+      {
+        "name": "allow_unattended_runs",
+        "ordinal": 3,
+        "type_info": "Bool"
+      },
+      {
+        "name": "created_at: chrono::DateTime<chrono::Utc>",
+        "ordinal": 4,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "2d163d1ecc821987216d78461d23a18518bbd6eaf203ebd391d7bfb85679b6e5"
+}

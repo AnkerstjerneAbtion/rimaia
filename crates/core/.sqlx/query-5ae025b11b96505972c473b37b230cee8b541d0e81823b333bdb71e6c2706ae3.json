@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT revision, updated_by FROM team_settings WHERE team_id = ?1 AND key = ?2",
+  "describe": {
+    "columns": [
+      {
+        "name": "revision",
+        "ordinal": 0,
+        "type_info": "Integer"
+      },
+      {
+        "name": "updated_by",
+        "ordinal": 1,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      false,
+      true
+    ]
+  },
+  "hash": "5ae025b11b96505972c473b37b230cee8b541d0e81823b333bdb71e6c2706ae3"
+}

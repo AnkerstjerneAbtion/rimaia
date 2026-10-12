@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT r.findings_recorded_at AS \"findings_recorded_at: DateTime<Utc>\"\n             FROM runs r JOIN tasks t ON t.id = r.task_id\n            WHERE r.id = ?1 AND t.team_id IN (SELECT value FROM json_each(?2))",
+  "describe": {
+    "columns": [
+      {
+        "name": "findings_recorded_at: DateTime<Utc>",
+        "ordinal": 0,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      true
+    ]
+  },
+  "hash": "b3d01bd89e6cbc2296d6f51bac4d67555649cb1ce91624e31d51c6f31e391246"
+}

@@ -12,7 +12,7 @@
 //! 004's `move_task` owns that transaction and the neighbour lookup; this
 //! module owns only the numbers.
 
-use sqlx::SqliteConnection;
+use crate::context::ScopedTx;
 
 use crate::db::BoardColumn;
 use crate::error::Result;
@@ -153,16 +153,16 @@ pub fn rebalanced_positions(count: usize) -> Vec<f64> {
 /// Renumbers every task in one `(repository_id, column)` to evenly spaced
 /// positions, in the order they currently sort.
 ///
-/// Takes a connection, not a pool, because the caller is normally partway
-/// through a move that found no gap: the renumber and the insert that follows
-/// it must be one transaction, or the MCP server and the scheduler can
-/// interleave and put back the very collision this just removed. Callers pass
-/// `&mut *tx`.
+/// Takes the caller's transaction, not a pool, because the caller is normally
+/// partway through a move that found no gap: the renumber and the insert that
+/// follows it must be one transaction, or the MCP server and the scheduler can
+/// interleave and put back the very collision this just removed.
 ///
-/// **That transaction is an obligation, and nothing here enforces it** —
-/// `&mut SqliteConnection` is what a `Transaction` derefs to, so a pooled
-/// connection in autocommit satisfies the signature just as well. Break it and
-/// the loop below is N independent commits. A failure part-way through — a
+/// **That transaction is an obligation, and the type enforces it** — a
+/// [`ScopedTx`] is always a real transaction, opened through a context, where
+/// the `&mut SqliteConnection` this used to take was satisfied just as well by
+/// a pooled connection in autocommit. Break it and the loop below is N
+/// independent commits. A failure part-way through — a
 /// `SQLITE_BUSY` that outlasts the pool's busy timeout, an I/O error — keeps
 /// the rows already renumbered and abandons the rest. Negative positions are
 /// ordinary, since `position_between(None, Some(x))` prepends at `x - 1.0`, so
@@ -191,7 +191,7 @@ pub fn rebalanced_positions(count: usize) -> Vec<f64> {
 /// "an id means re-read this") keeps every other card's pre-rebalance
 /// position.
 pub async fn rebalance_column(
-    conn: &mut SqliteConnection,
+    tx: &mut ScopedTx,
     repository_id: &str,
     column: BoardColumn,
 ) -> Result<Vec<String>> {
@@ -208,12 +208,12 @@ pub async fn rebalance_column(
         repository_id,
         column,
     )
-    .fetch_all(&mut *conn)
+    .fetch_all(&mut **tx)
     .await?;
 
     for (id, position) in ids.iter().zip(rebalanced_positions(ids.len())) {
         sqlx::query!("UPDATE tasks SET position = ?1 WHERE id = ?2", position, id,)
-            .execute(&mut *conn)
+            .execute(&mut **tx)
             .await?;
     }
 

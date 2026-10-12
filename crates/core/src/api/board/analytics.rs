@@ -1,0 +1,60 @@
+//! The analytics page (task 024, ADR-0022).
+//!
+//! Thin over `crate::analytics`, which does every `SELECT` and takes every
+//! decision about what a NULL means (seam-contract D18). **Nothing here writes
+//! a run row, and nothing anywhere caches an aggregate** — ADR-0022 part 3
+//! makes the page a pure read, and the cheapest way to keep that true is for
+//! there to be no other kind of function in this file.
+
+use chrono::{DateTime, Utc};
+use serde::Deserialize;
+
+use super::NoArgs;
+use crate::analytics::{self, Analytics, Period};
+use crate::api::BoardRequest;
+use crate::db::settings;
+use crate::Result;
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GetAnalytics {
+    pub from: Option<DateTime<Utc>>,
+    pub to: Option<DateTime<Utc>>,
+}
+
+/// Every figure the page renders, for one period.
+///
+/// The bounds arrive already resolved, because "this week" is a question about
+/// the *user's* calendar and timezone and the window is the only thing that
+/// knows either. Omitting both is all time.
+pub async fn get_analytics(request: BoardRequest, args: GetAnalytics) -> Result<Analytics> {
+    analytics::analytics(
+        &request.ctx,
+        Period {
+            from: args.from,
+            to: args.to,
+        },
+    )
+    .await
+}
+
+/// What the user says they pay per month, or `null` when they have not said.
+///
+/// Its own command rather than a field on [`get_analytics`], because the two
+/// change on completely different clocks: this one when a human types in a box,
+/// the other every time a run ends.
+pub async fn get_subscription_cost(request: BoardRequest, _: NoArgs) -> Result<Option<f64>> {
+    settings::subscription_monthly_usd(&request.ctx).await
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SetSubscriptionCost {
+    pub value: Option<f64>,
+}
+
+/// Stores it, or clears it with `null`. Refuses a negative figure at the field
+/// rather than storing one the page would have to ignore.
+pub async fn set_subscription_cost(request: BoardRequest, args: SetSubscriptionCost) -> Result<()> {
+    settings::set_subscription_monthly_usd(&request.ctx, args.value).await
+}

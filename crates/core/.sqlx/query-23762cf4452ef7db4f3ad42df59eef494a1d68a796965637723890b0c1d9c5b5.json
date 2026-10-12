@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE tasks\n            SET plan_revision = plan_revision + 1, plan_updated_by = ?1,\n                plan_written_during_run = ?2\n          WHERE id = ?3",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": []
+  },
+  "hash": "23762cf4452ef7db4f3ad42df59eef494a1d68a796965637723890b0c1d9c5b5"
+}

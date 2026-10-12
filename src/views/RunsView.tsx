@@ -7,6 +7,8 @@ import { RunDetailOverlay } from "../components/runs/RunDetailOverlay";
 import { SessionOutcomesList } from "../components/runs/SessionOutcomesList";
 import type { RunCostSummary } from "../types";
 import type { SessionOutcome } from "../components/runs/SessionOutcomesList";
+import { RUN_KIND_LABELS } from "../lib/board";
+import { useHasMachine } from "../lib/capabilities";
 import { environmentOverheadNote } from "../lib/runEnvironment";
 import { ErrorBanner } from "../components/ErrorBanner";
 import { EXIT_CLASS_LABELS, formatCostUsd } from "../components/panel/RunOutcomeSection";
@@ -21,6 +23,7 @@ import {
   toRimaiaError,
 } from "../lib/commands";
 import {
+  subscribeToRunnerChanged,
   subscribeToRunsChanged,
   subscribeToSettingsChanged,
   subscribeToTasksChanged,
@@ -30,6 +33,7 @@ import type {
   RimaiaError,
   RunEnvironment,
   RunFilterInput,
+  RunKind,
   RunListEntry,
   RunStatus,
   TaskSummary,
@@ -43,6 +47,9 @@ import type {
 interface HistoryFilterState {
   repositoryId: string;
   status: RunStatus | "";
+  /** What the runs were for. Empty is "All kinds", which leaves `kind` out of
+   *  the request altogether (task 037). */
+  kind: RunKind | "";
   since: string;
   until: string;
 }
@@ -50,9 +57,12 @@ interface HistoryFilterState {
 const EMPTY_HISTORY_FILTER: HistoryFilterState = {
   repositoryId: "",
   status: "",
+  kind: "",
   since: "",
   until: "",
 };
+
+const RUN_KIND_OPTIONS: RunKind[] = ["implementation", "review", "fix"];
 
 const RUN_STATUS_OPTIONS: RunStatus[] = [
   "running",
@@ -66,6 +76,7 @@ function toRunFilterInput(filter: HistoryFilterState): RunFilterInput {
   return {
     repositoryId: filter.repositoryId || undefined,
     status: filter.status || undefined,
+    kind: filter.kind || undefined,
     // A date input names a calendar day; `since` starts at its beginning and
     // `until` at the start of the *next* day, so the day the user picked is
     // included whichever field it is in rather than excluding whatever ran
@@ -97,6 +108,10 @@ function nextDayStart(day: string): string {
  * one's — this view only decides *which* tasks get a card.
  */
 export function RunsView() {
+  // The queue, its controls and the run environment are this machine's
+  // (`get_queue_status` and the queue commands, `get_run_environment`: they stay
+  // local, task 050 Scope 6), so a browser shows the runs and not the console.
+  const hasMachine = useHasMachine();
   const [runningTasks, setRunningTasks] = useState<TaskSummary[] | null>(null);
   const [readError, setReadError] = useState<RimaiaError | null>(null);
   const [repositoryNames, setRepositoryNames] = useState<ReadonlyMap<string, string>>(new Map());
@@ -137,7 +152,7 @@ export function RunsView() {
       (repositories) => setRepositoryNames(new Map(repositories.map((r) => [r.id, r.name]))),
       () => {},
     );
-    getRunEnvironment().then(setRunEnvironment, () => {});
+    if (hasMachine) getRunEnvironment().then(setRunEnvironment, () => {});
     // Cosmetic, like the two above: a failure here costs the proportion in the
     // note below and nothing else, so it stays silent rather than raising a
     // banner over the queue.
@@ -193,6 +208,7 @@ export function RunsView() {
   // card dragged to the top mid-queue shows up here as what runs next before
   // the queue itself gets there.
   useEffect(() => {
+    if (!hasMachine) return;
     let active = true;
 
     // Ids of runs already turned into a `SessionOutcome` — two events landing
@@ -269,10 +285,12 @@ export function RunsView() {
 
     refresh();
 
-    // Three sources can each change what the queue would report — a task
-    // moving, a run ending, or the switch itself — and all three just mean
-    // "read it again", so every subscription below shares one `settle`
-    // rather than each keeping its own `unlisten` slot.
+    // Four sources can each change what the queue would report — a task
+    // moving, a run ending, the switch, the window or the schedule error on
+    // this machine (`runner:changed`), or a team setting the plan reads
+    // (`settings:changed`) — and all of them just mean "read it again", so
+    // every subscription below shares one `settle` rather than each keeping
+    // its own `unlisten` slot.
     const unlistens: Array<() => void> = [];
     function settle(subscription: Promise<() => void>) {
       subscription.then(
@@ -292,12 +310,13 @@ export function RunsView() {
     settle(subscribeToTasksChanged(() => active && refresh()));
     settle(subscribeToRunsChanged(() => active && refresh()));
     settle(subscribeToSettingsChanged(() => active && refresh()));
+    settle(subscribeToRunnerChanged(() => active && refresh()));
 
     return () => {
       active = false;
       for (const unlisten of unlistens) unlisten();
     };
-  }, []);
+  }, [hasMachine]);
 
   // Re-read on every filter change, and on any mutation a run's outcome
   // could come from (`runs:changed`) or that could rename a task or
@@ -358,65 +377,69 @@ export function RunsView() {
       {readError && <ErrorBanner error={readError} onDismiss={() => setReadError(null)} />}
       {queueError && <ErrorBanner error={queueError} onDismiss={() => setQueueError(null)} />}
 
-      {/* The console: the queue's state, its four readouts and the transport,
-          in one bar. Everything below it is detail on one of those numbers. */}
-      <section className="queue-console" data-tone={queueConsole?.tone ?? "paused"}>
-        <div className="queue-console-state">
-          <div className="queue-console-heading">
-            <h2>Run queue</h2>
-            {queueConsole && (
-              <span className={`queue-state-badge queue-state-${queueConsole.tone}`}>
-                <span
-                  className={
-                    queueConsole.tone === "running" ? "status-dot status-dot-live" : "status-dot"
-                  }
-                  aria-hidden="true"
-                />
-                {queueConsole.label}
-              </span>
+      {hasMachine && (
+        <>
+        {/* The console: the queue's state, its four readouts and the transport,
+            in one bar. Everything below it is detail on one of those numbers. */}
+        <section className="queue-console" data-tone={queueConsole?.tone ?? "paused"}>
+          <div className="queue-console-state">
+            <div className="queue-console-heading">
+              <h2>Run queue</h2>
+              {queueConsole && (
+                <span className={`queue-state-badge queue-state-${queueConsole.tone}`}>
+                  <span
+                    className={
+                      queueConsole.tone === "running" ? "status-dot status-dot-live" : "status-dot"
+                    }
+                    aria-hidden="true"
+                  />
+                  {queueConsole.label}
+                </span>
+              )}
+            </div>
+
+            {/* What the badge cannot say by itself: *why* it reads what it reads.
+                A queue a schedule started at 22:00 stops by itself at 06:00, and
+                without this that reads exactly like a queue that failed with work
+                still on the board (task 013) — or, on a usage-limit hold, like a
+                queue that says "Running" and starts nothing (ADR-0011). */}
+            {queueConsole && <p className="queue-console-detail">{queueConsole.detail}</p>}
+
+            {queueStatus === null && !queueError && <p className="muted">Reading queue status…</p>}
+
+            {/* The one failure `SkipReason` cannot name: a missing `claude` fails
+                `probe_cli` before any task is even chosen, so nothing on the
+                board explains it and the state badge above would otherwise read
+                "Running" over a full plan while nothing happens all night. */}
+            {queueStatus?.lastStepError && (
+              <p className="queue-step-error" role="alert">
+                The queue could not complete its last pass: {queueStatus.lastStepError}
+              </p>
             )}
           </div>
 
-          {/* What the badge cannot say by itself: *why* it reads what it reads.
-              A queue a schedule started at 22:00 stops by itself at 06:00, and
-              without this that reads exactly like a queue that failed with work
-              still on the board (task 013) — or, on a usage-limit hold, like a
-              queue that says "Running" and starts nothing (ADR-0011). */}
-          {queueConsole && <p className="queue-console-detail">{queueConsole.detail}</p>}
+          {queueStatus && (
+            <QueueControls
+              state={queueStatus.state}
+              hasRunBefore={hasRunBefore}
+              hasRunInFlight={queueStatus.runningTaskIds.length > 0}
+            />
+          )}
 
-          {queueStatus === null && !queueError && <p className="muted">Reading queue status…</p>}
-
-          {/* The one failure `SkipReason` cannot name: a missing `claude` fails
-              `probe_cli` before any task is even chosen, so nothing on the
-              board explains it and the state badge above would otherwise read
-              "Running" over a full plan while nothing happens all night. */}
-          {queueStatus?.lastStepError && (
-            <p className="queue-step-error" role="alert">
-              The queue could not complete its last pass: {queueStatus.lastStepError}
+          {/* A footnote, not a paragraph in the control band. It is reference —
+              what every run costs before it does anything — and the three
+              sentences it used to spend saying where to change it and where to
+              read a finished run's cost were instructions nobody needs while
+              deciding whether to press Start. */}
+          {runEnvironment && (
+            <p className="runs-environment-note">
+              {runEnvironment === "inherit" ? "Inherit (default)" : "Strict / local"} environment
+              {runEnvironment === "inherit" && overheadNote ? ` · ${overheadNote}` : ". "}
             </p>
           )}
-        </div>
-
-        {queueStatus && (
-          <QueueControls
-            state={queueStatus.state}
-            hasRunBefore={hasRunBefore}
-            hasRunInFlight={queueStatus.runningTaskIds.length > 0}
-          />
-        )}
-
-        {/* A footnote, not a paragraph in the control band. It is reference —
-            what every run costs before it does anything — and the three
-            sentences it used to spend saying where to change it and where to
-            read a finished run's cost were instructions nobody needs while
-            deciding whether to press Start. */}
-        {runEnvironment && (
-          <p className="runs-environment-note">
-            {runEnvironment === "inherit" ? "Inherit (default)" : "Strict / local"} environment
-            {runEnvironment === "inherit" && overheadNote ? ` · ${overheadNote}` : ". "}
-          </p>
-        )}
-      </section>
+        </section>
+        </>
+      )}
 
       <section className="runs-live">
         <div className="runs-section-head">
@@ -545,6 +568,26 @@ export function RunsView() {
           </label>
 
           <label>
+            Kind
+            <select
+              value={historyFilter.kind}
+              onChange={(event) =>
+                setHistoryFilter((filter) => ({
+                  ...filter,
+                  kind: event.target.value as RunKind | "",
+                }))
+              }
+            >
+              <option value="">All kinds</option>
+              {RUN_KIND_OPTIONS.map((kind) => (
+                <option key={kind} value={kind}>
+                  {RUN_KIND_LABELS[kind]}
+                </option>
+              ))}
+            </select>
+          </label>
+
+          <label>
             From
             <input
               type="date"
@@ -591,6 +634,7 @@ export function RunsView() {
               <tr>
                 <th scope="col">Task</th>
                 <th scope="col">Repository</th>
+                <th scope="col">Kind</th>
                 <th scope="col">Outcome</th>
                 <th scope="col">Started</th>
                 {/* The three columns that are only comparable if their digits
@@ -624,6 +668,7 @@ export function RunsView() {
                     </button>
                   </td>
                   <td className="runs-history-repo">{entry.repositoryName}</td>
+                  <td className="runs-history-kind">{RUN_KIND_LABELS[entry.kind]}</td>
                   <td>
                     <span
                       className={

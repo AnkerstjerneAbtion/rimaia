@@ -1,4 +1,4 @@
-//! The eight checks, one function each, every input injected.
+//! The nine checks, one function each, every input injected.
 //!
 //! Each function corresponds to one row of task 018's table and to one way an
 //! overnight queue can waste a night. None of them reads the environment for
@@ -18,6 +18,7 @@ use tokio::process::Command;
 
 use crate::db::Repository;
 use crate::error::Result;
+use crate::machine::Checkout;
 use crate::paths::{AppPaths, DataDirOrigin, DATA_DIR_ENV};
 use crate::repo::{self, GhStatus};
 use crate::runner::probe_cli;
@@ -25,6 +26,7 @@ use crate::runner::process::strip_process_identity;
 use crate::runner::provider::{
     format_version, parse_version, AgentProvider, AuthState, ProbeOutput,
 };
+use crate::strategy::catalogue::{self, InvalidId};
 
 use super::{Check, CheckResult};
 
@@ -431,18 +433,20 @@ pub fn disk_space(paths: &AppPaths) -> CheckResult {
 /// Narrowing this to "only repositories with a `ready` task" would need the
 /// selection plan the doctor deliberately does not read, and is left to whoever
 /// finds the over-blocking worse than the wasted night (seam-contract D22).
-pub async fn repository_path(repository: &Repository) -> Result<CheckResult> {
-    Ok(match repo::path_problem(repository).await? {
+///
+/// The path is this machine's checkout's (task 066).
+pub async fn repository_path(repository: &Repository, checkout: &Checkout) -> Result<CheckResult> {
+    Ok(match repo::path_problem(checkout).await? {
         None => CheckResult::pass(
             Check::RepositoryPath,
-            format!("{} is at {}.", repository.name, repository.path),
+            format!("{} is at {}.", repository.name, checkout.path),
         )
         .about(&repository.name),
         Some(problem) => CheckResult::fail(
             Check::RepositoryPath,
             format!(
                 "{} is registered at {}, but {problem}.",
-                repository.name, repository.path
+                repository.name, checkout.path
             ),
             format!(
                 "Remove \"{}\" in Settings → Repositories and register it at its new path, then \
@@ -465,8 +469,12 @@ pub async fn repository_path(repository: &Repository) -> Result<CheckResult> {
 /// acceptance criterion, and because an installation-wide "gh is not
 /// authenticated" tells the user nothing about which of five repositories is
 /// affected.
-pub async fn github_cli(repository: &Repository, program: &Path) -> Result<CheckResult> {
-    let status = repo::gh_status(repository, program).await?;
+pub async fn github_cli(
+    repository: &Repository,
+    checkout: &Checkout,
+    program: &Path,
+) -> Result<CheckResult> {
+    let status = repo::gh_status(checkout, program).await?;
     Ok(match status {
         GhStatus::Ready => CheckResult::pass(
             Check::GitHubCli,
@@ -501,6 +509,68 @@ pub async fn github_cli(repository: &Repository, program: &Path) -> Result<Check
         ),
     }
     .about(&repository.name))
+}
+
+/// Values stored before task 073 gave them a write rule, that the rule would
+/// refuse now: catalogue ids, and the default branch of each repository this
+/// machine has a checkout of (seam-contract D37).
+///
+/// **Warns, never fails.** Such a value is never rewritten, and it still runs
+/// in a personal team, where every author is the runner's owner; a shared
+/// team cannot hold one, because every value it has was written under the
+/// rule. The row exists so the operator can fix it before the value reaches a
+/// door that refuses it, not because a night is at stake. One row per value,
+/// naming its field, or one passing row.
+pub async fn prompt_inputs(
+    invalid_ids: &[InvalidId],
+    repositories: &[Repository],
+) -> Result<Vec<CheckResult>> {
+    let mut results: Vec<CheckResult> = invalid_ids
+        .iter()
+        .map(|invalid| {
+            CheckResult::warn(
+                Check::PromptInputs,
+                format!(
+                    "the strategy catalogue's {} {:?} was stored before ids had a rule, and \
+                     would be refused now: {}.",
+                    invalid.field,
+                    invalid.id,
+                    catalogue::ID_RULE
+                ),
+                "Change it in Settings → Strategy to an id that fits. Until then it runs in this \
+                 personal team as it always has.",
+            )
+        })
+        .collect();
+
+    for repository in repositories {
+        if repo::is_valid_default_branch(&repository.default_branch).await? {
+            continue;
+        }
+        results.push(
+            CheckResult::warn(
+                Check::PromptInputs,
+                format!(
+                    "{}'s default branch {:?} was stored before default branches had a rule, and \
+                     would be refused now: {}.",
+                    repository.name,
+                    repository.default_branch,
+                    repo::DEFAULT_BRANCH_RULE
+                ),
+                "Change it in Settings → Repositories to a branch name that fits. Until then it \
+                 runs in this personal team as it always has.",
+            )
+            .about(&repository.name),
+        );
+    }
+
+    if results.is_empty() {
+        results.push(CheckResult::pass(
+            Check::PromptInputs,
+            "Every catalogue id and default branch fits the rule a shared team's prompt relies on.",
+        ));
+    }
+    Ok(results)
 }
 
 /// Whether the MCP server actually bound (ADR-0006, seam-contract D16.7).

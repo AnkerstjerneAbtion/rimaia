@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT r.base_ref FROM runs r JOIN tasks t ON t.id = r.task_id\n          WHERE r.task_id = ?1 AND t.team_id IN (SELECT value FROM json_each(?2))\n          ORDER BY r.attempt DESC LIMIT 1",
+  "describe": {
+    "columns": [
+      {
+        "name": "base_ref",
+        "ordinal": 0,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      true
+    ]
+  },
+  "hash": "7a74f0ae3d51e9854b23b6e46a540c1354a009a94b893db03a5daaf62503ef9d"
+}

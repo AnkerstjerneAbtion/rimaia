@@ -202,3 +202,25 @@ what the *implementation* run inherits, which is a real trade the operator makes
 capability and cost. The strategy run has no such trade to offer — nobody wants their
 planner reaching the issue tracker — so its environment is not configuration at all, and is
 not surfaced as any kind of override.
+
+---
+
+## Amendment, 2026-10-09 — review and fix phases follow `run_environment`
+
+ADR-0017's loop (task 021) spawns two more kinds of child after a successful implementation:
+a review and a fix. **Both follow the `run_environment` setting, `inherit` by default**,
+unlike the strategy run above, which is always `strict_local`.
+
+The planner's two reasons do not transfer. A review exists to run the user's own review
+skill or slash command — ADR-0017's "Rimaia does not ship a review methodology" — and
+`strict_local` would hide exactly that: the operator's skills, their MCP servers and their
+hooks are what the review instructions name. A fix is implementation work, and an
+implementation run inherits. The cost side is real and is the operator's to weigh: every
+phase pays the inheritance overhead once per session, which is why turning the loop on is
+spelled as acknowledging its cost (ADR-0017's amendment) and why task 037 shows the observed
+run cost beside that control.
+
+The security argument is met another way. Each phase holds a run-scoped handle served as
+`rimaia-run`, and the operator's `rimaia` surface is denied to every run whatever the
+setting (seam-contract D30 points 1 and 2), so inheriting the operator's registration does
+not hand a reviewer or a fixer the operator surface.

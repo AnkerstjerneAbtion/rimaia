@@ -63,7 +63,7 @@ use crate::schedule::cron;
 /// schema's own comment expected one — "a cron expression with a timezone, or a
 /// wall-clock time, or **neither for run now**". Declining it is
 /// seam-contract D24's, and the argument is that
-/// [`QueueHandle::start`](crate::scheduler::QueueHandle::start) already *is* Run
+/// `rimaia_runner::queue::QueueHandle::start` already *is* Run
 /// now: it is the button, it runs the doctor, and it flips the switch. A
 /// `schedules` row that nothing ever fires would be a second spelling of that
 /// button, with its own enable toggle to leave in the wrong position and its own

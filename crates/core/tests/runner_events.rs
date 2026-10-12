@@ -17,6 +17,7 @@
 
 use chrono::{DateTime, Duration, Utc};
 use pretty_assertions::assert_eq;
+use rimaia_core::events::TeamTail;
 use rimaia_core::runner::events::{
     Activity, EndReason, EventStream, InitEvent, McpServer, OtherEvent, RunEvent, RunTail,
     UsageState, WindowReopen, RECENT_ACTIVITY_CAPACITY,
@@ -266,8 +267,8 @@ async fn the_init_event_reports_the_isolation_that_was_actually_applied() {
 async fn the_usage_limit_signal_is_read_from_its_own_fields_rather_than_grepped() {
     // ADR-0011's amendment: a typed event on every run, early and unprompted —
     // not an error message to pattern-match. The state is `Allowed` because
-    // `"allowed"` is the one status the corpus contains; see this file's header
-    // and `spike/FINDINGS.md` §4 for why nothing else is asserted by value.
+    // this recording says `"allowed"`; see this file's header and
+    // `spike/FINDINGS.md` §4 for why no wall is asserted by value.
     let replay = Replay::of("success").await;
     let usage = replay
         .stream
@@ -495,7 +496,7 @@ struct Replay {
     stream: EventStream,
     events: Vec<RunEvent>,
     malformed_lines: u64,
-    tail: tokio::sync::broadcast::Receiver<RunTail>,
+    tail: tokio::sync::broadcast::Receiver<TeamTail>,
 }
 
 impl Replay {
@@ -521,8 +522,14 @@ impl Replay {
         // receivers that already existed — the same trap `TestContext` documents
         // for change events.
         let tail = harness.context.subscribe_tail();
-        let stream = EventStream::create(&harness.context, &paths, TASK_ID, RUN_ID)
-            .expect("the run directory is creatable");
+        let stream = EventStream::create(
+            &harness.context,
+            &harness.solo.team_id,
+            &paths,
+            TASK_ID,
+            RUN_ID,
+        )
+        .expect("the run directory is creatable");
 
         let mut replay = Self {
             _root: root,
@@ -574,7 +581,7 @@ impl Replay {
         let mut published = Vec::new();
         loop {
             match self.tail.try_recv() {
-                Ok(tail) => published.push(tail),
+                Ok(tail) => published.push(tail.tail),
                 Err(TryRecvError::Empty | TryRecvError::Closed) => break,
                 Err(TryRecvError::Lagged(dropped)) => {
                     panic!("the tail channel dropped {dropped} snapshots in a test")

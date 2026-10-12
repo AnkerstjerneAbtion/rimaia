@@ -24,6 +24,7 @@ function run(overrides: Partial<Run> = {}): Run {
     id: "run-1",
     taskId: "task-1",
     attempt: 1,
+    kind: "implementation",
     status: "succeeded",
     sessionId: "session-1",
     prompt: "do the thing",
@@ -33,7 +34,6 @@ function run(overrides: Partial<Run> = {}): Run {
     errorMessage: null,
     numTurns: 4,
     costUsd: 0.05,
-    logPath: "/data/runs/task-1/run-1.jsonl",
     prUrl: null,
     resumeAfter: null,
     baseRef: null,
@@ -44,6 +44,8 @@ function run(overrides: Partial<Run> = {}): Run {
     outputTokens: null,
     cacheReadTokens: null,
     cacheCreationTokens: null,
+    headSha: null,
+    baseSha: null,
     ...overrides,
   };
 }
@@ -66,6 +68,26 @@ describe("RunHistorySection", () => {
     expect(await screen.findByText(/No runs yet/)).toBeInTheDocument();
   });
 
+  it("labels each row by what it was for, and no longer calls it an attempt", async () => {
+    mockInvoke.mockImplementation(async (command) => {
+      if (command === "list_runs_for_task") {
+        return [
+          run({ id: "run-3", attempt: 3, kind: "fix" }),
+          run({ id: "run-2", attempt: 2, kind: "review" }),
+          run({ id: "run-1", attempt: 1 }),
+        ];
+      }
+      throw new Error(`unexpected command: ${command}`);
+    });
+
+    render(<RunHistorySection taskId="task-1" />);
+
+    expect(await screen.findByText("Fix · #3")).toBeInTheDocument();
+    expect(screen.getByText("Review · #2")).toBeInTheDocument();
+    expect(screen.getByText("Implementation · #1")).toBeInTheDocument();
+    expect(screen.queryByText(/attempt/i)).toBeNull();
+  });
+
   it("lists every attempt, newest first as list_runs_for_task orders them", async () => {
     mockInvoke.mockImplementation(async (command) => {
       if (command === "list_runs_for_task") {
@@ -76,8 +98,8 @@ describe("RunHistorySection", () => {
 
     render(<RunHistorySection taskId="task-1" />);
 
-    expect(await screen.findByText("Attempt 2")).toBeInTheDocument();
-    expect(screen.getByText("Attempt 1")).toBeInTheDocument();
+    expect(await screen.findByText("Implementation · #2")).toBeInTheDocument();
+    expect(screen.getByText("Implementation · #1")).toBeInTheDocument();
   });
 
   it("opens the run detail overlay when an attempt is clicked", async () => {
@@ -87,7 +109,7 @@ describe("RunHistorySection", () => {
         expect((args as { runId: string }).runId).toBe("run-1");
         return {
           ...run(),
-          diff: { taskId: "task-1", branch: null, baseRef: "main", diff: { filesChanged: 0, insertions: 0, deletions: 0 }, files: [], commits: [] },
+          review: { source: "recorded", bundle: null },
           logAvailable: true,
         };
       }
@@ -96,7 +118,7 @@ describe("RunHistorySection", () => {
 
     render(<RunHistorySection taskId="task-1" />);
 
-    fireEvent.click(await screen.findByText("Attempt 1"));
+    fireEvent.click(await screen.findByText("Implementation · #1"));
 
     expect(await screen.findByRole("dialog", { name: "Run detail" })).toBeInTheDocument();
   });
@@ -115,7 +137,7 @@ describe("RunHistorySection", () => {
       if (command === "get_run") {
         return {
           ...run(),
-          diff: { taskId: "task-1", branch: null, baseRef: "main", diff: { filesChanged: 0, insertions: 0, deletions: 0 }, files: [], commits: [] },
+          review: { source: "recorded", bundle: null },
           logAvailable: false,
         };
       }
@@ -124,7 +146,7 @@ describe("RunHistorySection", () => {
 
     const { container } = render(<RunHistorySection taskId="task-1" />);
 
-    fireEvent.click(await screen.findByText("Attempt 1"));
+    fireEvent.click(await screen.findByText("Implementation · #1"));
 
     const overlay = await screen.findByRole("dialog", { name: "Run detail" });
     expect(container.querySelector(".run-history-section")).not.toContainElement(overlay);
@@ -198,6 +220,6 @@ describe("RunHistorySection", () => {
 
     listenHandlers["runs:changed"]?.({ payload: ["run-1"] });
 
-    expect(await screen.findByText("Attempt 1")).toBeInTheDocument();
+    expect(await screen.findByText("Implementation · #1")).toBeInTheDocument();
   });
 });

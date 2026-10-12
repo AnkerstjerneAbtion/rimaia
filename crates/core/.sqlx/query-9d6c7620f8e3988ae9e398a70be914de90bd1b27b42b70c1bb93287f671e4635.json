@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "DELETE FROM api_token_teams\n          WHERE team_id = ?1 AND token_id IN (SELECT id FROM api_tokens WHERE user_id = ?2)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "9d6c7620f8e3988ae9e398a70be914de90bd1b27b42b70c1bb93287f671e4635"
+}

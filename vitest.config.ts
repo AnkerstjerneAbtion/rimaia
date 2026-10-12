@@ -14,6 +14,11 @@ export default defineConfig(async (env) =>
         environment: "jsdom",
         globals: true,
         setupFiles: ["src/test/setup.ts"],
+        // Node would load the opener plugin as an external module, and its own
+        // `import "@tauri-apps/api/core"` would then bypass `vi.mock`. Inlined,
+        // `openUrl`'s `invoke` is the same mocked one every other test sees
+        // (task 017: `openExternalUrl` is covered by that mock).
+        server: { deps: { inline: ["@tauri-apps/plugin-opener"] } },
       },
     }),
   ),

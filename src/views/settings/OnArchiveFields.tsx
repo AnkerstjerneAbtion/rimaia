@@ -1,10 +1,12 @@
 import { useEffect, useState } from "react";
 
 import { ON_ARCHIVE_LABELS } from "../../lib/archive";
-import type { OnArchive, Repository } from "../../types";
+import type { CheckoutView, OnArchive, Repository } from "../../types";
 
 interface OnArchiveFieldsProps {
   readonly repository: Repository;
+  /** This computer's checkout of it, which holds the policy since task 066. */
+  readonly checkout: CheckoutView;
   /** Both halves at once, because the mode and the path are one decision
    *  (ADR-0025 point 4): `"script"` with nothing to run is not one of the
    *  three states, so this form never emits it. */
@@ -22,7 +24,7 @@ interface OnArchiveFieldsProps {
  *
  * # What is stored, and when
  *
- * Choosing a radio is an *intent*; `repository.onArchive` is what is stored.
+ * Choosing a radio is an *intent*; `checkout.onArchive` is what is stored.
  * They differ on purpose for the two options that cannot be applied on the
  * click alone:
  *
@@ -37,18 +39,18 @@ interface OnArchiveFieldsProps {
  * happens, which is the same asymmetry `StorageSection` applies to its own
  * checkbox.
  */
-export function OnArchiveFields({ repository, onChange }: OnArchiveFieldsProps) {
-  const stored = repository.onArchive;
+export function OnArchiveFields({ repository, checkout, onChange }: OnArchiveFieldsProps) {
+  const stored = checkout.onArchive;
   const [intent, setIntent] = useState<OnArchive>(stored);
-  const [script, setScript] = useState(repository.onArchiveScript ?? "");
+  const [script, setScript] = useState(checkout.onArchiveScript ?? "");
 
   // Whatever the backend kept wins, including when it kept something this
   // form did not ask for — another window, or an MCP client, is a supported
   // writer of the same row (ADR-0006).
   useEffect(() => {
     setIntent(stored);
-    setScript(repository.onArchiveScript ?? "");
-  }, [stored, repository.onArchiveScript]);
+    setScript(checkout.onArchiveScript ?? "");
+  }, [stored, checkout.onArchiveScript]);
 
   const name = `on-archive-${repository.id}`;
 
@@ -109,7 +111,7 @@ export function OnArchiveFields({ repository, onChange }: OnArchiveFieldsProps) 
             type="button"
             disabled={
               script.trim() === "" ||
-              (stored === "script" && script.trim() === (repository.onArchiveScript ?? ""))
+              (stored === "script" && script.trim() === (checkout.onArchiveScript ?? ""))
             }
             onClick={() => onChange("script", script.trim())}
           >

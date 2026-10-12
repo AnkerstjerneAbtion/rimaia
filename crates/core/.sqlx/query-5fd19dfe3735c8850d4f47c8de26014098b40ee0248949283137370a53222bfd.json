@@ -1,0 +1,38 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT r.task_id, r.kind AS \"kind: RunKind\", r.status AS \"status: RunStatus\",\n                  r.findings_recorded_at AS \"findings_recorded_at: DateTime<Utc>\"\n             FROM runs r JOIN tasks t ON t.id = r.task_id\n            WHERE r.id = ?1 AND t.team_id IN (SELECT value FROM json_each(?2))",
+  "describe": {
+    "columns": [
+      {
+        "name": "task_id",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "kind: RunKind",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "status: RunStatus",
+        "ordinal": 2,
+        "type_info": "Text"
+      },
+      {
+        "name": "findings_recorded_at: DateTime<Utc>",
+        "ordinal": 3,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      true
+    ]
+  },
+  "hash": "5fd19dfe3735c8850d4f47c8de26014098b40ee0248949283137370a53222bfd"
+}

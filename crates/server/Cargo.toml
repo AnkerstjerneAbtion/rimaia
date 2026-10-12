@@ -1,0 +1,47 @@
+[package]
+name = "rimaia-server"
+version = "0.1.0"
+edition = "2021"
+description = "The Rimaia board over HTTP, and its binary (ADR-0027, ADR-0034)."
+
+# The board's HTTP door: `POST /api/v1/<name>` for every board row of
+# `rimaia_core::api::registry`, through `api::dispatch`. It never links the
+# runner (ADR-0027 point 6) or a desktop-framework crate, and takes no database
+# crate of its own: it reaches the store only through `rimaia-core`, and holds
+# no query macro and no offline query cache (seam-contract D33 point 2). A test
+# in `src/lib.rs` and `scripts/check-crate-boundaries.sh` hold it to that.
+# Every crate D34 gives a later task arrives with that task.
+
+[dependencies]
+rimaia-core = { path = "../core" }
+axum = { workspace = true }
+# The session, CSRF and sign-in cookies (task 047), set from typed fields.
+axum-extra = { workspace = true, features = ["cookie"] }
+# Sign-in with GitHub is two HTTPS requests (task 047), so this crate turns on
+# reqwest's TLS here and never on the workspace line, where `rimaia-core`'s
+# probe stays plain HTTP to 127.0.0.1 (seam-contract D34). Bodies are built with
+# `serde_json::to_vec`, so neither `json` nor `form` is enabled.
+reqwest = { workspace = true, features = ["rustls"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+# `ReceiverStream`, for the event stream (task 048, D34's amendment).
+tokio-stream = { workspace = true }
+# `trace` (task 046), `cors` and `fs` (task 050): the Tauri origins, and the
+# built web bundle at `/` (seam-contract D34).
+tower-http = { workspace = true, features = ["trace", "cors", "fs"] }
+tracing = { workspace = true }
+
+# `rimaia-core` again, with `testing` on, for `TwoTeams`, `FixedCaller`,
+# `FakeIdentityProvider` and the board case table. The tests drive a real
+# listener with the `reqwest` above, following no redirects and reading and
+# sending cookies by hand: its `cookies`, `json` and `form` features are not
+# approved (seam-contract D34).
+[dev-dependencies]
+rimaia-core = { path = "../core", features = ["testing"] }
+# The runner protocol's tests move the test clock by a duration and compare
+# the instants presence records (task 052). The workspace line `rimaia-core`
+# already uses, so no crate enters the lock (seam-contract D6, D34).
+chrono = { workspace = true }
+pretty_assertions = "1"
+tempfile = { workspace = true }

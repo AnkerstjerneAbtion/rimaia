@@ -26,21 +26,24 @@
 //! owns — spawn, argv, environment, cwd, stdin, pipes, exit status, signals,
 //! process groups.
 
-use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
 use pretty_assertions::assert_eq;
 use rimaia_core::db::{BoardColumn, ExitClass, RunState, StrategyMode};
+use rimaia_core::events::TeamTail;
 use rimaia_core::repo::{self, NewRepository};
-use rimaia_core::runner::events::RunTail;
-use rimaia_core::runner::provider::{ClaudeProvider, ProviderId};
+use rimaia_core::runner::events::{stderr_path, transcript_path};
+use rimaia_core::runner::provider::{ClaudeProvider, ProviderId, ProviderProfile};
 use rimaia_core::runner::{
-    run_task, AgentProvider, CancelSignal, RunRequest, RunnerConfig, STRATEGY_TRANSCRIPT_PREFIX,
+    run_task, AgentProvider, CancelSignal, RunRequest, RunTrigger, RunnerConfig,
+    STRATEGY_TRANSCRIPT_PREFIX,
 };
+use rimaia_core::scheduler;
 use rimaia_core::strategy::catalogue;
 use rimaia_core::tasks::strategy::{StrategyPlan, StrategyPlanStatus};
 use rimaia_core::tasks::{self, NewTask, TaskPatch};
+use rimaia_core::testing::board::claim_run;
 use rimaia_core::testing::fixtures::path_for;
 use rimaia_core::testing::provider::{Ledger, LedgerWithoutResume};
 use rimaia_core::testing::{FakeCli, TempRepo, TestContext};
@@ -96,7 +99,9 @@ async fn a_run_driven_by_the_second_provider_reaches_in_review() {
     // some other provider's shape.
     let recorded =
         std::fs::read_to_string(path_for(ProviderId::Ledger, "finished")).expect("the fixture");
-    let transcript = std::fs::read_to_string(&run.log_path).expect("a written transcript");
+    let transcript =
+        std::fs::read_to_string(transcript_path(&fixture.paths, &run.task_id, &run.id))
+            .expect("a written transcript");
     assert_eq!(transcript, recorded);
 
     // The prompt arrived whole, on stdin, and was closed — the mechanism
@@ -208,10 +213,7 @@ async fn two_attempts_of_one_task_share_a_conversation_and_spend_one_budget() {
     );
     let second = tokio::time::timeout(
         TEST_TIMEOUT,
-        fixture.run_request(
-            &cli,
-            RunRequest::resuming(&fixture.task_id, &first.session_id),
-        ),
+        fixture.run_request(&cli, true, RunRequest::default()),
     )
     .await
     .expect("the run finishes")
@@ -247,6 +249,12 @@ async fn a_requeued_task_gets_a_fresh_budget_under_a_self_minting_provider() {
         .await
         .expect("the run finishes")
         .expect("the run is recorded");
+    // A stopped run waits to be retried; giving up on it is what makes it the
+    // task that "gave up last night". Run now never claimed a waiting task:
+    // only `run_task`'s own claim did, and task 036 retired it.
+    scheduler::give_up(&fixture.harness.context, &fixture.task_id)
+        .await
+        .expect("give up on the waiting task");
     let second = tokio::time::timeout(TEST_TIMEOUT, fixture.run(&cli))
         .await
         .expect("the run finishes")
@@ -269,12 +277,13 @@ async fn a_provider_that_cannot_continue_is_sent_the_composed_prompt_not_the_con
         LEDGER_KILLED,
     );
 
-    let first = tokio::time::timeout(
+    tokio::time::timeout(
         TEST_TIMEOUT,
         fixture.run_with(
             &cli,
             Arc::new(LedgerWithoutResume),
-            RunRequest::manual(&fixture.task_id),
+            false,
+            RunRequest::default(),
         ),
     )
     .await
@@ -291,7 +300,8 @@ async fn a_provider_that_cannot_continue_is_sent_the_composed_prompt_not_the_con
         fixture.run_with(
             &cli,
             Arc::new(LedgerWithoutResume),
-            RunRequest::resuming(&fixture.task_id, &first.session_id),
+            true,
+            RunRequest::default(),
         ),
     )
     .await
@@ -332,9 +342,8 @@ async fn a_manual_attempt_records_the_mitigations_its_provider_could_not_enforce
         .expect("the run finishes")
         .expect("the run succeeds");
 
-    let diagnostics =
-        std::fs::read_to_string(PathBuf::from(&run.log_path).with_extension("stderr.log"))
-            .expect("a run that could not be fully protected says so beside its transcript");
+    let diagnostics = std::fs::read_to_string(stderr_path(&fixture.paths, &run.task_id, &run.id))
+        .expect("a run that could not be fully protected says so beside its transcript");
 
     assert!(
         diagnostics.contains("rewriting history on a remote"),
@@ -370,9 +379,10 @@ async fn a_second_provider_run_that_is_cancelled_still_records_the_ending_its_st
         tokio::join!(
             fixture.run_request(
                 &cli,
+                false,
                 RunRequest {
                     cancel: cancel.clone(),
-                    ..RunRequest::manual(&fixture.task_id)
+                    ..RunRequest::default()
                 },
             ),
             async {
@@ -392,7 +402,9 @@ async fn a_second_provider_run_that_is_cancelled_still_records_the_ending_its_st
     );
     // The ending the stream reported is on disk, which is what the grace period
     // buys — and it arrived after the signal, from a child that exits 137.
-    let transcript = std::fs::read_to_string(&run.log_path).expect("a written transcript");
+    let transcript =
+        std::fs::read_to_string(transcript_path(&fixture.paths, &run.task_id, &run.id))
+            .expect("a written transcript");
     assert!(
         transcript.contains("\"why\":\"stopped\""),
         "the ending its own stream reported: {transcript}",
@@ -445,7 +457,7 @@ async fn a_planner_falls_back_when_a_provider_cannot_inject_a_handle() {
 /// Opens a gated stand-in once the run says it is in flight, having cancelled it
 /// first — so the child is signalled, *then* allowed to emit its ending.
 async fn open_the_gate_once_the_run_is_live(
-    mut tail: Receiver<RunTail>,
+    mut tail: Receiver<TeamTail>,
     cancel: CancelSignal,
     gate: &std::path::Path,
 ) {
@@ -476,6 +488,7 @@ impl Fixture {
 
         let registered = repo::register(
             &harness.context,
+            harness.machine(),
             &paths.worktrees_dir(),
             NewRepository {
                 path: repository.path().to_string_lossy().into_owned(),
@@ -485,7 +498,7 @@ impl Fixture {
         )
         .await
         .expect("register the test repository");
-        repo::set_allow_unattended_runs(&harness.context, &registered.id, true)
+        repo::set_allow_unattended_runs(&harness.context, harness.machine(), &registered.id, true)
             .await
             .expect("ADR-0012's per-repository opt-in");
 
@@ -526,28 +539,45 @@ impl Fixture {
     }
 
     async fn run(&self, cli: &FakeCli) -> rimaia_core::Result<rimaia_core::db::Run> {
-        self.run_request(cli, RunRequest::manual(&self.task_id))
-            .await
+        self.run_request(cli, false, RunRequest::default()).await
     }
 
+    /// A manual run, claimed through the board first the way every starter
+    /// claims; `continue_session` is Retry now's claim rather than Run now's.
     async fn run_request(
         &self,
         cli: &FakeCli,
+        continue_session: bool,
         request: RunRequest,
     ) -> rimaia_core::Result<rimaia_core::db::Run> {
-        self.run_with(cli, Arc::new(Ledger), request).await
+        self.run_with(cli, Arc::new(Ledger), continue_session, request)
+            .await
     }
 
     async fn run_with(
         &self,
         cli: &FakeCli,
         provider: Arc<dyn AgentProvider>,
+        continue_session: bool,
         request: RunRequest,
     ) -> rimaia_core::Result<rimaia_core::db::Run> {
+        let config = self.config(cli, provider);
+        // The board built over the runner's own provider, so the planner is
+        // handed this provider's catalogue (task 036's Traps).
+        let board = self.harness.board(&self.paths, &config);
+        let claim = claim_run(
+            board.as_ref(),
+            &self.task_id,
+            RunTrigger::Manual,
+            continue_session,
+        )
+        .await?;
         run_task(
-            &self.harness.context,
+            board.as_ref(),
+            self.harness.machine(),
             &self.paths,
-            &self.config(cli, provider),
+            &config,
+            claim,
             request,
         )
         .await
@@ -556,7 +586,7 @@ impl Fixture {
     /// Puts the task into ADR-0016's `planned` mode, so `run_task` would resolve
     /// a strategy before spawning the implementation run.
     async fn set_planned(&self) {
-        catalogue::catalogue(&self.harness.context.pool, &ClaudeProvider)
+        catalogue::catalogue(&self.harness.context, &ProviderProfile::of(&ClaudeProvider))
             .await
             .expect("the seeded catalogue");
         tasks::update_task(

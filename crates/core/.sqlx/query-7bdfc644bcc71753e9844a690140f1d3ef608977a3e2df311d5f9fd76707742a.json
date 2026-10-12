@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "DELETE FROM team_settings WHERE team_id = ?1 AND key = ?2",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "7bdfc644bcc71753e9844a690140f1d3ef608977a3e2df311d5f9fd76707742a"
+}

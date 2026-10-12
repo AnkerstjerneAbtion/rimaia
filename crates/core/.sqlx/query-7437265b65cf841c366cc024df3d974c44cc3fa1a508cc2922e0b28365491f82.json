@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT r.user_id, r.unpaired_at AS \"unpaired_at: DateTime<Utc>\"\n             FROM runners r\n            WHERE r.id = ?1\n              AND EXISTS (SELECT 1 FROM team_memberships m\n                           WHERE m.user_id = r.user_id\n                             AND m.team_id IN (SELECT value FROM json_each(?2)))",
+  "describe": {
+    "columns": [
+      {
+        "name": "user_id",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "unpaired_at: DateTime<Utc>",
+        "ordinal": 1,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      false,
+      true
+    ]
+  },
+  "hash": "7437265b65cf841c366cc024df3d974c44cc3fa1a508cc2922e0b28365491f82"
+}

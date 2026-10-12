@@ -9,14 +9,18 @@ import { useSortable } from "@dnd-kit/sortable";
 import { CSS } from "@dnd-kit/utilities";
 
 import { cardBadge, relativeTime } from "../../lib/board";
+import { useClientCapabilities } from "../../lib/capabilities";
+import { PING_PONG_TEXT, finishedLoop, reviewLoopText } from "../../lib/review";
 import { getQueueStatus, listRepositories, startRun, toRimaiaError } from "../../lib/commands";
 import {
   subscribeToRepositoriesChanged,
+  subscribeToRunnerChanged,
   subscribeToRunsChanged,
   subscribeToSettingsChanged,
   subscribeToTasksChanged,
 } from "../../lib/events";
 import type {
+  CheckoutView,
   EffectiveStrategyFields,
   QueueEntry,
   Repository,
@@ -29,6 +33,8 @@ import {
   parseStrategyPlan,
   strategyBadgeText,
 } from "../panel/StrategySection";
+import { useCheckouts } from "../../hooks/useCheckouts";
+import { useLocalWorktrees } from "../../hooks/useLocalWorktrees";
 import { QUEUE_SKIP_LABELS } from "../runs/QueuePlanList";
 import { OpenInMenu } from "./OpenInMenu";
 import { RunStateBadge } from "./RunStateBadge";
@@ -150,6 +156,7 @@ let queueDirty = false;
 let queueUnlistenTasks: (() => void) | null = null;
 let queueUnlistenRuns: (() => void) | null = null;
 let queueUnlistenSettings: (() => void) | null = null;
+let queueUnlistenRunner: (() => void) | null = null;
 const queueSubscribers = new Set<(cache: ReadonlyMap<string, QueueEntry> | null) => void>();
 
 function notifyQueueSubscribers() {
@@ -192,10 +199,13 @@ function loadQueueStatus() {
  * three publishes the Runs view refreshes on: a task moving or ending, or the
  * switch itself (`settings:changed` — `queue_state` lives there).
  */
-function useQueueLookup(): ReadonlyMap<string, QueueEntry> | null {
+function useQueueLookup(enabled: boolean): ReadonlyMap<string, QueueEntry> | null {
   const [lookup, setLookup] = useState(queueCache);
 
   useEffect(() => {
+    // `get_queue_status` reads this machine's queue, which a browser has none
+    // of (task 050): it must not be sent.
+    if (!enabled) return;
     queueSubscribers.add(setLookup);
     loadQueueStatus();
 
@@ -229,10 +239,21 @@ function useQueueLookup(): ReadonlyMap<string, QueueEntry> | null {
         () => {},
       );
     }
+    // The queue status has a runner half (the switch, capacity, the window,
+    // the schedule error: `runner:changed`) and a board half (the plan, whose
+    // skip reasons read team settings: `settings:changed`), so both re-read.
     if (!queueUnlistenSettings) {
       subscribeToSettingsChanged(invalidate).then(
         (unlisten) => {
           queueUnlistenSettings = unlisten;
+        },
+        () => {},
+      );
+    }
+    if (!queueUnlistenRunner) {
+      subscribeToRunnerChanged(invalidate).then(
+        (unlisten) => {
+          queueUnlistenRunner = unlisten;
         },
         () => {},
       );
@@ -250,9 +271,11 @@ function useQueueLookup(): ReadonlyMap<string, QueueEntry> | null {
         queueUnlistenRuns = null;
         queueUnlistenSettings?.();
         queueUnlistenSettings = null;
+        queueUnlistenRunner?.();
+        queueUnlistenRunner = null;
       }
     };
-  }, []);
+  }, [enabled]);
 
   return lookup;
 }
@@ -265,24 +288,34 @@ type RunNowState =
   | { readonly kind: "blocked"; readonly reason: string };
 
 /**
- * ADR-0012's opt-in, applied to one card. The wording mirrors
- * `repo::ensure_unattended_runs_allowed`'s own refusal (`crates/core/src/
- * repo/mod.rs`) — the same sentence a rejected `start_task_run` call would
- * carry, so a card that guessed wrong about a repository's state still shows
- * the service's own reason rather than a paraphrase of it (seam-contract D8's
- * "specificity lives in the message", applied to a disabled button instead of
- * a rejection).
+ * ADR-0012's opt-in, applied to one card: this computer's consent, off its
+ * checkout of the task's repository (task 066). The wording mirrors
+ * `repo::ensure_unattended_runs_allowed`'s own refusals (`crates/core/src/
+ * repo/mod.rs` and `machine::not_set_up`) — the same sentence a rejected
+ * `start_task_run` call would carry, so a card that guessed wrong about a
+ * repository's state still shows the service's own reason rather than a
+ * paraphrase of it (seam-contract D8's "specificity lives in the message",
+ * applied to a disabled button instead of a rejection).
+ *
+ * `checkouts` is `null` until this computer's read answers.
  */
-function runNowState(task: CardTask, repositories: ReadonlyMap<string, Repository> | null): RunNowState {
+function runNowState(
+  task: CardTask,
+  repositories: ReadonlyMap<string, Repository> | null,
+  checkouts: ReadonlyMap<string, CheckoutView> | null,
+): RunNowState {
   if (task.runState === "running" || task.runState === "queued") {
     return { kind: "running" };
   }
-  if (repositories === null) {
+  if (repositories === null || checkouts === null) {
     return { kind: "unknown" };
   }
-  const repository = repositories.get(task.repositoryId);
-  if (!repository || !repository.allowUnattendedRuns) {
-    const name = repository?.name ?? "this task's repository";
+  const name = repositories.get(task.repositoryId)?.name ?? "this task's repository";
+  const checkout = checkouts.get(task.repositoryId);
+  if (!checkout) {
+    return { kind: "blocked", reason: `"${name}" is not set up on this computer` };
+  }
+  if (!checkout.unattendedConsent) {
     return {
       kind: "blocked",
       reason: `"${name}" has not enabled unattended agent runs. Enable it in Settings → Repositories before starting tasks here.`,
@@ -305,7 +338,12 @@ type CardTask = Task &
   Partial<
     Pick<
       TaskSummary,
-      "linkCount" | "dependencyCount" | "lastRun" | "blockedByIncomplete" | "blockingTitle"
+      | "linkCount"
+      | "dependencyCount"
+      | "lastRun"
+      | "blockedByIncomplete"
+      | "blockingTitle"
+      | "reviewLoop"
     >
   > &
   Partial<EffectiveStrategyFields>;
@@ -368,6 +406,11 @@ function CardFace({ task, repositoryName, now }: CardFace) {
   // An inherited value is still what runs, but it is not a decision anybody
   // made about *this* card, so it recedes.
   const inherited = origin === "global" || origin === "claude_code";
+  // The loop's line is for a loop that has finished. While the task is still
+  // moving, the badge already says what is happening and a verdict would
+  // describe an unfinished pass (task 037).
+  const loop = finishedLoop(task.runState, task.reviewLoop);
+  const loopText = reviewLoopText(loop);
   const proposalWaiting =
     task.strategyMode === "planned" &&
     task.strategySource === "planner" &&
@@ -404,6 +447,12 @@ function CardFace({ task, repositoryName, now }: CardFace) {
           thing it qualifies. */}
       {blocked && task.blockingTitle && (
         <p className="task-card-blocked-by">Blocked by {task.blockingTitle}</p>
+      )}
+      {loopText && (
+        <p className="task-card-loop">
+          <span className="task-card-loop-text">{loopText}</span>
+          {loop?.pingPong && <span className="task-card-loop-signal">{PING_PONG_TEXT}</span>}
+        </p>
       )}
       {(strategy || proposalWaiting) && (
         <div className="task-card-strategy">
@@ -514,8 +563,26 @@ export function TaskCard({
     registerCardRef(task.id, element);
   }
 
+  // What this client can do decides which of the card's controls exist. Run
+  // now and the queue are this machine's (`start_task_run`, `get_queue_status`:
+  // task 069 deletes the first gate with its runner picker); Open in is solo's
+  // alone, because the card names no runner (`TaskSummary`, D12) and so cannot
+  // tell whose worktree it would open. The panel and the review view can.
+  const { mode } = useClientCapabilities();
+  const hasMachine = mode !== "browser";
   const repositories = useRepositoryLookup();
-  const runNow = runNowState(task, repositories);
+  const {
+    checkouts,
+    loading: checkoutsLoading,
+    error: checkoutsError,
+  } = useCheckouts(hasMachine);
+  const { worktrees } = useLocalWorktrees(mode === "solo");
+  // Unknown, never "not set up", until this computer's read has answered.
+  const runNow = runNowState(
+    task,
+    repositories,
+    checkoutsLoading || checkoutsError !== null ? null : checkouts,
+  );
   const [starting, setStarting] = useState(false);
   const [runError, setRunError] = useState<RimaiaError | null>(null);
 
@@ -527,7 +594,7 @@ export function TaskCard({
   // `AlreadyInFlight`/`DependencyNotSatisfied`/`NeedsAttention` for a task in
   // one of those states — never for `idle` — so gating on `idle` costs
   // nothing this task's own scheduler code could otherwise show here.
-  const queuePlan = useQueueLookup();
+  const queuePlan = useQueueLookup(hasMachine);
   const queueEntry =
     task.column === "ready" && task.runState === "idle" ? (queuePlan?.get(task.id) ?? null) : null;
 
@@ -692,12 +759,12 @@ export function TaskCard({
             />
           </label>
         )}
-        {/* Task 026. Rendered off the card's own row — `worktree_path` is
-            already on every card (seam-contract D12), so no board read
-            changes and nothing here asks the disk. A task that has never run
-            has no worktree and shows no control at all, which is the normal
-            state of most of the board rather than something to report. */}
-        {task.worktreePath !== null && (
+        {/* Task 026. Rendered off this computer's worktree records, one
+            read shared by every card (task 066), so nothing here asks the
+            disk. A task that has never run here has no worktree and shows no
+            control at all, which is the normal state of most of the board
+            rather than something to report. */}
+        {mode === "solo" && worktrees.has(task.id) && (
           <OpenInMenu taskId={task.id} onError={setRunError} />
         )}
         {/* Task 008's "Run now", isolated from the drag/select machinery
@@ -706,17 +773,19 @@ export function TaskCard({
             run, never lift the card or open the panel underneath it. The two
             stoppers sit on the button itself rather than on a wrapper, so the
             explanations below stay part of the card's drag surface. */}
-        <button
-          type="button"
-          className="task-card-run-button"
-          disabled={runNow.kind !== "ready" || starting}
-          title={runNow.kind === "blocked" ? runNow.reason : undefined}
-          onPointerDown={(event) => event.stopPropagation()}
-          onKeyDown={(event) => event.stopPropagation()}
-          onClick={handleRunNow}
-        >
-          {starting ? "Starting…" : runNow.kind === "running" ? "Running…" : "Run now"}
-        </button>
+        {hasMachine && (
+          <button
+            type="button"
+            className="task-card-run-button"
+            disabled={runNow.kind !== "ready" || starting}
+            title={runNow.kind === "blocked" ? runNow.reason : undefined}
+            onPointerDown={(event) => event.stopPropagation()}
+            onKeyDown={(event) => event.stopPropagation()}
+            onClick={handleRunNow}
+          >
+            {starting ? "Starting…" : runNow.kind === "running" ? "Running…" : "Run now"}
+          </button>
+        )}
         </div>
       </div>
 
@@ -725,7 +794,9 @@ export function TaskCard({
           Not queued — {QUEUE_SKIP_LABELS[queueEntry.skip]}
         </p>
       )}
-      {runNow.kind === "blocked" && <p className="task-card-run-locked muted">{runNow.reason}</p>}
+      {hasMachine && runNow.kind === "blocked" && (
+        <p className="task-card-run-locked muted">{runNow.reason}</p>
+      )}
       {runError && <p className="task-card-run-error">{runError.message}</p>}
     </article>
   );

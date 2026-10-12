@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO runner_settings (key, value) VALUES (?1, ?2)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "abfde6ecb486cd0e84a1f15ae16490e73cf2d490a0187831a4f7ea2e20de30d3"
+}
